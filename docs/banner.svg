@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">Posse</title>
+  <desc id="desc">One Lead. A whole crew. Running on Herdr.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#101b31"/>
+      <stop offset="1" stop-color="#182846"/>
+    </linearGradient>
+    <linearGradient id="accent" x2="1" y2="1">
+      <stop stop-color="#78e4d3"/>
+      <stop offset="1" stop-color="#94aafb"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="300" rx="24" fill="url(#background)"/>
+  <path d="M0 242h1200M0 58h1200" stroke="#ffffff" stroke-opacity=".07"/>
+  <g transform="translate(75 62)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M63 88h47m0 0 34-50m-34 50 34 50" stroke="url(#accent)" stroke-width="7"/>
+    <circle cx="38" cy="88" r="25" fill="#78e4d3"/>
+    <circle cx="155" cy="38" r="19" fill="#94aafb"/>
+    <circle cx="155" cy="138" r="19" fill="#94aafb"/>
+    <circle cx="110" cy="88" r="10" fill="#172942" stroke="#78e4d3" stroke-width="5"/>
+  </g>
+  <text x="330" y="147" fill="#f7f9ff" font-family="system-ui, -apple-system, sans-serif" font-size="88" font-weight="750" letter-spacing="-4">posse</text>
+  <text x="333" y="195" fill="#b9c7df" font-family="system-ui, -apple-system, sans-serif" font-size="24" font-weight="500" letter-spacing=".2">One Lead. A whole crew. Running on Herdr.</text>
+</svg>

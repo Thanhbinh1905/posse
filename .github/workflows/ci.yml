@@ -1,0 +1,252 @@
+# Pull requests, including forks, run only on GitHub-hosted runners.
+# No job receives repository secrets or write permissions.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# One group per workflow and ref: a new push to the same PR cancels its superseded run,
+# while runs for different PRs and for main do not cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Clean stale job-local Go caches
+        run: |
+          cache_prefix="$RUNNER_TEMP/posse-${{ github.repository_id }}"
+          for cache in "$RUNNER_TEMP"/posse-go-cache-* "$RUNNER_TEMP"/posse-go-mod-* "$cache_prefix"-go-cache-* "$cache_prefix"-go-mod-*; do
+            [ -d "$cache" ] || continue
+            case "$cache" in
+              *-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"-*) continue ;;
+            esac
+            find "$cache" -type d -exec chmod u+w {} +
+            rm -rf -- "$cache"
+          done
+      - name: Use job-local Go caches
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-lint" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-lint" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check formatting
+        run: |
+          files=$(git ls-files '*.go' | xargs gofmt -l)
+          if [ -n "$files" ]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet -tags=e2e,perf ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 -tags=e2e,perf ./...
+      - name: Check generated code
+        run: |
+          go generate ./...
+          git diff --exit-code
+      - name: Clean job-local Go caches
+        if: ${{ always() }}
+        run: |
+          for cache in "$GOCACHE" "$GOMODCACHE"; do
+            [ -d "$cache" ] || continue
+            find "$cache" -type d -exec chmod u+w {} +
+          done
+          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use job-local Go caches
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Run race-enabled tests
+        run: |
+          export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-test-"
+          go test -race -count=1 ./...
+      - name: Clean test temporary roots
+        if: ${{ always() }}
+        run: |
+          for root in /tmp/posse-e2e-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"-test-*; do
+            [ -d "$root" ] || continue
+            find "$root" -type d -exec chmod u+rwx {} +
+            rm -rf -- "$root"
+          done
+          for cache in "$GOCACHE" "$GOMODCACHE"; do
+            [ -d "$cache" ] || continue
+            find "$cache" -type d -exec chmod u+w {} +
+          done
+          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use job-local Go caches
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install pinned Herdr release
+        run: |
+          tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/herdr"
+          mkdir -p "$tool_dir"
+          herdr="$tool_dir/herdr"
+          curl -fsSL \
+            https://github.com/herdrdev/herdr/releases/download/v0.9.1/herdr-linux-x86_64 \
+            -o "$herdr"
+          printf '%s  %s\n' \
+            2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7 \
+            "$herdr" | sha256sum --check --status
+          chmod 755 "$herdr"
+          echo "$tool_dir" >> "$GITHUB_PATH"
+          "$herdr" --version
+      - name: Run isolated Herdr end-to-end suite twice
+        run: |
+          export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
+          go test -tags=e2e -count=1 ./internal/e2e
+          go test -tags=e2e -count=1 ./internal/e2e
+      - name: Check command CPU budgets without the race detector
+        run: go test -tags='e2e perf' -count=1 ./internal/e2e -run '^TestCommandPerformanceBudgets$'
+      - name: Clean isolated E2E processes and state
+        if: ${{ always() }}
+        run: |
+          for process in /proc/[0-9]*; do
+            [ -r "$process/environ" ] || continue
+            if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Fxq 'POSSE_TEST_HERDR=1'; then
+              continue
+            fi
+            if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Eq "^XDG_CONFIG_HOME=/tmp/posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-[^/]*/xdg$"; then
+              continue
+            fi
+            command_line=$(tr '\0' ' ' < "$process/cmdline" 2>/dev/null || true)
+            case "$command_line" in
+              *herdr*server*) kill "${process##*/}" 2>/dev/null || true ;;
+            esac
+          done
+          for root in /tmp/posse-e2e-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"-* /var/tmp/posse-e2e-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"-installed-*; do
+            [ -d "$root" ] || continue
+            find "$root" -type d -exec chmod u+rwx {} +
+            rm -rf -- "$root"
+          done
+          rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e"
+          for cache in "$GOCACHE" "$GOMODCACHE"; do
+            [ -d "$cache" ] || continue
+            find "$cache" -type d -exec chmod u+w {} +
+          done
+          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned ShellCheck
+        run: |
+          tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/shellcheck"
+          mkdir -p "$tool_dir"
+          archive="$tool_dir/shellcheck-v0.11.0.linux.x86_64.tar.gz"
+          curl -fsSL \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz \
+            -o "$archive"
+          printf '%s  %s\n' \
+            b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6 \
+            "$archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$tool_dir" shellcheck-v0.11.0/shellcheck
+          chmod 755 "$tool_dir/shellcheck-v0.11.0/shellcheck"
+          echo "$tool_dir/shellcheck-v0.11.0" >> "$GITHUB_PATH"
+          "$tool_dir/shellcheck-v0.11.0/shellcheck" --version
+      - name: Install dash if needed
+        run: |
+          if command -v dash >/dev/null 2>&1; then
+            echo "dash is already available at $(command -v dash)"
+            exit 0
+          fi
+          command -v apt-get >/dev/null 2>&1 || { echo 'apt-get is required to download dash without root.' >&2; exit 1; }
+          command -v dpkg >/dev/null 2>&1 || { echo 'dpkg is required to unpack dash without root.' >&2; exit 1; }
+          tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/dash"
+          unpack_dir="$tool_dir/root"
+          mkdir -p "$tool_dir"
+          cd "$tool_dir"
+          apt-get download dash
+          mkdir -p "$unpack_dir"
+          dpkg -x ./dash_*.deb "$unpack_dir"
+          dash_bin=
+          for candidate in "$unpack_dir/bin/dash" "$unpack_dir/usr/bin/dash"; do
+            if [ -x "$candidate" ]; then
+              dash_bin=$candidate
+              break
+            fi
+          done
+          [ -n "$dash_bin" ] || { echo 'The downloaded dash package did not contain a dash executable.' >&2; exit 1; }
+          echo "${dash_bin%/*}" >> "$GITHUB_PATH"
+      - name: Check POSIX shell
+        run: |
+          shellcheck -s sh install.sh
+          shellcheck scripts/*.sh
+      - name: Exercise installer under both shells
+        run: |
+          dash scripts/test-install.sh
+          bash scripts/test-install.sh
+      - name: Clean installer tool downloads
+        if: ${{ always() }}
+        run: rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-installer"
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use job-local Go caches
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-build" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Cross-compile release targets
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os=${target%/*}
+            arch=${target#*/}
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags="-X main.version=ci" \
+              -o "$RUNNER_TEMP/posse-$os-$arch" ./cmd/posse
+          done
+      - name: Clean cross-compile output
+        if: ${{ always() }}
+        run: |
+          rm -f -- "$RUNNER_TEMP/posse-linux-amd64" "$RUNNER_TEMP/posse-linux-arm64" "$RUNNER_TEMP/posse-darwin-amd64" "$RUNNER_TEMP/posse-darwin-arm64"
+          for cache in "$GOCACHE" "$GOMODCACHE"; do
+            [ -d "$cache" ] || continue
+            find "$cache" -type d -exec chmod u+w {} +
+          done
+          rm -rf -- "$GOCACHE" "$GOMODCACHE"

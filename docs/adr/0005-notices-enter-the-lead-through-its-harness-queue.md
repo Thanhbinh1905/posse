@@ -1,0 +1,42 @@
+# Notices enter the Lead through its harness's own message queue
+
+A Lead must receive every Notice without the User prompting it, including while the User keeps the Lead pane focused. Typing into the pane (`agent.prompt`) is refused while it is focused, because the text would mix with what the User is typing. So each harness gets its Notices through its own queued-message input, which never touches the composer, and posse types into the pane only as a fallback for an idle, unfocused pane. The mode is `kinds.<kind>.notice_delivery`. Since the original decision, agent-directed prompts have gained a Posse envelope; the Pi extension now uses a custom message rather than a User-role chat message:
+
+- `lookout` (claude): the Lead keeps one `posse lookout` running as a background command, and claude re-invokes the Lead when it returns. Unchanged.
+- `codex-queue` (codex): posse runs `codex queue --thread <session> --message "[posse | Posse -> Lead ... | notice #...] ..."` wherever it would have typed the prompt. The session id comes from the Lead pane's Herdr `agent_session`.
+- `pi-extension` (pi): posse starts the Lead with `--extension <home>/projects/<p>/lead-pi-extension.ts`. The extension keeps one `posse lookout --json --quiet-routine` child running and passes actionable batches to `pi.sendMessage({customType: "posse-notices", ...}, {triggerTurn: true, deliverAs: "followUp"})`. In lowkey mode, the lookout quietly acknowledges safe `pr_opened` Notices and the extension hides actionable messages; with lowkey off, the custom message is visible. A failed send requeues the batch by Notice IDs.
+- `prompt` (any other kind): the typed prompt only.
+
+Lead instructions reach codex and pi as a system prompt, so they survive compaction. `kinds.<kind>.system_prompt_args` is a template with `{file}` (the path of `lead.md`) and `{text}` (its contents on one line): claude `--append-system-prompt-file {file}`, pi `--append-system-prompt {file}`, codex `-c developer_instructions={text}`.
+
+A Lead must also be able to run posse. codex's default `workspace-write` sandbox cannot write the posse home, where SQLite in WAL mode needs write access even to read. It also cannot write the Mounts or the trust files that `posse ride` prepares. So `kinds.codex.lead_args = ["--sandbox", "danger-full-access"]` gives a codex Lead the host access a claude or pi Lead already has, with codex's approval policy left as the User configured it. pi has no sandbox.
+
+Every Lead is told to end its turn and let its wake mechanism re-invoke it, never to poll with sleep, `posse peek`, `posse roster` or repeated `posse` calls: each polling turn resends the whole context. Workers of kinds with `background_commands` background long commands and never poll them, and no Worker waits for PR CI.
+
+## Findings (codex-cli 0.156.1, pi 0.87.0, Herdr 0.9.0)
+
+Verified in a Herdr pane:
+
+- **`codex queue --thread <id> --message <text>`** (app-server `thread/queue/add`) reaches a running interactive codex. An idle session starts a turn within a few seconds. A busy session runs the message after its current turn. A half-typed draft stays in the composer. The call takes about 150 ms and fails with an error when the thread has no rollout.
+- **A codex thread has no id until its first turn.** Herdr reports `agent_session` only after that turn, so posse passes an opening prompt as codex's positional `[PROMPT]` argument. That way posse never types into the pane at start. While that prompt runs, Herdr reports `working` with `launch_pending: true` and no `interactive_ready`, so for such a start posse waits only until Herdr detects the agent.
+- **`-c developer_instructions=<text>`** is added to codex's context, and the instructions were still followed after `/compact`. `-c` parses the value as TOML and uses the raw string when parsing fails, which is always the case for text that starts with "You are". `model_instructions_file` replaces codex's whole base prompt, so posse does not use it. No `developer_instructions` file variant exists. Herdr's `agent.start` refuses arguments that contain a newline (`invalid_agent_argument`), which is why `{text}` is on one line.
+- **Other codex options.** Hooks (`SessionStart`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop`) fire only on the agent's own activity, so none can wake an idle session. `notify` is outbound only. The `unified_exec` background terminals do not re-invoke the model when a process exits.
+- **The codex sandbox.** In `workspace-write`, `posse` cannot open its database under `~/.posse`, and on hosts where bubblewrap cannot create user namespaces every sandboxed command fails (`bwrap: setting up uid map: Permission denied`). `--sandbox danger-full-access` overrides a configured `sandbox_mode`, and `posse _context` then works.
+- **pi extensions** run in-process. `pi.sendMessage` with `triggerTurn: true` and `deliverAs: "followUp"` starts a turn when pi is idle and waits for the current run when it is busy. It never touches the editor, so a half-typed draft stayed intact. `session_start` and `session_shutdown` bracket every session, including reload, resume and fork, which gives the lookout child a bounded lifetime. `--extension <path>` loads a file without a trust prompt.
+- **`pi --append-system-prompt <value>`** reads the file's contents when the value is an existing path. The instructions were applied.
+- **pi `--mode rpc`** accepts prompts on stdin, but it replaces the interactive TUI, so it cannot serve a Lead the User talks to.
+- **Herdr** has no focus-safe input call. `agent.prompt` and `agent.send-keys` both write to the terminal.
+
+## Considered Options
+
+- **Queue typed prompts until the pane loses focus** (the previous behaviour): rejected as the primary path. A User who keeps talking to the Lead keeps it focused, so Notices waited indefinitely.
+- **A detached relay per Lead** (lookout plus `codex queue`, started from a codex `SessionStart` hook): rejected. It is a long-lived process with no owner to supervise it, which ADR 0001 rules out. The pi extension's lookout lives and dies with the pi process.
+- **Tell codex or pi Leads to keep a background `posse lookout`**: rejected, because neither re-invokes the model when a background command exits.
+- **One pull mechanism for every kind**: not possible, because codex has no in-process extension runtime. Push through `codex queue` reuses posse's existing delivery triggers (plugin events and CLI calls) and adds no process.
+
+## Consequences
+
+- Delivery stays exactly-once through the existing claim tokens. The Pi extension owns its lookout batch; if custom-message injection fails, it requeues that batch by ID.
+- A failed `codex queue`, or a codex Lead with no session yet, falls back to the typed prompt when the pane is idle and unfocused.
+- A pi Lead also runs stall and PR timers every minute inside its lookout, as a claude Lead does. A codex Lead still depends on plugin events and CLI calls for timers (spec section 23).
+- The pi extension is generated from the binary on every Lead start, with the running posse executable's absolute path, so it never drifts from the binary.

@@ -1,0 +1,25 @@
+id = "posse.herdr"
+name = "Posse"
+version = {{VERSION}}
+min_herdr_version = "0.9.0"
+description = "Keeps Posse Task and Lead state reconciled with Herdr."
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = [{{POSSE_BINARY}}, "_ingest"]
+
+[[events]]
+on = "pane.exited"
+command = [{{POSSE_BINARY}}, "_ingest"]
+
+[[events]]
+on = "pane.closed"
+command = [{{POSSE_BINARY}}, "_ingest"]
+
+[[events]]
+on = "pane.focused"
+command = [{{POSSE_BINARY}}, "_ingest"]
+
+[[startup]]
+command = [{{POSSE_BINARY}}, "recover", "--all"]
