@@ -378,7 +378,10 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 			return safetyErr
 		}
 		if !safe {
-			return axi.Failure("teardown_refused", "merged PR has unmerged Task work; keep the Rider and publish follow-up work before teardown", false)
+			if err := restoreMergedTaskWithWork(ctx.Context, db, project, task); err != nil {
+				return err
+			}
+			return axi.Failure("teardown_refused", "merged PR has unmerged Task work; Rider returned to working", false, "Continue the Rider and publish follow-up work as a new PR before teardown")
 		}
 	}
 	if discardable && !parsed.Bool("discard") {

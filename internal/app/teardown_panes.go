@@ -87,23 +87,7 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 }
 
 func restoreMergedTaskWithWork(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
-	if err := db.Transition(ctx, task.ID, store.StateLanded, store.StateWorking, "cli", "Unmerged Task work remains after PR merge"); err != nil {
-		return err
-	}
-	if err := db.UpdateTaskLanding(ctx, task.ID, task.PRURL, ""); err != nil {
-		return err
-	}
-	notices, err := db.Notices(ctx, project.ID, false)
-	if err != nil {
-		return err
-	}
-	for _, notice := range notices {
-		if notice.TaskID == task.ID && notice.Kind == "pr_follow_up_pending" {
-			return nil
-		}
-	}
-	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_follow_up_pending", Summary: task.Title + ": unmerged follow-up work remains; retain or relaunch the Rider", DataJSON: marshalJSON(map[string]any{"url": task.PRURL})})
-	return err
+	return db.RestoreMergedTaskWithWork(ctx, project.ID, task)
 }
 
 func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
@@ -169,7 +153,7 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 			return false, nil
 		}
 	}
-	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain", "--untracked-files=all", "--ignored")
+	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain", "--untracked-files=all")
 	if err != nil || status != "" {
 		return false, nil
 	}
@@ -375,6 +359,13 @@ func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project 
 	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
 		return errors.Join(cause, err)
 	}
+	current, err := db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return err
+	}
+	if task.State == store.StateLanded && current.State == store.StateWorking {
+		return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Follow-up work was preserved. Run `posse relaunch "+taskIDString(task.Seq)+"` if the Rider pane was closed, then publish the work")
+	}
 	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Resolve the remaining pane or Mount process, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
 }
 
@@ -391,7 +382,11 @@ func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, pr
 		}
 	}
 	if !found {
-		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "unsaddle_incomplete", Summary: fmt.Sprintf("%s teardown incomplete: %s", taskDisplayName(task), cause), DataJSON: `{}`}); err != nil {
+		summary := fmt.Sprintf("%s teardown incomplete: %s", taskDisplayName(task), cause)
+		if current, err := db.TaskByID(ctx, project.ID, task.ID); err == nil && task.State == store.StateLanded && current.State == store.StateWorking {
+			summary += "; run `posse relaunch " + taskIDString(task.Seq) + "` if the Rider pane closed"
+		}
+		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "unsaddle_incomplete", Summary: summary, DataJSON: `{}`}); err != nil {
 			return err
 		}
 	}

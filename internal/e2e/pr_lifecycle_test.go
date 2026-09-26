@@ -174,6 +174,9 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", current.PaneID)
 	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", current.HerdrWorkspaceID)
 	runPosse(t, fixture.binary, current.WorktreePath, workerEnv, "holler", "done", "Merged PR follow-up is complete", "--pr", current.PRURL)
+	if verified, err := fixture.db.WasVerifiedPRHead(context.Background(), current.ID, current.PRURL, movedTip); err != nil || verified {
+		t.Fatalf("moved local tip was recorded as verified PR head: %v %v", verified, err)
+	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	current = fixture.mustTask(t, "t1")
 	if current.State != store.StateTornDown || current.LandedRef != merge {
@@ -373,6 +376,82 @@ func TestMergedPRWithUnmergedFollowUpStaysReportable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMergedPRWithIgnoredArtifactStillLands(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	brief := filepath.Join(f.root, "ignored-artifact.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.rideAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
+	landing := f.mustTask(t, "t1")
+	exclude := filepath.Join(f.root, "exclude")
+	if err := os.WriteFile(exclude, []byte("build.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, landing.WorktreePath, "config", "core.excludesFile", exclude)
+	artifact := filepath.Join(landing.WorktreePath, "build.log")
+	if err := os.WriteFile(artifact, []byte("ignored build output\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	merge := f.mergeOnLocalOrigin(t, landing, "t1")
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
+		t.Fatalf("ignored artifact blocked normal landing: %#v", task)
+	}
+	if _, err := os.Stat(artifact); err != nil {
+		t.Fatalf("ignored artifact was discarded by default clean mode: %v", err)
+	}
+}
+
+func TestLandedPRLateWorkCanResumeWithoutAutoTeardown(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	configPath := filepath.Join(f.home, "config.toml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(strings.Replace(string(configData), "auto_unsaddle = \"finished\"", "auto_unsaddle = \"never\"", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(f.root, "late-work.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.rideAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
+	landing := f.mustTask(t, "t1")
+	merge := f.mergeOnLocalOrigin(t, landing, "t1")
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	if task := f.mustTask(t, "t1"); task.State != store.StateLanded {
+		t.Fatalf("PR did not Land before late work: %#v", task)
+	}
+	late := filepath.Join(landing.WorktreePath, "late-work.txt")
+	if err := os.WriteFile(late, []byte("preserve me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(f.binary, "unsaddle", "t1")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("plain unsaddle discarded late work: %s", output)
+	}
+	if task := f.mustTask(t, "t1"); task.State != store.StateWorking {
+		t.Fatalf("late work remains stranded after refused unsaddle: %#v", task)
+	}
+	f.requireNotice(t, "t1", "pr_follow_up_pending")
+	if data, err := os.ReadFile(late); err != nil || string(data) != "preserve me\n" {
+		t.Fatalf("late work lost: %q %v", data, err)
+	}
+	workerEnv := setEnv(f.env, "HERDR_ENV", "1")
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", landing.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", landing.HerdrWorkspaceID)
+	runPosse(t, f.binary, landing.WorktreePath, workerEnv, "holler", "working", "Late work is still being handled")
 }
 
 func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {

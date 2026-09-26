@@ -726,6 +726,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 					return err
 				}
 				validationErr := validateWorkerPullRequest(ctx.Context, project, task, forge, parsed.Flags["pr"], sha)
+				verifiedCurrentHead := validationErr == nil
 				if validationErr != nil && task.PRURL == parsed.Flags["pr"] {
 					// A merged PR retains its verified head even if the local
 					// branch was advanced by merging the Project default branch.
@@ -751,8 +752,10 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				if validationErr != nil {
 					return validationErr
 				}
-				if err := db.RecordVerifiedPRHead(ctx.Context, task.ID, parsed.Flags["pr"], sha); err != nil {
-					return err
+				if verifiedCurrentHead {
+					if err := db.RecordVerifiedPRHead(ctx.Context, task.ID, parsed.Flags["pr"], sha); err != nil {
+						return err
+					}
 				}
 			}
 		} else if parsed.Flags["report"] == "" {
