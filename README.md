@@ -35,6 +35,10 @@ The installer downloads a release to `~/.local/bin` by default and offers to set
 
 To uninstall, run the installer with `--uninstall` after `sh -s --`. Posse keeps local task history and configuration unless you confirm their removal.
 
+## Acknowledgements
+
+Inspired by [firstmate](https://github.com/kunchenguid/firstmate). The CLI follows [AXI](https://axi.md).
+
 ## License
 
 [MIT](LICENSE).

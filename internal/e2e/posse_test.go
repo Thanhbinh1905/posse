@@ -1129,7 +1129,7 @@ func assertLeadSidebarPresentation(t *testing.T, client *herdr.Client, workspace
 }
 
 // Assert the three default Agents-sidebar positions against a live isolated
-// Herdr snapshot: workspace and tab labels, with native harness subtitle.
+// Herdr snapshot: workspace and tab labels, with the detected harness subtitle.
 func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task store.Task, workspaceLabel string) {
 	t.Helper()
 	snapshot, err := client.Snapshot(context.Background())
@@ -1155,7 +1155,7 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 		}
 	}
 	if workspace.Label != workspaceLabel || workspace.Worktree.CheckoutPath != "" ||
-		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.DisplayAgent != "" ||
+		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
 		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.ShortName ||
 		tab.Label != task.ShortName {

@@ -345,18 +345,23 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	})
 }
 
-// Herdr's Agents rows show the workspace and tab labels above the harness
-// name. Clear any prior display_agent override so Herdr shows the real harness.
-// Pane title and tokens remain available to other UIs; none change cwd or the
-// canonical pane/agent identity.
-func workerDisplayMetadata(task store.Task) map[string]any {
+// Herdr otherwise prefers the unique agent.start name over its detected
+// harness in the Agents row. Use Herdr's detected identity for the subtitle;
+// clear stale overrides when no agent is detected. Pane title and tokens remain
+// available to other UIs without changing canonical pane/agent identity.
+func workerDisplayMetadata(task store.Task, detectedAgent string) map[string]any {
 	name := taskDisplayName(task)
-	return map[string]any{
+	metadata := map[string]any{
 		"pane_id": task.PaneID, "source": "posse",
-		"title":               task.Title + " · " + name + " · " + task.WorktreePath,
-		"clear_display_agent": true,
-		"tokens":              map[string]string{"posse_title": task.Title, "posse_branch": name, "posse_mount": filepath.Base(task.WorktreePath)},
+		"title":  task.Title + " · " + name + " · " + task.WorktreePath,
+		"tokens": map[string]string{"posse_title": task.Title, "posse_branch": name, "posse_mount": filepath.Base(task.WorktreePath)},
 	}
+	if detectedAgent != "" {
+		metadata["display_agent"] = detectedAgent
+	} else {
+		metadata["clear_display_agent"] = true
+	}
+	return metadata
 }
 
 func workerWorkspaceLabel(task store.Task, last bool) string {
@@ -419,7 +424,12 @@ func (s *Service) refreshWorkerDisplay(ctx context.Context, db *store.DB, projec
 		if _, err := s.herdrCall(ctx, "workspace.rename", map[string]any{"workspace_id": task.HerdrWorkspaceID, "label": workerWorkspaceLabel(task, index == len(visible)-1)}); err != nil {
 			return err
 		}
-		if _, err := s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task)); err != nil {
+		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+		detectedAgent := ""
+		if found {
+			detectedAgent = pane.Agent
+		}
+		if _, err := s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task, detectedAgent)); err != nil {
 			return err
 		}
 	}
@@ -1258,11 +1268,6 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 			return failure(err)
 		}
 	}
-	if err := track("pane.metadata", func() error {
-		return s.refreshWorkerDisplay(ctx, db, project, task.ID)
-	}); err != nil {
-		return failure(err)
-	}
 	if err := track("agent.start", func() error {
 		_, callErr := s.startAgent(ctx, map[string]any{"name": workerName, "kind": kind, "pane_id": pane.PaneID, "args": startArgs})
 		return callErr
@@ -1270,6 +1275,11 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		return failure(err)
 	}
 	if err := s.waitAgentReady(ctx, pane.PaneID); err != nil {
+		return failure(err)
+	}
+	if err := track("pane.metadata", func() error {
+		return s.refreshWorkerDisplay(ctx, db, project, task.ID)
+	}); err != nil {
 		return failure(err)
 	}
 	messages, err := db.TaskMessagesAfter(ctx, task.ID, task.CreatedAt, maxRelaunchMessages+1)

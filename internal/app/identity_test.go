@@ -94,7 +94,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 			t.Fatalf("home command failed: %s", output.String())
 		}
 		task.PaneID = "w1:p2"
-		display, err := json.Marshal(map[string]any{"workspace": workerWorkspaceLabel(task, true), "pane": workerDisplayMetadata(task)})
+		display, err := json.Marshal(map[string]any{"workspace": workerWorkspaceLabel(task, true), "pane": workerDisplayMetadata(task, "pi")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,7 +125,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	if err := json.Unmarshal(renders[0].display, &display); err != nil {
 		t.Fatal(err)
 	}
-	if display.Workspace != "└─ Stable output" || display.Pane["title"] != "Stable output · stable-output · " || display.Pane["clear_display_agent"] != true || display.Pane["display_agent"] != nil {
+	if display.Workspace != "└─ Stable output" || display.Pane["title"] != "Stable output · stable-output · " || display.Pane["clear_display_agent"] != nil || display.Pane["display_agent"] != "pi" {
 		t.Fatalf("Worker display metadata = %#v", display)
 	}
 	if got := leadAgentName("shop", 3); got != "posse-shop-lead-3" {

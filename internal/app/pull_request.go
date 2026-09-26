@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
+	"github.com/thanhbinh1905/posse/internal/execgroup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -587,6 +589,10 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	targets := make([]prWatchTarget, 0, len(watched))
 	failedTasks := make(map[int64]error)
 	forge, forgeErr := forgeForRepository(ctx, project.Root, cfg, "")
+	globalFailure := ""
+	if forgeErr != nil {
+		globalFailure = truncate(forgeErr.Error(), 300)
+	}
 	gitlabTargets := make([]store.Task, 0)
 	for _, task := range watched {
 		refErr := forgeErr
@@ -607,14 +613,20 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	pulls := make(map[int64]*ghPullRequest, len(targets))
 	var response ghQueryResponse
 	if query != "" {
-		output, commandErr := commandOutputArgs(ctx, project.Root, "gh", "api", "graphql", "-f", "query="+query)
-		if commandErr != nil {
-			_, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), truncate(strings.TrimSpace(output+" "+fmt.Sprint(commandErr)), 300))
+		output, stderr, commandErr := graphQLCommandOutput(ctx, project.Root, query)
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			failure := "invalid GraphQL response: " + err.Error()
+			if commandErr != nil {
+				failure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
+			}
+			_, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure)
 			return recordErr
 		}
-		if err := json.Unmarshal([]byte(output), &response); err != nil {
-			_, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), "invalid GraphQL response: "+err.Error())
-			return recordErr
+		if commandErr != nil && (len(response.Errors) == 0 || errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded)) {
+			globalFailure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
+		}
+		if response.Data.Repositories == nil {
+			globalFailure = "GraphQL response omitted data"
 		}
 		for _, failure := range response.Errors {
 			attributed := false
@@ -632,8 +644,7 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 				}
 			}
 			if !attributed {
-				_, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure.Message)
-				return recordErr
+				globalFailure = truncate(strings.TrimSpace(globalFailure+" "+failure.Message), 300)
 			}
 		}
 		for _, target := range targets {
@@ -647,10 +658,10 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			}
 			pulls[target.Task.ID] = pull
 		}
-		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), ""); err != nil {
+		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
 			return err
 		}
-	} else if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), ""); err != nil {
+	} else if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
 		return err
 	}
 	gitlabObservations := make(map[int64]store.PRObservation)
@@ -746,6 +757,27 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 		}
 	}
 	return nil
+}
+
+// gh may exit nonzero for a single GraphQL error while still printing usable
+// data for the other aliases. Keep stderr separate so it cannot corrupt JSON.
+func graphQLCommandOutput(ctx context.Context, root, query string) (string, string, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, externalCommandTimeout)
+	defer cancel()
+	command := execgroup.CommandContext(commandCtx, "gh", "api", "graphql", "-f", "query="+query)
+	command.Dir = root
+	command.Env = externalCommandEnvironment("gh")
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	if commandCtx.Err() != nil {
+		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("gh timed out after %s: %w", externalCommandTimeout, context.DeadlineExceeded)
+		} else {
+			err = commandCtx.Err()
+		}
+	}
+	return stdout.String(), stderr.String(), err
 }
 
 func pullRequestGraphQLQuery(targets []prWatchTarget) (string, []prWatchTarget) {
