@@ -216,6 +216,7 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 				if err != nil {
 					return cfg, err
 				}
+				s.relabelProjectTabs(ctx, db, fresh)
 				if err := s.deliverQueuedMessagesWithConfig(ctx, db, fresh, result.Snapshot, cfg); err != nil && !isHerdrUnavailable(err) {
 					return cfg, herdrError(err)
 				}

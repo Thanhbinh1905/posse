@@ -455,6 +455,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	if err := db.SetProjectLead(ctx.Context, project.ID, callerWorkspaceID, leadPane.PaneID, label); err != nil {
 		return err
 	}
+	s.relabelProjectTabs(ctx.Context, db, project)
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
 	}
