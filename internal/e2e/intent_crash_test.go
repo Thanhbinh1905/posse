@@ -738,6 +738,8 @@ type fakeHerdrSession struct {
 	serverAt        string
 	sequence        int
 	requests        chan string
+	prompts         []string
+	promptTargets   []string
 	agentStartGate  chan struct{}
 	agentStartNames []string
 	// workspaceCreates counts workspace.create requests: Riders open as tabs.
@@ -978,7 +980,11 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		return map[string]any{}, nil
 	case "pane.read":
 		return map[string]any{"text": ""}, nil
-	case "agent.prompt", "agent.send_keys", "pane.report_metadata", "workspace.report_metadata", "notification.show":
+	case "agent.prompt":
+		s.prompts = append(s.prompts, stringParam("text"))
+		s.promptTargets = append(s.promptTargets, stringParam("target"))
+		return map[string]any{}, nil
+	case "agent.send_keys", "pane.report_metadata", "workspace.report_metadata", "notification.show":
 		return map[string]any{}, nil
 	default:
 		return nil, &herdr.APIError{Code: "unsupported_test_method", Message: method}

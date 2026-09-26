@@ -176,6 +176,14 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// This ship task_done Notice produces no Decision, including after ack.
+	ignoredID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: ship.ID, Kind: "task_done", Summary: "Ship Task done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AckNotices(ctx, project.ID, []string{fmt.Sprint(ignoredID)}); err != nil {
+		t.Fatal(err)
+	}
 	service := testService(home, herdr.NewFake())
 	for i := 0; i < 2; i++ {
 		if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
@@ -191,5 +199,55 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		if strings.Join(d.Options, ",") != strings.Join(want[i], ",") {
 			t.Fatalf("options for %s: %#v", d.Origin, d.Options)
 		}
+	}
+	// All five Notices were evaluated, including the non-Decision kinds. A
+	// second pass must not fetch historical Notices or load their Tasks.
+	unseen, err := db.DecisionSourceNotices(ctx, project.ID)
+	if err != nil || len(unseen) != 0 {
+		t.Fatalf("rescanned evaluated Notices: %#v %v", unseen, err)
+	}
+	if err := db.Transition(ctx, ship.ID, store.StateLanding, store.StateLanded, "cli", "merged"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, lost.ID, store.StateLost, store.StateWorking, "cli", "relaunched"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, failed.ID, store.StateFailed, store.StateTornDown, "user", "discarded"); err == nil {
+		t.Fatal("discard without approval unexpectedly succeeded")
+	}
+	if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.Decisions(ctx, project.ID, true)
+	if err != nil || len(pending) != 3 {
+		t.Fatalf("resolved Decisions stayed pending: %#v %v", pending, err)
+	}
+	all, err := db.Decisions(ctx, project.ID, false)
+	if err != nil || all[0].ObsoleteReason != "Task left landing" || all[1].ObsoleteReason != "Task no longer failed or lost" || all[0].Answer != "" {
+		t.Fatalf("resolved Decisions were not marked obsolete: %#v %v", all, err)
+	}
+	// Repeated failure Notices still produce at most one pending recovery
+	// Decision for this Task.
+	for i := 0; i < 2; i++ {
+		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: failed.ID, Kind: "task_failed", Summary: "Repeated failure"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = db.Decisions(ctx, project.ID, true)
+	if err != nil || len(pending) != 3 {
+		t.Fatalf("repeated failure duplicated pending recovery Decision: %#v %v", pending, err)
+	}
+	if err := db.TransitionWithApproval(ctx, failed.ID, store.StateFailed, store.StateTornDown, "user", "discarded", "discard", "User requested discard"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = db.Decisions(ctx, project.ID, true)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("torn-down Task still has pending Decision: %#v %v", pending, err)
 	}
 }

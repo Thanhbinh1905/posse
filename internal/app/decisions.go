@@ -17,27 +17,33 @@ import (
 // It also catches Notices written in the same transaction as a Rider Signal or
 // pull request observation, including after a crash before delivery.
 func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, project store.Project) error {
+	if err := db.ObsoleteResolvedDecisions(ctx, project.ID); err != nil {
+		return err
+	}
 	notices, err := db.DecisionSourceNotices(ctx, project.ID)
 	if err != nil {
 		return err
 	}
 	for _, notice := range notices {
-		if notice.TaskID == 0 {
+		if notice.TaskID == 0 || !oneOfString(notice.Kind, "land_ready", "task_failed", "task_lost", "task_done", "needs_decision") {
 			continue
 		}
 		task, err := db.TaskByID(ctx, project.ID, notice.TaskID)
 		if err != nil {
 			return err
 		}
-		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
+		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID}
 		switch {
 		case notice.Kind == "land_ready" && task.AutonomyLand != "auto" && task.State == store.StateLanding:
+			request.Origin = fmt.Sprintf("land_ready:notice:%d", notice.ID)
 			request.Question = "Land " + task.Title + "? " + notice.Summary
 			request.Options = []string{"land", "wait"}
 		case (notice.Kind == "task_failed" || notice.Kind == "task_lost") && (task.State == store.StateFailed || task.State == store.StateLost):
+			request.Origin = fmt.Sprintf("recovery:notice:%d", notice.ID)
 			request.Question = "Relaunch or discard " + task.Title + "? " + notice.Summary
 			request.Options = []string{"relaunch", "discard"}
 		case notice.Kind == "task_done" && task.Type == "review" && task.ReviewsTaskID != 0 && task.AutonomyReview != "lead":
+			request.Origin = fmt.Sprintf("review:notice:%d", notice.ID)
 			request.Question = "How should the Review Task findings for " + task.Title + " be handled? " + notice.Summary
 			request.Options = []string{"accept", "request-changes", "ignore"}
 		case notice.Kind == "needs_decision" && task.LandingMode == "no-mistakes" && task.AutonomyReview != "lead":
@@ -46,6 +52,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 				return err
 			}
 			if _, err := os.Stat(filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err == nil {
+				request.Origin = fmt.Sprintf("review:notice:%d", notice.ID)
 				request.Question = "How should the findings for " + task.Title + " be handled? " + notice.Summary
 				request.Options = []string{"accept", "request-changes", "ignore"}
 			}
@@ -55,6 +62,9 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 				return err
 			}
 		}
+	}
+	if len(notices) > 0 {
+		return db.AdvanceDecisionNoticeCursor(ctx, project.ID, notices[len(notices)-1].ID)
 	}
 	return nil
 }
