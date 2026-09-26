@@ -41,7 +41,7 @@ type Decision struct {
 
 func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decision, error) {
 	if request.ProjectID < 1 || request.TaskID < 1 || strings.TrimSpace(request.Origin) == "" || strings.TrimSpace(request.Question) == "" || len(request.Options) < 2 {
-		return Decision{}, fmt.Errorf("Decision requires a Project, Task, origin, question and at least two options")
+		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least two options")
 	}
 	switch request.Kind {
 	case "land_ready", "recovery", "review", "rider_question", "leftover", "pr_closed":
@@ -51,7 +51,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	seen := map[string]bool{}
 	for _, option := range request.Options {
 		if strings.TrimSpace(option) != option || option == "" || seen[option] {
-			return Decision{}, fmt.Errorf("Decision options must be distinct and non-empty")
+			return Decision{}, fmt.Errorf("decision options must be distinct and non-empty")
 		}
 		seen[option] = true
 	}
@@ -66,7 +66,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	defer tx.Rollback()
 	if original, err := decisionRow(tx.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND origin=?`, request.ProjectID, request.Origin)); err == nil {
 		if original.TaskID != request.TaskID || original.Kind != request.Kind || original.Question != request.Question || !slices.Equal(original.Options, request.Options) {
-			return Decision{}, fmt.Errorf("Decision origin %q already belongs to another question", request.Origin)
+			return Decision{}, fmt.Errorf("decision origin %q already belongs to another question", request.Origin)
 		}
 		return original, nil
 	} else if !errors.Is(err, ErrNotFound) {
@@ -94,13 +94,13 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	}
 	decision, err := decisionRow(tx.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND origin=?`, request.ProjectID, request.Origin))
 	if errors.Is(err, ErrNotFound) {
-		return Decision{}, fmt.Errorf("Decision Task does not belong to Project")
+		return Decision{}, fmt.Errorf("decision Task does not belong to Project")
 	}
 	if err != nil {
 		return Decision{}, err
 	}
 	if count == 0 && (decision.TaskID != request.TaskID || decision.Kind != request.Kind || decision.Question != request.Question || !slices.Equal(request.Options, decision.Options)) {
-		return Decision{}, fmt.Errorf("Decision origin %q already belongs to another question", request.Origin)
+		return Decision{}, fmt.Errorf("decision origin %q already belongs to another question", request.Origin)
 	}
 	return decision, tx.Commit()
 }
@@ -109,7 +109,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 // cannot overwrite either the answer or the User's words.
 func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, userQuote string) (Decision, error) {
 	if strings.TrimSpace(userQuote) == "" {
-		return Decision{}, fmt.Errorf("User quote is required")
+		return Decision{}, fmt.Errorf("user quote is required")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -121,10 +121,10 @@ func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, u
 		return Decision{}, err
 	}
 	if decision.AnsweredAt != 0 {
-		return Decision{}, fmt.Errorf("Decision %d is already answered", id)
+		return Decision{}, fmt.Errorf("decision %d is already answered", id)
 	}
 	if decision.ObsoleteAt != 0 {
-		return Decision{}, fmt.Errorf("Decision %d is obsolete: %s", id, decision.ObsoleteReason)
+		return Decision{}, fmt.Errorf("decision %d is obsolete: %s", id, decision.ObsoleteReason)
 	}
 	if reason, err := decisionObsoleteReason(ctx, tx, decision); err != nil {
 		return Decision{}, err
@@ -135,7 +135,7 @@ func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, u
 		if err := tx.Commit(); err != nil {
 			return Decision{}, err
 		}
-		return Decision{}, fmt.Errorf("Decision %d is obsolete: %s", id, reason)
+		return Decision{}, fmt.Errorf("decision %d is obsolete: %s", id, reason)
 	}
 	valid := false
 	for _, choice := range decision.Options {
