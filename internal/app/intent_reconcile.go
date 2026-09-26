@@ -177,6 +177,9 @@ func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project s
 			return nil
 		}
 	}
+	if err := s.refreshWorkerDisplay(ctx, db, project, task.ID); err != nil {
+		return err
+	}
 	if err := db.Transition(ctx, task.ID, store.StateSpawning, store.StateWorking, "cli", "Recovered an interrupted ride after the Rider started"); err != nil && err != store.ErrStateRace {
 		return err
 	}

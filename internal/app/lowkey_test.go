@@ -41,7 +41,7 @@ func TestNoticeWakeUsesRiderNameInsteadOfInternalTaskID(t *testing.T) {
 	if tab := workerTabLabel(task); tab != "login-cleanup" {
 		t.Fatalf("legacy branch tab = %q", tab)
 	}
-	if metadata := workerDisplayMetadata(task); metadata["display_agent"] != nil || metadata["clear_display_agent"] != true {
+	if metadata := workerDisplayMetadata(task, ""); metadata["display_agent"] != nil || metadata["clear_display_agent"] != true {
 		t.Fatalf("legacy branch overrides harness subtitle: %#v", metadata)
 	}
 }
