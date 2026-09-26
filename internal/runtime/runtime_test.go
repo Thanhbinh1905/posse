@@ -38,6 +38,36 @@ func TestReconcileReAdoptsPaneByLabelAndHerdrIdleIsNotDone(t *testing.T) {
 	}
 }
 
+func TestReconcileDoesNotRestoreStalePaneIDsAfterRecovery(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p3", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTaskLaunch(ctx, task.ID, task.WorktreePath, "w1", "w1:p2", task.PaneLabel, "recovered-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectServerStartedAt(ctx, project.ID, "restored-generation"); err != nil {
+		t.Fatal(err)
+	}
+	stale := herdr.Snapshot{ServerStartedAt: "pre-restart-generation", Panes: []herdr.Pane{
+		{PaneID: "w1:p1", WorkspaceID: "w1", Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"},
+		{PaneID: "w1:p4", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "idle"},
+	}}
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, stale, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.PaneID != "w1:p2" {
+		t.Fatalf("stale snapshot replaced the restored Rider pane: %#v, %v", updated, err)
+	}
+	currentProject, err := db.ProjectByID(ctx, project.ID)
+	if err != nil || currentProject.LeadPaneID != "w1:p3" {
+		t.Fatalf("stale snapshot replaced the restored Lead pane: %#v, %v", currentProject, err)
+	}
+}
+
 func TestReconcileSkipsCompareAndSetRacesDuringBlockedMapping(t *testing.T) {
 	for _, testCase := range []struct {
 		name        string

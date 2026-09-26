@@ -320,8 +320,8 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 
 	lead := herdr.Pane{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "claude", AgentStatus: "working"}
 	worker := herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: before.PaneLabel, CWD: mount.Path, Agent: "claude", AgentStatus: "working"}
-	// The plugin event sees the Worker missing, recover --all sees it present,
-	// and the next snapshot sees it missing again.
+	// The plugin event sees the Worker missing in a new generation, recover --all
+	// sees it present, and the next snapshot sees it missing again.
 	snapshots := []herdr.Snapshot{
 		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{lead}},
 		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{{PaneID: lead.PaneID, WorkspaceID: lead.WorkspaceID, Label: lead.Label}, worker}},
@@ -340,8 +340,8 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 		t.Fatalf("event reconciliation consumed the pending Herdr restart: generation=%q err=%v", generation, err)
 	}
 	observed, err := db.Task(ctx, project.ID, "t1")
-	if err != nil || observed.AgentAbsentSince == 0 || observed.AgentServerStartedAt != "old-generation" {
-		t.Fatalf("pre-hook reconcile did not record the transient absence: task=%#v err=%v", observed, err)
+	if err != nil || observed.AgentAbsentSince != 0 || observed.AgentServerStartedAt != "old-generation" {
+		t.Fatalf("pre-hook reconcile changed an observation before recovery: task=%#v err=%v", observed, err)
 	}
 	if recovered, err := service.recoverProject(ctx, db, home, project); err != nil {
 		t.Fatalf("startup recovery: %v", err)
