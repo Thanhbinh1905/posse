@@ -27,6 +27,28 @@ type ConfigApproval struct {
 	At        int64
 }
 
+type Decision struct {
+	ID             int64
+	ProjectID      int64
+	TaskID         int64
+	Origin         string
+	Question       string
+	OptionsJson    string
+	Answer         string
+	UserQuote      string
+	CreatedAt      int64
+	AnsweredAt     int64
+	Kind           string
+	TaskLaunches   int64
+	ObsoleteAt     int64
+	ObsoleteReason string
+}
+
+type DecisionNoticeCursor struct {
+	ProjectID    int64
+	LastNoticeID int64
+}
+
 type Event struct {
 	ID         int64
 	ReceivedAt int64

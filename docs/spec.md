@@ -262,6 +262,10 @@ transitions(id, task_id, from_state, to_state, source, note, at)
 signals(id, task_id, verb, note, data_json, at)
 notices(id, project_id, task_id, kind, summary, data_json,
         created_at, delivered_at, acked_at)
+decisions(id, project_id, task_id, origin, question, options_json,
+          answer, user_quote, created_at, answered_at, kind, task_launches, obsolete_at, obsolete_reason)
+  -- unique(project_id, origin); at most one pending recovery Decision per Task
+decision_notice_cursors(project_id, last_notice_id)  -- Notices evaluated for Decisions
 messages(id, task_id, body, created_at, delivered_at, status)   -- Lead → Worker
 events(id, received_at, kind, pane_id, data_json)               -- raw ingest journal
 approvals(id, task_id, action, user_quote, at)                  -- merges and discards
@@ -351,6 +355,10 @@ It exits 0 even on internal errors (logged to the `events` row) so Herdr never r
 Notice kinds: `task_done`, `needs_decision`, `task_failed`, `worker_blocked`, `worker_exited`, `task_lost`, `stalled`, `gate_failed`, `land_ready` (a `local` Task is ready to merge, or a PR is ready to merge), the PR Notices of section 14 (`pr_opened`, `pr_checks_failed`, `pr_changes_requested`, `pr_conflict`, `pr_merged`, `pr_closed`, `pr_watch_failing`), and `root_behind` when a new upstream head cannot be synced safely.
 
 Not Notices: `working`/`idle` flips, `working` Signals, Herdr `done` without a Signal.
+
+A Decision is a question only the User answers. Posse raises one from `land_ready` under `autonomy.land=ask`, review findings under `autonomy.review=ask`, and failed/lost Tasks. `posse ask <task> "<question>" --option <choice> --option <choice>` raises a Rider question. `posse decisions` lists pending questions; `--all` includes answered and obsolete ones. `posse decide <id> <option> --user-approved "<User's words>"` records an answer once and raises a `decision_answered` Notice for the Lead to carry out the action. The User's shell needs no approval flag: the typed option is its quote. When a Task Lands, relaunches or tears down before a Decision is answered, the pending Decision becomes obsolete with a reason, never an answer. Notice evaluation advances a per-Project cursor so unrelated and already evaluated Notices are not rescanned.
+
+Store callers use `DB.RaiseDecision(ctx, store.DecisionRequest{ProjectID, TaskID, Kind, Origin, Question, Options})`. `Kind` is explicit: `land_ready`, `recovery`, `review`, `rider_question`, `leftover` or `pr_closed`. `Origin` is only a stable Project-unique idempotency key (for example `leftover:<branch>`); reuse with a different kind is refused. `DB.AnswerDecision(ctx, projectID, id, option, userQuote)` atomically records the answer and Notice. Neither call performs the chosen action.
 
 Delivery, run after any Notice is created and on the triggers in section 8:
 
@@ -641,6 +649,9 @@ Every command prints TOON on stdout (JSON with `--json`), keeps lists to 3 or 4 
 | `posse lead` | Lead | print Lead instructions |
 | `posse roster [--all]` | Lead, User | Tasks, or every Project |
 | `posse show <task> [--full]` | Lead | Task detail, PR state, last Signals, transitions |
+| `posse ask <task> <question> --option <choice> --option <choice>` | Lead | raise a Decision from a Rider question |
+| `posse decisions [--all]` | Lead, User | list pending or all Decisions |
+| `posse decide <id> <option> [--user-approved <quote>]` | Lead with User quote, User | record an answer and raise a Notice |
 | `posse dispatch --brief <f>` | Lead | preview Profile resolution |
 | `posse ride --brief <f> --name <short> [--profile p]` | Lead | start a Task |
 | `posse send <task> <msg> [--queue]` | Lead | steer an unfocused Worker or wait for idle with `--queue` |
