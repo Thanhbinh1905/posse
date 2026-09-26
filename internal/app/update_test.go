@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -57,14 +58,138 @@ func TestUpdateCheckReadsReleaseWithoutInstalling(t *testing.T) {
 func TestUpdateNeverInstallsInsideLeadTurn(t *testing.T) {
 	server, url := fakeRelease(t, strings.Repeat("0", 64))
 	defer server.Close()
-	service := testService(t.TempDir(), nil)
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(context.Background(), "demo", home, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p2", "posse:demo:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	userShellUpdatePane(t, service)
 	service.Version = "0.1.0"
 	service.updateURL = url
-	service.herdrContext = func() bool { return true }
 	code, output := runCLI(t, service, "update")
 	if code != 1 || !strings.Contains(output, "update_from_turn") {
 		t.Fatalf("update in Lead turn: %d %s", code, output)
 	}
+}
+
+func TestUpdateFromUserShellPaneReachesReleaseVerification(t *testing.T) {
+	server, url := fakeRelease(t, strings.Repeat("0", 64))
+	defer server.Close()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	userShellUpdatePane(t, service)
+	service.Version = "0.1.0"
+	service.updateURL = url
+	code, output := runCLI(t, service, "update")
+	if code != 1 || !strings.Contains(output, "checksum_mismatch") {
+		t.Fatalf("User shell pane update: %d %s", code, output)
+	}
+}
+
+func TestUpdateRejectsAgentAndUnverifiedHerdrPanes(t *testing.T) {
+	server, url := fakeRelease(t, strings.Repeat("0", 64))
+	defer server.Close()
+	for _, testCase := range []struct {
+		name string
+		code string
+		set  func(*testing.T, *Service)
+	}{
+		{"agent pane", "update_from_turn", func(_ *testing.T, service *Service) {
+			service.Herdr.(*herdr.Fake).SnapshotValue.Panes[0].Agent = "codex"
+		}},
+		{"stale pane", "update_pane_unknown", func(_ *testing.T, service *Service) {
+			service.Herdr.(*herdr.Fake).SnapshotValue.Panes = nil
+		}},
+		{"missing pane ID", "update_pane_unknown", func(t *testing.T, _ *Service) {
+			t.Setenv("HERDR_PANE_ID", "")
+		}},
+		{"Herdr unavailable", "update_pane_unknown", func(_ *testing.T, service *Service) {
+			service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = fmt.Errorf("server unavailable")
+		}},
+		{"inherited another pane", "update_pane_unknown", func(t *testing.T, _ *Service) {
+			procRoot = fakeProc(t, "/", []string{"HERDR_PANE_ID=w1:p1"})
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := testService(t.TempDir(), nil)
+			userShellUpdatePane(t, service)
+			service.Version = "0.1.0"
+			service.updateURL = url
+			testCase.set(t, service)
+			code, output := runCLI(t, service, "update")
+			if code != 1 || !strings.Contains(output, testCase.code) {
+				t.Fatalf("update from %s: %d %s", testCase.name, code, output)
+			}
+		})
+	}
+}
+
+func TestUpdateNeverInstallsInsideRiderTurn(t *testing.T) {
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(context.Background(), "demo", home, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "scout", Title: "Check update", State: store.StateSpawning, LandingMode: "local", PaneID: "w1:p2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	userShellUpdatePane(t, service)
+	code, output := runCLI(t, service, "update")
+	if code != 1 || !strings.Contains(output, "worker_forbidden") {
+		t.Fatalf("update from Rider pane: %d %s", code, output)
+	}
+}
+
+func TestUpdateCheckWorksInAgentPane(t *testing.T) {
+	server, url := fakeRelease(t, "bad")
+	defer server.Close()
+	service := testService(t.TempDir(), nil)
+	userShellUpdatePane(t, service)
+	service.Herdr.(*herdr.Fake).SnapshotValue.Panes[0].Agent = "codex"
+	service.Version = "0.1.0"
+	service.updateURL = url
+	code, output := runCLI(t, service, "update", "--check")
+	if code != 0 || !strings.Contains(output, "v0.2.0") {
+		t.Fatalf("update --check from agent pane: %d %s", code, output)
+	}
+}
+
+func userShellUpdatePane(t *testing.T, service *Service) {
+	t.Helper()
+	previousProcRoot := procRoot
+	procRoot = t.TempDir()
+	t.Cleanup(func() { procRoot = previousProcRoot })
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p2")
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p2", WorkspaceID: "w1"}}}
+	service.Herdr = fake
 }
 
 func TestUpdateNoticeOncePerReleaseAndDailyCache(t *testing.T) {
@@ -117,7 +242,7 @@ func TestUpdateRefusesChecksumMismatchBeforeBackupOrInstall(t *testing.T) {
 	}
 }
 
-func TestUpdateBacksUpAndAtomicallyInstallsVerifiedArchive(t *testing.T) {
+func TestUpdateFromUserShellPaneBacksUpAndAtomicallyInstallsVerifiedArchive(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("fixture uses a shell executable")
 	}
@@ -172,6 +297,7 @@ func TestUpdateBacksUpAndAtomicallyInstallsVerifiedArchive(t *testing.T) {
 	defer server.Close()
 	url = server.URL
 	service := testService(home, nil)
+	userShellUpdatePane(t, service)
 	service.Version = "0.1.0"
 	service.updateURL = url
 	code, output := runCLI(t, service, "update")

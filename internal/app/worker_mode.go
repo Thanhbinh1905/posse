@@ -164,7 +164,7 @@ func processAncestors(root string, pid int) []ancestorProcess {
 		}
 		if environ, err := os.ReadFile(filepath.Join(directory, "environ")); err == nil {
 			for _, entry := range strings.Split(string(environ), "\x00") {
-				if name, value, ok := strings.Cut(entry, "="); ok && (name == workerHomeEnv) {
+				if name, value, ok := strings.Cut(entry, "="); ok && (name == workerHomeEnv || name == "HERDR_PANE_ID") {
 					process.env[name] = value
 				}
 			}

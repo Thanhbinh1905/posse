@@ -80,7 +80,7 @@ func TestUpOffersUpdateBeforeRegistrationThenReexecsExactArguments(t *testing.T)
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = url
-	service.herdrContext = func() bool { return true }
+	userShellUpdatePane(t, service)
 	prompted := 0
 	service.updateConfirm = func(_ io.Writer, question string) (bool, bool, error) {
 		prompted++
@@ -130,7 +130,7 @@ func TestUpDeclineAndNonInteractiveDoNotInstallEvenWithYes(t *testing.T) {
 			service := testService(home, nil)
 			service.Version = "0.1.0"
 			service.updateURL = url
-			service.herdrContext = func() bool { return true }
+			userShellUpdatePane(t, service)
 			service.updateConfirm = func(io.Writer, string) (bool, bool, error) { return false, tc.interactive, nil }
 			code, output := runCLI(t, service, "up", "--yes")
 			if code == 0 || !strings.Contains(output, "posse update") || *requests != 0 {
@@ -159,11 +159,11 @@ func TestUpDoesNotOfferUpdateInsideExistingLeadTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	t.Setenv("HERDR_PANE_ID", "lead-pane")
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = url
-	service.herdrContext = func() bool { return true }
+	userShellUpdatePane(t, service)
+	t.Setenv("HERDR_PANE_ID", "lead-pane")
 	service.updateConfirm = func(io.Writer, string) (bool, bool, error) {
 		t.Fatal("prompted from Lead turn")
 		return false, false, nil
@@ -186,7 +186,7 @@ func TestUpUpdateMigrationRefusalDoesNotRegisterOrReplaceBinary(t *testing.T) {
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = url
-	service.herdrContext = func() bool { return true }
+	userShellUpdatePane(t, service)
 	service.updateConfirm = func(io.Writer, string) (bool, bool, error) { return true, true, nil }
 	code, output := runCLI(t, service, "up")
 	if code != 1 || !strings.Contains(output, "migration_refused") || !strings.Contains(output, "live Tasks") {

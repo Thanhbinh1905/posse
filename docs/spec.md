@@ -617,6 +617,8 @@ Skills and the hook ship inside the binary and are versioned with it.
 
 **`posse update [--check] [--version vX.Y.Z]`**:
 
+Installing requires a User terminal outside Herdr or a live Herdr shell pane with no agent and no Lead or Rider binding. Posse verifies the caller before downloading and installing; an unknown pane or unavailable Herdr state blocks installation.
+
 1. Finds the latest (or requested) release on GitHub; `--check` prints the current and latest version with the changelog summary and stops.
 2. Downloads the archive and `checksums.txt` and verifies the SHA-256.
 3. Backs up the database with `VACUUM INTO ~/.posse/backup/posse-pre-<version>.db`.
@@ -625,7 +627,7 @@ Skills and the hook ship inside the binary and are versioned with it.
 6. Database migrations run forward only, on the new binary's first command, and `posse setup` applies them right after installing. Every applied migration's SHA-256 is kept in `posse_migration_checksums`. Opening a database refuses `schema_unknown` when it has migrations the build does not know (an older build after an upgrade, or a branch build), and `schema_diverged` when a known migration was applied with different contents. Pending migrations on an existing database are applied only by the installed posse (the `binary` in `setup.json`), and never by a Worker for its own home (`migration_refused`). `POSSE_FORCE_MIGRATION=1` overrides every check but the Worker rule, for the User.
 7. Mark migrations that cannot run with live Tasks with `-- posse: requires-no-live-tasks` in the SQL migration. The downloaded binary preflights those migrations before replacement; `posse update` refuses until no Task is live, or until `--force`, saying why. The migration gate enforces the same rule on first open.
 
-**Update notice.** posse checks for a newer release at most once a day, cached and silent when offline. `posse` and `posse doctor` then show `update{current,latest}` with `posse update` in `help[]`, and the Lead tells the User once per new version through an `update_available` Notice. Interactive `posse up` also offers the newer release before registering a Project or starting a Lead, defaulting to No. Explicit consent verifies and installs it, then re-executes `up` with the original arguments and environment. `--yes` does not consent to updating; offline, non-interactive and declined offers continue without updating. Lead and Rider turns cannot install an update.
+**Update notice.** posse checks for a newer release at most once a day, cached and silent when offline. `posse` and `posse doctor` then show `update{current,latest}` with `posse update` in `help[]`, and the Lead tells the User once per new version through an `update_available` Notice. Interactive `posse up` also offers the newer release before registering a Project or starting a Lead, defaulting to No. Explicit consent verifies and installs it, then re-executes `up` with the original arguments and environment. `--yes` does not consent to updating; offline, non-interactive and declined offers continue without updating. Lead and Rider turns cannot install an update; a separate User shell pane can.
 
 ## 20. CLI
 

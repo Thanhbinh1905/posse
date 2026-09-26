@@ -2,7 +2,6 @@ package app
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/mattn/go-isatty"
 	"github.com/thanhbinh1905/posse/internal/axi"
-	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 // up offers a release before upCore can register a Project or start a Lead.
@@ -37,13 +35,13 @@ func (s *Service) up(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if err == nil {
-		_, _ = fmt.Fprintln(ctx.ErrOut, "A newer posse release is available. Run `posse update` to install it.")
+		_, _ = fmt.Fprintln(ctx.ErrOut, "A newer posse release is available. "+updateInstallHelp+".")
 		return nil
 	}
 	var structured *axi.Error
 	if errors.As(err, &structured) {
 		updated := *structured
-		updated.Help = append(append([]string(nil), structured.Help...), "Run `posse update` to install the newer release")
+		updated.Help = append(append([]string(nil), structured.Help...), updateInstallHelp)
 		return &updated
 	}
 	return err
@@ -61,7 +59,7 @@ func (s *Service) offerUpUpdate(ctx *axi.Context, args []string) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	if ctx.JSON || s.insidePosseTurn(ctx.Context, home) {
+	if ctx.JSON || s.requireUserUpdateCaller(ctx.Context, home) != nil {
 		return true, nil
 	}
 	confirm := s.updateConfirm
@@ -107,24 +105,4 @@ func terminalUpdateConfirm(out io.Writer, question string) (bool, bool, error) {
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes", true, nil
-}
-
-func (s *Service) insidePosseTurn(ctx context.Context, home string) bool {
-	if os.Getenv(workerHomeEnv) != "" || s.workerCaller(ctx, home) {
-		return true
-	}
-	paneID := os.Getenv("HERDR_PANE_ID")
-	if paneID == "" {
-		return false
-	}
-	db, err := store.OpenReadOnly(home)
-	if err != nil {
-		return false
-	}
-	defer db.Close()
-	if _, err := db.TaskByPane(ctx, paneID); err == nil {
-		return true
-	}
-	_, err = db.ProjectByLeadPane(ctx, paneID)
-	return err == nil
 }

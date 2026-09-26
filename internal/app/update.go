@@ -26,6 +26,7 @@ import (
 )
 
 const releaseAPI = "https://api.github.com/repos/Thanhbinh1905/posse/releases"
+const updateInstallHelp = "Run `posse update` from a live User shell pane or a terminal outside Herdr"
 
 var releaseVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
@@ -145,15 +146,21 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 	if parsed.Bool("force") && parsed.Bool("check") {
 		return axi.Usage("--force cannot be combined with --check")
 	}
+	if !parsed.Bool("check") {
+		home, err := s.homePath()
+		if err != nil {
+			return err
+		}
+		if err := s.requireUserUpdateCaller(ctx.Context, home); err != nil {
+			return err
+		}
+	}
 	release, err := s.fetchRelease(ctx.Context, tag)
 	if err != nil {
 		return axi.Failure("release_unavailable", err.Error(), true, "Retry when GitHub is reachable")
 	}
 	if parsed.Bool("check") {
-		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "help", Value: []any{"Run `posse update` to install this release"}}})
-	}
-	if s.herdrContext != nil && s.herdrContext() {
-		return axi.Failure("update_from_turn", "posse cannot install an update inside a Lead or Rider pane", false, "Run `posse update` from the User's shell outside Herdr")
+		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "help", Value: []any{updateInstallHelp}}})
 	}
 	if tag == "" && s.currentVersion() != "dev" && !newerVersion(s.currentVersion(), release.Tag) {
 		return axi.Failure("already_current", "no newer release is available", false, "Use `posse update --version vX.Y.Z` to select a release")
@@ -165,8 +172,57 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "installed", Value: release.Tag}, {Key: "binary", Value: installed.binary}, {Key: "backup", Value: installed.backup}, {Key: "help", Value: []any{"Run `posse doctor` to verify the update"}}})
 }
 
+func (s *Service) requireUserUpdateCaller(ctx context.Context, home string) error {
+	if os.Getenv(workerHomeEnv) != "" || s.workerCaller(ctx, home) {
+		return axi.Failure("worker_forbidden", "a Rider cannot update its own posse home", false)
+	}
+	if s.herdrContext == nil || !s.herdrContext() {
+		return nil
+	}
+	paneID := os.Getenv("HERDR_PANE_ID")
+	if paneID == "" {
+		return axi.Failure("update_pane_unknown", "posse cannot identify this Herdr pane", false, updateInstallHelp)
+	}
+	for _, ancestor := range processAncestors(procRoot, os.Getpid()) {
+		if inherited := ancestor.env["HERDR_PANE_ID"]; inherited != "" && inherited != paneID {
+			return axi.Failure("update_pane_unknown", "this process inherited a different Herdr pane", false, updateInstallHelp)
+		}
+	}
+	db, err := store.OpenReadOnly(home)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return axi.Failure("update_pane_unknown", "posse cannot verify the pane's role", false, updateInstallHelp)
+	}
+	if db != nil {
+		defer db.Close()
+		if _, err := db.TaskByPane(ctx, paneID); err == nil {
+			return axi.Failure("update_from_turn", "a Rider pane cannot install a Posse update", false, updateInstallHelp)
+		} else if !store.IsNotFound(err) {
+			return axi.Failure("update_pane_unknown", "posse cannot verify the pane's role", false, updateInstallHelp)
+		}
+		if _, err := db.ProjectByLeadPane(ctx, paneID); err == nil {
+			return axi.Failure("update_from_turn", "a Lead pane cannot install a Posse update", false, updateInstallHelp)
+		} else if !store.IsNotFound(err) {
+			return axi.Failure("update_pane_unknown", "posse cannot verify the pane's role", false, updateInstallHelp)
+		}
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return axi.Failure("update_pane_unknown", "posse cannot inspect this Herdr pane", false, updateInstallHelp)
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID != paneID {
+			continue
+		}
+		if pane.Agent != "" || pane.AgentStatus != "" {
+			return axi.Failure("update_from_turn", "an agent pane cannot install a Posse update", false, updateInstallHelp)
+		}
+		return nil
+	}
+	return axi.Failure("update_pane_unknown", "this Herdr pane no longer exists", false, updateInstallHelp)
+}
+
 // installRelease is called only after explicit consent, either by `update` or
-// by an interactive shell's `up` prompt. A Rider may never update its home.
+// by an interactive shell's `up` prompt.
 type updateInstallResult struct{ binary, backup string }
 
 func (s *Service) installRelease(ctx context.Context, release githubRelease, force bool, installed *updateInstallResult) error {
@@ -174,8 +230,8 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 	if err != nil {
 		return err
 	}
-	if s.workerCaller(ctx, home) {
-		return axi.Failure("worker_forbidden", "a Rider cannot update its own posse home", false)
+	if err := s.requireUserUpdateCaller(ctx, home); err != nil {
+		return err
 	}
 	manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName))
 	if err != nil {
