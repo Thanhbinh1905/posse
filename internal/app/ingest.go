@@ -185,6 +185,9 @@ func (s *Service) deliverNotices(ctx context.Context, db *store.DB, project stor
 }
 
 func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) error {
+	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
+		return err
+	}
 	if err := db.ReleaseExpiredDeliveryClaims(ctx, currentTime()-deliveryClaimTimeout.Milliseconds()); err != nil {
 		return err
 	}

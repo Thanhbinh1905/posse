@@ -26,6 +26,14 @@ _Avoid_: Worker (as a visible role label)
 One unit of delegated work with an explicit contract, carried out by one Worker.
 _Avoid_: Job, ticket, run
 
+**Task ID**:
+The handle `t<n>` that names one Task everywhere the User or the Lead refers to it; never reused within a Project.
+_Avoid_: Internal id, seq
+
+**Task Name**:
+A short slug derived from a Task's title, used for its branch and tab label; it is display only and may repeat across Tasks.
+_Avoid_: Id, handle, nickname
+
 **Ship Task**:
 A Task whose outcome is a change landed into the Project.
 _Avoid_: Fix task, build task
@@ -46,6 +54,10 @@ _Avoid_: Summary, output
 A Worker's own declaration of where its Task stands, such as done, needs-decision or failed.
 _Avoid_: Status, report, event
 
+**Decision**:
+A question put to the User that only the User may answer, such as whether to Land, relaunch or discard; answered once and recorded.
+_Avoid_: Approval (for the question itself), prompt, needs-decision (that is a Signal to the Lead)
+
 **Brief**:
 The written contract a Task starts from: its type, what done means, and how it Lands.
 _Avoid_: Prompt, spec, plan
@@ -63,8 +75,12 @@ One worktree in a Remuda; a Task holds exactly one Mount from spawn until Teardo
 _Avoid_: Worktree (when the reusable unit is meant), lease
 
 **Land**:
-To integrate a Ship Task's change into the Project through the Project's landing mode, either a pull request or a local merge.
+To integrate a Ship Task's change into the Project through the Project's landing mode, either a pull request or a local merge. A pull request has Landed once the forge reports it merged, whatever its Worker is doing at the time.
 _Avoid_: Merge (as the general term), ship, deliver
+
+**Leftover**:
+Work a Worker made on a Landed Task beyond what Landed, such as later commits or uncommitted changes; the User decides whether it becomes a new Task or is discarded.
+_Avoid_: Follow-up (that is a message to a Worker), residue, diff
 
 **Landing Mode**:
 How a Project's Ship Tasks Land: `local` (merge on this machine), `pr` (a pull request) or `no-mistakes` (through the no-mistakes pipeline).
