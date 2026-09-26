@@ -212,7 +212,7 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	transitioned := false
 	if effect.TransitionTo != "" {
 		state := current.State
-		if state == StateLanding || (state == StateDone && effect.TransitionTo == StateLanded) {
+		if transitions[state][effect.TransitionTo] && (effect.TransitionTo == StateLanded || state == StateLanding) {
 			if effect.LandedRef != "" {
 				if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, effect.LandedRef, time.Now().UnixMilli(), observation.TaskID); err != nil {
 					return false, err

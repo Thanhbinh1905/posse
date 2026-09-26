@@ -847,6 +847,20 @@ func (s *Service) send(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if task.PRURL != "" && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {
+		if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, true); err != nil {
+			return err
+		}
+		if err := s.autoTeardownLandedTasks(ctx.Context, db, project, cfg); err != nil {
+			return err
+		}
+		if task, err = db.TaskByID(ctx.Context, project.ID, task.ID); err != nil {
+			return err
+		}
+		if task.State == store.StateLanded || task.State == store.StateTornDown {
+			return axi.Failure("pr_merged", "pull request merged; Task Landed before the message could be sent", false)
+		}
+	}
 	if task.State == store.StateDone && task.Type != "ship" {
 		return axi.Failure("message_refused", "Task is not accepting Rider instructions in state done because it is not a Ship Task", false, "Create a new Ship Task with `posse ride --brief <file> --name <short>` to continue the work")
 	}

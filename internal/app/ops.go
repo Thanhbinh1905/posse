@@ -18,7 +18,7 @@ import (
 )
 
 func (s *Service) wait(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "quiet-routine": {boolean: true}})
+	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -41,6 +41,12 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	project, err := s.projectForCWD(ctx.Context, db)
 	if err != nil {
 		return err
+	}
+	if parsed.Bool("poll-only") {
+		if parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Bool("quiet-routine") {
+			return axi.Usage("--poll-only cannot deliver or acknowledge Notices")
+		}
+		return s.watchPullRequestsInLookoutTab(ctx, db, project, timeout)
 	}
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
@@ -99,6 +105,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					return err
 				}
 				if _, err := s.syncProjectRoot(ctx.Context, db, project, cfg, false); err != nil {
+					return err
+				}
+				if err := s.autoTeardownLandedTasks(ctx.Context, db, project, cfg); err != nil {
 					return err
 				}
 			}

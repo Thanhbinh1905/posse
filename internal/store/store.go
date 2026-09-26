@@ -220,17 +220,17 @@ const (
 )
 
 var transitions = map[State]map[State]bool{
-	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true},
-	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true},
-	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true},
-	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true},
-	StateStalled:       {StateWorking: true, StateTornDown: true, StateLost: true},
+	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
+	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateLanded: true},
+	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
+	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
+	StateStalled:       {StateWorking: true, StateTornDown: true, StateLost: true, StateLanded: true},
 	StateDone:          {StateLanding: true, StateLanded: true, StateReported: true, StateWorking: true},
 	StateLanding:       {StateLanded: true, StateDone: true, StateWorking: true},
-	StateLanded:        {StateTornDown: true, StateWorking: true},
+	StateLanded:        {StateTornDown: true},
 	StateReported:      {StateTornDown: true},
-	StateFailed:        {StateWorking: true, StateTornDown: true},
-	StateLost:          {StateWorking: true, StateTornDown: true},
+	StateFailed:        {StateWorking: true, StateTornDown: true, StateLanded: true},
+	StateLost:          {StateWorking: true, StateTornDown: true, StateLanded: true},
 }
 
 func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State, source, note string) error {

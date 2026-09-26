@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -378,10 +377,10 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 			return safetyErr
 		}
 		if !safe {
-			if err := restoreMergedTaskWithWork(ctx.Context, db, project, task); err != nil {
+			if err := s.recordUnsaddleIncomplete(ctx.Context, db, project, task, fmt.Errorf("merged PR Mount has work beyond its merged head")); err != nil {
 				return err
 			}
-			return axi.Failure("teardown_refused", "merged PR has unmerged Task work; Rider returned to working", false, "Continue the Rider and publish follow-up work as a new PR before teardown")
+			return axi.Failure("teardown_refused", "merged PR has unmerged Task work; Task remains landed", false)
 		}
 	}
 	if discardable && !parsed.Bool("discard") {
@@ -450,16 +449,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return releaseErr
 	})
 	if err != nil {
-		if task.State == store.StateLanded && task.LandingMode == "pr" {
-			safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
-			if safetyErr == nil && !safe {
-				// Work written after the first cleanliness check belongs to
-				// the Rider, not to teardown. Restore its reportable state.
-				if restoreErr := restoreMergedTaskWithWork(ctx, db, project, task); restoreErr != nil {
-					return result, errors.Join(err, restoreErr)
-				}
-			}
-		}
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
 	result.Panes = paneResult

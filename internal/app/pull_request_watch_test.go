@@ -16,6 +16,69 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+// Every observed merged PR must finish Teardown or retain exactly one
+// deduplicated, visible reason. A terminal Rider state never drops the watch.
+func TestMergedPRNeverSilentlySkipsTask(t *testing.T) {
+	states := []store.State{store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled, store.StateFailed, store.StateLost, store.StateDone, store.StateLanding}
+	for _, state := range states {
+		t.Run(string(state), func(t *testing.T) {
+			f := newPRLandingFixture(t, "pr", store.StateWorking)
+			defer f.db.Close()
+			ctx := context.Background()
+			if state == store.StateLanding {
+				if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateLanding, "cli", "landing"); err != nil {
+					t.Fatal(err)
+				}
+			} else if state != store.StateWorking {
+				source := "cli"
+				if state == store.StateDone || state == store.StateFailed || state == store.StateNeedsDecision {
+					source = "worker"
+				}
+				if state == store.StateBlocked {
+					source = "herdr"
+				}
+				if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, state, source, "test"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+				t.Fatal(err)
+			}
+			f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
+			cfg, err := config.Load(f.home, f.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for tick := 0; tick < 2; tick++ {
+				if err := f.service.pollProjectPullRequests(ctx, f.db, f.project, cfg, true); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, cfg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			task, err := f.db.Task(ctx, f.project.ID, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			notices, err := f.db.Notices(ctx, f.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reasons := countNoticeKind(notices, "unsaddle_incomplete") + countNoticeKind(notices, "pr_watch_failing")
+			if task.State != store.StateTornDown && (task.State != store.StateLanded || reasons != 1) {
+				t.Fatalf("merged PR silently skipped: state=%s reasons=%d notices=%#v", task.State, reasons, notices)
+			}
+			if countNoticeKind(notices, "pr_merged") != 1 {
+				t.Fatalf("merged Notice count = %d", countNoticeKind(notices, "pr_merged"))
+			}
+		})
+	}
+}
+
 func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateDone)
 	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
@@ -189,8 +252,8 @@ auto_unsaddle = "finished"
 				t.Fatalf("reconcile merged PR: %v", err)
 			}
 			task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-			if err != nil || task.State != store.StateDone {
-				t.Fatalf("unsafe Task was not preserved in done state: %#v, %v", task, err)
+			if err != nil || task.State != store.StateLanded {
+				t.Fatalf("merged Task was not Landed: %#v, %v", task, err)
 			}
 			if !containsPane(adapter.currentSnapshot(), "w2:p1") {
 				t.Fatal("unsafe Task Worker pane was closed")
@@ -262,7 +325,7 @@ func TestPRMergePreservesWorkWrittenDuringPaneClosure(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
-	if err != nil || task.State != store.StateWorking {
+	if err != nil || task.State != store.StateLanded {
 		t.Fatalf("Task after late Rider write: %#v %v", task, err)
 	}
 	if data, err := os.ReadFile(work); err != nil || string(data) != "preserve me\n" {
@@ -297,8 +360,8 @@ auto_unsaddle = "finished"
 		t.Fatalf("reconcile working Task: %v", err)
 	}
 	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateWorking {
-		t.Fatalf("merged PR changed working Task state: %#v, %v", task, err)
+	if err != nil || task.State != store.StateLanded {
+		t.Fatalf("merged PR did not Land working Task: %#v, %v", task, err)
 	}
 	fake, ok := fixture.service.Herdr.(*herdr.Fake)
 	if !ok || !containsPane(fake.SnapshotValue, "w2:p1") {
@@ -377,7 +440,12 @@ func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 			if tc.name == "verified needs decision" {
 				want = store.StateNeedsDecision
 			}
-			if task.State != want || task.LandedRef != "" {
+			if tc.land || tc.name == "unverified head" || tc.name == "wrong recorded URL" {
+				// The observed head is on the Mount's Task branch, even if no
+				// publish record was retained.
+				want = store.StateLanded
+			}
+			if task.State != want || (want != store.StateLanded && task.LandedRef != "") {
 				t.Fatalf("state=%s ref=%s, want=%s", task.State, task.LandedRef, want)
 			}
 			notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
@@ -385,7 +453,7 @@ func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantNotices := 0
-			if tc.land {
+			if want == store.StateLanded {
 				wantNotices = 1
 			}
 			if got := countNoticeKind(notices, "pr_merged"); got != wantNotices {

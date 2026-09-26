@@ -177,8 +177,8 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	if err != nil || countNoticeKind(notices, "unsaddle_incomplete") != 1 {
 		t.Fatalf("automatic Teardown failure Notice count = %d, want one: %#v, %v", countNoticeKind(notices, "unsaddle_incomplete"), notices, err)
 	}
-	if got := fake.CallCount("pane.close"); got != 1 {
-		t.Fatalf("automatic Teardown attempt count = %d, want one", got)
+	if got := fake.CallCount("pane.close"); got < 2 {
+		t.Fatalf("automatic Teardown was not retried: %d attempts", got)
 	}
 	fixture.test.Chdir(worktree2)
 	cli := fixture.service.CLI()
@@ -190,8 +190,8 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	if code, output, errOutput := fixture.run("lookout", "--timeout", "1"); code != 0 {
 		t.Fatalf("lookout was blocked by another Task's teardown failure: exit=%d output=%s error=%s", code, output, errOutput)
 	}
-	if got := fake.CallCount("pane.close"); got != 1 {
-		t.Fatalf("unacknowledged automatic Teardown retried %d times, want one", got)
+	if got := fake.CallCount("pane.close"); got < 2 {
+		t.Fatalf("unacknowledged automatic Teardown was not retried: %d attempts", got)
 	}
 }
 

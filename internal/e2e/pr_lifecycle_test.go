@@ -167,18 +167,9 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	current := fixture.mustTask(t, "t1")
-	if current.State != store.StateWorking {
-		t.Fatalf("active Rider was ended before its follow-up Signal: %#v", current)
-	}
-	workerEnv := setEnv(fixture.env, "HERDR_ENV", "1")
-	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", current.PaneID)
-	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", current.HerdrWorkspaceID)
-	runPosse(t, fixture.binary, current.WorktreePath, workerEnv, "holler", "done", "Merged PR follow-up is complete", "--pr", current.PRURL)
 	if verified, err := fixture.db.WasVerifiedPRHead(context.Background(), current.ID, current.PRURL, movedTip); err != nil || verified {
 		t.Fatalf("moved local tip was recorded as verified PR head: %v %v", verified, err)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
-	current = fixture.mustTask(t, "t1")
 	if current.State != store.StateTornDown || current.LandedRef != merge {
 		status, _ := gitCommand(fixture.env, landing.WorktreePath, "status", "--porcelain", "--untracked-files=all", "--ignored")
 		diff, diffErr := gitCommand(fixture.env, landing.WorktreePath, "diff", "--quiet", merge, "HEAD")

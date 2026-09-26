@@ -569,7 +569,7 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 		if task.PRURL == "" {
 			continue
 		}
-		if task.State == store.StateLanding || (task.LandingMode == "pr" && (task.State == store.StateDone || task.State == store.StateWorking || task.State == store.StateNeedsDecision)) {
+		if task.State != store.StateLanded && task.State != store.StateTornDown && task.State != store.StateReported {
 			watched = append(watched, task)
 		}
 	}
@@ -718,22 +718,27 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			}
 			continue
 		}
-		if task.State == store.StateWorking || task.State == store.StateNeedsDecision {
-			// Follow-up work may have moved the local branch. Only a merged PR
-			// whose exact head was verified before that move can finish the Task.
-			if observation.State != "MERGED" {
-				continue
-			}
+		if observation.State == "MERGED" {
 			verified, verifyErr := db.WasVerifiedPRHead(ctx, task.ID, task.PRURL, observation.HeadSHA)
 			if verifyErr != nil {
 				return verifyErr
 			}
+			// A head still on the Mount's Task branch is also the Rider's own.
+			if !verified && task.WorktreePath != "" && task.Branch != "" {
+				branch, branchErr := gitOutput(ctx, task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+				if branchErr == nil && branch == task.Branch {
+					_, verifyErr = gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD")
+					verified = verifyErr == nil
+				}
+			}
 			if !verified {
+				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("merged head %s is neither on the Mount Task branch nor recorded by publish", observation.HeadSHA), now); err != nil {
+					return err
+				}
 				continue
 			}
-			// A still-running Rider may have unmerged commits or edits. Mark
-			// the PR landed, but never tear down a Mount with such work.
-			if err := validateWorkerPullRequestWithRemote(ctx, project, task, forge, task.PRURL, observation.HeadSHA, false); err != nil {
+			if (task.State != store.StateLanding || task.GatedSHA != observation.HeadSHA) && validateWorkerPullRequestWithRemote(ctx, project, task, forge, task.PRURL, observation.HeadSHA, false) != nil {
+				err := fmt.Errorf("merged pull request identity could not be verified for %s", task.PRURL)
 				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, err, now); recordErr != nil {
 					return recordErr
 				}
@@ -744,24 +749,7 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	}
 	for _, observed := range observations {
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
-		if observed.current.State == "MERGED" && observed.task.LandingMode == "pr" {
-			if observed.task.State == store.StateWorking || observed.task.State == store.StateNeedsDecision {
-				effect.TransitionTo = "" // The Rider must remain able to finish its follow-up.
-			} else if observed.task.State == store.StateDone {
-				candidate := observed.task
-				candidate.LandedRef = observed.current.MergeCommit
-				safe, safetyErr := safeMergedPRWorktree(ctx, db, project, candidate, observed.current)
-				if safetyErr != nil {
-					return safetyErr
-				}
-				if !safe {
-					effect.TransitionTo = ""
-				}
-			}
-			if effect.TransitionTo == "" && (!observed.hasBefore || observed.previous.State != "MERGED") {
-				effect.Notices = append(effect.Notices, store.Notice{ProjectID: project.ID, TaskID: observed.task.ID, Kind: "pr_follow_up_pending", Summary: observed.task.Title + ": merged PR has follow-up work; retain the Rider and publish any unmerged change as a new PR", DataJSON: marshalJSON(map[string]any{"url": observed.current.PRURL}), CreatedAt: observed.current.ObservedAt})
-			}
-		}
+
 		recorded, err := db.RecordPRObservation(ctx, observed.current, effect, observed.task)
 		if err != nil {
 			return err

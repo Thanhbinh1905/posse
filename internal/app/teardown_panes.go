@@ -38,28 +38,18 @@ func shouldAutoUnsaddleLanded(cfg config.Config) bool {
 }
 
 func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
-	if !shouldAutoUnsaddleLanded(cfg) || s.Herdr == nil {
+	if s.Herdr == nil {
 		return nil
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {
 		return err
 	}
-	notices, err := db.Notices(ctx, project.ID, true)
-	if err != nil {
-		return err
-	}
-	unackedFailures := make(map[int64]bool)
-	for _, notice := range notices {
-		if notice.Kind == "unsaddle_incomplete" && notice.TaskID != 0 {
-			unackedFailures[notice.TaskID] = true
-		}
-	}
 	for _, task := range tasks {
 		if task.State != store.StateLanded {
 			continue
 		}
-		if unackedFailures[task.ID] {
+		if !shouldAutoUnsaddleLanded(cfg) && task.LandingMode != "pr" {
 			continue
 		}
 		safe, err := safePRMergeTeardown(ctx, db, project, task)
@@ -67,27 +57,18 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 			return err
 		}
 		if !safe {
-			if err := restoreMergedTaskWithWork(ctx, db, project, task); err != nil {
+			if err := s.recordUnsaddleIncomplete(ctx, db, project, task, fmt.Errorf("merged PR Mount has work beyond its merged head")); err != nil {
 				return err
 			}
 			continue
 		}
 		if _, err := s.unsaddleTask(ctx, db, project, cfg, task, false, ""); err != nil {
-			var commandError *axi.Error
-			if errors.As(err, &commandError) && commandError.Code == "intent_active" {
-				continue
-			}
 			if noticeErr := s.recordUnsaddleIncomplete(ctx, db, project, task, err); noticeErr != nil {
 				return noticeErr
 			}
-			unackedFailures[task.ID] = true
 		}
 	}
 	return nil
-}
-
-func restoreMergedTaskWithWork(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
-	return db.RestoreMergedTaskWithWork(ctx, project.ID, task)
 }
 
 func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
@@ -359,13 +340,6 @@ func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project 
 	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
 		return errors.Join(cause, err)
 	}
-	current, err := db.TaskByID(ctx, project.ID, task.ID)
-	if err != nil {
-		return err
-	}
-	if task.State == store.StateLanded && current.State == store.StateWorking {
-		return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Follow-up work was preserved. Run `posse relaunch "+taskIDString(task.Seq)+"` if the Rider pane was closed, then publish the work")
-	}
 	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Resolve the remaining pane or Mount process, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
 }
 
@@ -376,16 +350,13 @@ func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, pr
 	}
 	found := false
 	for _, notice := range notices {
-		if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" && notice.AckedAt == 0 {
+		if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" && strings.Contains(notice.Summary, cause.Error()) {
 			found = true
 			break
 		}
 	}
 	if !found {
 		summary := fmt.Sprintf("%s teardown incomplete: %s", taskDisplayName(task), cause)
-		if current, err := db.TaskByID(ctx, project.ID, task.ID); err == nil && task.State == store.StateLanded && current.State == store.StateWorking {
-			summary += "; run `posse relaunch " + taskIDString(task.Seq) + "` if the Rider pane closed"
-		}
 		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "unsaddle_incomplete", Summary: summary, DataJSON: `{}`}); err != nil {
 			return err
 		}
