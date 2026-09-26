@@ -181,7 +181,7 @@ func TestPRMergeRequiresApprovalAndPinsTheGatedHead(t *testing.T) {
 		ProjectID: fixture.project.ID, TaskID: task.ID, PRURL: task.PRURL,
 		HeadSHA: task.GatedSHA, State: "OPEN", Checks: marshalJSON(checkSnapshot{State: "SUCCESS"}),
 		Review: "APPROVED", Mergeable: "MERGEABLE",
-	}, store.PRObservationEffect{}); err != nil {
+	}, store.PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
 
@@ -220,7 +220,7 @@ func TestPRMergeRequiresGreenObservationForGatedHead(t *testing.T) {
 		HeadSHA: task.GatedSHA, State: "OPEN", Checks: marshalJSON(checkSnapshot{State: "PENDING"}),
 		Review: "APPROVED", Mergeable: "MERGEABLE",
 	}
-	if _, err := fixture.db.RecordPRObservation(context.Background(), pending, store.PRObservationEffect{}); err != nil {
+	if _, err := fixture.db.RecordPRObservation(context.Background(), pending, store.PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
 
@@ -238,12 +238,12 @@ func TestPRMergeRequiresGreenObservationForGatedHead(t *testing.T) {
 
 	green := pending
 	green.Checks = marshalJSON(checkSnapshot{State: "SUCCESS"})
-	if _, err := fixture.db.RecordPRObservation(context.Background(), green, store.PRObservationEffect{}); err != nil {
+	if _, err := fixture.db.RecordPRObservation(context.Background(), green, store.PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
 	differentHead := green
 	differentHead.HeadSHA = strings.Repeat("f", 40)
-	if _, err := fixture.db.RecordPRObservation(context.Background(), differentHead, store.PRObservationEffect{}); err != nil {
+	if _, err := fixture.db.RecordPRObservation(context.Background(), differentHead, store.PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
 	code, output, _ = fixture.run("land", "t1", "--merge", "--user-approved", "User approved this PR")
@@ -255,7 +255,7 @@ func TestPRMergeRequiresGreenObservationForGatedHead(t *testing.T) {
 		t.Fatalf("PR with a different latest head observation was merged: log=%q err=%v", log, err)
 	}
 
-	if _, err := fixture.db.RecordPRObservation(context.Background(), green, store.PRObservationEffect{}); err != nil {
+	if _, err := fixture.db.RecordPRObservation(context.Background(), green, store.PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
 	if code, output, errOutput := fixture.run("land", "t1", "--merge"); code != 0 {

@@ -67,6 +67,9 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 			return err
 		}
 		if !safe {
+			if err := restoreMergedTaskWithWork(ctx, db, project, task); err != nil {
+				return err
+			}
 			continue
 		}
 		if _, err := s.unsaddleTask(ctx, db, project, cfg, task, false, ""); err != nil {
@@ -83,25 +86,33 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 	return nil
 }
 
+func restoreMergedTaskWithWork(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	return db.RestoreMergedTaskWithWork(ctx, project.ID, task)
+}
+
 func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
 	if task.LandingMode != "pr" || task.PRURL == "" {
 		return true, nil
 	}
 	observation, err := db.LatestPRObservation(ctx, task.ID)
 	if store.IsNotFound(err) {
-		return true, nil
+		return false, nil // No verified merge observation can justify resetting the Mount.
 	}
 	if err != nil {
 		return false, err
 	}
 	if observation.State != "MERGED" {
-		return true, nil
+		return false, nil
 	}
+	return safeMergedPRWorktree(ctx, db, project, task, observation)
+}
+
+func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Project, task store.Task, observation store.PRObservation) (bool, error) {
 	if observation.PRURL != task.PRURL || observation.HeadSHA == "" || observation.MergeCommit == "" || task.LandedRef != observation.MergeCommit || task.Branch == "" || task.WorktreePath == "" {
 		return false, nil
 	}
 	branchSHA, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+task.Branch)
-	if err != nil || branchSHA != observation.HeadSHA {
+	if err != nil {
 		return false, nil
 	}
 	worktreeBranch, err := gitOutput(ctx, task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -109,10 +120,40 @@ func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Projec
 		return false, nil
 	}
 	worktreeSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
-	if err != nil || worktreeSHA != observation.HeadSHA {
+	if err != nil || worktreeSHA != branchSHA {
 		return false, nil
 	}
-	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain", "--untracked-files=all", "--ignored")
+	if branchSHA != observation.HeadSHA {
+		verified, err := db.WasVerifiedPRHead(ctx, task.ID, observation.PRURL, observation.HeadSHA)
+		if err != nil || !verified {
+			return false, err
+		}
+		if observation.MergeCommit == observation.HeadSHA {
+			return false, nil // No distinct merged commit proves the moved tip is safe.
+		}
+		// A merge of origin/main after the PR was merged is safe only if
+		// it contains both the PR head and the merge commit and carries no
+		// additional tree changes. Never discard a subsequent follow-up.
+		for _, ancestor := range []string{observation.HeadSHA, observation.MergeCommit} {
+			if _, err := gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", ancestor, branchSHA); err != nil {
+				return false, nil
+			}
+		}
+		// Compare against the newest default-branch ancestor of the Task
+		// tip. Other changes that landed on main after this PR are safe;
+		// changes made only on the Task branch are not.
+		base, err := gitOutput(ctx, task.WorktreePath, "merge-base", branchSHA, "refs/heads/"+project.DefaultBranch)
+		if err != nil {
+			return false, nil
+		}
+		if _, err := gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", observation.MergeCommit, base); err != nil {
+			return false, nil
+		}
+		if _, err := gitOutput(ctx, task.WorktreePath, "diff", "--quiet", base, branchSHA); err != nil {
+			return false, nil
+		}
+	}
+	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain", "--untracked-files=all")
 	if err != nil || status != "" {
 		return false, nil
 	}
@@ -318,6 +359,13 @@ func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project 
 	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
 		return errors.Join(cause, err)
 	}
+	current, err := db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return err
+	}
+	if task.State == store.StateLanded && current.State == store.StateWorking {
+		return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Follow-up work was preserved. Run `posse relaunch "+taskIDString(task.Seq)+"` if the Rider pane was closed, then publish the work")
+	}
 	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Resolve the remaining pane or Mount process, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
 }
 
@@ -334,7 +382,11 @@ func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, pr
 		}
 	}
 	if !found {
-		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "unsaddle_incomplete", Summary: fmt.Sprintf("%s teardown incomplete: %s", taskDisplayName(task), cause), DataJSON: `{}`}); err != nil {
+		summary := fmt.Sprintf("%s teardown incomplete: %s", taskDisplayName(task), cause)
+		if current, err := db.TaskByID(ctx, project.ID, task.ID); err == nil && task.State == store.StateLanded && current.State == store.StateWorking {
+			summary += "; run `posse relaunch " + taskIDString(task.Seq) + "` if the Rider pane closed"
+		}
+		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "unsaddle_incomplete", Summary: summary, DataJSON: `{}`}); err != nil {
 			return err
 		}
 	}

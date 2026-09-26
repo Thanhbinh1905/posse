@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -371,6 +372,18 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if !discardable && task.State != store.StateLanded && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
+	if task.State == store.StateLanded && task.LandingMode == "pr" {
+		safe, safetyErr := safePRMergeTeardown(ctx.Context, db, project, task)
+		if safetyErr != nil {
+			return safetyErr
+		}
+		if !safe {
+			if err := restoreMergedTaskWithWork(ctx.Context, db, project, task); err != nil {
+				return err
+			}
+			return axi.Failure("teardown_refused", "merged PR has unmerged Task work; Rider returned to working", false, "Continue the Rider and publish follow-up work as a new PR before teardown")
+		}
+	}
 	if discardable && !parsed.Bool("discard") {
 		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false)
 	}
@@ -421,11 +434,32 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
+		if !discardable && task.State == store.StateLanded && task.LandingMode == "pr" {
+			// The Rider's pane has been closed. Recheck after all writes stop,
+			// immediately before the destructive reset of its Mount.
+			safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
+			if safetyErr != nil {
+				return safetyErr
+			}
+			if !safe {
+				return axi.Failure("teardown_refused", "Task work changed before Mount release; preserve it", false)
+			}
+		}
 		var releaseErr error
 		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean)
 		return releaseErr
 	})
 	if err != nil {
+		if task.State == store.StateLanded && task.LandingMode == "pr" {
+			safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
+			if safetyErr == nil && !safe {
+				// Work written after the first cleanliness check belongs to
+				// the Rider, not to teardown. Restore its reportable state.
+				if restoreErr := restoreMergedTaskWithWork(ctx, db, project, task); restoreErr != nil {
+					return result, errors.Join(err, restoreErr)
+				}
+			}
+		}
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
 	result.Panes = paneResult
@@ -472,6 +506,20 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	} else {
 		if task.Branch != "" {
 			err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
+				// A PR branch advanced after its external merge stays at its
+				// existing tip even when the Mount can be safely released.
+				if task.LandingMode == "pr" {
+					observation, observationErr := db.LatestPRObservation(ctx, task.ID)
+					if observationErr != nil && !store.IsNotFound(observationErr) {
+						return observationErr
+					}
+					if observationErr == nil && observation.State == "MERGED" {
+						branchSHA, revErr := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+task.Branch)
+						if revErr == nil && branchSHA != observation.HeadSHA {
+							return nil
+						}
+					}
+				}
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
 					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+project.DefaultBranch); mergeErr == nil {

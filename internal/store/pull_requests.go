@@ -172,7 +172,7 @@ func (db *DB) LatestPRObservation(ctx context.Context, taskID int64) (PRObservat
 	return observation, err
 }
 
-func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation, effect PRObservationEffect) (bool, error) {
+func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation, effect PRObservationEffect, expected Task) (bool, error) {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return false, err
@@ -189,6 +189,15 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
+	// Reject a poll whose Task changed while the forge request was in flight.
+	// An old PR must never Land a Task now following a different PR or head.
+	var current Task
+	if err := tx.QueryRowContext(ctx, `SELECT state, pr_url, gated_sha FROM tasks WHERE id=? AND project_id=?`, observation.TaskID, observation.ProjectID).Scan(&current.State, &current.PRURL, &current.GatedSHA); err != nil {
+		return false, err
+	}
+	if current.PRURL != observation.PRURL || current.State != expected.State || current.GatedSHA != expected.GatedSHA || current.PRURL != expected.PRURL {
+		return false, nil
+	}
 	unchanged := err == nil && samePRObservation(previous, observation)
 	if !unchanged {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
@@ -202,10 +211,7 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	}
 	transitioned := false
 	if effect.TransitionTo != "" {
-		var state State
-		if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=? AND project_id=?`, observation.TaskID, observation.ProjectID).Scan(&state); err != nil {
-			return false, err
-		}
+		state := current.State
 		if state == StateLanding || (state == StateDone && effect.TransitionTo == StateLanded) {
 			if effect.LandedRef != "" {
 				if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, effect.LandedRef, time.Now().UnixMilli(), observation.TaskID); err != nil {

@@ -228,3 +228,9 @@ type Transition struct {
 	Note      string
 	At        int64
 }
+
+type VerifiedPrHead struct {
+	TaskID  int64
+	PrUrl   string
+	HeadSha string
+}

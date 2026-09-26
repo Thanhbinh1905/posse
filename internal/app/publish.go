@@ -120,6 +120,11 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err := validateWorkerPullRequest(out.Context, project, task, forge, prURL, sha); err != nil {
 		return err
 	}
+	if member == nil {
+		if err := db.RecordVerifiedPRHead(out.Context, task.ID, prURL, sha); err != nil {
+			return err
+		}
+	}
 	help := "Run `posse holler done \"<summary>\" --pr " + prURL + "` after committing and ensuring a clean worktree"
 	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "pr_url", Value: prURL}}
 	if member != nil {
@@ -172,6 +177,10 @@ func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.D
 // Check the remote branch as well as the forge's source repository, branch,
 // target, URL, state and head. A matching commit from a fork is not sufficient.
 func validateWorkerPullRequest(ctx context.Context, project store.Project, task store.Task, forge repositoryForge, prURL, sha string) error {
+	return validateWorkerPullRequestWithRemote(ctx, project, task, forge, prURL, sha, true)
+}
+
+func validateWorkerPullRequestWithRemote(ctx context.Context, project store.Project, task store.Task, forge repositoryForge, prURL, sha string, checkRemote bool) error {
 	number, err := forgeReference(prURL, forge)
 	if err != nil {
 		return axi.Failure("pr_url_invalid", "pull request is not in the Project repository", false, err.Error())
@@ -186,6 +195,9 @@ func validateWorkerPullRequest(ctx context.Context, project store.Project, task 
 		}
 		if mr.WebURL != prURL || (mr.State != "opened" && mr.State != "merged") || mr.SHA != sha || mr.SourceBranch != task.Branch || mr.TargetBranch != project.DefaultBranch || mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID {
 			return axi.Failure("pr_head_mismatch", "merge request does not target this Project from its Task branch and commit", false)
+		}
+		if !checkRemote {
+			return nil
 		}
 		return validateWorkerRemoteBranch(ctx, task, sha, mr.State == "merged")
 	}
@@ -208,6 +220,9 @@ func validateWorkerPullRequest(ctx context.Context, project store.Project, task 
 	}
 	if pull.URL != prURL || (pull.State != "OPEN" && pull.State != "MERGED") || pull.HeadRefOID != sha || pull.HeadRefName != task.Branch || pull.BaseRefName != project.DefaultBranch || !strings.EqualFold(pull.HeadRepository.NameWithOwner, forge.Path) {
 		return axi.Failure("pr_head_mismatch", fmt.Sprintf("pull request does not target %s from its Task branch and commit", forge.Path), false)
+	}
+	if !checkRemote {
+		return nil
 	}
 	return validateWorkerRemoteBranch(ctx, task, sha, pull.State == "MERGED")
 }

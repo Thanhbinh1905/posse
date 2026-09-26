@@ -725,8 +725,37 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				if err != nil {
 					return err
 				}
-				if err := validateWorkerPullRequest(ctx.Context, project, task, forge, parsed.Flags["pr"], sha); err != nil {
-					return err
+				validationErr := validateWorkerPullRequest(ctx.Context, project, task, forge, parsed.Flags["pr"], sha)
+				verifiedCurrentHead := validationErr == nil
+				if validationErr != nil && task.PRURL == parsed.Flags["pr"] {
+					// A merged PR retains its verified head even if the local
+					// branch was advanced by merging the Project default branch.
+					observation, observationErr := db.LatestPRObservation(ctx.Context, task.ID)
+					if observationErr == nil && observation.State == "MERGED" && observation.PRURL == task.PRURL {
+						verified, verifyErr := db.WasVerifiedPRHead(ctx.Context, task.ID, task.PRURL, observation.HeadSHA)
+						if verifyErr != nil {
+							return verifyErr
+						}
+						candidate := task
+						candidate.LandedRef = observation.MergeCommit
+						safe, safetyErr := safeMergedPRWorktree(ctx.Context, db, project, candidate, observation)
+						if safetyErr != nil {
+							return safetyErr
+						}
+						if verified && safe && validateWorkerPullRequestWithRemote(ctx.Context, project, task, forge, task.PRURL, observation.HeadSHA, false) == nil {
+							validationErr = nil
+						}
+					} else if observationErr != nil && !store.IsNotFound(observationErr) {
+						return observationErr
+					}
+				}
+				if validationErr != nil {
+					return validationErr
+				}
+				if verifiedCurrentHead {
+					if err := db.RecordVerifiedPRHead(ctx.Context, task.ID, parsed.Flags["pr"], sha); err != nil {
+						return err
+					}
 				}
 			}
 		} else if parsed.Flags["report"] == "" {

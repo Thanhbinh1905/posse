@@ -189,8 +189,8 @@ auto_unsaddle = "finished"
 				t.Fatalf("reconcile merged PR: %v", err)
 			}
 			task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-			if err != nil || task.State != store.StateLanded {
-				t.Fatalf("unsafe Task was not preserved in landed state: %#v, %v", task, err)
+			if err != nil || task.State != store.StateDone {
+				t.Fatalf("unsafe Task was not preserved in done state: %#v, %v", task, err)
 			}
 			if !containsPane(adapter.currentSnapshot(), "w2:p1") {
 				t.Fatal("unsafe Task Worker pane was closed")
@@ -205,6 +205,72 @@ auto_unsaddle = "finished"
 				}
 			}
 		})
+	}
+}
+
+func TestPlainUnsaddleRefusesLandedPRWithLateWork(t *testing.T) {
+	f := newPRLandingFixture(t, "pr", store.StateDone)
+	if code, out, stderr := f.run("land", "t1"); code != 0 {
+		t.Fatalf("land: %d %s %s", code, out, stderr)
+	}
+	ctx := context.Background()
+	landed, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, landed.GatedSHA)
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.pollProjectPullRequests(ctx, f.db, f.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(f.worktree, "uncommitted-follow-up.txt")
+	if err := os.WriteFile(work, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := f.run("unsaddle", "t1"); code == 0 {
+		t.Fatal("plain unsaddle discarded late work")
+	}
+	if data, err := os.ReadFile(work); err != nil || string(data) != "keep\n" {
+		t.Fatalf("late work lost: %q %v", data, err)
+	}
+}
+
+func TestPRMergePreservesWorkWrittenDuringPaneClosure(t *testing.T) {
+	f := newPRLandingFixture(t, "pr", store.StateDone)
+	mount := attachPRFixtureMount(t, f)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"finished\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
+	fake := f.service.Herdr.(*herdr.Fake)
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	work := filepath.Join(f.worktree, "late-rider-work.txt")
+	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue, afterClose: func() {
+		if err := os.WriteFile(work, []byte("preserve me\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	f.service.Herdr = adapter
+	if _, err := f.service.prepareProject(ctx, f.db, f.project); err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil || task.State != store.StateWorking {
+		t.Fatalf("Task after late Rider write: %#v %v", task, err)
+	}
+	if data, err := os.ReadFile(work); err != nil || string(data) != "preserve me\n" {
+		t.Fatalf("late work discarded: %q %v", data, err)
+	}
+	stillHeld, err := f.db.MountByTask(ctx, task.ID)
+	if err != nil || stillHeld.ID != mount.ID || stillHeld.State != "held" {
+		t.Fatalf("Mount released despite late work: %#v %v", stillHeld, err)
 	}
 }
 
@@ -241,6 +307,145 @@ auto_unsaddle = "finished"
 	preservedMount, err := fixture.db.MountByTask(ctx, task.ID)
 	if err != nil || preservedMount.ID != mount.ID || preservedMount.State != "held" {
 		t.Fatalf("working Task Mount was not preserved: %#v, %v", preservedMount, err)
+	}
+}
+
+func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, source, branch, base, head string
+		verified, land                          bool
+	}{
+		{name: "verified working", state: "MERGED", verified: true, land: true},
+		{name: "verified needs decision", state: "MERGED", verified: true, land: true},
+		{name: "open PR", state: "OPEN", verified: true},
+		{name: "unverified head", state: "MERGED"},
+		{name: "different head", state: "MERGED", verified: true, head: strings.Repeat("f", 40)},
+		{name: "wrong source", state: "MERGED", verified: true, source: "other/shop"},
+		{name: "wrong branch", state: "MERGED", verified: true, branch: "posse/other"},
+		{name: "wrong base", state: "MERGED", verified: true, base: "develop"},
+		{name: "wrong recorded URL", state: "MERGED", verified: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+			ctx := context.Background()
+			url := "https://github.com/acme/shop/pull/17"
+			if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, url, ""); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "verified needs decision" {
+				if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateNeedsDecision, "worker", "waiting"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.verified {
+				verifiedURL := url
+				if tc.name == "wrong recorded URL" {
+					verifiedURL = "https://github.com/acme/shop/pull/18"
+				}
+				if err := fixture.db.RecordVerifiedPRHead(ctx, fixture.task.ID, verifiedURL, fixture.headSHA); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.source != "" {
+				t.Setenv("POSSE_TEST_GH_SOURCE", tc.source)
+			}
+			if tc.branch != "" {
+				t.Setenv("POSSE_TEST_GH_HEAD_BRANCH", tc.branch)
+			}
+			if tc.base != "" {
+				t.Setenv("POSSE_TEST_GH_BASE_BRANCH", tc.base)
+			}
+			if tc.head != "" {
+				fixture.setGHHead(t, tc.head)
+			}
+			t.Setenv("POSSE_TEST_GH_VIEW_STATE", tc.state)
+			fixture.setGraphQLState(t, tc.state, "SUCCESS", "APPROVED", "MERGEABLE", fixture.headSHA, map[bool]string{true: tc.head, false: fixture.headSHA}[tc.head != ""])
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := store.StateWorking
+			if tc.name == "verified needs decision" {
+				want = store.StateNeedsDecision
+			}
+			if task.State != want || task.LandedRef != "" {
+				t.Fatalf("state=%s ref=%s, want=%s", task.State, task.LandedRef, want)
+			}
+			notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantNotices := 0
+			if tc.land {
+				wantNotices = 1
+			}
+			if got := countNoticeKind(notices, "pr_merged"); got != wantNotices {
+				t.Fatalf("merge Notices=%d want=%d", got, wantNotices)
+			}
+		})
+	}
+}
+
+func TestPRObservationRejectsStaleTaskIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*testing.T, *prLandingFixture)
+	}{
+		{"new PR", func(t *testing.T, f *prLandingFixture) {
+			t.Helper()
+			if err := f.db.UpdateTaskLanding(context.Background(), f.task.ID, "https://github.com/acme/shop/pull/18", ""); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"new head", func(t *testing.T, f *prLandingFixture) {
+			t.Helper()
+			if err := f.db.SetTaskGatedSHA(context.Background(), f.task.ID, strings.Repeat("f", 40)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"new state", func(t *testing.T, f *prLandingFixture) {
+			t.Helper()
+			if err := f.db.Transition(context.Background(), f.task.ID, store.StateDone, store.StateWorking, "lead", "follow-up"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPRLandingFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.SetTaskGatedSHA(ctx, f.task.ID, f.headSHA); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := f.db.Task(ctx, f.project.ID, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.change(t, f)
+			observed := store.PRObservation{ProjectID: f.project.ID, TaskID: f.task.ID, PRURL: snapshot.PRURL, HeadSHA: snapshot.GatedSHA, State: "MERGED", Checks: "{}", MergeCommit: f.headSHA}
+			effect := prObservationEffect(f.project, snapshot, observed, nil, store.PRObservation{}, false)
+			if _, err := f.db.RecordPRObservation(ctx, observed, effect, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			current, err := f.db.Task(ctx, f.project.ID, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.State == store.StateLanded {
+				t.Fatalf("stale observation landed Task: %#v", current)
+			}
+		})
 	}
 }
 
