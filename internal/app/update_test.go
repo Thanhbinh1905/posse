@@ -188,7 +188,8 @@ func userShellUpdatePane(t *testing.T, service *Service) {
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", "w1:p2")
 	fake := herdr.NewFake()
-	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p2", WorkspaceID: "w1"}}}
+	// Herdr reports agent_status "unknown" for a plain shell pane.
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p2", WorkspaceID: "w1", AgentStatus: "unknown"}}}
 	service.Herdr = fake
 }
 
