@@ -150,6 +150,14 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 		t.Fatalf("follow-up did not return to working: %#v", current)
 	}
 	merge := fixture.mergeOnLocalOrigin(t, landing, "t1")
+	// Other Tasks can Land on main before the Rider merges origin/main.
+	extra := filepath.Join(fixture.root, "external-merge-t1")
+	if err := os.WriteFile(filepath.Join(extra, "other-main-work.txt"), []byte("another Task\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.env, extra, "add", "other-main-work.txt")
+	gitTest(t, fixture.env, extra, "commit", "-m", "other Task on main")
+	gitTest(t, fixture.env, extra, "push", "origin", "HEAD:refs/heads/main")
 	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "origin", "main")
 	gitTest(t, fixture.env, landing.WorktreePath, "merge", "--no-edit", "origin/main")
 	movedTip := strings.TrimSpace(gitTest(t, fixture.env, landing.WorktreePath, "rev-parse", "HEAD"))
@@ -159,6 +167,15 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	current := fixture.mustTask(t, "t1")
+	if current.State != store.StateWorking {
+		t.Fatalf("active Rider was ended before its follow-up Signal: %#v", current)
+	}
+	workerEnv := setEnv(fixture.env, "HERDR_ENV", "1")
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", current.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", current.HerdrWorkspaceID)
+	runPosse(t, fixture.binary, current.WorktreePath, workerEnv, "holler", "done", "Merged PR follow-up is complete", "--pr", current.PRURL)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	current = fixture.mustTask(t, "t1")
 	if current.State != store.StateTornDown || current.LandedRef != merge {
 		status, _ := gitCommand(fixture.env, landing.WorktreePath, "status", "--porcelain", "--untracked-files=all", "--ignored")
 		diff, diffErr := gitCommand(fixture.env, landing.WorktreePath, "diff", "--quiet", merge, "HEAD")
@@ -302,6 +319,59 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	}
 	if mergeCount != 1 || failureCount != 1 {
 		t.Fatalf("repeated/restarted polls duplicated Notices: merge=%d failure=%d", mergeCount, failureCount)
+	}
+}
+
+func TestMergedPRWithUnmergedFollowUpStaysReportable(t *testing.T) {
+	for _, mode := range []string{"uncommitted", "committed"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newPRLifecycleFixture(t)
+			defer f.db.Close()
+			brief := filepath.Join(f.root, "follow-up.md")
+			if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f.rideAndComplete(t, brief, "t1")
+			runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
+			landing := f.mustTask(t, "t1")
+			f.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", landing.GatedSHA)
+			if err := os.WriteFile(filepath.Join(f.root, "pause-fix-commit"), []byte("wait"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runPosse(t, f.binary, f.repo, f.leadEnv, "send", "t1", "Add the follow-up.")
+			merge := f.mergeOnLocalOrigin(t, landing, "t1")
+			work := filepath.Join(landing.WorktreePath, "follow-up-work.txt")
+			if err := os.WriteFile(work, []byte("unmerged work\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "committed" {
+				gitTest(t, f.env, landing.WorktreePath, "add", "follow-up-work.txt")
+				gitTest(t, f.env, landing.WorktreePath, "commit", "-m", "unmerged follow-up")
+			}
+			f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+			if task := f.mustTask(t, "t1"); task.State != store.StateWorking {
+				t.Fatalf("unmerged follow-up cannot be landed: %#v", task)
+			}
+			workerEnv := setEnv(f.env, "HERDR_ENV", "1")
+			workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", landing.PaneID)
+			workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", landing.HerdrWorkspaceID)
+			runPosse(t, f.binary, landing.WorktreePath, workerEnv, "holler", "working", "Follow-up still needs a new PR")
+			f.requireNotice(t, "t1", "pr_merged")
+			f.requireNotice(t, "t1", "pr_follow_up_pending")
+			command := exec.Command(f.binary, "unsaddle", "t1")
+			command.Dir, command.Env = f.repo, f.leadEnv
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("plain unsaddle discarded follow-up: %s", output)
+			}
+			if task := f.mustTask(t, "t1"); task.State != store.StateWorking {
+				t.Fatalf("follow-up no longer reportable: %#v", task)
+			}
+			if data, err := os.ReadFile(work); err != nil || string(data) != "unmerged work\n" {
+				t.Fatalf("follow-up lost: %q %v", data, err)
+			}
+		})
 	}
 }
 

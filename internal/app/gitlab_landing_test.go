@@ -146,8 +146,8 @@ func TestGitLabWatchRecognizesMergeDuringFollowUp(t *testing.T) {
 		}
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
-	if err != nil || task.State != store.StateLanded || task.LandedRef != strings.Repeat("c", 40) {
-		t.Fatalf("merged MR: %#v %v", task, err)
+	if err != nil || task.State != store.StateWorking || task.LandedRef != "" {
+		t.Fatalf("active Rider was ended by merged MR: %#v %v", task, err)
 	}
 	notices, err := f.db.Notices(ctx, f.project.ID, false)
 	if err != nil || countNoticeKind(notices, "pr_merged") != 1 {

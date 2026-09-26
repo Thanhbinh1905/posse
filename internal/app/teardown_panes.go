@@ -67,6 +67,9 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 			return err
 		}
 		if !safe {
+			if err := restoreMergedTaskWithWork(ctx, db, project, task); err != nil {
+				return err
+			}
 			continue
 		}
 		if _, err := s.unsaddleTask(ctx, db, project, cfg, task, false, ""); err != nil {
@@ -83,20 +86,44 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 	return nil
 }
 
+func restoreMergedTaskWithWork(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	if err := db.Transition(ctx, task.ID, store.StateLanded, store.StateWorking, "cli", "Unmerged Task work remains after PR merge"); err != nil {
+		return err
+	}
+	if err := db.UpdateTaskLanding(ctx, task.ID, task.PRURL, ""); err != nil {
+		return err
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		return err
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "pr_follow_up_pending" {
+			return nil
+		}
+	}
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_follow_up_pending", Summary: task.Title + ": unmerged follow-up work remains; retain or relaunch the Rider", DataJSON: marshalJSON(map[string]any{"url": task.PRURL})})
+	return err
+}
+
 func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
 	if task.LandingMode != "pr" || task.PRURL == "" {
 		return true, nil
 	}
 	observation, err := db.LatestPRObservation(ctx, task.ID)
 	if store.IsNotFound(err) {
-		return true, nil
+		return false, nil // No verified merge observation can justify resetting the Mount.
 	}
 	if err != nil {
 		return false, err
 	}
 	if observation.State != "MERGED" {
-		return true, nil
+		return false, nil
 	}
+	return safeMergedPRWorktree(ctx, db, project, task, observation)
+}
+
+func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Project, task store.Task, observation store.PRObservation) (bool, error) {
 	if observation.PRURL != task.PRURL || observation.HeadSHA == "" || observation.MergeCommit == "" || task.LandedRef != observation.MergeCommit || task.Branch == "" || task.WorktreePath == "" {
 		return false, nil
 	}
@@ -128,7 +155,17 @@ func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Projec
 				return false, nil
 			}
 		}
-		if _, err := gitOutput(ctx, task.WorktreePath, "diff", "--quiet", observation.MergeCommit, branchSHA); err != nil {
+		// Compare against the newest default-branch ancestor of the Task
+		// tip. Other changes that landed on main after this PR are safe;
+		// changes made only on the Task branch are not.
+		base, err := gitOutput(ctx, task.WorktreePath, "merge-base", branchSHA, "refs/heads/"+project.DefaultBranch)
+		if err != nil {
+			return false, nil
+		}
+		if _, err := gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", observation.MergeCommit, base); err != nil {
+			return false, nil
+		}
+		if _, err := gitOutput(ctx, task.WorktreePath, "diff", "--quiet", base, branchSHA); err != nil {
 			return false, nil
 		}
 	}

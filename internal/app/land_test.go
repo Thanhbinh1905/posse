@@ -322,8 +322,9 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 
 type changingSnapshotAdapter struct {
 	*herdr.Fake
-	mu       sync.Mutex
-	snapshot herdr.Snapshot
+	mu         sync.Mutex
+	snapshot   herdr.Snapshot
+	afterClose func()
 }
 
 func (adapter *changingSnapshotAdapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
@@ -341,6 +342,9 @@ func (adapter *changingSnapshotAdapter) Call(ctx context.Context, method string,
 	defer adapter.mu.Unlock()
 	switch method {
 	case "pane.close":
+		if adapter.afterClose != nil {
+			adapter.afterClose()
+		}
 		paneID, _ := params["pane_id"].(string)
 		kept := adapter.snapshot.Panes[:0]
 		for _, pane := range adapter.snapshot.Panes {
@@ -350,6 +354,9 @@ func (adapter *changingSnapshotAdapter) Call(ctx context.Context, method string,
 		}
 		adapter.snapshot.Panes = kept
 	case "workspace.close":
+		if adapter.afterClose != nil {
+			adapter.afterClose()
+		}
 		workspaceID, _ := params["workspace_id"].(string)
 		kept := adapter.snapshot.Panes[:0]
 		for _, pane := range adapter.snapshot.Panes {

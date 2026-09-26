@@ -221,13 +221,13 @@ const (
 
 var transitions = map[State]map[State]bool{
 	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true},
-	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLanded: true, StateLost: true},
-	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLanded: true, StateLost: true},
+	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true},
+	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true},
 	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true},
 	StateStalled:       {StateWorking: true, StateTornDown: true, StateLost: true},
 	StateDone:          {StateLanding: true, StateLanded: true, StateReported: true, StateWorking: true},
 	StateLanding:       {StateLanded: true, StateDone: true, StateWorking: true},
-	StateLanded:        {StateTornDown: true},
+	StateLanded:        {StateTornDown: true, StateWorking: true},
 	StateReported:      {StateTornDown: true},
 	StateFailed:        {StateWorking: true, StateTornDown: true},
 	StateLost:          {StateWorking: true, StateTornDown: true},

@@ -447,6 +447,15 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 	if err != nil {
 		return killed, err
 	}
+	if task.State == store.StateLanded && task.LandingMode == "pr" {
+		safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
+		if safetyErr != nil {
+			return killed, safetyErr
+		}
+		if !safe {
+			return killed, fmt.Errorf("Task work changed before Mount reset; preserve it")
+		}
+	}
 	var resetErr error
 	if project.IsWorkspace() {
 		resetErr = releaseWorkspaceMount(ctx, db, project, mount, clean)

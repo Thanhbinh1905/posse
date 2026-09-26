@@ -744,11 +744,29 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	}
 	for _, observed := range observations {
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
-		recorded, err := db.RecordPRObservation(ctx, observed.current, effect)
+		if observed.current.State == "MERGED" && observed.task.LandingMode == "pr" {
+			if observed.task.State == store.StateWorking || observed.task.State == store.StateNeedsDecision {
+				effect.TransitionTo = "" // The Rider must remain able to finish its follow-up.
+			} else if observed.task.State == store.StateDone {
+				candidate := observed.task
+				candidate.LandedRef = observed.current.MergeCommit
+				safe, safetyErr := safeMergedPRWorktree(ctx, db, project, candidate, observed.current)
+				if safetyErr != nil {
+					return safetyErr
+				}
+				if !safe {
+					effect.TransitionTo = ""
+				}
+			}
+			if effect.TransitionTo == "" && (!observed.hasBefore || observed.previous.State != "MERGED") {
+				effect.Notices = append(effect.Notices, store.Notice{ProjectID: project.ID, TaskID: observed.task.ID, Kind: "pr_follow_up_pending", Summary: observed.task.Title + ": merged PR has follow-up work; retain the Rider and publish any unmerged change as a new PR", DataJSON: marshalJSON(map[string]any{"url": observed.current.PRURL}), CreatedAt: observed.current.ObservedAt})
+			}
+		}
+		recorded, err := db.RecordPRObservation(ctx, observed.current, effect, observed.task)
 		if err != nil {
 			return err
 		}
-		if recorded && effect.TransitionTo == store.StateLanded {
+		if recorded && observed.current.State == "MERGED" {
 			if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
 				if noticeErr := recordPRTaskWatchFailure(ctx, db, project, observed.task, err, now); noticeErr != nil {
 					return noticeErr

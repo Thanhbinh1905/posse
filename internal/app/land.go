@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -371,6 +372,15 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if !discardable && task.State != store.StateLanded && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
+	if task.State == store.StateLanded && task.LandingMode == "pr" {
+		safe, safetyErr := safePRMergeTeardown(ctx.Context, db, project, task)
+		if safetyErr != nil {
+			return safetyErr
+		}
+		if !safe {
+			return axi.Failure("teardown_refused", "merged PR has unmerged Task work; keep the Rider and publish follow-up work before teardown", false)
+		}
+	}
 	if discardable && !parsed.Bool("discard") {
 		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false)
 	}
@@ -421,11 +431,32 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
+		if !discardable && task.State == store.StateLanded && task.LandingMode == "pr" {
+			// The Rider's pane has been closed. Recheck after all writes stop,
+			// immediately before the destructive reset of its Mount.
+			safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
+			if safetyErr != nil {
+				return safetyErr
+			}
+			if !safe {
+				return axi.Failure("teardown_refused", "Task work changed before Mount release; preserve it", false)
+			}
+		}
 		var releaseErr error
 		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean)
 		return releaseErr
 	})
 	if err != nil {
+		if task.State == store.StateLanded && task.LandingMode == "pr" {
+			safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
+			if safetyErr == nil && !safe {
+				// Work written after the first cleanliness check belongs to
+				// the Rider, not to teardown. Restore its reportable state.
+				if restoreErr := restoreMergedTaskWithWork(ctx, db, project, task); restoreErr != nil {
+					return result, errors.Join(err, restoreErr)
+				}
+			}
+		}
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
 	result.Panes = paneResult
