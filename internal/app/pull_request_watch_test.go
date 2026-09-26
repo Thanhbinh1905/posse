@@ -243,6 +243,94 @@ auto_unsaddle = "finished"
 	}
 }
 
+func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, source, branch, base, head string
+		verified, land                          bool
+	}{
+		{name: "verified working", state: "MERGED", verified: true, land: true},
+		{name: "verified needs decision", state: "MERGED", verified: true, land: true},
+		{name: "open PR", state: "OPEN", verified: true},
+		{name: "unverified head", state: "MERGED"},
+		{name: "different head", state: "MERGED", verified: true, head: strings.Repeat("f", 40)},
+		{name: "wrong source", state: "MERGED", verified: true, source: "other/shop"},
+		{name: "wrong branch", state: "MERGED", verified: true, branch: "posse/other"},
+		{name: "wrong base", state: "MERGED", verified: true, base: "develop"},
+		{name: "wrong recorded URL", state: "MERGED", verified: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+			ctx := context.Background()
+			url := "https://github.com/acme/shop/pull/17"
+			if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, url, ""); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "verified needs decision" {
+				if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateNeedsDecision, "worker", "waiting"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.verified {
+				verifiedURL := url
+				if tc.name == "wrong recorded URL" {
+					verifiedURL = "https://github.com/acme/shop/pull/18"
+				}
+				if err := fixture.db.RecordVerifiedPRHead(ctx, fixture.task.ID, verifiedURL, fixture.headSHA); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.source != "" {
+				t.Setenv("POSSE_TEST_GH_SOURCE", tc.source)
+			}
+			if tc.branch != "" {
+				t.Setenv("POSSE_TEST_GH_HEAD_BRANCH", tc.branch)
+			}
+			if tc.base != "" {
+				t.Setenv("POSSE_TEST_GH_BASE_BRANCH", tc.base)
+			}
+			if tc.head != "" {
+				fixture.setGHHead(t, tc.head)
+			}
+			t.Setenv("POSSE_TEST_GH_VIEW_STATE", tc.state)
+			fixture.setGraphQLState(t, tc.state, "SUCCESS", "APPROVED", "MERGEABLE", fixture.headSHA, map[bool]string{true: tc.head, false: fixture.headSHA}[tc.head != ""])
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := store.StateWorking
+			if tc.name == "verified needs decision" {
+				want = store.StateNeedsDecision
+			}
+			if tc.land {
+				want = store.StateLanded
+			}
+			if task.State != want || (tc.land && task.LandedRef != fixture.headSHA) {
+				t.Fatalf("state=%s ref=%s, want=%s", task.State, task.LandedRef, want)
+			}
+			notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantNotices := 0
+			if tc.land {
+				wantNotices = 1
+			}
+			if got := countNoticeKind(notices, "pr_merged"); got != wantNotices {
+				t.Fatalf("merge Notices=%d want=%d", got, wantNotices)
+			}
+		})
+	}
+}
+
 func attachPRFixtureMount(t *testing.T, fixture *prLandingFixture) store.Mount {
 	t.Helper()
 	ctx := context.Background()

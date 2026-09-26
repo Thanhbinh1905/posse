@@ -472,6 +472,20 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	} else {
 		if task.Branch != "" {
 			err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
+				// A PR branch advanced after its external merge stays at its
+				// existing tip even when the Mount can be safely released.
+				if task.LandingMode == "pr" {
+					observation, observationErr := db.LatestPRObservation(ctx, task.ID)
+					if observationErr != nil && !store.IsNotFound(observationErr) {
+						return observationErr
+					}
+					if observationErr == nil && observation.State == "MERGED" {
+						branchSHA, revErr := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+task.Branch)
+						if revErr == nil && branchSHA != observation.HeadSHA {
+							return nil
+						}
+					}
+				}
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
 					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+project.DefaultBranch); mergeErr == nil {

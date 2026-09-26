@@ -567,7 +567,7 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 		if task.PRURL == "" {
 			continue
 		}
-		if task.State == store.StateLanding || (task.State == store.StateDone && task.LandingMode == "pr") {
+		if task.State == store.StateLanding || (task.LandingMode == "pr" && (task.State == store.StateDone || task.State == store.StateWorking || task.State == store.StateNeedsDecision)) {
 			watched = append(watched, task)
 		}
 	}
@@ -706,6 +706,28 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 				return recordErr
 			}
 			continue
+		}
+		if task.State == store.StateWorking || task.State == store.StateNeedsDecision {
+			// Follow-up work may have moved the local branch. Only a merged PR
+			// whose exact head was verified before that move can finish the Task.
+			if observation.State != "MERGED" {
+				continue
+			}
+			verified, verifyErr := db.WasVerifiedPRHead(ctx, task.ID, task.PRURL, observation.HeadSHA)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if !verified {
+				continue
+			}
+			// A still-running Rider may have unmerged commits or edits. Mark
+			// the PR landed, but never tear down a Mount with such work.
+			if err := validateWorkerPullRequestWithRemote(ctx, project, task, forge, task.PRURL, observation.HeadSHA, false); err != nil {
+				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, err, now); recordErr != nil {
+					return recordErr
+				}
+				continue
+			}
 		}
 		observations = append(observations, pendingObservation{task: task, current: observation, failures: failures, previous: previous, hasBefore: hasPrevious})
 	}

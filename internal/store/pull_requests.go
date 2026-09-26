@@ -206,7 +206,7 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 		if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=? AND project_id=?`, observation.TaskID, observation.ProjectID).Scan(&state); err != nil {
 			return false, err
 		}
-		if state == StateLanding || (state == StateDone && effect.TransitionTo == StateLanded) {
+		if state == StateLanding || (effect.TransitionTo == StateLanded && (state == StateDone || state == StateWorking || state == StateNeedsDecision)) {
 			if effect.LandedRef != "" {
 				if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, effect.LandedRef, time.Now().UnixMilli(), observation.TaskID); err != nil {
 					return false, err

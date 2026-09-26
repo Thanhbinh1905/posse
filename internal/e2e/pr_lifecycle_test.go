@@ -128,6 +128,75 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 }
 
+func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "follow-up.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.rideAndComplete(t, brief, "t1")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
+	landing := fixture.mustTask(t, "t1")
+	if landing.PRURL != "https://github.com/acme/shop/pull/17" || landing.GatedSHA == "" {
+		t.Fatalf("PR ownership was not recorded: %#v", landing)
+	}
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", landing.GatedSHA)
+	if err := os.WriteFile(filepath.Join(fixture.root, "pause-fix-commit"), []byte("wait"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Handle the follow-up.")
+	if current := fixture.mustTask(t, "t1"); current.State != store.StateWorking || current.GatedSHA != "" || current.PRURL != landing.PRURL {
+		t.Fatalf("follow-up did not return to working: %#v", current)
+	}
+	merge := fixture.mergeOnLocalOrigin(t, landing, "t1")
+	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "origin", "main")
+	gitTest(t, fixture.env, landing.WorktreePath, "merge", "--no-edit", "origin/main")
+	movedTip := strings.TrimSpace(gitTest(t, fixture.env, landing.WorktreePath, "rev-parse", "HEAD"))
+	if movedTip == landing.GatedSHA {
+		t.Fatal("follow-up did not move the Task branch tip")
+	}
+	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	current := fixture.mustTask(t, "t1")
+	if current.State != store.StateTornDown || current.LandedRef != merge {
+		status, _ := gitCommand(fixture.env, landing.WorktreePath, "status", "--porcelain", "--untracked-files=all", "--ignored")
+		diff, diffErr := gitCommand(fixture.env, landing.WorktreePath, "diff", "--quiet", merge, "HEAD")
+		t.Fatalf("externally merged PR was not Landed during follow-up: %#v status=%q diff=%q err=%v", current, status, diff, diffErr)
+	}
+	fixture.requireNotice(t, "t1", "pr_merged")
+	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/"+landing.Branch)); got != movedTip {
+		t.Fatalf("Task branch moved during teardown: got=%s want=%s", got, movedTip)
+	}
+	if current.PRURL != landing.PRURL || current.Branch != landing.Branch {
+		t.Fatalf("merged PR identity changed: %#v", current)
+	}
+	for i := 0; i < 2; i++ {
+		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	}
+	// A new CLI process opens the same database after the first observation.
+	calls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "pr create") != 1 || strings.Count(string(calls), "pr merge") != 0 {
+		t.Fatalf("watcher created or merged a PR: %s", calls)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged := 0
+	for _, notice := range notices {
+		if notice.TaskID == current.ID && notice.Kind == "pr_merged" {
+			merged++
+		}
+	}
+	if merged != 1 {
+		t.Fatalf("merge Notices=%d want 1", merged)
+	}
+}
+
 func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
@@ -307,6 +376,7 @@ case "$PWD/" in
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     while IFS= read -r instruction; do
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+      while [ -e "$POSSE_TEST_ROOT/pause-fix-commit" ]; do sleep 0.02; done
       printf 'fix change %s\n' "$task_id" > "e2e-fix-$task_id.txt"
       git add "e2e-fix-$task_id.txt"
       git commit -m "fix worker change $task_id" >/dev/null
@@ -347,7 +417,9 @@ case "$1 $2" in
   "pr view")
     case "$3" in */17) branch=$(git --git-dir="$POSSE_TEST_REMOTE" for-each-ref --format='%(refname:short)' 'refs/heads/posse/pr-*' | head -1) ;; */18) branch=posse/external-merge-change ;; *) exit 90 ;; esac
     head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
-    printf '{"url":"%s","state":"OPEN","headRefOid":"%s","headRefName":"%s","baseRefName":"main","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$head" "$branch" ;;
+    state=OPEN
+    if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then state=MERGED; fi
+    printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"main","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$state" "$head" "$branch" ;;
   "pr merge") : > "$POSSE_TEST_GH_MERGE"; printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
 esac

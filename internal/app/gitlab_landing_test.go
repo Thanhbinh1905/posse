@@ -128,6 +128,33 @@ func TestGitLabWorkerRejectsForkAndRebaseBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestGitLabWatchRecognizesMergeDuringFollowUp(t *testing.T) {
+	f := gitlabFixture(t, store.StateWorking)
+	ctx := context.Background()
+	url := "https://git.example.com/group/sub/shop/-/merge_requests/17"
+	if code, out, stderr := f.run("publish", "Worker summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, out, stderr)
+	}
+	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, url, ""); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.worktree, "commit", "--allow-empty", "-m", "local follow-up")
+	f.setGitLabState(t, "merged", "mergeable", "success", f.headSHA)
+	for i := 0; i < 2; i++ {
+		if err := f.pollGitLab(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil || task.State != store.StateLanded || task.LandedRef != strings.Repeat("c", 40) {
+		t.Fatalf("merged MR: %#v %v", task, err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil || countNoticeKind(notices, "pr_merged") != 1 {
+		t.Fatalf("merge Notices: %#v %v", notices, err)
+	}
+}
+
 func TestGitLabMRDescriptionMatchesGitHubPRBody(t *testing.T) {
 	f := gitlabFixture(t)
 	title, body, err := prDetails(context.Background(), f.db, f.project, f.task, f.service.homePath)

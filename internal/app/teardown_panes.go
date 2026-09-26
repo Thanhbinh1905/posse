@@ -101,7 +101,7 @@ func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Projec
 		return false, nil
 	}
 	branchSHA, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+task.Branch)
-	if err != nil || branchSHA != observation.HeadSHA {
+	if err != nil {
 		return false, nil
 	}
 	worktreeBranch, err := gitOutput(ctx, task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -109,8 +109,28 @@ func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Projec
 		return false, nil
 	}
 	worktreeSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
-	if err != nil || worktreeSHA != observation.HeadSHA {
+	if err != nil || worktreeSHA != branchSHA {
 		return false, nil
+	}
+	if branchSHA != observation.HeadSHA {
+		verified, err := db.WasVerifiedPRHead(ctx, task.ID, observation.PRURL, observation.HeadSHA)
+		if err != nil || !verified {
+			return false, err
+		}
+		if observation.MergeCommit == observation.HeadSHA {
+			return false, nil // No distinct merged commit proves the moved tip is safe.
+		}
+		// A merge of origin/main after the PR was merged is safe only if
+		// it contains both the PR head and the merge commit and carries no
+		// additional tree changes. Never discard a subsequent follow-up.
+		for _, ancestor := range []string{observation.HeadSHA, observation.MergeCommit} {
+			if _, err := gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", ancestor, branchSHA); err != nil {
+				return false, nil
+			}
+		}
+		if _, err := gitOutput(ctx, task.WorktreePath, "diff", "--quiet", observation.MergeCommit, branchSHA); err != nil {
+			return false, nil
+		}
 	}
 	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain", "--untracked-files=all", "--ignored")
 	if err != nil || status != "" {

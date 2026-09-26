@@ -775,6 +775,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				if err := validateWorkerPullRequest(ctx.Context, project, task, forge, parsed.Flags["pr"], sha); err != nil {
 					return err
 				}
+				if err := db.RecordVerifiedPRHead(ctx.Context, task.ID, parsed.Flags["pr"], sha); err != nil {
+					return err
+				}
 			}
 		} else if parsed.Flags["report"] == "" {
 			return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file-in-worktree>", false)
