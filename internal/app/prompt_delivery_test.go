@@ -202,7 +202,7 @@ func newRideFixture(t *testing.T) rideFixture {
 	}
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "idle"}}}
-	fake.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p1"}}`)
+	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t2","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p2","tab_id":"w1:t2"}}`)
 	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	t.Chdir(repo)
 	return rideFixture{fake: fake, service: testService(home, fake), home: home, repo: repo, brief: briefPath, project: project}

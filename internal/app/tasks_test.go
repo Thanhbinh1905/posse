@@ -55,12 +55,6 @@ func TestOpenCodeWorkerArgsAndResume(t *testing.T) {
 
 func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testing.T) {
 	task := store.Task{Seq: 12, Title: "Stable output for workers", ShortName: "stable-output", Branch: "posse/stable-output", WorktreePath: "/tmp/remuda/shop/mount-2", PaneID: "w2:p1", PaneLabel: "posse:shop:t12"}
-	if got := workerWorkspaceLabel(task, false); got != "├─ Stable output for workers" {
-		t.Fatalf("Worker workspace label = %q", got)
-	}
-	if got := workerWorkspaceLabel(task, true); got != "└─ Stable output for workers" {
-		t.Fatalf("last Worker workspace label = %q", got)
-	}
 	if got := workerTabLabel(task); got != "stable-output" {
 		t.Fatalf("Worker tab label = %q", got)
 	}
@@ -86,70 +80,6 @@ func TestWorkerDisplayMountContextDoesNotTruncateMidPath(t *testing.T) {
 	}
 	if got := metadata["title"].(string); !strings.Contains(got, mount) {
 		t.Fatalf("full Mount path was not submitted as pane title: %q", got)
-	}
-}
-
-func TestWorkerTitlePhrasePreservesWordsAndFullTitleInMetadata(t *testing.T) {
-	task := store.Task{Seq: 26, Title: "Show Worker worktrees clearly under the Lead root", WorktreePath: "/tmp/mount-3"}
-	if got := workerWorkspaceLabel(task, true); got != "└─ Show Worker worktrees…" {
-		t.Fatalf("title phrase = %q", got)
-	}
-	if got := workerDisplayMetadata(task, "pi")["title"]; !strings.Contains(got.(string), task.Title) {
-		t.Fatalf("full title missing from metadata: %q", got)
-	}
-}
-
-func TestRefreshWorkerDisplayReordersSiblingsAfterTeardown(t *testing.T) {
-	ctx := context.Background()
-	home := t.TempDir()
-	db, err := store.Open(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "shop"), "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for seq, title := range []string{"Show Worker worktrees", "Worker-owned PRs"} {
-		n := seq + 1
-		id, createErr := db.CreateTask(ctx, project.ID, store.Task{Seq: n, Type: "ship", Title: title, State: store.StateSpawning, LandingMode: "local", Branch: fmt.Sprintf("posse/t%d", n), WorktreePath: fmt.Sprintf("/tmp/remuda/mount-%d", n), HerdrWorkspaceID: fmt.Sprintf("w%d", n), PaneID: fmt.Sprintf("w%d:p1", n), PaneLabel: fmt.Sprintf("posse:shop:t%d", n)})
-		if createErr != nil {
-			t.Fatal(createErr)
-		}
-		if err := db.Transition(ctx, id, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	fake := herdr.NewFake()
-	fake.SnapshotValue.Panes = []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "claude"}, {PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t2", Agent: "codex"}}
-	service := testService(home, fake)
-	if err := service.refreshWorkerDisplay(ctx, db, project, 0); err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.Calls) != 5 || fake.Calls[1].Params["label"] != "├─ Show Worker worktrees" || fake.Calls[2].Params["display_agent"] != "claude" || fake.Calls[3].Params["label"] != "└─ Worker-owned PRs" || fake.Calls[4].Params["display_agent"] != "codex" {
-		t.Fatalf("first sibling presentation = %#v", fake.Calls)
-	}
-	second, err := db.Task(ctx, project.ID, "t2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, step := range []struct {
-		next   store.State
-		source string
-	}{{store.StateDone, "worker"}, {store.StateLanding, "cli"}, {store.StateLanded, "cli"}, {store.StateTornDown, "cli"}} {
-		next := step.next
-		if err := db.Transition(ctx, second.ID, second.State, next, step.source, "test"); err != nil {
-			t.Fatal(err)
-		}
-		second.State = next
-	}
-	fake.Calls = nil
-	if err := service.refreshWorkerDisplay(ctx, db, project, 0); err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.Calls) != 3 || fake.Calls[1].Params["label"] != "└─ Show Worker worktrees" || fake.Calls[2].Params["display_agent"] != "claude" {
-		t.Fatalf("last remaining sibling presentation = %#v", fake.Calls)
 	}
 }
 
@@ -284,6 +214,10 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetProjectLead(ctx, project.ID, "w3", "w3:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	project.HerdrWorkspaceID, project.LeadPaneID, project.LeadLabel = "w3", "w3:p1", "posse:shop:lead"
 	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Resume", ShortName: "worker-tree", Profile: "deep", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mount, HerdrWorkspaceID: "w2", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", AgentSession: `{"session_id":"session-9"}`})
 	if err != nil {
 		t.Fatal(err)
@@ -329,8 +263,10 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	if err := os.WriteFile(indexLock, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	lead := herdr.Pane{PaneID: "w3:p1", WorkspaceID: "w3", TabID: "w3:t0", Label: "posse:shop:lead"}
 	fake := herdr.NewFake()
-	fake.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w3"},"tab":{"tab_id":"w3:t1"},"root_pane":{"pane_id":"w3:p2"}}`)
+	fake.SnapshotValue.Panes = []herdr.Pane{lead}
+	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w3:t1","workspace_id":"w3"},"root_pane":{"pane_id":"w3:p2","tab_id":"w3:t1"}}`)
 	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
@@ -338,7 +274,7 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 			if fake.CallCount("agent.start") > 0 {
 				kind = "codex"
 			}
-			fake.SnapshotValue.Panes = []herdr.Pane{{PaneID: "w3:p2", WorkspaceID: "w3", TabID: "w3:t1", Agent: kind}}
+			fake.SnapshotValue.Panes = []herdr.Pane{lead, {PaneID: "w3:p2", WorkspaceID: "w3", TabID: "w3:t1", Label: "posse:shop:t1", Agent: kind}}
 		}
 	}
 	service := testService(home, fake)
@@ -375,7 +311,7 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	for index, call := range fake.Calls {
 		switch call.Method {
 		case "workspace.rename":
-			workspaceRenamed = call.Params["workspace_id"] == "w3" && call.Params["label"] == "└─ Resume"
+			workspaceRenamed = true
 		case "tab.rename":
 			tabRenamed = call.Params["tab_id"] == "w3:t1" && call.Params["label"] == "worker-tree"
 		case "agent.start":
@@ -385,8 +321,8 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 			metadataReported = call.Params["clear_display_agent"] == nil && call.Params["display_agent"] == "claude" && strings.Contains(call.Params["title"].(string), mount)
 		}
 	}
-	if !workspaceRenamed || !tabRenamed || !metadataReported || startedIndex < 0 || metadataIndex <= startedIndex {
-		t.Fatalf("relaunch did not update all Worker names: workspace=%v tab=%v metadata=%v calls=%#v", workspaceRenamed, tabRenamed, metadataReported, fake.Calls)
+	if workspaceRenamed || !tabRenamed || !metadataReported || startedIndex < 0 || metadataIndex <= startedIndex {
+		t.Fatalf("relaunch renamed a workspace or missed a Worker name: workspace renamed=%v tab=%v metadata=%v calls=%#v", workspaceRenamed, tabRenamed, metadataReported, fake.Calls)
 	}
 	relaunchText, err := os.ReadFile(filepath.Join(home, "projects", "shop", "tasks", "t1", "relaunch.md"))
 	if err != nil || !strings.Contains(string(relaunchText), "Re-read `launch.md`") || !strings.Contains(string(relaunchText), "posse holler") || !strings.Contains(string(relaunchText), "first instruction") || !strings.Contains(string(relaunchText), "later instruction supersedes the first") {

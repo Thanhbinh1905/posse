@@ -63,8 +63,8 @@ func TestLocalLandingRequiresApprovalAndTeardownAudits(t *testing.T) {
 	fake := &changingSnapshotAdapter{Fake: baseFake}
 	fake.snapshot = herdr.Snapshot{FocusedPaneID: "w1:p1", Workspaces: []herdr.Workspace{{WorkspaceID: "w2", Root: worktree}}, Panes: []herdr.Pane{
 		{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "working", Focused: true},
-		{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", CWD: worktree},
-		{PaneID: "w2:p2", WorkspaceID: "w2", Label: "user-notes", CWD: repo},
+		{PaneID: "w2:p1", WorkspaceID: "w2", TabID: "w2:t1", Label: "posse:shop:t1", CWD: worktree},
+		{PaneID: "w2:p2", WorkspaceID: "w2", TabID: "w2:t1", Label: "user-notes", CWD: repo},
 	}}
 	service := testService(home, fake)
 	output := &bytes.Buffer{}
@@ -268,7 +268,7 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	workerPane := herdr.Pane{PaneID: "w3:p1", WorkspaceID: "w3", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}
+	workerPane := herdr.Pane{PaneID: "w3:p1", WorkspaceID: "w3", TabID: "w3:t1", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}
 	snapshot := herdr.Snapshot{Panes: []herdr.Pane{
 		{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "idle"},
 		workerPane,
@@ -307,8 +307,9 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 	if code := cli.Run([]string{"unsaddle", "t1"}); code != 0 || !strings.Contains(output.String(), "torn-down") {
 		t.Fatalf("unsaddle did not close the re-adopted pane by its Task label: code=%d output=%s", code, output.String())
 	}
-	if fake.CallCount("workspace.close") != 1 {
-		t.Fatalf("Task-only moved workspace was not closed: %#v", fake.Calls)
+	// A legacy Rider workspace disappears with its last tab; posse never closes a workspace.
+	if fake.CallCount("tab.close") != 1 || fake.CallCount("workspace.close") != 0 {
+		t.Fatalf("Task-only tab in the moved workspace was not closed by tab: %#v", fake.Calls)
 	}
 	updated, err := db.Task(ctx, project.ID, "t1")
 	if err != nil || updated.State != store.StateTornDown || updated.HerdrWorkspaceID != "w3" {
@@ -345,6 +346,15 @@ func (adapter *changingSnapshotAdapter) Call(ctx context.Context, method string,
 		kept := adapter.snapshot.Panes[:0]
 		for _, pane := range adapter.snapshot.Panes {
 			if pane.PaneID != paneID {
+				kept = append(kept, pane)
+			}
+		}
+		adapter.snapshot.Panes = kept
+	case "tab.close":
+		tabID, _ := params["tab_id"].(string)
+		kept := adapter.snapshot.Panes[:0]
+		for _, pane := range adapter.snapshot.Panes {
+			if pane.TabID != tabID {
 				kept = append(kept, pane)
 			}
 		}

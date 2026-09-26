@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -278,6 +279,9 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 		item := item
 		t.Run(item.command+"/"+item.phase+"/"+item.step, func(t *testing.T) {
 			fixture := harness.newProject(t, strings.ReplaceAll(item.command+"-"+item.step+"-"+item.phase, " ", "-"))
+			harness.session.mu.Lock()
+			workspaceCreates := harness.session.workspaceCreates
+			harness.session.mu.Unlock()
 			var taskID string
 			var branchSHA, defaultSHA string
 			var err error
@@ -349,6 +353,38 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			code, output := fixture.run(t, "", "roster")
 			if code != 0 {
 				t.Fatalf("roster failed after recovery: code=%d output=%s", code, output)
+			}
+			harness.session.mu.Lock()
+			created := harness.session.workspaceCreates - workspaceCreates
+			var leftovers []herdr.Pane
+			for _, pane := range harness.session.panes {
+				if pane.WorkspaceID == fixture.project.HerdrWorkspaceID && pane.PaneID != fixture.project.LeadPaneID {
+					leftovers = append(leftovers, pane)
+				}
+			}
+			harness.session.mu.Unlock()
+			if created != 0 {
+				t.Fatalf("%s created %d Herdr workspaces; Riders open as tabs of the Lead workspace", item.command, created)
+			}
+			if item.command == "ride" {
+				if err := fixture.openDB(t, func(db *store.DB) error {
+					task, err := db.Task(context.Background(), fixture.project.ID, taskID)
+					if store.IsNotFound(err) {
+						task.State = store.StateFailed
+					} else if err != nil {
+						return err
+					}
+					// A failed ride leaves no tab behind in the Lead's workspace.
+					if task.State == store.StateFailed && len(leftovers) != 0 {
+						return fmt.Errorf("failed ride left panes in the Lead workspace: %#v", leftovers)
+					}
+					if task.State == store.StateWorking && (len(leftovers) != 1 || leftovers[0].Label != task.PaneLabel) {
+						return fmt.Errorf("working ride has panes %#v, want its one labeled Rider pane", leftovers)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := fixture.openDB(t, func(db *store.DB) error {
 				intents, err := db.Intents(context.Background(), fixture.project.ID)
@@ -558,9 +594,13 @@ func (h *intentCLIHarness) newProject(t *testing.T, name string) *intentProjectF
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	workspace, err := h.session.createWorkspace(repo, "posse:"+name)
+	workspace, err := h.session.createWorkspace(repo, "Lead:"+name)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// As `posse up` does, the Lead pane carries the Lead label.
+	if _, apiErr := h.session.call("pane.rename", map[string]any{"pane_id": workspace.RootPane.PaneID, "label": "posse:" + name + ":lead"}); apiErr != nil {
+		t.Fatal(apiErr.Message)
 	}
 	db, err := store.Open(home)
 	if err != nil {
@@ -680,7 +720,7 @@ func (f *intentProjectFixture) attachTaskPane(t *testing.T, taskID string, withA
 	}
 	agentName := ""
 	if withAgent {
-		agentName = fmt.Sprintf("posse-%s-t%d-1", f.project.Name, task.Seq)
+		agentName = posseAgentName(f.project.Name, task.Seq, 1)
 	}
 	workspaceID, paneID, err := f.addIntentPane(t, task.WorktreePath, task.PaneLabel, agentName)
 	if err == nil {
@@ -700,9 +740,11 @@ type fakeHerdrSession struct {
 	requests        chan string
 	agentStartGate  chan struct{}
 	agentStartNames []string
-	workspaces      map[string]herdr.Workspace
-	panes           map[string]herdr.Pane
-	agents          map[string]herdr.Agent
+	// workspaceCreates counts workspace.create requests: Riders open as tabs.
+	workspaceCreates int
+	workspaces       map[string]herdr.Workspace
+	panes            map[string]herdr.Pane
+	agents           map[string]herdr.Agent
 	// processes holds one real process group per started agent, so posse's
 	// stop path signals something real.
 	processes map[string]*fakeAgentProcess
@@ -837,6 +879,7 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		}
 		return herdr.Snapshot{Type: "session_snapshot", Version: "1", ServerStartedAt: s.serverAt, Protocol: herdr.MinimumProtocol, Workspaces: mapValues(s.workspaces), Panes: panes, Agents: mapAgentValues(s.agents)}, nil
 	case "workspace.create":
+		s.workspaceCreates++
 		workspaceID, paneID, tabID := newID("workspace"), newID("pane"), newID("tab")
 		workspace := herdr.Workspace{WorkspaceID: workspaceID, Label: stringParam("label"), Root: stringParam("cwd")}
 		s.workspaces[workspaceID] = workspace
@@ -850,9 +893,26 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, Label: stringParam("label"), CWD: stringParam("path")}
 		return map[string]any{"workspace": map[string]any{"workspace_id": workspaceID}, "root_pane": map[string]any{"pane_id": paneID, "tab_id": tabID}}, nil
 	case "tab.create":
+		// Like Herdr, the label names the tab; the root pane starts unlabeled.
 		workspaceID, paneID, tabID := stringParam("workspace_id"), newID("pane"), newID("tab")
-		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, Label: stringParam("label"), CWD: stringParam("cwd")}
-		return map[string]any{"workspace": map[string]any{"workspace_id": workspaceID}, "root_pane": map[string]any{"pane_id": paneID, "tab_id": tabID}}, nil
+		if _, ok := s.workspaces[workspaceID]; !ok {
+			return nil, &herdr.APIError{Code: "workspace_not_found", Message: "workspace " + workspaceID + " not found"}
+		}
+		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, CWD: stringParam("cwd")}
+		return map[string]any{"tab": map[string]any{"tab_id": tabID, "workspace_id": workspaceID}, "root_pane": map[string]any{"pane_id": paneID, "tab_id": tabID, "workspace_id": workspaceID}}, nil
+	case "tab.close":
+		tabID, closed := stringParam("tab_id"), false
+		for paneID, pane := range s.panes {
+			if pane.TabID == tabID {
+				delete(s.panes, paneID)
+				s.forgetAgent(paneID)
+				closed = true
+			}
+		}
+		if !closed {
+			return nil, &herdr.APIError{Code: "tab_not_found", Message: "tab " + tabID + " not found"}
+		}
+		return map[string]any{}, nil
 	case "pane.rename":
 		paneID := stringParam("pane_id")
 		pane := s.panes[paneID]
@@ -966,4 +1026,15 @@ func mapAgentValues(values map[string]herdr.Agent) []herdr.Agent {
 		result = append(result, value)
 	}
 	return result
+}
+
+// posseAgentName builds a Rider's agent name as posse does: sanitized and cut
+// to Herdr's 32-character agent name limit before the launch suffix.
+func posseAgentName(project string, sequence, launch int) string {
+	base := "posse-" + strings.Trim(regexp.MustCompile(`[^a-z0-9_-]+`).ReplaceAllString(strings.ToLower(project), "-"), "-_ ")
+	suffix := fmt.Sprintf("-t%d-%d", sequence, launch)
+	if len(base)+len(suffix) > 32 {
+		base = strings.TrimRight(base[:32-len(suffix)], "-_")
+	}
+	return base + suffix
 }

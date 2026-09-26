@@ -250,21 +250,7 @@ func hasRecordedSession(session string) bool {
 }
 
 func findPane(panes []herdr.Pane, paneID, label string) (herdr.Pane, bool) {
-	if paneID != "" {
-		for _, pane := range panes {
-			if pane.PaneID == paneID {
-				return pane, true
-			}
-		}
-	}
-	if label != "" {
-		for _, pane := range panes {
-			if pane.Label == label {
-				return pane, true
-			}
-		}
-	}
-	return herdr.Pane{}, false
+	return herdr.FindPane(panes, paneID, label)
 }
 
 func markLost(ctx context.Context, db *store.DB, task store.Task, reason string, now time.Time, notices *[]store.Notice) error {

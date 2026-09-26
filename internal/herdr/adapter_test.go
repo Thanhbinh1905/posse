@@ -199,3 +199,21 @@ func TestProcStartTicksReadsFieldAfterCommandName(t *testing.T) {
 		t.Fatalf("proc start time = %q, %v", got, err)
 	}
 }
+
+func TestFindPanePrefersLabelOverRecordedID(t *testing.T) {
+	panes := []Pane{
+		{PaneID: "w1:p2", Label: "posse:shop:t2"},
+		{PaneID: "w1:p3", Label: "posse:shop:t1"},
+		{PaneID: "w1:p4"},
+	}
+	// After a restart renumbers panes, t1's recorded id names t2's pane.
+	if pane, found := FindPane(panes, "w1:p2", "posse:shop:t1"); !found || pane.PaneID != "w1:p3" {
+		t.Fatalf("FindPane by label = %#v, %v", pane, found)
+	}
+	if pane, found := FindPane(panes, "w1:p2", "posse:shop:t9"); found {
+		t.Fatalf("FindPane matched another labeled pane by id: %#v", pane)
+	}
+	if pane, found := FindPane(panes, "w1:p4", "posse:shop:t9"); !found || pane.PaneID != "w1:p4" {
+		t.Fatalf("FindPane did not fall back to an unlabeled pane's id: %#v, %v", pane, found)
+	}
+}

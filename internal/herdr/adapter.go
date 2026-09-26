@@ -390,3 +390,24 @@ func firstNonempty(values ...string) string {
 	}
 	return ""
 }
+
+// FindPane finds a posse pane by its label. Herdr renumbers pane ids when it
+// restores a session and reuses workspace ids, so a recorded id can name
+// another pane; an id match counts only for a pane that has no label.
+func FindPane(panes []Pane, paneID, label string) (Pane, bool) {
+	if label != "" {
+		for _, pane := range panes {
+			if pane.Label == label {
+				return pane, true
+			}
+		}
+	}
+	if paneID != "" {
+		for _, pane := range panes {
+			if pane.PaneID == paneID && pane.Label == "" {
+				return pane, true
+			}
+		}
+	}
+	return Pane{}, false
+}
