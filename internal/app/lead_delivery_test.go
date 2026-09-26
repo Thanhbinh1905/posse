@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -165,6 +166,31 @@ func TestLowkeyTypedWakeCarriesNoticeText(t *testing.T) {
 	if !found {
 		t.Fatalf("typed wake missing lowkey Notice: %#v", fixture.fake.Calls)
 	}
+}
+
+func TestClaudeTypedNoticeHasMatchingDeliveryRecord(t *testing.T) {
+	lead := herdr.Pane{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "idle"}
+	fixture := newCodexLeadFixture(t, lead, "", "0")
+	notices, err := fixture.db.UndeliveredNotices(context.Background(), fixture.project.ID)
+	if err != nil || len(notices) != 1 {
+		t.Fatalf("notice fixture: %v %#v", err, notices)
+	}
+	if err := fixture.service.deliverNotices(context.Background(), fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(claudeNoticeDirectory(fixture.home, "shop"), fmt.Sprint(notices[0].ID)+".txt")
+	recorded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range fixture.fake.Calls {
+		if call.Method == "agent.prompt" {
+			if text, _ := call.Params["text"].(string); string(recorded) == text && strings.HasPrefix(text, "[posse | Posse -> Lead") {
+				return
+			}
+		}
+	}
+	t.Fatalf("Claude Notice record does not match delivered prompt: %q", recorded)
 }
 
 func TestPiLowkeyRoutineDoesNotShowHerdrNotice(t *testing.T) {
@@ -337,8 +363,16 @@ func TestLeadLaunchByKind(t *testing.T) {
 	instructions := filepath.Join(home, "projects", "shop", "lead.md")
 
 	claude := launch("claude")
-	if !equalStrings(claude.Args, []string{"--append-system-prompt-file", instructions}) || claude.TypedPrompt != "" {
+	plugin := filepath.Join(home, "projects", "shop", "lead-claude-lowkey")
+	if !equalStrings(claude.Args, []string{"--append-system-prompt-file", instructions, "--plugin-dir", plugin}) || claude.TypedPrompt != "" ||
+		claude.Env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] != "1" || claude.Env["POSSE_LOWKEY_CONFIG"] != config.ConfigPath(home, "shop") ||
+		claude.Env["POSSE_LOWKEY_GLOBAL_CONFIG"] != config.ConfigPath(home, "") || claude.Env["POSSE_LOWKEY_NOTICES_DIR"] != claudeNoticeDirectory(home, "shop") {
 		t.Fatalf("claude launch = %#v", claude)
+	}
+	for _, file := range []string{".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.ts", "lib/presentation.ts"} {
+		if _, err := os.ReadFile(filepath.Join(plugin, file)); err != nil {
+			t.Fatalf("Claude Lead plugin %s: %v", file, err)
+		}
 	}
 
 	codex := launch("codex")
@@ -386,6 +420,45 @@ func TestLeadLaunchByKind(t *testing.T) {
 	if strings.Contains(string(contents), "tui.appendPrompt") {
 		t.Fatal("pi extension touches the composer")
 	}
+}
+
+func TestClaudeLowkeyVersionEvidence(t *testing.T) {
+	for version, verified := range map[string]bool{
+		"2.1.272 (Claude Code)": true, "2.1.280 (Claude Code)": true,
+		"2.1.282 (Claude Code)": true, "2.1.283 (Claude Code)": false,
+		"2.1.284 (Claude Code)": false, "garbage": false,
+	} {
+		if claudeLowkeyVerified(version) != verified {
+			t.Errorf("version %q verified = %v", version, !verified)
+		}
+	}
+}
+
+func TestDoctorWarnsAboutUnverifiedClaudeCode(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\necho '2.1.283 (Claude Code)'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	service := testService(t.TempDir(), nil)
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"doctor", "--json"}); code != 0 {
+		t.Fatalf("doctor: %d %s", code, output.String())
+	}
+	var result struct {
+		Checks []map[string]string `json:"checks"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range result.Checks {
+		if check["check"] == "Claude Code lowkey" && check["status"] == "warn" && strings.Contains(check["detail"], "2.1.283 (Claude Code) function hooks unverified") {
+			return
+		}
+	}
+	t.Fatalf("doctor omitted Claude version warning: %s", output.String())
 }
 
 func TestOpenCodeLeadLaunchAndPluginConfig(t *testing.T) {

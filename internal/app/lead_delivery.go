@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,6 +21,9 @@ var leadPiExtension string
 
 //go:embed lead_opencode_plugin.js
 var leadOpenCodePlugin string
+
+//go:embed claude_lowkey/.claude-plugin/plugin.json claude_lowkey/FIRSTMATE-LICENSE claude_lowkey/hooks claude_lowkey/lib
+var leadClaudeLowkey embed.FS
 
 // The prompt limit is a byte-based approximation, not a model tokenizer.
 const (
@@ -120,6 +123,19 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 		argument = strings.ReplaceAll(argument, "{file}", instructionsFile)
 		launch.Args = append(launch.Args, strings.ReplaceAll(argument, "{text}", oneLine))
 	}
+	if kind == "claude" {
+		plugin, err := s.writeLeadClaudeLowkey(home, project)
+		if err != nil {
+			return leadLaunch{}, err
+		}
+		launch.Args = append(launch.Args, "--plugin-dir", plugin)
+		launch.Env = map[string]string{
+			"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
+			"POSSE_LOWKEY_CONFIG":               config.ConfigPath(home, project.Name),
+			"POSSE_LOWKEY_GLOBAL_CONFIG":        config.ConfigPath(home, ""),
+			"POSSE_LOWKEY_NOTICES_DIR":          claudeNoticeDirectory(home, project.Name),
+		}
+	}
 	if kind == "opencode" && noticeDelivery(kindConfig) == config.NoticeDeliveryOpenCodePlugin {
 		plugin, err := s.writeLeadOpenCodePlugin(home, project)
 		if err != nil {
@@ -164,6 +180,28 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 		launch.StartsBusy = true
 	}
 	return launch, nil
+}
+
+func claudeNoticeDirectory(home, project string) string {
+	return filepath.Join(home, "projects", project, "lead-claude-notices")
+}
+
+func (s *Service) writeLeadClaudeLowkey(home string, project store.Project) (string, error) {
+	root := filepath.Join(home, "projects", project.Name, "lead-claude-lowkey")
+	for _, file := range []string{".claude-plugin/plugin.json", "FIRSTMATE-LICENSE", "hooks/hooks.json", "hooks/register.ts", "lib/presentation.ts"} {
+		data, err := leadClaudeLowkey.ReadFile("claude_lowkey/" + file)
+		if err != nil {
+			return "", err
+		}
+		path := filepath.Join(root, file)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return "", err
+		}
+		if err := writeFile(path, data); err != nil {
+			return "", err
+		}
+	}
+	return root, nil
 }
 
 func (s *Service) writeLeadPiExtension(home string, project store.Project) (string, error) {

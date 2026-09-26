@@ -98,7 +98,7 @@ func TestConcurrentUpStartsAtMostOneLead(t *testing.T) {
 	if got := fake.CallCount("agent.start"); got != 0 {
 		t.Fatalf("concurrent up invoked Herdr agent.start %d times", got)
 	}
-	wantArgs := []string{"--append-system-prompt-file", filepath.Join(home, "projects", "shop", "lead.md"), "--profile-extra", "--model=opus", "--effort", "high"}
+	wantArgs := []string{"--append-system-prompt-file", filepath.Join(home, "projects", "shop", "lead.md"), "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--profile-extra", "--model=opus", "--effort", "high"}
 	if service.pendingLead == nil || service.pendingLead.PaneID != "w1:p1" || !equalStrings(service.pendingLead.Args, wantArgs) {
 		t.Fatalf("pending Lead launch = %#v, want pane w1:p1 and args %#v", service.pendingLead, wantArgs)
 	}
@@ -248,7 +248,7 @@ func TestUpSchedulesProfileLeadPromptWithoutSystemPromptWhenNoticesArePending(t 
 	if code := cli.Run([]string{"up", "--name", "shop"}); code != 0 {
 		t.Fatalf("up failed: code=%d output=%s", code, output.String())
 	}
-	if service.pendingLead == nil || !service.pendingLead.NeedsPrompt || !equalStrings(service.pendingLead.Args, []string{"--profile-arg", "--model", "sonnet"}) {
+	if service.pendingLead == nil || !service.pendingLead.NeedsPrompt || !equalStrings(service.pendingLead.Args, []string{"--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--profile-arg", "--model", "sonnet"}) {
 		t.Fatalf("profile Lead startup did not preserve its arguments and prompt requirement: %#v", service.pendingLead)
 	}
 	if fake.CallCount("agent.prompt") != 0 {
