@@ -886,6 +886,67 @@ func TestProjectSyncRefusesWhenDefaultBranchIsCheckedOutElsewhere(t *testing.T) 
 	}
 }
 
+func TestProjectSyncFastForwardsWithUnrelatedUntrackedFiles(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	localPath := filepath.Join(fixture.repo, "AGENTS.md")
+	localContents := []byte("preserve this untracked file\n")
+	if err := os.WriteFile(localPath, localContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upstream := updateBareMain(t, fixture, "upstream.txt", "origin update\n")
+	code, output, errOutput := fixture.run("sync")
+	if code != 0 || !strings.Contains(output, "updated") {
+		t.Fatalf("posse sync did not fast-forward with unrelated untracked files: exit=%d output=%s error=%s", code, output, errOutput)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "HEAD")); got != upstream {
+		t.Fatalf("posse sync left the branch at %s, want %s", got, upstream)
+	}
+	if contents, err := os.ReadFile(localPath); err != nil || !bytes.Equal(contents, localContents) {
+		t.Fatalf("sync changed unrelated untracked bytes: %q, %v", contents, err)
+	}
+}
+
+func TestProjectSyncWithUntrackedFilesReportsCurrentWhenAlreadyUpToDate(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	localPath := filepath.Join(fixture.repo, "AGENTS.md")
+	localContents := []byte("preserve this untracked file\n")
+	if err := os.WriteFile(localPath, localContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.service.syncProjectRoot(context.Background(), fixture.db, fixture.project, cfg, true)
+	if err != nil || result.Status != "current" {
+		t.Fatalf("sync with no upstream changes should report current: %#v, %v", result, err)
+	}
+	if contents, err := os.ReadFile(localPath); err != nil || !bytes.Equal(contents, localContents) {
+		t.Fatalf("sync changed unrelated untracked bytes: %q, %v", contents, err)
+	}
+}
+
+func TestProjectSyncWatcherFastForwardsWithUnrelatedUntrackedFiles(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	localPath := filepath.Join(fixture.repo, "AGENTS.md")
+	localContents := []byte("preserve this untracked file\n")
+	if err := os.WriteFile(localPath, localContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upstream := updateBareMain(t, fixture, "upstream.txt", "origin update\n")
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.service.syncProjectRoot(context.Background(), fixture.db, fixture.project, cfg, false)
+	if err != nil || result.Status != "updated" || strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "HEAD")) != upstream {
+		t.Fatalf("watcher did not fast-forward with unrelated untracked files: %#v, %v", result, err)
+	}
+	if contents, err := os.ReadFile(localPath); err != nil || !bytes.Equal(contents, localContents) {
+		t.Fatalf("watcher changed unrelated untracked bytes: %q, %v", contents, err)
+	}
+}
+
 func TestProjectSyncLeavesDirtyRootBytesUntouchedAndDeduplicatesNotice(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
 	tracked := filepath.Join(fixture.repo, "README.md")
@@ -904,16 +965,16 @@ func TestProjectSyncLeavesDirtyRootBytesUntouchedAndDeduplicatesNotice(t *testin
 	}
 	for index := 0; index < 2; index++ {
 		result, syncErr := fixture.service.syncProjectRoot(context.Background(), fixture.db, fixture.project, cfg, true)
-		if syncErr != nil || result.Status != "root_behind" {
-			t.Fatalf("dirty root should remain behind: %#v, %v", result, syncErr)
+		if syncErr != nil || result.Status != "root_behind" || !strings.Contains(result.Reason, "README.md") {
+			t.Fatalf("dirty root should remain behind and name its tracked change: %#v, %v", result, syncErr)
 		}
 	}
 	if afterTree := snapshotProjectFiles(t, fixture.repo); !reflect.DeepEqual(afterTree, beforeTree) {
 		t.Fatalf("sync changed Project worktree bytes: before=%#v after=%#v", beforeTree, afterTree)
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "root_behind") != 1 {
-		t.Fatalf("root_behind Notice count=%d notices=%#v err=%v", countNoticeKind(notices, "root_behind"), notices, err)
+	if err != nil || countNoticeKind(notices, "root_behind") != 1 || !strings.Contains(notices[0].Summary, "README.md") {
+		t.Fatalf("root_behind Notice did not name the tracked blocker: notices=%#v err=%v", notices, err)
 	}
 	if err := os.WriteFile(tracked, []byte("test\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -927,6 +988,35 @@ func TestProjectSyncLeavesDirtyRootBytesUntouchedAndDeduplicatesNotice(t *testin
 	}
 	if _, err := os.Stat(filepath.Join(fixture.repo, "dirty-update.txt")); err != nil {
 		t.Fatalf("explicit sync did not fast-forward the root after cleanup: %v", err)
+	}
+}
+
+func TestProjectSyncRefusesToOverwriteUntrackedLocalPath(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	localPath := filepath.Join(fixture.repo, "AGENTS.md")
+	localContents := []byte("preserve user content\n")
+	if err := os.WriteFile(localPath, localContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "HEAD"))
+	updateBareMain(t, fixture, "AGENTS.md", "upstream content\n")
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.service.syncProjectRoot(context.Background(), fixture.db, fixture.project, cfg, true)
+	if err != nil || result.Status != "root_behind" || !strings.Contains(result.Reason, "AGENTS.md") {
+		t.Fatalf("sync did not identify the colliding untracked path: result=%#v err=%v", result, err)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "HEAD")); got != before {
+		t.Fatalf("sync moved default branch across local content: before=%s after=%s", before, got)
+	}
+	if contents, err := os.ReadFile(localPath); err != nil || !bytes.Equal(contents, localContents) {
+		t.Fatalf("sync changed local untracked bytes: %q err=%v", contents, err)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "root_behind") != 1 || !strings.Contains(notices[0].Summary, "AGENTS.md") {
+		t.Fatalf("root_behind Notice did not name the untracked blocker: notices=%#v err=%v", notices, err)
 	}
 }
 

@@ -155,20 +155,38 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		return result, recordErr
 	}
 	defaultCheckedOut := worktreeHasBranch(worktrees, target.DefaultBranch)
+	trackedChanges := []string(nil)
+	if rootStatus != "" {
+		trackedOutput, trackedErr := gitOutputRaw(ctx, target.Root, "diff", "--name-only", "-z", "HEAD")
+		if trackedErr != nil {
+			result.Status = "root_behind"
+			result.Reason = "could not identify tracked local changes: " + truncate(trackedErr.Error(), 200)
+			result.Err = trackedErr
+			_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)
+			return result, recordErr
+		}
+		trackedChanges = nulPaths(trackedOutput)
+	}
 	var branchUpdateErr error
-	if rootStatus == "" && currentBranch == target.DefaultBranch && localAhead == 0 {
+	if currentBranch == target.DefaultBranch && localAhead == 0 && (rootStatus == "" || result.CommitsBehind > 0) {
 		if result.CommitsBehind > 0 {
-			collision, collisionErr := upstreamUntrackedCollision(ctx, target.Root, "refs/heads/"+target.DefaultBranch, upstreamRef)
+			if reason := rootSyncBlockReason(trackedChanges, nil); reason != "" {
+				result.Status = "root_behind"
+				result.Reason = reason
+				_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)
+				return result, recordErr
+			}
+			collisions, collisionErr := untrackedPathCollisions(ctx, target.Root, "refs/heads/"+target.DefaultBranch, upstreamRef)
 			if collisionErr != nil {
 				result.Status = "root_behind"
-				result.Reason = "could not verify local ignored and untracked paths: " + truncate(collisionErr.Error(), 240)
+				result.Reason = "could not verify local ignored and untracked paths: " + truncate(collisionErr.Error(), 200)
 				result.Err = collisionErr
 				_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)
 				return result, recordErr
 			}
-			if collision != "" {
+			if reason := rootSyncBlockReason(nil, collisions); reason != "" {
 				result.Status = "root_behind"
-				result.Reason = "upstream path " + collision + " conflicts with a local ignored or untracked path"
+				result.Reason = reason
 				_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)
 				return result, recordErr
 			}
@@ -208,6 +226,8 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	switch {
 	case branchUpdateErr != nil:
 		result.Reason = "the default branch could not be advanced: " + truncate(strings.TrimSpace(branchUpdateErr.Error()), 240)
+	case rootStatus != "" && len(trackedChanges) > 0:
+		result.Reason = "tracked local changes: " + formatGitPaths(trackedChanges)
 	case rootStatus != "":
 		result.Reason = "the root checkout has uncommitted changes"
 	case localAhead > 0:
@@ -224,32 +244,62 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	return result, err
 }
 
-func upstreamUntrackedCollision(ctx context.Context, root, localRef, upstreamRef string) (string, error) {
+func untrackedPathCollisions(ctx context.Context, root, localRef, upstreamRef string) ([]string, error) {
 	changedOutput, err := gitOutputRaw(ctx, root, "diff", "--name-only", "-z", localRef+".."+upstreamRef)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	changed := nulPaths(changedOutput)
 	if len(changed) == 0 {
-		return "", nil
+		return nil, nil
 	}
 	localOutput, err := gitOutputRaw(ctx, root, "ls-files", "--others", "-z", "--exclude-standard")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	ignoredOutput, err := gitOutputRaw(ctx, root, "ls-files", "--others", "--ignored", "-z", "--exclude-standard")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	local := append(nulPaths(localOutput), nulPaths(ignoredOutput)...)
-	for _, upstreamPath := range changed {
-		for _, localPath := range local {
-			if gitPathsOverlap(upstreamPath, localPath) {
-				return upstreamPath, nil
+	return gitPathCollisions(changed, local), nil
+}
+
+func gitPathCollisions(upstreamPaths, localPaths []string) []string {
+	var collisions []string
+	seen := make(map[string]bool)
+	for _, localPath := range localPaths {
+		for _, upstreamPath := range upstreamPaths {
+			if gitPathsOverlap(upstreamPath, localPath) && !seen[localPath] {
+				collisions = append(collisions, localPath)
+				seen[localPath] = true
+				break
 			}
 		}
 	}
-	return "", nil
+	return collisions
+}
+
+func rootSyncBlockReason(trackedChanges, untrackedCollisions []string) string {
+	if len(trackedChanges) > 0 {
+		return "tracked local changes: " + formatGitPaths(trackedChanges)
+	}
+	if len(untrackedCollisions) > 0 {
+		return "local ignored or untracked paths conflict with incoming changes: " + formatGitPaths(untrackedCollisions)
+	}
+	return ""
+}
+
+func formatGitPaths(paths []string) string {
+	const maxPaths = 3
+	shown := make([]string, 0, min(len(paths), maxPaths)+1)
+	for _, path := range paths[:min(len(paths), maxPaths)] {
+		shown = append(shown, strconv.Quote(path))
+	}
+	if len(paths) > maxPaths {
+		shown = append(shown, fmt.Sprintf("and %d more", len(paths)-maxPaths))
+	}
+	return strings.Join(shown, ", ")
 }
 
 func nulPaths(output string) []string {
