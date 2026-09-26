@@ -521,9 +521,10 @@ The forge is selected from the repository's `origin` host (`github.com`, `gitlab
 
 **Keeping the Project checkout current.** The User never has to leave the Lead to `git pull`. After any Land (a local merge, or `pr_merged` from the PR watch), and during reconcile when the last fetch of the Project is older than `defaults.pr_poll`, posse runs `git fetch origin` in the Project root and brings the local default branch up to `origin/<default>` by fast-forward only:
 
-- the root checkout is on the default branch and clean: `git merge --ff-only refs/remotes/origin/<default>`;
+- the root checkout is on the default branch with no tracked local changes: `git merge --ff-only refs/remotes/origin/<default>`. Untracked and ignored files do not block the fast-forward unless an incoming path overlaps them;
+- when that root checkout is on the default branch, a tracked local change blocks the fast-forward even when it does not overlap incoming changes. An untracked or ignored path that an incoming change would overwrite also blocks it. In either case, posse leaves the checkout untouched and names the blocking paths in the `root_behind` Notice;
 - the default branch is not checked out: `git fetch origin <default>:refs/heads/<default>` (no `+`, so it can only fast-forward);
-- otherwise (uncommitted changes, another branch checked out, or local commits that are not on `origin`): posse changes nothing and raises one `root_behind` Notice per new upstream head, saying how many commits behind and why it could not update. `posse sync` retries the same rules once the User is ready.
+- otherwise (another branch checked out, or local commits that are not on `origin`): posse changes nothing and raises one `root_behind` Notice per new upstream head, saying how many commits behind and why it could not update. `posse sync` retries the same rules once the User is ready.
 
 posse never merges, rebases, stashes or resets in the Project root; the User's own work there is never touched.
 
