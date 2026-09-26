@@ -213,7 +213,9 @@ func (s *Service) requireUserUpdateCaller(ctx context.Context, home string) erro
 		if pane.PaneID != paneID {
 			continue
 		}
-		if pane.Agent != "" || pane.AgentStatus != "" {
+		// Herdr sets agent_status to "unknown" on plain shell panes, so only
+		// a detected agent marks an agent pane.
+		if pane.Agent != "" {
 			return axi.Failure("update_from_turn", "an agent pane cannot install a Posse update", false, updateInstallHelp)
 		}
 		return nil
