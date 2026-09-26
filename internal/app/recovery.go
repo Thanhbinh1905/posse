@@ -509,6 +509,11 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	if err := db.SetProjectLead(ctx, project.ID, current.WorkspaceID, current.PaneID, label); err != nil {
 		return err
 	}
+	project, err = db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	s.relabelProjectTabs(ctx, db, project)
 	if leadStart.TypedPrompt != "" {
 		if err := s.deliverLaunchPrompt(ctx, current.PaneID, leadStart.TypedPrompt); err != nil {
 			return err

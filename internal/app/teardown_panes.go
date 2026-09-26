@@ -275,20 +275,6 @@ func taskTabs(snapshot herdr.Snapshot, project store.Project, task store.Task) m
 	return tabs
 }
 
-// taskOwnsTab reports whether every pane in tabID is the Task's.
-func taskOwnsTab(snapshot herdr.Snapshot, project store.Project, task store.Task, tabID string) bool {
-	tabs := taskTabs(snapshot, project, task)
-	if tabID == "" || !tabs[tabID] {
-		return false
-	}
-	for _, pane := range snapshot.Panes {
-		if pane.TabID == tabID && !ownsTaskPane(snapshot, project, task, tabs, pane) {
-			return false
-		}
-	}
-	return true
-}
-
 // ownsTaskPane reports whether pane is the Task's: it carries the Task's
 // label, or it is an unlabeled pane inside the Mount in one of the Task's
 // tabs. An unlabeled pane elsewhere, even inside the Mount, is not the Task's.

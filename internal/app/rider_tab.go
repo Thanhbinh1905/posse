@@ -51,7 +51,7 @@ func leadWorkspace(snapshot herdr.Snapshot, project store.Project) (string, bool
 // the pane before returning so an interrupted command leaves a pane that
 // recovery and Teardown can recognize. POSSE_WORKER_HOME marks the pane as a
 // Worker of this home (section 13).
-func (s *Service) openRiderTab(ctx context.Context, home string, project store.Project, task store.Task, path string) (openedTab, error) {
+func (s *Service) openRiderTab(ctx context.Context, home string, project store.Project, task store.Task, path, displayAgent string) (openedTab, error) {
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return openedTab{}, err
@@ -61,7 +61,7 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 		return openedTab{}, axi.Failure("lead_missing", "the Lead's Herdr workspace is not open", false, "Run `posse up` to restart the Lead, then retry")
 	}
 	raw, err := s.herdrCall(ctx, "tab.create", map[string]any{
-		"workspace_id": workspaceID, "cwd": path, "label": workerTabLabel(task), "focus": false,
+		"workspace_id": workspaceID, "cwd": path, "label": riderTabLabel(workerTabLabel(task), true), "focus": false,
 		"env": map[string]string{workerHomeEnv: filepath.Clean(home)},
 	})
 	if err != nil {
@@ -88,6 +88,13 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 	opened := openedTab{WorkspaceID: workspaceID, TabID: result.RootPane.TabID, PaneID: result.RootPane.PaneID}
 	if opened.TabID == "" {
 		opened.TabID = result.Tab.TabID
+	}
+	task.PaneID = opened.PaneID
+	if _, err := s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task, "", displayAgent)); err != nil {
+		if opened.TabID != "" {
+			_, _ = s.herdrCall(ctx, "tab.close", map[string]any{"tab_id": opened.TabID})
+		}
+		return openedTab{}, err
 	}
 	if _, err := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": opened.PaneID, "label": task.PaneLabel}); err != nil {
 		// The tab holds only the pane just created, and nothing else can find it unlabeled.
