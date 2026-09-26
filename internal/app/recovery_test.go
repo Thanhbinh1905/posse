@@ -248,9 +248,39 @@ func TestRecoverAllContinuesAcrossProjectsAndRecordsGeneration(t *testing.T) {
 	defer db.Close()
 	for _, project := range []store.Project{alpha, beta} {
 		generation, err := db.ProjectServerStartedAt(ctx, project.ID)
-		if err != nil || generation != "new-generation" {
-			t.Fatalf("Project %s generation = %q, %v", project.Name, generation, err)
+		want := "new-generation"
+		if project.ID == alpha.ID {
+			want = "old-generation" // Invalid config must leave recovery pending.
 		}
+		if err != nil || generation != want {
+			t.Fatalf("Project %s generation = %q, want %q: %v", project.Name, generation, want, err)
+		}
+	}
+}
+
+func TestFailedRecoveryLeavesGenerationPending(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "missing-repository"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "old-generation"); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue.ServerStartedAt = "new-generation"
+	if _, err := testService(home, fake).recoverProject(ctx, db, home, project); err == nil {
+		t.Fatal("recovery succeeded for a missing Project root")
+	}
+	generation, err := db.ProjectServerStartedAt(ctx, project.ID)
+	if err != nil || generation != "old-generation" {
+		t.Fatalf("failed recovery consumed restart generation: %q, %v", generation, err)
 	}
 }
 

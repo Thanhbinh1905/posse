@@ -19,6 +19,55 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+// This fixture installs no posse startup plugin: a normal command must
+// recover the Project even when Herdr never invokes recover --all.
+func TestRosterRecoversRestartWithoutStartupHook(t *testing.T) {
+	fixture := newRiderTabsFixture(t)
+	before := fixture.ride(t, "t1", "Tabs missing hook", "tabs-missing-hook")
+	db, err := store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldGeneration, err := db.ProjectServerStartedAt(context.Background(), fixture.projectID)
+	_ = db.Close()
+	if err != nil || oldGeneration == "" {
+		t.Fatalf("Project had no recorded generation before restart: %q, %v", oldGeneration, err)
+	}
+	killServer(t, fixture.server)
+	fixture.server = startServer(t, fixture.client)
+	newGeneration := fixture.snapshot(t).ServerStartedAt
+	if newGeneration == oldGeneration {
+		t.Fatalf("Herdr generation did not change: %q", newGeneration)
+	}
+	// With no startup hook, nothing can relaunch the Rider before this command.
+	if current := fixture.task(t, "t1"); current.Launches != before.Launches {
+		t.Fatalf("Rider relaunched without a startup hook: %#v", current)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "roster")
+	after := fixture.task(t, "t1")
+	if after.Launches != before.Launches+1 || after.AgentName == before.AgentName {
+		t.Fatalf("roster did not recover the Rider: before=%#v after=%#v", before, after)
+	}
+	var restored herdr.Pane
+	for _, pane := range fixture.snapshot(t).Panes {
+		if pane.Label == after.PaneLabel {
+			restored = pane
+		}
+	}
+	if restored.PaneID == "" || restored.PaneID != after.PaneID || restored.WorkspaceID != after.HerdrWorkspaceID || restored.CWD != after.WorktreePath {
+		t.Fatalf("recovered Rider pane does not match its Task: pane=%#v task=%#v", restored, after)
+	}
+	db, err = store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	generation, err := db.ProjectServerStartedAt(context.Background(), fixture.projectID)
+	if err != nil || generation != newGeneration {
+		t.Fatalf("Project generation after command = %q, want %q: %v", generation, newGeneration, err)
+	}
+}
+
 // TestRidersOpenAsTabsOfTheLeadWorkspace drives the shared-workspace layout
 // through the real CLI against an isolated Herdr with the User's own
 // workspaces and tabs around the Lead. Riders must open as tabs of the Lead

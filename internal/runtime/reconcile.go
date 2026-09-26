@@ -16,8 +16,9 @@ const ReconcileBudget = 3 * time.Second
 const AgentAbsentGrace = 2 * time.Minute
 
 type RunResult struct {
-	Snapshot herdr.Snapshot
-	Notices  []store.Notice
+	Snapshot           herdr.Snapshot
+	Notices            []store.Notice
+	GenerationMismatch bool
 }
 
 type ProgressSource interface {
@@ -58,6 +59,7 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 	// resumed after recovery. Do not evaluate stalls against that old layout.
 	matches, err := snapshotMatchesProjectGeneration(budgetCtx, db, projectID, snapshot)
 	if err != nil || !matches {
+		result.GenerationMismatch = err == nil && !matches
 		return result, err
 	}
 	notices, err := ReconcileSnapshot(budgetCtx, db, projectID, snapshot, now, idleAfter)

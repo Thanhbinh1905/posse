@@ -140,6 +140,41 @@ func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) 
 	return project, err
 }
 
+// reconcileProject recovers a real Herdr restart before proceeding with a
+// generation-mismatched snapshot. A delayed event from the old server instead
+// retries against the current server, without rolling pane ids backward.
+func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) (runtime.RunResult, error) {
+	run := func() (runtime.RunResult, error) {
+		return runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+	}
+	result, err := run()
+	if err != nil || !result.GenerationMismatch {
+		return result, err
+	}
+	current, err := s.snapshot(ctx)
+	if err != nil {
+		return result, err
+	}
+	recorded, err := db.ProjectServerStartedAt(ctx, project.ID)
+	if err != nil {
+		return result, err
+	}
+	if current.ServerStartedAt != "" && recorded != "" && current.ServerStartedAt != recorded {
+		home, err := s.homePath()
+		if err != nil {
+			return result, err
+		}
+		if _, err := s.recoverProject(ctx, db, home, project); err != nil {
+			return result, fmt.Errorf("recover Project %s after Herdr restart: %w", project.Name, err)
+		}
+	}
+	result, err = run()
+	if err == nil && result.GenerationMismatch {
+		return result, fmt.Errorf("project %s Herdr generation changed during recovery; retry reconcile", project.Name)
+	}
+	return result, err
+}
+
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
@@ -161,7 +196,7 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 				return cfg, herdrError(err)
 			}
 		} else {
-			result, runErr := runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+			result, runErr := s.reconcileProject(ctx, db, project, cfg)
 			if runErr != nil {
 				if !isHerdrUnavailable(runErr) {
 					return cfg, herdrError(runErr)
