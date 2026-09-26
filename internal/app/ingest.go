@@ -11,7 +11,6 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
-	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -94,7 +93,7 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			return err
 		}
-		result, err := runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+		result, err := s.reconcileProject(ctx, db, project, cfg)
 		if err != nil {
 			if focusEvent {
 				failures = append(failures, err)

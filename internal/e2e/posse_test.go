@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	posseRuntime "github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -846,6 +847,11 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Reproduce a plugin event that read the old server snapshot before recovery
+	// but finishes reconciliation after the new server's recovery completes.
+	if _, err := posseRuntime.ReconcileSnapshot(context.Background(), db, project.ID, beforeRestart, time.Now()); err != nil {
+		t.Fatalf("reconcile delayed pre-restart event: %v", err)
+	}
 	recovered, err := db.Task(context.Background(), project.ID, "t3")
 	if err != nil || recovered.State != store.StateWorking || recovered.MountID != thirdTask.MountID || recovered.WorktreePath != thirdTask.WorktreePath || recovered.Branch != thirdTask.Branch || recovered.AgentName == thirdTask.AgentName {
 		transitions, _ := db.TaskTransitions(context.Background(), recovered.ID, 10)
@@ -853,11 +859,13 @@ esac
 		pluginLogs, pluginLogsErr := client.Run(context.Background(), "plugin", "log", "list", "--plugin", "posse.herdr")
 		t.Fatalf("Worker was not relaunched on its original Mount and branch: before=%#v after=%#v transitions=%#v snapshot=%#v snapshotErr=%v recovery=%s err=%v pluginLogs=%s pluginLogsErr=%v", thirdTask, recovered, transitions, reconcileSnapshot, snapshotErr, recoveryOutput, err, pluginLogs, pluginLogsErr)
 	}
+	var recoverySnapshot herdr.Snapshot
 	if !waitForCondition(5*time.Second, func() bool {
 		snapshot, err := client.Snapshot(context.Background())
 		if err != nil {
 			return false
 		}
+		recoverySnapshot = snapshot
 		for _, pane := range snapshot.Panes {
 			if pane.PaneID == recovered.PaneID && pane.WorkspaceID == recovered.HerdrWorkspaceID {
 				return true
@@ -865,7 +873,7 @@ esac
 		}
 		return false
 	}) {
-		t.Fatalf("recovered Worker pane %s did not appear in Herdr", recovered.PaneID)
+		t.Fatalf("recovered Worker pane %s did not appear in Herdr: before=%#v after=%#v recovered=%#v", recovered.PaneID, beforeRestart.Panes, recoverySnapshot.Panes, recovered)
 	}
 	// Herdr renumbers pane ids on restore; recovery re-records the Lead found by its label.
 	project, err = db.ProjectByName(context.Background(), "shop")

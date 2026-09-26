@@ -16,8 +16,9 @@ const ReconcileBudget = 3 * time.Second
 const AgentAbsentGrace = 2 * time.Minute
 
 type RunResult struct {
-	Snapshot herdr.Snapshot
-	Notices  []store.Notice
+	Snapshot           herdr.Snapshot
+	Notices            []store.Notice
+	GenerationMismatch bool
 }
 
 type ProgressSource interface {
@@ -53,6 +54,14 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 		now = time.Now()
 	}
 	result = RunResult{Snapshot: snapshot}
+	// Recovery is the only operation that advances the recorded generation.
+	// A plugin event may have captured a snapshot before a server restart and
+	// resumed after recovery. Do not evaluate stalls against that old layout.
+	matches, err := snapshotMatchesProjectGeneration(budgetCtx, db, projectID, snapshot)
+	if err != nil || !matches {
+		result.GenerationMismatch = err == nil && !matches
+		return result, err
+	}
 	notices, err := ReconcileSnapshot(budgetCtx, db, projectID, snapshot, now, idleAfter)
 	result.Notices = append(result.Notices, notices...)
 	if err != nil {
@@ -71,6 +80,11 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 	return result, nil
 }
 
+func snapshotMatchesProjectGeneration(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot) (bool, error) {
+	generation, err := db.ProjectServerStartedAt(ctx, projectID)
+	return generation == "" || snapshot.ServerStartedAt == "" || generation == snapshot.ServerStartedAt, err
+}
+
 func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot, now time.Time, idleAfterValues ...time.Duration) ([]store.Notice, error) {
 	idleAfter := time.Duration(0)
 	if len(idleAfterValues) > 0 {
@@ -87,7 +101,12 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 	if err != nil {
 		return nil, err
 	}
-	serverRestarted := previousServerStartedAt != "" && snapshot.ServerStartedAt != "" && previousServerStartedAt != snapshot.ServerStartedAt
+	// A snapshot from another Herdr generation cannot identify current panes.
+	// On a new restart, the startup recovery hook owns relaunch and advances
+	// this generation; until then, do not overwrite recorded pane ids.
+	if previousServerStartedAt != "" && snapshot.ServerStartedAt != "" && previousServerStartedAt != snapshot.ServerStartedAt {
+		return nil, nil
+	}
 	tasks, err := db.LiveTasks(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -107,7 +126,7 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 				continue
 			}
 			agentServerRestarted := task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
-			if serverRestarted || agentServerRestarted {
+			if agentServerRestarted {
 				absentSince := task.AgentAbsentSince
 				if absentSince == 0 {
 					absentSince = now.UnixMilli()

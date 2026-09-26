@@ -183,18 +183,6 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, err
 	}
-	defer func() {
-		if snapshot.ServerStartedAt == "" {
-			return
-		}
-		if err := db.SetProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt); err != nil {
-			if returnedErr == nil {
-				returnedErr = err
-			} else {
-				returnedErr = errors.Join(returnedErr, err)
-			}
-		}
-	}()
 	serverRestarted := previousGeneration != "" && snapshot.ServerStartedAt != "" && previousGeneration != snapshot.ServerStartedAt
 	tasks, err := db.LiveTasks(ctx, project.ID)
 	if err != nil {
@@ -309,6 +297,12 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		return len(recovered), err
 	}
 	if err := s.deliverNotices(ctx, db, project); err != nil {
+		return len(recovered), err
+	}
+	// Keep the previous generation pending when any recovery step fails, so
+	// the next command retries instead of silently reconciling an incomplete
+	// layout as if recovery succeeded.
+	if err := db.SetProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt); err != nil {
 		return len(recovered), err
 	}
 	recoveryComplete = true
