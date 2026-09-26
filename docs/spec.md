@@ -275,6 +275,12 @@ repo_watch_state(project_id, repo, root_behind_head)             -- per-member r
 
 Retention: `events` rows older than 7 days are deleted on ingest. Nothing else is deleted automatically.
 
+## Decisions
+
+A Decision is a question only the User answers. `posse decisions` lists pending Decisions (`--all` includes answered ones); `posse ask <task> "<question>" --option <choice> --option <choice>` records a Rider question. `posse decide <id> <option> --user-approved "<User's words>"` records the answer, quote and time and raises a `decision_answered` Notice for the Lead to carry out the mechanics. From the User's own shell the approval flag is optional: the typed option is recorded as the User's quote. The Lead pane must supply the quote. A second answer cannot replace the first.
+
+For callers in other modules, `DB.RaiseDecision(ctx, store.DecisionRequest{ProjectID, TaskID, Origin, Question, Options}) (store.Decision, error)` is idempotent by `(ProjectID, Origin)`. Use a stable origin for each occurrence (for example `notice:<id>` or `leftover:<branch>`); repeating an origin with different content fails. `DB.AnswerDecision(ctx, projectID, id, option, userQuote)` atomically answers once and raises the Notice. `DB.Decisions(ctx, projectID, pendingOnly)` and `DB.Decision(ctx, projectID, id)` read the records. Raising a Decision never performs the action.
+
 ## 6. Task lifecycle
 
 ```
@@ -641,6 +647,9 @@ Every command prints TOON on stdout (JSON with `--json`), keeps lists to 3 or 4 
 | `posse lead` | Lead | print Lead instructions |
 | `posse roster [--all]` | Lead, User | Tasks, or every Project |
 | `posse show <task> [--full]` | Lead | Task detail, PR state, last Signals, transitions |
+| `posse ask <task> <question> --option <choice> --option <choice>` | Lead | raise a Decision from a Rider question |
+| `posse decisions [--all]` | Lead, User | list pending or all Decisions |
+| `posse decide <id> <option> [--user-approved <quote>]` | Lead with User quote, User | record an answer and raise a Notice |
 | `posse dispatch --brief <f>` | Lead | preview Profile resolution |
 | `posse ride --brief <f> --name <short> [--profile p]` | Lead | start a Task |
 | `posse send <task> <msg> [--queue]` | Lead | steer an unfocused Worker or wait for idle with `--queue` |
