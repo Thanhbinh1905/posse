@@ -453,7 +453,7 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 			return killed, safetyErr
 		}
 		if !safe {
-			return killed, fmt.Errorf("Task work changed before Mount reset; preserve it")
+			return killed, fmt.Errorf("task work changed before Mount reset; preserve it")
 		}
 	}
 	var resetErr error
