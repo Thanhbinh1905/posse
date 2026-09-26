@@ -150,7 +150,7 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	fake := fixture.service.Herdr.(*herdr.Fake)
 	fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
-	fake.Errors["workspace.close"] = errors.New("boom")
+	fake.Errors["pane.close"] = errors.New("boom")
 	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", fixture.headSHA, fixture.headSHA)
 	worktree2 := filepath.Join(fixture.root, "mount-t2")
 	gitTest(t, fixture.repo, "worktree", "add", "-b", "posse/t2", worktree2, "refs/heads/main")
@@ -177,7 +177,7 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	if err != nil || countNoticeKind(notices, "unsaddle_incomplete") != 1 {
 		t.Fatalf("automatic Teardown failure Notice count = %d, want one: %#v, %v", countNoticeKind(notices, "unsaddle_incomplete"), notices, err)
 	}
-	if got := fake.CallCount("workspace.close"); got != 1 {
+	if got := fake.CallCount("pane.close"); got != 1 {
 		t.Fatalf("automatic Teardown attempt count = %d, want one", got)
 	}
 	fixture.test.Chdir(worktree2)
@@ -190,7 +190,7 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	if code, output, errOutput := fixture.run("lookout", "--timeout", "1"); code != 0 {
 		t.Fatalf("lookout was blocked by another Task's teardown failure: exit=%d output=%s error=%s", code, output, errOutput)
 	}
-	if got := fake.CallCount("workspace.close"); got != 1 {
+	if got := fake.CallCount("pane.close"); got != 1 {
 		t.Fatalf("unacknowledged automatic Teardown retried %d times, want one", got)
 	}
 }

@@ -328,7 +328,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertWorkerSidebarPresentation(t, client, launched, "└─ E2E change")
+	assertWorkerSidebarPresentation(t, client, launched, "Lead:shop")
 	if output := runPosse(t, posseBinary, repo, leadEnv, "send", "t1", "Steer the current work"); !strings.Contains(output, "delivered") {
 		t.Fatalf("mid-turn send did not deliver: %s", output)
 	}
@@ -867,8 +867,13 @@ esac
 	}) {
 		t.Fatalf("recovered Worker pane %s did not appear in Herdr", recovered.PaneID)
 	}
+	// Herdr renumbers pane ids on restore; recovery re-records the Lead found by its label.
+	project, err = db.ProjectByName(context.Background(), "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertLeadSidebarPresentation(t, client, project.HerdrWorkspaceID, project.LeadPaneID, "Lead:shop")
-	assertWorkerSidebarPresentation(t, client, recovered, "└─ Recovery worker")
+	assertWorkerSidebarPresentation(t, client, recovered, "Lead:shop")
 	if _, err := db.ProjectServerStartedAt(context.Background(), project.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -1129,7 +1134,7 @@ func assertLeadSidebarPresentation(t *testing.T, client *herdr.Client, workspace
 }
 
 // Assert the three default Agents-sidebar positions against a live isolated
-// Herdr snapshot: workspace and tab labels, with the detected harness subtitle.
+// Herdr snapshot: the Lead workspace label, the Rider tab label and the detected harness subtitle.
 func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task store.Task, workspaceLabel string) {
 	t.Helper()
 	snapshot, err := client.Snapshot(context.Background())

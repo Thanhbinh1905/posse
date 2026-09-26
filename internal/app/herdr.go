@@ -213,21 +213,7 @@ func (s *Service) agentActive(ctx context.Context, paneID string) bool {
 }
 
 func findAppPane(panes []herdr.Pane, paneID, label string) (herdr.Pane, bool) {
-	if paneID != "" {
-		for _, pane := range panes {
-			if pane.PaneID == paneID {
-				return pane, true
-			}
-		}
-	}
-	if label != "" {
-		for _, pane := range panes {
-			if pane.Label == label {
-				return pane, true
-			}
-		}
-	}
-	return herdr.Pane{}, false
+	return herdr.FindPane(panes, paneID, label)
 }
 
 var (

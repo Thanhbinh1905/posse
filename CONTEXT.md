@@ -15,7 +15,7 @@ The single agent the User talks to in a Project; it plans, dispatches and superv
 _Avoid_: Primary, orchestrator, supervisor
 
 **Worker**:
-The internal name for an agent that carries out exactly one Task on the Lead's behalf. **Rider** is its role name in messages, CLI prose and agent-facing labels; Herdr workspace labels show the Task title.
+The internal name for an agent that carries out exactly one Task on the Lead's behalf. **Rider** is its role name in messages, CLI prose and agent-facing labels; Herdr tab labels show the Rider name.
 _Avoid_: Subagent, child
 
 **Rider**:

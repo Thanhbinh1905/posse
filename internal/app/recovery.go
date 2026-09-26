@@ -403,13 +403,12 @@ func waitForRecoveryGeneration(ctx context.Context, db *store.DB, projectID int6
 }
 
 func (s *Service) ensureRecoveryWorkspace(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) (store.Project, error) {
-	for _, workspace := range snapshot.Workspaces {
-		if workspace.WorkspaceID == project.HerdrWorkspaceID && project.HerdrWorkspaceID != "" {
-			return project, nil
-		}
+	// Reconcile follows a Lead pane that moved; a reused id is not the Lead's.
+	if _, found := leadWorkspace(snapshot, project); found {
+		return project, nil
 	}
 	var created json.RawMessage
-	created, err := s.herdrCall(ctx, "workspace.create", map[string]any{"cwd": project.Root, "label": "Lead:" + project.Name, "focus": false, "no_focus": true})
+	created, err := s.herdrCall(ctx, "workspace.create", map[string]any{"cwd": project.Root, "label": leadWorkspaceLabel(project), "focus": false, "no_focus": true})
 	if err != nil {
 		return store.Project{}, err
 	}
@@ -480,7 +479,7 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	if _, err := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": current.PaneID, "label": label}); err != nil {
 		return err
 	}
-	if _, err := s.herdrCall(ctx, "workspace.rename", map[string]any{"workspace_id": current.WorkspaceID, "label": "Lead:" + project.Name}); err != nil {
+	if _, err := s.herdrCall(ctx, "workspace.rename", map[string]any{"workspace_id": current.WorkspaceID, "label": leadWorkspaceLabel(project)}); err != nil {
 		return err
 	}
 	if _, err := s.herdrCall(ctx, "pane.report_metadata", map[string]any{"pane_id": current.PaneID, "source": "posse", "title": "Lead: " + project.Name, "display_agent": "Lead"}); err != nil {
