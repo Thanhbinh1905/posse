@@ -795,7 +795,7 @@ set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 if [ "${POSSE_TEST_GH_FAIL:-}" != "" ]; then printf 'fake gh unavailable\n' >&2; exit 1; fi
 case "$1 $2" in
-  "api graphql") cat "$POSSE_TEST_GH_STATE" ;;
+  "api graphql") cat "$POSSE_TEST_GH_STATE"; if [ -e "$POSSE_TEST_GH_STATE.exit" ]; then printf 'GraphQL request returned errors\n' >&2; exit 1; fi ;;
   "pr list") cat "$POSSE_TEST_GH_OPEN_PRS" ;;
   "pr create") printf '%s\n' "$POSSE_TEST_GH_URL" ;;
   "pr view") printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "${POSSE_TEST_GH_VIEW_STATE:-OPEN}" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "${POSSE_TEST_GH_BASE_BRANCH:-main}" "${POSSE_TEST_GH_SOURCE:-acme/shop}" ;;
