@@ -59,6 +59,9 @@ func (s *Service) commands() *axi.Command {
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "roster", Usage: "$ roster [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
 		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, its Signals and transitions.", Handler: s.show},
+		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Rider's question to the User as a Decision.", Handler: s.ask},
+		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
+		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file>", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
 		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
 		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note>", Summary: "Record a Rider's Signal.", Handler: s.signal},
@@ -188,6 +191,9 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 		}
 	}
 	if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
+		return cfg, err
+	}
+	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
 		return cfg, err
 	}
 	if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
