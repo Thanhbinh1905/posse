@@ -94,7 +94,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 			t.Fatalf("home command failed: %s", output.String())
 		}
 		task.PaneID = "w1:p2"
-		display, err := json.Marshal(map[string]any{"tab": workerTabLabel(task), "pane": workerDisplayMetadata(task, "pi")})
+		display, err := json.Marshal(map[string]any{"tab": workerTabLabel(task), "pane": workerDisplayMetadata(task, "pi", "")})
 		if err != nil {
 			t.Fatal(err)
 		}

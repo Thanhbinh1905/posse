@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
-	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -94,7 +95,7 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			return err
 		}
-		result, err := runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+		result, err := s.reconcileProject(ctx, db, project, cfg)
 		if err != nil {
 			if focusEvent {
 				failures = append(failures, err)
@@ -274,11 +275,30 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 	}
 	if (lead.AgentStatus == "idle" || lead.AgentStatus == "done") && !lead.Focused && snapshot.FocusedPaneID != lead.PaneID {
 		_, err := s.deliverNoticeBatch(ctx, db, project, notices, func() error {
+			if lead.Agent == "claude" {
+				if err := recordClaudeNotice(home, project.Name, notices, prompt); err != nil {
+					return err
+				}
+			}
 			return s.safePrompt(ctx, lead.PaneID, prompt)
 		})
 		return err
 	}
 	return nil
+}
+
+// Record only Posse-produced deliveries. A text prefix alone cannot authenticate
+// a User prompt, so the Claude renderer requires a matching record as well.
+func recordClaudeNotice(home, project string, notices []store.Notice, prompt string) error {
+	parts := make([]string, 0, len(notices))
+	for _, notice := range notices {
+		parts = append(parts, fmt.Sprint(notice.ID))
+	}
+	dir := claudeNoticeDirectory(home, project)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return writeFile(filepath.Join(dir, strings.Join(parts, ",")+".txt"), []byte(prompt))
 }
 
 func extensionOwnsNotices(delivery string) bool {

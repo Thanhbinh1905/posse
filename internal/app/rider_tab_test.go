@@ -189,7 +189,7 @@ func TestOpenRiderTabUsesTheLeadWorkspace(t *testing.T) {
 	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t5","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p5","tab_id":"w1:t5","workspace_id":"w1"}}`)
 	task.ShortName = "first-rider"
 	home := t.TempDir()
-	opened, err := testService(home, adapter).openRiderTab(context.Background(), home, project, task, task.WorktreePath)
+	opened, err := testService(home, adapter).openRiderTab(context.Background(), home, project, task, task.WorktreePath, "claude")
 	if err != nil || opened != (openedTab{WorkspaceID: "w1", TabID: "w1:t5", PaneID: "w1:p5"}) {
 		t.Fatalf("openRiderTab = %#v, %v", opened, err)
 	}
@@ -198,21 +198,24 @@ func TestOpenRiderTabUsesTheLeadWorkspace(t *testing.T) {
 		methods = append(methods, call.Method)
 		if call.Method == "tab.create" {
 			env, _ := call.Params["env"].(map[string]string)
-			if call.Params["workspace_id"] != "w1" || call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "first-rider" || call.Params["focus"] != false || env[workerHomeEnv] != filepath.Clean(home) {
+			if call.Params["workspace_id"] != "w1" || call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "└─ first-rider" || call.Params["focus"] != false || env[workerHomeEnv] != filepath.Clean(home) {
 				t.Fatalf("tab.create params = %#v", call.Params)
 			}
 		}
 		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w1:p5" || call.Params["label"] != task.PaneLabel) {
 			t.Fatalf("pane.rename params = %#v", call.Params)
 		}
+		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w1:p5" || call.Params["display_agent"] != "claude") {
+			t.Fatalf("initial Rider metadata = %#v", call.Params)
+		}
 	}
-	if strings.Join(methods, ",") != "tab.create,pane.rename" {
+	if strings.Join(methods, ",") != "tab.create,pane.report_metadata,pane.rename" {
 		t.Fatalf("openRiderTab calls = %v", methods)
 	}
 
 	// Without the Lead, posse refuses rather than open a second workspace.
 	adapter = &changingSnapshotAdapter{Fake: herdr.NewFake(), snapshot: herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "notes"}}}}
-	_, err = testService(home, adapter).openRiderTab(context.Background(), home, project, task, task.WorktreePath)
+	_, err = testService(home, adapter).openRiderTab(context.Background(), home, project, task, task.WorktreePath, "claude")
 	var cliErr *axi.Error
 	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("tab.create") != 0 || adapter.CallCount("workspace.create") != 0 {
 		t.Fatalf("openRiderTab without the Lead = %v, calls %#v", err, adapter.Calls)
@@ -237,7 +240,7 @@ func TestRefreshWorkerDisplayNeverRenamesWorkspaces(t *testing.T) {
 	}
 	fake := herdr.NewFake()
 	fake.SnapshotValue.Panes = []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead"}, {PaneID: "w1:p3", WorkspaceID: "w1", TabID: "w1:t3", Label: "posse:shop:t1", Agent: "claude"}}
-	if err := testService(home, fake).refreshWorkerDisplay(ctx, db, project, id); err != nil {
+	if err := testService(home, fake).refreshWorkerDisplay(ctx, db, project, id, "claude"); err != nil {
 		t.Fatal(err)
 	}
 	if fake.CallCount("workspace.rename") != 0 || fake.CallCount("pane.report_metadata") != 1 {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	posseRuntime "github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -670,10 +671,6 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousNotices, err := db.UndeliveredNotices(context.Background(), project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	previousPromptLog, _ := os.ReadFile(leadLog)
 	previousPromptCount := strings.Count(string(previousPromptLog), "[posse | Posse -> Lead ")
 	if _, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "focused guard check", DataJSON: `{}`}); err != nil {
@@ -700,8 +697,17 @@ esac
 		t.Fatal(err)
 	}
 	undelivered, err := db.UndeliveredNotices(context.Background(), project.ID)
-	if err != nil || len(undelivered) != len(previousNotices)+1 {
-		t.Fatalf("focused Lead Notice state = %#v, %v", undelivered, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	focusedNotice := false
+	for _, notice := range undelivered {
+		if notice.Summary == "focused guard check" && notice.DeliveredAt == 0 {
+			focusedNotice = true
+		}
+	}
+	if !focusedNotice {
+		t.Fatalf("focused Lead Notice was delivered unexpectedly: %#v", undelivered)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -846,6 +852,11 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Reproduce a plugin event that read the old server snapshot before recovery
+	// but finishes reconciliation after the new server's recovery completes.
+	if _, err := posseRuntime.ReconcileSnapshot(context.Background(), db, project.ID, beforeRestart, time.Now()); err != nil {
+		t.Fatalf("reconcile delayed pre-restart event: %v", err)
+	}
 	recovered, err := db.Task(context.Background(), project.ID, "t3")
 	if err != nil || recovered.State != store.StateWorking || recovered.MountID != thirdTask.MountID || recovered.WorktreePath != thirdTask.WorktreePath || recovered.Branch != thirdTask.Branch || recovered.AgentName == thirdTask.AgentName {
 		transitions, _ := db.TaskTransitions(context.Background(), recovered.ID, 10)
@@ -853,11 +864,13 @@ esac
 		pluginLogs, pluginLogsErr := client.Run(context.Background(), "plugin", "log", "list", "--plugin", "posse.herdr")
 		t.Fatalf("Worker was not relaunched on its original Mount and branch: before=%#v after=%#v transitions=%#v snapshot=%#v snapshotErr=%v recovery=%s err=%v pluginLogs=%s pluginLogsErr=%v", thirdTask, recovered, transitions, reconcileSnapshot, snapshotErr, recoveryOutput, err, pluginLogs, pluginLogsErr)
 	}
+	var recoverySnapshot herdr.Snapshot
 	if !waitForCondition(5*time.Second, func() bool {
 		snapshot, err := client.Snapshot(context.Background())
 		if err != nil {
 			return false
 		}
+		recoverySnapshot = snapshot
 		for _, pane := range snapshot.Panes {
 			if pane.PaneID == recovered.PaneID && pane.WorkspaceID == recovered.HerdrWorkspaceID {
 				return true
@@ -865,7 +878,7 @@ esac
 		}
 		return false
 	}) {
-		t.Fatalf("recovered Worker pane %s did not appear in Herdr", recovered.PaneID)
+		t.Fatalf("recovered Worker pane %s did not appear in Herdr: before=%#v after=%#v recovered=%#v", recovered.PaneID, beforeRestart.Panes, recoverySnapshot.Panes, recovered)
 	}
 	// Herdr renumbers pane ids on restore; recovery re-records the Lead found by its label.
 	project, err = db.ProjectByName(context.Background(), "shop")
@@ -1134,7 +1147,7 @@ func assertLeadSidebarPresentation(t *testing.T, client *herdr.Client, workspace
 }
 
 // Assert the three default Agents-sidebar positions against a live isolated
-// Herdr snapshot: the Lead workspace label, the Rider tab label and the detected harness subtitle.
+// Herdr snapshot: the Lead workspace label, the tree-labeled Rider tab and harness subtitle.
 func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task store.Task, workspaceLabel string) {
 	t.Helper()
 	snapshot, err := client.Snapshot(context.Background())
@@ -1163,7 +1176,7 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
 		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.ShortName ||
-		tab.Label != task.ShortName {
+		tab.Label != "└─ "+task.ShortName {
 		t.Fatalf("isolated Worker sidebar/cwd mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
 	}
 }

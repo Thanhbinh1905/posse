@@ -58,7 +58,7 @@ func snapshotPRLeftoverFromObservation(ctx context.Context, db *store.DB, projec
 			return err
 		}
 		if tree != currentTree {
-			return fmt.Errorf("Leftover branch %s already exists with different content", name)
+			return fmt.Errorf("leftover branch %s already exists with different content", name)
 		}
 	} else {
 		if _, err := gitOutput(ctx, path, "add", "-A"); err != nil {

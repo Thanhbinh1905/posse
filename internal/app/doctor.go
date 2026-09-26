@@ -90,6 +90,19 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 		}
 	}
 	referencedKinds, kindConfigErr := configuredAgentKinds(home)
+	if claude, lookupErr := exec.LookPath("claude"); lookupErr == nil {
+		version, versionErr := commandOutputArgs(ctx.Context, "", claude, "--version")
+		if versionErr == nil {
+			version = strings.TrimSpace(version)
+			if claudeLowkeyVerified(version) {
+				addCheck("Claude Code lowkey", "ok", version+" function hooks verified", "")
+			} else {
+				addCheck("Claude Code lowkey", "warn", version+" function hooks unverified", "Verify the Claude lowkey plugin against this Claude Code version")
+			}
+		} else {
+			addCheck("Claude Code lowkey", "warn", versionErr.Error(), "Check the Claude Code installation")
+		}
+	}
 	if kindConfigErr != nil {
 		addCheck("agent configuration", "warn", kindConfigErr.Error(), "Fix the agent settings in config.toml")
 	}
@@ -214,6 +227,16 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 		return ctx.Print(addUpdateHelp(axi.Object{{Key: "checks", Value: checks}, {Key: "help", Value: help}, {Key: "agent_manifests", Value: jsonRaw(manifests)}}, update))
 	}
 	return ctx.Print(addUpdateHelp(axi.Object{{Key: "checks", Value: checks}, {Key: "help", Value: help}}, update))
+}
+
+// Function hooks can change without notice. Do not infer support from a newer version.
+func claudeLowkeyVerified(version string) bool {
+	for _, verified := range []string{"2.1.272", "2.1.280", "2.1.282"} {
+		if version == verified+" (Claude Code)" {
+			return true
+		}
+	}
+	return false
 }
 
 func stringListContains(values []string, wanted string) bool {

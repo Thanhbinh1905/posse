@@ -58,7 +58,7 @@ func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testi
 	if got := workerTabLabel(task); got != "stable-output" {
 		t.Fatalf("Worker tab label = %q", got)
 	}
-	metadata := workerDisplayMetadata(task, "claude")
+	metadata := workerDisplayMetadata(task, "claude", "")
 	if metadata["title"] != "Stable output for workers · stable-output · /tmp/remuda/shop/mount-2" || metadata["clear_display_agent"] != nil || metadata["display_agent"] != "claude" || metadata["pane_id"] != task.PaneID {
 		t.Fatalf("Worker display metadata = %#v", metadata)
 	}
@@ -70,7 +70,7 @@ func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testi
 func TestWorkerDisplayMountContextDoesNotTruncateMidPath(t *testing.T) {
 	mount := filepath.Join("/tmp", strings.Repeat("ci-run-", 18), "posse", "remuda", "shop", "mount-3")
 	task := store.Task{Seq: 3, Title: "Show Worker worktrees", ShortName: "show-worktrees", Branch: "posse/show-worktrees", WorktreePath: mount, PaneID: "w2:p1"}
-	metadata := workerDisplayMetadata(task, "codex")
+	metadata := workerDisplayMetadata(task, "codex", "")
 	if metadata["clear_display_agent"] != nil || metadata["display_agent"] != "codex" {
 		t.Fatalf("Worker harness subtitle does not match the detected agent: %#v", metadata)
 	}
@@ -306,23 +306,28 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	if !started {
 		t.Fatalf("relaunch omitted the complete resume args: %#v", fake.Calls)
 	}
-	workspaceRenamed, tabRenamed, metadataReported := false, false, false
-	startedIndex, metadataIndex := -1, -1
+	workspaceRenamed, tabCreated, metadataBeforeStart, metadataAfterStart := false, false, false, false
+	startedIndex, firstMetadataIndex, lastMetadataIndex := -1, -1, -1
 	for index, call := range fake.Calls {
 		switch call.Method {
 		case "workspace.rename":
 			workspaceRenamed = true
-		case "tab.rename":
-			tabRenamed = call.Params["tab_id"] == "w3:t1" && call.Params["label"] == "worker-tree"
+		case "tab.create":
+			tabCreated = call.Params["label"] == "└─ worker-tree"
 		case "agent.start":
 			startedIndex = index
 		case "pane.report_metadata":
-			metadataIndex = index
-			metadataReported = call.Params["clear_display_agent"] == nil && call.Params["display_agent"] == "claude" && strings.Contains(call.Params["title"].(string), mount)
+			if firstMetadataIndex < 0 {
+				firstMetadataIndex = index
+			}
+			lastMetadataIndex = index
+			metadataReported := call.Params["clear_display_agent"] == nil && call.Params["display_agent"] == "claude" && strings.Contains(call.Params["title"].(string), mount)
+			metadataBeforeStart = metadataBeforeStart || (metadataReported && (startedIndex < 0 || index < startedIndex))
+			metadataAfterStart = metadataAfterStart || (metadataReported && startedIndex >= 0 && index > startedIndex)
 		}
 	}
-	if workspaceRenamed || !tabRenamed || !metadataReported || startedIndex < 0 || metadataIndex <= startedIndex {
-		t.Fatalf("relaunch renamed a workspace or missed a Worker name: workspace renamed=%v tab=%v metadata=%v calls=%#v", workspaceRenamed, tabRenamed, metadataReported, fake.Calls)
+	if workspaceRenamed || !tabCreated || !metadataBeforeStart || !metadataAfterStart || startedIndex < 0 || firstMetadataIndex >= startedIndex || lastMetadataIndex <= startedIndex {
+		t.Fatalf("relaunch relabeled a workspace or missed early harness metadata: workspace renamed=%v tab_created=%v metadata_before=%v metadata_after=%v calls=%#v", workspaceRenamed, tabCreated, metadataBeforeStart, metadataAfterStart, fake.Calls)
 	}
 	relaunchText, err := os.ReadFile(filepath.Join(home, "projects", "shop", "tasks", "t1", "relaunch.md"))
 	if err != nil || !strings.Contains(string(relaunchText), "Re-read `launch.md`") || !strings.Contains(string(relaunchText), "posse holler") || !strings.Contains(string(relaunchText), "first instruction") || !strings.Contains(string(relaunchText), "later instruction supersedes the first") {
@@ -355,6 +360,7 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	codexRelaunchStart := len(fake.Calls)
 	if _, err := service.relaunchTask(ctx, observer, home, project, cfg, updated, "codex-fast"); err != nil {
 		t.Fatalf("relaunch with a different harness failed: %v", err)
 	}
@@ -367,14 +373,17 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	if !freshStart {
 		t.Fatalf("kind-changing relaunch resumed the old session or omitted Profile args: %#v", fake.Calls)
 	}
-	codexSubtitle := false
-	for _, call := range fake.Calls[metadataIndex+1:] {
-		if call.Method == "pane.report_metadata" && call.Params["display_agent"] == "codex" {
-			codexSubtitle = true
+	codexMetadataIndex, codexStartIndex := -1, -1
+	for index, call := range fake.Calls[codexRelaunchStart:] {
+		if call.Method == "pane.report_metadata" && call.Params["display_agent"] == "codex" && codexMetadataIndex < 0 {
+			codexMetadataIndex = codexRelaunchStart + index
+		}
+		if call.Method == "agent.start" && call.Params["kind"] == "codex" {
+			codexStartIndex = codexRelaunchStart + index
 		}
 	}
-	if !codexSubtitle {
-		t.Fatalf("kind-changing relaunch kept the old harness subtitle: %#v", fake.Calls)
+	if codexMetadataIndex < 0 || codexStartIndex < 0 || codexMetadataIndex >= codexStartIndex {
+		t.Fatalf("kind-changing relaunch did not set the harness subtitle before agent.start: %#v", fake.Calls)
 	}
 	codexConfig, err := os.ReadFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"))
 	if err != nil || !strings.Contains(string(codexConfig), `trust_level = "trusted"`) || !strings.Contains(string(codexConfig), mount) {

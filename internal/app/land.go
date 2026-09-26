@@ -414,6 +414,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
 		var closeErr error
 		paneResult, closeErr = s.closeTaskPanes(ctx, project, task)
+		if closeErr == nil {
+			s.relabelProjectTabs(ctx, db, project)
+		}
 		return closeErr
 	})
 	if err != nil {

@@ -248,9 +248,39 @@ func TestRecoverAllContinuesAcrossProjectsAndRecordsGeneration(t *testing.T) {
 	defer db.Close()
 	for _, project := range []store.Project{alpha, beta} {
 		generation, err := db.ProjectServerStartedAt(ctx, project.ID)
-		if err != nil || generation != "new-generation" {
-			t.Fatalf("Project %s generation = %q, %v", project.Name, generation, err)
+		want := "new-generation"
+		if project.ID == alpha.ID {
+			want = "old-generation" // Invalid config must leave recovery pending.
 		}
+		if err != nil || generation != want {
+			t.Fatalf("Project %s generation = %q, want %q: %v", project.Name, generation, want, err)
+		}
+	}
+}
+
+func TestFailedRecoveryLeavesGenerationPending(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "missing-repository"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "old-generation"); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue.ServerStartedAt = "new-generation"
+	if _, err := testService(home, fake).recoverProject(ctx, db, home, project); err == nil {
+		t.Fatal("recovery succeeded for a missing Project root")
+	}
+	generation, err := db.ProjectServerStartedAt(ctx, project.ID)
+	if err != nil || generation != "old-generation" {
+		t.Fatalf("failed recovery consumed restart generation: %q, %v", generation, err)
 	}
 }
 
@@ -320,8 +350,8 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 
 	lead := herdr.Pane{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "claude", AgentStatus: "working"}
 	worker := herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: before.PaneLabel, CWD: mount.Path, Agent: "claude", AgentStatus: "working"}
-	// The plugin event sees the Worker missing, recover --all sees it present,
-	// and the next snapshot sees it missing again.
+	// The plugin event sees the Worker missing in a new generation, recover --all
+	// sees it present, and the next snapshot sees it missing again.
 	snapshots := []herdr.Snapshot{
 		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{lead}},
 		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{{PaneID: lead.PaneID, WorkspaceID: lead.WorkspaceID, Label: lead.Label}, worker}},
@@ -340,8 +370,8 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 		t.Fatalf("event reconciliation consumed the pending Herdr restart: generation=%q err=%v", generation, err)
 	}
 	observed, err := db.Task(ctx, project.ID, "t1")
-	if err != nil || observed.AgentAbsentSince == 0 || observed.AgentServerStartedAt != "old-generation" {
-		t.Fatalf("pre-hook reconcile did not record the transient absence: task=%#v err=%v", observed, err)
+	if err != nil || observed.AgentAbsentSince != 0 || observed.AgentServerStartedAt != "old-generation" {
+		t.Fatalf("pre-hook reconcile changed an observation before recovery: task=%#v err=%v", observed, err)
 	}
 	if recovered, err := service.recoverProject(ctx, db, home, project); err != nil {
 		t.Fatalf("startup recovery: %v", err)

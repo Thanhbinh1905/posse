@@ -19,6 +19,55 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+// This fixture installs no posse startup plugin: a normal command must
+// recover the Project even when Herdr never invokes recover --all.
+func TestRosterRecoversRestartWithoutStartupHook(t *testing.T) {
+	fixture := newRiderTabsFixture(t)
+	before := fixture.ride(t, "t1", "Tabs missing hook", "tabs-missing-hook")
+	db, err := store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldGeneration, err := db.ProjectServerStartedAt(context.Background(), fixture.projectID)
+	_ = db.Close()
+	if err != nil || oldGeneration == "" {
+		t.Fatalf("Project had no recorded generation before restart: %q, %v", oldGeneration, err)
+	}
+	killServer(t, fixture.server)
+	fixture.server = startServer(t, fixture.client)
+	newGeneration := fixture.snapshot(t).ServerStartedAt
+	if newGeneration == oldGeneration {
+		t.Fatalf("Herdr generation did not change: %q", newGeneration)
+	}
+	// With no startup hook, nothing can relaunch the Rider before this command.
+	if current := fixture.task(t, "t1"); current.Launches != before.Launches {
+		t.Fatalf("Rider relaunched without a startup hook: %#v", current)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "roster")
+	after := fixture.task(t, "t1")
+	if after.Launches != before.Launches+1 || after.AgentName == before.AgentName {
+		t.Fatalf("roster did not recover the Rider: before=%#v after=%#v", before, after)
+	}
+	var restored herdr.Pane
+	for _, pane := range fixture.snapshot(t).Panes {
+		if pane.Label == after.PaneLabel {
+			restored = pane
+		}
+	}
+	if restored.PaneID == "" || restored.PaneID != after.PaneID || restored.WorkspaceID != after.HerdrWorkspaceID || restored.CWD != after.WorktreePath {
+		t.Fatalf("recovered Rider pane does not match its Task: pane=%#v task=%#v", restored, after)
+	}
+	db, err = store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	generation, err := db.ProjectServerStartedAt(context.Background(), fixture.projectID)
+	if err != nil || generation != newGeneration {
+		t.Fatalf("Project generation after command = %q, want %q: %v", generation, newGeneration, err)
+	}
+}
+
 // TestRidersOpenAsTabsOfTheLeadWorkspace drives the shared-workspace layout
 // through the real CLI against an isolated Herdr with the User's own
 // workspaces and tabs around the Lead. Riders must open as tabs of the Lead
@@ -34,6 +83,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	fixture.assertUserLayout(t, snapshot)
 	fixture.assertRiderTab(t, snapshot, first)
 	fixture.assertRiderTab(t, snapshot, second)
+	fixture.assertRiderLabels(t, snapshot, first, second)
 	if tabOf(t, snapshot, first.PaneID) == tabOf(t, snapshot, second.PaneID) {
 		t.Fatalf("two Riders share tab %s", tabOf(t, snapshot, first.PaneID))
 	}
@@ -53,6 +103,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	}
 	snapshot = fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
+	fixture.assertRiderLabels(t, snapshot, second)
 	fixture.assertAlive(t, snapshot, foreign, stray, second.PaneID)
 	fixture.assertGone(t, snapshot, first.PaneID)
 
@@ -69,6 +120,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	}
 	snapshot = fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
+	fixture.assertRiderLabels(t, snapshot)
 	fixture.assertGone(t, snapshot, second.PaneID, ownSplit)
 	fixture.assertAlive(t, snapshot, foreign)
 	for _, tab := range snapshot.Tabs {
@@ -93,12 +145,13 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	snapshot = fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
 	fixture.assertRiderTab(t, snapshot, relaunched)
+	fixture.assertRiderLabels(t, snapshot, relaunched)
 
 	// After a Herdr restart, recovery reuses the restored tab instead of opening another.
 	// Herdr renumbers tab and pane ids on restore, so the tab is compared by its label.
 	riderTabs := func(snapshot herdr.Snapshot) (count int) {
 		for _, tab := range snapshot.Tabs {
-			if tab.Label == relaunched.ShortName {
+			if tab.Label == "└─ "+relaunched.ShortName {
 				count++
 			}
 		}
@@ -116,6 +169,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	snapshot = fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
 	fixture.assertRiderTab(t, snapshot, recovered)
+	fixture.assertRiderLabels(t, snapshot, recovered)
 	if riderTabs(snapshot) != 1 || len(snapshot.Tabs) != tabsBefore {
 		t.Fatalf("recovery opened a new tab: tabs before=%d after=%d: %#v", tabsBefore, len(snapshot.Tabs), snapshot.Tabs)
 	}
@@ -135,9 +189,11 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 		t.Fatalf("could not move the legacy Rider into its own workspace: %s %v", moved, err)
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "roster")
-	if current := fixture.task(t, "t4"); current.PaneID != movedPane.MoveResult.Pane.PaneID || current.HerdrWorkspaceID != movedPane.MoveResult.Pane.WorkspaceID || current.State != store.StateWorking {
+	current := fixture.task(t, "t4")
+	if current.PaneID != movedPane.MoveResult.Pane.PaneID || current.HerdrWorkspaceID != movedPane.MoveResult.Pane.WorkspaceID || current.State != store.StateWorking {
 		t.Fatalf("reconcile did not follow the legacy Rider into its workspace: %#v moved=%#v", current, movedPane.MoveResult.Pane)
 	}
+	fixture.assertRiderLabels(t, fixture.snapshot(t), recovered, current)
 	fixture.fail(t, "t4")
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t4", "--discard", "--user-approved", "User approved the legacy teardown test")
 	snapshot = fixture.snapshot(t)
@@ -148,6 +204,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 		}
 	}
 	fixture.assertUserLayout(t, snapshot)
+	fixture.assertRiderLabels(t, snapshot, recovered)
 	fixture.assertAlive(t, snapshot, recovered.PaneID, foreign)
 
 }
@@ -374,6 +431,16 @@ func (f *riderTabsFixture) assertUserLayout(t *testing.T, snapshot herdr.Snapsho
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("Herdr workspaces = %v, want only the User's %v", got, want)
 	}
+	labels := make(map[string]string, len(snapshot.Tabs))
+	for _, tab := range snapshot.Tabs {
+		labels[tab.TabID] = tab.Label
+	}
+	if got := labels[tabOf(t, snapshot, f.leadPaneID)]; got != "Lead" {
+		t.Fatalf("Lead tab label = %q, want Lead", got)
+	}
+	if got := labels[f.userTab.RootPane.TabID]; got != "user-shell" {
+		t.Fatalf("User tab label = %q, want user-shell", got)
+	}
 	f.assertAlive(t, snapshot, f.leadPaneID, f.userTab.RootPane.PaneID, f.userBefore.RootPane.PaneID, f.userAfter.RootPane.PaneID)
 }
 
@@ -399,10 +466,8 @@ func (f *riderTabsFixture) assertRiderTab(t *testing.T, snapshot herdr.Snapshot,
 	if pane.TabID == leadTab || pane.TabID == f.userTab.RootPane.TabID || len(tabPanes) != 1 {
 		t.Fatalf("Rider %s does not own its tab %s: panes=%v lead tab=%s", task.PaneLabel, pane.TabID, tabPanes, leadTab)
 	}
-	for _, tab := range snapshot.Tabs {
-		if tab.TabID == pane.TabID && tab.Label != task.ShortName {
-			t.Fatalf("Rider tab label = %q, want %q", tab.Label, task.ShortName)
-		}
+	if pane.DisplayAgent != "claude" {
+		t.Fatalf("Rider display_agent = %q, want claude", pane.DisplayAgent)
 	}
 	raw, err := f.client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": pane.PaneID})
 	if err != nil {
@@ -423,6 +488,33 @@ func (f *riderTabsFixture) assertRiderTab(t *testing.T, snapshot herdr.Snapshot,
 	// Herdr does not persist per-pane env across a restart; recovery then relies on the Mount cwd.
 	if !bytes.Contains(environ, []byte("\x00POSSE_WORKER_HOME="+f.home+"\x00")) && task.Launches < 2 {
 		t.Fatalf("Rider pane %s was not marked with POSSE_WORKER_HOME=%s", pane.PaneID, f.home)
+	}
+}
+
+func (f *riderTabsFixture) assertRiderLabels(t *testing.T, snapshot herdr.Snapshot, tasks ...store.Task) {
+	t.Helper()
+	byTab := make(map[string]store.Task, len(tasks))
+	for _, task := range tasks {
+		byTab[tabOf(t, snapshot, task.PaneID)] = task
+	}
+	count := 0
+	for _, tab := range snapshot.Tabs {
+		task, ok := byTab[tab.TabID]
+		if !ok {
+			continue
+		}
+		branch := "├─"
+		if count == len(byTab)-1 {
+			branch = "└─"
+		}
+		want := branch + " " + task.ShortName
+		if tab.Label != want {
+			t.Fatalf("Rider tab label = %q, want %q in Herdr order", tab.Label, want)
+		}
+		count++
+	}
+	if count != len(byTab) {
+		t.Fatalf("found %d of %d Rider tabs in Herdr tab order", count, len(byTab))
 	}
 }
 

@@ -201,7 +201,7 @@ requestsDrained:
 	}
 	harness.session.mu.Unlock()
 	if after.Launches != before.Launches+1 || after.AgentServerStartedAt != newGeneration || recovery.OwnerPID != 0 || recovery.Generation != newGeneration || recoveryNotices != 1 || workerStarts != 1 {
-		t.Fatalf("overlapping recovery duplicated or lost relaunch: before=%#v after=%#v recovery=%#v notices=%d workerStarts=%d", before, after, recovery, recoveryNotices, workerStarts)
+		t.Fatalf("overlapping recovery duplicated or lost relaunch: before=%#v after=%#v recovery=%#v notices=%d workerStarts=%d startup=%s explicit=%s", before, after, recovery, recoveryNotices, workerStarts, startupOutput.String(), explicitOutput.String())
 	}
 }
 
@@ -984,7 +984,7 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		s.prompts = append(s.prompts, stringParam("text"))
 		s.promptTargets = append(s.promptTargets, stringParam("target"))
 		return map[string]any{}, nil
-	case "agent.send_keys", "pane.report_metadata", "workspace.report_metadata", "notification.show":
+	case "agent.send_keys", "pane.send_input", "pane.report_metadata", "workspace.report_metadata", "notification.show":
 		return map[string]any{}, nil
 	default:
 		return nil, &herdr.APIError{Code: "unsupported_test_method", Message: method}

@@ -199,6 +199,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		_ = db.Transition(ctx.Context, taskID, store.StateSpawning, store.StateFailed, "cli", "Rider limit changed during spawn")
 		return axi.Failure("worker_limit", "Rider limit was reached during spawn", false)
 	}
+	kind := taskKind(cfg, task)
 	var mount store.Mount
 	err = s.runIntentStep(ctx.Context, db, intent, "mount.acquire", func() error {
 		var acquireErr error
@@ -218,7 +219,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	var opened openedTab
 	err = s.runIntentStep(ctx.Context, db, intent, "pane.open", func() error {
 		var callErr error
-		opened, callErr = s.openRiderTab(ctx.Context, home, project, task, mount.Path)
+		opened, callErr = s.openRiderTab(ctx.Context, home, project, task, mount.Path, kind)
 		return callErr
 	})
 	if err != nil {
@@ -231,6 +232,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
+	s.relabelProjectTabs(ctx.Context, db, project)
 	worktreePath := filepath.Clean(mount.Path)
 	if kindConfig, ok := cfg.Kinds[cfg.Profiles[resolution.Profile].Kind]; ok {
 		prepareErr := s.runIntentStep(ctx.Context, db, intent, "repository.prepare", func() error {
@@ -272,10 +274,6 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	kind := cfg.Profiles[resolution.Profile].Kind
-	if kind == "" {
-		kind = "claude"
-	}
 	kindConfig := cfg.Kinds[kind]
 	taskHome := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(sequence))
 	briefPath := filepath.Join(taskHome, "brief.md")
@@ -313,7 +311,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if err := s.runIntentStep(ctx.Context, db, intent, "pane.metadata", func() error {
-		return s.refreshWorkerDisplay(ctx.Context, db, project, taskID)
+		return s.refreshWorkerDisplay(ctx.Context, db, project, taskID, kind)
 	}); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
@@ -340,18 +338,22 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 }
 
 // Herdr otherwise prefers the unique agent.start name over its detected
-// harness in the Agents row. Use Herdr's detected identity for the subtitle;
-// clear stale overrides when no agent is detected. Pane title and tokens remain
-// available to other UIs without changing canonical pane/agent identity.
-func workerDisplayMetadata(task store.Task, detectedAgent string) map[string]any {
+// harness in the Agents row. Use the resolved harness before start and Herdr's
+// detected identity afterward. Pane title and tokens remain available to other
+// UIs without changing canonical pane or agent identity.
+func workerDisplayMetadata(task store.Task, detectedAgent, expectedAgent string) map[string]any {
 	name := taskDisplayName(task)
 	metadata := map[string]any{
 		"pane_id": task.PaneID, "source": "posse",
 		"title":  task.Title + " · " + name + " · " + task.WorktreePath,
 		"tokens": map[string]string{"posse_title": task.Title, "posse_branch": name, "posse_mount": filepath.Base(task.WorktreePath)},
 	}
-	if detectedAgent != "" {
-		metadata["display_agent"] = detectedAgent
+	displayAgent := detectedAgent
+	if displayAgent == "" {
+		displayAgent = expectedAgent
+	}
+	if displayAgent != "" {
+		metadata["display_agent"] = displayAgent
 	} else {
 		metadata["clear_display_agent"] = true
 	}
@@ -364,7 +366,7 @@ func workerTabLabel(task store.Task) string {
 
 // refreshWorkerDisplay reports a Rider's pane title and tokens. Riders are
 // tabs of the Lead's workspace, so posse never renames a workspace for them.
-func (s *Service) refreshWorkerDisplay(ctx context.Context, db *store.DB, project store.Project, taskID int64) error {
+func (s *Service) refreshWorkerDisplay(ctx context.Context, db *store.DB, project store.Project, taskID int64, expectedAgent string) error {
 	task, err := db.TaskByID(ctx, project.ID, taskID)
 	if err != nil {
 		return err
@@ -378,7 +380,7 @@ func (s *Service) refreshWorkerDisplay(ctx context.Context, db *store.DB, projec
 		return nil
 	}
 	task.PaneID = pane.PaneID
-	_, err = s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task, pane.Agent))
+	_, err = s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task, pane.Agent, expectedAgent))
 	return err
 }
 
@@ -567,6 +569,8 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 		if s.Herdr != nil && (task.HerdrWorkspaceID != "" || task.PaneID != "" || task.PaneLabel != "") {
 			if _, closeErr := s.closeTaskPanes(ctx, project, task); closeErr != nil {
 				reason += "; Task pane cleanup failed: " + closeErr.Error()
+			} else {
+				s.relabelProjectTabs(ctx, db, project)
 			}
 		}
 		cfg, _ := config.Load(s.Home, project.Name)
@@ -1172,18 +1176,16 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		return failure(err)
 	}
 	pane, found := findTaskPane(snapshot.Panes, task)
-	ownsTab := found && taskOwnsTab(snapshot, project, task, pane.TabID)
 	if !found {
 		var opened openedTab
 		if err := track("pane.open", func() error {
 			var callErr error
-			opened, callErr = s.openRiderTab(ctx, home, project, task, task.WorktreePath)
+			opened, callErr = s.openRiderTab(ctx, home, project, task, task.WorktreePath, kind)
 			return callErr
 		}); err != nil {
 			return failure(err)
 		}
 		pane = herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
-		ownsTab = true
 	}
 	if pane.Agent != "" {
 		if err := track("agent.stop", func() error {
@@ -1214,15 +1216,13 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		if _, callErr := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": pane.PaneID, "label": task.PaneLabel}); callErr != nil {
 			return callErr
 		}
-		// A tab shared with a pane that is not this Rider's keeps its name.
-		if pane.TabID != "" && ownsTab {
-			_, callErr := s.herdrCall(ctx, "tab.rename", map[string]any{"tab_id": pane.TabID, "label": workerTabLabel(task)})
-			return callErr
-		}
-		return nil
+		task.PaneID = pane.PaneID
+		_, callErr := s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task, "", kind))
+		return callErr
 	}); err != nil {
 		return failure(err)
 	}
+	s.relabelProjectTabs(ctx, db, project)
 	launch := 0
 	if err := track("agent.sequence", func() error {
 		var launchErr error
@@ -1259,7 +1259,7 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		return failure(err)
 	}
 	if err := track("pane.metadata", func() error {
-		return s.refreshWorkerDisplay(ctx, db, project, task.ID)
+		return s.refreshWorkerDisplay(ctx, db, project, task.ID, kind)
 	}); err != nil {
 		return failure(err)
 	}

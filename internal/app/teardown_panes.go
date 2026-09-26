@@ -71,23 +71,6 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 	return nil
 }
 
-func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
-	if (task.LandingMode != "pr" && task.LandingMode != "no-mistakes") || task.PRURL == "" {
-		return true, nil
-	}
-	observation, err := db.LatestPRObservation(ctx, task.ID)
-	if store.IsNotFound(err) {
-		return false, nil // No verified merge observation can justify resetting the Mount.
-	}
-	if err != nil {
-		return false, err
-	}
-	if observation.State != "MERGED" {
-		return false, nil
-	}
-	return safeMergedPRWorktree(ctx, db, project, task, observation)
-}
-
 func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Project, task store.Task, observation store.PRObservation) (bool, error) {
 	if observation.PRURL != task.PRURL || observation.HeadSHA == "" || observation.MergeCommit == "" || task.LandedRef != observation.MergeCommit || task.Branch == "" || task.WorktreePath == "" {
 		return false, nil
@@ -254,20 +237,6 @@ func taskTabs(snapshot herdr.Snapshot, project store.Project, task store.Task) m
 		}
 	}
 	return tabs
-}
-
-// taskOwnsTab reports whether every pane in tabID is the Task's.
-func taskOwnsTab(snapshot herdr.Snapshot, project store.Project, task store.Task, tabID string) bool {
-	tabs := taskTabs(snapshot, project, task)
-	if tabID == "" || !tabs[tabID] {
-		return false
-	}
-	for _, pane := range snapshot.Panes {
-		if pane.TabID == tabID && !ownsTaskPane(snapshot, project, task, tabs, pane) {
-			return false
-		}
-	}
-	return true
 }
 
 // ownsTaskPane reports whether pane is the Task's: it carries the Task's

@@ -40,7 +40,7 @@ func (s *Service) reconcileIntents(ctx context.Context, db *store.DB, project st
 		intent.ProcessID = os.Getpid()
 		switch intent.Command {
 		case "ride":
-			err = s.recoverRideIntent(ctx, db, project, task, intent, snapshot)
+			err = s.recoverRideIntent(ctx, db, project, cfg, task, intent, snapshot)
 		case "land --open-pr":
 			err = s.recoverOpenPullRequestIntent(ctx, db, project, task, intent)
 		case "land --merge":
@@ -141,7 +141,7 @@ func (s *Service) recordIntentStuck(ctx context.Context, db *store.DB, project s
 	return err
 }
 
-func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, snapshot herdr.Snapshot) error {
+func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, snapshot herdr.Snapshot) error {
 	if task.State != store.StateSpawning {
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	}
@@ -177,12 +177,13 @@ func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project s
 			return nil
 		}
 	}
-	if err := s.refreshWorkerDisplay(ctx, db, project, task.ID); err != nil {
+	if err := s.refreshWorkerDisplay(ctx, db, project, task.ID, taskKind(cfg, task)); err != nil {
 		return err
 	}
 	if err := db.Transition(ctx, task.ID, store.StateSpawning, store.StateWorking, "cli", "Recovered an interrupted ride after the Rider started"); err != nil && err != store.ErrStateRace {
 		return err
 	}
+	s.relabelProjectTabs(ctx, db, project)
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 }
 

@@ -12,7 +12,6 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
-	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -325,7 +324,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	defer db.ReleaseLeadStart(context.Background(), project.ID)
 	var snapshot herdr.Snapshot
 	if registered {
-		runtimeResult, err := runtime.Run(ctx.Context, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+		runtimeResult, err := s.reconcileProject(ctx.Context, db, project, cfg)
 		if err != nil {
 			return herdrError(err)
 		}
@@ -457,6 +456,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 		return err
 	}
 	project.HerdrWorkspaceID = callerWorkspaceID
+	s.relabelProjectTabs(ctx.Context, db, project)
 	if err := s.ensureLookoutTab(ctx.Context, project, snapshot); err != nil {
 		return err
 	}

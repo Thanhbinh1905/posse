@@ -40,7 +40,7 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 		return err
 	}
 	if opened.RootPane.PaneID == "" {
-		return fmt.Errorf("Lookout tab has no root pane")
+		return fmt.Errorf("lookout tab has no root pane")
 	}
 	tabID := opened.RootPane.TabID
 	if tabID == "" {
