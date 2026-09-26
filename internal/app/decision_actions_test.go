@@ -1,0 +1,177 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
+)
+
+func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
+	f := newPRLandingFixture(t, "pr", store.StateDone)
+	defer f.db.Close()
+	ctx := context.Background()
+	attachPRFixtureMount(t, f)
+	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateLanding, "cli", "PR ready"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, f.task.ID, store.StateLanding, store.StateLanded, "cli", "merged"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.RecordPRObservation(ctx, store.PRObservation{TaskID: task.ID, ProjectID: f.project.ID, PRURL: task.PRURL, State: "MERGED", HeadSHA: f.headSHA, MergeCommit: f.headSHA}, store.PRObservationEffect{}, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.worktree, "unsaved.txt"), []byte("unfinished\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "branch", "posse/t1-leftover")
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := f.service.Herdr.(*herdr.Fake)
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	if _, err := f.service.unsaddleTask(ctx, f.db, f.project, cfg, task, false, ""); err == nil {
+		t.Fatal("conflicting Leftover snapshot should stop Teardown")
+	} else {
+		t.Logf("Teardown failure: %v", err)
+	}
+	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unrecoverable store.Decision
+	for _, decision := range decisions {
+		if strings.HasPrefix(decision.Origin, "leftover:unrecoverable:") {
+			unrecoverable = decision
+		}
+	}
+	if unrecoverable.ID == 0 {
+		t.Fatalf("missing repair/discard Decision: %#v", decisions)
+	}
+	if _, err := f.db.AnswerDecision(ctx, f.project.ID, unrecoverable.ID, "discard", "User approved losing the unsaved work"); err != nil {
+		t.Fatal(err)
+	}
+	code, out, stderr := f.run("apply", fmt.Sprint(unrecoverable.ID))
+	if code != 0 {
+		t.Fatalf("apply: %s %s", out, stderr)
+	}
+	task, err = f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown {
+		t.Fatalf("discard did not tear down: %#v %v", task, err)
+	}
+}
+
+func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
+	f := newPRLandingFixture(t, "pr", store.StateDone)
+	defer f.db.Close()
+	ctx := context.Background()
+	attachPRFixtureMount(t, f)
+	if code, out, stderr := f.run("land", "t1"); code != 0 {
+		t.Fatalf("land: %s %s", out, stderr)
+	}
+	f.setGraphQLState(t, "CLOSED", "SUCCESS", "APPROVED", "MERGEABLE", "", f.headSHA)
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.pollProjectPullRequests(ctx, f.db, f.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closed store.Decision
+	for _, decision := range decisions {
+		if decision.Kind == "pr_closed" {
+			closed = decision
+		}
+	}
+	if closed.ID == 0 {
+		t.Fatalf("closed PR Decision absent: %#v", decisions)
+	}
+	if _, err := f.db.AnswerDecision(ctx, f.project.ID, closed.ID, "discard", "User approved discarding the closed PR"); err != nil {
+		t.Fatal(err)
+	}
+	fake := f.service.Herdr.(*herdr.Fake)
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	code, out, stderr := f.run("apply", fmt.Sprint(closed.ID))
+	if code != 0 {
+		t.Fatalf("apply discard: %s %s", out, stderr)
+	}
+	task, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown {
+		t.Fatalf("discard did not release Task: %#v %v", task, err)
+	}
+}
+
+func TestAnsweredLeftoverDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
+	for _, option := range []string{"open-task", "discard"} {
+		t.Run(option, func(t *testing.T) {
+			f := newPRLandingFixture(t, "pr", store.StateDone)
+			defer f.db.Close()
+			ctx := context.Background()
+			if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.worktree, "untracked.txt"), []byte("save\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
+			cfg, err := config.Load(f.home, f.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.service.pollProjectPullRequests(ctx, f.db, f.project, cfg, true); err != nil {
+				t.Fatal(err)
+			}
+			task, err := f.db.Task(ctx, f.project.ID, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := snapshotPRLeftover(ctx, f.db, f.project, task); err != nil {
+				t.Fatal(err)
+			}
+			decisions, err := f.db.Decisions(ctx, f.project.ID, true)
+			if err != nil || len(decisions) != 1 {
+				t.Fatalf("decisions=%#v err=%v", decisions, err)
+			}
+			decision, err := f.db.AnswerDecision(ctx, f.project.ID, decisions[0].ID, option, "User selected "+option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, out, stderr := f.run("apply", fmt.Sprint(decision.ID))
+			if code != 0 {
+				t.Fatalf("apply: %s %s", out, stderr)
+			}
+			if option == "open-task" {
+				if !strings.Contains(out, "--from-leftover") {
+					t.Fatalf("new Task command missing: %s", out)
+				}
+				if got := gitTest(t, f.repo, "show", "refs/heads/posse/t1-leftover:untracked.txt"); got != "save\n" {
+					t.Fatalf("Leftover lost: %q", got)
+				}
+			} else {
+				if _, err := gitOutput(ctx, f.repo, "rev-parse", "--verify", "refs/heads/posse/t1-leftover"); err == nil {
+					t.Fatal("discard left branch behind")
+				}
+			}
+		})
+	}
+}

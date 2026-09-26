@@ -230,15 +230,18 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	if err == nil && samePRObservation(previous, observation) {
+	unchanged := err == nil && samePRObservation(previous, observation)
+	if unchanged && effect.RepoState == "" {
 		return false, tx.Commit()
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, repo, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
-		return false, err
-	}
-	for _, notice := range effect.Notices {
-		if err := insertNoticeTx(ctx, tx, notice); err != nil {
+	if !unchanged {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, repo, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
 			return false, err
+		}
+		for _, notice := range effect.Notices {
+			if err := insertNoticeTx(ctx, tx, notice); err != nil {
+				return false, err
+			}
 		}
 	}
 	transitioned := false
@@ -246,7 +249,7 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		now := time.Now().UnixMilli()
 		switch effect.RepoState {
 		case TaskRepoLanded:
-			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, landed_ref=?, updated_at=? WHERE task_id=? AND repo=? AND state=?`, TaskRepoLanded, effect.LandedRef, now, observation.TaskID, repo, TaskRepoLanding)
+			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, landed_ref=?, updated_at=? WHERE task_id=? AND repo=? AND state IN ('landing','open','gated')`, TaskRepoLanded, effect.LandedRef, now, observation.TaskID, repo)
 		case TaskRepoOpen:
 			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, gated_sha='', updated_at=? WHERE task_id=? AND repo=? AND state=?`, TaskRepoOpen, now, observation.TaskID, repo, TaskRepoLanding)
 		}

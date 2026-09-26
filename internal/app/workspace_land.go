@@ -468,6 +468,15 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			return err
 		}
 		for _, member := range members {
+			if member.repo.State == store.TaskRepoOpen && member.repo.PRURL == "" {
+				commits, err := gitOutput(ctx, member.task.WorktreePath, "rev-list", "--count", member.repo.BaseRef+"..HEAD")
+				if err == nil && commits == "0" {
+					member.repo.State = store.TaskRepoUnchanged
+					if err := db.UpdateTaskRepo(ctx, member.repo); err != nil {
+						return err
+					}
+				}
+			}
 			if member.repo.PRURL == "" || member.repo.State == store.TaskRepoLanded || member.repo.State == store.TaskRepoUnchanged {
 				continue
 			}
@@ -475,14 +484,10 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			if previousErr != nil && !store.IsNotFound(previousErr) {
 				return previousErr
 			}
-			if previousErr == nil && previous.State == "CLOSED" {
+			if previousErr == nil && previous.PRURL == member.repo.PRURL && previous.State == "CLOSED" {
 				if err := raiseClosedPRDecision(ctx, db, project, task, member.repo.PRURL); err != nil {
 					return err
 				}
-				continue
-			}
-			if previousErr == nil && previous.State == "MERGED" {
-				continue
 			}
 			forge, err := forgeForRepository(ctx, member.target.Root, cfg, member.repo.Repo)
 			if err != nil {
@@ -506,7 +511,7 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 				}
 				continue
 			}
-			hasPrevious := previousErr == nil
+			hasPrevious := previousErr == nil && previous.PRURL == member.repo.PRURL
 			if strings.EqualFold(observation.Mergeable, "UNKNOWN") && hasPrevious {
 				observation.Mergeable = previous.Mergeable
 			}

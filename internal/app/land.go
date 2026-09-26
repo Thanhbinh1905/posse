@@ -2,7 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -422,7 +426,17 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
-	if task.State == store.StateLanded && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
+	var stopped []string
+	if task.State == store.StateLanded && !discardable && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
+		// Background processes may write after the Rider pane closes. Stop
+		// them before taking the snapshot, never after it.
+		if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
+			var stopErr error
+			stopped, stopErr = stopMountProcesses(task.WorktreePath)
+			return stopErr
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+		}
 		if err := s.runIntentStep(ctx, db, intent, "leftover.snapshot", func() error {
 			if !project.IsWorkspace() {
 				return snapshotPRLeftover(ctx, db, project, task)
@@ -431,20 +445,50 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			if err != nil {
 				return err
 			}
+			requested := map[string]bool{}
 			for _, member := range members {
-				if member.repo.State != store.TaskRepoLanded || member.repo.PRURL == "" {
-					continue
-				}
-				observation, err := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
-				if err != nil {
+				requested[member.repo.Repo] = true
+				if member.repo.State == store.TaskRepoLanded && member.repo.PRURL != "" {
+					observation, err := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+					if err != nil {
+						return err
+					}
+					if err := snapshotPRLeftoverFromObservation(ctx, db, member.project, member.task, observation, member.repo.Repo); err != nil {
+						return err
+					}
+				} else if err := snapshotUnmergedMemberWork(ctx, db, member.project, member.task, member.repo.Repo); err != nil {
 					return err
 				}
-				if err := snapshotPRLeftoverFromObservation(ctx, db, member.project, member.task, observation, member.repo.Repo); err != nil {
+			}
+			// An unrequested Member may still have a detached worktree in a
+			// reused Mount. Its non-ignored edits belong to this Rider too.
+			targets, err := workspaceMountTargets(ctx, db, project)
+			if err != nil {
+				return err
+			}
+			for _, target := range targets {
+				if requested[target.Name] {
+					continue
+				}
+				memberTask := task
+				memberTask.WorktreePath = filepath.Join(task.WorktreePath, target.Path)
+				if _, err := os.Stat(filepath.Join(memberTask.WorktreePath, ".git")); os.IsNotExist(err) {
+					continue
+				} else if err != nil {
+					return err
+				}
+				memberProject := project
+				memberProject.Root, memberProject.DefaultBranch = target.Root, target.DefaultBranch
+				if err := snapshotUnmergedMemberWork(ctx, db, memberProject, memberTask, target.Name); err != nil {
 					return err
 				}
 			}
 			return nil
 		}); err != nil {
+			_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: "leftover:unrecoverable:" + strconv.FormatInt(task.ID, 10), Question: "The merged PR Leftover could not be snapshotted. Repair the Mount and retry Teardown, or approve discarding its unsaved work?", Options: []string{"repair", "discard"}})
+			if decisionErr != nil {
+				return result, errors.Join(err, decisionErr)
+			}
 			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 		}
 	}
@@ -458,7 +502,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
 	result.Panes = paneResult
-	result.StoppedProcesses = killed
+	result.StoppedProcesses = append(stopped, killed...)
 	if project.IsWorkspace() {
 		err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
 			tips := ""
@@ -533,6 +577,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	err = s.runIntentStep(ctx, db, intent, "task.torn_down", func() error {
 		if discardable {
+			if task.State == store.StateLanded {
+				return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", "Unrecoverable Leftover discarded with recorded User approval")
+			}
 			return db.TransitionAfterApproval(ctx, task.ID, task.State, store.StateTornDown, "user", "Task Mount discarded with User approval", "discard")
 		}
 		return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", "Task Mount released after completion")

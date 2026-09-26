@@ -583,13 +583,12 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			if previousErr != nil && !store.IsNotFound(previousErr) {
 				return previousErr
 			}
-			if previousErr == nil && previous.State == "CLOSED" {
+			if previousErr == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
 				if err := raiseClosedPRDecision(ctx, db, project, task, task.PRURL); err != nil {
 					return err
 				}
-			} else if previousErr != nil || previous.State != "MERGED" {
-				watched = append(watched, task)
 			}
+			watched = append(watched, task)
 		}
 	}
 	state, err := db.ProjectWatchState(ctx, project.ID)
@@ -711,6 +710,12 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	observations := make([]pendingObservation, 0, len(targets))
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
+			if strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest") || strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest with") {
+				if err := raiseInvalidPRDecision(ctx, db, project, task); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := recordPRTaskWatchFailure(ctx, db, project, task, taskErr, now); err != nil {
 				return err
 			}
@@ -721,7 +726,7 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			continue
 		}
 		previous, previousErr := db.LatestPRObservation(ctx, task.ID)
-		hasPrevious := previousErr == nil
+		hasPrevious := previousErr == nil && previous.PRURL == task.PRURL
 		if previousErr != nil && !store.IsNotFound(previousErr) {
 			return previousErr
 		}
@@ -775,7 +780,15 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	}
 	for _, observed := range observations {
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
-
+		if observed.current.State == "MERGED" && observed.hasBefore && observed.previous.PRURL == observed.current.PRURL && observed.previous.State == "MERGED" {
+			var exists bool
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='pr_merged' AND data_json=?)`, observed.task.ID, marshalJSON(map[string]any{"url": observed.current.PRURL, "head_sha": observed.current.HeadSHA, "merge_commit": observed.current.MergeCommit})).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				effect.Notices = append(effect.Notices, store.Notice{ProjectID: project.ID, TaskID: observed.task.ID, Kind: "pr_merged", Summary: observed.task.Title + ": pull request merged", DataJSON: marshalJSON(map[string]any{"url": observed.current.PRURL, "head_sha": observed.current.HeadSHA, "merge_commit": observed.current.MergeCommit}), CreatedAt: observed.current.ObservedAt})
+			}
+		}
 		recorded, err := db.RecordPRObservation(ctx, observed.current, effect, observed.task)
 		if err != nil {
 			return err

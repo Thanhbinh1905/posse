@@ -15,7 +15,7 @@ import (
 
 // A: a workspace member PR published but not yet gated (repo state "open")
 // merges on the forge. The Task must Land.
-func TestT76WorkspaceOpenMemberMergedLands(t *testing.T) {
+func TestWorkspaceOpenMemberMergedLands(t *testing.T) {
 	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
 	bin := filepath.Join(f.root, "bin")
 	state := filepath.Join(f.root, "gh-view.json")
@@ -70,7 +70,7 @@ func insertObservation(t *testing.T, db *store.DB, projectID, taskID int64, url,
 
 // B: upgrade. The previous release recorded a MERGED observation but kept the
 // Task working (pr_follow_up_pending). The first reconcile must Land it.
-func TestT76UpgradeWorkingTaskWithRecordedMergeLands(t *testing.T) {
+func TestUpgradeWorkingTaskWithRecordedMergeLands(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
@@ -104,7 +104,7 @@ func TestT76UpgradeWorkingTaskWithRecordedMergeLands(t *testing.T) {
 }
 
 // C: a PR closed, then reopened on the forge and merged. The Task must Land.
-func TestT76ReopenedPRIsWatchedAgain(t *testing.T) {
+func TestReopenedPRIsWatchedAgain(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
@@ -137,7 +137,7 @@ func TestT76ReopenedPRIsWatchedAgain(t *testing.T) {
 
 // D: the Task's PR changes after the first one closed (new PR published).
 // The new PR must be watched and no Decision must claim it closed.
-func TestT76NewPRAfterClosedOneIsWatched(t *testing.T) {
+func TestNewPRAfterClosedOneIsWatched(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
@@ -168,7 +168,7 @@ func TestT76NewPRAfterClosedOneIsWatched(t *testing.T) {
 }
 
 // E: guard false refusals and bypasses of direct git push.
-func TestT76GuardGitPush(t *testing.T) {
+func TestGuardGitPushSubcommands(t *testing.T) {
 	scope, _ := guardFixture(t)
 	for _, command := range []string{"git stash push -m wip", "git commit -m push", "git log --grep push", "git checkout -b push"} {
 		if refused, _ := guardCommand(command, scope); refused {
@@ -184,7 +184,7 @@ func TestT76GuardGitPush(t *testing.T) {
 
 // F: a concurrent Teardown (another process holds the unsaddle intent) must
 // not leave a false "teardown incomplete" reason on a Task that is torn down.
-func TestT76ConcurrentTeardownRaisesNoFalseReason(t *testing.T) {
+func TestConcurrentTeardownRaisesNoFalseReason(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
@@ -230,7 +230,7 @@ func TestT76ConcurrentTeardownRaisesNoFalseReason(t *testing.T) {
 
 // T: a PR closes while its Task is landing with an open land_ready Decision.
 // The Decision must not stay answerable with "land".
-func TestT76ClosedPRObsoletesLandReadyDecision(t *testing.T) {
+func TestClosedPRObsoletesLandReadyDecision(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	if code, output, errOutput := f.run("land", "t1"); code != 0 {
@@ -255,7 +255,7 @@ func TestT76ClosedPRObsoletesLandReadyDecision(t *testing.T) {
 	if err := f.service.raiseNoticeDecisions(ctx, f.db, f.project); err != nil {
 		t.Fatal(err)
 	}
-	decisions, err := f.db.Decisions(ctx, f.project.ID, false)
+	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestT76ClosedPRObsoletesLandReadyDecision(t *testing.T) {
 // W: a workspace Task Lands from working because its PR member merged. Edits
 // the Rider left in another member (here the already-landed local member) must
 // be snapshotted or kept, not discarded by Mount release.
-func TestT76WorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
+func TestWorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
 	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
 	bin := filepath.Join(f.root, "bin")
 	state := filepath.Join(f.root, "gh-view.json")
@@ -329,10 +329,21 @@ func TestT76WorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
 	if f.state() != store.StateTornDown {
 		t.Fatalf("state=%s", f.state())
 	}
-	if _, err := os.Stat(unsaved); err == nil {
-		return
-	}
 	tool := filepath.Join(f.workspace, "e2e-tool")
-	refs := gitTest(t, tool, "for-each-ref", "--format=%(refname)", "refs/heads/")
-	t.Errorf("uncommitted e2e-tool work discarded by Teardown; e2e-tool refs: %s", strings.ReplaceAll(refs, "\n", " "))
+	content := gitTest(t, tool, "show", "refs/heads/posse/span-members-leftover:follow-up-edit.txt")
+	if content != "Rider work\n" {
+		t.Fatalf("uncommitted Member Leftover was not saved: %q", content)
+	}
+	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range decisions {
+		found = found || d.Kind == "leftover" && strings.Contains(d.Origin, "e2e-tool")
+	}
+	if !found {
+		t.Fatalf("Member Leftover has no Decision: %#v", decisions)
+	}
+	_ = unsaved
 }

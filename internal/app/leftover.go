@@ -29,17 +29,30 @@ func snapshotPRLeftoverFromObservation(ctx context.Context, db *store.DB, projec
 	if err != nil || safe {
 		return err
 	}
-	path := task.WorktreePath
-	branch, err := gitOutput(ctx, path, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil || branch != task.Branch {
-		return fmt.Errorf("cannot snapshot Leftover: Mount is not on its Task branch")
+	return persistLeftoverSnapshot(ctx, db, project, task, member)
+}
+
+// A workspace can have uncommitted follow-up edits in local, unchanged, or
+// otherwise detached members, not only in the member whose PR merged.
+func snapshotUnmergedMemberWork(ctx context.Context, db *store.DB, project store.Project, task store.Task, member string) error {
+	if task.WorktreePath == "" {
+		return nil
 	}
-	head, err := gitOutput(ctx, path, "rev-parse", "HEAD")
+	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain", "--untracked-files=all")
 	if err != nil {
 		return err
 	}
-	if _, err := gitOutput(ctx, path, "merge-base", "--is-ancestor", observation.HeadSHA, head); err != nil {
-		return fmt.Errorf("cannot snapshot Leftover: merged head is not an ancestor of the Task branch")
+	if status == "" {
+		return nil
+	}
+	return persistLeftoverSnapshot(ctx, db, project, task, member)
+}
+
+func persistLeftoverSnapshot(ctx context.Context, db *store.DB, project store.Project, task store.Task, member string) error {
+	path := task.WorktreePath
+	head, err := gitOutput(ctx, path, "rev-parse", "HEAD")
+	if err != nil {
+		return err
 	}
 	name := task.Branch + "-leftover"
 	ref := "refs/heads/" + name

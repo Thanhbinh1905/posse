@@ -600,8 +600,8 @@ func TestPRWatchClosedPRRaisesDecisionOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(fixture.ghLog)
-	if err != nil || string(after) != string(before) {
-		t.Fatalf("closed PR was polled again: %q %q %v", before, after, err)
+	if err != nil || strings.Count(string(after), "api graphql") != strings.Count(string(before), "api graphql")+1 {
+		t.Fatalf("closed PR was not watched for reopening: %q %q %v", before, after, err)
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil || countNoticeKind(notices, "pr_closed") != 1 || countNoticeKind(notices, "pr_watch_failing") != 0 {

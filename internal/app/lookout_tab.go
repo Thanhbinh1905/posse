@@ -18,9 +18,40 @@ func lookoutTabLabel(project store.Project) string { return "posse:" + project.N
 // Notices or types into the Lead; the configured delivery integration does that.
 func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, snapshot herdr.Snapshot) error {
 	label := lookoutTabLabel(project)
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	command := "POSSE_HOME=" + shellQuote(home) + " " + shellQuote(binary) + " lookout --poll-only"
 	for _, pane := range snapshot.Panes {
-		if pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == label {
-			return nil
+		if pane.Label != label {
+			continue
+		}
+		if pane.WorkspaceID == project.HerdrWorkspaceID {
+			if lookoutProcessRunning(pane.PaneID, home) {
+				return nil
+			}
+			_, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": pane.PaneID, "text": command, "keys": []string{"enter"}})
+			return err
+		}
+		// A replacement Lead may use another workspace. Close only the old
+		// dedicated Lookout tab, never a tab containing foreign panes.
+		whole := pane.TabID != ""
+		for _, other := range snapshot.Panes {
+			if other.TabID == pane.TabID && other.PaneID != pane.PaneID {
+				whole = false
+			}
+		}
+		method, params := "pane.close", map[string]any{"pane_id": pane.PaneID}
+		if whole {
+			method, params = "tab.close", map[string]any{"tab_id": pane.TabID}
+		}
+		if _, err := s.herdrCall(ctx, method, params); err != nil && !missingPaneError(err) {
+			return err
 		}
 	}
 	raw, err := s.herdrCall(ctx, "tab.create", map[string]any{"workspace_id": project.HerdrWorkspaceID, "cwd": project.Root, "label": label, "focus": false})
@@ -55,7 +86,7 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 	if _, err := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": opened.RootPane.PaneID, "label": label}); err != nil {
 		return fail(err)
 	}
-	if _, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": opened.RootPane.PaneID, "text": "posse lookout --poll-only", "keys": []string{"enter"}}); err != nil {
+	if _, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": opened.RootPane.PaneID, "text": command, "keys": []string{"enter"}}); err != nil {
 		return fail(err)
 	}
 	return nil
@@ -80,9 +111,22 @@ func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, 
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
 	}
+	lastFailure := ""
 	for {
-		if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+		fresh, err := db.ProjectByID(ctx.Context, project.ID)
+		if err != nil {
 			return err
+		}
+		if fresh.HerdrWorkspaceID != project.HerdrWorkspaceID {
+			return nil
+		}
+		if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+			if lastFailure != err.Error() {
+				_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout reconcile failed: " + truncate(err.Error(), 240), DataJSON: `{}`})
+				lastFailure = err.Error()
+			}
+		} else {
+			lastFailure = ""
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return nil

@@ -281,7 +281,19 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 			t.Fatalf("merged Rider still holds its Mount: %#v, %v", mounts, err)
 		}
 		fixture.requireNotice(t, "t1", "pr_merged")
-		fixture.requireNotice(t, "t2", "pr_watch_failing")
+		decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, decision := range decisions {
+			if decision.TaskID == badID && decision.Kind == "pr_closed" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("invalid PR has no User Decision: %#v", decisions)
+		}
 		watch, err := fixture.db.ProjectWatchState(context.Background(), fixture.project.ID)
 		if err != nil || watch.PRConsecutiveFailures != 0 {
 			t.Fatalf("target-specific failure blocked healthy project polling: %#v, %v", watch, err)
@@ -311,7 +323,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 			failureCount++
 		}
 	}
-	if mergeCount != 1 || failureCount != 1 {
+	if mergeCount != 1 || failureCount != 0 {
 		t.Fatalf("repeated/restarted polls duplicated Notices: merge=%d failure=%d", mergeCount, failureCount)
 	}
 }

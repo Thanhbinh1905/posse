@@ -203,6 +203,8 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
 			return false, err
 		}
+	}
+	if !unchanged || effect.TransitionTo == StateLanded && transitions[current.State][StateLanded] {
 		for _, notice := range effect.Notices {
 			if err := insertNoticeTx(ctx, tx, notice); err != nil {
 				return false, err

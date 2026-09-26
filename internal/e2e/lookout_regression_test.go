@@ -52,10 +52,9 @@ func lookoutPIDs(root string) []int {
 	return pids
 }
 
-// L1: the Lookout process exits (Ctrl-C, crash, transient error). The tab
-// remains with its label, so a later `posse up` never restarts polling, and a
-// merged PR is not Landed without a Lead command.
-func TestT76LookoutExitIsNeverRestarted(t *testing.T) {
+// L1: a dead Lookout leaves a labeled tab. After a Herdr restart, Lead
+// recovery must restart polling rather than trusting that label.
+func TestLookoutRestartsAfterProcessExit(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
@@ -70,24 +69,30 @@ func TestT76LookoutExitIsNeverRestarted(t *testing.T) {
 	}
 	panes := lookoutPanes(t, client)
 	t.Logf("Lookout panes after exit: %d", len(panes))
-	// The Lead session ends and the User runs `posse up` again in that pane.
-	if _, err := client.Call(context.Background(), "pane.rename", map[string]any{"pane_id": f.project.LeadPaneID, "label": ""}); err != nil {
+	// A recovered Lead must restore polling even when the old shell pane
+	// still carries the Lookout label.
+	if err := client.StopIsolatedServer(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	callerEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", f.project.LeadPaneID)
-	command := exec.Command(f.binary, "up", "--name", "shop", "--yes")
-	command.Dir, command.Env = f.repo, callerEnv
+	startServer(t, client)
+	env := f.env
+	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"} {
+		env = setEnv(env, key, "")
+	}
+	command := exec.Command(f.binary, "recover", "--all")
+	command.Dir, command.Env = f.repo, env
 	output, err := command.CombinedOutput()
-	t.Logf("posse up --replace: %v %s", err, output)
-	time.Sleep(3 * time.Second)
-	if pids := lookoutPIDs(f.root); len(pids) == 0 {
-		t.Errorf("no Lookout polls after the Lead restarted; panes labelled Lookout=%d", len(lookoutPanes(t, client)))
+	if err != nil {
+		t.Fatalf("recover: %v %s", err, output)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Errorf("no Lookout polls after recovery; panes labelled Lookout=%d", len(lookoutPanes(t, client)))
 	}
 }
 
 // L2: Herdr restarts. Recovery restarts the Lead but must also restore the
 // Lookout tab, or nothing polls while the Lead is idle.
-func TestT76LookoutRestoredAfterHerdrRestart(t *testing.T) {
+func TestLookoutRestartsAfterHerdrRestart(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
@@ -128,7 +133,7 @@ func TestT76LookoutRestoredAfterHerdrRestart(t *testing.T) {
 
 // L3: the Lookout tab and ordinary Lead commands both run automatic Teardown.
 // A merged PR must be torn down without a false "teardown incomplete" reason.
-func TestT76ConcurrentLookoutTeardownRaisesNoFalseReason(t *testing.T) {
+func TestConcurrentLookoutTeardownRaisesNoFalseReason(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	brief := filepath.Join(f.root, "lookout-follow-up.md")

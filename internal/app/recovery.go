@@ -508,6 +508,13 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 		return err
 	}
 	s.relabelProjectTabs(ctx, db, project)
+	freshSnapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureLookoutTab(ctx, project, freshSnapshot); err != nil {
+		return err
+	}
 	if leadStart.TypedPrompt != "" {
 		if err := s.deliverLaunchPrompt(ctx, current.PaneID, leadStart.TypedPrompt); err != nil {
 			return err

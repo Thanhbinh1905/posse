@@ -69,7 +69,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) spawn(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}})
+	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-leftover": {}})
 	if err != nil {
 		return err
 	}
@@ -163,6 +163,41 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if project.IsWorkspace() {
 		// Each member records its own base ref and Landing Mode; the Task keeps the strictest.
 		baseRef, mode = "", workspaceMode
+	}
+	if from := parsed.Flags["from-leftover"]; from != "" {
+		id, parseErr := strconv.ParseInt(from, 10, 64)
+		if parseErr != nil || id < 1 {
+			return axi.Usage("--from-leftover requires a Decision id")
+		}
+		decision, lookupErr := db.Decision(ctx.Context, project.ID, id)
+		if lookupErr != nil || decision.Kind != "leftover" || decision.Answer != "open-task" {
+			return axi.Failure("leftover_refused", "an answered open-task Leftover Decision is required", false)
+		}
+		origin := strings.TrimPrefix(decision.Origin, "leftover:")
+		if project.IsWorkspace() {
+			memberName, ref, found := strings.Cut(origin, ":")
+			if !found {
+				return axi.Failure("leftover_refused", "Leftover has no workspace Member", false)
+			}
+			matched := false
+			for i := range members {
+				if members[i].Name == memberName {
+					if _, err := gitOutput(ctx.Context, members[i].Root, "rev-parse", "--verify", "refs/heads/"+ref); err != nil {
+						return err
+					}
+					members[i].BaseRef = "refs/heads/" + ref
+					matched = true
+				}
+			}
+			if !matched {
+				return axi.Failure("leftover_refused", "Brief does not include the Leftover Member", false)
+			}
+		} else {
+			baseRef = "refs/heads/" + origin
+			if _, err := gitOutput(ctx.Context, project.Root, "rev-parse", "--verify", baseRef); err != nil {
+				return err
+			}
+		}
 	}
 	if err := taskBranchAvailable(ctx.Context, db, project, slug); err != nil {
 		return err
@@ -851,7 +886,17 @@ func (s *Service) send(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if task.PRURL != "" && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {
+	refreshPR := task.PRURL != "" && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes")
+	if project.IsWorkspace() {
+		repos, err := db.TaskRepos(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		for _, repo := range repos {
+			refreshPR = refreshPR || repo.PRURL != "" && repo.LandingMode == "pr"
+		}
+	}
+	if refreshPR {
 		if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, true); err != nil {
 			return err
 		}

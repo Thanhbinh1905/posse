@@ -63,6 +63,10 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 			continue
 		}
 		if _, err := s.unsaddleTask(ctx, db, project, cfg, task, false, ""); err != nil {
+			var commandError *axi.Error
+			if errors.As(err, &commandError) && commandError.Code == "intent_active" {
+				continue
+			}
 			if noticeErr := s.recordUnsaddleIncomplete(ctx, db, project, task, err); noticeErr != nil {
 				return noticeErr
 			}
@@ -319,7 +323,7 @@ func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, pr
 	}
 	found := false
 	for _, notice := range notices {
-		if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" && strings.Contains(notice.Summary, cause.Error()) {
+		if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" && notice.AckedAt == 0 && strings.Contains(notice.Summary, cause.Error()) {
 			found = true
 			break
 		}
