@@ -128,6 +128,114 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 }
 
+// A missing old PR must not prevent a merged PR in the same GraphQL batch
+// from landing and releasing its Rider, even when gh exits unsuccessfully.
+func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "partial-merge.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nObserve a merge despite an inaccessible old PR.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.rideAndComplete(t, brief, "t1")
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
+		t.Fatalf("valid PR did not enter landing: %s", output)
+	}
+	valid := fixture.mustTask(t, "t1")
+	badID, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{
+		Seq: 2, Type: "ship", Title: "inaccessible old PR", State: store.StateSpawning,
+		LandingMode: "pr", Branch: "posse/old-pr", BaseRef: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct{ from, to store.State }{
+		{store.StateSpawning, store.StateWorking}, {store.StateWorking, store.StateDone}, {store.StateDone, store.StateLanding},
+	} {
+		source := "cli"
+		if transition.to == store.StateDone {
+			source = "worker"
+		}
+		if err := fixture.db.Transition(context.Background(), badID, transition.from, transition.to, source, "old PR"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=? WHERE id=?`, "https://github.com/acme/shop/pull/41", badID); err != nil {
+		t.Fatal(err)
+	}
+	merge := fixture.mergeOnLocalOrigin(t, valid, "t1")
+	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, valid.GatedSHA)
+	var response map[string]any
+	encoded, err := os.ReadFile(fixture.ghState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &response); err != nil {
+		t.Fatal(err)
+	}
+	response["data"].(map[string]any)["repo1"].(map[string]any)["pr2"] = nil
+	response["errors"] = []any{map[string]any{"message": "Could not resolve to a PullRequest with the number of 41.", "path": []string{"repo1", "pr2"}, "type": "NOT_FOUND"}}
+	encoded, err = json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.ghState, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-exit-nonzero"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforePolls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"show", "t1"}, {"show", "t1"}, {"roster"}} {
+		time.Sleep(5 * time.Millisecond)
+		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, command...)
+		landed := fixture.mustTask(t, "t1")
+		if landed.State != store.StateTornDown || landed.LandedRef != merge {
+			t.Fatalf("%v missed valid merge or safe teardown: %#v", command, landed)
+		}
+		mounts, err := fixture.db.Mounts(context.Background(), fixture.project.ID)
+		if err != nil || len(mounts) != 1 || mounts[0].TaskID != 0 || mounts[0].State != "idle" {
+			t.Fatalf("merged Rider still holds its Mount: %#v, %v", mounts, err)
+		}
+		fixture.requireNotice(t, "t1", "pr_merged")
+		fixture.requireNotice(t, "t2", "pr_watch_failing")
+		watch, err := fixture.db.ProjectWatchState(context.Background(), fixture.project.ID)
+		if err != nil || watch.PRConsecutiveFailures != 0 {
+			t.Fatalf("target-specific failure blocked healthy project polling: %#v, %v", watch, err)
+		}
+		bad := fixture.mustTask(t, "t2")
+		if bad.State != store.StateLanding {
+			t.Fatalf("bad PR was changed despite failed observation: %#v", bad)
+		}
+	}
+	afterPolls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if polls := strings.Count(string(afterPolls), "api graphql") - strings.Count(string(beforePolls), "api graphql"); polls != 3 {
+		t.Fatalf("expected one poll per CLI restart, got %d", polls)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergeCount, failureCount := 0, 0
+	for _, notice := range notices {
+		if notice.TaskID == valid.ID && notice.Kind == "pr_merged" {
+			mergeCount++
+		}
+		if notice.TaskID == badID && notice.Kind == "pr_watch_failing" {
+			failureCount++
+		}
+	}
+	if mergeCount != 1 || failureCount != 1 {
+		t.Fatalf("repeated/restarted polls duplicated Notices: merge=%d failure=%d", mergeCount, failureCount)
+	}
+}
+
 func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
@@ -329,7 +437,7 @@ esac
 set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 case "$1 $2" in
-  "api graphql") cat "$POSSE_TEST_GH_STATE" ;;
+  "api graphql") cat "$POSSE_TEST_GH_STATE"; if [ -e "$POSSE_TEST_ROOT/gh-exit-nonzero" ]; then exit 1; fi ;;
   "pr list")
     case " $* " in *' --head posse/pr-lifecycle-change '*) branch=posse/pr-lifecycle-change; number=17 ;; *' --head posse/pr-follow-up '*) branch=posse/pr-follow-up; number=17 ;; *' --head posse/pr-create-recovery '*) branch=posse/pr-create-recovery; number=17 ;; *' --head posse/external-merge-change '*) branch=posse/external-merge-change; number=18 ;; *) exit 90 ;; esac
     if grep -q "/pull/$number" "$POSSE_TEST_GH_OPEN_PRS"; then
