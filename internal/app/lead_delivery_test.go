@@ -378,7 +378,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 			t.Errorf("generated pi extension is missing Slab frame %q", frame)
 		}
 	}
-	for _, part := range []string{`placement: "aboveEditor"`, `ui.setWorkingVisible(!showSlab)`, `pi.on("agent_start"`, `pi.on("agent_settled"`, `clearInterval(animation)`} {
+	for _, part := range []string{`const slabIntervalMs = 225;`, `placement: "aboveEditor"`, `ui.setWorkingVisible(!showSlab)`, `pi.on("agent_start"`, `pi.on("agent_settled"`, `clearInterval(animation)`} {
 		if !strings.Contains(string(contents), part) {
 			t.Errorf("generated pi extension is missing Slab lifecycle behavior %q", part)
 		}

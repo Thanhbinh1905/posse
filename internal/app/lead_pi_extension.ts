@@ -64,7 +64,7 @@ export default function (pi) {
 	let slabShown = false;
 	const slabWidgetKey = "posse-lowkey-slab";
 	const slabFrames = ["░░▒▓", "░▒▓█", "▒▓█▓", "▓█▓▒", "█▓▒░", "▓▒░░"];
-	const slabIntervalMs = 800;
+	const slabIntervalMs = 225;
 	const createSlabWidget = (tui) => {
 		let frame = 0;
 		let disposed = false;
