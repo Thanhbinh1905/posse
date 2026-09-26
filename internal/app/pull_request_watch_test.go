@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -354,6 +355,102 @@ func TestPRMergeAutoTeardownRetriesAfterHerdrReturns(t *testing.T) {
 	task, err = fixture.db.Task(context.Background(), fixture.project.ID, "t1")
 	if err != nil || task.State != store.StateTornDown {
 		t.Fatalf("landed Task did not auto-teardown on the next healthy reconcile: %#v, %v", task, err)
+	}
+}
+
+func TestPRWatchAttributesPartialGraphQLErrorsAndKeepsGlobalFailures(t *testing.T) {
+	for _, test := range []struct {
+		name, alias string
+		global      bool
+	}{
+		{name: "missing old PR", alias: "pr2"},
+		{name: "unattributed error", alias: "unknown", global: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPRLandingFixture(t, "pr", store.StateDone)
+			defer fixture.db.Close()
+			if code, out, stderr := fixture.run("land", "t1"); code != 0 {
+				t.Fatalf("open PR: %d %s %s", code, out, stderr)
+			}
+			ctx := context.Background()
+			badID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "ship", Title: "old PR", State: store.StateSpawning, LandingMode: "pr", Branch: "posse/old", BaseRef: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, step := range []struct{ from, to store.State }{
+				{store.StateSpawning, store.StateWorking}, {store.StateWorking, store.StateDone}, {store.StateDone, store.StateLanding},
+			} {
+				source := "cli"
+				if step.to == store.StateDone {
+					source = "worker"
+				}
+				if err := fixture.db.Transition(ctx, badID, step.from, step.to, source, "old PR"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET pr_url=? WHERE id=?`, "https://github.com/acme/shop/pull/41", badID); err != nil {
+				t.Fatal(err)
+			}
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+			encoded, err := os.ReadFile(fixture.ghState)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response map[string]any
+			if err := json.Unmarshal(encoded, &response); err != nil {
+				t.Fatal(err)
+			}
+			response["data"].(map[string]any)["repo1"].(map[string]any)["pr2"] = nil
+			response["errors"] = []any{map[string]any{"message": "PR 41 is inaccessible", "path": []string{"repo1", test.alias}}}
+			encoded, err = json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fixture.ghState, encoded, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fixture.ghState+".exit", nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 3; i++ {
+				if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := fixture.db.LatestPRObservation(ctx, fixture.task.ID); err != nil {
+				t.Fatalf("valid PR starved by error: %v", err)
+			}
+			state, err := fixture.db.ProjectWatchState(ctx, fixture.project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.global {
+				if state.PRConsecutiveFailures != 3 || countNoticeKind(notices, "pr_watch_failing") == 0 {
+					t.Fatalf("unattributed GraphQL failure hidden: state=%#v notices=%#v", state, notices)
+				}
+			} else {
+				if state.PRConsecutiveFailures != 0 {
+					t.Fatalf("target-specific error counted as global: %#v", state)
+				}
+				badFailure := false
+				for _, notice := range notices {
+					if notice.TaskID == badID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "PR 41 is inaccessible") {
+						badFailure = true
+					}
+				}
+				if !badFailure {
+					t.Fatalf("old PR has no attributed failure: %#v", notices)
+				}
+			}
+		})
 	}
 }
 
