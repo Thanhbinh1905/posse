@@ -215,10 +215,10 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	}
 	task.MountID = mount.ID
 	task.WorktreePath = mount.Path
-	var opened openedWorkspace
+	var opened openedTab
 	err = s.runIntentStep(ctx.Context, db, intent, "pane.open", func() error {
 		var callErr error
-		opened, callErr = s.openWorkerWorkspace(ctx.Context, home, mount.Path, workerWorkspaceLabel(task, true))
+		opened, callErr = s.openRiderTab(ctx.Context, home, project, task, mount.Path)
 		return callErr
 	})
 	if err != nil {
@@ -266,14 +266,8 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if err := s.runIntentStep(ctx.Context, db, intent, "pane.label", func() error {
-		if _, callErr := s.herdrCall(ctx.Context, "pane.rename", map[string]any{"pane_id": opened.PaneID, "label": worktreeLabel}); callErr != nil {
-			return callErr
-		}
-		if opened.TabID != "" {
-			_, callErr := s.herdrCall(ctx.Context, "tab.rename", map[string]any{"tab_id": opened.TabID, "label": workerTabLabel(task)})
-			return callErr
-		}
-		return nil
+		_, callErr := s.herdrCall(ctx.Context, "pane.rename", map[string]any{"pane_id": opened.PaneID, "label": worktreeLabel})
+		return callErr
 	}); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
@@ -364,76 +358,28 @@ func workerDisplayMetadata(task store.Task, detectedAgent string) map[string]any
 	return metadata
 }
 
-func workerWorkspaceLabel(task store.Task, last bool) string {
-	connector := "├─"
-	if last {
-		connector = "└─"
-	}
-	return fmt.Sprintf("%s %s", connector, taskTitlePhrase(task.Title))
-}
-
-// Fit a useful title phrase in the sidebar space formerly used by the role prefix.
-// The complete title remains in pane metadata.
-func taskTitlePhrase(title string) string {
-	const limit = 25
-	title = strings.Join(strings.Fields(title), " ")
-	runes := []rune(title)
-	if len(runes) <= limit {
-		return title
-	}
-	phrase := string(runes[:limit-1])
-	if cut := strings.LastIndex(phrase, " "); cut >= 12 {
-		phrase = phrase[:cut]
-	}
-	return phrase + "…"
-}
-
 func workerTabLabel(task store.Task) string {
 	return taskDisplayName(task)
 }
 
-// Keep the final visible sibling's connector up to date when Workers launch,
-// relaunch or leave. Herdr has no parent relation between independent workspaces.
-func (s *Service) refreshWorkerDisplay(ctx context.Context, db *store.DB, project store.Project, launchingTaskID int64) error {
-	tasks, err := db.Tasks(ctx, project.ID, true)
+// refreshWorkerDisplay reports a Rider's pane title and tokens. Riders are
+// tabs of the Lead's workspace, so posse never renames a workspace for them.
+func (s *Service) refreshWorkerDisplay(ctx context.Context, db *store.DB, project store.Project, taskID int64) error {
+	task, err := db.TaskByID(ctx, project.ID, taskID)
 	if err != nil {
 		return err
-	}
-	var candidates []store.Task
-	for _, task := range tasks {
-		if task.HerdrWorkspaceID != "" && task.PaneID != "" && task.State != store.StateTornDown &&
-			(task.ID == launchingTaskID || (task.State != store.StateFailed && task.State != store.StateLost)) {
-			candidates = append(candidates, task)
-		}
-	}
-	if len(candidates) == 0 {
-		return nil
 	}
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	var visible []store.Task
-	for _, task := range candidates {
-		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-		if task.ID == launchingTaskID || (found && pane.WorkspaceID == task.HerdrWorkspaceID) {
-			visible = append(visible, task)
-		}
+	pane, found := findTaskPane(snapshot.Panes, task)
+	if !found {
+		return nil
 	}
-	for index, task := range visible {
-		if _, err := s.herdrCall(ctx, "workspace.rename", map[string]any{"workspace_id": task.HerdrWorkspaceID, "label": workerWorkspaceLabel(task, index == len(visible)-1)}); err != nil {
-			return err
-		}
-		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-		detectedAgent := ""
-		if found {
-			detectedAgent = pane.Agent
-		}
-		if _, err := s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task, detectedAgent)); err != nil {
-			return err
-		}
-	}
-	return nil
+	task.PaneID = pane.PaneID
+	_, err = s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task, pane.Agent))
+	return err
 }
 
 var workerNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -630,9 +576,6 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 	}
 	if err := db.Transition(ctx, id, store.StateSpawning, store.StateFailed, "cli", reason); err != nil {
 		return err
-	}
-	if s.Herdr != nil {
-		_ = s.refreshWorkerDisplay(ctx, db, project, 0)
 	}
 	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: id, Kind: "task_failed", Summary: title + " failed to start", DataJSON: `{}`}); err != nil {
 		return err
@@ -1211,17 +1154,19 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	if err != nil {
 		return failure(err)
 	}
-	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+	pane, found := findTaskPane(snapshot.Panes, task)
+	ownsTab := found && taskOwnsTab(snapshot, project, task, pane.TabID)
 	if !found {
-		var opened openedWorkspace
+		var opened openedTab
 		if err := track("pane.open", func() error {
 			var callErr error
-			opened, callErr = s.openWorkerWorkspace(ctx, home, task.WorktreePath, workerWorkspaceLabel(task, true))
+			opened, callErr = s.openRiderTab(ctx, home, project, task, task.WorktreePath)
 			return callErr
 		}); err != nil {
 			return failure(err)
 		}
 		pane = herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
+		ownsTab = true
 	}
 	if pane.Agent != "" {
 		if err := track("agent.stop", func() error {
@@ -1252,12 +1197,8 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		if _, callErr := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": pane.PaneID, "label": task.PaneLabel}); callErr != nil {
 			return callErr
 		}
-		if pane.WorkspaceID != "" {
-			if _, callErr := s.herdrCall(ctx, "workspace.rename", map[string]any{"workspace_id": pane.WorkspaceID, "label": workerWorkspaceLabel(task, true)}); callErr != nil {
-				return callErr
-			}
-		}
-		if pane.TabID != "" {
+		// A tab shared with a pane that is not this Rider's keeps its name.
+		if pane.TabID != "" && ownsTab {
 			_, callErr := s.herdrCall(ctx, "tab.rename", map[string]any{"tab_id": pane.TabID, "label": workerTabLabel(task)})
 			return callErr
 		}
@@ -1613,48 +1554,4 @@ func defaultValue(value, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-type openedWorkspace struct {
-	WorkspaceID string
-	PaneID      string
-	TabID       string
-}
-
-// openWorkerWorkspace opens a Mount in its own Herdr workspace. It never uses
-// worktree.open: Herdr groups every worktree workspace of a repository, and
-// `workspace close --group` on any member closes the Lead and every Worker.
-// POSSE_WORKER_HOME marks the pane as a Worker of this home (section 13).
-func (s *Service) openWorkerWorkspace(ctx context.Context, home, path, label string) (openedWorkspace, error) {
-	raw, err := s.herdrCall(ctx, "workspace.create", map[string]any{
-		"cwd": path, "label": label, "focus": false,
-		"env": map[string]string{workerHomeEnv: filepath.Clean(home)},
-	})
-	if err != nil {
-		return openedWorkspace{}, err
-	}
-	var result struct {
-		Workspace struct {
-			WorkspaceID string `json:"workspace_id"`
-		} `json:"workspace"`
-		RootPane struct {
-			PaneID string `json:"pane_id"`
-			TabID  string `json:"tab_id"`
-		} `json:"root_pane"`
-		Tab struct {
-			TabID string `json:"tab_id"`
-		} `json:"tab"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil || result.Workspace.WorkspaceID == "" || result.RootPane.PaneID == "" {
-		detail := "response is missing workspace.workspace_id or root_pane.pane_id"
-		if err != nil {
-			detail = err.Error()
-		}
-		return openedWorkspace{}, axi.Failure("herdr_invalid_response", "Herdr did not return the Rider's workspace and pane", true, detail)
-	}
-	tabID := result.Tab.TabID
-	if tabID == "" {
-		tabID = result.RootPane.TabID
-	}
-	return openedWorkspace{WorkspaceID: result.Workspace.WorkspaceID, PaneID: result.RootPane.PaneID, TabID: tabID}, nil
 }

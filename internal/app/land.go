@@ -542,9 +542,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
-	if err := s.refreshWorkerDisplay(ctx, db, project, 0); err != nil {
-		return result, err
-	}
 	if err := s.regenerateProjects(ctx, db); err != nil {
 		return result, err
 	}

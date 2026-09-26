@@ -98,9 +98,12 @@ func TestTaskPaneCwdOwnershipResolvesSymlinks(t *testing.T) {
 	}
 	project := store.Project{Name: "shop"}
 	task := store.Task{Seq: 4, WorktreePath: mount, HerdrWorkspaceID: "w2", PaneLabel: "posse:shop:t4"}
-	pane := herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", CWD: filepath.Join(alias, "nested")}
-	if !ownsTaskPane(herdr.Snapshot{}, project, task, pane) {
+	pane := herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", TabID: "w2:t1", CWD: filepath.Join(alias, "nested")}
+	if !ownsTaskPane(herdr.Snapshot{}, project, task, map[string]bool{"w2:t1": true}, pane) {
 		t.Fatal("symlinked cwd inside the Task Mount was not recognized")
+	}
+	if ownsTaskPane(herdr.Snapshot{}, project, task, map[string]bool{"w2:t2": true}, pane) {
+		t.Fatal("an unlabeled pane outside the Task's tab was claimed by its cwd")
 	}
 }
 

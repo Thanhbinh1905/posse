@@ -94,7 +94,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 			t.Fatalf("home command failed: %s", output.String())
 		}
 		task.PaneID = "w1:p2"
-		display, err := json.Marshal(map[string]any{"workspace": workerWorkspaceLabel(task, true), "pane": workerDisplayMetadata(task, "pi")})
+		display, err := json.Marshal(map[string]any{"tab": workerTabLabel(task), "pane": workerDisplayMetadata(task, "pi")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -119,13 +119,13 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		t.Fatalf("display_prefix changed Worker sidebar or pane metadata:\nfirst:  %s\nsecond: %s", renders[0].display, renders[1].display)
 	}
 	var display struct {
-		Workspace string         `json:"workspace"`
-		Pane      map[string]any `json:"pane"`
+		Tab  string         `json:"tab"`
+		Pane map[string]any `json:"pane"`
 	}
 	if err := json.Unmarshal(renders[0].display, &display); err != nil {
 		t.Fatal(err)
 	}
-	if display.Workspace != "└─ Stable output" || display.Pane["title"] != "Stable output · stable-output · " || display.Pane["clear_display_agent"] != nil || display.Pane["display_agent"] != "pi" {
+	if display.Tab != "stable-output" || display.Pane["title"] != "Stable output · stable-output · " || display.Pane["clear_display_agent"] != nil || display.Pane["display_agent"] != "pi" {
 		t.Fatalf("Worker display metadata = %#v", display)
 	}
 	if got := leadAgentName("shop", 3); got != "posse-shop-lead-3" {

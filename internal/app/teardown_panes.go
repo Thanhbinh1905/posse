@@ -176,6 +176,11 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 	return true, nil
 }
 
+// closeTaskPanes closes a Task's panes as found in a fresh snapshot. A tab
+// whose panes are all the Task's closes with tab.close; in any other tab only
+// the Task's own panes close, and the other panes of its tabs are reported as
+// foreign. posse never closes a workspace: the Lead and sibling Riders share
+// the Lead's, and a legacy Rider workspace disappears with its last tab.
 func (s *Service) closeTaskPanes(ctx context.Context, project store.Project, task store.Task) (teardownPanes, error) {
 	result := teardownPanes{}
 	if task.PaneLabel == "" && task.HerdrWorkspaceID == "" && task.PaneID == "" {
@@ -188,46 +193,61 @@ func (s *Service) closeTaskPanes(ctx context.Context, project store.Project, tas
 	if err != nil {
 		return result, err
 	}
+	tabs := taskTabs(snapshot, project, task)
 	owned := make([]herdr.Pane, 0)
 	ownedIDs := map[string]bool{}
-	workspacePanes := make([]herdr.Pane, 0)
+	tabPanes := map[string][]herdr.Pane{}
 	for _, pane := range snapshot.Panes {
-		if pane.WorkspaceID == task.HerdrWorkspaceID && task.HerdrWorkspaceID != "" {
-			workspacePanes = append(workspacePanes, pane)
-		}
-		if ownsTaskPane(snapshot, project, task, pane) {
+		if ownsTaskPane(snapshot, project, task, tabs, pane) {
 			owned = append(owned, pane)
 			ownedIDs[pane.PaneID] = true
 		}
-	}
-	for _, pane := range workspacePanes {
-		if !ownedIDs[pane.PaneID] {
-			result.Foreign = append(result.Foreign, pane.PaneID)
+		if tabs[pane.TabID] {
+			tabPanes[pane.TabID] = append(tabPanes[pane.TabID], pane)
 		}
+	}
+	leadPaneID := ""
+	for _, pane := range owned {
+		if pane.PaneID == snapshot.FocusedPaneID {
+			leadPaneID = leadPaneBeside(snapshot, project, pane)
+		}
+	}
+	closedTabs := map[string]bool{}
+	tabIDs := make([]string, 0, len(tabPanes))
+	for tabID := range tabPanes {
+		tabIDs = append(tabIDs, tabID)
+	}
+	sort.Strings(tabIDs)
+	for _, tabID := range tabIDs {
+		whole := true
+		for _, pane := range tabPanes[tabID] {
+			if !ownedIDs[pane.PaneID] {
+				whole = false
+				result.Foreign = append(result.Foreign, pane.PaneID)
+			}
+		}
+		if !whole {
+			continue
+		}
+		if _, err := s.herdrCall(ctx, "tab.close", map[string]any{"tab_id": tabID}); err != nil && !missingPaneError(err) {
+			return result, fmt.Errorf("close Task tab %s: %w", tabID, err)
+		}
+		closedTabs[tabID] = true
 	}
 	sort.Strings(result.Foreign)
-
-	workspaceOnlyTask := task.HerdrWorkspaceID != "" && len(workspacePanes) > 0 && len(workspacePanes) == len(owned)
 	for _, pane := range owned {
-		if pane.WorkspaceID != task.HerdrWorkspaceID {
-			workspaceOnlyTask = false
-			break
-		}
-	}
-	if workspaceOnlyTask {
-		if _, err := s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": task.HerdrWorkspaceID}); err != nil && !missingPaneError(err) {
-			return result, fmt.Errorf("close Task workspace %s: %w", task.HerdrWorkspaceID, err)
-		}
-		for _, pane := range owned {
-			result.Closed = append(result.Closed, pane.PaneID)
-		}
-	} else {
-		for _, pane := range owned {
+		if !closedTabs[pane.TabID] {
 			if _, err := s.herdrCall(ctx, "pane.close", map[string]any{"pane_id": pane.PaneID}); err != nil && !missingPaneError(err) {
 				return result, fmt.Errorf("close Task pane %s: %w", pane.PaneID, err)
 			}
-			result.Closed = append(result.Closed, pane.PaneID)
 		}
+		result.Closed = append(result.Closed, pane.PaneID)
+	}
+	// The User was watching a Rider pane that just closed. Return focus to the
+	// Lead instead of leaving Herdr to pick a sibling Rider's tab. Teardown has
+	// already succeeded, so a focus failure is ignored.
+	if leadPaneID != "" {
+		_, _ = s.herdrCall(ctx, "pane.focus", map[string]any{"pane_id": leadPaneID})
 	}
 
 	verified, err := s.snapshot(ctx)
@@ -245,16 +265,54 @@ func (s *Service) closeTaskPanes(ctx context.Context, project store.Project, tas
 	return result, nil
 }
 
-func ownsTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Task, pane herdr.Pane) bool {
-	labelMatch := task.PaneLabel != "" && pane.Label == task.PaneLabel
-	pathMatch := false
-	if !labelMatch && task.HerdrWorkspaceID != "" && pane.WorkspaceID == task.HerdrWorkspaceID && task.WorktreePath != "" {
-		pathMatch = pathInside(pane.CWD, task.WorktreePath)
+// leadPaneBeside returns the Lead's pane when it shares pane's workspace.
+func leadPaneBeside(snapshot herdr.Snapshot, project store.Project, pane herdr.Pane) string {
+	lead, found := findAppPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
+	if !found || lead.WorkspaceID != pane.WorkspaceID {
+		return ""
 	}
-	if !labelMatch && !pathMatch {
+	return lead.PaneID
+}
+
+// taskTabs returns the tabs that hold a pane carrying the Task's label and
+// passing the agent check. Recorded tab, pane and workspace ids are never
+// trusted alone: Herdr reuses workspace ids, and with them tab and pane ids,
+// after a restart.
+func taskTabs(snapshot herdr.Snapshot, project store.Project, task store.Task) map[string]bool {
+	tabs := map[string]bool{}
+	if task.PaneLabel == "" {
+		return tabs
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.TabID != "" && pane.Label == task.PaneLabel && ownsTaskPane(snapshot, project, task, nil, pane) {
+			tabs[pane.TabID] = true
+		}
+	}
+	return tabs
+}
+
+// taskOwnsTab reports whether every pane in tabID is the Task's.
+func taskOwnsTab(snapshot herdr.Snapshot, project store.Project, task store.Task, tabID string) bool {
+	tabs := taskTabs(snapshot, project, task)
+	if tabID == "" || !tabs[tabID] {
 		return false
 	}
-	if pane.Label != "" && pane.Label != task.PaneLabel {
+	for _, pane := range snapshot.Panes {
+		if pane.TabID == tabID && !ownsTaskPane(snapshot, project, task, tabs, pane) {
+			return false
+		}
+	}
+	return true
+}
+
+// ownsTaskPane reports whether pane is the Task's: it carries the Task's
+// label, or it is an unlabeled pane inside the Mount in one of the Task's
+// tabs. An unlabeled pane elsewhere, even inside the Mount, is not the Task's.
+// A pane running an agent must run one of the Task's launches.
+func ownsTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Task, tabs map[string]bool, pane herdr.Pane) bool {
+	labelMatch := task.PaneLabel != "" && pane.Label == task.PaneLabel
+	pathMatch := !labelMatch && pane.Label == "" && pane.TabID != "" && tabs[pane.TabID] && pathInside(pane.CWD, task.WorktreePath)
+	if !labelMatch && !pathMatch {
 		return false
 	}
 	if pane.Agent == "" {
@@ -271,21 +329,18 @@ func ownsTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Tas
 	return false
 }
 
+// agentNameMatchesTask reports whether name is one of the Task's launches as
+// agentName builds it, including its sanitizing and length limit.
 func agentNameMatchesTask(name, project string, sequence int) bool {
-	base := "posse-" + strings.ToLower(project) + "-t" + strconv.Itoa(sequence) + "-"
-	if !strings.HasPrefix(name, base) {
+	cut := strings.LastIndexByte(name, '-')
+	if cut < 0 {
 		return false
 	}
-	launch := strings.TrimPrefix(name, base)
-	if launch == "" {
+	launch, err := strconv.Atoi(name[cut+1:])
+	if err != nil || launch < 1 || strconv.Itoa(launch) != name[cut+1:] {
 		return false
 	}
-	for _, char := range launch {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
+	return name == agentName(project, sequence, launch)
 }
 
 func pathInside(path, root string) bool {
@@ -307,13 +362,13 @@ func pathInside(path, root string) bool {
 func missingPaneError(err error) bool {
 	var axiErr *axi.Error
 	if errors.As(err, &axiErr) {
-		return axiErr.Code == "pane_not_found" || axiErr.Code == "workspace_not_found" || axiErr.Code == "not_found"
+		return axiErr.Code == "pane_not_found" || axiErr.Code == "tab_not_found" || axiErr.Code == "workspace_not_found" || axiErr.Code == "not_found"
 	}
 	var herdrErr *herdr.Error
 	if !errors.As(err, &herdrErr) {
 		return false
 	}
-	return herdrErr.Code == "pane_not_found" || herdrErr.Code == "workspace_not_found" || herdrErr.Code == "not_found"
+	return herdrErr.Code == "pane_not_found" || herdrErr.Code == "tab_not_found" || herdrErr.Code == "workspace_not_found" || herdrErr.Code == "not_found"
 }
 
 func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {

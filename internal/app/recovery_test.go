@@ -328,7 +328,7 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{lead}},
 	}
 	adapter := &recoveryOrderingAdapter{Fake: herdr.NewFake(), snapshots: snapshots}
-	adapter.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p3"}}`)
+	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t3","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p3","tab_id":"w1:t3"}}`)
 	adapter.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	service := testService(home, adapter)
 

@@ -21,6 +21,13 @@ func TestGuardRefusesHerdrChangesToTheWorkerSession(t *testing.T) {
 		"herdr workspace close wGN --group",
 		"herdr workspace close w1",
 		"herdr tab close w1:t1",
+		// Riders share the Lead's workspace: their own ids reach the Lead and every sibling.
+		`herdr tab close "$HERDR_TAB_ID"`,
+		`herdr workspace close "$HERDR_WORKSPACE_ID"`,
+		"herdr tab move w1:t2 --index 0",
+		"herdr tab focus w1:t1",
+		"herdr tab rename w1:t1 lead",
+		"herdr pane move w1:p2 --new-workspace",
 		"herdr pane close w1:p1",
 		"herdr pane send-text w1:p1 'hello'",
 		"herdr pane run w1:p1 'printf SHELL_READY'",

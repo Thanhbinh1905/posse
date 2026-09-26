@@ -436,7 +436,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	if _, err := s.herdrCall(ctx.Context, "pane.rename", map[string]any{"pane_id": leadPane.PaneID, "label": label}); err != nil {
 		return err
 	}
-	if _, err := s.herdrCall(ctx.Context, "workspace.rename", map[string]any{"workspace_id": callerWorkspaceID, "label": "Lead:" + project.Name}); err != nil {
+	if _, err := s.herdrCall(ctx.Context, "workspace.rename", map[string]any{"workspace_id": callerWorkspaceID, "label": leadWorkspaceLabel(project)}); err != nil {
 		return err
 	}
 	leadName := "Lead"
