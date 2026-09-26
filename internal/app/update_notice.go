@@ -16,7 +16,7 @@ func (s *Service) availableUpdate(ctx context.Context, db *store.DB, project *st
 		return nil, false
 	}
 	if project != nil && db != nil {
-		_ = db.CreateUpdateNoticeOnce(ctx, project.ID, release.Tag, "Posse "+release.Tag+" is available. Run `posse update --check` to read changes, then `posse update` to install.")
+		_ = db.CreateUpdateNoticeOnce(ctx, project.ID, release.Tag, "Posse "+release.Tag+" is available. Run `posse update --check` to read changes. "+updateInstallHelp+".")
 	}
 	return axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}, true
 }
@@ -30,13 +30,13 @@ func addUpdateHelp(result axi.Object, update axi.Row) axi.Object {
 		if result[i].Key == "help" {
 			switch help := result[i].Value.(type) {
 			case []any:
-				result[i].Value = append(help, "Run `posse update` to install the latest release")
+				result[i].Value = append(help, updateInstallHelp)
 			case []axi.Object:
-				result[i].Value = append(help, axi.Object{{Key: "check", Value: "update"}, {Key: "action", Value: "Run `posse update` to install the latest release"}})
+				result[i].Value = append(help, axi.Object{{Key: "check", Value: "update"}, {Key: "action", Value: updateInstallHelp}})
 			}
 			return result
 		}
 	}
-	result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse update` to install the latest release"}})
+	result = append(result, axi.Field{Key: "help", Value: []any{updateInstallHelp}})
 	return result
 }
