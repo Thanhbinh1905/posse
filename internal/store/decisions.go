@@ -17,6 +17,7 @@ type DecisionRequest struct {
 	ProjectID int64
 	TaskID    int64
 	Origin    string
+	Kind      string
 	Question  string
 	Options   []string
 }
@@ -42,6 +43,11 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	if request.ProjectID < 1 || request.TaskID < 1 || strings.TrimSpace(request.Origin) == "" || strings.TrimSpace(request.Question) == "" || len(request.Options) < 2 {
 		return Decision{}, fmt.Errorf("Decision requires a Project, Task, origin, question and at least two options")
 	}
+	switch request.Kind {
+	case "land_ready", "recovery", "review", "rider_question", "leftover", "pr_closed":
+	default:
+		return Decision{}, fmt.Errorf("invalid Decision kind %q", request.Kind)
+	}
 	seen := map[string]bool{}
 	for _, option := range request.Options {
 		if strings.TrimSpace(option) != option || option == "" || seen[option] {
@@ -58,21 +64,15 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 		return Decision{}, err
 	}
 	defer tx.Rollback()
-	kind := ""
-	if strings.HasPrefix(request.Origin, "recovery:notice:") {
-		kind = "recovery"
-	} else if strings.HasPrefix(request.Origin, "land_ready:notice:") {
-		kind = "land_ready"
-	}
 	if original, err := decisionRow(tx.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND origin=?`, request.ProjectID, request.Origin)); err == nil {
-		if original.TaskID != request.TaskID || original.Question != request.Question || !slices.Equal(original.Options, request.Options) {
+		if original.TaskID != request.TaskID || original.Kind != request.Kind || original.Question != request.Question || !slices.Equal(original.Options, request.Options) {
 			return Decision{}, fmt.Errorf("Decision origin %q already belongs to another question", request.Origin)
 		}
 		return original, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return Decision{}, err
 	}
-	if kind == "recovery" {
+	if request.Kind == "recovery" {
 		var existingID int64
 		err := tx.QueryRowContext(ctx, `SELECT id FROM decisions WHERE task_id=? AND kind='recovery' AND answered_at=0 AND obsolete_at=0`, request.TaskID).Scan(&existingID)
 		if err == nil {
@@ -84,7 +84,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO decisions(project_id,task_id,origin,question,options_json,created_at,kind,task_launches)
 		SELECT ?,?,?,?,?,?,?,launches FROM tasks WHERE id=? AND project_id=?
-		ON CONFLICT(project_id,origin) DO NOTHING`, request.ProjectID, request.TaskID, request.Origin, request.Question, string(options), time.Now().UnixMilli(), kind, request.TaskID, request.ProjectID)
+		ON CONFLICT(project_id,origin) DO NOTHING`, request.ProjectID, request.TaskID, request.Origin, request.Question, string(options), time.Now().UnixMilli(), request.Kind, request.TaskID, request.ProjectID)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -99,7 +99,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	if err != nil {
 		return Decision{}, err
 	}
-	if count == 0 && (decision.TaskID != request.TaskID || decision.Question != request.Question || !slices.Equal(request.Options, decision.Options)) {
+	if count == 0 && (decision.TaskID != request.TaskID || decision.Kind != request.Kind || decision.Question != request.Question || !slices.Equal(request.Options, decision.Options)) {
 		return Decision{}, fmt.Errorf("Decision origin %q already belongs to another question", request.Origin)
 	}
 	return decision, tx.Commit()

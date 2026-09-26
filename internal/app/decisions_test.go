@@ -195,7 +195,11 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		t.Fatalf("raised Decisions: %#v %v", items, err)
 	}
 	want := [][]string{{"land", "wait"}, {"relaunch", "discard"}, {"relaunch", "discard"}, {"accept", "request-changes", "ignore"}, {"accept", "request-changes", "ignore"}}
+	wantKinds := []string{"land_ready", "recovery", "recovery", "review", "review"}
 	for i, d := range items {
+		if d.Kind != wantKinds[i] || !strings.HasPrefix(d.Origin, "notice:") {
+			t.Fatalf("Decision origin or kind not recorded explicitly: %#v", d)
+		}
 		if strings.Join(d.Options, ",") != strings.Join(want[i], ",") {
 			t.Fatalf("options for %s: %#v", d.Origin, d.Options)
 		}

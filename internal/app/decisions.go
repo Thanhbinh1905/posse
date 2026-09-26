@@ -32,18 +32,18 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		if err != nil {
 			return err
 		}
-		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID}
+		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
 		switch {
 		case notice.Kind == "land_ready" && task.AutonomyLand != "auto" && task.State == store.StateLanding:
-			request.Origin = fmt.Sprintf("land_ready:notice:%d", notice.ID)
+			request.Kind = "land_ready"
 			request.Question = "Land " + task.Title + "? " + notice.Summary
 			request.Options = []string{"land", "wait"}
 		case (notice.Kind == "task_failed" || notice.Kind == "task_lost") && (task.State == store.StateFailed || task.State == store.StateLost):
-			request.Origin = fmt.Sprintf("recovery:notice:%d", notice.ID)
+			request.Kind = "recovery"
 			request.Question = "Relaunch or discard " + task.Title + "? " + notice.Summary
 			request.Options = []string{"relaunch", "discard"}
 		case notice.Kind == "task_done" && task.Type == "review" && task.ReviewsTaskID != 0 && task.AutonomyReview != "lead":
-			request.Origin = fmt.Sprintf("review:notice:%d", notice.ID)
+			request.Kind = "review"
 			request.Question = "How should the Review Task findings for " + task.Title + " be handled? " + notice.Summary
 			request.Options = []string{"accept", "request-changes", "ignore"}
 		case notice.Kind == "needs_decision" && task.LandingMode == "no-mistakes" && task.AutonomyReview != "lead":
@@ -52,7 +52,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 				return err
 			}
 			if _, err := os.Stat(filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err == nil {
-				request.Origin = fmt.Sprintf("review:notice:%d", notice.ID)
+				request.Kind = "review"
 				request.Question = "How should the findings for " + task.Title + " be handled? " + notice.Summary
 				request.Options = []string{"accept", "request-changes", "ignore"}
 			}
@@ -110,7 +110,7 @@ func (s *Service) ask(ctx *axi.Context, args []string) error {
 	if task.State == store.StateTornDown {
 		return axi.Failure("ask_refused", "Task is torn down", false)
 	}
-	request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: "lead:" + strconv.FormatInt(task.ID, 10) + ":" + strconv.FormatInt(time.Now().UnixNano(), 10), Question: positionals[1], Options: options}
+	request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: "lead:" + strconv.FormatInt(task.ID, 10) + ":" + strconv.FormatInt(time.Now().UnixNano(), 10), Kind: "rider_question", Question: positionals[1], Options: options}
 	decision, err := db.RaiseDecision(ctx.Context, request)
 	if err != nil {
 		return axi.Usage(err.Error())

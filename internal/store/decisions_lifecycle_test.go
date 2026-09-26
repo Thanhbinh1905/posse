@@ -27,7 +27,7 @@ func TestAnswerRefusesResolvedSituationEvenBeforeReconciliation(t *testing.T) {
 	if err := db.Transition(ctx, taskID, StateWorking, StateFailed, "worker", "failed"); err != nil {
 		t.Fatal(err)
 	}
-	question := DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "recovery:notice:1", Question: "Relaunch?", Options: []string{"relaunch", "discard"}}
+	question := DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "incident-1", Kind: "recovery", Question: "Relaunch?", Options: []string{"relaunch", "discard"}}
 	d, err := db.RaiseDecision(ctx, question)
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestAnswerRefusesResolvedSituationEvenBeforeReconciliation(t *testing.T) {
 	if err := db.Transition(ctx, taskID, StateWorking, StateFailed, "worker", "failed again"); err != nil {
 		t.Fatal(err)
 	}
-	current, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "recovery:notice:2", Question: "Retry again?", Options: []string{"relaunch", "discard"}})
+	current, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "incident-2", Kind: "recovery", Question: "Retry again?", Options: []string{"relaunch", "discard"}})
 	if err != nil {
 		t.Fatal(err)
 	}
