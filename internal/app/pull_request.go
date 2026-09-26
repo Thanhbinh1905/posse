@@ -91,6 +91,15 @@ type checkSnapshot struct {
 
 func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merge bool, userQuote string) (returnErr error) {
 	ctx := out.Context
+	if task.PRURL != "" {
+		previous, err := db.LatestPRObservation(ctx, task.ID)
+		if err != nil && !store.IsNotFound(err) {
+			return err
+		}
+		if err == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
+			return axi.Failure("pr_closed", "pull request closed without merging; resolve its Decision before retrying Land", false)
+		}
+	}
 	var openIntent store.Intent
 	openIntentActive := false
 	defer func() {
@@ -570,7 +579,17 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			continue
 		}
 		if task.State != store.StateLanded && task.State != store.StateTornDown && task.State != store.StateReported {
-			watched = append(watched, task)
+			previous, previousErr := db.LatestPRObservation(ctx, task.ID)
+			if previousErr != nil && !store.IsNotFound(previousErr) {
+				return previousErr
+			}
+			if previousErr == nil && previous.State == "CLOSED" {
+				if err := raiseClosedPRDecision(ctx, db, project, task, task.PRURL); err != nil {
+					return err
+				}
+			} else if previousErr != nil || previous.State != "MERGED" {
+				watched = append(watched, task)
+			}
 		}
 	}
 	state, err := db.ProjectWatchState(ctx, project.ID)
@@ -619,8 +638,15 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			if commandErr != nil {
 				failure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
 			}
-			_, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure)
-			return recordErr
+			if _, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure); recordErr != nil {
+				return recordErr
+			}
+			for _, task := range watched {
+				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, errors.New(failure), now); recordErr != nil {
+					return recordErr
+				}
+			}
+			return nil
 		}
 		if commandErr != nil && (len(response.Errors) == 0 || errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded)) {
 			globalFailure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
@@ -753,6 +779,11 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 		recorded, err := db.RecordPRObservation(ctx, observed.current, effect, observed.task)
 		if err != nil {
 			return err
+		}
+		if recorded && observed.current.State == "CLOSED" {
+			if err := raiseClosedPRDecision(ctx, db, project, observed.task, observed.current.PRURL); err != nil {
+				return err
+			}
 		}
 		if recorded && observed.current.State == "MERGED" {
 			if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
@@ -964,8 +995,6 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 	case "CLOSED":
 		if !hasPrevious || previous.State != "CLOSED" {
 			addNotice("pr_closed", task.Title+": pull request closed without merging", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
-			effect.TransitionTo = store.StateDone
-			effect.TransitionNote = "Pull request closed without merging"
 		}
 	case "OPEN":
 		if len(failures) > 0 && (newHead || len(previousChecks.Failures) == 0 || !sameFailures(previousChecks.Failures, failures)) {

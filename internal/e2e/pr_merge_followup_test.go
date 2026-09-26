@@ -50,8 +50,8 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 		runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
 	}
 	task := f.mustTask(t, "t1")
-	if task.State != store.StateLanded || task.LandedRef != merge {
-		t.Fatalf("merged PR not Landed: %#v", task)
+	if task.State != store.StateTornDown || task.LandedRef != merge {
+		t.Fatalf("merged PR not torn down: %#v", task)
 	}
 	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
 	if err != nil {
@@ -63,8 +63,12 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 			reasons++
 		}
 	}
-	if reasons != 1 {
-		t.Fatalf("merged PR has %d visible teardown reasons, want one", reasons)
+	if reasons != 0 {
+		t.Fatalf("torn-down PR still has %d teardown failure reasons", reasons)
+	}
+	decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "leftover" {
+		t.Fatalf("Leftover Decision: %#v %v", decisions, err)
 	}
 }
 

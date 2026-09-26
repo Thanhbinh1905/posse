@@ -298,6 +298,9 @@ func TestWorkspacePullRequestMemberLandsWhenMerged(t *testing.T) {
 	}
 	writeView("MERGED", head)
 	ctx := context.Background()
+	if err := f.db.Transition(ctx, f.task.ID, store.StateLanding, store.StateWorking, "lead", "follow-up after PR opened"); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.service.pollWorkspacePullRequests(ctx, f.db, f.project, f.config(), true); err != nil {
 		t.Fatal(err)
 	}
@@ -317,6 +320,32 @@ func TestWorkspacePullRequestMemberLandsWhenMerged(t *testing.T) {
 	joined := strings.Join(kinds, "|")
 	if !strings.Contains(joined, "pr_opened:worker: Span members") || !strings.Contains(joined, "pr_merged:worker: Span members") {
 		t.Fatalf("PR Notices do not name the member: %s", joined)
+	}
+	leftoverPath := filepath.Join(f.task.WorktreePath, "worker", "untracked-follow-up.txt")
+	if err := os.WriteFile(leftoverPath, []byte("Member Leftover\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, f.config()); err != nil {
+		t.Fatal(err)
+	}
+	if f.state() != store.StateTornDown {
+		t.Fatalf("workspace PR did not tear down: %s", f.state())
+	}
+	if content := gitTest(t, worker, "show", "refs/heads/posse/span-members-leftover:untracked-follow-up.txt"); content != "Member Leftover\n" {
+		t.Fatalf("Member Leftover missing: %q", content)
+	}
+	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftovers := 0
+	for _, d := range decisions {
+		if d.Kind == "leftover" {
+			leftovers++
+		}
+	}
+	if leftovers != 1 {
+		t.Fatalf("Member Leftover Decisions=%d: %#v", leftovers, decisions)
 	}
 }
 

@@ -252,20 +252,26 @@ auto_unsaddle = "finished"
 				t.Fatalf("reconcile merged PR: %v", err)
 			}
 			task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-			if err != nil || task.State != store.StateLanded {
-				t.Fatalf("merged Task was not Landed: %#v, %v", task, err)
+			if err != nil || task.State != store.StateTornDown {
+				t.Fatalf("merged Task was not torn down: %#v, %v", task, err)
 			}
-			if !containsPane(adapter.currentSnapshot(), "w2:p1") {
-				t.Fatal("unsafe Task Worker pane was closed")
+			if containsPane(adapter.currentSnapshot(), "w2:p1") {
+				t.Fatal("merged Rider pane remained open")
 			}
-			preservedMount, err := fixture.db.MountByTask(ctx, task.ID)
-			if err != nil || preservedMount.ID != mount.ID || preservedMount.State != "held" {
-				t.Fatalf("unsafe Task Mount was not preserved: %#v, %v", preservedMount, err)
+			if held, err := fixture.db.MountByTask(ctx, task.ID); err == nil {
+				t.Fatalf("Mount %d remained held: %#v", mount.ID, held)
 			}
+			leftover := "refs/heads/posse/t1-leftover"
 			if tc.name == "dirty worktree" {
-				if _, err := os.Stat(filepath.Join(fixture.worktree, "late-change.txt")); err != nil {
-					t.Fatalf("dirty worktree change was discarded: %v", err)
+				if content := gitTest(t, fixture.repo, "show", leftover+":late-change.txt"); content != "preserve me\n" {
+					t.Fatalf("Leftover omitted untracked work: %q", content)
 				}
+			} else if commit := gitTest(t, fixture.repo, "log", "-1", "--format=%s", leftover); !strings.Contains(commit, "unreviewed follow-up") {
+				t.Fatalf("Leftover omitted committed work: %q", commit)
+			}
+			decisions, err := fixture.db.Decisions(ctx, fixture.project.ID, true)
+			if err != nil || len(decisions) != 1 || decisions[0].Kind != "leftover" {
+				t.Fatalf("Leftover Decision: %#v %v", decisions, err)
 			}
 		})
 	}
@@ -294,10 +300,10 @@ func TestPlainUnsaddleRefusesLandedPRWithLateWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code, _, _ := f.run("unsaddle", "t1"); code == 0 {
-		t.Fatal("plain unsaddle discarded late work")
+		t.Fatal("Teardown succeeded without verifying the pane closed")
 	}
-	if data, err := os.ReadFile(work); err != nil || string(data) != "keep\n" {
-		t.Fatalf("late work lost: %q %v", data, err)
+	if content, err := os.ReadFile(work); err != nil || string(content) != "keep\n" {
+		t.Fatalf("work was discarded before pane closure: %q %v", content, err)
 	}
 }
 
@@ -325,16 +331,16 @@ func TestPRMergePreservesWorkWrittenDuringPaneClosure(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
-	if err != nil || task.State != store.StateLanded {
+	if err != nil || task.State != store.StateTornDown {
 		t.Fatalf("Task after late Rider write: %#v %v", task, err)
 	}
-	if data, err := os.ReadFile(work); err != nil || string(data) != "preserve me\n" {
-		t.Fatalf("late work discarded: %q %v", data, err)
+	if content := gitTest(t, f.repo, "show", "refs/heads/posse/t1-leftover:late-rider-work.txt"); content != "preserve me\n" {
+		t.Fatalf("late work missing from snapshot: %q", content)
 	}
-	stillHeld, err := f.db.MountByTask(ctx, task.ID)
-	if err != nil || stillHeld.ID != mount.ID || stillHeld.State != "held" {
-		t.Fatalf("Mount released despite late work: %#v %v", stillHeld, err)
+	if held, err := f.db.MountByTask(ctx, task.ID); err == nil {
+		t.Fatalf("Mount %d was not released: %#v", mount.ID, held)
 	}
+	_ = work
 }
 
 func TestPRWatchDoesNotTeardownWorkingTaskWithMergedPR(t *testing.T) {
@@ -569,7 +575,7 @@ func TestPRWatchRetainsMergeabilityWhenGitHubReportsUnknown(t *testing.T) {
 	}
 }
 
-func TestPRWatchClosedPRReturnsTaskToDone(t *testing.T) {
+func TestPRWatchClosedPRRaisesDecisionOnce(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateDone)
 	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
@@ -583,12 +589,27 @@ func TestPRWatchClosedPRReturnsTaskToDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateDone {
-		t.Fatalf("closed PR did not return Task to done: %#v, %v", task, err)
+	if err != nil || task.State != store.StateLanding {
+		t.Fatalf("closed PR moved Task unexpectedly: %#v, %v", task, err)
+	}
+	before, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(fixture.ghLog)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("closed PR was polled again: %q %q %v", before, after, err)
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "pr_closed") != 1 {
+	if err != nil || countNoticeKind(notices, "pr_closed") != 1 || countNoticeKind(notices, "pr_watch_failing") != 0 {
 		t.Fatalf("closed Notice count=%d notices=%#v err=%v", countNoticeKind(notices, "pr_closed"), notices, err)
+	}
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "pr_closed" || decisions[0].Origin != "pr_closed:"+task.PRURL {
+		t.Fatalf("closed PR Decision: %#v %v", decisions, err)
 	}
 }
 
@@ -743,7 +764,7 @@ func TestPRWatchFailureNoticeRequiresThreeConsecutiveFailures(t *testing.T) {
 		}
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "pr_watch_failing") != 1 {
+	if err != nil || countNoticeKind(notices, "pr_watch_failing") != 2 {
 		t.Fatalf("watch failure Notice count=%d notices=%#v err=%v", countNoticeKind(notices, "pr_watch_failing"), notices, err)
 	}
 	state, err := fixture.db.ProjectWatchState(context.Background(), fixture.project.ID)

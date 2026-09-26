@@ -49,17 +49,17 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 		if task.State != store.StateLanded {
 			continue
 		}
-		if !shouldAutoUnsaddleLanded(cfg) && task.LandingMode != "pr" {
-			continue
-		}
-		safe, err := safePRMergeTeardown(ctx, db, project, task)
-		if err != nil {
-			return err
-		}
-		if !safe {
-			if err := s.recordUnsaddleIncomplete(ctx, db, project, task, fmt.Errorf("merged PR Mount has work beyond its merged head")); err != nil {
+		mergedPR := task.LandingMode == "pr" || task.LandingMode == "no-mistakes"
+		if project.IsWorkspace() {
+			repos, err := db.TaskRepos(ctx, task.ID)
+			if err != nil {
 				return err
 			}
+			for _, repo := range repos {
+				mergedPR = mergedPR || (repo.PRURL != "" && repo.State == store.TaskRepoLanded)
+			}
+		}
+		if !shouldAutoUnsaddleLanded(cfg) && !mergedPR {
 			continue
 		}
 		if _, err := s.unsaddleTask(ctx, db, project, cfg, task, false, ""); err != nil {
@@ -72,7 +72,7 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 }
 
 func safePRMergeTeardown(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
-	if task.LandingMode != "pr" || task.PRURL == "" {
+	if (task.LandingMode != "pr" && task.LandingMode != "no-mistakes") || task.PRURL == "" {
 		return true, nil
 	}
 	observation, err := db.LatestPRObservation(ctx, task.ID)

@@ -371,18 +371,6 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if !discardable && task.State != store.StateLanded && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
-	if task.State == store.StateLanded && task.LandingMode == "pr" {
-		safe, safetyErr := safePRMergeTeardown(ctx.Context, db, project, task)
-		if safetyErr != nil {
-			return safetyErr
-		}
-		if !safe {
-			if err := s.recordUnsaddleIncomplete(ctx.Context, db, project, task, fmt.Errorf("merged PR Mount has work beyond its merged head")); err != nil {
-				return err
-			}
-			return axi.Failure("teardown_refused", "merged PR has unmerged Task work; Task remains landed", false)
-		}
-	}
 	if discardable && !parsed.Bool("discard") {
 		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false)
 	}
@@ -431,19 +419,34 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
+	if task.State == store.StateLanded && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
+		if err := s.runIntentStep(ctx, db, intent, "leftover.snapshot", func() error {
+			if !project.IsWorkspace() {
+				return snapshotPRLeftover(ctx, db, project, task)
+			}
+			members, err := s.workspaceMembers(ctx, db, project, task)
+			if err != nil {
+				return err
+			}
+			for _, member := range members {
+				if member.repo.State != store.TaskRepoLanded || member.repo.PRURL == "" {
+					continue
+				}
+				observation, err := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+				if err != nil {
+					return err
+				}
+				if err := snapshotPRLeftoverFromObservation(ctx, db, member.project, member.task, observation, member.repo.Repo); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+		}
+	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
-		if !discardable && task.State == store.StateLanded && task.LandingMode == "pr" {
-			// The Rider's pane has been closed. Recheck after all writes stop,
-			// immediately before the destructive reset of its Mount.
-			safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
-			if safetyErr != nil {
-				return safetyErr
-			}
-			if !safe {
-				return axi.Failure("teardown_refused", "Task work changed before Mount release; preserve it", false)
-			}
-		}
 		var releaseErr error
 		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean)
 		return releaseErr

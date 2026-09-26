@@ -292,8 +292,12 @@ func TestGitLabClosedAndChangedHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := f.db.Task(context.Background(), f.project.ID, "t1")
-	if err != nil || task.State != store.StateDone {
+	if err != nil || task.State != store.StateLanding {
 		t.Fatalf("closed MR: %+v %v", task, err)
+	}
+	decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "pr_closed" {
+		t.Fatalf("closed MR Decision: %#v %v", decisions, err)
 	}
 	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
 	if err != nil || countNoticeKind(notices, "pr_closed") != 1 {

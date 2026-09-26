@@ -229,8 +229,8 @@ func TestReviewRelandAfterClosedPR(t *testing.T) {
 	}
 	t.Setenv("POSSE_TEST_GH_URL", "https://github.com/acme/shop/pull/18")
 	code, out, e := fixture.run("land", "t1")
-	if code != 0 {
-		t.Fatalf("re-land after closed PR failed: output=%s error=%s", out, e)
+	if code == 0 || !strings.Contains(out, "pr_closed") {
+		t.Fatalf("closed PR was re-landed without a Decision: output=%s error=%s", out, e)
 	}
 	task, _ := fixture.db.Task(ctx, fixture.project.ID, "t1")
 	notices, _ := fixture.db.Notices(ctx, fixture.project.ID, false)
@@ -238,8 +238,9 @@ func TestReviewRelandAfterClosedPR(t *testing.T) {
 	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pr_observations WHERE task_id=? AND state='CLOSED' AND pr_url=?`, fixture.task.ID, "https://github.com/acme/shop/pull/17").Scan(&observations); err != nil {
 		t.Fatal(err)
 	}
-	if task.State != store.StateLanding || task.PRURL != "https://github.com/acme/shop/pull/18" || observations != 1 || countNoticeKind(notices, "pr_closed") != 1 {
-		t.Fatalf("closed PR was reused after re-land: task=%#v notices=%#v", task, notices)
+	decisions, decisionErr := fixture.db.Decisions(ctx, fixture.project.ID, true)
+	if task.State != store.StateLanding || task.PRURL != "https://github.com/acme/shop/pull/17" || observations != 1 || countNoticeKind(notices, "pr_closed") != 1 || decisionErr != nil || len(decisions) != 1 || decisions[0].Kind != "pr_closed" {
+		t.Fatalf("closed PR did not raise a stable Decision: task=%#v notices=%#v decisions=%#v err=%v", task, notices, decisions, decisionErr)
 	}
 }
 

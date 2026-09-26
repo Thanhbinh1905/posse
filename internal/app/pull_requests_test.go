@@ -592,11 +592,11 @@ func TestClosedWorkerPRMustBeReplacedBeforeRelanding(t *testing.T) {
 	if err := f.service.pollProjectPullRequests(context.Background(), f.db, f.project, cfg, true); err != nil {
 		t.Fatal(err)
 	}
-	if code, out, _ := f.run("land", "t1"); code != 1 || !strings.Contains(out, "pr_head_mismatch") {
+	if code, out, _ := f.run("land", "t1"); code != 1 || !strings.Contains(out, "pr_closed") {
 		t.Fatalf("relied on closed Worker PR: %d %s", code, out)
 	}
 	task, _ := f.db.Task(context.Background(), f.project.ID, "t1")
-	if task.PRURL != url || task.State != store.StateDone {
+	if task.PRURL != url || task.State != store.StateLanding {
 		t.Fatalf("discarded closed PR URL: %+v", task)
 	}
 }

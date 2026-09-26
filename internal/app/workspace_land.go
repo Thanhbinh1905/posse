@@ -460,7 +460,7 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 	landedAny := false
 	failure := ""
 	for _, task := range tasks {
-		if task.State != store.StateLanding {
+		if task.State == store.StateLanded || task.State == store.StateTornDown || task.State == store.StateReported {
 			continue
 		}
 		members, err := s.workspaceMembers(ctx, db, project, task)
@@ -468,7 +468,20 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			return err
 		}
 		for _, member := range members {
-			if member.repo.State != store.TaskRepoLanding || member.repo.PRURL == "" {
+			if member.repo.PRURL == "" || member.repo.State == store.TaskRepoLanded || member.repo.State == store.TaskRepoUnchanged {
+				continue
+			}
+			previous, previousErr := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+			if previousErr != nil && !store.IsNotFound(previousErr) {
+				return previousErr
+			}
+			if previousErr == nil && previous.State == "CLOSED" {
+				if err := raiseClosedPRDecision(ctx, db, project, task, member.repo.PRURL); err != nil {
+					return err
+				}
+				continue
+			}
+			if previousErr == nil && previous.State == "MERGED" {
 				continue
 			}
 			forge, err := forgeForRepository(ctx, member.target.Root, cfg, member.repo.Repo)
@@ -493,11 +506,7 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 				}
 				continue
 			}
-			previous, previousErr := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
 			hasPrevious := previousErr == nil
-			if previousErr != nil && !store.IsNotFound(previousErr) {
-				return previousErr
-			}
 			if strings.EqualFold(observation.Mergeable, "UNKNOWN") && hasPrevious {
 				observation.Mergeable = previous.Mergeable
 			}
@@ -506,15 +515,30 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			for index := range memberEffect.Notices {
 				memberEffect.Notices[index].DataJSON = withRepo(memberEffect.Notices[index].DataJSON, member.repo.Repo)
 			}
-			switch effect.TransitionTo {
-			case store.StateLanded:
+			if observation.State == "MERGED" {
+				branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+				if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
+					if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+						return err
+					}
+					continue
+				}
+				if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
+					if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+						return err
+					}
+					continue
+				}
 				memberEffect.RepoState = store.TaskRepoLanded
-			case store.StateDone:
-				memberEffect.RepoState = store.TaskRepoOpen
 			}
 			recorded, err := db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, memberEffect)
 			if err != nil {
 				return err
+			}
+			if recorded && observation.State == "CLOSED" {
+				if err := raiseClosedPRDecision(ctx, db, project, task, member.repo.PRURL); err != nil {
+					return err
+				}
 			}
 			landedAny = landedAny || (recorded && memberEffect.RepoState == store.TaskRepoLanded)
 		}

@@ -316,7 +316,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	}
 }
 
-func TestMergedPRWithUnmergedFollowUpStaysReportable(t *testing.T) {
+func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 	for _, mode := range []string{"uncommitted", "committed"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newPRLifecycleFixture(t)
@@ -344,26 +344,16 @@ func TestMergedPRWithUnmergedFollowUpStaysReportable(t *testing.T) {
 			}
 			f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
 			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
-			if task := f.mustTask(t, "t1"); task.State != store.StateWorking {
-				t.Fatalf("unmerged follow-up cannot be landed: %#v", task)
+			if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
+				t.Fatalf("merged Task did not release its Rider: %#v", task)
 			}
-			workerEnv := setEnv(f.env, "HERDR_ENV", "1")
-			workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", landing.PaneID)
-			workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", landing.HerdrWorkspaceID)
-			runPosse(t, f.binary, landing.WorktreePath, workerEnv, "holler", "working", "Follow-up still needs a new PR")
 			f.requireNotice(t, "t1", "pr_merged")
-			f.requireNotice(t, "t1", "pr_follow_up_pending")
-			command := exec.Command(f.binary, "unsaddle", "t1")
-			command.Dir, command.Env = f.repo, f.leadEnv
-			output, err := command.CombinedOutput()
-			if err == nil {
-				t.Fatalf("plain unsaddle discarded follow-up: %s", output)
+			if content := gitTest(t, f.env, f.repo, "show", "refs/heads/posse/pr-follow-up-leftover:follow-up-work.txt"); content != "unmerged work\n" {
+				t.Fatalf("Leftover did not preserve %s work: %q", mode, content)
 			}
-			if task := f.mustTask(t, "t1"); task.State != store.StateWorking {
-				t.Fatalf("follow-up no longer reportable: %#v", task)
-			}
-			if data, err := os.ReadFile(work); err != nil || string(data) != "unmerged work\n" {
-				t.Fatalf("follow-up lost: %q %v", data, err)
+			decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
+			if err != nil || len(decisions) != 1 || decisions[0].Kind != "leftover" {
+				t.Fatalf("Leftover Decision: %#v %v", decisions, err)
 			}
 		})
 	}
@@ -399,7 +389,7 @@ func TestMergedPRWithIgnoredArtifactStillLands(t *testing.T) {
 	}
 }
 
-func TestLandedPRLateWorkCanResumeWithoutAutoTeardown(t *testing.T) {
+func TestMergedPRAutoTearsDownEvenWhenAutoUnsaddleIsNever(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	configPath := filepath.Join(f.home, "config.toml")
@@ -420,29 +410,10 @@ func TestLandedPRLateWorkCanResumeWithoutAutoTeardown(t *testing.T) {
 	merge := f.mergeOnLocalOrigin(t, landing, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
 	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
-	if task := f.mustTask(t, "t1"); task.State != store.StateLanded {
-		t.Fatalf("PR did not Land before late work: %#v", task)
+	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown {
+		t.Fatalf("merged PR did not tear down despite auto_unsaddle=never: %#v", task)
 	}
-	late := filepath.Join(landing.WorktreePath, "late-work.txt")
-	if err := os.WriteFile(late, []byte("preserve me\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(f.binary, "unsaddle", "t1")
-	command.Dir, command.Env = f.repo, f.leadEnv
-	if output, err := command.CombinedOutput(); err == nil {
-		t.Fatalf("plain unsaddle discarded late work: %s", output)
-	}
-	if task := f.mustTask(t, "t1"); task.State != store.StateWorking {
-		t.Fatalf("late work remains stranded after refused unsaddle: %#v", task)
-	}
-	f.requireNotice(t, "t1", "pr_follow_up_pending")
-	if data, err := os.ReadFile(late); err != nil || string(data) != "preserve me\n" {
-		t.Fatalf("late work lost: %q %v", data, err)
-	}
-	workerEnv := setEnv(f.env, "HERDR_ENV", "1")
-	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", landing.PaneID)
-	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", landing.HerdrWorkspaceID)
-	runPosse(t, f.binary, landing.WorktreePath, workerEnv, "holler", "working", "Late work is still being handled")
+	f.requireNotice(t, "t1", "pr_merged")
 }
 
 func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
