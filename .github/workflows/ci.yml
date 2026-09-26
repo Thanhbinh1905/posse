@@ -206,10 +206,11 @@ jobs:
           done
           [ -n "$dash_bin" ] || { echo 'The downloaded dash package did not contain a dash executable.' >&2; exit 1; }
           echo "${dash_bin%/*}" >> "$GITHUB_PATH"
-      - name: Check POSIX shell
+      - name: Check POSIX shell and release workflow policy
         run: |
           shellcheck -s sh install.sh
           shellcheck scripts/*.sh
+          sh scripts/test-release-workflow.sh
       - name: Exercise installer under both shells
         run: |
           dash scripts/test-install.sh

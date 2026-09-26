@@ -613,9 +613,7 @@ Skills and the hook ship inside the binary and are versioned with it.
 
 ## 19. Updates and releases
 
-Both start once the repository is public; until then posse is installed from a checkout.
-
-**Releases.** Commits follow Conventional Commits. release-please keeps one Release PR open with the next version and a generated `CHANGELOG.md`; merging it tags `vX.Y.Z`, and GoReleaser builds the archives and `checksums.txt`. Before 1.0, `fix:` bumps the patch and `feat:` the minor. A fix-only Release PR may auto-merge after CI and review; a Release PR with features waits for the User. Configure `RELEASE_PLEASE_TOKEN` as a repository-scoped token with Contents, Issues and Pull requests write access so Release PR CI runs and release tags trigger GoReleaser. Branch protection on `main` must require pull-request reviews and the checks `lint`, `test`, `e2e`, `installer`, and `build`, and must prohibit force-push and deletion. Do not apply branch protection from posse.
+**Releases.** Releases are manual: the User chooses whether and when to publish a version. After the intended changes land on `main`, publish a `vX.Y.Z` tag on a reviewed commit with passing CI. Before 1.0, `fix:` changes imply a patch bump and `feat:` changes imply a minor bump. Pushing a version tag starts `.github/workflows/release.yml`, which runs GoReleaser and publishes Linux and macOS archives for amd64 and arm64 plus `checksums.txt`. Ordinary pushes and merges to `main` run CI only; they do not create tags or release PRs. Branch protection on `main` must require pull-request reviews and the checks `lint`, `test`, `e2e`, `installer`, and `build`, and must prohibit force-push and deletion. Do not apply branch protection from posse.
 
 **`posse update [--check] [--version vX.Y.Z]`**:
 
