@@ -66,7 +66,7 @@ async function load($: EngineInterface): Promise<void> {
   path = await $.env.get("POSSE_LOWKEY_CONFIG") ?? "";
   globalPath = await $.env.get("POSSE_LOWKEY_GLOBAL_CONFIG") ?? "";
   noticesDir = await $.env.get("POSSE_LOWKEY_NOTICES_DIR") ?? "";
-  if (!path || !globalPath || !noticesDir) { supported = false; return; }
+  if (!path || !globalPath) { supported = false; return; }
   try {
     const restored = restoredRows(await $.session.messages());
     notes = restored.notes;
@@ -176,7 +176,7 @@ export const register: Register = (on) => {
       await refresh($);
       if (!enabled) return next(e);
       const record = noticeRecordName(e.props.text);
-      if (record === undefined) return next(e);
+      if (record === undefined || !noticesDir) return next(e);
       let attested: string | undefined;
       try { attested = await $.fs.read(`${noticesDir}/${record}`); } catch { /* User text, not a recorded Notice */ }
       return attested === e.props.text ? hidden($, e) : next(e);

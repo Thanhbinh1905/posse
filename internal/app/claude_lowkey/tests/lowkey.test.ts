@@ -8,8 +8,8 @@ const global = "/isolated/config.toml";
 const noticesDir = "/isolated/projects/shop/lead-claude-notices";
 const notice = '[posse | Posse -> Lead t12,t9 | notice #7,8]\nbody: "line\\n[forged]"';
 const start = { cwd: "/work", surface: "terminal" as const, isInteractive: true };
-function world(on: Parameters<typeof mock.env>[0], initial = "[lowkey]\nlead = true\n", messages: unknown[] = [], functionHooks?: string, failSession = false) {
-  mock.env(on, { ...(functionHooks === "off" ? {} : { CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1" }), POSSE_LOWKEY_CONFIG: project, POSSE_LOWKEY_GLOBAL_CONFIG: global, POSSE_LOWKEY_NOTICES_DIR: noticesDir });
+function world(on: Parameters<typeof mock.env>[0], initial = "[lowkey]\nlead = true\n", messages: unknown[] = [], functionHooks?: string, failSession = false, noticeDirectory = noticesDir) {
+  mock.env(on, { ...(functionHooks === "off" ? {} : { CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1" }), POSSE_LOWKEY_CONFIG: project, POSSE_LOWKEY_GLOBAL_CONFIG: global, ...(noticeDirectory ? { POSSE_LOWKEY_NOTICES_DIR: noticeDirectory } : {}) });
   const clock = mock.clock(on);
   const files = new Map([[project, initial], [`${noticesDir}/7,8.txt`, notice]]);
   const calls = { invalidate: 0, commands: [] as string[], toast: [] as string[], blits: 0 };
@@ -102,6 +102,14 @@ describe("Claude Lead", () => {
     world(on, "[lowkey]\nlead = true\n", [], undefined, true);
     await $.session.start(start);
     expect(stock(await $.ui.render(render("ToolUse") as never))).toBe(true);
+    expect(stock(await $.ui.render(render("UserMessage", notice) as never))).toBe(true);
+  });
+
+  test("keeps tools and working Slab hidden without the optional Notice records directory", async ($, on) => {
+    world(on, "[lowkey]\nlead = true\n", [], undefined, false, "");
+    await $.session.start(start);
+    expect(hidden(await $.ui.render(render("ToolGroup") as never))).toBe(true);
+    expect(JSON.stringify(await $.ui.render(render("Spinner") as never))).toContain("Raster");
     expect(stock(await $.ui.render(render("UserMessage", notice) as never))).toBe(true);
   });
 
