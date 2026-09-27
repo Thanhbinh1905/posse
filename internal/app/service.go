@@ -183,7 +183,7 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 					return runtime.RunResult{}, err
 				}
 				if riderGroupClosed(fresh, current, currentTasks) {
-					return runtime.RunResult{}, fmt.Errorf("Lead still missing after Herdr group recovery for %s", project.Name)
+					return runtime.RunResult{}, fmt.Errorf("lead still missing after Herdr group recovery for %s", project.Name)
 				}
 			}
 		}

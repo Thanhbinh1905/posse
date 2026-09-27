@@ -1,7 +1,6 @@
 package app
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,7 +94,7 @@ func TestSidebarLayoutReadsThroughSymlinksWithoutWritingThem(t *testing.T) {
 	}
 }
 
-func TestDoctorExplainsSymlinkedSidebarConfigAndRecognizesPosseRows(t *testing.T) {
+func TestDoctorDoesNotOfferRetiredSidebarLayoutForSymlinkedConfig(t *testing.T) {
 	service, _, userHome := humanSetupFixture(t)
 	configHome := filepath.Join(userHome, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", configHome)
@@ -110,40 +109,12 @@ func TestDoctorExplainsSymlinkedSidebarConfigAndRecognizesPosseRows(t *testing.T
 	if err := os.Symlink(source, path); err != nil {
 		t.Fatal(err)
 	}
-	check := func() (string, string) {
-		t.Helper()
-		code, output := runCLI(t, service, "doctor", "--json")
-		if code != 0 {
-			t.Fatalf("doctor: %d %s", code, output)
-		}
-		var result struct {
-			Checks []struct {
-				Check  string `json:"check"`
-				Status string `json:"status"`
-				Detail string `json:"detail"`
-			} `json:"checks"`
-		}
-		if err := json.Unmarshal([]byte(output), &result); err != nil {
-			t.Fatalf("doctor JSON: %s: %v", output, err)
-		}
-		for _, row := range result.Checks {
-			if row.Check == "Herdr Agents sidebar layout" {
-				return row.Status, row.Detail
-			}
-		}
-		t.Fatalf("doctor omitted sidebar layout check: %s", output)
-		return "", ""
+	code, output := runCLI(t, service, "doctor", "--json")
+	if code != 0 {
+		t.Fatalf("doctor: %d %s", code, output)
 	}
-	status, detail := check()
-	if status != "warn" || !strings.Contains(detail, "Herdr config is a symlink") || !strings.Contains(detail, sidebarLayoutSnippet) {
-		t.Fatalf("symlinked config check = %q, %q", status, detail)
-	}
-	if err := os.WriteFile(source, []byte(sidebarLayoutSnippet), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	status, detail = check()
-	if status != "ok" || detail != "Posse layout present" {
-		t.Fatalf("symlink with Posse rows check = %q, %q", status, detail)
+	if strings.Contains(output, "Herdr Agents sidebar layout") {
+		t.Fatalf("doctor offered retired sidebar layout: %s", output)
 	}
 }
 

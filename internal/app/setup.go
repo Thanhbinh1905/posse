@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
-	"golang.org/x/term"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -389,10 +388,6 @@ func setupPending(plan []map[string]any) bool {
 		}
 	}
 	return false
-}
-
-func setupInputIsTerminal() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 func herdrSupportsSidebarRules(version string) bool {

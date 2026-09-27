@@ -491,7 +491,7 @@ func lockMount(ctx context.Context, repo, path string, seq int) error {
 		return nil
 	}
 	if current != "" {
-		return fmt.Errorf("Mount %s is locked by %q, not %q", path, current, reason)
+		return fmt.Errorf("mount %s is locked by %q, not %q", path, current, reason)
 	}
 	_, err = gitOutput(ctx, repo, "worktree", "lock", "--reason", reason, path)
 	return err
@@ -532,7 +532,7 @@ func mountLockReason(ctx context.Context, repo, path string) (string, error) {
 		}
 		return "", nil
 	}
-	return "", fmt.Errorf("Mount %s is missing from git worktree list", path)
+	return "", fmt.Errorf("mount %s is missing from git worktree list", path)
 }
 
 func breakMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, mount store.Mount, reason string) error {
