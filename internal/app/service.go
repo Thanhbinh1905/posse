@@ -152,8 +152,11 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
 	}
 	result, err := run()
-	if err != nil || !result.GenerationMismatch {
+	if err != nil {
 		return result, err
+	}
+	if !result.GenerationMismatch {
+		return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 	}
 	current, err := s.snapshot(ctx)
 	if err != nil {
@@ -176,7 +179,10 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	if err == nil && result.GenerationMismatch {
 		return result, fmt.Errorf("project %s Herdr generation changed during recovery; retry reconcile", project.Name)
 	}
-	return result, err
+	if err != nil {
+		return result, err
+	}
+	return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 }
 
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
