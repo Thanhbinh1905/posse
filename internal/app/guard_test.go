@@ -58,6 +58,10 @@ func TestGuardRefusesHerdrChangesToTheWorkerSession(t *testing.T) {
 		"HERDR_SOCKET_PATH=$(mktemp) herdr workspace close w1",
 		"herdr --session other workspace close w1",
 		"command herdr pane close w1:p1",
+		"command -v herdr workspace close w1",
+		"command -V herdr workspace close w1 --group",
+		"command -v herdr; herdr workspace close w1 --group",
+		"command -v $(herdr workspace close w1)",
 		"nohup herdr pane close w1:p1 &",
 	} {
 		if refused, reason := guardHerdrCommand(command, guardEnv); !refused {
@@ -91,6 +95,24 @@ func TestGuardAllowsReadsAndIsolatedHerdrServers(t *testing.T) {
 	} {
 		if refused, reason := guardHerdrCommand(command, guardEnv); refused {
 			t.Errorf("guard refused %q: %#v", command, reason)
+		}
+	}
+}
+
+func TestGuardAllowsReadOnlyHerdrProbesAndPlainMentions(t *testing.T) {
+	for _, command := range []string{
+		"command -v herdr",
+		"command -V herdr",
+		"builtin command -v herdr",
+		"which herdr",
+		"type herdr",
+		"herdr --version",
+		"herdr --help",
+		"printf '%s\\n' /tmp/herdr-linux-x86_64",
+		"curl -fsSL https://example.test/herdr-linux-x86_64 -o /tmp/herdr-linux-x86_64",
+	} {
+		if refused, reason := guardHerdrCommand(command, guardEnv); refused {
+			t.Errorf("guard refused harmless probe %q: %#v", command, reason)
 		}
 	}
 }
