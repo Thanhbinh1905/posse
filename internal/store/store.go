@@ -1610,19 +1610,17 @@ func (db *DB) DeleteEmptyProject(ctx context.Context, projectID int64) error {
 	if tasks != 0 || mounts != 0 {
 		return ErrProjectNotEmpty
 	}
-	for _, table := range []string{"notices", "intents", "pr_observations", "lead_start_claims", "notice_notifications", "project_watch_state", "project_runtime"} {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE project_id=?`, projectID); err != nil {
-			return fmt.Errorf("delete %s: %w", table, err)
-		}
+	if err := deleteProjectReferences(ctx, tx, projectID); err != nil {
+		return err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id=?`, projectID)
 	if err != nil {
-		return err
+		return projectReferenceConstraint(err)
 	}
 	if deleted, err := result.RowsAffected(); err != nil {
 		return err
 	} else if deleted == 0 {
 		return sql.ErrNoRows
 	}
-	return tx.Commit()
+	return projectReferenceConstraint(tx.Commit())
 }

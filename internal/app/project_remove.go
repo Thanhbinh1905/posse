@@ -67,6 +67,9 @@ func (s *Service) projectRemove(ctx *axi.Context, args []string) error {
 		if errors.Is(err, store.ErrProjectNotEmpty) {
 			return projectNotEmpty(project, tasks, mounts)
 		}
+		if errors.Is(err, store.ErrProjectReferenced) {
+			return axi.Failure("project_has_dependents", fmt.Sprintf("Project %s has related records that prevent removal", project.Name), false, "Inspect and remove related records before retrying")
+		}
 		return err
 	}
 	if err := os.RemoveAll(projectHome); err != nil {
