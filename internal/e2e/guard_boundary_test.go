@@ -112,8 +112,8 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			if blocked != tc.blocked {
 				t.Errorf("guard blocked=%v, want %v: %v %s", blocked, tc.blocked, err, output)
 			}
-			if tc.blocked && strings.HasPrefix(tc.name, "default socket") && (!strings.Contains(string(output), "default socket reaches the User's Herdr server") || !strings.Contains(string(output), "unset every HERDR_* variable and point XDG_CONFIG_HOME and POSSE_HOME at a temp dir")) {
-				t.Errorf("refusal omitted the default-socket reason or isolation recipe: %s", output)
+			if tc.blocked && strings.HasPrefix(tc.name, "default socket") && (!strings.Contains(string(output), "default socket reaches the User's Herdr server") || !strings.Contains(string(output), "env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse")) {
+				t.Errorf("refusal omitted the default-socket reason or accepted isolation command: %s", output)
 			}
 			if !blocked {
 				shell := exec.Command("bash", "-c", tc.command)

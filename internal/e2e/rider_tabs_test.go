@@ -323,7 +323,8 @@ rows = [["state_icon", "machine", { token = "workspace", rules = [{ starts_with 
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build posse: %v\n%s", err, output)
 	}
-	// The fake Rider stays working until torn down; the fake Lead just reads.
+	// The fake Rider stays working until torn down; the fake Lead reports
+	// activity when prompted so its detached startup finalizer can finish.
 	agent := `#!/bin/sh
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 case "$PWD/" in
@@ -334,7 +335,9 @@ case "$PWD/" in
     while IFS= read -r line; do :; done
     ;;
   *)
-    while IFS= read -r line; do :; done
+    while IFS= read -r line; do
+      herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+    done
     ;;
 esac
 `

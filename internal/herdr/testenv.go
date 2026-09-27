@@ -20,7 +20,7 @@ func IsolatedTestEnvironment(root string) []string {
 		if found && strings.HasPrefix(key, "HERDR_") {
 			continue
 		}
-		if found && (key == "HOME" || key == "POSSE_HOME" || key == "CLAUDE_CONFIG_DIR" || key == "CODEX_HOME" || key == "PI_CODING_AGENT_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_TEST_HERDR" || key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_NOSYSTEM") {
+		if found && (key == "HOME" || key == "POSSE_HOME" || key == "CLAUDE_CONFIG_DIR" || key == "CODEX_HOME" || key == "PI_CODING_AGENT_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_TEST_HERDR" || key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_NOSYSTEM" || key == "LANG" || key == "LC_ALL" || key == "TERM" || key == "SHELL") {
 			continue
 		}
 		values = append(values, entry)
@@ -35,6 +35,12 @@ func IsolatedTestEnvironment(root string) []string {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"POSSE_TEST_HERDR=1",
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"TERM=xterm-256color",
+		// script(1) runs the E2E desktop client through SHELL. With /bin/sh
+		// (or no SHELL), its pseudo-terminal captures no sidebar frames.
+		"SHELL=/bin/bash",
 	)
 }
 

@@ -91,6 +91,7 @@ func TestGuardAllowsReadsAndIsolatedHerdrServers(t *testing.T) {
 		`export HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock; herdr workspace close w1`,
 		"HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock herdr pane close w1:p1",
 		"env -i HOME=/tmp/posse-e2e-x/home herdr server",
+		"env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server",
 		"if true; then export HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock; else export HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock; fi; herdr workspace close w1",
 	} {
 		if refused, reason := guardHerdrCommand(command, guardEnv); refused {
