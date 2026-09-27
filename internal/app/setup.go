@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -109,8 +108,8 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	if parsed.Bool("exit-code") && !parsed.Bool("check") {
 		return axi.Usage("--exit-code applies only to setup --check")
 	}
-	if parsed.Bool("sidebar-layout") && (parsed.Bool("check") || parsed.Bool("uninstall") || parsed.Bool("no-sidebar-layout")) || parsed.Bool("no-sidebar-layout") && (parsed.Bool("check") || parsed.Bool("uninstall")) {
-		return axi.Usage("sidebar layout flags apply only when installing setup")
+	if parsed.Bool("sidebar-layout") {
+		return axi.Usage("--sidebar-layout is retired; Posse uses Herdr's native worktree grouping")
 	}
 	home, err := s.homePath()
 	if err != nil {
@@ -125,30 +124,6 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 		return s.uninstallSetup(ctx, home, manifestPath, manifest, found)
 	}
 	run, err := s.runSetup(ctx.Context, home, manifestPath, manifest, found, parsed.Flags["binary"], !parsed.Bool("check"), human)
-	if err == nil && run.applied && sidebarOffer(run.plan) && !parsed.Bool("no-sidebar-layout") {
-		confirmed := parsed.Bool("sidebar-layout")
-		if !confirmed && !parsed.Bool("human") && setupInputIsTerminal() {
-			fmt.Fprint(ctx.Out, "Add Posse Agents sidebar layout to Herdr config? [y/N] ")
-			answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-			confirmed = strings.EqualFold(strings.TrimSpace(answer), "y")
-		}
-		if confirmed {
-			path, pathErr := herdrConfigPath()
-			if pathErr == nil {
-				var changed bool
-				changed, pathErr = installSidebarLayout(path)
-				if changed && pathErr == nil {
-					run.changed = append(run.changed, "sidebar_layout:"+path)
-					for _, row := range run.plan {
-						if row["step"] == "sidebar_layout" {
-							row["action"] = "installed"
-						}
-					}
-				}
-			}
-			err = pathErr
-		}
-	}
 	if human {
 		printHumanSetup(ctx.Out, run, err)
 		if err != nil {
@@ -196,24 +171,6 @@ func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manif
 		return run, err
 	}
 	run.plan = s.setupPlan(home, binary, version, dirs, manifest, found, run.inspection)
-	path, pathErr := herdrConfigPath()
-	if pathErr != nil {
-		return run, pathErr
-	}
-	state, stateErr := sidebarLayoutState(path)
-	row := map[string]any{"step": "sidebar_layout", "target": path, "action": state}
-	if stateErr != nil {
-		row["action"] = "manual"
-		row["error"] = stateErr.Error()
-	}
-	if state != "keep" {
-		row["snippet"] = sidebarLayoutSnippet
-	}
-	if state == "offer" && !run.inspection.SidebarSupported {
-		row["action"] = "manual"
-		row["error"] = "Herdr 0.9.1 or newer is required for styled sidebar rules"
-	}
-	run.plan = append(run.plan, row)
 	run.prerequisites = setupPrerequisites(run.inspection)
 	if setupPrerequisiteMissing(run.prerequisites, "git") {
 		return run, axi.Failure("setup_prerequisite_missing", "git is required for posse", false)
@@ -444,15 +401,6 @@ func herdrSupportsSidebarRules(version string) bool {
 		return false
 	}
 	return major > 0 || minor > 9 || minor == 9 && patch >= 1
-}
-
-func sidebarOffer(plan []map[string]any) bool {
-	for _, row := range plan {
-		if row["step"] == "sidebar_layout" && row["action"] == "offer" {
-			return true
-		}
-	}
-	return false
 }
 
 func validateSetupPlan(plan []map[string]any) error {

@@ -81,6 +81,9 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 						return errors.Join(err, db.RestoreMountAfterPrune(ctx.Context, mount.ID, mount.State))
 					}
 				}
+				if err := unlockMount(ctx.Context, project.Root, mount.Path); err != nil {
+					return errors.Join(err, db.RestoreMountAfterPrune(ctx.Context, mount.ID, mount.State))
+				}
 				removeErr = s.removeMount(ctx.Context, project.Root, mount.Path)
 			}
 			if err := removeErr; err != nil {
@@ -178,6 +181,9 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 				}
 				continue
 			}
+		}
+		if err := lockMount(ctx, project.Root, mount.Path, task.Seq); err != nil {
+			return mount, err
 		}
 		if err := resetMount(ctx, mount.Path, project, cleanMode); err != nil {
 			if breakErr := breakMount(ctx, db, project, task, mount, "Mount could not be reset to a clean state"); breakErr != nil {
@@ -459,10 +465,74 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 		}
 		return killed, err
 	}
+	if !project.IsWorkspace() {
+		if err := unlockMount(ctx, project.Root, mount.Path); err != nil {
+			return killed, err
+		}
+	}
 	if err := db.ReleaseMount(ctx, mount.ID, task.ID); err != nil {
+		if !project.IsWorkspace() {
+			return killed, errors.Join(err, lockMount(ctx, project.Root, mount.Path, task.Seq))
+		}
 		return killed, err
 	}
 	return killed, nil
+}
+
+// Git worktree locks protect held Mounts from Herdr's single-force UI delete.
+// A repeated acquire/reconcile may encounter its own existing lock.
+func lockMount(ctx context.Context, repo, path string, seq int) error {
+	reason := fmt.Sprintf("posse: held by t%d", seq)
+	current, err := mountLockReason(ctx, repo, path)
+	if err != nil {
+		return err
+	}
+	if current == reason {
+		return nil
+	}
+	if current != "" {
+		return fmt.Errorf("Mount %s is locked by %q, not %q", path, current, reason)
+	}
+	_, err = gitOutput(ctx, repo, "worktree", "lock", "--reason", reason, path)
+	return err
+}
+
+func unlockMount(ctx context.Context, repo, path string) error {
+	reason, err := mountLockReason(ctx, repo, path)
+	if err != nil {
+		return err
+	}
+	if reason == "" {
+		return nil
+	}
+	if !strings.HasPrefix(reason, "posse: held by t") {
+		return fmt.Errorf("refuse to unlock Mount %s locked by %q", path, reason)
+	}
+	_, err = gitOutput(ctx, repo, "worktree", "unlock", path)
+	return err
+}
+
+func mountLockReason(ctx context.Context, repo, path string) (string, error) {
+	listing, err := gitOutput(ctx, repo, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", err
+	}
+	for _, block := range strings.Split(listing, "\n\n") {
+		lines := strings.Split(block, "\n")
+		if len(lines) == 0 || lines[0] != "worktree "+path {
+			continue
+		}
+		for _, line := range lines {
+			if line == "locked" {
+				return "locked", nil
+			}
+			if strings.HasPrefix(line, "locked ") {
+				return strings.TrimPrefix(line, "locked "), nil
+			}
+		}
+		return "", nil
+	}
+	return "", fmt.Errorf("Mount %s is missing from git worktree list", path)
 }
 
 func breakMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, mount store.Mount, reason string) error {

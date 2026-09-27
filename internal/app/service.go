@@ -148,6 +148,70 @@ func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) 
 // generation-mismatched snapshot. A delayed event from the old server instead
 // retries against the current server, without rolling pane ids backward.
 func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) (runtime.RunResult, error) {
+	// No snapshot taken during a recovery claim is a complete project view.
+	if recovery, err := db.ProjectRecovery(ctx, project.ID); err != nil {
+		return runtime.RunResult{}, err
+	} else if recovery.OwnerPID != 0 && recovery.OwnerPID != os.Getpid() {
+		deadline := time.Now().Add(60 * time.Second)
+		for recovery.OwnerPID != 0 {
+			if time.Now().After(deadline) {
+				return runtime.RunResult{}, fmt.Errorf("project recovery is still running for %s", project.Name)
+			}
+			select {
+			case <-ctx.Done():
+				return runtime.RunResult{}, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+			recovery, err = db.ProjectRecovery(ctx, project.ID)
+			if err != nil {
+				return runtime.RunResult{}, err
+			}
+		}
+	}
+	if !project.IsWorkspace() {
+		if snapshot, err := s.snapshot(ctx); err == nil {
+			if tasks, err := db.LiveTasks(ctx, project.ID); err == nil && riderGroupClosed(snapshot, project, tasks) {
+				home, err := s.homePath()
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				if _, err := s.recoverProject(ctx, db, home, project); err != nil {
+					return runtime.RunResult{}, fmt.Errorf("recover Project %s after Herdr group close: %w", project.Name, err)
+				}
+				// Concurrent workspace.closed hooks must wait for the one recovery
+				// owner. Otherwise runtime.Run marks partially restored Riders lost.
+				deadline := time.Now().Add(60 * time.Second)
+				for {
+					recovery, err := db.ProjectRecovery(ctx, project.ID)
+					if err != nil {
+						return runtime.RunResult{}, err
+					}
+					if recovery.OwnerPID == 0 {
+						break
+					}
+					if time.Now().After(deadline) {
+						return runtime.RunResult{}, fmt.Errorf("group recovery is still running for %s", project.Name)
+					}
+					select {
+					case <-ctx.Done():
+						return runtime.RunResult{}, ctx.Err()
+					case <-time.After(50 * time.Millisecond):
+					}
+				}
+				fresh, err := s.snapshot(ctx)
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				current, err := db.ProjectByID(ctx, project.ID)
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				if _, found := leadWorkspace(fresh, current); !found {
+					return runtime.RunResult{}, fmt.Errorf("Lead still missing after Herdr group recovery for %s", project.Name)
+				}
+			}
+		}
+	}
 	run := func() (runtime.RunResult, error) {
 		return runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
 	}
@@ -192,6 +256,9 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
 		return config.Config{}, configError(err)
+	}
+	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+		return cfg, err
 	}
 	herdrReady := false
 	if s.Herdr != nil {

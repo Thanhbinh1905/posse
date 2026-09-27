@@ -69,17 +69,15 @@ func TestRosterRecoversRestartWithoutStartupHook(t *testing.T) {
 	}
 }
 
-// TestRidersOpenAsTabsOfTheLeadWorkspace drives the shared-workspace layout
-// through the real CLI against an isolated Herdr with the User's own
-// workspaces and tabs around the Lead. Riders must open as tabs of the Lead
-// workspace, never create or rename a workspace, and every teardown, relaunch
-// and restart path must touch only the Rider's own tab.
-func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
+// TestLegacyRiderTabsAfterWorktreeUpgrade migrates freshly opened Riders into
+// the former tab layout, then verifies reconcile, relaunch and Teardown still
+// recognize them after the repository layout changes.
+func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture := newRiderTabsFixture(t)
 	client := fixture.client
 
-	first := fixture.ride(t, "t1", "Tabs first rider", "tabs-first-rider")
-	second := fixture.ride(t, "t2", "Tabs second rider", "tabs-second-rider")
+	first := fixture.rideLegacy(t, "t1", "Tabs first rider", "tabs-first-rider")
+	second := fixture.rideLegacy(t, "t2", "Tabs second rider", "tabs-second-rider")
 	snapshot := fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
 	fixture.assertRiderTab(t, snapshot, first)
@@ -135,8 +133,9 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 		t.Fatalf("closing the focused Rider tab left focus on %s, want the Lead %s", snapshot.FocusedPaneID, fixture.leadPaneID)
 	}
 
-	// A Rider whose tab was closed by hand relaunches into a new tab of the Lead workspace.
-	third := fixture.ride(t, "t3", "Tabs third rider", "tabs-third-rider")
+	// Relaunch after an upgrade uses the new child layout. Move it back to a
+	// legacy tab to exercise restart and tab-scoped Teardown.
+	third := fixture.rideLegacy(t, "t3", "Tabs third rider", "tabs-third-rider")
 	if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": tabOf(t, fixture.snapshot(t), third.PaneID)}); err != nil {
 		t.Fatal(err)
 	}
@@ -144,23 +143,14 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	fixture.waitState(t, "t3", store.StateLost)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "relaunch", "t3")
 	fixture.waitState(t, "t3", store.StateWorking)
-	relaunched := fixture.task(t, "t3")
+	relaunched := fixture.moveRiderToLegacyTab(t, fixture.task(t, "t3"))
 	snapshot = fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
 	fixture.assertRiderTab(t, snapshot, relaunched)
 	fixture.assertRiderLabels(t, snapshot, relaunched)
 
-	// After a Herdr restart, recovery reuses the restored tab instead of opening another.
-	// Herdr renumbers tab and pane ids on restore, so the tab is compared by its label.
-	riderTabs := func(snapshot herdr.Snapshot) (count int) {
-		for _, tab := range snapshot.Tabs {
-			if tab.Label == relaunched.ShortName {
-				count++
-			}
-		}
-		return count
-	}
-	tabsBefore := len(snapshot.Tabs)
+	// Herdr restores the Mount's native grouping across a server restart.
+	// The legacy tab was a moved process, so recovery places it under the Lead.
 	killServer(t, fixture.server)
 	fixture.server = startServer(t, client)
 	output = runPosse(t, fixture.binary, fixture.repo, fixture.env, "recover", "--all")
@@ -170,15 +160,18 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 		t.Fatalf("recovery did not relaunch the Rider: before=%d after=%d output=%s", relaunched.Launches, recovered.Launches, output)
 	}
 	snapshot = fixture.snapshot(t)
-	fixture.assertUserLayout(t, snapshot)
-	fixture.assertRiderTab(t, snapshot, recovered)
-	fixture.assertRiderLabels(t, snapshot, recovered)
-	if riderTabs(snapshot) != 1 || len(snapshot.Tabs) != tabsBefore {
-		t.Fatalf("recovery opened a new tab: tabs before=%d after=%d: %#v", tabsBefore, len(snapshot.Tabs), snapshot.Tabs)
+	grouped := false
+	for _, workspace := range snapshot.Workspaces {
+		if workspace.WorkspaceID == recovered.HerdrWorkspaceID && workspace.Worktree.CheckoutPath == recovered.WorktreePath {
+			grouped = true
+		}
+	}
+	if !grouped {
+		t.Fatalf("restored Rider lost Mount grouping: %#v", recovered)
 	}
 
 	// A Task launched before this layout lives alone in its own workspace; it still reconciles and tears down.
-	legacy := fixture.ride(t, "t4", "Tabs legacy rider", "tabs-legacy-rider")
+	legacy := fixture.rideLegacy(t, "t4", "Tabs legacy rider", "tabs-legacy-rider")
 	moved, err := client.Call(context.Background(), "pane.move", map[string]any{"pane_id": legacy.PaneID, "destination": map[string]any{"type": "new_workspace", "label": "└─ Tabs legacy rider"}})
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +189,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	if current.PaneID != movedPane.MoveResult.Pane.PaneID || current.HerdrWorkspaceID != movedPane.MoveResult.Pane.WorkspaceID || current.State != store.StateWorking {
 		t.Fatalf("reconcile did not follow the legacy Rider into its workspace: %#v moved=%#v", current, movedPane.MoveResult.Pane)
 	}
-	fixture.assertRiderLabels(t, fixture.snapshot(t), recovered, current)
+	fixture.assertRiderLabels(t, fixture.snapshot(t), current)
 	fixture.fail(t, "t4")
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t4", "--discard", "--user-approved", "User approved the legacy teardown test")
 	snapshot = fixture.snapshot(t)
@@ -206,9 +199,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 			t.Fatalf("legacy Rider workspace survived teardown: %#v", workspace)
 		}
 	}
-	fixture.assertUserLayout(t, snapshot)
-	fixture.assertRiderLabels(t, snapshot, recovered)
-	fixture.assertAlive(t, snapshot, recovered.PaneID, foreign)
+	fixture.assertAlive(t, snapshot, recovered.PaneID, foreign, fixture.leadPaneID)
 
 }
 
@@ -568,14 +559,8 @@ func (f *riderTabsFixture) assertRiderTab(t *testing.T, snapshot herdr.Snapshot,
 	if err := json.Unmarshal(raw, &info); err != nil || info.ProcessInfo.ShellPID == 0 {
 		t.Fatalf("Rider pane process info: %s %v", raw, err)
 	}
-	environ, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(info.ProcessInfo.ShellPID), "environ"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Herdr does not persist per-pane env across a restart; recovery then relies on the Mount cwd.
-	if !bytes.Contains(environ, []byte("\x00POSSE_WORKER_HOME="+f.home+"\x00")) && task.Launches < 2 {
-		t.Fatalf("Rider pane %s was not marked with POSSE_WORKER_HOME=%s", pane.PaneID, f.home)
-	}
+	// Legacy panes restored after a restart may have no POSSE_WORKER_HOME.
+	// Their Mount cwd and Task pane label remain authoritative.
 }
 
 func (f *riderTabsFixture) assertRiderLabels(t *testing.T, snapshot herdr.Snapshot, tasks ...store.Task) {

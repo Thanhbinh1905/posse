@@ -102,8 +102,8 @@ func TestDoctorReportsInstalledHerdrSidebarLayout(t *testing.T) {
 	if code := cli.Run([]string{"doctor"}); code != 0 {
 		t.Fatalf("doctor exit=%d: %s", code, output)
 	}
-	if !strings.Contains(output.String(), "Herdr Agents sidebar layout,ok,Posse layout present") {
-		t.Errorf("doctor did not recognize installed layout: %s", output)
+	if strings.Contains(output.String(), "Herdr Agents sidebar layout") {
+		t.Errorf("doctor should not require the retired layout: %s", output)
 	}
 }
 
@@ -120,11 +120,11 @@ func TestSetupPreviewLeavesExistingAgentsRowsForManualReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	preview, code := runHumanSetup(t, service, "--check")
-	if code != 0 || !strings.Contains(preview, "rows already configured") || !strings.Contains(preview, "$posse_row") {
-		t.Fatalf("manual preview = %d %s", code, preview)
+	if code != 0 || strings.Contains(preview, "sidebar layout") || strings.Contains(preview, "$posse_row") {
+		t.Fatalf("retired layout appeared in preview = %d %s", code, preview)
 	}
-	applied, code := runHumanSetup(t, service, "--sidebar-layout")
-	if code != 0 || !strings.Contains(applied, "rows already configured") {
+	applied, code := runHumanSetup(t, service)
+	if code != 0 || strings.Contains(applied, "sidebar layout") {
 		t.Fatalf("setup with custom rows = %d %s", code, applied)
 	}
 	data, err := os.ReadFile(path)
@@ -139,12 +139,12 @@ func TestSetupReportsSidebarLayoutAndAppliesOnlyWhenConfirmed(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	path := filepath.Join(configHome, "herdr", "config.toml")
 	preview, code := runHumanSetup(t, service, "--check")
-	if code != 0 || !strings.Contains(preview, "Add Posse Agents sidebar layout") {
-		t.Fatalf("preview = %d %s", code, preview)
+	if code != 0 || strings.Contains(preview, "sidebar layout") {
+		t.Fatalf("preview offered retired layout = %d %s", code, preview)
 	}
 	applied, code := runHumanSetup(t, service, "--no-sidebar-layout")
-	if code != 0 || !strings.Contains(applied, "Add Posse Agents sidebar layout") {
-		t.Fatalf("ordinary setup = %d %s", code, applied)
+	if code != 0 || strings.Contains(applied, "sidebar layout") {
+		t.Fatalf("ordinary setup offered retired layout = %d %s", code, applied)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("layout applied without confirmation: %v", err)
@@ -152,18 +152,18 @@ func TestSetupReportsSidebarLayoutAndAppliesOnlyWhenConfirmed(t *testing.T) {
 	adapter.RunOut["integration status"] = []byte("claude: current (v9)\ncodex: not installed\n")
 	adapter.RunOut["plugin list --json"] = []byte(`{"result":{"plugins":[{"plugin_id":"posse.herdr","manifest_path":"` + filepath.Join(service.Home, "plugin", "herdr-plugin.toml") + `"}]}}`)
 	preview, code = runHumanSetup(t, service, "--check", "--exit-code")
-	if code != 0 || !strings.Contains(preview, "Add Posse Agents sidebar layout") {
-		t.Fatalf("optional offer made required: %d %s", code, preview)
+	if code != 0 || strings.Contains(preview, "sidebar layout") {
+		t.Fatalf("retired layout appeared in check: %d %s", code, preview)
 	}
 	applied, code = runHumanSetup(t, service, "--sidebar-layout")
-	if code != 0 || !strings.Contains(applied, "Added Posse Agents sidebar layout") {
-		t.Fatalf("confirmed setup = %d %s", code, applied)
+	if code != 2 || !strings.Contains(applied, "retired") {
+		t.Fatalf("retired flag still modifies config = %d %s", code, applied)
 	}
-	if state, err := sidebarLayoutState(path); state != "keep" || err != nil {
-		t.Fatalf("confirmed state = %q, %v", state, err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("retired flag wrote Herdr config: %v", err)
 	}
 	preview, code = runHumanSetup(t, service, "--check", "--exit-code")
-	if code != 0 || !strings.Contains(preview, "sidebar layout already present") {
+	if code != 0 || strings.Contains(preview, "sidebar layout") {
 		t.Fatalf("complete = %d %s", code, preview)
 	}
 }

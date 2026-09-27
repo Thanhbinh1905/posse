@@ -186,30 +186,29 @@ func TestLeadWorkspaceRequiresTheLeadOrItsLabel(t *testing.T) {
 
 func TestOpenRiderTabUsesTheLeadWorkspace(t *testing.T) {
 	project, task, adapter := riderTabSession(t)
-	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t5","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p5","tab_id":"w1:t5","workspace_id":"w1"}}`)
+	adapter.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w5"},"tab":{"tab_id":"w5:t1"},"root_pane":{"pane_id":"w5:p1","tab_id":"w5:t1"}}`)
 	task.ShortName = "first-rider"
 	home := t.TempDir()
 	opened, err := testService(home, adapter).openRiderTab(context.Background(), home, project, task, task.WorktreePath, "claude")
-	if err != nil || opened != (openedTab{WorkspaceID: "w1", TabID: "w1:t5", PaneID: "w1:p5"}) {
+	if err != nil || opened != (openedTab{WorkspaceID: "w5", TabID: "w5:t1", PaneID: "w5:p1"}) {
 		t.Fatalf("openRiderTab = %#v, %v", opened, err)
 	}
 	var methods []string
 	for _, call := range adapter.Calls {
 		methods = append(methods, call.Method)
-		if call.Method == "tab.create" {
-			env, _ := call.Params["env"].(map[string]string)
-			if call.Params["workspace_id"] != "w1" || call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "first-rider" || call.Params["focus"] != false || env[workerHomeEnv] != filepath.Clean(home) {
-				t.Fatalf("tab.create params = %#v", call.Params)
+		if call.Method == "worktree.open" {
+			if call.Params["workspace_id"] != "w1" || call.Params["path"] != task.WorktreePath || call.Params["label"] != "first-rider" || call.Params["focus"] != false {
+				t.Fatalf("worktree.open params = %#v", call.Params)
 			}
 		}
-		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w1:p5" || call.Params["label"] != task.PaneLabel) {
+		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w5:p1" || call.Params["label"] != task.PaneLabel) {
 			t.Fatalf("pane.rename params = %#v", call.Params)
 		}
-		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w1:p5" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "└─ first-rider") {
+		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w5:p1" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "first-rider") {
 			t.Fatalf("initial Rider metadata = %#v", call.Params)
 		}
 	}
-	if strings.Join(methods, ",") != "tab.create,pane.report_metadata,pane.rename" {
+	if strings.Join(methods, ",") != "worktree.open,pane.report_metadata,pane.rename" {
 		t.Fatalf("openRiderTab calls = %v", methods)
 	}
 
@@ -217,7 +216,7 @@ func TestOpenRiderTabUsesTheLeadWorkspace(t *testing.T) {
 	adapter = &changingSnapshotAdapter{Fake: herdr.NewFake(), snapshot: herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "notes"}}}}
 	_, err = testService(home, adapter).openRiderTab(context.Background(), home, project, task, task.WorktreePath, "claude")
 	var cliErr *axi.Error
-	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("tab.create") != 0 || adapter.CallCount("workspace.create") != 0 {
+	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("worktree.open") != 0 || adapter.CallCount("workspace.create") != 0 {
 		t.Fatalf("openRiderTab without the Lead = %v, calls %#v", err, adapter.Calls)
 	}
 }

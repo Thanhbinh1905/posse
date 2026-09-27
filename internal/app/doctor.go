@@ -11,6 +11,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func (s *Service) doctor(ctx *axi.Context, args []string) error {
@@ -27,23 +28,12 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 	}
 	checks := []axi.Object{}
 	help := []axi.Object{}
+	var registeredProjects []store.Project
 	addCheck := func(name, status, detail, action string) {
 		checks = append(checks, axi.Object{{Key: "check", Value: name}, {Key: "status", Value: status}, {Key: "detail", Value: detail}})
 		if status != "ok" {
 			help = append(help, axi.Object{{Key: "check", Value: name}, {Key: "action", Value: action}})
 		}
-	}
-
-	if path, pathErr := herdrConfigPath(); pathErr != nil {
-		addCheck("Herdr Agents sidebar layout", "warn", pathErr.Error(), "Inspect Herdr config path")
-	} else if state, stateErr := sidebarLayoutState(path); stateErr != nil {
-		addCheck("Herdr Agents sidebar layout", "warn", stateErr.Error(), "Repair the Herdr config and run `posse setup`")
-	} else if state == "keep" {
-		addCheck("Herdr Agents sidebar layout", "ok", "Posse layout present", "")
-	} else if state == "manual" {
-		addCheck("Herdr Agents sidebar layout", "warn", "custom Agents rows present", "Review the snippet from `posse setup --check` before editing Herdr config")
-	} else {
-		addCheck("Herdr Agents sidebar layout", "warn", "not installed", "Run `posse setup` to add the optional layout")
 	}
 
 	cfg, configErr := config.Load(home, "")
@@ -60,6 +50,7 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 		if projectsErr != nil {
 			addCheck("database", "fail", projectsErr.Error(), "Inspect the Posse database")
 		} else {
+			registeredProjects = projects
 			addCheck("database", "ok", "database opened", "")
 			hosts := map[string]bool{}
 			for _, project := range projects {
@@ -140,6 +131,31 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 			addCheck("Herdr", "warn", "server is stopped or incompatible", "Start a compatible Herdr server")
 		}
 
+		if snapshot, snapErr := s.snapshot(ctx.Context); snapErr == nil {
+			for _, project := range registeredProjects {
+				if project.IsWorkspace() {
+					continue
+				}
+				leadID, found := leadWorkspace(snapshot, project)
+				if !found {
+					continue
+				}
+				key := ""
+				for _, workspace := range snapshot.Workspaces {
+					if workspace.WorkspaceID == leadID {
+						key = workspace.Worktree.RepoKey
+					}
+				}
+				if key == "" {
+					continue
+				}
+				for _, workspace := range snapshot.Workspaces {
+					if workspace.WorkspaceID != leadID && workspace.Worktree.RepoKey == key && !workspace.Worktree.IsLinkedWorktree {
+						addCheck("Herdr group "+project.Name, "warn", "another primary workspace "+workspace.WorkspaceID+" shares the Lead's repository; its group close also closes the Lead and Riders", "Do not use workspace close --group on another primary; Posse recovers the group if it happens")
+					}
+				}
+			}
+		}
 		pluginData, pluginErr := s.herdrCall(ctx.Context, "plugin.list", map[string]any{})
 		if pluginErr != nil {
 			addCheck("Posse Herdr plugin", "warn", pluginErr.Error(), "Run `posse setup` to inspect plugin setup")

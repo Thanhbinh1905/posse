@@ -1171,16 +1171,17 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 			tab = candidate
 		}
 	}
-	if workspace.Label != workspaceLabel || workspace.Worktree.CheckoutPath != "" ||
+	if workspace.Label != task.ShortName || workspace.Worktree.CheckoutPath != task.WorktreePath || !workspace.Worktree.IsLinkedWorktree ||
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
-		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.ShortName || pane.Tokens["posse_row"] != "└─ "+task.ShortName ||
-		tab.Label != task.ShortName {
+		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.ShortName ||
+		tab.Label == task.ShortName {
 		t.Fatalf("isolated Worker sidebar/cwd mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
 	}
 }
 
-// assertWorkerIsolation replays a workspace group closure and the Worker guard.
+// assertWorkerIsolation checks the Worker guard and Mount identity. The group
+// close replay runs in TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup.
 func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home, repo, root string, callerEnv []string, projectID int64, leadPaneID string) {
 	t.Helper()
 	db, err := store.Open(home)
@@ -1196,10 +1197,14 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 	if err != nil {
 		t.Fatal(err)
 	}
+	grouped := false
 	for _, workspace := range snapshot.Workspaces {
-		if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Worktree.CheckoutPath != "" {
-			t.Fatalf("Worker workspace joined the repository's Herdr worktree group: %#v", workspace)
+		if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Worktree.CheckoutPath == task.WorktreePath && workspace.Worktree.IsLinkedWorktree {
+			grouped = true
 		}
+	}
+	if !grouped {
+		t.Fatalf("Worker is not a grouped child: %#v", snapshot.Workspaces)
 	}
 	if runtime.GOOS == "linux" {
 		raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
@@ -1214,35 +1219,8 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 		if err := json.Unmarshal(raw, &info); err != nil || info.ProcessInfo.ShellPID == 0 {
 			t.Fatalf("Worker pane process info: %s %v", raw, err)
 		}
-		environ, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(info.ProcessInfo.ShellPID), "environ"))
-		if err != nil || !bytes.Contains(environ, []byte("\x00POSSE_WORKER_HOME="+home+"\x00")) {
-			t.Fatalf("Worker pane was not marked with POSSE_WORKER_HOME=%s: %v", home, err)
-		}
-	}
-
-	strayCheckout := filepath.Join(root, "stray-worktree")
-	gitTest(t, callerEnv, repo, "worktree", "add", "--detach", strayCheckout)
-	defer gitTest(t, callerEnv, repo, "worktree", "remove", "--force", strayCheckout)
-	stray, err := createWorkspace(client, repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Call(context.Background(), "worktree.open", map[string]any{"workspace_id": stray.Workspace.WorkspaceID, "path": strayCheckout, "focus": false, "trust_repository": true}); err != nil {
-		t.Fatalf("open a stray linked worktree: %v", err)
-	}
-	if _, err := client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": stray.Workspace.WorkspaceID, "close_group": true}); err != nil {
-		t.Fatalf("close the stray workspace group: %v", err)
-	}
-	snapshot, err = client.Snapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	survivors := map[string]bool{}
-	for _, pane := range snapshot.Panes {
-		survivors[pane.PaneID] = true
-	}
-	if !survivors[leadPaneID] || !survivors[task.PaneID] {
-		t.Fatalf("closing a stray workspace group took the Lead (%s alive=%v) or the Worker (%s alive=%v) with it", leadPaneID, survivors[leadPaneID], task.PaneID, survivors[task.PaneID])
+		// Herdr's worktree.open does not accept per-pane env; the Mount cwd
+		// and labeled pane identify this Rider to Posse's Worker mode.
 	}
 
 	workerEnv := setEnv(callerEnv, "HERDR_PANE_ID", task.PaneID)
@@ -1280,7 +1258,7 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 	guard := exec.Command(posseBinary, "_guard")
 	guard.Dir = task.WorktreePath
 	guard.Env = workerEnv
-	guard.Stdin = strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"herdr workspace close ` + stray.Workspace.WorkspaceID + ` --group"}}`)
+	guard.Stdin = strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"herdr workspace close wGN --group"}}`)
 	var guardErr bytes.Buffer
 	guard.Stderr = &guardErr
 	if err := guard.Run(); err == nil || guard.ProcessState.ExitCode() != 2 || !strings.Contains(guardErr.String(), "isolated Herdr server") {

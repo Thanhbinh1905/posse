@@ -1,4 +1,6 @@
-# Riders open as tabs of the Lead's workspace
+# Workspace Project Riders open as tabs of the Lead's workspace
+
+*Amended by [ADR 0012](0012-group-repository-riders-under-lead.md): repository Riders now open as linked worktree children of the Lead, while Workspace Project Riders and legacy Tasks keep this tab behavior.*
 
 Each Rider used to open in its own Herdr workspace ([ADR 0007](0007-isolate-workers-from-the-user-session.md) layer 1). With several Riders the sidebar held one row per Rider, interleaved with the User's own workspaces, and every launch or teardown renamed sibling Rider workspaces to keep the `├─`/`└─` connectors in order. The User chose one shared workspace for the Lead and its Riders.
 

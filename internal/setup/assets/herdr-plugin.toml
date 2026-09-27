@@ -18,6 +18,10 @@ on = "pane.closed"
 command = [{{POSSE_BINARY}}, "_ingest"]
 
 [[events]]
+on = "workspace.closed"
+command = [{{POSSE_BINARY}}, "_ingest"]
+
+[[events]]
 on = "pane.focused"
 command = [{{POSSE_BINARY}}, "_ingest"]
 

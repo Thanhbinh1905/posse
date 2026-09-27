@@ -142,6 +142,28 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 }
 
 func (s *Service) ingestProjects(ctx context.Context, db *store.DB, event pluginEvent, paneID string) ([]store.Project, bool, error) {
+	if event.Event == "workspace.closed" || event.Event == "workspace_closed" {
+		closedID := valueString(event.Data, "workspace_id")
+		projects, err := db.Projects(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, project := range projects {
+			if project.HerdrWorkspaceID == closedID {
+				return []store.Project{project}, false, nil
+			}
+			tasks, err := db.LiveTasks(ctx, project.ID)
+			if err != nil {
+				return nil, false, err
+			}
+			for _, task := range tasks {
+				if task.HerdrWorkspaceID == closedID {
+					return []store.Project{project}, true, nil
+				}
+			}
+		}
+		return nil, false, nil
+	}
 	if eventIs(event.Event, "pane.focused") {
 		projects, err := db.Projects(ctx)
 		if err != nil {
