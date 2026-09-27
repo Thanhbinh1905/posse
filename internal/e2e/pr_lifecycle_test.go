@@ -283,18 +283,28 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 			t.Fatalf("merged Rider still holds its Mount: %#v, %v", mounts, err)
 		}
 		fixture.requireNotice(t, "t1", "pr_merged")
-		decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, decision := range decisions {
-			if decision.TaskID == badID && decision.Kind == "pr_closed" {
-				found = true
+		// Lookout can claim a poll before the old URL is exposed, then read
+		// only pr1. Allow the next poll to see the old URL before checking the
+		// invalid PR Decision; it must still be raised, not skipped.
+		var decisions []store.Decision
+		if !waitForCondition(10*time.Second, func() bool {
+			var err error
+			decisions, err = fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		if !found {
-			t.Fatalf("invalid PR has no User Decision: %#v", decisions)
+			for _, decision := range decisions {
+				if decision.TaskID == badID && decision.Kind == "pr_closed" {
+					return true
+				}
+			}
+			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+			return false
+		}) {
+			calls, _ := os.ReadFile(fixture.ghLog)
+			notices, _ := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+			watch, _ := fixture.db.ProjectWatchState(context.Background(), fixture.project.ID)
+			t.Fatalf("%v: invalid PR has no User Decision: decisions=%#v notices=%#v watch=%#v ghCalls=%q", command, decisions, notices, watch, calls)
 		}
 		watch, err := fixture.db.ProjectWatchState(context.Background(), fixture.project.ID)
 		if err != nil || watch.PRConsecutiveFailures != 0 {
