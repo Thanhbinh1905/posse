@@ -194,7 +194,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 			break
 		}
 	}
-	groupClosed := riderGroupClosed(snapshot, project) && !serverRestarted
+	groupClosed := riderGroupClosed(snapshot, project, tasks) && !serverRestarted
 	if !serverRestarted && !groupClosed {
 		if _, err := s.prepareProject(ctx, db, project); err != nil {
 			return 0, err
@@ -245,7 +245,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if dbErr != nil {
 			return 0, dbErr
 		}
-		if !riderGroupClosed(fresh, current) {
+		if !riderGroupClosed(fresh, current, tasks) {
 			recoveryComplete = true
 			return 0, nil
 		}
@@ -393,9 +393,18 @@ func (s *Service) claimProjectRecovery(ctx context.Context, db *store.DB, projec
 // Riders without restarting Herdr. During recovery some Rider panes may
 // already be back, but no reconciliation may mark the others lost while the
 // Lead is still absent. A lone closed Rider has a live Lead.
-func riderGroupClosed(snapshot herdr.Snapshot, project store.Project) bool {
+func riderGroupClosed(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) bool {
 	if project.IsWorkspace() || project.HerdrWorkspaceID == "" || snapshot.ServerStartedAt == "" {
 		return false
+	}
+	// Closing only the Lead pane leaves its workspace intact. `posse up`
+	// handles that case; it is not a group-close recovery when no Rider is live.
+	if len(tasks) == 0 {
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.WorkspaceID == project.HerdrWorkspaceID {
+				return false
+			}
+		}
 	}
 	if project.LeadPaneID == "" || project.LeadLabel == "" {
 		return true // A prior recovery has not recorded its Lead yet.

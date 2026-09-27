@@ -157,7 +157,7 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	}
 	if !project.IsWorkspace() {
 		if snapshot, err := s.snapshot(ctx); err == nil {
-			if riderGroupClosed(snapshot, project) {
+			if tasks, err := db.LiveTasks(ctx, project.ID); err == nil && riderGroupClosed(snapshot, project, tasks) {
 				home, err := s.homePath()
 				if err != nil {
 					return runtime.RunResult{}, err
@@ -178,7 +178,11 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 				if err != nil {
 					return runtime.RunResult{}, err
 				}
-				if riderGroupClosed(fresh, current) {
+				currentTasks, err := db.LiveTasks(ctx, project.ID)
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				if riderGroupClosed(fresh, current, currentTasks) {
 					return runtime.RunResult{}, fmt.Errorf("lead still missing after Herdr group recovery for %s", project.Name)
 				}
 			}
