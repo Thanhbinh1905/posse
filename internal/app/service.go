@@ -148,6 +148,9 @@ func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) 
 // generation-mismatched snapshot. A delayed event from the old server instead
 // retries against the current server, without rolling pane ids backward.
 func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) (runtime.RunResult, error) {
+	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+		return runtime.RunResult{}, err
+	}
 	// No snapshot taken during a recovery claim is a complete project view.
 	if recovery, err := db.ProjectRecovery(ctx, project.ID); err != nil {
 		return runtime.RunResult{}, err
@@ -206,7 +209,11 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 				if err != nil {
 					return runtime.RunResult{}, err
 				}
-				if _, found := leadWorkspace(fresh, current); !found {
+				currentTasks, err := db.LiveTasks(ctx, project.ID)
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				if riderGroupClosed(fresh, current, currentTasks) {
 					return runtime.RunResult{}, fmt.Errorf("Lead still missing after Herdr group recovery for %s", project.Name)
 				}
 			}
@@ -256,9 +263,6 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
 		return config.Config{}, configError(err)
-	}
-	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
-		return cfg, err
 	}
 	herdrReady := false
 	if s.Herdr != nil {

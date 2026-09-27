@@ -58,6 +58,11 @@ func TestRosterRecoversRestartWithoutStartupHook(t *testing.T) {
 	if restored.PaneID == "" || restored.PaneID != after.PaneID || restored.WorkspaceID != after.HerdrWorkspaceID || restored.CWD != after.WorktreePath {
 		t.Fatalf("recovered Rider pane does not match its Task: pane=%#v task=%#v", restored, after)
 	}
+	grouped := false
+	for _, workspace := range fixture.snapshot(t).Workspaces {
+		if workspace.WorkspaceID == after.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == after.WorktreePath { grouped = true }
+	}
+	if !grouped { t.Fatalf("restored Rider lost native worktree grouping: %#v", after) }
 	db, err = store.OpenReadOnly(fixture.home)
 	if err != nil {
 		t.Fatal(err)

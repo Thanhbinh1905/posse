@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -63,6 +64,10 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 				t.Fatalf("child tab duplicates workspace label")
 			}
 		}
+	}
+	assertNativeWorktreeSidebar(t, f, first.ShortName, second.ShortName)
+	if f.snapshot(t).FocusedPaneID != f.leadPaneID {
+		t.Fatal("sidebar client stole focus")
 	}
 	// Leave uncommitted work in the Mount. Recovery must not reset the checkout.
 	changed := filepath.Join(first.WorktreePath, "unfinished.txt")
@@ -169,6 +174,35 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	for _, block := range strings.Split(string(output), "\n\n") {
 		if strings.HasPrefix(block, "worktree "+second.WorktreePath+"\n") && strings.Contains(block, "locked ") {
 			t.Fatalf("released Mount still locked: %s", block)
+		}
+	}
+}
+
+// A real attached Herdr 0.9.0 client must render the grouped names without
+// any Posse-specific sidebar configuration.
+func assertNativeWorktreeSidebar(t *testing.T, f *riderTabsFixture, names ...string) {
+	t.Helper()
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Log("script unavailable; snapshot still verifies grouping")
+		return
+	}
+	cmd := exec.Command("script", "-q", "-c", "stty rows 45 cols 160; timeout 4 herdr", "/dev/null")
+	cmd.Env = setEnv(f.env, "TERM", "xterm-256color")
+	cmd.Dir = f.repo
+	input, keepOpen, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	defer keepOpen.Close()
+	cmd.Stdin = input
+	output, err := cmd.CombinedOutput()
+	if err != nil && !strings.Contains(err.Error(), "exit status 124") {
+		t.Fatalf("attach isolated client: %v: %q", err, output)
+	}
+	for _, name := range append([]string{"Lead:shop"}, names...) {
+		if !bytes.Contains(output, []byte(name)) {
+			t.Fatalf("Herdr sidebar did not render %q; output tail: %q", name, output[max(0, len(output)-4000):])
 		}
 	}
 }

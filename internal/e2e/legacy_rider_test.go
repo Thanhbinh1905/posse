@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -22,6 +23,7 @@ func (f *riderTabsFixture) rideLegacy(t *testing.T, id, title, name string) stor
 
 func (f *riderTabsFixture) moveRiderToLegacyTab(t *testing.T, task store.Task) store.Task {
 	t.Helper()
+	focusedBefore := f.snapshot(t).FocusedPaneID
 	raw, err := f.client.Call(context.Background(), "pane.move", map[string]any{
 		"pane_id":     task.PaneID,
 		"destination": map[string]any{"type": "new_tab", "workspace_id": f.leadWorkspaceID, "label": task.ShortName},
@@ -35,9 +37,19 @@ func (f *riderTabsFixture) moveRiderToLegacyTab(t *testing.T, task store.Task) s
 			Pane herdr.Pane `json:"pane"`
 		} `json:"move_result"`
 	}
+	if f.snapshot(t).FocusedPaneID != focusedBefore {
+		t.Fatal("unfocused Rider move stole focus")
+	}
 	if err := json.Unmarshal(raw, &moved); err != nil || moved.MoveResult.Pane.PaneID == "" {
 		t.Fatalf("move legacy Rider: %s %v", raw, err)
 	}
-	runPosse(t, f.binary, f.repo, f.env, "roster")
-	return f.task(t, fmt.Sprintf("t%d", task.Seq))
+	id := fmt.Sprintf("t%d", task.Seq)
+	if !waitForCondition(10*time.Second, func() bool {
+		runPosse(t, f.binary, f.repo, f.env, "roster")
+		current := f.task(t, id)
+		return current.PaneID == moved.MoveResult.Pane.PaneID
+	}) {
+		t.Fatalf("reconcile did not follow moved Rider pane %s: %#v", moved.MoveResult.Pane.PaneID, f.task(t, id))
+	}
+	return f.task(t, id)
 }

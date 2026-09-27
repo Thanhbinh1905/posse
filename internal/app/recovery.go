@@ -235,7 +235,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if dbErr != nil {
 			return 0, dbErr
 		}
-		if _, present := leadWorkspace(fresh, current); present {
+		if !riderGroupClosed(fresh, current, tasks) {
 			recoveryComplete = true
 			return 0, nil
 		}
@@ -384,12 +384,20 @@ func (s *Service) claimProjectRecovery(ctx context.Context, db *store.DB, projec
 // already be back, but no reconciliation may mark the others lost while the
 // Lead is still absent. A lone closed Rider has a live Lead.
 func riderGroupClosed(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) bool {
-	if project.IsWorkspace() || len(tasks) == 0 || project.LeadPaneID == "" || snapshot.ServerStartedAt == "" {
+	if project.IsWorkspace() || len(tasks) == 0 || project.HerdrWorkspaceID == "" || snapshot.ServerStartedAt == "" {
 		return false
 	}
-	if _, present := leadWorkspace(snapshot, project); present {
-		return false
+	label := project.LeadLabel
+	if label == "" {
+		label = "posse:" + project.Name + ":lead"
 	}
+	for _, pane := range snapshot.Panes {
+		if pane.Label == label {
+			return false
+		}
+	}
+	// A recovery may have created the Lead workspace before its Lead pane.
+	// Its label alone is not proof that the recovery completed.
 	return true
 }
 
