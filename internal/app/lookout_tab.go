@@ -90,7 +90,7 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 	return nil
 }
 
-func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration) error {
+func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal) error {
 	snapshot, err := s.snapshot(ctx.Context)
 	if err != nil {
 		return err
@@ -111,6 +111,11 @@ func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, 
 	}
 	lastFailure := ""
 	for {
+		select {
+		case <-stopSignals:
+			return s.reportLookoutStopped(ctx, project, true)
+		default:
+		}
 		fresh, err := db.ProjectByID(ctx.Context, project.ID)
 		if err != nil {
 			return err
@@ -128,6 +133,8 @@ func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, 
 			return nil
 		}
 		select {
+		case <-stopSignals:
+			return s.reportLookoutStopped(ctx, project, true)
 		case <-ctx.Context.Done():
 			return ctx.Context.Err()
 		case <-time.After(2 * time.Second):

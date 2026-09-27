@@ -630,7 +630,7 @@ Skills and the hook ship inside the binary and are versioned with it.
 
 **Releases.** Releases are manual: the User chooses whether and when to publish a version. After the intended changes land on `main`, publish a `vX.Y.Z` tag on a reviewed commit with passing CI. Before 1.0, `fix:` changes imply a patch bump and `feat:` changes imply a minor bump. Pushing a version tag starts `.github/workflows/release.yml`, which runs GoReleaser and publishes Linux and macOS archives for amd64 and arm64 plus `checksums.txt`. Ordinary pushes and merges to `main` run CI only; they do not create tags or release PRs. Branch protection on `main` must require pull-request reviews and the checks `lint`, `test`, `e2e`, `installer`, and `build`, and must prohibit force-push and deletion. Do not apply branch protection from posse.
 
-**`posse update [--check] [--version vX.Y.Z]`**:
+**`posse update [--check] [--version vX.Y.Z] [--force] [--stop-lookouts]`**:
 
 Installing requires a User terminal outside Herdr or a live Herdr shell pane with no agent and no Lead or Rider binding. Posse verifies the caller before downloading and installing; an unknown pane or unavailable Herdr state blocks installation.
 
@@ -641,6 +641,8 @@ Installing requires a User terminal outside Herdr or a live Herdr shell pane wit
 5. Runs `posse setup`, so skills, hooks and the plugin match the new version.
 6. Database migrations run forward only, on the new binary's first command, and `posse setup` applies them right after installing. Every applied migration's SHA-256 is kept in `posse_migration_checksums`. Opening a database refuses `schema_unknown` when it has migrations the build does not know (an older build after an upgrade, or a branch build), and `schema_diverged` when a known migration was applied with different contents. Pending migrations on an existing database are applied only by the installed posse (the `binary` in `setup.json`), and never by a Worker for its own home (`migration_refused`). `POSSE_FORCE_MIGRATION=1` overrides every check but the Worker rule, for the User.
 7. Mark migrations that cannot run with live Tasks with `-- posse: requires-no-live-tasks` in the SQL migration. The downloaded binary preflights those migrations before replacement; `posse update` refuses until no Task is live, or until `--force`, saying why. The migration gate enforces the same rule on first open.
+
+`posse update` refuses with `lookouts_running` while any `posse lookout` for this `POSSE_HOME` is alive, including `--poll-only` Lookout tabs and Lead watchers. The error lists each PID, Project and kind. `--check` reports the same process list without stopping anything. `--stop-lookouts` sends SIGTERM, waits five seconds, then sends SIGKILL to remaining processes before replacing the binary; the result lists what stopped and who restarts it. The Lookout tab owner recreates its process on its next tick, a Claude Lead restarts its background lookout on its next wake, and the Pi/OpenCode Lead extension restarts its watcher automatically. A Lead-side lookout stopped by an update returns `state=stopped` and `reason=update` with restart guidance. Discovery uses `/proc` on Linux and `ps` on macOS.
 
 **Update notice.** posse checks for a newer release at most once a day, cached and silent when offline. `posse` and `posse doctor` then show `update{current,latest}` with `posse update` in `help[]`, and the Lead tells the User once per new version through an `update_available` Notice. Interactive `posse up` also offers the newer release before registering a Project or starting a Lead, defaulting to No. Explicit consent verifies and installs it, then re-executes `up` with the original arguments and environment. `--yes` does not consent to updating; offline, non-interactive and declined offers continue without updating. Lead and Rider turns cannot install an update; a separate User shell pane can.
 
@@ -684,7 +686,7 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse setup [--check [--exit-code]\|--uninstall] [--human]` | User | section 18 |
 | `posse _context` | SessionStart hook | section 18 |
 | `posse _guard` | PreToolUse hook, pi extension | refuse a Worker's `herdr` changes to its own session (section 13) |
-| `posse update [--check] [--version v]` | User | section 19 |
+| `posse update [--check] [--version v] [--force] [--stop-lookouts]` | User | section 19 |
 | `posse doctor` | User | check Herdr protocol, plugin, DB, config, `gh`, `glab` authentication for each GitLab host, `no-mistakes` |
 | `posse _ingest` | Herdr | section 8 |
 
