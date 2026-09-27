@@ -159,8 +159,8 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	gitTest(t, fixture.env, extra, "add", "other-main-work.txt")
 	gitTest(t, fixture.env, extra, "commit", "-m", "other Task on main")
 	gitTest(t, fixture.env, extra, "push", "origin", "HEAD:refs/heads/main")
-	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "origin", "main")
-	gitTest(t, fixture.env, landing.WorktreePath, "merge", "--no-edit", "origin/main")
+	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "--no-write-fetch-head", "origin", "main:refs/remotes/origin/posse-test-main")
+	gitTest(t, fixture.env, landing.WorktreePath, "merge", "--no-edit", "refs/remotes/origin/posse-test-main")
 	movedTip := strings.TrimSpace(gitTest(t, fixture.env, landing.WorktreePath, "rev-parse", "HEAD"))
 	if movedTip == landing.GatedSHA {
 		t.Fatal("follow-up did not move the Task branch tip")

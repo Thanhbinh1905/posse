@@ -167,7 +167,7 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 			}
 			ref, remote := mountDefaultRef(ctx, projectRepoTarget(project))
 			if remote {
-				if _, err := gitOutput(ctx, project.Root, "fetch", "origin"); err != nil {
+				if _, err := gitFetch(ctx, project.Root, "origin"); err != nil {
 					return mount, err
 				}
 				ref = "refs/remotes/origin/" + project.DefaultBranch
@@ -222,7 +222,7 @@ func resetMount(ctx context.Context, path string, project store.Project, clean s
 func resetWorktree(ctx context.Context, path string, target repoTarget, clean string, fetch bool) error {
 	ref, remote := mountDefaultRef(ctx, target)
 	if remote && fetch {
-		if _, err := gitOutput(ctx, target.Root, "fetch", "origin"); err != nil {
+		if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
 			return err
 		}
 	}
