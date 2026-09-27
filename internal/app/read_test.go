@@ -64,12 +64,12 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 	if code := cli.Run([]string{"--full"}); code != 0 {
 		t.Fatalf("home failed: code=%d output=%s", code, output.String())
 	}
-	for _, expected := range []string{"project{name,mode,autonomy,lead}:", "shop,local,\"review=ask land=ask\",working", "Run `posse show ready-to-land`", "Run `posse land ready-to-land`", "Run `posse ack 1`"} {
+	for _, expected := range []string{"project{name,mode,autonomy,lead}:", "shop,local,\"review=ask land=ask\",working", "Run `posse show t5`", "Run `posse land t5`", "Run `posse ack 1`"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Errorf("home output missing %q:\n%s", expected, output.String())
 		}
 	}
-	if strings.Contains(output.String(), "open_tasks") || strings.Contains(output.String(), "open_notices") || strings.Contains(output.String(), "t5") || !strings.Contains(output.String(), "ready-to-land") {
+	if strings.Contains(output.String(), "open_tasks") || strings.Contains(output.String(), "open_notices") || !strings.Contains(output.String(), "t5") || !strings.Contains(output.String(), "ready-to-land") {
 		t.Fatalf("home output included roster fields, omitted the Task name, or used a hardcoded Task id: %s", output.String())
 	}
 	output.Reset()
@@ -79,7 +79,7 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 	var roster struct {
 		Tasks []map[string]any `json:"tasks"`
 	}
-	if err := json.Unmarshal(output.Bytes(), &roster); err != nil || len(roster.Tasks) != 1 || roster.Tasks[0]["id"] != "ready-to-land" {
+	if err := json.Unmarshal(output.Bytes(), &roster); err != nil || len(roster.Tasks) != 1 || roster.Tasks[0]["id"] != "t5" || roster.Tasks[0]["name"] != "ready-to-land" {
 		t.Fatalf("roster omitted the Task name: err=%v output=%s rows=%#v", err, output.String(), roster.Tasks)
 	}
 	output.Reset()
@@ -87,7 +87,7 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 		t.Fatalf("full roster exposed legacy branch: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"--json", "show", "ready-to-land"}); code != 0 || strings.Contains(output.String(), `"id":"t5"`) || !strings.Contains(output.String(), `"id":"ready-to-land"`) {
+	if code := cli.Run([]string{"--json", "show", "ready-to-land"}); code != 0 || !strings.Contains(output.String(), `"id":"t5"`) || !strings.Contains(output.String(), `"name":"ready-to-land"`) {
 		t.Fatalf("show by visible Rider name failed: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
