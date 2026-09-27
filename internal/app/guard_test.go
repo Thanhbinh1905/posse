@@ -84,6 +84,30 @@ func TestGuardAllowsReadsAndIsolatedHerdrServers(t *testing.T) {
 	}
 }
 
+func TestGuardEnvUnsetsAndCleanEnvironmentReachSameSocket(t *testing.T) {
+	for _, tc := range []struct {
+		name, configHome string
+		blocked          bool
+	}{
+		{"default socket", "/home/u/.config", true},
+		{"isolated socket", "/tmp/posse-e2e-x/xdg", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			commands := []string{
+				"env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=" + tc.configHome + " herdr workspace close w1",
+				"env -i HOME=/home/u XDG_CONFIG_HOME=" + tc.configHome + " PATH=/usr/bin herdr workspace close w1",
+				"R=$(mktemp -d); env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=" + tc.configHome + " POSSE_HOME=$R/posse HOME=$R/home herdr workspace close w1",
+			}
+			for _, command := range commands {
+				blocked, reason := guardHerdrCommand(command, guardEnv)
+				if blocked != tc.blocked {
+					t.Errorf("guard %q blocked=%v, want %v: %#v", command, blocked, tc.blocked, reason)
+				}
+			}
+		})
+	}
+}
+
 func TestGuardConservativeAcrossBranchesAndRuntimeFiles(t *testing.T) {
 	for _, command := range []string{
 		"if false; then export HERDR_SOCKET_PATH=/tmp/iso.sock; fi; herdr workspace close w1 --group",

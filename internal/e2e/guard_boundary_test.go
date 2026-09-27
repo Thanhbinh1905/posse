@@ -88,7 +88,11 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"default make recipe", fmt.Sprintf("printf 'all:\\n\\therdr workspace rename %s forbidden\\n' > ./Makefile && make", id), true},
 		{"generated executable", fmt.Sprintf("printf '#!/bin/sh\\nherdr workspace rename %s forbidden\\n' > ./generated && chmod +x ./generated && ./generated", id), true},
 		{"renamed posse build", foreignBinary + " config set defaults.max_workers 9", true},
+		{"default socket via unsets", fmt.Sprintf("env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s herdr workspace rename %s forbidden", filepath.Join(root, "xdg"), id), true},
+		{"default socket via clean environment", fmt.Sprintf("env -i HOME=%s XDG_CONFIG_HOME=%s PATH=%s herdr workspace rename %s forbidden", filepath.Join(root, "home"), filepath.Join(root, "xdg"), os.Getenv("PATH"), id), true},
 		{"isolated experiment", fmt.Sprintf("env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s POSSE_HOME=%s herdr workspace rename %s harmless", filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), otherWorkspace.Workspace.WorkspaceID), false},
+		{"isolated dynamic posse home", fmt.Sprintf("R=$(printf %%s %s); env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s POSSE_HOME=$R/posse herdr workspace rename %s harmless", otherRoot, filepath.Join(otherRoot, "xdg"), otherWorkspace.Workspace.WorkspaceID), false},
+		{"isolated clean environment", fmt.Sprintf("env -i HOME=%s XDG_CONFIG_HOME=%s POSSE_HOME=%s PATH=%s herdr workspace rename %s harmless", filepath.Join(otherRoot, "home"), filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), os.Getenv("PATH"), otherWorkspace.Workspace.WorkspaceID), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,6 +105,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			blocked := err != nil && guard.ProcessState.ExitCode() == 2
 			if blocked != tc.blocked {
 				t.Errorf("guard blocked=%v, want %v: %v %s", blocked, tc.blocked, err, output)
+			}
+			if tc.blocked && strings.HasPrefix(tc.name, "default socket") && (!strings.Contains(string(output), "default socket reaches the User's Herdr server") || !strings.Contains(string(output), "unset every HERDR_* variable and point XDG_CONFIG_HOME and POSSE_HOME at a temp dir")) {
+				t.Errorf("refusal omitted the default-socket reason or isolation recipe: %s", output)
 			}
 			if !blocked {
 				shell := exec.Command("bash", "-c", tc.command)
