@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -158,7 +160,7 @@ func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project s
 		}
 		return nil
 	}
-	if !strings.HasPrefix(intent.Step, "done:agent.prompt") && !strings.HasPrefix(intent.Step, "done:task.working") && pane.AgentStatus != "working" {
+	if !strings.HasPrefix(intent.Step, "done:agent.prompt") && !strings.HasPrefix(intent.Step, "done:task.working") && pane.AgentStatus != "working" && taskKind(cfg, task) != "codex" && taskKind(cfg, task) != "opencode" {
 		home, err := s.homePath()
 		if err != nil {
 			return err
@@ -171,6 +173,10 @@ func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project s
 			return nil
 		}
 		if err := s.deliverLaunchPrompt(ctx, pane.PaneID, "Read "+launchPath+" and follow it."); err != nil {
+			var focused *axi.Error
+			if errors.As(err, &focused) && focused.Code == "pane_focused" {
+				return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+			}
 			if failErr := s.failSpawn(ctx, db, project, task.ID, task.Title, "interrupted ride could not resume its Rider: "+err.Error()); failErr != nil {
 				return failErr
 			}
