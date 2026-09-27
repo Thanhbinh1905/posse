@@ -1075,7 +1075,7 @@ func pullRequestDisplay(ctx context.Context, db *store.DB, task store.Task) (map
 	if len(checks.Failures) > 0 {
 		checkLabel = "failed: " + failedCheckNames(checks.Failures)
 	}
-	updated := time.UnixMilli(observation.ObservedAt).UTC().Format(time.RFC3339)
+	updated := time.UnixMilli(observation.ObservedAt).Local().Format(time.RFC3339)
 	return map[string]any{
 		"url": observation.PRURL, "state": observation.State, "checks": checkLabel,
 		"review":    defaultValue(strings.ToLower(observation.Review), "unknown"),

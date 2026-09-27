@@ -1400,19 +1400,37 @@ func projectFromDB(row dbgen.Project) Project {
 	return Project{ID: row.ID, Name: row.Name, Root: row.Root, DefaultBranch: row.DefaultBranch, Kind: row.Kind, HerdrWorkspaceID: row.HerdrWorkspaceID, LeadPaneID: row.LeadPaneID, LeadLabel: row.LeadLabel, LeadLaunches: int(row.LeadLaunches), LeadAbsentSince: row.LeadAbsentSince, Status: row.Status, CreatedAt: row.CreatedAt, LastActivityAt: row.LastActivityAt}
 }
 
+type AmbiguousTaskName struct {
+	Name string
+	IDs  []string
+}
+
+func (e *AmbiguousTaskName) Error() string { return fmt.Sprintf("Task name %q is ambiguous", e.Name) }
+
 func (db *DB) Task(ctx context.Context, projectID int64, identifier string) (Task, error) {
 	row, err := db.queries.Task(ctx, dbgen.TaskParams{ProjectID: projectID, Identifier: identifier})
 	if errors.Is(err, sql.ErrNoRows) {
-		var count int
-		var seq sql.NullInt64
-		if lookupErr := db.QueryRowContext(ctx, `SELECT COUNT(*), MAX(seq) FROM tasks WHERE project_id=? AND (short_name=? OR (short_name='' AND title=?))`, projectID, identifier, identifier).Scan(&count, &seq); lookupErr != nil {
+		rows, lookupErr := db.QueryContext(ctx, `SELECT seq FROM tasks WHERE project_id=? AND (short_name=? OR (short_name='' AND title=?)) ORDER BY seq`, projectID, identifier, identifier)
+		if lookupErr != nil {
 			return Task{}, lookupErr
 		}
-		if count > 1 {
-			return Task{}, fmt.Errorf("Task name %q is ambiguous; use its internal id", identifier)
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var seq int
+			if err := rows.Scan(&seq); err != nil {
+				return Task{}, err
+			}
+			ids = append(ids, fmt.Sprintf("t%d", seq))
 		}
-		if count == 1 {
-			return db.Task(ctx, projectID, fmt.Sprintf("t%d", seq.Int64))
+		if err := rows.Err(); err != nil {
+			return Task{}, err
+		}
+		if len(ids) > 1 {
+			return Task{}, &AmbiguousTaskName{Name: identifier, IDs: ids}
+		}
+		if len(ids) == 1 {
+			return db.Task(ctx, projectID, ids[0])
 		}
 	}
 	return taskFromDB(row), err

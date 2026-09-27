@@ -63,7 +63,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Leftover or closed-PR Decision.", Handler: s.applyDecision},
-		{Name: "dispatch", Usage: "$ dispatch --brief <file>", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
+		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--profile <name>]", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
 		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p] [--from-leftover <decision>]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
 		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note>", Summary: "Record a Rider's Signal.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] <summary>", Summary: "Push this PR-mode Ship Task's branch and open or reuse its pull request.", Handler: s.publish},
@@ -321,6 +321,14 @@ func hasHerdrAncestorAt(procRoot string, pid int) bool {
 
 func (s *Service) currentTask(ctx context.Context, db *store.DB, project store.Project, identifier string) (store.Task, error) {
 	task, err := db.Task(ctx, project.ID, identifier)
+	var ambiguous *store.AmbiguousTaskName
+	if errors.As(err, &ambiguous) {
+		help := make([]string, 0, len(ambiguous.IDs))
+		for _, id := range ambiguous.IDs {
+			help = append(help, "Run `posse show "+id+"` to inspect this Task")
+		}
+		return store.Task{}, axi.Failure("task_ambiguous", err.Error(), false, help...)
+	}
 	if store.IsNotFound(err) {
 		return store.Task{}, axi.Failure("task_unknown", fmt.Sprintf("unknown Task %q", identifier), false, "Run `posse roster` to list Tasks")
 	}
