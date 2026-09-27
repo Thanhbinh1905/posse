@@ -746,8 +746,20 @@ Each has an automated test.
 ## 22. Testing
 
 - **Unit**: config merge and validation, dispatch resolution, state machine, reconcile, stall rule, landing decisions, against an in-memory fake of the Herdr adapter.
-- **E2E**: an isolated Herdr server, a temp git repo with a bare remote, and a fake agent. Covers spawn to teardown for each Landing Mode, blocked, stall, Worker death, Herdr server restart and Lead replacement. The harness, verified against Herdr 0.9.0:
-  - Isolate Herdr by starting `herdr server` with `XDG_CONFIG_HOME` pointing at a test dir, with every inherited `HERDR_*` variable unset. `HOME`, `POSSE_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `PI_CODING_AGENT_DIR` point into the same dir. This separates the socket, `plugins.json` and session state from the User's live Herdr, so the test plugin never sees real panes. Keep that path short: the socket path must fit `sun_path` (about 108 bytes).
+- **E2E**: an isolated Herdr server, a temp git repo with a bare remote, and a fake agent. Covers spawn to teardown for each Landing Mode, blocked, stall, Worker death, Herdr server restart and Lead replacement. CI pins Herdr 0.9.1. On Linux, Riders can download the same release binary into a temporary tools directory, verify it, and make it executable before running the suite:
+  ```sh
+  tool_dir=$(mktemp -d /tmp/posse-e2e-tools.XXXXXX)
+  herdr="$tool_dir/herdr"
+  curl -fsSL \
+    https://github.com/herdrdev/herdr/releases/download/v0.9.1/herdr-linux-x86_64 \
+    -o "$herdr"
+  printf '%s  %s\n' \
+    2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7 \
+    "$herdr" | sha256sum --check
+  chmod 755 "$herdr"
+  export PATH="$tool_dir:$PATH"
+  ```
+  Downloading or copying the binary does not contact a Herdr server. Herdr commands are allowed only when their resolved socket differs from the User's session. To run the suite, isolate Herdr by starting `herdr server` with `XDG_CONFIG_HOME` pointing at a test dir, with every inherited `HERDR_*` variable unset. `HOME`, `POSSE_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `PI_CODING_AGENT_DIR` point into the same dir. This separates the socket, `plugins.json` and session state from the User's live Herdr, so the test plugin never sees real panes. Keep that path short: the socket path must fit `sun_path` (about 108 bytes).
   - In the test `config.toml`, set `[terminal] default_shell = "/bin/sh"` so panes keep the server's `PATH`, and point `[worktrees] directory` into the test dir.
   - The fake agent is an executable named after a known kind (for example `claude`) placed first on the server's `PATH`. `agent.start` launches it, and `agent.prompt` only accepts panes whose foreground process Herdr identifies as a known kind. It reports its own state with `herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle|working|blocked`, which fires the plugin's `pane.agent_status_changed` hook the same way a real agent does.
 - **Smoke**: manual runs with real `claude` and `codex` Workers before each release.
