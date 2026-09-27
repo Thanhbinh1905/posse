@@ -43,7 +43,11 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			request.Options = []string{"land", "wait"}
 		case (notice.Kind == "task_failed" || notice.Kind == "task_lost") && (task.State == store.StateFailed || task.State == store.StateLost):
 			request.Kind = "recovery"
-			request.Question = "Relaunch or discard " + task.Title + "? " + notice.Summary
+			reason, err := taskFailureReason(ctx, db, task)
+			if err != nil {
+				return err
+			}
+			request.Question = "Relaunch or discard " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? " + reason
 			request.Options = []string{"relaunch", "discard"}
 		case notice.Kind == "task_done" && task.Type == "review" && task.ReviewsTaskID != 0 && task.AutonomyReview != "lead":
 			request.Kind = "review"
@@ -118,7 +122,7 @@ func (s *Service) ask(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return axi.Usage(err.Error())
 	}
-	return ctx.Print(axi.Object{{Key: "decision", Value: decision}, {Key: "help", Value: []any{"Ask the User to choose an option; record their answer with `posse decide <decision> <option> --user-approved \"<User's words>\"`"}}})
+	return ctx.Print(axi.Object{{Key: "decision", Value: decisionOutput(ctx.Context, db, project.ID, decision)}, {Key: "help", Value: []any{"Ask the User to choose an option; record their answer with `posse decide <decision> <option> --user-approved \"<User's words>\"`"}}})
 }
 
 func (s *Service) decisions(ctx *axi.Context, args []string) error {
@@ -148,7 +152,21 @@ func (s *Service) decisions(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "decisions", Value: items}, {Key: "help", Value: []any{"Run `posse decide <decision> <option> --user-approved \"<User's words>\"` to answer a Decision"}}})
+	rows := make([]any, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, decisionOutput(ctx.Context, db, project.ID, item))
+	}
+	return ctx.Print(axi.Object{{Key: "decisions", Value: rows}, {Key: "help", Value: []any{"Run `posse decide <decision> <option> --user-approved \"<User's words>\"` to answer a Decision"}}})
+}
+
+func decisionOutput(ctx context.Context, db *store.DB, projectID int64, d store.Decision) map[string]any {
+	return map[string]any{
+		"id": d.ID, "project_id": d.ProjectID, "task_id": noticeTaskID(ctx, db, projectID, d.TaskID),
+		"origin": d.Origin, "question": d.Question, "options": d.Options,
+		"answer": d.Answer, "user_quote": d.UserQuote, "created_at": d.CreatedAt,
+		"answered_at": d.AnsweredAt, "kind": d.Kind, "task_launches": d.TaskLaunches,
+		"obsolete_at": d.ObsoleteAt, "obsolete_reason": d.ObsoleteReason,
+	}
 }
 
 func (s *Service) requireLeadOrUser(ctx context.Context, db *store.DB, project store.Project) error {
@@ -203,5 +221,5 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 	if err := s.deliverNotices(ctx.Context, db, project); err != nil && !isHerdrUnavailable(err) {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "decision", Value: decision}, {Key: "help", Value: []any{"The Lead will receive a Notice to carry out the chosen action"}}})
+	return ctx.Print(axi.Object{{Key: "decision", Value: decisionOutput(ctx.Context, db, project.ID, decision)}, {Key: "help", Value: []any{"The Lead will receive a Notice to carry out the chosen action"}}})
 }

@@ -157,7 +157,18 @@ func (s *Service) ingestProjects(ctx context.Context, db *store.DB, event plugin
 			if err != nil {
 				return nil, false, err
 			}
-			if len(notices) > 0 || messages {
+			tasks, err := db.Tasks(ctx, project.ID, true)
+			if err != nil {
+				return nil, false, err
+			}
+			launchPending := false
+			for _, task := range tasks {
+				if task.State == store.StateSpawning && task.PaneID != "" {
+					launchPending = true
+					break
+				}
+			}
+			if len(notices) > 0 || messages || launchPending {
 				pending = append(pending, project)
 			}
 		}
@@ -434,7 +445,7 @@ func noticeIDs(notices []store.Notice) []int64 {
 func noticeRows(ctx context.Context, db *store.DB, notices []store.Notice) []noticeSummary {
 	rows := make([]noticeSummary, 0, len(notices))
 	for _, notice := range notices {
-		rows = append(rows, noticeSummary{ID: notice.ID, Task: noticeTaskTitle(ctx, db, notice.ProjectID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
+		rows = append(rows, noticeSummary{ID: notice.ID, Task: noticeTaskID(ctx, db, notice.ProjectID, notice.TaskID), Name: noticeTaskName(ctx, db, notice.ProjectID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
 	}
 	return rows
 }

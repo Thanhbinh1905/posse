@@ -1,8 +1,11 @@
 package app
 
 import (
+	"bufio"
 	"context"
+	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -16,6 +19,64 @@ func TestLookoutProcessListingMatchesPaneAndPosseHome(t *testing.T) {
 	}
 	if lookoutProcessInListing(listing, "w1:p9", "/tmp/shop") {
 		t.Fatal("mixed separate Lookout homes")
+	}
+}
+
+func TestLookoutProcessListingRecognizesLeadWatchersAndDefaultHome(t *testing.T) {
+	listing := "21 /nix/store/posse/bin/posse lookout --json --quiet-routine HERDR_PANE_ID=w1:p1 POSSE_HOME=/tmp/shop HOME=/tmp PWD=/tmp/shop\n" +
+		"22 /usr/local/bin/posse lookout --ack 9 HOME=/home/user POSSE_HOME=/home/user/.posse PWD=/repo\n" +
+		"23 /usr/local/bin/other lookout --poll-only POSSE_HOME=/tmp/shop HOME=/tmp\n"
+	processes := lookoutProcessesInListing(listing, "/tmp/shop")
+	if len(processes) != 1 {
+		t.Fatalf("found %d lookouts, want only the matching-home Posse process: %#v", len(processes), processes)
+	}
+	if processes[0].PID != 21 || processes[0].Kind != "lead" || !processes[0].QuietRoutine || processes[0].PaneID != "w1:p1" {
+		t.Fatalf("Lead watcher = %#v", processes[0])
+	}
+	if got := processHome(map[string]string{"HOME": "/home/user"}); got != "/home/user/.posse" {
+		t.Fatalf("default process home = %q", got)
+	}
+	defaultHome := lookoutProcessesInListing("24 /usr/local/bin/posse lookout HOME=/home/user PWD=/repo\n", "/home/user/.posse")
+	if len(defaultHome) != 1 || defaultHome[0].Kind != "lead" {
+		t.Fatalf("default-home Lead watcher = %#v", defaultHome)
+	}
+}
+
+func TestLookoutProjectDiscoveryMatchesNestedWorkingDirectory(t *testing.T) {
+	project := store.Project{Name: "shop", Root: "/workspace/shop", LeadPaneID: "w1:p1"}
+	if !processBelongsToProject(lookoutProcess{WorkingDir: "/workspace/shop/tools"}, project) {
+		t.Fatal("lookout from a Project subdirectory was not matched")
+	}
+	if processBelongsToProject(lookoutProcess{WorkingDir: "/workspace/shopping"}, project) {
+		t.Fatal("lookout from a sibling path was matched")
+	}
+}
+
+func TestStopLookoutsEscalatesToSIGKILL(t *testing.T) {
+	previousGracePeriod := lookoutStopGracePeriod
+	lookoutStopGracePeriod = 50 * time.Millisecond
+	t.Cleanup(func() { lookoutStopGracePeriod = previousGracePeriod })
+	command := exec.Command("/bin/sh", "-c", "trap '' TERM; printf 'ready\\n'; while :; do :; done")
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || line != "ready\n" {
+		t.Fatalf("SIGTERM-ignoring process readiness = %q, %v", line, err)
+	}
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	})
+	processes, err := stopLookoutProcesses(context.Background(), t.TempDir(), []lookoutProcess{{PID: command.Process.Pid, Project: "shop", Kind: "lead"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processes) != 1 || !processes[0].ForceKilled || lookoutPIDRunning(command.Process.Pid) {
+		t.Fatalf("SIGTERM-ignoring process was not killed: %#v", processes)
 	}
 }
 
