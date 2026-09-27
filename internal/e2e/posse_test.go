@@ -1482,18 +1482,28 @@ func assertWorkerSleepsStopped(t *testing.T, pidFile string) {
 
 func gitTest(t *testing.T, env []string, cwd string, args ...string) string {
 	t.Helper()
-	output, err := gitCommand(env, cwd, args...)
+	stdout, stderr, err := gitCommandOutput(env, cwd, args...)
 	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+		t.Fatalf("git %s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout, stderr)
 	}
-	return output
+	return stdout
 }
 
 func gitCommand(env []string, cwd string, args ...string) (string, error) {
+	stdout, stderr, err := gitCommandOutput(env, cwd, args...)
+	if err != nil {
+		return stdout + stderr, err
+	}
+	return stdout, nil
+}
+
+func gitCommandOutput(env []string, cwd string, args ...string) (string, string, error) {
 	command := exec.Command("git", append([]string{"-C", cwd}, args...)...)
 	command.Env = env
-	output, err := command.CombinedOutput()
-	return string(output), err
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 func waitForCondition(timeout time.Duration, condition func() bool) bool {

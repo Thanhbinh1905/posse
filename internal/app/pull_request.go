@@ -89,6 +89,16 @@ type checkSnapshot struct {
 	Failures []failedCheck `json:"failures"`
 }
 
+const (
+	openPullRequestHeadAttempts = 8
+	openPullRequestHeadDelay    = 250 * time.Millisecond
+)
+
+func createPROpenedNotice(ctx context.Context, db *store.DB, project store.Project, task store.Task, prURL, head, summary string) error {
+	_, err := db.CreatePROpenedNoticeOnce(ctx, project.ID, task.ID, summary, prURL, head)
+	return err
+}
+
 func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merge bool, userQuote string) (returnErr error) {
 	ctx := out.Context
 	if task.PRURL != "" {
@@ -224,19 +234,19 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return axi.Failure("pr_push_failed", "could not push the gated Task branch", true, err.Error())
 				}
 			}
-			prCreated := workerPR
+			openedURL := ""
 			if task.PRURL == "" {
 				openIntent, err = s.startTaskIntent(ctx, db, project.ID, task.ID, "land --open-pr")
 				if err != nil {
 					return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 				}
 				openIntentActive = true
-				prURL, created, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge)
+				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge)
 				if openErr != nil {
 					return openErr
 				}
 				task.PRURL = prURL
-				prCreated = created
+				openedURL = prURL
 				if _, err := forgeReference(prURL, forge); err != nil {
 					return axi.Failure("pr_create_failed", "forge returned an invalid pull request URL", false, err.Error())
 				}
@@ -247,8 +257,8 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 			if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "Pull request is open for review"); err != nil {
 				return err
 			}
-			if prCreated {
-				if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_opened", Summary: task.Title + ": pull request opened", DataJSON: marshalJSON(map[string]any{"url": task.PRURL, "head_sha": task.GatedSHA})}); err != nil {
+			if openedURL != "" {
+				if err := createPROpenedNotice(ctx, db, project, task, openedURL, task.GatedSHA, task.Title+": pull request opened"); err != nil {
 					return err
 				}
 			}
@@ -278,19 +288,43 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, summary...)
 	}
 	args := []string{"pr", "list", "--state", "open", "--base", project.DefaultBranch, "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
-	output, err := runOutputStep(ctx, db, intent, "pr.lookup", project.Root, "gh", args...)
-	if err != nil {
-		return "", false, axi.Failure("pr_list_failed", "could not find an existing open pull request for the Task branch", true, truncate(err.Error(), 1200))
-	}
-	urlValue, found, err := openPullRequestForBranch(output, task.Branch, task.GatedSHA)
-	if err != nil {
-		return "", false, axi.Failure("pr_list_failed", "gh pr list returned invalid pull request data", true, err.Error())
-	}
-	if found {
-		if err := validatePullRequestOrigin(ctx, project.Root, urlValue); err != nil {
-			return "", false, err
+	var urlValue, lastHead string
+	foundOpenPR := false
+	for attempt := 0; attempt < openPullRequestHeadAttempts; attempt++ {
+		output, err := runOutputStep(ctx, db, intent, "pr.lookup", project.Root, "gh", args...)
+		if err != nil {
+			return "", false, axi.Failure("pr_list_failed", "could not find an existing open pull request for the Task branch", true, truncate(err.Error(), 1200))
 		}
-		return urlValue, false, nil
+		candidateURL, candidateHead, found, err := openPullRequestForBranch(output, task.Branch)
+		if err != nil {
+			return "", false, axi.Failure("pr_list_failed", "gh pr list returned invalid pull request data", true, err.Error())
+		}
+		if !found {
+			if !foundOpenPR {
+				break
+			}
+		} else {
+			foundOpenPR = true
+			urlValue, lastHead = candidateURL, candidateHead
+			if candidateHead == task.GatedSHA {
+				if err := validatePullRequestOrigin(ctx, project.Root, urlValue); err != nil {
+					return "", false, err
+				}
+				return urlValue, false, nil
+			}
+		}
+		if attempt+1 < openPullRequestHeadAttempts {
+			timer := time.NewTimer(openPullRequestHeadDelay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return "", false, ctx.Err()
+			}
+		}
+	}
+	if foundOpenPR {
+		return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
 	}
 	title, body, err := prDetails(ctx, db, project, task, s.homePath, summary...)
 	if err != nil {
@@ -310,36 +344,33 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	return urlValue, true, nil
 }
 
-func openPullRequestForBranch(output, branch, gatedSHA string) (string, bool, error) {
+func openPullRequestForBranch(output, branch string) (string, string, bool, error) {
 	var pullRequests []struct {
 		URL         string `json:"url"`
 		HeadRefName string `json:"headRefName"`
 		HeadRefOID  string `json:"headRefOid"`
 	}
 	if err := json.Unmarshal([]byte(output), &pullRequests); err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	for _, pull := range pullRequests {
 		if pull.HeadRefName != branch {
 			continue
 		}
-		if pull.HeadRefOID != gatedSHA {
-			return "", false, axi.Failure("branch_moved", "an open pull request for the Task branch has a different head", false, "Re-run `posse land` to verify the gated branch tip")
-		}
 		if _, err := pullRequestReferenceFromURL(pull.URL); err != nil {
-			return "", false, err
+			return "", "", false, err
 		}
-		return pull.URL, true, nil
+		return pull.URL, pull.HeadRefOID, true, nil
 	}
-	return "", false, nil
+	return "", "", false, nil
+}
+
+func pullRequestHeadMismatch(actual, expected string) error {
+	return axi.Failure("branch_moved", fmt.Sprintf("open pull request for the Task branch has head %s; expected %s", actual, expected), false, "Re-run `posse land` to verify the Task branch tip")
 }
 
 func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
 	if err := validatePullRequestOrigin(ctx, project.Root, task.PRURL); err != nil {
-		return err
-	}
-	hasOpenedNotice, err := db.HasNotice(ctx, project.ID, task.ID, "pr_opened")
-	if err != nil {
 		return err
 	}
 	if task.Branch == "" || task.WorktreePath == "" {
@@ -358,10 +389,7 @@ func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, proj
 	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "no-mistakes delivered the pull request"); err != nil {
 		return err
 	}
-	if !hasOpenedNotice {
-		_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_opened", Summary: task.Title + ": no-mistakes pull request is ready for review", DataJSON: marshalJSON(map[string]any{"url": task.PRURL, "head_sha": gatedSHA})})
-	}
-	return err
+	return createPROpenedNotice(ctx, db, project, task, task.PRURL, gatedSHA, task.Title+": no-mistakes pull request is ready for review")
 }
 
 func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, userQuote string) (returnErr error) {

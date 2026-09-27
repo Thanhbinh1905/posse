@@ -124,6 +124,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		if err := db.RecordVerifiedPRHead(out.Context, task.ID, prURL, sha); err != nil {
 			return err
 		}
+		if err := createPROpenedNotice(out.Context, db, project, task, prURL, sha, task.Title+": pull request opened"); err != nil {
+			return err
+		}
 	}
 	help := "Run `posse holler done \"<summary>\" --pr " + prURL + "` after committing and ensuring a clean worktree"
 	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "pr_url", Value: prURL}}

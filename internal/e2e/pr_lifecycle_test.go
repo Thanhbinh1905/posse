@@ -159,8 +159,8 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	gitTest(t, fixture.env, extra, "add", "other-main-work.txt")
 	gitTest(t, fixture.env, extra, "commit", "-m", "other Task on main")
 	gitTest(t, fixture.env, extra, "push", "origin", "HEAD:refs/heads/main")
-	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "origin", "main")
-	gitTest(t, fixture.env, landing.WorktreePath, "merge", "--no-edit", "origin/main")
+	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "--no-write-fetch-head", "origin", "main:refs/remotes/origin/posse-test-main")
+	gitTest(t, fixture.env, landing.WorktreePath, "merge", "--no-edit", "refs/remotes/origin/posse-test-main")
 	movedTip := strings.TrimSpace(gitTest(t, fixture.env, landing.WorktreePath, "rev-parse", "HEAD"))
 	if movedTip == landing.GatedSHA {
 		t.Fatal("follow-up did not move the Task branch tip")
@@ -497,6 +497,144 @@ func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 	}
 }
 
+func TestLandReadyBeforeMergeDoesNotRaiseLatePROpened(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "ready-before-merge.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise the order of PR lifecycle Notices.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.rideAndComplete(t, brief, "t1")
+	head := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", head)
+	if !waitForCondition(30*time.Second, func() bool {
+		notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+		if err != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.TaskID == task.ID && notice.Kind == "land_ready" {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("PR watcher did not raise land_ready")
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge", "--user-approved", "User approved the pull request")
+
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened, ready []store.Notice
+	for _, notice := range notices {
+		if notice.TaskID != task.ID {
+			continue
+		}
+		switch notice.Kind {
+		case "pr_opened":
+			opened = append(opened, notice)
+		case "land_ready":
+			ready = append(ready, notice)
+		}
+	}
+	if len(opened) != 1 || len(ready) != 1 {
+		t.Fatalf("expected one pr_opened and one land_ready Notice, got opened=%#v ready=%#v", opened, ready)
+	}
+	if opened[0].ID >= ready[0].ID {
+		t.Fatalf("pr_opened was raised after land_ready: opened=%#v ready=%#v", opened[0], ready[0])
+	}
+	var openedData struct {
+		URL  string `json:"url"`
+		Head string `json:"head_sha"`
+	}
+	if err := json.Unmarshal([]byte(opened[0].DataJSON), &openedData); err != nil {
+		t.Fatal(err)
+	}
+	if openedData.URL != task.PRURL || openedData.Head != head {
+		t.Fatalf("pr_opened does not identify the observed PR head: %#v", openedData)
+	}
+}
+
+func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "publish-follow-up.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nExercise a stale PR head immediately after a push.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.rideAndComplete(t, brief, "t1")
+	oldHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Add the publish consistency follow-up.")
+	if !waitForCondition(30*time.Second, func() bool {
+		current := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+		return current != oldHead
+	}) {
+		t.Fatal("follow-up Worker did not commit a new Task head")
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head"), []byte(oldHead), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head-remaining"), []byte("4"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.fixGate, "t1"), []byte("continue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finished := waitForCondition(30*time.Second, func() bool {
+		if fixture.mustTask(t, "t1").State == store.StateDone {
+			return true
+		}
+		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
+		return strings.Contains(string(log), "branch_moved") || strings.Contains(string(log), "pr_list_failed")
+	})
+	if !finished {
+		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
+		t.Fatalf("Worker did not finish or report publish failure: %s", log)
+	}
+	if current := fixture.mustTask(t, "t1"); current.State != store.StateDone {
+		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
+		t.Fatalf("publish rejected the temporarily stale PR head: task=%#v Worker delivery=%s", current, log)
+	}
+	if remaining, err := os.ReadFile(filepath.Join(fixture.root, "gh-list-stale-head-remaining")); err != nil || strings.TrimSpace(string(remaining)) != "0" {
+		t.Fatalf("fake forge did not serve four stale reads before the current head: remaining=%q err=%v", remaining, err)
+	}
+	newHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	remoteHead := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/"+task.Branch))
+	if newHead == oldHead || remoteHead != newHead {
+		t.Fatalf("publish did not push the new Task head: local=%s old=%s remote=%s", newHead, oldHead, remoteHead)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openedHeads := map[string]int{}
+	for _, notice := range notices {
+		if notice.TaskID != task.ID || notice.Kind != "pr_opened" {
+			continue
+		}
+		var data struct {
+			Head string `json:"head_sha"`
+		}
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		openedHeads[data.Head]++
+	}
+	if len(openedHeads) != 2 || openedHeads[oldHead] != 1 || openedHeads[newHead] != 1 {
+		t.Fatalf("expected one pr_opened Notice per published head, got %#v", openedHeads)
+	}
+	calls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "pr list") < 6 {
+		t.Fatalf("publish did not re-read four stale PR heads before the update: %s", calls)
+	}
+}
+
 func TestPRCreateCrashRecoveryAdoptsOpenPullRequest(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	brief := filepath.Join(fixture.root, "crash-ship.md")
@@ -673,7 +811,17 @@ case "$1 $2" in
   "pr list")
     case " $* " in *' --head posse/pr-lifecycle-change '*) branch=posse/pr-lifecycle-change; number=17 ;; *' --head posse/pr-follow-up '*) branch=posse/pr-follow-up; number=17 ;; *' --head posse/pr-create-recovery '*) branch=posse/pr-create-recovery; number=17 ;; *' --head posse/external-merge-change '*) branch=posse/external-merge-change; number=18 ;; *) exit 90 ;; esac
     if grep -q "/pull/$number" "$POSSE_TEST_GH_OPEN_PRS"; then
-      head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
+      if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ] && [ -f "$POSSE_TEST_ROOT/gh-list-stale-head-remaining" ]; then
+        remaining=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head-remaining")
+        if [ "$remaining" -gt 0 ]; then
+          head=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head")
+          printf '%s\n' "$((remaining - 1))" > "$POSSE_TEST_ROOT/gh-list-stale-head-remaining"
+        else
+          head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
+        fi
+      else
+        head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
+      fi
       printf '[{"url":"https://github.com/acme/shop/pull/%s","headRefName":"%s","headRefOid":"%s"}]\n' "$number" "$branch" "$head"
     else
       printf '[]\n'
