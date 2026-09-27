@@ -303,6 +303,13 @@ func TestGitLabClosedAndChangedHead(t *testing.T) {
 
 func TestGitLabDoctorChecksHostAuthentication(t *testing.T) {
 	f := gitlabFixture(t)
+	// Keep this fixture outside the configured temp directory so doctor treats
+	// the Project as a live checkout and reaches the forge authentication check.
+	tempDir := filepath.Join(f.root, "other-temp")
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempDir)
 	code, output, stderr := f.run("doctor")
 	if code != 0 || !strings.Contains(output, "glab auth git.example.com") || !strings.Contains(output, "authenticated") {
 		t.Fatalf("doctor: %d %s %s", code, output, stderr)

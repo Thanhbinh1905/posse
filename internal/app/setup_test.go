@@ -397,7 +397,7 @@ func TestDoctorIsCompactAndOnlyChecksConfiguredAgentKinds(t *testing.T) {
 	}
 	var sawAvailable bool
 	for _, row := range compact.Checks {
-		if len(row) != 3 || row["check"] == "" || !oneOfString(row["status"], "ok", "warn", "fail") {
+		if len(row) != 3 || row["check"] == "" || !oneOfString(row["status"], "ok", "info", "warn", "fail") {
 			t.Fatalf("doctor check row does not match check,status,detail: %#v", row)
 		}
 		if strings.HasPrefix(row["check"], "agent integration cursor") || strings.HasPrefix(row["check"], "agent integration opencode") {
