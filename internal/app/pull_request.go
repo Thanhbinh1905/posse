@@ -90,8 +90,8 @@ type checkSnapshot struct {
 }
 
 const (
-	openPullRequestHeadAttempts = 4
-	openPullRequestHeadDelay    = 200 * time.Millisecond
+	openPullRequestHeadAttempts = 8
+	openPullRequestHeadDelay    = 250 * time.Millisecond
 )
 
 func createPROpenedNotice(ctx context.Context, db *store.DB, project store.Project, task store.Task, prURL, head, summary string) error {

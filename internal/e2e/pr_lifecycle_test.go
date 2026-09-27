@@ -577,6 +577,9 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head"), []byte(oldHead), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head-remaining"), []byte("4"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(fixture.fixGate, "t1"), []byte("continue\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -595,8 +598,8 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
 		t.Fatalf("publish rejected the temporarily stale PR head: task=%#v Worker delivery=%s", current, log)
 	}
-	if _, err := os.Stat(filepath.Join(fixture.root, "gh-list-stale-head-used")); err != nil {
-		t.Fatalf("fake forge did not serve its one-read stale head: %v", err)
+	if remaining, err := os.ReadFile(filepath.Join(fixture.root, "gh-list-stale-head-remaining")); err != nil || strings.TrimSpace(string(remaining)) != "0" {
+		t.Fatalf("fake forge did not serve four stale reads before the current head: remaining=%q err=%v", remaining, err)
 	}
 	newHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
 	remoteHead := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/"+task.Branch))
@@ -627,8 +630,8 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(calls), "pr list") < 3 {
-		t.Fatalf("publish did not re-read the stale PR head: %s", calls)
+	if strings.Count(string(calls), "pr list") < 6 {
+		t.Fatalf("publish did not re-read four stale PR heads before the update: %s", calls)
 	}
 }
 
@@ -808,9 +811,14 @@ case "$1 $2" in
   "pr list")
     case " $* " in *' --head posse/pr-lifecycle-change '*) branch=posse/pr-lifecycle-change; number=17 ;; *' --head posse/pr-follow-up '*) branch=posse/pr-follow-up; number=17 ;; *' --head posse/pr-create-recovery '*) branch=posse/pr-create-recovery; number=17 ;; *' --head posse/external-merge-change '*) branch=posse/external-merge-change; number=18 ;; *) exit 90 ;; esac
     if grep -q "/pull/$number" "$POSSE_TEST_GH_OPEN_PRS"; then
-      if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ] && [ ! -e "$POSSE_TEST_ROOT/gh-list-stale-head-used" ]; then
-        head=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head")
-        : > "$POSSE_TEST_ROOT/gh-list-stale-head-used"
+      if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ] && [ -f "$POSSE_TEST_ROOT/gh-list-stale-head-remaining" ]; then
+        remaining=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head-remaining")
+        if [ "$remaining" -gt 0 ]; then
+          head=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head")
+          printf '%s\n' "$((remaining - 1))" > "$POSSE_TEST_ROOT/gh-list-stale-head-remaining"
+        else
+          head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
+        fi
       else
         head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
       fi
