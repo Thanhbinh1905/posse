@@ -40,6 +40,9 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 		addCheck("Herdr Agents sidebar layout", "warn", stateErr.Error(), "Repair the Herdr config and run `posse setup`")
 	} else if state == "keep" {
 		addCheck("Herdr Agents sidebar layout", "ok", "Posse layout present", "")
+	} else if state == "symlink" {
+		detail := "Herdr config is a symlink (managed elsewhere, e.g. Nix home-manager); add this snippet to its source:\n\n" + sidebarLayoutSnippet
+		addCheck("Herdr Agents sidebar layout", "warn", detail, "Add the snippet to the symlink target's source")
 	} else if state == "manual" {
 		addCheck("Herdr Agents sidebar layout", "warn", "custom Agents rows present", "Review the snippet from `posse setup --check` before editing Herdr config")
 	} else {

@@ -93,7 +93,7 @@ func (s *Service) commands() *axi.Command {
 			{Name: "set", Usage: "$ config set <key> <value> [--project <n>] [--user-approved <quote>]", Summary: "Set one validated config value; Lead needs a User quote for user-only keys.", Handler: s.configSet},
 			{Name: "unset", Usage: "$ config unset <key> [--project <n>] [--user-approved <quote>]", Summary: "Remove one config value; Lead needs a User quote for user-only keys.", Handler: s.configUnset},
 		}},
-		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
+		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-lookouts]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "setup", Summary: "Install or update the Herdr plugin, skills and hooks; optionally offer the Agents sidebar layout (--check previews; --exit-code returns 3 for required changes; --human prints a checklist).", Handler: s.setup},
 		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Riders after a Herdr restart or rebuild state from Task snapshots.", Handler: s.recover},
@@ -152,8 +152,11 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
 	}
 	result, err := run()
-	if err != nil || !result.GenerationMismatch {
+	if err != nil {
 		return result, err
+	}
+	if !result.GenerationMismatch {
+		return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 	}
 	current, err := s.snapshot(ctx)
 	if err != nil {
@@ -176,7 +179,10 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	if err == nil && result.GenerationMismatch {
 		return result, fmt.Errorf("project %s Herdr generation changed during recovery; retry reconcile", project.Name)
 	}
-	return result, err
+	if err != nil {
+		return result, err
+	}
+	return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 }
 
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {

@@ -83,12 +83,29 @@ func TestLookoutRestartsAfterProcessExit(t *testing.T) {
 // L2: Herdr restarts. Recovery restarts the Lead but must also restore the
 // Lookout tab, or nothing polls while the Lead is idle.
 func TestLookoutRestartsAfterHerdrRestart(t *testing.T) {
+	checkLookoutRestore(t, false)
+}
+
+func TestLookoutRestartsWithoutRecordedGeneration(t *testing.T) {
+	checkLookoutRestore(t, true)
+}
+
+func checkLookoutRestore(t *testing.T, clearGeneration bool) {
+	t.Helper()
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
 	if len(lookoutPanes(t, client)) != 1 {
 		t.Fatal("Lookout tab missing before restart")
 	}
+	if clearGeneration {
+		// The Lookout's first tick might not have recorded the server generation
+		// before Herdr exits. Pin that race rather than rely on its timing.
+		if _, err := f.db.ExecContext(context.Background(), `DELETE FROM project_runtime WHERE project_id=?`, f.project.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beforeGeneration, _ := f.db.ProjectServerStartedAt(context.Background(), f.project.ID)
 	if err := client.StopIsolatedServer(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +133,12 @@ func TestLookoutRestartsAfterHerdrRestart(t *testing.T) {
 	t.Logf("Lead pane restored=%v workspace=%s", leadFound, project.HerdrWorkspaceID)
 	time.Sleep(3 * time.Second)
 	if len(lookoutPanes(t, client)) == 0 || len(lookoutPIDs(f.root)) == 0 {
-		t.Errorf("Lookout not restored after Herdr restart: panes=%d processes=%d", len(lookoutPanes(t, client)), len(lookoutPIDs(f.root)))
+		for _, pane := range lookoutPanes(t, client) {
+			visible, readErr := client.Call(context.Background(), "pane.read", map[string]any{"pane_id": pane.PaneID, "source": "visible"})
+			t.Logf("lookout pane %s status=%s visible=%q readError=%v", pane.PaneID, pane.AgentStatus, visible, readErr)
+		}
+		afterGeneration, _ := f.db.ProjectServerStartedAt(context.Background(), f.project.ID)
+		t.Errorf("Lookout not restored after Herdr restart: panes=%d processes=%d generation=%q -> %q", len(lookoutPanes(t, client)), len(lookoutPIDs(f.root)), beforeGeneration, afterGeneration)
 	}
 	_ = store.StateLanded
 }
