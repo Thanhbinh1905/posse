@@ -8,6 +8,12 @@ if [[ ${POSSE_CLAUDE_LOWKEY_LIVE_E2E:-} != 1 ]]; then
 fi
 command -v tmux >/dev/null
 command -v claude >/dev/null
+claude_version=$(claude --version)
+claude_version=${claude_version%% *}
+if [[ ! $claude_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Could not parse Claude Code version: $claude_version" >&2
+  exit 1
+fi
 if [[ -z ${ANTHROPIC_API_KEY:-} && ! -r $HOME/.claude/.credentials.json ]]; then
   echo 'Set ANTHROPIC_API_KEY or sign in to Claude Code with OAuth' >&2
   exit 1
@@ -134,4 +140,5 @@ tmux -L "$socket" new-session -d -s test -x 140 -y 44 -c "$lab/project" \
   "claude --continue --plugin-dir '$plugin' --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'"
 wait_for 'gamma beta alpha'
 if screen | grep -Eq 'Ran 1 shell command|Bash\(|⏺ Bash'; then echo 'continued tool row leaked' >&2; exit 1; fi
-echo 'Claude lowkey live E2E passed'
+printf 'Claude lowkey live E2E passed on Claude Code %s\n' "$claude_version"
+printf 'Add this exact line to internal/app/claude_lowkey/verified-versions.txt:\n%s\n' "$claude_version"

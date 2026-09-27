@@ -425,7 +425,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 func TestClaudeLowkeyVersionEvidence(t *testing.T) {
 	for version, verified := range map[string]bool{
 		"2.1.272 (Claude Code)": true, "2.1.280 (Claude Code)": true,
-		"2.1.282 (Claude Code)": true, "2.1.283 (Claude Code)": false,
+		"2.1.282 (Claude Code)": true, "2.1.283 (Claude Code)": true,
 		"2.1.284 (Claude Code)": false, "garbage": false,
 	} {
 		if claudeLowkeyVerified(version) != verified {
@@ -434,31 +434,57 @@ func TestClaudeLowkeyVersionEvidence(t *testing.T) {
 	}
 }
 
-func TestDoctorWarnsAboutUnverifiedClaudeCode(t *testing.T) {
+func TestDoctorClassifiesClaudeLowkeyVersions(t *testing.T) {
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\necho '2.1.283 (Claude Code)'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	claude := filepath.Join(bin, "claude")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	service := testService(t.TempDir(), nil)
-	var output bytes.Buffer
-	cli := service.CLI()
-	cli.Out, cli.ErrOut = &output, &output
-	if code := cli.Run([]string{"doctor", "--json"}); code != 0 {
-		t.Fatalf("doctor: %d %s", code, output.String())
+	for _, testCase := range []struct {
+		version string
+		status  string
+		detail  string
+	}{
+		{"2.1.283 (Claude Code)", "ok", "function hooks verified"},
+		{"2.1.284 (Claude Code)", "info", "not yet verified; the mod probes its hooks and falls back to stock rendering"},
+		{"2.1.281 (Claude Code)", "warn", "function hooks unverified"},
+	} {
+		t.Run(testCase.version, func(t *testing.T) {
+			if err := os.WriteFile(claude, []byte("#!/bin/sh\necho '"+testCase.version+"'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			service := testService(t.TempDir(), nil)
+			var output bytes.Buffer
+			cli := service.CLI()
+			cli.Out, cli.ErrOut = &output, &output
+			if code := cli.Run([]string{"doctor", "--json"}); code != 0 {
+				t.Fatalf("doctor: %d %s", code, output.String())
+			}
+			var result struct {
+				Checks []map[string]string `json:"checks"`
+				Help   []map[string]string `json:"help"`
+			}
+			if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			for _, check := range result.Checks {
+				if check["check"] != "Claude Code lowkey" {
+					continue
+				}
+				if check["status"] != testCase.status || !strings.Contains(check["detail"], testCase.detail) {
+					t.Fatalf("Claude lowkey doctor check = %#v, want %s containing %q", check, testCase.status, testCase.detail)
+				}
+				if testCase.status != "ok" {
+					for _, help := range result.Help {
+						if help["check"] == "Claude Code lowkey" && strings.Contains(help["action"], "POSSE_CLAUDE_LOWKEY_LIVE_E2E=1 scripts/claude-lowkey-live-e2e.sh") {
+							return
+						}
+					}
+					t.Fatalf("doctor help omitted live verification command: %s", output.String())
+				}
+				return
+			}
+			t.Fatalf("doctor omitted Claude lowkey check: %s", output.String())
+		})
 	}
-	var result struct {
-		Checks []map[string]string `json:"checks"`
-	}
-	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	for _, check := range result.Checks {
-		if check["check"] == "Claude Code lowkey" && check["status"] == "warn" && strings.Contains(check["detail"], "2.1.283 (Claude Code) function hooks unverified") {
-			return
-		}
-	}
-	t.Fatalf("doctor omitted Claude version warning: %s", output.String())
 }
 
 func TestOpenCodeLeadLaunchAndPluginConfig(t *testing.T) {
