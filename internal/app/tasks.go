@@ -24,7 +24,7 @@ import (
 )
 
 func (s *Service) dispatch(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("dispatch", args, map[string]flagSpec{"brief": {}})
+	parsed, err := parseArgs("dispatch", args, map[string]flagSpec{"brief": {}, "profile": {}})
 	if err != nil {
 		return err
 	}
@@ -51,20 +51,29 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return briefError(err)
 	}
-	resolution, err := dispatch.Resolve(cfg, brief.Type, "")
-	if err != nil {
-		return profileError(err)
-	}
 	slug := taskTitleSlug(brief.Title)
 	if err := validateWorkerName(slug); err != nil {
 		return axi.Failure("brief_invalid", "Task title cannot produce a descriptive branch slug", false, "Rewrite the title to state the work")
+	}
+	resolution, err := dispatch.Resolve(cfg, brief.Type, parsed.Flags["profile"])
+	if err != nil {
+		var failure *axi.Error
+		if errors.As(profileError(err), &failure) {
+			failure.Help = append([]string{"Task Name: " + slug, "Run `posse ride --brief " + parsed.Flags["brief"] + " --name " + slug + " --profile <name>` after choosing a Profile"}, failure.Help...)
+			return failure
+		}
+		return err
+	}
+	rideCommand := "posse ride --brief " + parsed.Flags["brief"] + " --name " + slug
+	if parsed.Flags["profile"] != "" {
+		rideCommand += " --profile " + parsed.Flags["profile"]
 	}
 	return ctx.Print(axi.Object{
 		{Key: "task_type", Value: brief.Type},
 		{Key: "name", Value: slug},
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "dispatch_rule", Value: resolution.Rule},
-		{Key: "help", Value: []any{"Run `posse ride --brief " + parsed.Flags["brief"] + " --name " + slug + "` to start this Rider"}},
+		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
 	})
 }
 
@@ -78,9 +87,6 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	}
 	if parsed.Flags["name"] == "" {
 		return axi.Usage("ride requires --name <short>")
-	}
-	if err := validateWorkerName(parsed.Flags["name"]); err != nil {
-		return axi.Failure("name_invalid", err.Error(), false, "Pass --name <short> using lowercase kebab-case with at most 24 characters, for example `rider-tree`")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -110,8 +116,17 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err := validateWorkerName(slug); err != nil {
 		return axi.Failure("brief_invalid", "Task title cannot produce a descriptive branch slug", false, "Rewrite the title to state the work")
 	}
+	if err := validateWorkerName(parsed.Flags["name"]); err != nil {
+		return axi.Failure("name_invalid", err.Error(), false, "Use --name "+slug+" (derived from the Task title)")
+	}
 	if parsed.Flags["name"] != slug {
-		return axi.Failure("name_invalid", fmt.Sprintf("Rider name must come from the Task title %q", brief.Title), false, "Use --name "+slug+" or rewrite the Task title to state the work")
+		allowed, err := retryNameAllowed(ctx.Context, db, project, brief.Title, slug, parsed.Flags["name"])
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return axi.Failure("name_invalid", fmt.Sprintf("Rider name must come from the Task title %q", brief.Title), false, "Use --name "+slug+" or, when retrying a failed or discarded Task, append a short suffix to its slug")
+		}
 	}
 	count, err := db.ActiveWorkerCount(ctx.Context, project.ID)
 	if err != nil {
@@ -223,14 +238,15 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			}
 		}
 	}
-	if err := taskBranchAvailable(ctx.Context, db, project, slug); err != nil {
+	name := parsed.Flags["name"]
+	if err := taskBranchAvailable(ctx.Context, db, project, name); err != nil {
 		return err
 	}
 	if project.HerdrWorkspaceID == "" {
 		return axi.Failure("lead_missing", "Project has no Herdr workspace recorded", false, "Run `posse up` to restart the Lead")
 	}
 	task := store.Task{
-		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: slug, State: store.StateSpawning,
+		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, LandingMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
 		BaseRef: baseRef,
@@ -238,7 +254,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	crashIntentAt("ride", "before", "task.create")
 	taskID, sequence, intent, err := createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
 	if errors.Is(err, store.ErrTaskBranchExists) {
-		return branchNameTaken(slug)
+		return branchNameTaken(name)
 	}
 	if err != nil {
 		return err
@@ -516,8 +532,32 @@ func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project 
 	return taskID, sequence, intent, err
 }
 
+func retryNameAllowed(ctx context.Context, db *store.DB, project store.Project, title, slug, name string) (bool, error) {
+	prefix := slug
+	if len(prefix) > 18 {
+		prefix = strings.TrimRight(prefix[:18], "-")
+	}
+	if !strings.HasPrefix(name, prefix+"-") {
+		return false, nil
+	}
+	tasks, err := db.Tasks(ctx, project.ID, true)
+	if err != nil {
+		return false, err
+	}
+	for _, task := range tasks {
+		if task.Title == title && (task.State == store.StateFailed || task.State == store.StateLost || task.State == store.StateTornDown) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func branchNameTaken(name string) error {
-	return axi.Failure("branch_exists", "Task branch posse/"+name+" already exists or was used", false, "Rewrite the Task title to produce a different slug, then run `posse ride` with its --name")
+	prefix := name
+	if len(prefix) > 18 {
+		prefix = strings.TrimRight(prefix[:18], "-")
+	}
+	return axi.Failure("branch_exists", "Task branch posse/"+name+" already exists or was used", false, "If retrying a failed or discarded Task, keep the Brief title and use --name "+prefix+"-retry (at most 24 characters); otherwise rewrite the Task title")
 }
 
 // Check every repository before inserting the Task, including members a
