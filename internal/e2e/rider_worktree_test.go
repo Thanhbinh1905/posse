@@ -218,23 +218,30 @@ func assertNativeWorktreeSidebar(t *testing.T, f *riderTabsFixture, names ...str
 		t.Log("script unavailable; snapshot still verifies grouping")
 		return
 	}
-	cmd := exec.Command("script", "-q", "-c", "stty rows 45 cols 160; timeout 4 herdr", "/dev/null")
-	cmd.Env = setEnv(f.env, "TERM", "xterm-256color")
-	cmd.Dir = f.repo
-	input, keepOpen, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer input.Close()
-	defer keepOpen.Close()
-	cmd.Stdin = input
-	output, err := cmd.CombinedOutput()
-	if err != nil && !strings.Contains(err.Error(), "exit status 124") {
-		t.Fatalf("attach isolated client: %v: %q", err, output)
+	var output []byte
+	for attempt := 0; attempt < 3; attempt++ {
+		cmd := exec.Command("script", "-q", "-c", "stty rows 45 cols 160; timeout 4 herdr", "/dev/null")
+		cmd.Env = setEnv(f.env, "TERM", "xterm-256color")
+		cmd.Dir = f.repo
+		input, keepOpen, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd.Stdin = input // An EOF would type Ctrl-D into the active pane.
+		output, err = cmd.CombinedOutput()
+		_ = input.Close()
+		_ = keepOpen.Close()
+		if err != nil && !strings.Contains(err.Error(), "exit status 124") {
+			t.Fatalf("attach isolated client: %v: %q", err, output)
+		}
+		if bytes.Contains(output, []byte("Lead:shop")) {
+			break
+		}
 	}
 	for _, name := range append([]string{"Lead:shop"}, names...) {
 		if !bytes.Contains(output, []byte(name)) {
-			t.Fatalf("Herdr sidebar did not render %q; output tail: %q", name, output[max(0, len(output)-4000):])
+			log, _ := os.ReadFile(filepath.Join(f.root, "xdg", "herdr", "herdr-client.log"))
+			t.Fatalf("Herdr client did not render %q after retries; output tail: %q client log tail: %q", name, output[max(0, len(output)-4000):], log[max(0, len(log)-2500):])
 		}
 	}
 }

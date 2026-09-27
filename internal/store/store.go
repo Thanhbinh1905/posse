@@ -623,14 +623,34 @@ func (db *DB) AcquireMount(ctx context.Context, projectID, taskID int64, basePat
 	return mount, nil
 }
 
-func (db *DB) ReleaseMount(ctx context.Context, mountID, taskID int64) error {
+// BeginMountRelease records that the checkout has been reset and no longer
+// contains Task work. Its Git lock may now be removed without ever exposing
+// an unlocked checkout that the database still describes as held.
+func (db *DB) BeginMountRelease(ctx context.Context, mountID, taskID int64) error {
+	result, err := db.ExecContext(ctx, `UPDATE mounts SET state='releasing' WHERE id=? AND task_id=? AND state='held'`, mountID, taskID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrStateRace
+	}
+	return nil
+}
+
+// FinishMountRelease is retryable after a crash. A failed Task snapshot write
+// may follow the committed idle transition; callers must never relock it.
+func (db *DB) FinishMountRelease(ctx context.Context, mountID, taskID int64) error {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	result, err := tx.ExecContext(ctx, `UPDATE mounts SET state='idle',task_id=NULL,released_at=? WHERE id=? AND task_id=? AND state='held'`, now, mountID, taskID)
+	result, err := tx.ExecContext(ctx, `UPDATE mounts SET state='idle',task_id=NULL,released_at=? WHERE id=? AND task_id=? AND state='releasing'`, now, mountID, taskID)
 	if err != nil {
 		return err
 	}

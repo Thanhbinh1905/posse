@@ -491,8 +491,11 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 			break
 		}
 	}
-	if mount.ID == 0 || mount.State != "held" || mount.TaskID != task.ID {
+	if mount.ID == 0 || mount.TaskID != task.ID || (mount.State != "held" && mount.State != "releasing") {
 		return nil, nil
+	}
+	if mount.State == "releasing" {
+		return nil, finishReleasingMount(ctx, db, project, mount, task)
 	}
 	killed, err := stopMountProcesses(mount.Path)
 	if err != nil {
@@ -513,23 +516,34 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 		}
 		return killed, err
 	}
-	if err := withMountStateLock(ctx, db, func() error {
-		if !project.IsWorkspace() {
-			if err := unlockTaskMount(ctx, project.Root, mount.Path, task.Seq); err != nil {
-				return err
-			}
-		}
-		if err := db.ReleaseMount(ctx, mount.ID, task.ID); err != nil {
-			if !project.IsWorkspace() {
-				return errors.Join(err, relockIfStillHeld(ctx, db, project, mount, task))
-			}
+	return killed, withMountStateLock(ctx, db, func() error {
+		if err := db.BeginMountRelease(ctx, mount.ID, task.ID); err != nil {
 			return err
 		}
-		return nil
-	}); err != nil {
-		return killed, err
+		return finishReleasingMountLocked(ctx, db, project, mount, task)
+	})
+}
+
+func finishReleasingMount(ctx context.Context, db *store.DB, project store.Project, mount store.Mount, task store.Task) error {
+	return withMountStateLock(ctx, db, func() error {
+		return finishReleasingMountLocked(ctx, db, project, mount, task)
+	})
+}
+
+func finishReleasingMountLocked(ctx context.Context, db *store.DB, project store.Project, mount store.Mount, task store.Task) error {
+	current, err := db.MountByTask(ctx, task.ID)
+	if err != nil {
+		return err
 	}
-	return killed, nil
+	if current.ID != mount.ID || current.State != "releasing" {
+		return store.ErrStateRace
+	}
+	if !project.IsWorkspace() {
+		if err := unlockRegisteredMount(ctx, project.Root, mount.Path, task.Seq); err != nil {
+			return err
+		}
+	}
+	return db.FinishMountRelease(ctx, mount.ID, task.ID)
 }
 
 // Git worktree locks protect held Mounts from Herdr's single-force UI delete.

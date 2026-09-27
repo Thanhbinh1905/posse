@@ -116,7 +116,11 @@ func TestConcurrentWritesNeverReturnBusy(t *testing.T) {
 					recordErr(err)
 					continue
 				}
-				if err := db.ReleaseMount(ctx, mount.ID, tasks[0].ID); err != nil {
+				if err := db.BeginMountRelease(ctx, mount.ID, tasks[0].ID); err != nil {
+					recordErr(err)
+					continue
+				}
+				if err := db.FinishMountRelease(ctx, mount.ID, tasks[0].ID); err != nil {
 					recordErr(err)
 				}
 			}

@@ -73,15 +73,24 @@ func TestGroupCloseDuringRideRecoversLeadAndMount(t *testing.T) {
 	}
 	output, err := pauseCommand(t, f, "ride:after:pane.record", func() { closeRiderGroup(t, f) }, "ride", "--brief", brief, "--name", "group-ride")
 	if err == nil {
-		t.Logf("ride resumed after group close: %s", output)
+		if !strings.Contains(output, "state: working") {
+			t.Fatalf("ride succeeded without a working Task: %s", output)
+		}
+	} else if !strings.Contains(output, `"pane_not_found"`) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse recover --all") {
+		t.Fatalf("ride failed without a recoverable pane-close error: %s %v", output, err)
 	}
 	restoreRiderGroup(t, f)
 	task := f.task(t, "t1")
+	if task.State != store.StateWorking && task.State != store.StateFailed && task.State != store.StateLost {
+		t.Fatalf("interrupted ride left Task in unexpected state %s", task.State)
+	}
 	if task.MountID != 0 {
 		reason := gitTest(t, f.env, f.repo, "worktree", "list", "--porcelain")
 		if !strings.Contains(reason, "locked posse: held by t1") {
 			t.Fatalf("held Rider Mount lost its lock: %s", reason)
 		}
+	} else if task.State == store.StateWorking {
+		t.Fatal("working Task lost its Mount")
 	}
 }
 
@@ -89,11 +98,21 @@ func TestGroupCloseDuringRelaunchRestoresLeadAndRider(t *testing.T) {
 	f := newRiderTabsFixture(t)
 	before := f.ride(t, "t1", "Group relaunch", "group-relaunch")
 	f.fail(t, "t1")
-	_, _ = pauseCommand(t, f, "relaunch:after:pane.label", func() { closeRiderGroup(t, f) }, "relaunch", "t1")
+	output, commandErr := pauseCommand(t, f, "relaunch:after:pane.label", func() { closeRiderGroup(t, f) }, "relaunch", "t1")
+	if commandErr == nil {
+		if !strings.Contains(output, "t1") {
+			t.Fatalf("relaunch succeeded without reporting Task t1: %s", output)
+		}
+	} else if !strings.Contains(output, `"agent_pane_not_found"`) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse recover --all") {
+		t.Fatalf("relaunch failed without a recoverable pane-close error: %s %v", output, commandErr)
+	}
 	restoreRiderGroup(t, f)
 	after := f.task(t, "t1")
 	if after.MountID != before.MountID {
 		t.Fatalf("relaunch lost held Mount: before=%#v after=%#v", before, after)
+	}
+	if after.State != store.StateWorking && after.State != store.StateFailed && after.State != store.StateLost {
+		t.Fatalf("interrupted relaunch left Task in unexpected state %s", after.State)
 	}
 	if after.State == store.StateFailed || after.State == store.StateLost {
 		lead, found := findLeadInSnapshot(f.snapshot(t))

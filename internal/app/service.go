@@ -470,6 +470,9 @@ func herdrError(err error) error {
 		if apiError.Cause != nil {
 			message = apiError.Error()
 		}
+		if code == "pane_not_found" || code == "agent_pane_not_found" {
+			return axi.Failure(code, message, true, "The pane may have closed during this command. Run `posse recover --all`; then inspect the Task and relaunch it if it still holds a Mount")
+		}
 		return axi.Failure(code, message, code == "herdr_unavailable", "Run `posse doctor` to inspect Herdr connectivity")
 	}
 	return err

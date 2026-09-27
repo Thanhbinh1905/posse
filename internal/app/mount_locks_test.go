@@ -150,13 +150,19 @@ func TestReconcileCannotRelockDuringRelease(t *testing.T) {
 		reconciled <- ensureHeldMountLocks(ctx, db, project)
 	}()
 	err = withMountStateLock(ctx, db, func() error {
+		if err := resetMount(ctx, mount.Path, project, "warm"); err != nil {
+			return err
+		}
+		if err := db.BeginMountRelease(ctx, mount.ID, task.ID); err != nil {
+			return err
+		}
 		if err := unlockMount(ctx, repo, mount.Path); err != nil {
 			return err
 		}
 		close(started)
-		// Reconcile begins while Git is unlocked but ownership remains held.
+		// Reconcile begins while Git is unlocked but Mount is not reusable.
 		time.Sleep(50 * time.Millisecond)
-		return db.ReleaseMount(ctx, mount.ID, task.ID)
+		return db.FinishMountRelease(ctx, mount.ID, task.ID)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -512,9 +518,57 @@ func TestReleaseSnapshotFailureDoesNotRelockIdleMount(t *testing.T) {
 	}
 }
 
-// This probe pauses Git after it has unlocked the checkout but before Posse can
-// commit the idle state. A non-Posse actor can observe the held checkout then.
-func TestReleaseExposesHeldCheckoutAfterGitUnlock(t *testing.T) {
+func TestInterruptedReleasingMountCompletesWithoutExposingHeldWork(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Interrupted release", LandingMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mount, err := acquireMount(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resetMount(ctx, mount.Path, project, "warm"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BeginMountRelease(ctx, mount.ID, id); err != nil {
+		t.Fatal(err)
+	}
+	if reason, err := mountLockReason(ctx, repo, mount.Path); err != nil || reason != "posse: held by t1" {
+		t.Fatalf("releasing checkout should remain locked until unlock: %q %v", reason, err)
+	}
+	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	mounts, err := db.Mounts(ctx, project.ID)
+	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" {
+		t.Fatalf("releasing Mount not recovered: %+v %v", mounts, err)
+	}
+	if reason, err := mountLockReason(ctx, repo, mount.Path); err != nil || reason != "" {
+		t.Fatalf("recovered release retained Git lock: %q %v", reason, err)
+	}
+}
+
+// A single-force UI removal during Git unlock can only reach a cleaned,
+// non-reusable releasing checkout, never one still held by an active Task.
+func TestReleaseDoesNotExposeHeldCheckoutAfterGitUnlock(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -584,15 +638,19 @@ func TestReleaseExposesHeldCheckoutAfterGitUnlock(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	mounts, err := db.Mounts(ctx, project.ID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "held" || mounts[0].TaskID != task.ID {
-		t.Fatalf("unexpected Mount during unlock window: %+v, %v", mounts, err)
+	if err != nil || len(mounts) != 1 || mounts[0].State != "releasing" || mounts[0].TaskID != task.ID {
+		t.Fatalf("Mount still held during unlock window: %+v, %v", mounts, err)
+	}
+	dirty, statusErr := gitOutput(ctx, mount.Path, "status", "--porcelain")
+	if statusErr != nil || strings.TrimSpace(dirty) != "" {
+		t.Fatalf("releasing checkout still contains Task work: %s %v", dirty, statusErr)
 	}
 	if reason, err := mountLockReason(ctx, repo, mount.Path); err != nil || reason != "" {
 		t.Fatalf("expected observable held checkout without lock, got %q, %v", reason, err)
 	}
-	// Herdr's single-force removal can delete it while the database still
-	// advertises the Mount as held.
+	// Herdr may remove a releasing checkout; recovery will not mistake it
+	// for missing unlanded work or reuse it while release is incomplete.
 	if _, err := gitOutput(ctx, repo, "worktree", "remove", "--force", mount.Path); err != nil {
-		t.Fatalf("single-force removal of the unlocked held Mount failed: %v", err)
+		t.Fatalf("single-force removal of the cleaned Mount failed: %v", err)
 	}
 }

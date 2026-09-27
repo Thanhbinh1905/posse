@@ -14,16 +14,23 @@ import (
 // A held repository Mount stays protected across Posse and Herdr restarts.
 // Missing checkouts are reported once rather than recreated over lost work.
 func ensureHeldMountLocks(ctx context.Context, db *store.DB, project store.Project) error {
-	if project.IsWorkspace() {
-		return nil
-	}
 	return withMountStateLock(ctx, db, func() error {
 		mounts, err := db.Mounts(ctx, project.ID)
 		if err != nil {
 			return err
 		}
 		for _, mount := range mounts {
-			if mount.State != "held" || mount.TaskID == 0 {
+			if mount.State == "releasing" && mount.TaskID != 0 {
+				task, err := db.TaskByID(ctx, project.ID, mount.TaskID)
+				if err != nil {
+					return err
+				}
+				if err := finishReleasingMountLocked(ctx, db, project, mount, task); err != nil {
+					return err
+				}
+				continue
+			}
+			if project.IsWorkspace() || mount.State != "held" || mount.TaskID == 0 {
 				continue
 			}
 			task, err := db.TaskByID(ctx, project.ID, mount.TaskID)

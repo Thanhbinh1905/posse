@@ -249,7 +249,7 @@ tasks(
 
 mounts(
   id INTEGER PRIMARY KEY, project_id INTEGER, n INTEGER, path TEXT UNIQUE,
-  state TEXT,                        -- idle | held | broken
+  state TEXT,                        -- idle | held | releasing | broken
   task_id INTEGER, acquired_at INTEGER, released_at INTEGER,
   UNIQUE(project_id, n))
 
@@ -406,12 +406,12 @@ The Task records the Profile and the rule used. Model and effort come only from 
 
 ## 12. Remuda
 
-Each Project has a Remuda of reusable worktrees (Mounts) under `~/.posse/remuda/<project>/mount-<n>`, created with `git worktree add --detach` from the Project root. A Mount is held by exactly one Task from spawn to Teardown. The point of reuse is warmth: dependencies, build caches and other ignored files survive between Tasks.
+Each Project has a Remuda of reusable worktrees (Mounts) under `~/.posse/remuda/<project>/mount-<n>`, created with `git worktree add --detach --lock --reason "posse: held by t<n>"` from the Project root. A Mount is held by exactly one Task from spawn to Teardown. The point of reuse is warmth: dependencies, build caches and other ignored files survive between Tasks.
 
 **Acquire** (in `posse ride`):
 
-1. Pick the lowest-numbered `idle` Mount of the Project; if none, create `mount-<max+1>`. The pick and the `held` mark are one transaction.
-2. `git fetch origin` in the Project root when an `origin` remote exists (skip otherwise). Lock the held repository Mount with `git worktree lock --reason "posse: held by t<n>"` before resetting it. Reconcile restores a missing lock and raises a `mount_missing` Notice instead of rebuilding a vanished held checkout.
+1. Lock the lowest-numbered `idle` repository Mount before atomically claiming it as `held` for the Task; if none exists, claim the next path and create its checkout with Git's atomic `--lock`. A stale Posse lock can be replaced only after checking that its former Task no longer holds the Mount; foreign locks are never replaced.
+2. `git fetch origin` in the Project root when an `origin` remote exists (skip otherwise). Reconcile restores a missing lock on every held repository Mount, including those owned by failed or lost Tasks, and raises a `mount_missing` Notice instead of rebuilding a vanished held checkout.
 3. In the Mount: `git checkout --detach refs/remotes/origin/<default>` (or `refs/heads/<default>` without a remote), `git reset --hard`, then `git clean -fd` (`warm`) or `git clean -fdx` (`pristine`).
 4. Verify `git status --porcelain` is empty; otherwise mark the Mount `broken`, create a `mount_broken` Notice, and try the next Mount.
 5. Create the Task branch, then run `[remuda] setup` commands in the Mount; a failing setup fails the spawn (`mount_setup_failed`) and releases the Mount.
@@ -419,7 +419,7 @@ Each Project has a Remuda of reusable worktrees (Mounts) under `~/.posse/remuda/
 **Release** (in `posse unsaddle`, and when a spawn fails before the agent starts):
 
 1. Stop leftover processes whose cwd is inside the Mount (`/proc/<pid>/cwd`): SIGTERM, wait 5 seconds, then SIGKILL. Never touch a process outside that Mount. List them in the output.
-2. Detach at the default branch, `git reset --hard`, make untracked paths writable inside the Mount, clean per `[remuda] clean`, unlock the repository Mount, and mark it `idle`.
+2. Detach at the default branch, `git reset --hard`, make untracked paths writable inside the Mount, clean per `[remuda] clean`, then mark it `releasing` before unlocking the repository Mount. Finalize it as `idle` after unlock. Reconcile completes an interrupted `releasing` Mount without making it reusable before cleanup; an interrupted held Mount remains locked.
 
 A Mount is never released while its Task holds unlanded work, except through an approved discard.
 
