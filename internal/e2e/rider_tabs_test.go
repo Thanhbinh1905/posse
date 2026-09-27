@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,6 +85,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	fixture.assertRiderTab(t, snapshot, first)
 	fixture.assertRiderTab(t, snapshot, second)
 	fixture.assertRiderLabels(t, snapshot, first, second)
+	fixture.assertRenderedSidebar(t, first, second)
 	if tabOf(t, snapshot, first.PaneID) == tabOf(t, snapshot, second.PaneID) {
 		t.Fatalf("two Riders share tab %s", tabOf(t, snapshot, first.PaneID))
 	}
@@ -151,7 +153,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	// Herdr renumbers tab and pane ids on restore, so the tab is compared by its label.
 	riderTabs := func(snapshot herdr.Snapshot) (count int) {
 		for _, tab := range snapshot.Tabs {
-			if tab.Label == "└─ "+relaunched.ShortName {
+			if tab.Label == relaunched.ShortName {
 				count++
 			}
 		}
@@ -239,8 +241,27 @@ func newRiderTabsFixture(t *testing.T) *riderTabsFixture {
 	} {
 		env = setEnv(env, key, value)
 	}
-	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
+	herdrConfig, err := herdr.WriteIsolatedConfig(root)
+	if err != nil {
 		t.Fatal(err)
+	}
+	version, err := exec.Command("herdr", "--version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(version), "0.9.0") {
+		contents, err := os.ReadFile(herdrConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents = append([]byte("onboarding = false\n"), contents...)
+		contents = append(contents, []byte(`
+[ui.sidebar.agents]
+rows = [["state_icon", "machine", { token = "workspace", rules = [{ starts_with = "Lead:", hide = true }] }, { token = "$posse_row", bold = true }], ["agent"]]
+`)...)
+		if err := os.WriteFile(herdrConfig, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	binary := filepath.Join(binDir, "posse")
 	build := exec.Command("go", "build", "-o", binary, "./cmd/posse")
@@ -275,6 +296,15 @@ esac
 	initRepository(t, repo, filepath.Join(root, "origin.git"), env)
 
 	client := herdr.NewWithEnv("herdr", env)
+	t.Cleanup(func() {
+		if t.Failed() {
+			for _, name := range []string{"herdr.log", "herdr-server.log", "herdr-client.log"} {
+				if data, err := os.ReadFile(filepath.Join(root, "xdg", "herdr", name)); err == nil {
+					t.Logf("%s:\n%s", name, data)
+				}
+			}
+		}
+	})
 	server := startServer(t, client)
 	if err := client.CheckProtocol(context.Background()); err != nil {
 		t.Fatal(err)
@@ -319,6 +349,47 @@ esac
 		leadEnv: callerEnv, client: client, server: server,
 		userBefore: userBefore, userAfter: userAfter, userTab: userTab,
 		leadWorkspaceID: lead.Workspace.WorkspaceID, leadPaneID: lead.RootPane.PaneID, projectID: project.ID,
+	}
+}
+
+// assertRenderedSidebar attaches a real desktop client to the isolated server.
+// The server snapshot alone cannot prove that the client's token layout renders.
+func (f *riderTabsFixture) assertRenderedSidebar(t *testing.T, first, second store.Task) {
+	t.Helper()
+	version, err := exec.Command("herdr", "--version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(version), "0.9.0") {
+		return
+	} // Sidebar token rules require 0.9.1.
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("script is required to capture an isolated Herdr client")
+	}
+	cmd := exec.Command("script", "-q", "-c", "stty rows 45 cols 160; timeout 4 herdr", "/dev/null")
+	cmd.Env = setEnv(f.env, "TERM", "xterm-256color")
+	cmd.Dir = f.repo
+	output, err := cmd.CombinedOutput()
+	if err != nil && !strings.Contains(err.Error(), "exit status 124") {
+		t.Fatalf("attach isolated Herdr client: %v: %s", err, output)
+	}
+	for _, want := range []string{"Lead:shop", "  " + first.ShortName + "  ", "  " + second.ShortName + "  "} {
+		if !bytes.Contains(output, []byte(want)) {
+			t.Errorf("desktop client missing sidebar or plain tab %q; output tail: %q", want, output[max(0, len(output)-4000):])
+		}
+	}
+	for _, entry := range []struct{ branch, name string }{{"├", first.ShortName}, {"└", second.ShortName}} {
+		pattern := regexp.MustCompile(entry.branch + `\x1b\[[0-9;]+H─\x1b\[[0-9;]+H ` + entry.name)
+		if !pattern.Match(output) {
+			t.Errorf("desktop sidebar did not render %s─ %s as main text", entry.branch, entry.name)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	logData, _ := os.ReadFile(filepath.Join(f.root, "xdg", "herdr", "herdr-client.log"))
+	if bytes.Contains(logData, []byte("config parse error")) {
+		t.Fatalf("client rejected sidebar config: %s", logData)
 	}
 }
 
@@ -438,6 +509,11 @@ func (f *riderTabsFixture) assertUserLayout(t *testing.T, snapshot herdr.Snapsho
 	if got := labels[tabOf(t, snapshot, f.leadPaneID)]; got != "Lead" {
 		t.Fatalf("Lead tab label = %q, want Lead", got)
 	}
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == f.leadPaneID && pane.Tokens["posse_row"] != "Lead:shop" {
+			t.Fatalf("Lead Agents row token = %q, want Lead:shop", pane.Tokens["posse_row"])
+		}
+	}
 	if got := labels[f.userTab.RootPane.TabID]; got != "user-shell" {
 		t.Fatalf("User tab label = %q, want user-shell", got)
 	}
@@ -507,9 +583,15 @@ func (f *riderTabsFixture) assertRiderLabels(t *testing.T, snapshot herdr.Snapsh
 		if count == len(byTab)-1 {
 			branch = "└─"
 		}
-		want := branch + " " + task.ShortName
+		want := task.ShortName
 		if tab.Label != want {
 			t.Fatalf("Rider tab label = %q, want %q in Herdr order", tab.Label, want)
+		}
+		row := branch + " " + want
+		for _, pane := range snapshot.Panes {
+			if pane.TabID == tab.TabID && pane.Label == task.PaneLabel && pane.Tokens["posse_row"] != row {
+				t.Fatalf("Rider Agents row token = %q, want %q", pane.Tokens["posse_row"], row)
+			}
 		}
 		count++
 	}

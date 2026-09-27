@@ -440,7 +440,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 		return err
 	}
 	leadName := "Lead"
-	if _, err := s.herdrCall(ctx.Context, "pane.report_metadata", map[string]any{"pane_id": leadPane.PaneID, "source": "posse", "title": "Lead: " + name, "display_agent": leadName}); err != nil {
+	if _, err := s.herdrCall(ctx.Context, "pane.report_metadata", map[string]any{"pane_id": leadPane.PaneID, "source": "posse", "title": "Lead: " + name, "display_agent": leadName, "tokens": map[string]string{"posse_row": "Lead:" + name}}); err != nil {
 		return err
 	}
 	launch, err := s.prepareLeadLaunch(home, project, cfg, kind)

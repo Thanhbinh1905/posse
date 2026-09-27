@@ -38,8 +38,8 @@ func TestRelabelProjectTabsUsesHerdrOrderAndLeavesUserTabsAlone(t *testing.T) {
 		Tabs: []herdr.Tab{
 			{TabID: "t1", WorkspaceID: "w1", Label: "1"},
 			{TabID: "t2", WorkspaceID: "w1", Label: "user-shell"},
-			{TabID: "t3", WorkspaceID: "w1", Label: "second-rider"},
-			{TabID: "t4", WorkspaceID: "w1", Label: "first-rider"},
+			{TabID: "t3", WorkspaceID: "w1", Label: "├─ second-rider"},
+			{TabID: "t4", WorkspaceID: "w1", Label: "└─ first-rider"},
 		},
 		Panes: []herdr.Pane{
 			{PaneID: "p1", WorkspaceID: "w1", TabID: "t1", Label: project.LeadLabel},
@@ -57,7 +57,21 @@ func TestRelabelProjectTabsUsesHerdrOrderAndLeavesUserTabsAlone(t *testing.T) {
 			got[call.Params["tab_id"].(string)] = call.Params["label"].(string)
 		}
 	}
-	want := map[string]string{"t1": "Lead", "t3": "├─ second-rider", "t4": "└─ first-rider"}
+	want := map[string]string{"t1": "Lead", "t3": "second-rider", "t4": "first-rider"}
+	wantRows := map[string]string{"p1": "Lead:shop", "p3": "├─ second-rider", "p4": "└─ first-rider"}
+	for _, call := range fake.Calls {
+		if call.Method != "pane.report_metadata" {
+			continue
+		}
+		paneID := call.Params["pane_id"].(string)
+		if got := call.Params["tokens"].(map[string]string)["posse_row"]; got != wantRows[paneID] {
+			t.Errorf("pane %s row = %q, want %q", paneID, got, wantRows[paneID])
+		}
+		delete(wantRows, paneID)
+	}
+	if len(wantRows) != 0 {
+		t.Errorf("missing pane row metadata: %#v", wantRows)
+	}
 	if len(got) != len(want) {
 		t.Fatalf("tab renames = %#v, want %#v", got, want)
 	}
@@ -89,7 +103,7 @@ func TestRelabelProjectTabsLogsFailuresAndContinues(t *testing.T) {
 	}
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{
-		Tabs:  []herdr.Tab{{TabID: "t1", Label: "1"}, {TabID: "t2", Label: "first-rider"}},
+		Tabs:  []herdr.Tab{{TabID: "t1", Label: "1"}, {TabID: "t2", Label: "└─ first-rider"}},
 		Panes: []herdr.Pane{{PaneID: "p1", TabID: "t1", Label: project.LeadLabel}, {PaneID: "p2", TabID: "t2", Label: "posse:shop:t1"}},
 	}
 	fake.Errors["tab.rename"] = &herdr.Error{Code: "tab_unavailable", Message: "rename denied"}

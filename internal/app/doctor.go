@@ -34,6 +34,18 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 		}
 	}
 
+	if path, pathErr := herdrConfigPath(); pathErr != nil {
+		addCheck("Herdr Agents sidebar layout", "warn", pathErr.Error(), "Inspect Herdr config path")
+	} else if state, stateErr := sidebarLayoutState(path); stateErr != nil {
+		addCheck("Herdr Agents sidebar layout", "warn", stateErr.Error(), "Repair the Herdr config and run `posse setup`")
+	} else if state == "keep" {
+		addCheck("Herdr Agents sidebar layout", "ok", "Posse layout present", "")
+	} else if state == "manual" {
+		addCheck("Herdr Agents sidebar layout", "warn", "custom Agents rows present", "Review the snippet from `posse setup --check` before editing Herdr config")
+	} else {
+		addCheck("Herdr Agents sidebar layout", "warn", "not installed", "Run `posse setup` to add the optional layout")
+	}
+
 	cfg, configErr := config.Load(home, "")
 	if configErr != nil {
 		addCheck("config", "fail", configErr.Error(), "Fix the reported configuration key")

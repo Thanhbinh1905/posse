@@ -1141,8 +1141,7 @@ func assertLeadSidebarPresentation(t *testing.T, client *herdr.Client, workspace
 	t.Fatalf("Lead workspace/pane missing: workspace=%q pane=%q snapshot=%#v", workspaceID, paneID, snapshot)
 }
 
-// Assert the three default Agents-sidebar positions against a live isolated
-// Herdr snapshot: the Lead workspace label, the tree-labeled Rider tab and harness subtitle.
+// Assert the pane metadata and tab label against a live isolated Herdr snapshot.
 func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task store.Task, workspaceLabel string) {
 	t.Helper()
 	snapshot, err := client.Snapshot(context.Background())
@@ -1170,8 +1169,8 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 	if workspace.Label != workspaceLabel || workspace.Worktree.CheckoutPath != "" ||
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
-		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.ShortName ||
-		tab.Label != "└─ "+task.ShortName {
+		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.ShortName || pane.Tokens["posse_row"] != "└─ "+task.ShortName ||
+		tab.Label != task.ShortName {
 		t.Fatalf("isolated Worker sidebar/cwd mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
 	}
 }

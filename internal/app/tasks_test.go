@@ -313,7 +313,7 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 		case "workspace.rename":
 			workspaceRenamed = true
 		case "tab.create":
-			tabCreated = call.Params["label"] == "└─ worker-tree"
+			tabCreated = call.Params["label"] == "worker-tree"
 		case "agent.start":
 			startedIndex = index
 		case "pane.report_metadata":

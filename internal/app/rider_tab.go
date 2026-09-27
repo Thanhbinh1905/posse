@@ -61,7 +61,7 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 		return openedTab{}, axi.Failure("lead_missing", "the Lead's Herdr workspace is not open", false, "Run `posse up` to restart the Lead, then retry")
 	}
 	raw, err := s.herdrCall(ctx, "tab.create", map[string]any{
-		"workspace_id": workspaceID, "cwd": path, "label": riderTabLabel(workerTabLabel(task), true), "focus": false,
+		"workspace_id": workspaceID, "cwd": path, "label": workerTabLabel(task), "focus": false,
 		"env": map[string]string{workerHomeEnv: filepath.Clean(home)},
 	})
 	if err != nil {
@@ -90,7 +90,9 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 		opened.TabID = result.Tab.TabID
 	}
 	task.PaneID = opened.PaneID
-	if _, err := s.herdrCall(ctx, "pane.report_metadata", workerDisplayMetadata(task, "", displayAgent)); err != nil {
+	metadata := workerDisplayMetadata(task, "", displayAgent)
+	metadata["tokens"].(map[string]string)["posse_row"] = riderTabLabel(workerTabLabel(task), true)
+	if _, err := s.herdrCall(ctx, "pane.report_metadata", metadata); err != nil {
 		if opened.TabID != "" {
 			_, _ = s.herdrCall(ctx, "tab.close", map[string]any{"tab_id": opened.TabID})
 		}
