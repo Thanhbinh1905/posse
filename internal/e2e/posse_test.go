@@ -663,6 +663,7 @@ esac
 	}
 
 	// A focused Lead must receive a desktop notification, never typed input.
+	// Its background Lookout may claim the Notice even while the pane is focused.
 	db, err = store.Open(home)
 	if err != nil {
 		t.Fatal(err)
@@ -686,6 +687,12 @@ esac
 	if _, err := client.Call(context.Background(), "agent.focus", map[string]any{"target": project.LeadPaneID}); err != nil {
 		t.Fatal(err)
 	}
+	// Force the overlap that used to make the pending-Notice assertion flaky:
+	// Lookout delivery is valid while the Lead is focused, but typed delivery is not.
+	lookoutEnv = setEnv(lookoutEnv, "HERDR_PANE_ID", project.LeadPaneID)
+	if output := runPosse(t, posseBinary, repo, lookoutEnv, "lookout", "--timeout", "3000"); !strings.Contains(output, "focused guard check") {
+		t.Fatalf("focused Lead's Lookout did not receive the Notice: %s", output)
+	}
 	focusedEnv := setEnv(env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane_focused","data":{"pane_id":%q}}`, project.LeadPaneID))
 	runPosse(t, posseBinary, repo, focusedEnv, "_ingest")
 	currentLog, _ := os.ReadFile(leadLog)
@@ -700,14 +707,10 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	focusedNotice := false
 	for _, notice := range undelivered {
-		if notice.Summary == "focused guard check" && notice.DeliveredAt == 0 {
-			focusedNotice = true
+		if notice.Summary == "focused guard check" {
+			t.Fatalf("Lookout did not mark the focused Lead Notice delivered: %#v", undelivered)
 		}
-	}
-	if !focusedNotice {
-		t.Fatalf("focused Lead Notice was delivered unexpectedly: %#v", undelivered)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
