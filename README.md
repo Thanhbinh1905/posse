@@ -9,7 +9,7 @@ Posse is a local-first CLI for coordinating coding agents. You talk to one Lead 
 ## How it works
 
 1. Start a Lead with `posse up` from a Herdr pane in your project.
-2. Describe the outcome you want. The Lead splits work into tasks and starts Riders as tabs of its own Herdr workspace.
+2. Describe the outcome you want. The Lead splits work into tasks and starts repository Riders as worktree children under its Herdr workspace. Workspace Project Riders use tabs.
 3. Riders commit changes in their own branches and report back. The Lead reviews results and asks for decisions when needed.
 4. Changes land locally or through pull requests, according to your project's landing mode and approval settings.
 

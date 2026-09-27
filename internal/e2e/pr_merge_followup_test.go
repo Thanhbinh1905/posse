@@ -72,6 +72,17 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 	}
 }
 
+// Assert against Git's worktree registry, not only the checkout filesystem.
+func assertMountUnlocked(t *testing.T, env []string, repo, path string) {
+	t.Helper()
+	listing := gitTest(t, env, repo, "worktree", "list", "--porcelain")
+	for _, block := range strings.Split(listing, "\n\n") {
+		if strings.HasPrefix(block, "worktree "+path+"\n") && strings.Contains("\n"+block+"\n", "\nlocked ") {
+			t.Fatalf("released Mount %s is still locked: %s", path, block)
+		}
+	}
+}
+
 func TestMergeInterruptsFollowUpAndReleasesRider(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
@@ -120,6 +131,7 @@ func TestMergeInterruptsFollowUpAndReleasesRider(t *testing.T) {
 	if err != nil || len(mounts) != 1 || mounts[0].TaskID != 0 {
 		t.Fatalf("Mount retained: %#v %v", mounts, err)
 	}
+	assertMountUnlocked(t, f.env, f.repo, mounts[0].Path)
 	f.requireNotice(t, "t1", "pr_merged")
 	if log, err := os.ReadFile(f.ghLog); err != nil || strings.Contains(string(log), "pr merge") {
 		t.Fatalf("watcher merged PR: %s %v", log, err)

@@ -99,6 +99,18 @@ func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, task
 		if !exists || candidate.ambiguous {
 			continue
 		}
+		// Native child workspaces already render their workspace label. Keep
+		// their tab label at Herdr's default instead of duplicating the name.
+		linked := false
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.WorkspaceID == tab.WorkspaceID && workspace.Worktree.CheckoutPath == candidate.task.WorktreePath {
+				linked = true
+				break
+			}
+		}
+		if linked {
+			continue
+		}
 		riderTabs = append(riderTabs, struct {
 			tab  herdr.Tab
 			name string

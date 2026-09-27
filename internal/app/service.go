@@ -148,6 +148,46 @@ func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) 
 // generation-mismatched snapshot. A delayed event from the old server instead
 // retries against the current server, without rolling pane ids backward.
 func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) (runtime.RunResult, error) {
+	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+		return runtime.RunResult{}, err
+	}
+	// No snapshot taken during a recovery claim is a complete project view.
+	if err := waitProjectRecovery(ctx, db, project); err != nil {
+		return runtime.RunResult{}, err
+	}
+	if !project.IsWorkspace() {
+		if snapshot, err := s.snapshot(ctx); err == nil {
+			if tasks, err := db.LiveTasks(ctx, project.ID); err == nil && riderGroupClosed(snapshot, project, tasks) {
+				home, err := s.homePath()
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				if _, err := s.recoverProject(ctx, db, home, project); err != nil {
+					return runtime.RunResult{}, fmt.Errorf("recover Project %s after Herdr group close: %w", project.Name, err)
+				}
+				// Concurrent workspace.closed hooks wait for the recovery owner;
+				// a partial snapshot would mark still-restoring Riders lost.
+				if err := waitProjectRecovery(ctx, db, project); err != nil {
+					return runtime.RunResult{}, err
+				}
+				fresh, err := s.snapshot(ctx)
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				current, err := db.ProjectByID(ctx, project.ID)
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				currentTasks, err := db.LiveTasks(ctx, project.ID)
+				if err != nil {
+					return runtime.RunResult{}, err
+				}
+				if riderGroupClosed(fresh, current, currentTasks) {
+					return runtime.RunResult{}, fmt.Errorf("lead still missing after Herdr group recovery for %s", project.Name)
+				}
+			}
+		}
+	}
 	run := func() (runtime.RunResult, error) {
 		return runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
 	}
@@ -183,6 +223,27 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return result, err
 	}
 	return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
+}
+
+func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Project) error {
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		claim, err := db.ProjectRecovery(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		if claim.OwnerPID == 0 || claim.OwnerPID == os.Getpid() || !processAlive(claim.OwnerPID) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("project recovery is still running for %s", project.Name)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
@@ -408,6 +469,9 @@ func herdrError(err error) error {
 		message := apiError.Message
 		if apiError.Cause != nil {
 			message = apiError.Error()
+		}
+		if code == "pane_not_found" || code == "agent_pane_not_found" {
+			return axi.Failure(code, message, true, "The pane may have closed during this command. Run `posse recover --all`; then inspect the Task and relaunch it if it still holds a Mount")
 		}
 		return axi.Failure(code, message, code == "herdr_unavailable", "Run `posse doctor` to inspect Herdr connectivity")
 	}

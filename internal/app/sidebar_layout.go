@@ -22,18 +22,6 @@ rows = [
 var agentsTableHeader = regexp.MustCompile(`(?m)^\s*\[ui\.sidebar\.agents\]\s*(?:#.*)?$`)
 var agentsChildHeader = regexp.MustCompile(`(?m)^\s*\[ui\.sidebar\.agents\.[^\]]+\]\s*(?:#.*)?$`)
 
-func herdrConfigPath() (string, error) {
-	root := os.Getenv("XDG_CONFIG_HOME")
-	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		root = filepath.Join(home, ".config")
-	}
-	return filepath.Join(root, "herdr", "config.toml"), nil
-}
-
 // sidebarLayoutState reads the actual Herdr config, not Posse's setup manifest.
 // A custom rows value is always left alone, even when it resembles our layout.
 func sidebarLayoutState(path string) (string, error) {

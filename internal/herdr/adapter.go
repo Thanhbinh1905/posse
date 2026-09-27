@@ -74,7 +74,9 @@ type Workspace struct {
 	Root        string `json:"cwd"`
 	Focused     bool   `json:"focused"`
 	Worktree    struct {
-		CheckoutPath string `json:"checkout_path"`
+		CheckoutPath     string `json:"checkout_path"`
+		RepoKey          string `json:"repo_key"`
+		IsLinkedWorktree bool   `json:"is_linked_worktree"`
 	} `json:"worktree"`
 }
 

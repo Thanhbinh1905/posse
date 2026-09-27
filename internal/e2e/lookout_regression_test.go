@@ -131,8 +131,9 @@ func checkLookoutRestore(t *testing.T, clearGeneration bool) {
 		}
 	}
 	t.Logf("Lead pane restored=%v workspace=%s", leadFound, project.HerdrWorkspaceID)
-	time.Sleep(3 * time.Second)
-	if len(lookoutPanes(t, client)) == 0 || len(lookoutPIDs(f.root)) == 0 {
+	if !waitForCondition(15*time.Second, func() bool {
+		return len(lookoutPanes(t, client)) > 0 && len(lookoutPIDs(f.root)) > 0
+	}) {
 		for _, pane := range lookoutPanes(t, client) {
 			visible, readErr := client.Call(context.Background(), "pane.read", map[string]any{"pane_id": pane.PaneID, "source": "visible"})
 			t.Logf("lookout pane %s status=%s visible=%q readError=%v", pane.PaneID, pane.AgentStatus, visible, readErr)

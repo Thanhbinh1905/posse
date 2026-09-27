@@ -19,7 +19,18 @@ var guardEnv = []string{"HOME=/home/u", "HERDR_SOCKET_PATH=/home/u/.config/herdr
 func TestGuardRefusesHerdrChangesToTheWorkerSession(t *testing.T) {
 	for _, command := range []string{
 		"herdr workspace close wGN --group",
+		"herdr workspace close --group wGN",
+		"herdr workspace close --group=true wGN",
+		"herdr workspace close wGN -g",
 		"herdr workspace close w1",
+		`herdr workspace close "$HERDR_WORKSPACE_ID" --group`,
+		`herdr api call workspace.close '{"workspace_id":"w1","close_group":true}'`,
+		`herdr api call worktree.remove '{"workspace_id":"w2","force":true}'`,
+		"herdr worktree remove w2 --force",
+		"herdr worktree create --workspace w1 --branch erase",
+		"herdr worktree open --workspace w1 --path /tmp/m",
+		"env -u HERDR_SOCKET_PATH herdr worktree remove w2 --force",
+		"bash -c 'herdr workspace close --group wGN'",
 		"herdr tab close w1:t1",
 		// Riders share the Lead's workspace: their own ids reach the Lead and every sibling.
 		`herdr tab close "$HERDR_TAB_ID"`,
@@ -32,7 +43,6 @@ func TestGuardRefusesHerdrChangesToTheWorkerSession(t *testing.T) {
 		"herdr pane send-text w1:p1 'hello'",
 		"herdr pane run w1:p1 'printf SHELL_READY'",
 		"herdr agent prompt posse-lead 'hi'",
-		"herdr worktree open --workspace w1 --path /tmp/m",
 		"herdr server stop",
 		"herdr",
 		"cd /tmp && herdr workspace create --cwd /tmp",
@@ -61,6 +71,7 @@ func TestGuardRefusesHerdrChangesToTheWorkerSession(t *testing.T) {
 func TestGuardAllowsReadsAndIsolatedHerdrServers(t *testing.T) {
 	for _, command := range []string{
 		"herdr workspace list",
+		"herdr worktree list --workspace w1",
 		"herdr pane read w1:p1 --source recent",
 		"herdr api snapshot",
 		"herdr api schema --json",

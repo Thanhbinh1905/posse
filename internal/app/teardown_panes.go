@@ -146,6 +146,58 @@ func (s *Service) closeTaskPanes(ctx context.Context, project store.Project, tas
 		return result, err
 	}
 	tabs := taskTabs(snapshot, project, task)
+	// If Posse crashed after worktree.open but before pane.rename, the
+	// just-opened child has one unlabeled shell. Its Mount, Rider name and
+	// linked provenance together identify it; never adopt a foreign pane.
+	if !project.IsWorkspace() && task.ShortName != "" {
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.Label != task.ShortName || workspace.Worktree.CheckoutPath != task.WorktreePath || !workspace.Worktree.IsLinkedWorktree {
+				continue
+			}
+			var panes []herdr.Pane
+			for _, pane := range snapshot.Panes {
+				if pane.WorkspaceID == workspace.WorkspaceID {
+					panes = append(panes, pane)
+				}
+			}
+			if len(panes) != 1 || panes[0].Label != "" || panes[0].Agent != "" || !pathInside(panes[0].CWD, task.WorktreePath) {
+				continue
+			}
+			if _, err := s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": workspace.WorkspaceID}); err != nil && !missingPaneError(err) {
+				return result, fmt.Errorf("close unlabeled Rider child %s: %w", workspace.WorkspaceID, err)
+			}
+			if snapshot.FocusedWorkspaceID == workspace.WorkspaceID {
+				if lead, found := findAppPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel); found {
+					_, _ = s.herdrCall(ctx, "pane.focus", map[string]any{"pane_id": lead.PaneID})
+				}
+			}
+			verified, err := s.snapshot(ctx)
+			if err != nil {
+				return result, err
+			}
+			for _, pane := range verified.Panes {
+				if pane.PaneID == panes[0].PaneID {
+					return result, fmt.Errorf("unlabeled Rider pane %s remains open", pane.PaneID)
+				}
+			}
+			result.Closed = append(result.Closed, panes[0].PaneID)
+			return result, nil
+		}
+	}
+	// A child is identified by both its worktree path and the Task's labeled
+	// pane. A recorded workspace id alone may belong to someone else after restore.
+	childID := ""
+	if !project.IsWorkspace() {
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.Worktree.CheckoutPath != "" && workspace.Worktree.CheckoutPath == task.WorktreePath {
+				for _, pane := range snapshot.Panes {
+					if pane.WorkspaceID == workspace.WorkspaceID && pane.Label == task.PaneLabel && ownsTaskPane(snapshot, project, task, tabs, pane) {
+						childID = workspace.WorkspaceID
+					}
+				}
+			}
+		}
+	}
 	owned := make([]herdr.Pane, 0)
 	ownedIDs := map[string]bool{}
 	tabPanes := map[string][]herdr.Pane{}
@@ -165,17 +217,41 @@ func (s *Service) closeTaskPanes(ctx context.Context, project store.Project, tas
 		}
 	}
 	closedTabs := map[string]bool{}
+	closedChild := false
+	if childID != "" {
+		whole := true
+		for _, pane := range snapshot.Panes {
+			if pane.WorkspaceID == childID && !ownedIDs[pane.PaneID] {
+				whole = false
+				result.Foreign = append(result.Foreign, pane.PaneID)
+			}
+		}
+		if whole {
+			if _, err := s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": childID}); err != nil && !missingPaneError(err) {
+				return result, fmt.Errorf("close Rider child workspace %s: %w", childID, err)
+			}
+			closedChild = true
+			for _, pane := range owned {
+				result.Closed = append(result.Closed, pane.PaneID)
+			}
+		}
+	}
 	tabIDs := make([]string, 0, len(tabPanes))
 	for tabID := range tabPanes {
 		tabIDs = append(tabIDs, tabID)
 	}
 	sort.Strings(tabIDs)
 	for _, tabID := range tabIDs {
+		if closedChild {
+			continue
+		}
 		whole := true
 		for _, pane := range tabPanes[tabID] {
 			if !ownedIDs[pane.PaneID] {
 				whole = false
-				result.Foreign = append(result.Foreign, pane.PaneID)
+				if childID == "" || pane.WorkspaceID != childID {
+					result.Foreign = append(result.Foreign, pane.PaneID)
+				}
 			}
 		}
 		if !whole {
@@ -188,6 +264,9 @@ func (s *Service) closeTaskPanes(ctx context.Context, project store.Project, tas
 	}
 	sort.Strings(result.Foreign)
 	for _, pane := range owned {
+		if closedChild {
+			continue
+		}
 		if !closedTabs[pane.TabID] {
 			if _, err := s.herdrCall(ctx, "pane.close", map[string]any{"pane_id": pane.PaneID}); err != nil && !missingPaneError(err) {
 				return result, fmt.Errorf("close Task pane %s: %w", pane.PaneID, err)
@@ -198,6 +277,11 @@ func (s *Service) closeTaskPanes(ctx context.Context, project store.Project, tas
 	// The User was watching a Rider pane that just closed. Return focus to the
 	// Lead instead of leaving Herdr to pick a sibling Rider's tab. Teardown has
 	// already succeeded, so a focus failure is ignored.
+	if leadPaneID == "" && closedChild && snapshot.FocusedWorkspaceID == childID {
+		if lead, found := findAppPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel); found {
+			leadPaneID = lead.PaneID
+		}
+	}
 	if leadPaneID != "" {
 		_, _ = s.herdrCall(ctx, "pane.focus", map[string]any{"pane_id": leadPaneID})
 	}

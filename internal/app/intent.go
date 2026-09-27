@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -86,6 +87,19 @@ func (s *Service) completeIntentStep(ctx context.Context, db *store.DB, intent s
 }
 
 func crashIntentAt(command, phase, step string) {
+	// Isolated E2E can hold a live command exactly between intent steps
+	// while its Herdr group closes. Never enable the pause in a User home.
+	if os.Getenv("POSSE_TEST_ROOT") != "" && os.Getenv("POSSE_INTENT_PAUSE_AT") == command+":"+phase+":"+step {
+		if marker := os.Getenv("POSSE_INTENT_PAUSE_FILE"); marker != "" {
+			_ = os.WriteFile(marker, []byte(step), 0o600)
+			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+				if _, err := os.Stat(marker + ".continue"); err == nil {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	}
 	crashAt := os.Getenv("POSSE_INTENT_CRASH_AT")
 	if crashAt == command+":"+phase+":"+step || (phase == "after" && (crashAt == step || crashAt == command+":"+step)) {
 		os.Exit(86)

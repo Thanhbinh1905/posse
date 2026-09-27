@@ -358,13 +358,13 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			created := harness.session.workspaceCreates - workspaceCreates
 			var leftovers []herdr.Pane
 			for _, pane := range harness.session.panes {
-				if pane.WorkspaceID == fixture.project.HerdrWorkspaceID && pane.PaneID != fixture.project.LeadPaneID {
+				if pane.PaneID != fixture.project.LeadPaneID && strings.HasPrefix(pane.CWD, filepath.Join(fixture.home, "remuda")+string(os.PathSeparator)) {
 					leftovers = append(leftovers, pane)
 				}
 			}
 			harness.session.mu.Unlock()
 			if created != 0 {
-				t.Fatalf("%s created %d Herdr workspaces; Riders open as tabs of the Lead workspace", item.command, created)
+				t.Fatalf("%s created %d top-level Herdr workspaces; Riders open as linked worktrees", item.command, created)
 			}
 			if item.command == "ride" {
 				if err := fixture.openDB(t, func(db *store.DB) error {
@@ -374,9 +374,9 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					} else if err != nil {
 						return err
 					}
-					// A failed ride leaves no tab behind in the Lead's workspace.
+					// A failed ride leaves no Rider pane in the Lead or a linked child.
 					if task.State == store.StateFailed && len(leftovers) != 0 {
-						return fmt.Errorf("failed ride left panes in the Lead workspace: %#v", leftovers)
+						return fmt.Errorf("failed ride left Rider panes: %#v", leftovers)
 					}
 					if task.State == store.StateWorking && (len(leftovers) != 1 || leftovers[0].Label != task.PaneLabel) {
 						return fmt.Errorf("working ride has panes %#v, want its one labeled Rider pane", leftovers)
@@ -742,7 +742,7 @@ type fakeHerdrSession struct {
 	promptTargets   []string
 	agentStartGate  chan struct{}
 	agentStartNames []string
-	// workspaceCreates counts workspace.create requests: Riders open as tabs.
+	// workspaceCreates counts top-level workspace.create requests, not linked worktree opens.
 	workspaceCreates int
 	workspaces       map[string]herdr.Workspace
 	panes            map[string]herdr.Pane

@@ -395,7 +395,7 @@ func TestDoctorIsCompactAndOnlyChecksConfiguredAgentKinds(t *testing.T) {
 	if len(compact.Checks) == 0 || compact.AgentManifests != nil {
 		t.Fatalf("default doctor output is not compact: %s", output)
 	}
-	var sawAvailable, sawLayout bool
+	var sawAvailable bool
 	for _, row := range compact.Checks {
 		if len(row) != 3 || row["check"] == "" || !oneOfString(row["status"], "ok", "info", "warn", "fail") {
 			t.Fatalf("doctor check row does not match check,status,detail: %#v", row)
@@ -403,15 +403,15 @@ func TestDoctorIsCompactAndOnlyChecksConfiguredAgentKinds(t *testing.T) {
 		if strings.HasPrefix(row["check"], "agent integration cursor") || strings.HasPrefix(row["check"], "agent integration opencode") {
 			t.Fatalf("doctor reported unconfigured agent integration as missing: %#v", row)
 		}
-		if row["check"] == "Herdr Agents sidebar layout" && row["status"] == "warn" {
-			sawLayout = true
+		if row["check"] == "Herdr Agents sidebar layout" {
+			t.Fatal("doctor still requests a retired sidebar layout")
 		}
 		if row["check"] == "other agent kinds" && row["status"] == "ok" && strings.Contains(row["detail"], "cursor") && strings.Contains(row["detail"], "opencode") {
 			sawAvailable = true
 		}
 	}
-	if !sawAvailable || !sawLayout {
-		t.Fatalf("doctor did not report available kinds and optional sidebar layout: %s", output)
+	if !sawAvailable {
+		t.Fatalf("doctor did not report available kinds: %s", output)
 	}
 	for _, row := range compact.Help {
 		if row["check"] == "" || row["action"] == "" {

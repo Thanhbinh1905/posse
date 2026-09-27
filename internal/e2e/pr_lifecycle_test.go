@@ -362,6 +362,7 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 			if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
 				t.Fatalf("merged Task did not release its Rider: %#v", task)
 			}
+			assertMountUnlocked(t, f.env, f.repo, landing.WorktreePath)
 			f.requireNotice(t, "t1", "pr_merged")
 			if content := gitTest(t, f.env, f.repo, "show", "refs/heads/posse/pr-follow-up-leftover:follow-up-work.txt"); content != "unmerged work\n" {
 				t.Fatalf("Leftover did not preserve %s work: %q", mode, content)
