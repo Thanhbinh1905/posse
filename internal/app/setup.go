@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -434,8 +435,7 @@ func setupPending(plan []map[string]any) bool {
 }
 
 func setupInputIsTerminal() bool {
-	_, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), unix.TCGETS)
-	return err == nil
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 func herdrSupportsSidebarRules(version string) bool {

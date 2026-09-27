@@ -7,6 +7,7 @@ require (
 	github.com/mattn/go-isatty v0.0.24
 	github.com/pressly/goose/v3 v3.28.0
 	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	modernc.org/sqlite v1.57.0
 	mvdan.cc/sh/v3 v3.14.1
 )

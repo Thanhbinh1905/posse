@@ -86,6 +86,7 @@ func TestRidersOpenAsTabsOfTheLeadWorkspace(t *testing.T) {
 	fixture.assertRiderTab(t, snapshot, second)
 	fixture.assertRiderLabels(t, snapshot, first, second)
 	fixture.assertRenderedSidebar(t, first, second)
+	fixture.assertAlive(t, fixture.snapshot(t), fixture.leadPaneID)
 	if tabOf(t, snapshot, first.PaneID) == tabOf(t, snapshot, second.PaneID) {
 		t.Fatalf("two Riders share tab %s", tabOf(t, snapshot, first.PaneID))
 	}
@@ -369,6 +370,16 @@ func (f *riderTabsFixture) assertRenderedSidebar(t *testing.T, first, second sto
 	cmd := exec.Command("script", "-q", "-c", "stty rows 45 cols 160; timeout 4 herdr", "/dev/null")
 	cmd.Env = setEnv(f.env, "TERM", "xterm-256color")
 	cmd.Dir = f.repo
+	// An EOF on script's stdin is sent to the active Herdr pane as Ctrl-D.
+	// Keep the pipe's writer open until the client detaches; a file descriptor
+	// avoids an exec.Cmd stdin-copy goroutine that would wait for EOF.
+	input, keepOpen, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	defer keepOpen.Close()
+	cmd.Stdin = input
 	output, err := cmd.CombinedOutput()
 	if err != nil && !strings.Contains(err.Error(), "exit status 124") {
 		t.Fatalf("attach isolated Herdr client: %v: %s", err, output)
