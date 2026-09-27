@@ -95,6 +95,42 @@ func TestGuardAllowsReadsAndIsolatedHerdrServers(t *testing.T) {
 	}
 }
 
+func TestGuardAllowsDownloadingAndRunningAnIsolatedHerdrBinary(t *testing.T) {
+	commands := []string{
+		`tool_dir="/tmp/posse-tools/herdr"; mkdir -p "$tool_dir"; herdr="$tool_dir/herdr"; curl -fsSL https://github.com/herdrdev/herdr/releases/download/v0.9.1/herdr-linux-x86_64 -o "$herdr"; chmod 755 "$herdr"; "$herdr" --version`,
+		`tool_dir="/tmp/posse-tools/herdr"; mkdir -p "$tool_dir"; herdr="$tool_dir/herdr"; gh release download v0.9.1 --repo herdrdev/herdr --pattern herdr-linux-x86_64 --dir "$tool_dir"; chmod +x "$herdr"`,
+		`cp /tmp/source/herdr /tmp/dest/herdr; chmod +x /tmp/dest/herdr`,
+		`curl --unix-socket /tmp/posse-e2e-x/herdr.sock http://example.test/`,
+	}
+	for _, command := range commands {
+		if refused, reason := guardHerdrCommand(command, guardEnv); refused {
+			t.Errorf("guard refused download or isolated run %q: %#v", command, reason)
+		}
+	}
+
+	root, err := os.MkdirTemp("/tmp", "posse-e2e-t91-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
+		t.Fatal(err)
+	}
+	isolatedEnv := herdr.IsolatedTestEnvironment(root)
+	if _, err := herdr.ValidateIsolatedEnvironment(isolatedEnv); err != nil {
+		t.Fatalf("test isolation fixture is invalid: %v", err)
+	}
+	command := `herdr="/tmp/posse-tools/herdr"; env -i ` + strings.Join(quoteArgv(isolatedEnv), " ") + ` "$herdr" workspace close w1`
+	if refused, reason := guardHerdrCommand(command, guardEnv); refused {
+		t.Errorf("guard refused a downloaded binary targeting an isolated server: %#v", reason)
+	}
+
+	command = `herdr="/tmp/posse-tools/herdr"; "$herdr" workspace close w1`
+	if refused, reason := guardHerdrCommand(command, guardEnv); !refused {
+		t.Errorf("guard allowed downloaded binary to reach the User's session: %#v", reason)
+	}
+}
+
 func TestGuardEnvUnsetsAndCleanEnvironmentReachSameSocket(t *testing.T) {
 	for _, tc := range []struct {
 		name, configHome string
@@ -154,6 +190,7 @@ func TestGuardRecognizesSocketHardlinks(t *testing.T) {
 	env := append(append([]string{}, guardEnv...), "HERDR_SOCKET_PATH="+socket)
 	for _, command := range []string{
 		"HERDR_SOCKET_PATH=" + alias + " herdr workspace rename w1 changed",
+		"curl --unix-socket " + alias + " http://example.test/",
 		"ln -f $HERDR_SOCKET_PATH ./new.sock && HERDR_SOCKET_PATH=./new.sock herdr workspace rename w1 changed",
 	} {
 		if refused, _ := guardHerdrCommand(command, env); !refused {

@@ -367,6 +367,8 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			return false, guardReason{}
 		case name == "herdr":
 			return g.herdr(e, args, literal)
+		case name == "curl":
+			return g.curl(e, args, literal, raw)
 		case name == "git" && g.workerHome != "":
 			if gitRemoteWrite(e, args[1:], literal[1:]) {
 				return refuse(raw, "Riders must push their Task branch through `posse publish`, not `git push`")
@@ -687,6 +689,43 @@ func (g *guard) posseBuild(e *shellEnv, program, raw string) (bool, guardReason)
 		return false, guardReason{}
 	}
 	return refuse(raw, "it runs a posse build other than the installed one against the Rider's posse home")
+}
+
+func (g *guard) curl(e *shellEnv, args []string, literal []bool, raw string) (bool, guardReason) {
+	for index := 1; index < len(args); index++ {
+		arg := args[index]
+		if !literal[index] {
+			if g.mentionsHerdr(raw) {
+				return g.opaque(e, raw, strings.Join(args, " "))
+			}
+			continue
+		}
+		if arg == "--" {
+			break
+		}
+		socket := ""
+		switch {
+		case arg == "--unix-socket":
+			index++
+			if index >= len(args) || !literal[index] || args[index] == "" {
+				return refuse(raw, "posse cannot tell which Herdr server curl reaches")
+			}
+			socket = args[index]
+		case strings.HasPrefix(arg, "--unix-socket="):
+			socket = strings.TrimPrefix(arg, "--unix-socket=")
+		}
+		if socket == "" {
+			continue
+		}
+		socket = e.path(socket)
+		if socket == "" || g.realSocket == "" {
+			return refuse(raw, "posse cannot tell which Herdr server curl reaches")
+		}
+		if sameSocket(socket, g.realSocket) {
+			return refuse(raw, "it targets the Herdr session this Rider runs in")
+		}
+	}
+	return false, guardReason{}
 }
 
 func (g *guard) herdr(e *shellEnv, args []string, literal []bool) (bool, guardReason) {
