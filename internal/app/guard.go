@@ -362,6 +362,11 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			return false, guardReason{}
 		case name == "herdr":
 			return g.herdr(e, args, literal)
+		case name == "git" && g.workerHome != "":
+			if gitRemoteWrite(e, args[1:], literal[1:]) {
+				return refuse(raw, "Riders must push their Task branch through `posse publish`, not `git push`")
+			}
+			return false, guardReason{}
 		case name == "ln" && len(args) >= 3 && sameSocket(args[len(args)-2], g.realSocket):
 			return refuse(raw, "it aliases the Rider's Herdr socket")
 		case name == "make" || name == "gmake":
@@ -937,6 +942,11 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 			builder.WriteString(value)
 		}
 		return builder.String(), true
+	case *syntax.CmdSubst:
+		if sourceText(script, part) == "$(pwd)" && e.cwd != "" {
+			return e.cwd, true
+		}
+		return "", false
 	case *syntax.ParamExp:
 		match := simpleVar.FindStringSubmatch(sourceText(script, part))
 		if match == nil {

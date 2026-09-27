@@ -91,6 +91,15 @@ type checkSnapshot struct {
 
 func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merge bool, userQuote string) (returnErr error) {
 	ctx := out.Context
+	if task.PRURL != "" {
+		previous, err := db.LatestPRObservation(ctx, task.ID)
+		if err != nil && !store.IsNotFound(err) {
+			return err
+		}
+		if err == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
+			return axi.Failure("pr_closed", "pull request closed without merging; resolve its Decision before retrying Land", false)
+		}
+	}
 	var openIntent store.Intent
 	openIntentActive := false
 	defer func() {
@@ -569,19 +578,29 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 		if task.PRURL == "" {
 			continue
 		}
-		if task.State == store.StateLanding || (task.LandingMode == "pr" && (task.State == store.StateDone || task.State == store.StateWorking || task.State == store.StateNeedsDecision)) {
+		if task.State != store.StateLanded && task.State != store.StateTornDown && task.State != store.StateReported {
+			previous, previousErr := db.LatestPRObservation(ctx, task.ID)
+			if previousErr != nil && !store.IsNotFound(previousErr) {
+				return previousErr
+			}
+			if previousErr == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
+				if err := raiseClosedPRDecision(ctx, db, project, task, task.PRURL); err != nil {
+					return err
+				}
+			}
 			watched = append(watched, task)
 		}
 	}
-	state, err := db.ProjectWatchState(ctx, project.ID)
+	now := time.Now()
+	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
+	claim, err := db.ClaimPRPoll(ctx, project.ID, now, interval, force)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
-	if !force && !store.ProjectWatchInterval(state.PRPolledAt, interval, now) {
+	if claim == "" {
 		return nil
 	}
+	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
 	if len(watched) == 0 {
 		_, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), "")
 		return err
@@ -619,8 +638,15 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			if commandErr != nil {
 				failure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
 			}
-			_, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure)
-			return recordErr
+			if _, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure); recordErr != nil {
+				return recordErr
+			}
+			for _, task := range watched {
+				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, errors.New(failure), now); recordErr != nil {
+					return recordErr
+				}
+			}
+			return nil
 		}
 		if commandErr != nil && (len(response.Errors) == 0 || errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded)) {
 			globalFailure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
@@ -685,6 +711,12 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	observations := make([]pendingObservation, 0, len(targets))
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
+			if strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest") {
+				if err := raiseInvalidPRDecision(ctx, db, project, task); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := recordPRTaskWatchFailure(ctx, db, project, task, taskErr, now); err != nil {
 				return err
 			}
@@ -695,7 +727,7 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			continue
 		}
 		previous, previousErr := db.LatestPRObservation(ctx, task.ID)
-		hasPrevious := previousErr == nil
+		hasPrevious := previousErr == nil && previous.PRURL == task.PRURL
 		if previousErr != nil && !store.IsNotFound(previousErr) {
 			return previousErr
 		}
@@ -718,22 +750,27 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			}
 			continue
 		}
-		if task.State == store.StateWorking || task.State == store.StateNeedsDecision {
-			// Follow-up work may have moved the local branch. Only a merged PR
-			// whose exact head was verified before that move can finish the Task.
-			if observation.State != "MERGED" {
-				continue
-			}
+		if observation.State == "MERGED" {
 			verified, verifyErr := db.WasVerifiedPRHead(ctx, task.ID, task.PRURL, observation.HeadSHA)
 			if verifyErr != nil {
 				return verifyErr
 			}
+			// A head still on the Mount's Task branch is also the Rider's own.
+			if !verified && task.WorktreePath != "" && task.Branch != "" {
+				branch, branchErr := gitOutput(ctx, task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+				if branchErr == nil && branch == task.Branch {
+					_, verifyErr = gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD")
+					verified = verifyErr == nil
+				}
+			}
 			if !verified {
+				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("merged head %s is neither on the Mount Task branch nor recorded by publish", observation.HeadSHA), now); err != nil {
+					return err
+				}
 				continue
 			}
-			// A still-running Rider may have unmerged commits or edits. Mark
-			// the PR landed, but never tear down a Mount with such work.
-			if err := validateWorkerPullRequestWithRemote(ctx, project, task, forge, task.PRURL, observation.HeadSHA, false); err != nil {
+			if (task.State != store.StateLanding || task.GatedSHA != observation.HeadSHA) && validateWorkerPullRequestWithRemote(ctx, project, task, forge, task.PRURL, observation.HeadSHA, false) != nil {
+				err := fmt.Errorf("merged pull request identity could not be verified for %s", task.PRURL)
 				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, err, now); recordErr != nil {
 					return recordErr
 				}
@@ -744,27 +781,23 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	}
 	for _, observed := range observations {
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
-		if observed.current.State == "MERGED" && observed.task.LandingMode == "pr" {
-			if observed.task.State == store.StateWorking || observed.task.State == store.StateNeedsDecision {
-				effect.TransitionTo = "" // The Rider must remain able to finish its follow-up.
-			} else if observed.task.State == store.StateDone {
-				candidate := observed.task
-				candidate.LandedRef = observed.current.MergeCommit
-				safe, safetyErr := safeMergedPRWorktree(ctx, db, project, candidate, observed.current)
-				if safetyErr != nil {
-					return safetyErr
-				}
-				if !safe {
-					effect.TransitionTo = ""
-				}
+		if observed.current.State == "MERGED" && observed.hasBefore && observed.previous.PRURL == observed.current.PRURL && observed.previous.State == "MERGED" {
+			var exists bool
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='pr_merged' AND data_json=?)`, observed.task.ID, marshalJSON(map[string]any{"url": observed.current.PRURL, "head_sha": observed.current.HeadSHA, "merge_commit": observed.current.MergeCommit})).Scan(&exists); err != nil {
+				return err
 			}
-			if effect.TransitionTo == "" && (!observed.hasBefore || observed.previous.State != "MERGED") {
-				effect.Notices = append(effect.Notices, store.Notice{ProjectID: project.ID, TaskID: observed.task.ID, Kind: "pr_follow_up_pending", Summary: observed.task.Title + ": merged PR has follow-up work; retain the Rider and publish any unmerged change as a new PR", DataJSON: marshalJSON(map[string]any{"url": observed.current.PRURL}), CreatedAt: observed.current.ObservedAt})
+			if !exists {
+				effect.Notices = append(effect.Notices, store.Notice{ProjectID: project.ID, TaskID: observed.task.ID, Kind: "pr_merged", Summary: observed.task.Title + ": pull request merged", DataJSON: marshalJSON(map[string]any{"url": observed.current.PRURL, "head_sha": observed.current.HeadSHA, "merge_commit": observed.current.MergeCommit}), CreatedAt: observed.current.ObservedAt})
 			}
 		}
 		recorded, err := db.RecordPRObservation(ctx, observed.current, effect, observed.task)
 		if err != nil {
 			return err
+		}
+		if recorded && observed.current.State == "CLOSED" {
+			if err := raiseClosedPRDecision(ctx, db, project, observed.task, observed.current.PRURL); err != nil {
+				return err
+			}
 		}
 		if recorded && observed.current.State == "MERGED" {
 			if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
@@ -976,8 +1009,6 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 	case "CLOSED":
 		if !hasPrevious || previous.State != "CLOSED" {
 			addNotice("pr_closed", task.Title+": pull request closed without merging", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
-			effect.TransitionTo = store.StateDone
-			effect.TransitionNote = "Pull request closed without merging"
 		}
 	case "OPEN":
 		if len(failures) > 0 && (newHead || len(previousChecks.Failures) == 0 || !sameFailures(previousChecks.Failures, failures)) {

@@ -445,14 +445,15 @@ func prefixFailure(repo string, err error) error {
 // pollWorkspacePullRequests watches every open member pull request of the
 // Project's landing Tasks and records what changed.
 func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) error {
-	state, err := db.ProjectWatchState(ctx, project.ID)
+	now := time.Now()
+	claim, err := db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	if !force && !store.ProjectWatchInterval(state.PRPolledAt, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), now) {
+	if claim == "" {
 		return nil
 	}
+	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
 	tasks, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {
 		return err
@@ -460,7 +461,7 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 	landedAny := false
 	failure := ""
 	for _, task := range tasks {
-		if task.State != store.StateLanding {
+		if task.State == store.StateLanded || task.State == store.StateTornDown || task.State == store.StateReported {
 			continue
 		}
 		members, err := s.workspaceMembers(ctx, db, project, task)
@@ -468,8 +469,17 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			return err
 		}
 		for _, member := range members {
-			if member.repo.State != store.TaskRepoLanding || member.repo.PRURL == "" {
+			if member.repo.PRURL == "" || member.repo.State == store.TaskRepoLanded {
 				continue
+			}
+			previous, previousErr := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+			if previousErr != nil && !store.IsNotFound(previousErr) {
+				return previousErr
+			}
+			if previousErr == nil && previous.PRURL == member.repo.PRURL && previous.State == "CLOSED" {
+				if err := raiseClosedPRDecision(ctx, db, project, task, member.repo.PRURL); err != nil {
+					return err
+				}
 			}
 			forge, err := forgeForRepository(ctx, member.target.Root, cfg, member.repo.Repo)
 			if err != nil {
@@ -493,11 +503,7 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 				}
 				continue
 			}
-			previous, previousErr := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
-			hasPrevious := previousErr == nil
-			if previousErr != nil && !store.IsNotFound(previousErr) {
-				return previousErr
-			}
+			hasPrevious := previousErr == nil && previous.PRURL == member.repo.PRURL
 			if strings.EqualFold(observation.Mergeable, "UNKNOWN") && hasPrevious {
 				observation.Mergeable = previous.Mergeable
 			}
@@ -506,15 +512,33 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			for index := range memberEffect.Notices {
 				memberEffect.Notices[index].DataJSON = withRepo(memberEffect.Notices[index].DataJSON, member.repo.Repo)
 			}
-			switch effect.TransitionTo {
-			case store.StateLanded:
+			if observation.State == "MERGED" {
+				if err := settleUnchangedWorkspaceMembers(ctx, db, members); err != nil {
+					return err
+				}
+				branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+				if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
+					if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+						return err
+					}
+					continue
+				}
+				if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
+					if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+						return err
+					}
+					continue
+				}
 				memberEffect.RepoState = store.TaskRepoLanded
-			case store.StateDone:
-				memberEffect.RepoState = store.TaskRepoOpen
 			}
 			recorded, err := db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, memberEffect)
 			if err != nil {
 				return err
+			}
+			if recorded && observation.State == "CLOSED" {
+				if err := raiseClosedPRDecision(ctx, db, project, task, member.repo.PRURL); err != nil {
+					return err
+				}
 			}
 			landedAny = landedAny || (recorded && memberEffect.RepoState == store.TaskRepoLanded)
 		}
@@ -525,6 +549,31 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 	if landedAny {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// An untouched member is only unchanged at settle time. A poll while the
+// Rider is still working must not make that state permanent.
+func settleUnchangedWorkspaceMembers(ctx context.Context, db *store.DB, members []memberLanding) error {
+	for _, member := range members {
+		if member.repo.PRURL != "" || (member.repo.State != store.TaskRepoOpen && member.repo.State != store.TaskRepoUnchanged) {
+			continue
+		}
+		commits, err := gitOutput(ctx, member.task.WorktreePath, "rev-list", "--count", member.repo.BaseRef+"..HEAD")
+		if err != nil {
+			return memberFailure(member.repo.Repo, err)
+		}
+		state := store.TaskRepoOpen
+		if commits == "0" {
+			state = store.TaskRepoUnchanged
+		}
+		if member.repo.State != state {
+			member.repo.State = state
+			if err := db.UpdateTaskRepo(ctx, member.repo); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

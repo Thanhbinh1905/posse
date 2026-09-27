@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"strconv"
 	"time"
 )
@@ -45,6 +48,42 @@ func (db *DB) ProjectWatchState(ctx context.Context, projectID int64) (ProjectWa
 		return ProjectWatchState{}, nil
 	}
 	return state, err
+}
+
+// ClaimPRPoll reserves a Project poll before any forge call. SQLite serializes
+// the conditional update across the Lead and Lookout processes. The token
+// prevents an old owner releasing a successor's lease after expiry.
+func (db *DB) ClaimPRPoll(ctx context.Context, projectID int64, now time.Time, interval time.Duration, force bool) (string, error) {
+	stamp := now.UnixMilli()
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(bytes)
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO project_watch_state(project_id) VALUES (?)`, projectID); err != nil {
+		return "", err
+	}
+	threshold := stamp - int64(interval/time.Millisecond)
+	if force {
+		threshold = math.MaxInt64
+	}
+	result, err := db.ExecContext(ctx, `UPDATE project_watch_state SET pr_poll_claim_until=?,pr_poll_claim_token=? WHERE project_id=? AND pr_poll_claim_until<=? AND pr_polled_at<=?`, stamp+int64((5*time.Minute)/time.Millisecond), token, projectID, stamp, threshold)
+	if err != nil {
+		return "", err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if rows == 0 {
+		return "", nil
+	}
+	return token, nil
+}
+
+func (db *DB) ReleasePRPoll(ctx context.Context, projectID int64, token string) error {
+	_, err := db.ExecContext(ctx, `UPDATE project_watch_state SET pr_poll_claim_until=0,pr_poll_claim_token='' WHERE project_id=? AND pr_poll_claim_token=?`, projectID, token)
+	return err
 }
 
 func (db *DB) RecordPRPoll(ctx context.Context, projectID int64, at int64, failureSummary string) (int, error) {
@@ -203,6 +242,8 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
 			return false, err
 		}
+	}
+	if !unchanged || effect.TransitionTo == StateLanded && transitions[current.State][StateLanded] {
 		for _, notice := range effect.Notices {
 			if err := insertNoticeTx(ctx, tx, notice); err != nil {
 				return false, err
@@ -212,7 +253,7 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	transitioned := false
 	if effect.TransitionTo != "" {
 		state := current.State
-		if state == StateLanding || (state == StateDone && effect.TransitionTo == StateLanded) {
+		if transitions[state][effect.TransitionTo] && (effect.TransitionTo == StateLanded || state == StateLanding) {
 			if effect.LandedRef != "" {
 				if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, effect.LandedRef, time.Now().UnixMilli(), observation.TaskID); err != nil {
 					return false, err

@@ -72,6 +72,9 @@ func (f *Fake) Call(_ context.Context, method string, params map[string]any) (js
 	if result, ok := f.Results[method]; ok {
 		return append(json.RawMessage(nil), result...), nil
 	}
+	if method == "tab.create" {
+		return json.RawMessage(`{"tab":{"tab_id":"fake:lookout"},"root_pane":{"pane_id":"fake:lookout-pane","tab_id":"fake:lookout"}}`), nil
+	}
 	return json.RawMessage(`{}`), nil
 }
 

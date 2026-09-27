@@ -62,8 +62,9 @@ func (s *Service) commands() *axi.Command {
 		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Rider's question to the User as a Decision.", Handler: s.ask},
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
+		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Leftover or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file>", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
-		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
+		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p] [--from-leftover <decision>]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
 		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note>", Summary: "Record a Rider's Signal.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] <summary>", Summary: "Push this PR-mode Ship Task's branch and open or reuse its pull request.", Handler: s.publish},
 		{Name: "brief", Summary: "Reprint this Rider's launch Brief.", Handler: s.brief},
@@ -75,7 +76,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "land", Summary: "Land a completed Ship Task.", Handler: s.land},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "unsaddle", Summary: "Teardown a finished Task and release its Mount.", Handler: s.teardown},
-		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>]", Summary: "Acknowledge Notices and wait for the next undelivered Notice.", Handler: s.wait},
+		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--poll-only]", Summary: "Acknowledge Notices and wait for the next undelivered Notice.", Handler: s.wait},
 		{Name: "remuda", Summary: "List a Project's Remuda or prune idle Mounts.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
@@ -238,6 +239,9 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 	_, _ = s.availableUpdate(ctx, db, &project)
 	if herdrReady {
 		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+			return cfg, err
+		}
+		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
 			return cfg, err
 		}
 		fresh, err := db.ProjectByID(ctx, project.ID)

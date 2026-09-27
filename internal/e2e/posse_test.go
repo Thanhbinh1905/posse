@@ -671,10 +671,6 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousNotices, err := db.UndeliveredNotices(context.Background(), project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	previousPromptLog, _ := os.ReadFile(leadLog)
 	previousPromptCount := strings.Count(string(previousPromptLog), "[posse | Posse -> Lead ")
 	if _, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "focused guard check", DataJSON: `{}`}); err != nil {
@@ -701,8 +697,17 @@ esac
 		t.Fatal(err)
 	}
 	undelivered, err := db.UndeliveredNotices(context.Background(), project.ID)
-	if err != nil || len(undelivered) != len(previousNotices)+1 {
-		t.Fatalf("focused Lead Notice state = %#v, %v", undelivered, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	focusedNotice := false
+	for _, notice := range undelivered {
+		if notice.Summary == "focused guard check" && notice.DeliveredAt == 0 {
+			focusedNotice = true
+		}
+	}
+	if !focusedNotice {
+		t.Fatalf("focused Lead Notice was delivered unexpectedly: %#v", undelivered)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

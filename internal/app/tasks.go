@@ -69,7 +69,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) spawn(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}})
+	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-leftover": {}})
 	if err != nil {
 		return err
 	}
@@ -163,6 +163,65 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if project.IsWorkspace() {
 		// Each member records its own base ref and Landing Mode; the Task keeps the strictest.
 		baseRef, mode = "", workspaceMode
+	}
+	if from := parsed.Flags["from-leftover"]; from != "" {
+		id, parseErr := strconv.ParseInt(from, 10, 64)
+		if parseErr != nil || id < 1 {
+			return axi.Usage("--from-leftover requires a Decision id")
+		}
+		decision, lookupErr := db.Decision(ctx.Context, project.ID, id)
+		if lookupErr != nil || decision.Kind != "leftover" || decision.Answer != "open-task" {
+			return axi.Failure("leftover_refused", "an answered open-task Leftover Decision is required", false)
+		}
+		origin := strings.TrimPrefix(decision.Origin, "leftover:")
+		source, err := db.TaskByID(ctx.Context, project.ID, decision.TaskID)
+		if err != nil {
+			return err
+		}
+		if project.IsWorkspace() {
+			memberName, ref, found := strings.Cut(origin, ":")
+			if !found {
+				return axi.Failure("leftover_refused", "Leftover has no workspace Member", false)
+			}
+			matched := false
+			for i := range members {
+				if members[i].Name == memberName {
+					if _, err := gitOutput(ctx.Context, members[i].Root, "rev-parse", "--verify", "refs/heads/"+ref); err != nil {
+						return err
+					}
+					merged := members[i].BaseRef
+					repos, err := db.TaskRepos(ctx.Context, source.ID)
+					if err != nil {
+						return err
+					}
+					for _, repo := range repos {
+						if repo.Repo == memberName && repo.LandedRef != "" {
+							merged = repo.LandedRef
+							break
+						}
+					}
+					base, err := leftoverBase(ctx.Context, members[i].Root, "refs/heads/"+ref, merged, members[i].BaseRef)
+					if err != nil {
+						return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current default branch before retrying")
+					}
+					members[i].BaseRef = base
+					matched = true
+				}
+			}
+			if !matched {
+				return axi.Failure("leftover_refused", "Brief does not include the Leftover Member", false)
+			}
+		} else {
+			snapshot := "refs/heads/" + origin
+			merged := source.LandedRef
+			if merged == "" {
+				merged = source.BaseRef
+			}
+			baseRef, err = leftoverBase(ctx.Context, project.Root, snapshot, merged, baseRef)
+			if err != nil {
+				return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current default branch before retrying")
+			}
+		}
 	}
 	if err := taskBranchAvailable(ctx.Context, db, project, slug); err != nil {
 		return err
@@ -850,6 +909,30 @@ func (s *Service) send(ctx *axi.Context, args []string) error {
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
+	}
+	refreshPR := task.PRURL != "" && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes")
+	if project.IsWorkspace() {
+		repos, err := db.TaskRepos(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		for _, repo := range repos {
+			refreshPR = refreshPR || repo.PRURL != "" && repo.LandingMode == "pr"
+		}
+	}
+	if refreshPR {
+		if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, true); err != nil {
+			return err
+		}
+		if err := s.autoTeardownLandedTasks(ctx.Context, db, project, cfg); err != nil {
+			return err
+		}
+		if task, err = db.TaskByID(ctx.Context, project.ID, task.ID); err != nil {
+			return err
+		}
+		if task.State == store.StateLanded || task.State == store.StateTornDown {
+			return axi.Failure("pr_merged", "pull request merged; Task Landed before the message could be sent", false)
+		}
 	}
 	if task.State == store.StateDone && task.Type != "ship" {
 		return axi.Failure("message_refused", "Task is not accepting Rider instructions in state done because it is not a Ship Task", false, "Create a new Ship Task with `posse ride --brief <file> --name <short>` to continue the work")

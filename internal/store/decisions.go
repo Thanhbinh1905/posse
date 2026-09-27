@@ -199,15 +199,20 @@ func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int
 func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) error {
 	_, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=CASE kind
 		WHEN 'land_ready' THEN 'Task left landing'
+		WHEN 'pr_closed' THEN 'Closed PR was reopened, replaced or Task discarded'
+		WHEN 'leftover' THEN 'Unrecoverable Leftover resolved during Teardown'
 		ELSE 'Task no longer failed or lost' END
-		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('land_ready','recovery')
+		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('land_ready','recovery','pr_closed','leftover')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=decisions.task_id AND
-		((kind='land_ready' AND t.state<>'landing') OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))))`, time.Now().UnixMilli(), projectID)
+		((kind='land_ready' AND (t.state<>'landing' OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url ORDER BY id DESC LIMIT 1)='CLOSED'))
+		OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))
+		OR (kind='pr_closed' AND ((decisions.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR decisions.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url)) OR (decisions.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
+		OR (kind='leftover' AND decisions.origin LIKE 'leftover:unrecoverable:%' AND t.state='torn-down')))`, time.Now().UnixMilli(), projectID)
 	return err
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *sql.Tx, decision Decision) (string, error) {
-	if decision.Kind != "land_ready" && decision.Kind != "recovery" {
+	if decision.Kind != "land_ready" && decision.Kind != "recovery" && decision.Kind != "pr_closed" && decision.Kind != "leftover" {
 		return "", nil
 	}
 	var state State
@@ -215,11 +220,38 @@ func decisionObsoleteReason(ctx context.Context, tx *sql.Tx, decision Decision) 
 	if err := tx.QueryRowContext(ctx, `SELECT state,launches FROM tasks WHERE id=? AND project_id=?`, decision.TaskID, decision.ProjectID).Scan(&state, &launches); err != nil {
 		return "", err
 	}
-	if decision.Kind == "land_ready" && state != StateLanding {
-		return "Task left landing", nil
+	if decision.Kind == "land_ready" {
+		var closed bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks t JOIN pr_observations p ON p.task_id=t.id AND p.pr_url=t.pr_url WHERE t.id=? AND p.state='CLOSED' AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url))`, decision.TaskID).Scan(&closed); err != nil {
+			return "", err
+		}
+		if state != StateLanding {
+			return "Task left landing", nil
+		}
+		if closed {
+			return "Task PR closed", nil
+		}
 	}
 	if decision.Kind == "recovery" && (state != StateFailed && state != StateLost || launches != decision.TaskLaunches) {
 		return "Task no longer failed or lost", nil
+	}
+	if decision.Kind == "pr_closed" {
+		var owned bool
+		var latest string
+		url := strings.TrimPrefix(decision.Origin, "pr_closed:")
+		invalid := strings.HasPrefix(url, "invalid:")
+		if invalid {
+			_, url, _ = strings.Cut(strings.TrimPrefix(url, "invalid:"), ":")
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT (t.pr_url=? OR EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=?)), COALESCE((SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=? ORDER BY id DESC LIMIT 1),'') FROM tasks t WHERE t.id=?`, url, url, url, decision.TaskID).Scan(&owned, &latest); err != nil {
+			return "", err
+		}
+		if state == StateTornDown || !owned || (latest != "CLOSED" && !invalid) {
+			return "Closed PR was reopened, replaced or Task discarded", nil
+		}
+	}
+	if decision.Kind == "leftover" && strings.HasPrefix(decision.Origin, "leftover:unrecoverable:") && state == StateTornDown {
+		return "Unrecoverable Leftover resolved during Teardown", nil
 	}
 	return "", nil
 }

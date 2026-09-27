@@ -127,6 +127,18 @@ func TestGuardRecognizesSocketHardlinks(t *testing.T) {
 	}
 }
 
+func TestRiderGuardBlocksDirectGitPush(t *testing.T) {
+	scope, _ := guardFixture(t)
+	for _, command := range []string{"git push origin HEAD", "env git -C repo push origin main", "sh -c 'git push'"} {
+		if refused, reason := guardCommand(command, scope); !refused || !strings.Contains(reason.why, "posse publish") {
+			t.Errorf("direct Rider push allowed: %q (%v, %#v)", command, refused, reason)
+		}
+	}
+	if refused, reason := guardCommand("git status --short", scope); refused {
+		t.Fatalf("Rider read blocked: %#v", reason)
+	}
+}
+
 func TestRunGuardBlocksOnlyWorkers(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "posse")

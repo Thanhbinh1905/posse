@@ -18,7 +18,7 @@ import (
 )
 
 func (s *Service) wait(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "quiet-routine": {boolean: true}})
+	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -41,6 +41,12 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	project, err := s.projectForCWD(ctx.Context, db)
 	if err != nil {
 		return err
+	}
+	if parsed.Bool("poll-only") {
+		if parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Bool("quiet-routine") {
+			return axi.Usage("--poll-only cannot deliver or acknowledge Notices")
+		}
+		return s.watchPullRequestsInLookoutTab(ctx, db, project, timeout)
 	}
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
@@ -75,6 +81,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		deadline = time.Now().Add(timeout)
 	}
 	lastHerdrReconcile := time.Time{}
+	lookoutPaneID := ""
 	for {
 		notices, err := db.UndeliveredNotices(ctx.Context, project.ID)
 		if err != nil {
@@ -86,7 +93,35 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					return err
 				}
 				lastHerdrReconcile = time.Now()
+				if snapshot, err := s.snapshot(ctx.Context); err == nil {
+					for _, pane := range snapshot.Panes {
+						if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
+							lookoutPaneID = pane.PaneID
+							break
+						}
+					}
+				}
 			} else {
+				// Poll PRs at their configured cadence, without a full Herdr
+				// reconciliation on every tick. Only a dead known Lookout
+				// needs a new snapshot and replacement tab.
+				if lookoutPaneID != "" {
+					if home, err := s.homePath(); err == nil && !lookoutProcessRunning(lookoutPaneID, home) {
+						if snapshot, err := s.snapshot(ctx.Context); err == nil {
+							if err := s.ensureLookoutTab(ctx.Context, project, snapshot); err != nil {
+								return err
+							}
+							if fresh, err := s.snapshot(ctx.Context); err == nil {
+								for _, pane := range fresh.Panes {
+									if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
+										lookoutPaneID = pane.PaneID
+										break
+									}
+								}
+							}
+						}
+					}
+				}
 				home, err := s.homePath()
 				if err != nil {
 					return err
@@ -99,6 +134,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					return err
 				}
 				if _, err := s.syncProjectRoot(ctx.Context, db, project, cfg, false); err != nil {
+					return err
+				}
+				if err := s.autoTeardownLandedTasks(ctx.Context, db, project, cfg); err != nil {
 					return err
 				}
 			}

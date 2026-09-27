@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -372,18 +375,6 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if !discardable && task.State != store.StateLanded && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
-	if task.State == store.StateLanded && task.LandingMode == "pr" {
-		safe, safetyErr := safePRMergeTeardown(ctx.Context, db, project, task)
-		if safetyErr != nil {
-			return safetyErr
-		}
-		if !safe {
-			if err := restoreMergedTaskWithWork(ctx.Context, db, project, task); err != nil {
-				return err
-			}
-			return axi.Failure("teardown_refused", "merged PR has unmerged Task work; Rider returned to working", false, "Continue the Rider and publish follow-up work as a new PR before teardown")
-		}
-	}
 	if discardable && !parsed.Bool("discard") {
 		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false)
 	}
@@ -435,38 +426,83 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
+	var stopped []string
+	if task.State == store.StateLanded && !discardable && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
+		// Background processes may write after the Rider pane closes. Stop
+		// them before taking the snapshot, never after it.
+		if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
+			var stopErr error
+			stopped, stopErr = stopMountProcesses(task.WorktreePath)
+			return stopErr
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+		}
+		if err := s.runIntentStep(ctx, db, intent, "leftover.snapshot", func() error {
+			if !project.IsWorkspace() {
+				return snapshotPRLeftover(ctx, db, project, task)
+			}
+			members, err := s.workspaceMembers(ctx, db, project, task)
+			if err != nil {
+				return err
+			}
+			requested := map[string]bool{}
+			for _, member := range members {
+				requested[member.repo.Repo] = true
+				if member.repo.State == store.TaskRepoLanded && member.repo.PRURL != "" {
+					observation, err := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+					if err != nil {
+						return err
+					}
+					if err := snapshotPRLeftoverFromObservation(ctx, db, member.project, member.task, observation, member.repo.Repo); err != nil {
+						return err
+					}
+				} else if err := snapshotUnmergedMemberWork(ctx, db, member.project, member.task, member.repo.Repo); err != nil {
+					return err
+				}
+			}
+			// An unrequested Member may still have a detached worktree in a
+			// reused Mount. Its non-ignored edits belong to this Rider too.
+			targets, err := workspaceMountTargets(ctx, db, project)
+			if err != nil {
+				return err
+			}
+			for _, target := range targets {
+				if requested[target.Name] {
+					continue
+				}
+				memberTask := task
+				memberTask.WorktreePath = filepath.Join(task.WorktreePath, target.Path)
+				if _, err := os.Stat(filepath.Join(memberTask.WorktreePath, ".git")); os.IsNotExist(err) {
+					continue
+				} else if err != nil {
+					return err
+				}
+				memberProject := project
+				memberProject.Root, memberProject.DefaultBranch = target.Root, target.DefaultBranch
+				if err := snapshotUnmergedMemberWork(ctx, db, memberProject, memberTask, target.Name); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: "leftover:unrecoverable:" + strconv.FormatInt(task.ID, 10), Question: "The merged PR Leftover could not be snapshotted. Repair the Mount and retry Teardown, or approve discarding its unsaved work?", Options: []string{"repair", "discard"}})
+			if decisionErr != nil {
+				return result, errors.Join(err, decisionErr)
+			}
+			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+		}
+	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
-		if !discardable && task.State == store.StateLanded && task.LandingMode == "pr" {
-			// The Rider's pane has been closed. Recheck after all writes stop,
-			// immediately before the destructive reset of its Mount.
-			safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
-			if safetyErr != nil {
-				return safetyErr
-			}
-			if !safe {
-				return axi.Failure("teardown_refused", "Task work changed before Mount release; preserve it", false)
-			}
-		}
 		var releaseErr error
 		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean)
 		return releaseErr
 	})
 	if err != nil {
-		if task.State == store.StateLanded && task.LandingMode == "pr" {
-			safe, safetyErr := safePRMergeTeardown(ctx, db, project, task)
-			if safetyErr == nil && !safe {
-				// Work written after the first cleanliness check belongs to
-				// the Rider, not to teardown. Restore its reportable state.
-				if restoreErr := restoreMergedTaskWithWork(ctx, db, project, task); restoreErr != nil {
-					return result, errors.Join(err, restoreErr)
-				}
-			}
-		}
 		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 	}
 	result.Panes = paneResult
-	result.StoppedProcesses = killed
+	result.StoppedProcesses = append(stopped, killed...)
 	if project.IsWorkspace() {
 		err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
 			tips := ""
@@ -541,6 +577,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	err = s.runIntentStep(ctx, db, intent, "task.torn_down", func() error {
 		if discardable {
+			if task.State == store.StateLanded {
+				return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", "Unrecoverable Leftover discarded with recorded User approval")
+			}
 			return db.TransitionAfterApproval(ctx, task.ID, task.State, store.StateTornDown, "user", "Task Mount discarded with User approval", "discard")
 		}
 		return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", "Task Mount released after completion")
