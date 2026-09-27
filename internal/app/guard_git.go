@@ -2,6 +2,7 @@ package app
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -15,6 +16,7 @@ func gitRemoteWriteDepth(e *shellEnv, args []string, literal []bool, depth int) 
 	if depth >= 6 {
 		return true
 	}
+	e = e.clone() // -C applies only to this git invocation, not the shell.
 	aliases := map[string]string{}
 	i := 0
 	for i < len(args) {
@@ -37,11 +39,24 @@ func gitRemoteWriteDepth(e *shellEnv, args []string, literal []bool, depth int) 
 			if arg == "-c" {
 				recordGitAlias(aliases, args[i+1])
 			}
+			if arg == "-C" {
+				e.cwd = e.path(args[i+1])
+			}
+			if arg == "--config-env" {
+				recordGitConfigEnvAlias(aliases, e, args[i+1])
+			}
 			i += 2
 		case strings.HasPrefix(arg, "-c") && len(arg) > 2:
 			recordGitAlias(aliases, arg[2:])
 			i++
-		case strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--work-tree=") || strings.HasPrefix(arg, "--namespace=") || strings.HasPrefix(arg, "--config-env=") || arg == "--no-pager" || arg == "--paginate" || arg == "--bare" || arg == "--version" || arg == "--help":
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			e.cwd = e.path(arg[2:])
+			i++
+		case strings.HasPrefix(arg, "--config-env="):
+			recordGitConfigEnvAlias(aliases, e, strings.TrimPrefix(arg, "--config-env="))
+			i++
+		case strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--work-tree=") || strings.HasPrefix(arg, "--namespace=") || strings.HasPrefix(arg, "--exec-path=") || strings.HasPrefix(arg, "--list-cmds=") ||
+			oneOfString(arg, "-P", "-p", "--no-pager", "--paginate", "--bare", "--version", "--help", "--no-optional-locks", "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--exec-path", "--html-path", "--man-path", "--info-path", "--no-lazy-fetch", "--no-advice"):
 			i++
 		default:
 			// An unknown option may consume a value. Do not misidentify its value
@@ -56,8 +71,38 @@ func gitRemoteWriteDepth(e *shellEnv, args []string, literal []bool, depth int) 
 		return true
 	}
 	subcommand := args[i]
-	if subcommand == "push" || subcommand == "send-pack" || subcommand == "receive-pack" {
+	if oneOfString(subcommand, "push", "send-pack", "receive-pack", "http-push") {
 		return true
+	}
+	if subcommand == "subtree" {
+		for j := i + 1; j < len(args); j++ {
+			if !literal[j] || args[j] == "push" {
+				return true
+			}
+		}
+	}
+	if subcommand == "config" {
+		for j := i + 1; j < len(args); j++ {
+			// An alias write in the same shell command changes what a later
+			// git invocation will execute; the hook runs before that write.
+			if strings.HasPrefix(args[j], "alias.") && j+1 < len(args) && args[j-1] != "--get" {
+				return true
+			}
+		}
+	}
+	count, _ := strconv.Atoi(e.values["GIT_CONFIG_COUNT"])
+	if count > 128 || e.unknown["GIT_CONFIG_COUNT"] {
+		return true
+	}
+	for n := 0; n < count; n++ {
+		if e.unknown["GIT_CONFIG_KEY_"+strconv.Itoa(n)] || e.unknown["GIT_CONFIG_VALUE_"+strconv.Itoa(n)] {
+			return true
+		}
+	}
+	for n := 0; n < count; n++ {
+		if e.values["GIT_CONFIG_KEY_"+strconv.Itoa(n)] == "alias."+subcommand {
+			aliases[subcommand] = e.values["GIT_CONFIG_VALUE_"+strconv.Itoa(n)]
+		}
 	}
 	alias := aliases[subcommand]
 	if alias == "" && e.cwd != "" {
@@ -79,6 +124,13 @@ func gitRemoteWriteDepth(e *shellEnv, args []string, literal []bool, depth int) 
 		return gitRemoteWriteDepth(e, fields, allLiteral(len(fields)), depth+1)
 	}
 	return false
+}
+
+func recordGitConfigEnvAlias(aliases map[string]string, e *shellEnv, spec string) {
+	key, name, ok := strings.Cut(spec, "=")
+	if ok && strings.HasPrefix(key, "alias.") {
+		aliases[strings.TrimPrefix(key, "alias.")] = e.values[name]
+	}
 }
 
 func recordGitAlias(aliases map[string]string, config string) {

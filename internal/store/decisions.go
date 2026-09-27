@@ -200,14 +200,14 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 	_, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=CASE kind
 		WHEN 'land_ready' THEN 'Task left landing'
 		WHEN 'pr_closed' THEN 'Closed PR was reopened, replaced or Task discarded'
-		WHEN 'leftover' THEN 'Task discarded'
+		WHEN 'leftover' THEN 'Unrecoverable Leftover resolved during Teardown'
 		ELSE 'Task no longer failed or lost' END
 		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('land_ready','recovery','pr_closed','leftover')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=decisions.task_id AND
 		((kind='land_ready' AND (t.state<>'landing' OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url ORDER BY id DESC LIMIT 1)='CLOSED'))
 		OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))
 		OR (kind='pr_closed' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))
-		OR (kind='leftover' AND EXISTS(SELECT 1 FROM approvals WHERE task_id=t.id AND action='discard'))))`, time.Now().UnixMilli(), projectID)
+		OR (kind='leftover' AND decisions.origin LIKE 'leftover:unrecoverable:%' AND t.state='torn-down')))`, time.Now().UnixMilli(), projectID)
 	return err
 }
 
@@ -246,14 +246,8 @@ func decisionObsoleteReason(ctx context.Context, tx *sql.Tx, decision Decision) 
 			return "Closed PR was reopened, replaced or Task discarded", nil
 		}
 	}
-	if decision.Kind == "leftover" {
-		var discarded bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM approvals WHERE task_id=? AND action='discard')`, decision.TaskID).Scan(&discarded); err != nil {
-			return "", err
-		}
-		if discarded {
-			return "Task discarded", nil
-		}
+	if decision.Kind == "leftover" && strings.HasPrefix(decision.Origin, "leftover:unrecoverable:") && state == StateTornDown {
+		return "Unrecoverable Leftover resolved during Teardown", nil
 	}
 	return "", nil
 }

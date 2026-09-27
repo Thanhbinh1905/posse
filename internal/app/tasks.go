@@ -174,6 +174,10 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			return axi.Failure("leftover_refused", "an answered open-task Leftover Decision is required", false)
 		}
 		origin := strings.TrimPrefix(decision.Origin, "leftover:")
+		source, err := db.TaskByID(ctx.Context, project.ID, decision.TaskID)
+		if err != nil {
+			return err
+		}
 		if project.IsWorkspace() {
 			memberName, ref, found := strings.Cut(origin, ":")
 			if !found {
@@ -185,7 +189,22 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 					if _, err := gitOutput(ctx.Context, members[i].Root, "rev-parse", "--verify", "refs/heads/"+ref); err != nil {
 						return err
 					}
-					members[i].BaseRef = "refs/heads/" + ref
+					merged := members[i].BaseRef
+					repos, err := db.TaskRepos(ctx.Context, source.ID)
+					if err != nil {
+						return err
+					}
+					for _, repo := range repos {
+						if repo.Repo == memberName && repo.LandedRef != "" {
+							merged = repo.LandedRef
+							break
+						}
+					}
+					base, err := leftoverBase(ctx.Context, members[i].Root, "refs/heads/"+ref, merged, members[i].BaseRef)
+					if err != nil {
+						return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current default branch before retrying")
+					}
+					members[i].BaseRef = base
 					matched = true
 				}
 			}
@@ -193,9 +212,14 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 				return axi.Failure("leftover_refused", "Brief does not include the Leftover Member", false)
 			}
 		} else {
-			baseRef = "refs/heads/" + origin
-			if _, err := gitOutput(ctx.Context, project.Root, "rev-parse", "--verify", baseRef); err != nil {
-				return err
+			snapshot := "refs/heads/" + origin
+			merged := source.LandedRef
+			if merged == "" {
+				merged = source.BaseRef
+			}
+			baseRef, err = leftoverBase(ctx.Context, project.Root, snapshot, merged, baseRef)
+			if err != nil {
+				return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current default branch before retrying")
 			}
 		}
 	}

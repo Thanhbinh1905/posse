@@ -4,14 +4,77 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestTeardownStopsMountWriterBeforeSnapshot(t *testing.T) {
+	f := newPRLandingFixture(t, "pr", store.StateDone)
+	defer f.db.Close()
+	ctx := context.Background()
+	attachPRFixtureMount(t, f)
+	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateLanding, "cli", "PR ready"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, f.task.ID, store.StateLanding, store.StateLanded, "cli", "merged"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.RecordPRObservation(ctx, store.PRObservation{TaskID: task.ID, ProjectID: f.project.ID, PRURL: task.PRURL, State: "MERGED", HeadSHA: f.headSHA, MergeCommit: f.headSHA}, store.PRObservationEffect{}, task); err != nil {
+		t.Fatal(err)
+	}
+	writer := exec.Command("bash", "-c", "trap 'printf late\\n > late.txt; exit 0' TERM; while true; do sleep 0.1; done")
+	writer.Dir = f.worktree
+	if err := writer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if writer.Process != nil {
+			_ = writer.Process.Kill()
+			_ = writer.Wait()
+		}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		pids, err := mountProcessIDs(f.worktree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pids) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("writer did not start in Mount")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	fake := f.service.Herdr.(*herdr.Fake)
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.unsaddleTask(ctx, f.db, f.project, cfg, task, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitTest(t, f.repo, "show", "refs/heads/posse/t1-leftover:late.txt"); !strings.Contains(got, "late") {
+		t.Fatalf("Mount writer's final edit was lost: %q", got)
+	}
+}
 
 func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateDone)
@@ -63,6 +126,9 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 	if unrecoverable.ID == 0 {
 		t.Fatalf("missing repair/discard Decision: %#v", decisions)
 	}
+	if _, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: task.ID, Kind: "leftover", Origin: "leftover:posse/t1-leftover", Question: "Keep the independently saved Leftover?", Options: []string{"open-task", "discard"}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.db.AnswerDecision(ctx, f.project.ID, unrecoverable.ID, "discard", "User approved losing the unsaved work"); err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +139,10 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 	task, err = f.db.Task(ctx, f.project.ID, "t1")
 	if err != nil || task.State != store.StateTornDown {
 		t.Fatalf("discard did not tear down: %#v %v", task, err)
+	}
+	pending, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil || len(pending) != 1 || pending[0].Origin != "leftover:posse/t1-leftover" {
+		t.Fatalf("discard of unrecoverable work retired another Member's saved Leftover: %#v %v", pending, err)
 	}
 }
 

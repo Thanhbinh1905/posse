@@ -52,8 +52,8 @@ func lookoutPIDs(root string) []int {
 	return pids
 }
 
-// L1: a dead Lookout leaves a labeled tab. After a Herdr restart, Lead
-// recovery must restart polling rather than trusting that label.
+// A dead Lookout leaves a labeled tab while Herdr and the Lead stay up.
+// The Lead's ordinary lookout tick must restart it without `posse up`.
 func TestLookoutRestartsAfterProcessExit(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
@@ -69,24 +69,14 @@ func TestLookoutRestartsAfterProcessExit(t *testing.T) {
 	}
 	panes := lookoutPanes(t, client)
 	t.Logf("Lookout panes after exit: %d", len(panes))
-	// A recovered Lead must restore polling even when the old shell pane
-	// still carries the Lookout label.
-	if err := client.StopIsolatedServer(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	startServer(t, client)
-	env := f.env
-	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"} {
-		env = setEnv(env, key, "")
-	}
-	command := exec.Command(f.binary, "recover", "--all")
-	command.Dir, command.Env = f.repo, env
+	command := exec.Command(f.binary, "lookout", "--ack", "all", "--timeout", "3000")
+	command.Dir, command.Env = f.repo, f.leadEnv
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("recover: %v %s", err, output)
+		t.Fatalf("Lead lookout: %v %s", err, output)
 	}
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
-		t.Errorf("no Lookout polls after recovery; panes labelled Lookout=%d", len(lookoutPanes(t, client)))
+		t.Errorf("no Lookout process after Lead tick; panes labelled Lookout=%d", len(lookoutPanes(t, client)))
 	}
 }
 

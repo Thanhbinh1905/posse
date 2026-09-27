@@ -468,16 +468,7 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			return err
 		}
 		for _, member := range members {
-			if member.repo.State == store.TaskRepoOpen && member.repo.PRURL == "" {
-				commits, err := gitOutput(ctx, member.task.WorktreePath, "rev-list", "--count", member.repo.BaseRef+"..HEAD")
-				if err == nil && commits == "0" {
-					member.repo.State = store.TaskRepoUnchanged
-					if err := db.UpdateTaskRepo(ctx, member.repo); err != nil {
-						return err
-					}
-				}
-			}
-			if member.repo.PRURL == "" || member.repo.State == store.TaskRepoLanded || member.repo.State == store.TaskRepoUnchanged {
+			if member.repo.PRURL == "" || member.repo.State == store.TaskRepoLanded {
 				continue
 			}
 			previous, previousErr := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
@@ -521,6 +512,9 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 				memberEffect.Notices[index].DataJSON = withRepo(memberEffect.Notices[index].DataJSON, member.repo.Repo)
 			}
 			if observation.State == "MERGED" {
+				if err := settleUnchangedWorkspaceMembers(ctx, db, members); err != nil {
+					return err
+				}
 				branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
 				if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
 					if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
@@ -554,6 +548,31 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 	if landedAny {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// An untouched member is only unchanged at settle time. A poll while the
+// Rider is still working must not make that state permanent.
+func settleUnchangedWorkspaceMembers(ctx context.Context, db *store.DB, members []memberLanding) error {
+	for _, member := range members {
+		if member.repo.PRURL != "" || (member.repo.State != store.TaskRepoOpen && member.repo.State != store.TaskRepoUnchanged) {
+			continue
+		}
+		commits, err := gitOutput(ctx, member.task.WorktreePath, "rev-list", "--count", member.repo.BaseRef+"..HEAD")
+		if err != nil {
+			return memberFailure(member.repo.Repo, err)
+		}
+		state := store.TaskRepoOpen
+		if commits == "0" {
+			state = store.TaskRepoUnchanged
+		}
+		if member.repo.State != state {
+			member.repo.State = state
+			if err := db.UpdateTaskRepo(ctx, member.repo); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

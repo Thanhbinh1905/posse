@@ -31,13 +31,11 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 		if pane.Label != label {
 			continue
 		}
-		if pane.WorkspaceID == project.HerdrWorkspaceID {
-			if lookoutProcessRunning(pane.PaneID, home) {
-				return nil
-			}
-			_, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": pane.PaneID, "text": command, "keys": []string{"enter"}})
-			return err
+		if pane.WorkspaceID == project.HerdrWorkspaceID && (pane.PaneID == os.Getenv("HERDR_PANE_ID") || lookoutProcessRunning(pane.PaneID, home)) {
+			return nil
 		}
+		// A label is not proof that the shell is idle. Close its dedicated
+		// tab before starting a replacement; never type into a live pane.
 		// A replacement Lead may use another workspace. Close only the old
 		// dedicated Lookout tab, never a tab containing foreign panes.
 		whole := pane.TabID != ""
@@ -125,8 +123,6 @@ func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, 
 				_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout reconcile failed: " + truncate(err.Error(), 240), DataJSON: `{}`})
 				lastFailure = err.Error()
 			}
-		} else {
-			lastFailure = ""
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return nil

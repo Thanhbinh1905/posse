@@ -2,13 +2,20 @@ package app
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
 
 // Check the process rather than trusting a restored shell pane's label.
 func lookoutProcessRunning(paneID, home string) bool {
+	if runtime.GOOS == "darwin" {
+		// Darwin has no /proc; -E includes each process's environment.
+		output, err := exec.Command("ps", "-axEww", "-o", "pid=,command=").Output()
+		return err == nil && lookoutProcessInListing(string(output), paneID, home)
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return false
@@ -31,6 +38,15 @@ func lookoutProcessRunning(paneID, home string) bool {
 			if args[i] == "lookout" && args[i+1] == "--poll-only" {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func lookoutProcessInListing(listing, paneID, home string) bool {
+	for _, line := range strings.Split(listing, "\n") {
+		if strings.Contains(line, "HERDR_PANE_ID="+paneID+" ") && strings.Contains(line, "POSSE_HOME="+home+" ") && strings.Contains(line, "lookout --poll-only") {
+			return true
 		}
 	}
 	return false

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -119,12 +120,37 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
 		t.Fatal(err)
 	}
+	found := false
 	for _, call := range fake.Calls {
 		if call.Method == "agent.prompt" && call.Params["target"] == "w1:p1" && strings.Contains(call.Params["text"].(string), "posse lead") {
-			return
+			found = true
 		}
 	}
-	t.Fatalf("Profile args suppressed restart Lead instructions: %#v", fake.Calls)
+	if !found {
+		t.Fatalf("Profile args suppressed restart Lead instructions: %#v", fake.Calls)
+	}
+	// Lookout failure must not strand the newly launched prompt-kind Lead.
+	fake.Errors["tab.create"] = errors.New("Lookout unavailable")
+	before := fake.CallCount("agent.prompt")
+	if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
+		t.Fatal(err)
+	}
+	if fake.CallCount("agent.prompt") <= before {
+		t.Fatal("Lookout failure suppressed the Lead launch prompt")
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Lookout restart failed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Lookout failure produced no Notice: %#v", notices)
+	}
 }
 
 func TestOpenCodeRestartExportsInlinePluginOnlyToLeadShell(t *testing.T) {

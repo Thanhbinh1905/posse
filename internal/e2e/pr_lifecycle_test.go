@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -307,8 +308,10 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if polls := strings.Count(string(afterPolls), "api graphql") - strings.Count(string(beforePolls), "api graphql"); polls != 3 {
-		t.Fatalf("expected one poll per CLI restart, got %d", polls)
+	// The fixture sets pr_poll=1ms. Its live Lookout may legitimately poll
+	// between these CLI calls, so an exact count races the background poller.
+	if polls := strings.Count(string(afterPolls), "api graphql") - strings.Count(string(beforePolls), "api graphql"); polls < 3 {
+		t.Fatalf("expected at least one poll per CLI restart, got %d", polls)
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
@@ -366,6 +369,26 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 			decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
 			if err != nil || len(decisions) != 1 || decisions[0].Kind != "leftover" {
 				t.Fatalf("Leftover Decision: %#v %v", decisions, err)
+			}
+			if mode == "committed" {
+				// A squash merge has a different commit ID from the old Task.
+				// The next PR must contain only the unmerged follow-up diff.
+				if _, err := f.db.AnswerDecision(context.Background(), f.project.ID, decisions[0].ID, "open-task", "Open a follow-up Task"); err != nil {
+					t.Fatal(err)
+				}
+				runPosse(t, f.binary, f.repo, f.leadEnv, "apply", strconv.FormatInt(decisions[0].ID, 10))
+				gitTest(t, f.env, f.repo, "fetch", "origin")
+				gitTest(t, f.env, f.repo, "merge", "--ff-only", "origin/main")
+				followup := filepath.Join(f.root, "leftover-next.md")
+				if err := os.WriteFile(followup, []byte("---\ntype: ship\ntitle: From Leftover\ndone_when: follow-up change exists\n---\nKeep only the follow-up.\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				runPosse(t, f.binary, f.repo, f.leadEnv, "ride", "--brief", followup, "--name", "from-leftover", "--from-leftover", strconv.FormatInt(decisions[0].ID, 10))
+				next := f.mustTask(t, "t2")
+				diff := gitTest(t, f.env, next.WorktreePath, "diff", "--name-only", "origin/main...HEAD")
+				if strings.Contains(diff, "e2e-worker-t1.txt") || !strings.Contains(diff, "follow-up-work.txt") {
+					t.Fatalf("new PR includes old squash-merged work or loses the Leftover: %q", diff)
+				}
 			}
 		})
 	}

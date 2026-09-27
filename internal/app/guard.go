@@ -942,6 +942,11 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 			builder.WriteString(value)
 		}
 		return builder.String(), true
+	case *syntax.CmdSubst:
+		if sourceText(script, part) == "$(pwd)" && e.cwd != "" {
+			return e.cwd, true
+		}
+		return "", false
 	case *syntax.ParamExp:
 		match := simpleVar.FindStringSubmatch(sourceText(script, part))
 		if match == nil {

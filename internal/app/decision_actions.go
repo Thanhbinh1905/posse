@@ -134,7 +134,8 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		} else {
 			observation, err = db.LatestPRObservation(out.Context, task.ID)
 		}
-		if err != nil && !store.IsNotFound(err) {
+		invalidURL := store.IsNotFound(err)
+		if err != nil && !invalidURL {
 			return err
 		}
 		if err == nil && observation.State == "CLOSED" {
@@ -166,8 +167,14 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		if task.State == store.StateLanded || task.State == store.StateTornDown {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: string(task.State)}})
 		}
-		if _, err := s.relaunchTask(out.Context, db, home, project, cfg, task, ""); err != nil {
+		relaunched, err := s.relaunchTask(out.Context, db, home, project, cfg, task, "")
+		if err != nil {
 			return err
+		}
+		if invalidURL {
+			if _, err := s.herdrCall(out.Context, "agent.prompt", map[string]any{"target": relaunched.Pane, "text": "The previous URL " + url + " was not a pull request. Publish a real pull request for this Task and report its new URL with `posse holler done`."}); err != nil {
+				return err
+			}
 		}
 		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "working"}})
 	}

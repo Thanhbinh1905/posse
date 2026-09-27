@@ -508,12 +508,12 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 		return err
 	}
 	s.relabelProjectTabs(ctx, db, project)
-	freshSnapshot, err := s.snapshot(ctx)
-	if err != nil {
-		return err
+	freshSnapshot, lookoutErr := s.snapshot(ctx)
+	if lookoutErr == nil {
+		lookoutErr = s.ensureLookoutTab(ctx, project, freshSnapshot)
 	}
-	if err := s.ensureLookoutTab(ctx, project, freshSnapshot); err != nil {
-		return err
+	if lookoutErr != nil {
+		_, _ = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout restart failed: " + truncate(lookoutErr.Error(), 240), DataJSON: `{}`})
 	}
 	if leadStart.TypedPrompt != "" {
 		if err := s.deliverLaunchPrompt(ctx, current.PaneID, leadStart.TypedPrompt); err != nil {

@@ -42,8 +42,34 @@ func snapshotUnmergedMemberWork(ctx context.Context, db *store.DB, project store
 	if err != nil {
 		return err
 	}
+	ref := "refs/heads/" + task.Branch
+	tip, tipErr := gitOutput(ctx, project.Root, "rev-parse", "--verify", ref)
 	if status == "" {
-		return nil
+		if tipErr != nil {
+			return nil
+		}
+		if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", tip, "refs/heads/"+project.DefaultBranch); err == nil {
+			return nil
+		}
+		name := task.Branch + "-leftover"
+		leftoverRef := "refs/heads/" + name
+		if previous, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", leftoverRef); err == nil {
+			if previous != tip {
+				return fmt.Errorf("leftover branch %s already exists with different content", name)
+			}
+		} else if _, err := gitOutput(ctx, project.Root, "update-ref", leftoverRef, tip, strings.Repeat("0", 40)); err != nil {
+			return err
+		}
+		return raiseLeftoverDecision(ctx, db, project, task, member, name)
+	}
+	if tipErr == nil {
+		head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		if head != tip {
+			return fmt.Errorf("%s has edits on a detached checkout different from its Task branch", member)
+		}
 	}
 	return persistLeftoverSnapshot(ctx, db, project, task, member)
 }
@@ -96,10 +122,14 @@ func persistLeftoverSnapshot(ctx context.Context, db *store.DB, project store.Pr
 			return err
 		}
 	}
+	return raiseLeftoverDecision(ctx, db, project, task, member, name)
+}
+
+func raiseLeftoverDecision(ctx context.Context, db *store.DB, project store.Project, task store.Task, member, name string) error {
 	origin := "leftover:" + name
 	if member != "" {
 		origin = "leftover:" + member + ":" + name
 	}
-	_, err = db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: origin, Question: "A Leftover from the merged pull request is saved on " + name + ". Open a new Task from it or discard it?", Options: []string{"open-task", "discard"}})
+	_, err := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: origin, Question: "A Leftover from the merged pull request is saved on " + name + ". Open a new Task from it or discard it?", Options: []string{"open-task", "discard"}})
 	return err
 }
