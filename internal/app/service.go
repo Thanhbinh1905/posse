@@ -241,6 +241,9 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
 			return cfg, err
 		}
+		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
+			return cfg, err
+		}
 		fresh, err := db.ProjectByID(ctx, project.ID)
 		if err != nil {
 			return cfg, err

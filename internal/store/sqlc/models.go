@@ -173,6 +173,8 @@ type ProjectWatchState struct {
 	PrConsecutiveFailures int64
 	CheckoutCheckedAt     int64
 	RootBehindHead        string
+	PrPollClaimUntil      int64
+	PrPollClaimToken      string
 }
 
 type RepoWatchState struct {

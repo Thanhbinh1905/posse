@@ -74,6 +74,25 @@ func gitRemoteWriteDepth(e *shellEnv, args []string, literal []bool, depth int) 
 	if oneOfString(subcommand, "push", "send-pack", "receive-pack", "http-push") {
 		return true
 	}
+	if subcommand == "rebase" {
+		for j := i + 1; j < len(args); j++ {
+			if args[j] == "-x" || args[j] == "--exec" {
+				if j+1 >= len(args) || !literal[j+1] || strings.Contains(args[j+1], "git push") {
+					return true
+				}
+			}
+			if (strings.HasPrefix(args[j], "-x") && len(args[j]) > 2 || strings.HasPrefix(args[j], "--exec=")) && strings.Contains(args[j], "git push") {
+				return true
+			}
+		}
+	}
+	if subcommand == "submodule" && i+1 < len(args) && args[i+1] == "foreach" {
+		for j := i + 2; j < len(args); j++ {
+			if !literal[j] || strings.Contains(args[j], "git push") || (args[j] == "git" && j+1 < len(args) && (!literal[j+1] || args[j+1] == "push")) {
+				return true
+			}
+		}
+	}
 	if subcommand == "subtree" {
 		for j := i + 1; j < len(args); j++ {
 			if !literal[j] || args[j] == "push" {

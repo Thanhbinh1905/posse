@@ -110,7 +110,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		}
-		url := strings.TrimPrefix(decision.Origin, "pr_closed:")
+		url := closedPRDecisionURL(decision.Origin)
 		target := project.Root
 		memberName := ""
 		if project.IsWorkspace() {

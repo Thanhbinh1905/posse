@@ -445,14 +445,15 @@ func prefixFailure(repo string, err error) error {
 // pollWorkspacePullRequests watches every open member pull request of the
 // Project's landing Tasks and records what changed.
 func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) error {
-	state, err := db.ProjectWatchState(ctx, project.ID)
+	now := time.Now()
+	claim, err := db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	if !force && !store.ProjectWatchInterval(state.PRPolledAt, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), now) {
+	if claim == "" {
 		return nil
 	}
+	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
 	tasks, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {
 		return err

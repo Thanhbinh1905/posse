@@ -591,15 +591,16 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 			watched = append(watched, task)
 		}
 	}
-	state, err := db.ProjectWatchState(ctx, project.ID)
+	now := time.Now()
+	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
+	claim, err := db.ClaimPRPoll(ctx, project.ID, now, interval, force)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
-	if !force && !store.ProjectWatchInterval(state.PRPolledAt, interval, now) {
+	if claim == "" {
 		return nil
 	}
+	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
 	if len(watched) == 0 {
 		_, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), "")
 		return err
@@ -710,7 +711,7 @@ func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, pro
 	observations := make([]pendingObservation, 0, len(targets))
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
-			if strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest") || strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest with") {
+			if strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest") {
 				if err := raiseInvalidPRDecision(ctx, db, project, task); err != nil {
 					return err
 				}

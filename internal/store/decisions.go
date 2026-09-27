@@ -206,7 +206,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=decisions.task_id AND
 		((kind='land_ready' AND (t.state<>'landing' OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url ORDER BY id DESC LIMIT 1)='CLOSED'))
 		OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))
-		OR (kind='pr_closed' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))
+		OR (kind='pr_closed' AND ((decisions.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR decisions.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url)) OR (decisions.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
 		OR (kind='leftover' AND decisions.origin LIKE 'leftover:unrecoverable:%' AND t.state='torn-down')))`, time.Now().UnixMilli(), projectID)
 	return err
 }
@@ -239,10 +239,14 @@ func decisionObsoleteReason(ctx context.Context, tx *sql.Tx, decision Decision) 
 		var owned bool
 		var latest string
 		url := strings.TrimPrefix(decision.Origin, "pr_closed:")
+		invalid := strings.HasPrefix(url, "invalid:")
+		if invalid {
+			_, url, _ = strings.Cut(strings.TrimPrefix(url, "invalid:"), ":")
+		}
 		if err := tx.QueryRowContext(ctx, `SELECT (t.pr_url=? OR EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=?)), COALESCE((SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=? ORDER BY id DESC LIMIT 1),'') FROM tasks t WHERE t.id=?`, url, url, url, decision.TaskID).Scan(&owned, &latest); err != nil {
 			return "", err
 		}
-		if state == StateTornDown || !owned || (latest != "CLOSED" && !(latest == "" && strings.Contains(decision.Question, "not a pull request"))) {
+		if state == StateTornDown || !owned || (latest != "CLOSED" && !invalid) {
 			return "Closed PR was reopened, replaced or Task discarded", nil
 		}
 	}
