@@ -93,6 +93,12 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"isolated experiment", fmt.Sprintf("env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s POSSE_HOME=%s herdr workspace rename %s harmless", filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), otherWorkspace.Workspace.WorkspaceID), false},
 		{"isolated dynamic posse home", fmt.Sprintf("R=$(printf %%s %s); env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s POSSE_HOME=$R/posse herdr workspace rename %s harmless", otherRoot, filepath.Join(otherRoot, "xdg"), otherWorkspace.Workspace.WorkspaceID), false},
 		{"isolated clean environment", fmt.Sprintf("env -i HOME=%s XDG_CONFIG_HOME=%s POSSE_HOME=%s PATH=%s herdr workspace rename %s harmless", filepath.Join(otherRoot, "home"), filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), os.Getenv("PATH"), otherWorkspace.Workspace.WorkspaceID), false},
+		{"command probe", "command -v herdr", false},
+		{"which probe", "which herdr", false},
+		{"type probe", "type herdr", false},
+		{"version probe", "herdr --version", false},
+		{"help probe", "herdr --help", false},
+		{"plain path mention", "printf '%s\\n' /tmp/herdr-linux-x86_64", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,7 +135,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 					t.Errorf("foreign workspace label %q changed by %s", ws.Label, tc.command)
 				}
 			}
-			if !tc.blocked {
+			if strings.HasPrefix(tc.name, "isolated ") {
 				otherSnapshot, err := otherClient.Snapshot(context.Background())
 				if err != nil {
 					t.Fatal(err)
