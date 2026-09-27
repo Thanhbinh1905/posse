@@ -720,6 +720,9 @@ func TestNoticeRulesForbidPollingForEveryDelivery(t *testing.T) {
 		if !strings.Contains(rule, noPollRule) || !strings.Contains(rule, wake) {
 			t.Errorf("%s Notice rule = %q", delivery, rule)
 		}
+		if delivery == config.NoticeDeliveryLookout && !strings.Contains(rule, "If it returns with `state=stopped` and `reason=update`, restart `posse lookout` on your next wake.") {
+			t.Errorf("Claude Lead lookout restart rule = %q", rule)
+		}
 	}
 }
 

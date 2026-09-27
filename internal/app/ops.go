@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -18,6 +20,9 @@ import (
 )
 
 func (s *Service) wait(ctx *axi.Context, args []string) error {
+	stopSignals := make(chan os.Signal, 1)
+	signal.Notify(stopSignals, syscall.SIGTERM)
+	defer signal.Stop(stopSignals)
 	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}})
 	if err != nil {
 		return err
@@ -46,7 +51,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		if parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Bool("quiet-routine") {
 			return axi.Usage("--poll-only cannot deliver or acknowledge Notices")
 		}
-		return s.watchPullRequestsInLookoutTab(ctx, db, project, timeout)
+		return s.watchPullRequestsInLookoutTab(ctx, db, project, timeout, stopSignals)
 	}
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
@@ -83,6 +88,11 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	lastHerdrReconcile := time.Time{}
 	lookoutPaneID := ""
 	for {
+		select {
+		case <-stopSignals:
+			return s.reportLookoutStopped(ctx, project, false)
+		default:
+		}
 		notices, err := db.UndeliveredNotices(ctx.Context, project.ID)
 		if err != nil {
 			return err
@@ -218,8 +228,27 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			}
 			return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "notices", Value: []any{}}, {Key: "state", Value: "timeout"}, {Key: "lowkey", Value: cfg.Lowkey.Lead}, {Key: "reporting_rule", Value: reportingRule(cfg.Lowkey.Lead)}, {Key: "help", Value: []any{"Run `posse lookout` to keep waiting for a Notice"}}})
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-stopSignals:
+			return s.reportLookoutStopped(ctx, project, false)
+		case <-ctx.Context.Done():
+			return ctx.Context.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
+}
+
+func (s *Service) reportLookoutStopped(ctx *axi.Context, project store.Project, pollOnly bool) error {
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	reason := lookoutStopReason(home, os.Getpid())
+	help := "The Lead should restart `posse lookout` on its next wake"
+	if pollOnly {
+		help = "The Lookout tab owner will restart this process on its next tick"
+	}
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "state", Value: "stopped"}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})
 }
 
 func (s *Service) ack(ctx *axi.Context, args []string) error {

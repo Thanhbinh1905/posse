@@ -38,14 +38,15 @@ func herdrConfigPath() (string, error) {
 // A custom rows value is always left alone, even when it resembles our layout.
 func sidebarLayoutState(path string) (string, error) {
 	info, statErr := os.Lstat(path)
-	if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "manual", nil
-	}
+	isSymlink := statErr == nil && info.Mode()&os.ModeSymlink != 0
 	if statErr != nil && !os.IsNotExist(statErr) {
 		return "", statErr
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		if isSymlink {
+			return "symlink", nil
+		}
 		return "offer", nil
 	}
 	if err != nil {
@@ -63,6 +64,9 @@ func sidebarLayoutState(path string) (string, error) {
 			return "keep", nil
 		}
 		return "manual", nil
+	}
+	if isSymlink {
+		return "symlink", nil
 	}
 	return "offer", nil
 }
