@@ -511,3 +511,88 @@ func TestReleaseSnapshotFailureDoesNotRelockIdleMount(t *testing.T) {
 		t.Fatalf("idle Mount retained lock %q, %v", reason, err)
 	}
 }
+
+// This probe pauses Git after it has unlocked the checkout but before Posse can
+// commit the idle state. A non-Posse actor can observe the held checkout then.
+func TestReleaseExposesHeldCheckoutAfterGitUnlock(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Release window", LandingMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mount, err := acquireMount(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := filepath.Join(root, "after-unlock"), filepath.Join(root, "release-unlock")
+	shim := fmt.Sprintf("#!/bin/sh\n%s \"$@\" || exit $?\nif [ \"$3\" = worktree ] && [ \"$4\" = unlock ]; then\n  : > %s\n  while [ ! -e %s ]; do sleep 0.01; done\nfi\n", shellQuote(realGit), shellQuote(entered), shellQuote(release))
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	done := make(chan error, 1)
+	go func() { _, err := releaseMount(ctx, db, project, task, "warm", false); done <- err }()
+	defer func() {
+		_ = os.WriteFile(release, nil, 0o600)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("release ended before Git unlock: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("release did not reach Git unlock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mounts, err := db.Mounts(ctx, project.ID)
+	if err != nil || len(mounts) != 1 || mounts[0].State != "held" || mounts[0].TaskID != task.ID {
+		t.Fatalf("unexpected Mount during unlock window: %+v, %v", mounts, err)
+	}
+	if reason, err := mountLockReason(ctx, repo, mount.Path); err != nil || reason != "" {
+		t.Fatalf("expected observable held checkout without lock, got %q, %v", reason, err)
+	}
+	// Herdr's single-force removal can delete it while the database still
+	// advertises the Mount as held.
+	if _, err := gitOutput(ctx, repo, "worktree", "remove", "--force", mount.Path); err != nil {
+		t.Fatalf("single-force removal of the unlocked held Mount failed: %v", err)
+	}
+}
