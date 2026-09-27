@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 const fixtureLockName = ".posse-e2e-fixture.lock"
@@ -66,25 +67,34 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 // Go's module cache makes directories read-only. WalkDir never follows links,
 // so only directories within this fixture have their owner write bit restored.
 func removeFixtureRoot(root string) error {
-	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !entry.IsDir() {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !entry.IsDir() {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if info.Mode().Perm()&0o700 != 0o700 {
+				return os.Chmod(path, info.Mode().Perm()|0o700)
+			}
 			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
+		}); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if info.Mode().Perm()&0o700 != 0o700 {
-			return os.Chmod(path, info.Mode().Perm()|0o700)
+		err := os.RemoveAll(root)
+		if err == nil || (!errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST)) || time.Now().After(deadline) {
+			return err
 		}
-		return nil
-	}); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		// A finishing Herdr hook can recreate its SQLite state while RemoveAll
+		// walks the root. Retry that narrow race, but report persistent writers.
+		time.Sleep(20 * time.Millisecond)
 	}
-	return os.RemoveAll(root)
 }
 
 func reclaimAbandonedFixtures(parent string) error {
