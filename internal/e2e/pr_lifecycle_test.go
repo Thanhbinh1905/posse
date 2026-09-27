@@ -241,9 +241,6 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=? WHERE id=?`, "https://github.com/acme/shop/pull/41", badID); err != nil {
-		t.Fatal(err)
-	}
 	merge := fixture.mergeOnLocalOrigin(t, valid, "t1")
 	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, valid.GatedSHA)
 	var response map[string]any
@@ -264,6 +261,10 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.root, "gh-exit-nonzero"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Do not expose the old PR to Lookout until its GraphQL response is ready.
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=? WHERE id=?`, "https://github.com/acme/shop/pull/41", badID); err != nil {
 		t.Fatal(err)
 	}
 	beforePolls, err := os.ReadFile(fixture.ghLog)
