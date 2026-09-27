@@ -92,6 +92,18 @@ func TestGroupCloseDuringRideRecoversLeadAndMount(t *testing.T) {
 	} else if task.State == store.StateWorking {
 		t.Fatal("working Task lost its Mount")
 	}
+	// Recovery can move the Lead to a different workspace. Close that
+	// isolated group so its panes do not outlive the fixture server.
+	lead, found := findLeadInSnapshot(f.snapshot(t))
+	if !found {
+		t.Fatal("recovered Lead pane missing before cleanup")
+	}
+	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": lead.WorkspaceID, "close_group": true}); err != nil {
+		t.Fatalf("close recovered group: %v", err)
+	}
+	if _, present := findLeadInSnapshot(f.snapshot(t)); present {
+		t.Fatal("recovered group still holds the Lead after close")
+	}
 }
 
 func TestGroupCloseDuringRelaunchRestoresLeadAndRider(t *testing.T) {
