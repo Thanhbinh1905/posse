@@ -278,10 +278,29 @@ func (s *Service) runningLookouts(ctx context.Context, home string) ([]lookoutPr
 	return processes, nil
 }
 
+// A Lead-side lookout belongs to this Project, not the dedicated poll-only
+// tab. Process discovery is checked on each delivery attempt, so a killed
+// lookout leaves no durable claim that could block the typed fallback.
+func liveLeadLookout(project store.Project, processes []lookoutProcess) bool {
+	for _, process := range processes {
+		if process.PollOnly || !lookoutPIDRunning(process.PID) {
+			continue
+		}
+		if process.PaneID != "" && process.PaneID == project.LeadPaneID || processWorkingInProject(process, project) {
+			return true
+		}
+	}
+	return false
+}
+
 func processBelongsToProject(process lookoutProcess, project store.Project) bool {
 	if process.PaneID != "" && (process.PaneID == project.LeadPaneID || project.HerdrWorkspaceID != "" && strings.HasPrefix(process.PaneID, project.HerdrWorkspaceID+":")) {
 		return true
 	}
+	return processWorkingInProject(process, project)
+}
+
+func processWorkingInProject(process lookoutProcess, project store.Project) bool {
 	if process.WorkingDir == "" || project.Root == "" {
 		return false
 	}

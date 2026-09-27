@@ -719,6 +719,10 @@ type prLifecycleFixture struct {
 }
 
 func newPRLifecycleFixture(t *testing.T) *prLifecycleFixture {
+	return newPRLifecycleFixtureWithLead(t, false)
+}
+
+func newPRLifecycleFixtureWithLead(t *testing.T, liveLead bool) *prLifecycleFixture {
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("pr-"))
 	binDir := filepath.Join(root, "bin")
@@ -797,7 +801,7 @@ case "$PWD/" in
     done
     ;;
   *)
-    while IFS= read -r line; do :; done
+    while IFS= read -r line; do printf '%s\n' "$line" >> "$POSSE_TEST_ROOT/lead-prompts.log"; done
     ;;
 esac
 `
@@ -883,14 +887,25 @@ esac
 	callerEnv = setEnv(callerEnv, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	callerEnv = setEnv(callerEnv, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
 	callerEnv = setEnv(callerEnv, "HERDR_TAB_ID", workspace.RootPane.TabID)
-	runPosse(t, binary, repo, callerEnv, "up", "--name", "shop", "--yes")
+	if liveLead {
+		// Run up inside the shell so its finalizer execs the fake Lead in
+		// the actual pane. A detached CLI leaves no foreground agent to prompt.
+		if _, err := client.Run(context.Background(), "pane", "run", workspace.RootPane.PaneID, "posse up --name shop --yes"); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		runPosse(t, binary, repo, callerEnv, "up", "--name", "shop", "--yes")
+	}
 	opened, err := store.Open(home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := opened.ProjectByName(context.Background(), "shop")
-	if err != nil {
-		t.Fatal(err)
+	var project store.Project
+	if !waitForCondition(15*time.Second, func() bool {
+		project, err = opened.ProjectByName(context.Background(), "shop")
+		return err == nil && project.LeadPaneID != ""
+	}) {
+		t.Fatalf("Lead did not start: %v", err)
 	}
 	leadEnv := setEnv(callerEnv, "HERDR_PANE_ID", project.LeadPaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)

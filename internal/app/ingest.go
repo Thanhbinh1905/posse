@@ -307,6 +307,15 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 		// A failed queue leaves the Notices undelivered for the typed prompt below.
 	}
 	if (lead.AgentStatus == "idle" || lead.AgentStatus == "done") && !lead.Focused && snapshot.FocusedPaneID != lead.PaneID {
+		if delivery == config.NoticeDeliveryLookout {
+			processes, err := systemLookoutProcesses(home)
+			if err != nil {
+				return err
+			}
+			if liveLeadLookout(project, processes) {
+				return nil
+			}
+		}
 		_, err := s.deliverNoticeBatch(ctx, db, project, notices, func() error {
 			if lead.Agent == "claude" {
 				if err := recordClaudeNotice(home, project.Name, notices, prompt); err != nil {
