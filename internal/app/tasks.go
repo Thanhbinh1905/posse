@@ -51,6 +51,13 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return briefError(err)
 	}
+	targets, err := s.projectTargets(ctx.Context, db, project)
+	if err != nil {
+		return err
+	}
+	if err := validateBriefIssueReferences(project, brief, targets); err != nil {
+		return briefError(err)
+	}
 	slug := taskTitleSlug(brief.Title)
 	if err := validateWorkerName(slug); err != nil {
 		return axi.Failure("brief_invalid", "Task title cannot produce a descriptive branch slug", false, "Rewrite the title to state the work")
@@ -68,13 +75,20 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if parsed.Flags["profile"] != "" {
 		rideCommand += " --profile " + parsed.Flags["profile"]
 	}
-	return ctx.Print(axi.Object{
+	result := axi.Object{
 		{Key: "task_type", Value: brief.Type},
 		{Key: "name", Value: slug},
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
-	})
+	}
+	if len(brief.Issues)+len(brief.Refs) > 0 {
+		warnings := s.checkBriefIssues(ctx.Context, cfg, brief, targets)
+		if len(warnings) > 0 {
+			result = append(result, axi.Field{Key: "warnings", Value: warnings})
+		}
+	}
+	return ctx.Print(result)
 }
 
 func (s *Service) spawn(ctx *axi.Context, args []string) error {
@@ -174,6 +188,22 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	members, workspaceMode, err := s.planTaskMembers(ctx.Context, db, project, cfg, brief, reviewedTask)
 	if err != nil {
 		return err
+	}
+	issueTargets, err := s.projectTargets(ctx.Context, db, project)
+	if err != nil {
+		return err
+	}
+	if err := validateBriefIssueReferences(project, brief, issueTargets); err != nil {
+		return briefError(err)
+	}
+	if project.IsWorkspace() {
+		taskIssueTargets := make([]repoTarget, 0, len(members))
+		for _, member := range members {
+			taskIssueTargets = append(taskIssueTargets, member.repoTarget)
+		}
+		if err := validateShipIssueTargets(brief, taskIssueTargets); err != nil {
+			return briefError(err)
+		}
 	}
 	if project.IsWorkspace() {
 		// Each member records its own base ref and Landing Mode; the Task keeps the strictest.

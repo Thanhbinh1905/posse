@@ -33,6 +33,33 @@ func TestSpecBriefFixtureParsesWithTrailingComments(t *testing.T) {
 	}
 }
 
+func TestBriefParsesIssueReferences(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: ship\ntitle: Fix issue links\ndone_when: PR body includes links\nissues: [12, 16]\nrefs: [worker#9]\n---\nWork on the listed issues.\n")
+	if err != nil {
+		t.Fatalf("Brief with issue references did not validate: %v", err)
+	}
+	if len(brief.Issues) != 2 || brief.Issues[0].Number != 12 || brief.Issues[1].Number != 16 {
+		t.Fatalf("parsed issues = %#v", brief.Issues)
+	}
+	if len(brief.Refs) != 1 || brief.Refs[0].Repository != "worker" || brief.Refs[0].Number != 9 {
+		t.Fatalf("parsed refs = %#v", brief.Refs)
+	}
+}
+
+func TestBriefRejectsInvalidOrRepeatedIssueReferences(t *testing.T) {
+	for _, frontmatter := range []string{
+		"issues: [0]\n",
+		"issues: [12, 12]\n",
+		"issues: [member#12]\nrefs: [member#12]\n",
+		"refs: [../member#12]\n",
+	} {
+		source := "---\ntype: ship\ntitle: Fix issue links\ndone_when: tests pass\n" + frontmatter + "---\n"
+		if _, err := ParseBriefText(source); err == nil {
+			t.Fatalf("accepted invalid issue references:\\n%s", source)
+		}
+	}
+}
+
 func TestBriefRejectsRemovedNameField(t *testing.T) {
 	_, err := ParseBriefText("---\ntype: ship\ntitle: Fix flaky login test\nname: worker-tree\ndone_when: tests pass\n---\n")
 	briefErr, ok := err.(*BriefError)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -113,12 +114,24 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral: only the Lead's Gate may persist a gated SHA.
-	prURL, _, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Positionals[0])
+	prURL, created, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Flags["repo"], parsed.Positionals[0])
 	if err != nil {
 		return err
 	}
 	if err := validateWorkerPullRequest(out.Context, project, task, forge, prURL, sha); err != nil {
 		return err
+	}
+	if !created {
+		brief, err := readTaskBrief(home, project, task)
+		if os.IsNotExist(err) {
+			return axi.Failure("brief_missing", "could not read the Task Brief for linked issues", false, err.Error())
+		}
+		if err != nil {
+			return err
+		}
+		if err := s.ensureExistingPRIssueLinks(out.Context, db, intent, forge, prURL, parsed.Flags["repo"], brief); err != nil {
+			return err
+		}
 	}
 	if member == nil {
 		if err := db.RecordVerifiedPRHead(out.Context, task.ID, prURL, sha); err != nil {

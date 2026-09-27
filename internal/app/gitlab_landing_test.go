@@ -29,6 +29,11 @@ func gitlabFixture(t *testing.T, states ...store.State) *prLandingFixture {
 set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 case "$*" in
+ *"--method PUT"*)
+   for argument in "$@"; do
+     case "$argument" in description=*) printf '%s' "${argument#description=}" > "$POSSE_TEST_GLAB_DESCRIPTION" ;; esac
+   done
+   printf 'updated\n' ;;
  *"merge_requests?state=opened"*) if [ -n "${POSSE_TEST_GLAB_LIST:-}" ]; then cat "$POSSE_TEST_GLAB_LIST"; else printf '[]\n'; fi ;;
  *"/approvals"*) cat "$POSSE_TEST_GLAB_APPROVALS" ;;
  *"/merge_requests/17"*) cat "$POSSE_TEST_GH_STATE" ;;
@@ -82,6 +87,11 @@ func (f *prLandingFixture) setGitLabState(t *testing.T, state, mergeable, pipeli
 
 func TestGitLabWorkerPublishesAndLeadLands(t *testing.T) {
 	f := gitlabFixture(t, store.StateWorking)
+	briefPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "brief.md")
+	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12]\nrefs: [14]\n---\nE2E intent\n"
+	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	url := "https://git.example.com/group/sub/shop/-/merge_requests/17"
 	if code, out, e := f.run("publish", "Worker completion summary"); code != 0 || !strings.Contains(out, url) {
 		t.Fatalf("publish MR: %d %s %s", code, out, e)
@@ -99,6 +109,40 @@ func TestGitLabWorkerPublishesAndLeadLands(t *testing.T) {
 	log, _ := os.ReadFile(f.ghLog)
 	if strings.Count(string(log), "mr create ") != 1 {
 		t.Fatalf("Lead recreated MR: %s", log)
+	}
+	description, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_DESCRIPTION"))
+	if err != nil || !strings.Contains(string(description), "Closes #12") || !strings.Contains(string(description), "Refs #14") {
+		t.Fatalf("GitLab MR description omitted issue links: %q %v", description, err)
+	}
+}
+
+func TestGitLabPublishAddsIssueLinksToAnExistingMergeRequest(t *testing.T) {
+	f := gitlabFixture(t, store.StateWorking)
+	briefPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "brief.md")
+	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12]\nrefs: [14]\n---\nE2E intent\n"
+	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := map[string]any{
+		"web_url": "https://git.example.com/group/sub/shop/-/merge_requests/17",
+		"state":   "opened", "sha": f.headSHA, "source_branch": "posse/t1",
+		"source_project_id": 7, "target_project_id": 7,
+	}
+	encoded, err := json.Marshal([]any{request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listPath := filepath.Join(f.root, "existing-mrs.json")
+	if err := os.WriteFile(listPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GLAB_LIST", listPath)
+	if code, output, stderr := f.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	description, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_DESCRIPTION"))
+	if err != nil || !strings.Contains(string(description), "Closes #12") || !strings.Contains(string(description), "Refs #14") {
+		t.Fatalf("existing GitLab MR description omitted issue links: %q %v", description, err)
 	}
 }
 
@@ -157,7 +201,7 @@ func TestGitLabWatchRecognizesMergeDuringFollowUp(t *testing.T) {
 
 func TestGitLabMRDescriptionMatchesGitHubPRBody(t *testing.T) {
 	f := gitlabFixture(t)
-	title, body, err := prDetails(context.Background(), f.db, f.project, f.task, f.service.homePath)
+	title, body, err := prDetails(context.Background(), f.db, f.project, f.task, f.service.homePath, "")
 	if err != nil {
 		t.Fatal(err)
 	}

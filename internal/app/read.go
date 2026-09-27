@@ -56,15 +56,17 @@ type activeTaskSummary struct {
 }
 
 type taskSummary struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	State   string `json:"state"`
-	Title   string `json:"title"`
-	Name    string `json:"name"`
-	PRState string `json:"pr_state,omitempty"`
-	Profile string `json:"profile,omitempty"`
-	Branch  string `json:"branch,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	ID      string   `json:"id"`
+	Type    string   `json:"type"`
+	State   string   `json:"state"`
+	Title   string   `json:"title"`
+	Name    string   `json:"name"`
+	PRState string   `json:"pr_state,omitempty"`
+	Profile string   `json:"profile,omitempty"`
+	Branch  string   `json:"branch,omitempty"`
+	Reason  string   `json:"reason,omitempty"`
+	Issues  []string `json:"issues,omitempty"`
+	Refs    []string `json:"refs,omitempty"`
 }
 
 type noticeSummary struct {
@@ -329,7 +331,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("roster does not take positional arguments")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -395,8 +397,14 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 				return err
 			}
 		}
-		if parsed.Bool("full") && task.Branch != "posse/"+taskIDString(task.Seq) {
-			row.Branch = task.Branch
+		if parsed.Bool("full") {
+			row.Issues, row.Refs, err = taskIssueReferences(home, project, task)
+			if err != nil {
+				return err
+			}
+			if task.Branch != "posse/"+taskIDString(task.Seq) {
+				row.Branch = task.Branch
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -414,7 +422,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 1 {
 		return axi.Usage("show requires one Task id", "Run `posse roster` to list Tasks")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -435,6 +443,16 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile}
+	issues, refs, err := taskIssueReferences(home, project, task)
+	if err != nil {
+		return err
+	}
+	if len(issues) > 0 {
+		view["issues"] = issues
+	}
+	if len(refs) > 0 {
+		view["refs"] = refs
+	}
 	if task.Type != "ship" {
 		home, err := s.homePath()
 		if err != nil {
