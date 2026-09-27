@@ -706,7 +706,7 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 		_, launchErr := os.Stat(launchPath)
 		if task.Branch == "" || task.WorktreePath == "" || launchErr != nil || homeErr != nil {
 			cfg, _ := config.Load(home, project.Name)
-			if _, releaseErr := releaseMount(ctx, db, project, task, cfg.Remuda.Clean); releaseErr != nil {
+			if _, releaseErr := releaseMount(ctx, db, project, task, cfg.Remuda.Clean, false); releaseErr != nil {
 				reason += "; Mount release failed: " + releaseErr.Error()
 			}
 		}
@@ -744,6 +744,7 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 		}
 	} else {
 		signal += " --report <file-in-worktree>"
+		work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted, untracked and Task-committed files beside report.md at those paths; use repeatable `--attach <file-or-directory>` on the done Signal for ignored artifacts. `posse show <task>` lists saved attachments."
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
 	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, brief.DoneWhen, signal, launchPath)
@@ -777,7 +778,20 @@ func renderArgs(template []string, token, value string) []string {
 }
 
 func (s *Service) signal(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("holler", args, map[string]flagSpec{"report": {}, "findings": {}, "pr": {}})
+	var attachments []string
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--attach" {
+			if i+1 == len(args) || strings.HasPrefix(args[i+1], "--") {
+				return axi.Usage("--attach requires a path")
+			}
+			i++
+			attachments = append(attachments, args[i])
+		} else {
+			filtered = append(filtered, args[i])
+		}
+	}
+	parsed, err := parseArgs("holler", filtered, map[string]flagSpec{"report": {}, "findings": {}, "pr": {}})
 	if err != nil {
 		return err
 	}
@@ -812,6 +826,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	if task.State != store.StateWorking && task.State != store.StateStalled {
 		return axi.Failure("signal_state_invalid", fmt.Sprintf("Task %s is %s and cannot accept a %s Signal", taskIDString(task.Seq), task.State, verb), false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
+	}
+	if len(attachments) > 0 && (verb != "done" || task.Type == "ship") {
+		return axi.Failure("signal_invalid", "--attach is only valid on a Scout or Review done Signal", false)
 	}
 	if parsed.Flags["pr"] != "" && (verb != "done" || task.Type != "ship" || project.IsWorkspace() || (task.LandingMode != "no-mistakes" && task.LandingMode != "pr")) {
 		return axi.Failure("signal_invalid", "--pr is only valid on a PR or no-mistakes Ship Task done Signal", false)
@@ -907,6 +924,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if verb == "done" && task.Type != "ship" {
 		if _, err := copyWorktreeFile(task, parsed.Flags["report"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
+		}
+		for _, path := range attachments {
+			if err := saveExplicitAttachment(task, home, project, path); err != nil {
+				return axi.Failure("signal_invalid", err.Error(), false)
+			}
 		}
 	}
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]

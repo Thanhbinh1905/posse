@@ -492,10 +492,30 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
 		}
 	}
+	if task.State == store.StateReported && !discardable {
+		if err := s.runIntentStep(ctx, db, intent, "report.attachments", func() error {
+			if task.WorktreePath != "" {
+				if _, err := stopMountProcesses(task.WorktreePath); err != nil {
+					return err
+				}
+			}
+			home, err := s.homePath()
+			if err != nil {
+				return err
+			}
+			return preserveReportAttachments(ctx, home, project, task)
+		}); err != nil {
+			_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: "leftover:unrecoverable:" + strconv.FormatInt(task.ID, 10), Question: "Report attachments could not be preserved. Repair the Mount and retry Teardown, or approve discarding the unsaved attachments?", Options: []string{"repair", "discard"}})
+			if decisionErr != nil {
+				return result, errors.Join(err, decisionErr)
+			}
+			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+		}
+	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
 		var releaseErr error
-		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean)
+		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean, discardable)
 		return releaseErr
 	})
 	if err != nil {

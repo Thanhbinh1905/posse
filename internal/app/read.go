@@ -435,6 +435,17 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile}
+	if task.Type != "ship" {
+		home, err := s.homePath()
+		if err != nil {
+			return err
+		}
+		attachments, err := reportAttachments(home, project, task)
+		if err != nil {
+			return err
+		}
+		view["attachments"] = attachments
+	}
 	if task.PRURL != "" {
 		pr, _, err := pullRequestDisplay(ctx.Context, db, task)
 		if err != nil {
