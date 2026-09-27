@@ -428,7 +428,7 @@ func mountHasReadOnlyUntracked(ctx context.Context, path string) bool {
 	return false
 }
 
-func releaseMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, clean string) ([]string, error) {
+func releaseMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, clean string, approvedDiscard bool) ([]string, error) {
 	mounts, err := db.Mounts(ctx, project.ID)
 	if err != nil {
 		return nil, err
@@ -456,6 +456,9 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 	if err := resetErr; err != nil {
 		if breakErr := breakMount(ctx, db, project, task, mount, "Mount could not be reset during release"); breakErr != nil {
 			return killed, errors.Join(err, breakErr)
+		}
+		if approvedDiscard {
+			return killed, nil // Broken Mount stays quarantined; approved discard may finish.
 		}
 		return killed, err
 	}

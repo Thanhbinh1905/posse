@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -47,10 +48,57 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		return err
 	}
 	switch decision.Kind {
+	case "recovery":
+		if decision.Answer == "relaunch" {
+			if task.State == store.StateWorking || task.State == store.StateTornDown {
+				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: string(task.State)}})
+			}
+			if _, err := s.relaunchTask(out.Context, db, home, project, cfg, task, ""); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "working"}})
+		}
+		if decision.Answer == "discard" {
+			if task.State == store.StateTornDown {
+				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+			}
+			if task.State != store.StateFailed && task.State != store.StateLost && task.State != store.StateStalled {
+				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)
+			}
+			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		}
+	case "review":
+		if decision.Answer == "ignore" {
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "ignored"}})
+		}
+		target := task
+		if task.ReviewsTaskID != 0 {
+			target, err = db.TaskByID(out.Context, project.ID, task.ReviewsTaskID)
+			if err != nil {
+				return err
+			}
+		}
+		if target.State == store.StateTornDown || target.State == store.StateLanded {
+			return axi.Failure("decision_refused", "review target is already finished", false)
+		}
+		// The answer authorizes sharing the findings, not landing a Ship Task.
+		file := "findings.toon"
+		if task.Type == "review" {
+			file = "report.md"
+		}
+		path := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), file)
+		message := "User chose " + decision.Answer + " for findings on " + task.Title + ". Read " + path + " and carry out the chosen response before reporting done."
+		if err := db.QueueDecisionMessage(out.Context, decision, target.ID, message); err != nil {
+			return err
+		}
+		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "queued"}, {Key: "task", Value: taskIDString(target.Seq)}})
 	case "leftover":
 		if strings.HasPrefix(decision.Origin, "leftover:unrecoverable:") {
 			if decision.Answer == "repair" {
-				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "help", Value: []any{"Repair the Mount, then run `posse unsaddle " + taskIDString(task.Seq) + "` to retry the Leftover snapshot"}}})
+				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "help", Value: []any{"Repair the Mount, then run `posse unsaddle " + taskIDString(task.Seq) + "` to retry Teardown"}}})
 			}
 			if task.State == store.StateTornDown {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})

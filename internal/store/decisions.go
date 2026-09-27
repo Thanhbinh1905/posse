@@ -105,6 +105,43 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	return decision, tx.Commit()
 }
 
+// ObsoletePendingPRDecision retires a stale observation without changing a
+// User's answer or affecting a different Member's PR.
+func (db *DB) ObsoletePendingPRDecision(ctx context.Context, taskID int64, origin, reason string) error {
+	_, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?, obsolete_reason=? WHERE task_id=? AND kind='pr_closed' AND origin=? AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), reason, taskID, origin)
+	return err
+}
+
+func (db *DB) ObsoletePendingLeftoverDecision(ctx context.Context, id int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Leftover has no content diff' WHERE id=? AND kind='leftover' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), id)
+	return err
+}
+
+// QueueDecisionMessage makes applying a Review answer retry-safe.
+func (db *DB) QueueDecisionMessage(ctx context.Context, decision Decision, targetID int64, body string) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	key := fmt.Sprintf("%d", decision.ID)
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND kind='decision_applied' AND data_json=?)`, decision.ProjectID, key).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	now := time.Now().UnixMilli()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(task_id,body,created_at,status,wait_for_idle) VALUES(?,?,?,'queued',1)`, targetID, body, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at) VALUES(?,?,'decision_applied',?,?,?, ?, ?)`, decision.ProjectID, decision.TaskID, "Review answer applied", key, now, now, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // AnswerDecision records one answer and one Notice atomically. A second answer
 // cannot overwrite either the answer or the User's words.
 func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, userQuote string) (Decision, error) {

@@ -20,6 +20,9 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 	if err := db.ObsoleteResolvedDecisions(ctx, project.ID); err != nil {
 		return err
 	}
+	if err := s.obsoleteEmptyLeftovers(ctx, db, project); err != nil {
+		return err
+	}
 	notices, err := db.DecisionSourceNotices(ctx, project.ID)
 	if err != nil {
 		return err

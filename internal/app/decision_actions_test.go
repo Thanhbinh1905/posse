@@ -101,6 +101,14 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitTest(t, f.repo, "branch", "posse/t1-leftover")
+	saved := filepath.Join(f.root, "saved-leftover")
+	gitTest(t, f.repo, "worktree", "add", saved, "posse/t1-leftover")
+	if err := os.WriteFile(filepath.Join(saved, "independent.txt"), []byte("independent saved work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, saved, "add", "independent.txt")
+	gitTest(t, saved, "commit", "-m", "save independent work")
+	gitTest(t, f.repo, "worktree", "remove", saved)
 	cfg, err := config.Load(f.home, f.project.Name)
 	if err != nil {
 		t.Fatal(err)
@@ -181,6 +189,9 @@ func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
 	fake := f.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	if err := os.WriteFile(filepath.Join(f.worktree, ".git"), []byte("gitdir: /missing/pruned/gitdir\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	code, out, stderr := f.run("apply", fmt.Sprint(closed.ID))
 	if code != 0 {
 		t.Fatalf("apply discard: %s %s", out, stderr)

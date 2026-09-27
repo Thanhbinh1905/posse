@@ -192,7 +192,7 @@ func TestReleaseMountRemovesReadOnlyUntrackedCache(t *testing.T) {
 	if err := os.Chmod(filepath.Join(cache, "go.mod"), 0o444); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := releaseMount(ctx, db, project, task, "warm"); err != nil {
+	if _, err := releaseMount(ctx, db, project, task, "warm", false); err != nil {
 		t.Fatalf("release failed on read-only untracked cache: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cache, "go.mod")); !os.IsNotExist(err) {
