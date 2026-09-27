@@ -65,6 +65,28 @@ func TestForeignPaneKeepsLinkedChildOpen(t *testing.T) {
 	}
 }
 
+func TestCrashBetweenWorktreeOpenAndPaneLabelClosesOnlyEmptyChild(t *testing.T) {
+	project, task, adapter := linkedRiderSession(t)
+	task.ShortName = "first"
+	adapter.snapshot.Panes[2].Agent = ""
+	adapter.snapshot.Panes[2].Label = ""
+	adapter.snapshot.Agents = nil
+	result, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
+	if err != nil || adapter.CallCount("workspace.close") != 1 || len(result.Closed) != 1 {
+		t.Fatalf("unlabeled child was not recovered: %+v %v calls=%+v", result, err, adapter.Calls)
+	}
+	project, task, adapter = linkedRiderSession(t)
+	task.ShortName = "first"
+	adapter.snapshot.Panes[2].Agent = ""
+	adapter.snapshot.Panes[2].Label = ""
+	adapter.snapshot.Agents = nil
+	adapter.addPane(herdr.Pane{PaneID: "w2:p2", WorkspaceID: "w2", Label: "user-shell", CWD: task.WorktreePath})
+	_, err = testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
+	if err != nil || adapter.CallCount("workspace.close") != 0 {
+		t.Fatalf("unlabeled child with foreign pane was closed: %v calls=%+v", err, adapter.Calls)
+	}
+}
+
 func TestPartlyRecoveredGroupStillNeedsRecovery(t *testing.T) {
 	project, task, adapter := linkedRiderSession(t)
 	adapter.snapshot.ServerStartedAt = "same-server"

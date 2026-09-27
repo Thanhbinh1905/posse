@@ -387,10 +387,10 @@ func riderGroupClosed(snapshot herdr.Snapshot, project store.Project, tasks []st
 	if project.IsWorkspace() || len(tasks) == 0 || project.HerdrWorkspaceID == "" || snapshot.ServerStartedAt == "" {
 		return false
 	}
-	label := project.LeadLabel
-	if label == "" {
-		label = "posse:" + project.Name + ":lead"
+	if project.LeadPaneID == "" || project.LeadLabel == "" {
+		return true // A prior recovery has not recorded its Lead yet.
 	}
+	label := project.LeadLabel
 	for _, pane := range snapshot.Panes {
 		if pane.Label == label {
 			return false
@@ -483,9 +483,13 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	}
 	defer db.ReleaseLeadStart(context.Background(), project.ID)
 	var current *herdr.Pane
+	leadLabel := project.LeadLabel
+	if leadLabel == "" {
+		leadLabel = "posse:" + project.Name + ":lead"
+	}
 	for i := range snapshot.Panes {
 		pane := &snapshot.Panes[i]
-		if pane.PaneID == project.LeadPaneID || (project.LeadLabel != "" && pane.Label == project.LeadLabel) {
+		if pane.PaneID == project.LeadPaneID && project.LeadPaneID != "" || pane.Label == leadLabel {
 			current = pane
 			break
 		}

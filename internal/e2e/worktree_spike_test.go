@@ -27,7 +27,7 @@ func TestExistingMountWorktreeOpenAndLockSpike(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := f.snapshot(t)
-	t.Logf("open=%s workspace=%+v focus=%s", raw, opened.Workspace, snap.FocusedPaneID)
+	t.Logf("existing Mount opened in linked workspace %s; focus remains %s", opened.Workspace.WorkspaceID, snap.FocusedPaneID)
 	if opened.Workspace.WorkspaceID == "" || opened.Workspace.WorkspaceID == f.leadWorkspaceID || opened.Workspace.Worktree.CheckoutPath != task.WorktreePath || snap.FocusedPaneID != f.leadPaneID {
 		t.Fatalf("not an unfocused linked workspace: %+v %+v", opened, snap)
 	}
@@ -42,6 +42,15 @@ func TestExistingMountWorktreeOpenAndLockSpike(t *testing.T) {
 			t.Fatalf("locked Mount removed with force=%v", force)
 		}
 		t.Logf("remove(force=%v) refused: %v", force, err)
+	}
+	workerEnv := setEnv(f.env, "HERDR_ENV", "1")
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", task.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
+	workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", tabOf(t, f.snapshot(t), task.PaneID))
+	command := exec.Command(f.binary, "roster")
+	command.Env, command.Dir = workerEnv, task.WorktreePath
+	if output, err := command.CombinedOutput(); err == nil || !strings.Contains(string(output), "worker_forbidden") {
+		t.Fatalf("native Rider without POSSE_WORKER_HOME escaped Worker mode: %s %v", output, err)
 	}
 	snap = f.snapshot(t)
 	if snap.FocusedPaneID != f.leadPaneID {

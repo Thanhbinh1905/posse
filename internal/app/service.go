@@ -152,24 +152,8 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return runtime.RunResult{}, err
 	}
 	// No snapshot taken during a recovery claim is a complete project view.
-	if recovery, err := db.ProjectRecovery(ctx, project.ID); err != nil {
+	if err := waitProjectRecovery(ctx, db, project); err != nil {
 		return runtime.RunResult{}, err
-	} else if recovery.OwnerPID != 0 && recovery.OwnerPID != os.Getpid() {
-		deadline := time.Now().Add(60 * time.Second)
-		for recovery.OwnerPID != 0 {
-			if time.Now().After(deadline) {
-				return runtime.RunResult{}, fmt.Errorf("project recovery is still running for %s", project.Name)
-			}
-			select {
-			case <-ctx.Done():
-				return runtime.RunResult{}, ctx.Err()
-			case <-time.After(50 * time.Millisecond):
-			}
-			recovery, err = db.ProjectRecovery(ctx, project.ID)
-			if err != nil {
-				return runtime.RunResult{}, err
-			}
-		}
 	}
 	if !project.IsWorkspace() {
 		if snapshot, err := s.snapshot(ctx); err == nil {
@@ -181,25 +165,10 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 				if _, err := s.recoverProject(ctx, db, home, project); err != nil {
 					return runtime.RunResult{}, fmt.Errorf("recover Project %s after Herdr group close: %w", project.Name, err)
 				}
-				// Concurrent workspace.closed hooks must wait for the one recovery
-				// owner. Otherwise runtime.Run marks partially restored Riders lost.
-				deadline := time.Now().Add(60 * time.Second)
-				for {
-					recovery, err := db.ProjectRecovery(ctx, project.ID)
-					if err != nil {
-						return runtime.RunResult{}, err
-					}
-					if recovery.OwnerPID == 0 {
-						break
-					}
-					if time.Now().After(deadline) {
-						return runtime.RunResult{}, fmt.Errorf("group recovery is still running for %s", project.Name)
-					}
-					select {
-					case <-ctx.Done():
-						return runtime.RunResult{}, ctx.Err()
-					case <-time.After(50 * time.Millisecond):
-					}
+				// Concurrent workspace.closed hooks wait for the recovery owner;
+				// a partial snapshot would mark still-restoring Riders lost.
+				if err := waitProjectRecovery(ctx, db, project); err != nil {
+					return runtime.RunResult{}, err
 				}
 				fresh, err := s.snapshot(ctx)
 				if err != nil {
@@ -248,6 +217,27 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return result, fmt.Errorf("project %s Herdr generation changed during recovery; retry reconcile", project.Name)
 	}
 	return result, err
+}
+
+func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Project) error {
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		claim, err := db.ProjectRecovery(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		if claim.OwnerPID == 0 || claim.OwnerPID == os.Getpid() || !processAlive(claim.OwnerPID) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("project recovery is still running for %s", project.Name)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {

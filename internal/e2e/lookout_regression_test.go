@@ -114,8 +114,9 @@ func TestLookoutRestartsAfterHerdrRestart(t *testing.T) {
 		}
 	}
 	t.Logf("Lead pane restored=%v workspace=%s", leadFound, project.HerdrWorkspaceID)
-	time.Sleep(3 * time.Second)
-	if len(lookoutPanes(t, client)) == 0 || len(lookoutPIDs(f.root)) == 0 {
+	if !waitForCondition(15*time.Second, func() bool {
+		return len(lookoutPanes(t, client)) > 0 && len(lookoutPIDs(f.root)) > 0
+	}) {
 		t.Errorf("Lookout not restored after Herdr restart: panes=%d processes=%d", len(lookoutPanes(t, client)), len(lookoutPIDs(f.root)))
 	}
 	_ = store.StateLanded
