@@ -225,7 +225,7 @@ func (s *Service) prepareWorkspaceMount(ctx context.Context, project store.Proje
 func addMemberWorktree(ctx context.Context, target repoTarget, worktree string) error {
 	ref, remote := mountDefaultRef(ctx, target)
 	if remote {
-		if _, err := gitOutput(ctx, target.Root, "fetch", "origin"); err != nil {
+		if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
 			return err
 		}
 	}

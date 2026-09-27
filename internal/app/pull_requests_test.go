@@ -439,6 +439,36 @@ func TestWorkerPublishAdoptsExistingPR(t *testing.T) {
 	}
 }
 
+func TestWorkerPublishReportsPersistentPRHeadMismatch(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	oldHead := fixture.headSHA
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "follow-up.txt"), []byte("follow-up\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", "follow-up.txt")
+	gitTest(t, fixture.worktree, "commit", "-m", "follow-up commit")
+	newHead := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	openPRs := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, oldHead)
+	if err := os.WriteFile(fixture.ghOpenPRs, []byte(openPRs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("publish", "Worker follow-up")
+	if code != 1 || !strings.Contains(output, oldHead) || !strings.Contains(output, newHead) {
+		t.Fatalf("persistent PR head mismatch did not report both heads: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.remote, "rev-parse", "refs/heads/posse/t1")); got != newHead {
+		t.Fatalf("publish did not push the expected Task head before checking the PR: got=%s want=%s", got, newHead)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "pr list") < 2 {
+		t.Fatalf("publish did not retry the persistent mismatch: %s", log)
+	}
+}
+
 func TestWorkerDoneAcceptsMergedPRAfterSourceBranchDeletion(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
 	mount := attachPRFixtureMount(t, fixture)

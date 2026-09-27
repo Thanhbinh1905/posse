@@ -72,7 +72,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		result.Err = err
 		return result, nil
 	}
-	if _, err := gitOutput(ctx, target.Root, "fetch", "origin"); err != nil {
+	if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
 		result.Status = "root_behind"
 		result.Err = err
 		result.UpstreamHead, _ = gitOutput(ctx, target.Root, "rev-parse", "refs/remotes/origin/"+target.DefaultBranch)
@@ -83,7 +83,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	upstreamRef := "refs/remotes/origin/" + target.DefaultBranch
 	upstreamHead, err := gitOutput(ctx, target.Root, "rev-parse", upstreamRef)
 	if err != nil {
-		if _, fetchErr := gitOutput(ctx, target.Root, "fetch", "origin", target.DefaultBranch+":"+upstreamRef); fetchErr != nil {
+		if _, fetchErr := gitFetch(ctx, target.Root, "origin", target.DefaultBranch+":"+upstreamRef); fetchErr != nil {
 			result.Status = "fetch_failed"
 			result.Err = fetchErr
 			return result, nil
@@ -205,7 +205,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		return result, nil
 	}
 	if !defaultCheckedOut && localAhead == 0 {
-		if _, err := gitOutput(ctx, target.Root, "fetch", "origin", target.DefaultBranch+":refs/heads/"+target.DefaultBranch); err == nil {
+		if _, err := gitFetch(ctx, target.Root, "origin", target.DefaultBranch+":refs/heads/"+target.DefaultBranch); err == nil {
 			result.Status = "updated"
 			if err := db.ClearRootBehind(ctx, project.ID, target.Name, now.UnixMilli()); err != nil {
 				return result, err

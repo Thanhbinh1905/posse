@@ -99,12 +99,15 @@ func (s *Service) recoverOpenPullRequestIntent(ctx context.Context, db *store.DB
 	if err != nil {
 		return err
 	}
-	prURL, found, err := openPullRequestForBranch(output, task.Branch, task.GatedSHA)
+	prURL, head, found, err := openPullRequestForBranch(output, task.Branch)
 	if err != nil {
 		return err
 	}
 	if !found {
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+	}
+	if head != task.GatedSHA {
+		return pullRequestHeadMismatch(head, task.GatedSHA)
 	}
 	if err := validatePullRequestOrigin(ctx, project.Root, prURL); err != nil {
 		return err
@@ -117,14 +120,8 @@ func (s *Service) recoverOpenPullRequestIntent(ctx context.Context, db *store.DB
 			return err
 		}
 	}
-	hasNotice, err := db.HasNotice(ctx, project.ID, task.ID, "pr_opened")
-	if err != nil {
+	if err := createPROpenedNotice(ctx, db, project, task, prURL, task.GatedSHA, task.Title+": pull request opened"); err != nil {
 		return err
-	}
-	if !hasNotice {
-		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_opened", Summary: task.Title + ": pull request opened", DataJSON: marshalJSON(map[string]any{"url": prURL, "head_sha": task.GatedSHA})}); err != nil {
-			return err
-		}
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 }
