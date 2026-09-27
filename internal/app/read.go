@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,15 +15,16 @@ import (
 )
 
 type projectSummary struct {
-	Name          string `json:"name"`
-	Mode          string `json:"mode"`
-	Autonomy      string `json:"autonomy"`
-	Lead          string `json:"lead"`
-	OpenTasks     int    `json:"open_tasks"`
-	OpenNotices   int    `json:"open_notices"`
-	Lowkey        bool   `json:"lowkey"`
-	ReportingRule string `json:"reporting_rule"`
-	Error         string `json:"error,omitempty"`
+	Name          string              `json:"name"`
+	Mode          string              `json:"mode"`
+	Autonomy      string              `json:"autonomy"`
+	Lead          string              `json:"lead"`
+	OpenTasks     int                 `json:"open_tasks"`
+	Tasks         []activeTaskSummary `json:"tasks,omitempty"`
+	OpenNotices   int                 `json:"open_notices"`
+	Lowkey        bool                `json:"lowkey"`
+	ReportingRule string              `json:"reporting_rule"`
+	Error         string              `json:"error,omitempty"`
 }
 
 func (s *Service) leadStatus(ctx context.Context, project store.Project) string {
@@ -49,6 +51,7 @@ func (s *Service) leadStatus(ctx context.Context, project store.Project) string 
 
 type activeTaskSummary struct {
 	ID    string `json:"id"`
+	Name  string `json:"name"`
 	State string `json:"state"`
 }
 
@@ -61,11 +64,13 @@ type taskSummary struct {
 	PRState string `json:"pr_state,omitempty"`
 	Profile string `json:"profile,omitempty"`
 	Branch  string `json:"branch,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 type noticeSummary struct {
 	ID      int64  `json:"id"`
 	Task    string `json:"task"`
+	Name    string `json:"name,omitempty"`
 	Kind    string `json:"kind"`
 	Summary string `json:"summary"`
 }
@@ -116,7 +121,7 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 			summaries = append(summaries, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
 			continue
 		}
-		summaries = append(summaries, summarizeProject(project, cfg, len(tasks), len(notices), s.leadStatus(ctx.Context, project)))
+		summaries = append(summaries, summarizeProject(project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project)))
 	}
 	update, _ := s.availableUpdate(ctx.Context, db, nil)
 	if len(summaries) == 0 {
@@ -150,19 +155,28 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		return err
 	}
 	taskRows := make([]taskSummary, 0, len(tasks))
+	needsYou := make([]taskSummary, 0)
 	for _, task := range tasks {
-		row := taskSummary{ID: taskDisplayName(task), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task)}
+		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task)}
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
 			if err != nil {
 				return err
 			}
 		}
-		taskRows = append(taskRows, row)
+		if taskNeedsUser(task) {
+			row.Reason, err = taskFailureReason(ctx.Context, db, task)
+			if err != nil {
+				return err
+			}
+			needsYou = append(needsYou, row)
+		} else {
+			taskRows = append(taskRows, row)
+		}
 	}
 	noticeRows := make([]noticeSummary, 0, len(openNotices))
 	for _, notice := range openNotices {
-		noticeRows = append(noticeRows, noticeSummary{ID: notice.ID, Task: noticeTaskTitle(ctx.Context, db, project.ID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
+		noticeRows = append(noticeRows, noticeSummary{ID: notice.ID, Task: noticeTaskID(ctx.Context, db, project.ID, notice.TaskID), Name: noticeTaskName(ctx.Context, db, project.ID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
 	}
 	help := homeHelp(tasks, openNotices)
 	result := axi.Object{
@@ -179,17 +193,26 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		}
 		result = append(result, axi.Field{Key: "repos", Value: names})
 	}
-	result = append(result, axi.Field{Key: "notices", Value: noticeRows}, axi.Field{Key: "tasks", Value: taskRows})
+	result = append(result, axi.Field{Key: "notices", Value: noticeRows}, axi.Field{Key: "tasks", Value: taskRows}, axi.Field{Key: "needs_you", Value: needsYou})
 	if !ctx.JSON && !full {
 		active := make([]activeTaskSummary, 0, len(tasks))
+		attention := make([]taskSummary, 0)
 		for _, task := range tasks {
-			active = append(active, activeTaskSummary{ID: taskDisplayName(task), State: string(task.State)})
+			if taskNeedsUser(task) {
+				reason, reasonErr := taskFailureReason(ctx.Context, db, task)
+				if reasonErr != nil {
+					return reasonErr
+				}
+				attention = append(attention, taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason})
+			} else {
+				active = append(active, activeTaskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State)})
+			}
 		}
 		pending, err := db.UndeliveredNotices(ctx.Context, project.ID)
 		if err != nil {
 			return err
 		}
-		result = axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: active}, {Key: "undelivered_notices", Value: len(pending)}, {Key: "next_action", Value: help[0]}}
+		result = axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: active}, {Key: "needs_you", Value: attention}, {Key: "undelivered_notices", Value: len(pending)}, {Key: "next_action", Value: help[0]}}
 	}
 	update, _ := s.availableUpdate(ctx.Context, db, &project)
 	rule := reportingRule(cfg.Lowkey.Lead)
@@ -227,21 +250,31 @@ func summarizeHomeProject(project store.Project, cfg config.Config, leadStatus s
 }
 
 func homeHelp(tasks []store.Task, notices []store.Notice) []any {
-	var show, land string
+	var show, land, recovery string
 	for _, task := range tasks {
 		if show == "" && (task.State == store.StateNeedsDecision || task.State == store.StateBlocked) {
 			show = taskCLIName(task)
 		}
+		if recovery == "" && taskNeedsUser(task) {
+			recovery = taskCLIName(task)
+		}
 		if land == "" && task.Type == "ship" && (task.State == store.StateDone || task.State == store.StateLanding) {
 			land = taskCLIName(task)
 		}
+	}
+	if show == "" {
+		show = recovery
 	}
 	if show == "" && len(tasks) > 0 {
 		show = taskCLIName(tasks[0])
 	}
 	help := []any{}
 	if show != "" {
-		help = append(help, "Run `posse show "+show+"` to inspect this Task")
+		if show == recovery {
+			help = append(help, "Run `posse decisions` to ask the User whether to relaunch or discard "+recovery)
+		} else {
+			help = append(help, "Run `posse show "+show+"` to inspect this Task")
+		}
 	} else {
 		help = append(help, "Run `posse ride --brief <file> --name <short>` to delegate a Task")
 	}
@@ -269,7 +302,7 @@ func shortReportingRule(lowkey bool) string {
 	return "Report every Notice and ack it."
 }
 
-func summarizeProject(project store.Project, cfg config.Config, taskCount, noticeCount int, leadStatus string) projectSummary {
+func summarizeProject(project store.Project, cfg config.Config, tasks []store.Task, noticeCount int, leadStatus string) projectSummary {
 	autonomy := cfg.Autonomy
 	if autonomy.Review == "" {
 		autonomy.Review = "ask"
@@ -281,7 +314,11 @@ func summarizeProject(project store.Project, cfg config.Config, taskCount, notic
 	if lead == "" {
 		lead = "missing"
 	}
-	return projectSummary{Name: project.Name, Mode: cfg.Defaults.LandingMode, Autonomy: "review=" + autonomy.Review + " land=" + autonomy.Land, Lead: lead, OpenTasks: taskCount, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
+	rows := make([]activeTaskSummary, 0, len(tasks))
+	for _, task := range tasks {
+		rows = append(rows, activeTaskSummary{ID: project.Name + "/" + taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State)})
+	}
+	return projectSummary{Name: project.Name, Mode: cfg.Defaults.LandingMode, Autonomy: "review=" + autonomy.Review + " land=" + autonomy.Land, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
 }
 
 func (s *Service) ls(ctx *axi.Context, args []string) error {
@@ -325,7 +362,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 				rows = append(rows, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
 				continue
 			}
-			rows = append(rows, summarizeProject(project, cfg, len(tasks), len(notices), s.leadStatus(ctx.Context, project)))
+			rows = append(rows, summarizeProject(project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project)))
 		}
 		if len(rows) == 0 {
 			return ctx.Print(axi.Object{{Key: "projects", Value: []any{}}, {Key: "state", Value: "No Projects registered"}, {Key: "help", Value: []any{"Run `posse up` inside a Herdr pane to register the first Project"}}})
@@ -345,7 +382,13 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	}
 	rows := make([]taskSummary, 0, len(tasks))
 	for _, task := range tasks {
-		row := taskSummary{ID: taskDisplayName(task), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Profile: task.Profile}
+		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Profile: task.Profile}
+		if taskNeedsUser(task) {
+			row.Reason, err = taskFailureReason(ctx.Context, db, task)
+			if err != nil {
+				return err
+			}
+		}
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
 			if err != nil {
@@ -390,7 +433,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	id := taskDisplayName(task)
+	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile}
 	if task.PRURL != "" {
 		pr, _, err := pullRequestDisplay(ctx.Context, db, task)
@@ -435,8 +478,8 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		view["signals"] = signals
-		view["transitions"] = transitions
+		view["signals"] = taskSignalRows(task, signals)
+		view["transitions"] = taskTransitionRows(task, transitions)
 		view["profile"] = task.Profile
 		view["dispatch_rule"] = task.DispatchRule
 		view["landing_mode"] = task.LandingMode
@@ -455,7 +498,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	return ctx.Print(view)
 }
 
-func noticeTaskTitle(ctx context.Context, db *store.DB, projectID, id int64) string {
+func noticeTaskID(ctx context.Context, db *store.DB, projectID, id int64) string {
 	if id == 0 {
 		return ""
 	}
@@ -463,7 +506,47 @@ func noticeTaskTitle(ctx context.Context, db *store.DB, projectID, id int64) str
 	if err != nil {
 		return ""
 	}
-	return task.Title
+	return taskIDString(task.Seq)
+}
+
+func noticeTaskName(ctx context.Context, db *store.DB, projectID, id int64) string {
+	if id == 0 {
+		return ""
+	}
+	task, err := db.TaskByID(ctx, projectID, id)
+	if err != nil {
+		return ""
+	}
+	return taskDisplayName(task)
+}
+
+func taskNeedsUser(task store.Task) bool {
+	return task.State == store.StateFailed || task.State == store.StateLost
+}
+
+func taskFailureReason(ctx context.Context, db *store.DB, task store.Task) (string, error) {
+	var reason string
+	err := db.QueryRowContext(ctx, `SELECT note FROM transitions WHERE task_id=? AND to_state=? AND from_state<>to_state ORDER BY id DESC LIMIT 1`, task.ID, task.State).Scan(&reason)
+	if err != nil && err != sql.ErrNoRows {
+		return "", err
+	}
+	return reason, nil
+}
+
+func taskSignalRows(task store.Task, signals []store.Signal) []any {
+	rows := make([]any, 0, len(signals))
+	for _, signal := range signals {
+		rows = append(rows, map[string]any{"id": signal.ID, "task_id": taskIDString(task.Seq), "verb": signal.Verb, "note": signal.Note, "data_json": signal.DataJSON, "at": signal.At})
+	}
+	return rows
+}
+
+func taskTransitionRows(task store.Task, transitions []store.TransitionRecord) []any {
+	rows := make([]any, 0, len(transitions))
+	for _, transition := range transitions {
+		rows = append(rows, map[string]any{"id": transition.ID, "task_id": taskIDString(task.Seq), "from": transition.From, "to": transition.To, "source": transition.Source, "note": transition.Note, "at": transition.At})
+	}
+	return rows
 }
 
 func taskDisplayName(task store.Task) string {
@@ -473,12 +556,7 @@ func taskDisplayName(task store.Task) string {
 	return task.Title
 }
 
-func taskCLIName(task store.Task) string {
-	if task.ShortName != "" && !taskIDNamePattern.MatchString(task.ShortName) {
-		return task.ShortName
-	}
-	return "'" + strings.ReplaceAll(task.Title, "'", "'\\''") + "'"
-}
+func taskCLIName(task store.Task) string { return taskIDString(task.Seq) }
 
 func truncate(value string, limit int) string {
 	if len(value) <= limit {

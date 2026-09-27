@@ -96,20 +96,39 @@ func TestTaskTitleSlugNamesTheWork(t *testing.T) {
 }
 
 func TestRideRequiresAValidWorkerName(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "home")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateProject(context.Background(), "shop", repo, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(root, "brief.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Fix unstable tests\ndone_when: Tests pass\n---\nRepair.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
 	for _, name := range []string{"Worker-tree", "worker_tree", "worker--tree", "-worker", "worker-", "t36", "worker-name-that-is-too-long-for-sidebar"} {
 		t.Run(name, func(t *testing.T) {
 			output := &bytes.Buffer{}
-			cli := testService(t.TempDir(), nil).CLI()
+			cli := testService(home, nil).CLI()
 			cli.Out, cli.ErrOut = output, output
-			if code := cli.Run([]string{"ride", "--brief", "missing.md", "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "invalid Rider name") {
+			if code := cli.Run([]string{"ride", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "fix-unstable-tests") {
 				t.Fatalf("invalid Rider name exit=%d output=%s", code, output.String())
 			}
 		})
 	}
 	output := &bytes.Buffer{}
-	cli := testService(t.TempDir(), nil).CLI()
+	cli := testService(home, nil).CLI()
 	cli.Out, cli.ErrOut = output, output
-	if code := cli.Run([]string{"ride", "--brief", "missing.md"}); code != 2 || !strings.Contains(output.String(), "--name <short>") {
+	if code := cli.Run([]string{"ride", "--brief", brief}); code != 2 || !strings.Contains(output.String(), "--name <short>") {
 		t.Fatalf("missing Worker name exit=%d output=%s", code, output.String())
 	}
 }
@@ -176,11 +195,18 @@ func TestRideReportsMountSetupFailureAndReleasesMount(t *testing.T) {
 		t.Fatalf("unrelated name exit=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "setup-failure"}); code != 1 || !strings.Contains(output.String(), "branch_exists") || !strings.Contains(output.String(), "Rewrite the Task title") {
+	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "setup-failure"}); code != 1 || !strings.Contains(output.String(), "branch_exists") || !strings.Contains(output.String(), "setup-failure-retry") {
 		t.Fatalf("reused name exit=%d output=%s", code, output.String())
 	}
 	if tasks, err := db.Tasks(ctx, project.ID, true); err != nil || len(tasks) != 1 {
 		t.Fatalf("collision created a Task: %#v, %v", tasks, err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "setup-failure-retry"}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
+		t.Fatalf("retry with unchanged Brief refused: code=%d output=%s", code, output.String())
+	}
+	if tasks, err := db.Tasks(ctx, project.ID, true); err != nil || len(tasks) != 2 || tasks[1].ShortName != "setup-failure-retry" {
+		t.Fatalf("retry did not create distinct Task: %#v, %v", tasks, err)
 	}
 	mounts, err := db.Mounts(ctx, project.ID)
 	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" || mounts[0].TaskID != 0 {

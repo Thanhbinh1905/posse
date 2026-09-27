@@ -456,7 +456,7 @@ func noticeIDs(notices []store.Notice) []int64 {
 func noticeRows(ctx context.Context, db *store.DB, notices []store.Notice) []noticeSummary {
 	rows := make([]noticeSummary, 0, len(notices))
 	for _, notice := range notices {
-		rows = append(rows, noticeSummary{ID: notice.ID, Task: noticeTaskTitle(ctx, db, notice.ProjectID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
+		rows = append(rows, noticeSummary{ID: notice.ID, Task: noticeTaskID(ctx, db, notice.ProjectID, notice.TaskID), Name: noticeTaskName(ctx, db, notice.ProjectID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
 	}
 	return rows
 }
