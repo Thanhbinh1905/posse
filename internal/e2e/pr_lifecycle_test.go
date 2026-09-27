@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -904,7 +906,12 @@ esac
 			t.Fatal(err)
 		}
 	} else {
+		// This mode calls up outside the pane and has no live Lead to answer
+		// its detached startup finalizer. Stop only that fixture's finalizer;
+		// it otherwise waits 30s after a Herdr restart and outlives cleanup.
 		runPosse(t, binary, repo, callerEnv, "up", "--name", "shop", "--yes")
+		stopHeadlessLeadFinalizers(t, root, binary)
+		t.Cleanup(func() { stopHeadlessLeadFinalizers(t, root, binary) })
 	}
 	opened, err := store.Open(home)
 	if err != nil {
@@ -928,6 +935,76 @@ esac
 		ghState: filepath.Join(root, "gh-state.json"), ghOpenPRs: filepath.Join(root, "gh-open-prs.json"),
 		ghMerge: filepath.Join(root, "gh-merge-called"), db: opened, project: project,
 	}
+}
+
+// The headless PR fixture starts its Lead outside Herdr's pane. Its detached
+// finalizer has no agent to observe, so stop it before the isolated server and
+// fixture root are torn down. Never signal a process without matching both the
+// fixture binary and its exact isolated state paths.
+func stopHeadlessLeadFinalizers(t *testing.T, root, binary string) {
+	t.Helper()
+	pids, err := headlessLeadFinalizerPIDs(root, binary)
+	if err != nil {
+		t.Errorf("find isolated Lead finalizers: %v", err)
+		return
+	}
+	for _, pid := range pids {
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("stop isolated Lead finalizer %d: %v", pid, err)
+		}
+	}
+	if waitForCondition(2*time.Second, func() bool {
+		pids, err = headlessLeadFinalizerPIDs(root, binary)
+		return err == nil && len(pids) == 0
+	}) {
+		return
+	}
+	// A finalizer stuck in an RPC must not survive fixture shutdown.
+	for _, pid := range pids {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("kill isolated Lead finalizer %d: %v", pid, err)
+		}
+	}
+	if !waitForCondition(2*time.Second, func() bool {
+		pids, err = headlessLeadFinalizerPIDs(root, binary)
+		return err == nil && len(pids) == 0
+	}) {
+		t.Errorf("isolated Lead finalizers remain after shutdown: pids=%v err=%v", pids, err)
+	}
+}
+
+func headlessLeadFinalizerPIDs(root, binary string) ([]int, error) {
+	if runtime.GOOS != "linux" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		args := strings.Split(string(cmdline), "\x00")
+		if len(args) < 2 || args[0] != binary || args[1] != "_finalize-lead" {
+			continue
+		}
+		environ, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "environ"))
+		if err != nil {
+			continue
+		}
+		values := "\x00" + string(environ)
+		if strings.Contains(values, "\x00POSSE_TEST_ROOT="+root+"\x00") && strings.Contains(values, "\x00XDG_CONFIG_HOME="+filepath.Join(root, "xdg")+"\x00") {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
 }
 
 func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID string) store.Task {
