@@ -344,6 +344,10 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 		program := args[0]
 		name := filepath.Base(program)
 		switch {
+		case name == "command" && len(args) == 3 && literal[1] && literal[2] && (args[1] == "-v" || args[1] == "-V"):
+			// These shell-builtin forms inspect a single program name; they do
+			// not execute it. All other command forms still unwrap and check it.
+			return false, guardReason{}
 		case wrapperOptions[name] != nil:
 			args, literal = skipWrapper(name, args[1:], literal[1:])
 			continue
