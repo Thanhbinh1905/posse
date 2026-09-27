@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 const fixtureLockName = ".posse-e2e-fixture.lock"
@@ -55,6 +56,27 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		t.Fatalf("lock E2E fixture %s: %v", root, err)
 	}
 	t.Cleanup(func() {
+		// A Herdr plugin can still be finishing a Posse command after the
+		// server stops. Wait for fixture processes to exit before removing
+		// their database, or a late backup write can race RemoveAll.
+		if runtime.GOOS == "linux" {
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				active, err := fixtureProcessAlive(root)
+				if err != nil {
+					t.Errorf("inspect E2E fixture processes %s: %v", root, err)
+					break
+				}
+				if !active {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Errorf("E2E fixture processes still running for %s", root)
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
 		if err := removeFixtureRoot(root); err != nil {
 			t.Errorf("remove E2E fixture %s: %v", root, err)
 		}

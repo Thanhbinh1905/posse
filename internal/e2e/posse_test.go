@@ -83,8 +83,16 @@ func TestPosseSpawnNoticeLandTeardownAndRecovery(t *testing.T) {
 	    ;;
 	  *)
 	    printf 'start %s\n' "$*" >> "$POSSE_E2E_LEAD_ARGS_LOG"
-	    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
-	    while IFS= read -r line; do printf '%s\n' "$line" >> "$POSSE_E2E_LEAD_LOG"; done
+	    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1 || exit 1
+	    : > "$POSSE_TEST_ROOT/lead-initial-idle-reported"
+	    while IFS= read -r line; do
+	      if [ "$line" = '__posse_e2e_busy__' ]; then
+	        herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1 || exit 1
+	        : > "$POSSE_TEST_ROOT/lead-busy-reported"
+	        continue
+	      fi
+	      printf '%s\n' "$line" >> "$POSSE_E2E_LEAD_LOG"
+	    done
 	    ;;
 esac
 `
@@ -336,8 +344,22 @@ esac
 	if output := runPosse(t, posseBinary, repo, leadEnv, "send", "t1", "Queue after the current turn", "--queue"); !strings.Contains(output, "queued") {
 		t.Fatalf("queued instruction was not held: %s", output)
 	}
-	if _, err := client.Run(context.Background(), "pane", "report-agent", leadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
-		t.Fatalf("fake Lead working report failed: %v", err)
+	// The fake Lead reports idle on startup. Have its input loop report busy
+	// only after startup, so a late idle report cannot undo the working state.
+	if !waitForCondition(15*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(root, "lead-initial-idle-reported"))
+		return err == nil
+	}) {
+		t.Fatal("fake Lead never finished its initial idle report")
+	}
+	if _, err := client.Call(context.Background(), "agent.prompt", map[string]any{"target": leadPaneID, "text": "__posse_e2e_busy__"}); err != nil {
+		t.Fatalf("ask fake Lead to start a busy turn: %v", err)
+	}
+	if !waitForCondition(15*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(root, "lead-busy-reported"))
+		return err == nil
+	}) {
+		t.Fatal("fake Lead did not report its busy turn")
 	}
 	if err := os.WriteFile(filepath.Join(signalGateDir, "t1"), []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -396,7 +418,11 @@ esac
 		notices, noticeErr := pending.UndeliveredNotices(context.Background(), project.ID)
 		return noticeErr == nil && len(notices) == 1
 	}) {
-		t.Fatal("busy Lead did not leave the Worker Notice pending")
+		snapshot, snapshotErr := client.Snapshot(context.Background())
+		notices, noticesErr := db.Notices(context.Background(), project.ID, false)
+		leadPrompt, _ := os.ReadFile(leadLog)
+		pluginLogs, _ := client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.herdr", "limit": 20})
+		t.Fatalf("busy Lead did not leave the Worker Notice pending: notices=%#v noticesErr=%v snapshot=%#v snapshotErr=%v leadLog=%q pluginLogs=%s", notices, noticesErr, snapshot, snapshotErr, leadPrompt, pluginLogs)
 	}
 	leadSnapshot, err := client.Snapshot(context.Background())
 	if err != nil {
