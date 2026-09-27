@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -291,5 +292,167 @@ func TestMissingHeldMountRaisesNoticeWithoutRecreatingCheckout(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("missing Mount Notices = %#v", notices)
+	}
+}
+
+func TestFailedTaskHeldMountIsRelockedByReconcile(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Failed launch", LandingMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mount, err := acquireMount(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, store.StateSpawning, store.StateFailed, "cli", "launch failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "unlock", mount.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	reason, err := mountLockReason(ctx, repo, mount.Path)
+	if err != nil || reason != "posse: held by t1" {
+		t.Fatalf("failed Task's held Mount lock = %q, %v", reason, err)
+	}
+}
+
+func TestMountIsLockedBeforeAcquireCanExposeHeldCheckout(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Lock timing", LandingMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := filepath.Join(root, "before-lock"), filepath.Join(root, "release-lock")
+	shim := fmt.Sprintf("#!/bin/sh\nif [ \"$3\" = worktree ] && [ \"$4\" = lock ]; then\n  : > %s\n  while [ ! -e %s ]; do sleep 0.01; done\nfi\nexec %s \"$@\"\n", shellQuote(entered), shellQuote(release), shellQuote(realGit))
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	done := make(chan error, 1)
+	go func() { _, err := acquireMount(ctx, db, project, task, home, "warm", nil); done <- err }()
+	defer func() {
+		_ = os.WriteFile(release, nil, 0600)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("acquire ended before git worktree lock: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("acquire did not reach git worktree lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mount, err := db.MountByTask(ctx, task.ID)
+	if err != nil || mount.State != "held" {
+		t.Fatalf("Mount before lock = %+v, %v", mount, err)
+	}
+	reason, err := mountLockReason(ctx, repo, mount.Path)
+	if err != nil || reason != "posse: held by t1" {
+		t.Fatalf("held checkout before lock command = %q, %v", reason, err)
+	}
+}
+
+func TestReleaseSnapshotFailureDoesNotRelockIdleMount(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Release snapshot", LandingMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mount, err := acquireMount(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotDir := filepath.Dir(db.TaskSnapshotPath(project.Name, task.Seq))
+	if err := os.Chmod(snapshotDir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(snapshotDir, 0700)
+	if _, err := releaseMount(ctx, db, project, task, "warm", false); err == nil {
+		t.Fatal("expected snapshot persistence failure after release commit")
+	}
+	mounts, err := db.Mounts(ctx, project.ID)
+	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" {
+		t.Fatalf("Mount after committed release = %+v, %v", mounts, err)
+	}
+	reason, err := mountLockReason(ctx, repo, mount.Path)
+	if err != nil || reason != "" {
+		t.Fatalf("idle Mount retained lock %q, %v", reason, err)
 	}
 }

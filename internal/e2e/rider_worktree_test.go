@@ -141,6 +141,38 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	if !recoveredNotice {
 		t.Fatalf("no group-close recovery Notice: %#v", notices)
 	}
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPanes(t, f.client)) > 0 && len(lookoutPIDs(f.root)) > 0 }) {
+		t.Fatal("foreign-primary recovery did not restart Lookout")
+	}
+	if panes, processes := lookoutPanes(t, f.client), lookoutPIDs(f.root); len(panes) != 1 || len(processes) != 1 {
+		t.Fatalf("group recovery left Lookouts: panes=%d processes=%d", len(panes), len(processes))
+	}
+	// The primary row uses the same close-group operation as a foreign primary.
+	firstBeforeLeadClose, secondBeforeLeadClose := f.task(t, "t1"), f.task(t, "t2")
+	leadBeforeClose, ok := findLeadInSnapshot(snap)
+	if !ok {
+		t.Fatal("recovered Lead missing before primary close")
+	}
+	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": leadBeforeClose.WorkspaceID, "close_group": true}); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(30*time.Second, func() bool {
+		a, b := f.task(t, "t1"), f.task(t, "t2")
+		_, leadReady := findLeadInSnapshot(f.snapshot(t))
+		return leadReady && a.Launches > firstBeforeLeadClose.Launches && b.Launches > secondBeforeLeadClose.Launches
+	}) {
+		t.Fatalf("Lead group close did not restore both Riders: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
+	}
+	snap = f.snapshot(t)
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPanes(t, f.client)) > 0 && len(lookoutPIDs(f.root)) > 0 }) {
+		t.Fatal("Lead-primary recovery did not restart Lookout")
+	}
+	if panes, processes := lookoutPanes(t, f.client), lookoutPIDs(f.root); len(panes) != 1 || len(processes) != 1 {
+		t.Fatalf("Lead group close left Lookouts: panes=%d processes=%d", len(panes), len(processes))
+	}
+	if data, err := os.ReadFile(changed); err != nil || string(data) != "keep this work" {
+		t.Fatalf("Lead group close lost unfinished work: %q %v", data, err)
+	}
 	// A normal Teardown closes only the child and unlocks its released Mount.
 	second = f.task(t, "t2")
 	f.fail(t, "t2")
