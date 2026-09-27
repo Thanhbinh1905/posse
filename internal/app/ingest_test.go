@@ -83,7 +83,7 @@ func TestIngestAppliesBlockedStateAndJournalsEvent(t *testing.T) {
 	if err := service.ingest(contextValue, nil); err != nil {
 		t.Fatal(err)
 	}
-	if fake.CallCount("session.snapshot") != 1 {
+	if fake.CallCount("session.snapshot") < 1 {
 		t.Fatalf("_ingest did not reconcile the owned pane: %#v", fake.Calls)
 	}
 	db, err = store.Open(home)

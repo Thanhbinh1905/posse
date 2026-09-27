@@ -1,0 +1,13 @@
+# Group repository Riders as Herdr worktree children of the Lead
+
+Repository Projects open a held Remuda Mount with `worktree.open` from the Lead workspace, making the Lead the group primary and each Rider a linked child. Workspace Projects are not single Git worktrees and retain ADR 0009's tab layout. This amends ADR 0007 layer 1 and ADR 0009. The User chose native grouping without changing their Nix-managed Herdr configuration or adding top-level workspaces.
+
+## Isolated Herdr 0.9.0 spike
+
+In `TestExistingMountWorktreeOpenAndLockSpike`, an existing Mount opened by `worktree.open` with `workspace_id` set to the Lead and `path` set to the Mount returned a new workspace with `worktree.is_linked_worktree=true`, `repo_key` shared with the Lead, and `checkout_path` equal to the Mount. The Lead remained focused with `focus=false`. A Git lock with reason `posse: held by t1` made `worktree.remove` refuse both `force=false` and `force=true` with `worktree_remove_failed` (`cannot remove a locked working tree; use 'remove -f -f' to override`). The server and Posse home were isolated under `/tmp/posse-e2e-*`; no User session was touched. The 0.9.0 socket schema supports `worktree.open` with `path`, `workspace.close` without `close_group`, `worktree.remove` with `force`, and snapshot worktree provenance.
+
+## Failure boundary
+
+Herdr's `workspace.close` with `close_group=true` closes **all** workspaces sharing the repository key, even another primary and the Lead. A close of the Lead parent row also closes its linked Riders. Posse closes only a Rider child without `close_group`; the Worker tool guard refuses group-affecting Herdr commands, but a UI action or unguarded caller can still close the group. A doctor warning names other primaries. When the Lead and Riders disappear together, reconcile rebuilds the Lead workspace and resumes saved sessions, raising a Notice. Identifiers are not trusted without pane labels after a restart; grouping provenance is restored by Herdr.
+
+The Herdr UI's Delete worktree checkout action invokes `git worktree remove` with at most one `--force`. A held Mount is locked until cleanup finishes; release records a non-reusable `releasing` state before Git unlock, then finalizes the clean Mount as idle. Reconcile completes interrupted releases. The UI action cannot erase unlanded work. A double-force Git command outside that UI, or an OS-level deletion, remains outside this boundary; a missing Mount must produce a Notice rather than silently losing a Task. Posse never calls `worktree.create` or `worktree.remove`. Teardown checks ownership and foreign panes before closing a child and does not touch sibling or Lead workspaces. A legacy Rider tab retains ADR 0009's tab-scoped Teardown.

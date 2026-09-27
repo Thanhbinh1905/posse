@@ -452,7 +452,7 @@ setup_after_install() {
     3)
       ask_yes_no "Apply these changes now?" y yes
       if [ "$PROMPT_REPLY" = y ]; then
-        if setup_result=$("$binary" setup --human --no-sidebar-layout 2>&1); then
+        if setup_result=$("$binary" setup --human 2>&1); then
           printf '\n'
           print_setup_lines "$setup_result"
         else
@@ -466,19 +466,6 @@ setup_after_install() {
     *)
       status_line skip "Machine setup was not applied."
       return
-      ;;
-  esac
-  case $setup_plan in
-    *'Add Posse Agents sidebar layout'*)
-      ask_yes_no "Add Posse Agents sidebar layout to Herdr config?" n no
-      if [ "$PROMPT_REPLY" = y ]; then
-        if setup_result=$("$binary" setup --human --sidebar-layout 2>&1); then
-          print_setup_lines "$setup_result"
-        else
-          print_setup_lines "$setup_result"
-          fail "Could not add the Herdr sidebar layout."
-        fi
-      fi
       ;;
   esac
 }

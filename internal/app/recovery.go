@@ -194,7 +194,8 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 			break
 		}
 	}
-	if !serverRestarted {
+	groupClosed := riderGroupClosed(snapshot, project, tasks) && !serverRestarted
+	if !serverRestarted && !groupClosed {
 		if _, err := s.prepareProject(ctx, db, project); err != nil {
 			return 0, err
 		}
@@ -212,7 +213,11 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	}
 	recoveryOwnerPID := os.Getpid()
 	recoveryNow := time.Now()
-	claimed, previousRecovery, err := s.claimProjectRecovery(ctx, db, project.ID, snapshot.ServerStartedAt, recoveryOwnerPID, recoveryNow)
+	claimGeneration := snapshot.ServerStartedAt
+	if groupClosed {
+		claimGeneration += "/group/" + project.HerdrWorkspaceID + "/" + project.LeadPaneID
+	}
+	claimed, previousRecovery, err := s.claimProjectRecovery(ctx, db, project.ID, claimGeneration, recoveryOwnerPID, recoveryNow)
 	if err != nil {
 		return 0, err
 	}
@@ -221,7 +226,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	}
 	recoveryComplete := false
 	defer func() {
-		if err := db.FinishProjectRecovery(ctx, project.ID, snapshot.ServerStartedAt, recoveryOwnerPID, previousRecovery.Generation, recoveryComplete); err != nil {
+		if err := db.FinishProjectRecovery(ctx, project.ID, claimGeneration, recoveryOwnerPID, previousRecovery.Generation, recoveryComplete); err != nil {
 			if returnedErr == nil {
 				returnedErr = err
 			} else {
@@ -229,12 +234,31 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 			}
 		}
 	}()
+	if groupClosed {
+		// A second event can arrive after the first recovery finished. Check
+		// current labeled panes before relaunching anything.
+		fresh, snapErr := s.snapshot(ctx)
+		if snapErr != nil {
+			return 0, snapErr
+		}
+		current, dbErr := db.ProjectByID(ctx, project.ID)
+		if dbErr != nil {
+			return 0, dbErr
+		}
+		if !riderGroupClosed(fresh, current, tasks) {
+			recoveryComplete = true
+			return 0, nil
+		}
+	}
 	if _, err := os.Stat(project.Root); err != nil {
 		return 0, axi.Failure("project_missing", fmt.Sprintf("Project %s path no longer exists: %s", project.Name, project.Root), false, "Run `posse project move "+project.Name+" <new-root>`")
 	}
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
 		return 0, configError(err)
+	}
+	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+		return 0, err
 	}
 	project, err = s.ensureRecoveryWorkspace(ctx, db, project, snapshot)
 	if err != nil {
@@ -283,6 +307,9 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	}
 	data := marshalJSON(map[string]any{"server_started_at": snapshot.ServerStartedAt, "tasks": recovered})
 	summary := "Recovered after a Herdr restart"
+	if groupClosed {
+		summary = "Recovered after a Herdr workspace group close"
+	}
 	if len(recovered) > 0 {
 		summary += ": " + strings.Join(recovered, ", ")
 	}
@@ -360,6 +387,37 @@ func (s *Service) claimProjectRecovery(ctx context.Context, db *store.DB, projec
 		case <-ticker.C:
 		}
 	}
+}
+
+// A close of another primary with close_group can remove the Lead and all
+// Riders without restarting Herdr. During recovery some Rider panes may
+// already be back, but no reconciliation may mark the others lost while the
+// Lead is still absent. A lone closed Rider has a live Lead.
+func riderGroupClosed(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) bool {
+	if project.IsWorkspace() || project.HerdrWorkspaceID == "" || snapshot.ServerStartedAt == "" {
+		return false
+	}
+	// Closing only the Lead pane leaves its workspace intact. `posse up`
+	// handles that case; it is not a group-close recovery when no Rider is live.
+	if len(tasks) == 0 {
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.WorkspaceID == project.HerdrWorkspaceID {
+				return false
+			}
+		}
+	}
+	if project.LeadPaneID == "" || project.LeadLabel == "" {
+		return true // A prior recovery has not recorded its Lead yet.
+	}
+	label := project.LeadLabel
+	for _, pane := range snapshot.Panes {
+		if pane.Label == label {
+			return false
+		}
+	}
+	// A recovery may have created the Lead workspace before its Lead pane.
+	// Its label alone is not proof that the recovery completed.
+	return true
 }
 
 func taskNeedsRestartRecovery(task store.Task, snapshot herdr.Snapshot) bool {
@@ -444,9 +502,13 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	}
 	defer db.ReleaseLeadStart(context.Background(), project.ID)
 	var current *herdr.Pane
+	leadLabel := project.LeadLabel
+	if leadLabel == "" {
+		leadLabel = "posse:" + project.Name + ":lead"
+	}
 	for i := range snapshot.Panes {
 		pane := &snapshot.Panes[i]
-		if pane.PaneID == project.LeadPaneID || (project.LeadLabel != "" && pane.Label == project.LeadLabel) {
+		if pane.PaneID == project.LeadPaneID && project.LeadPaneID != "" || pane.Label == leadLabel {
 			current = pane
 			break
 		}

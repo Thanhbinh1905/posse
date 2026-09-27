@@ -269,8 +269,9 @@ func TestRideFocusedDuringLaunchRemainsSpawning(t *testing.T) {
 	fixture := newRideFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
-			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
-			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
+			fixture.fake.SnapshotValue.FocusedPaneID = "fake:child:p1"
+			fixture.fake.SnapshotValue.FocusedWorkspaceID = "fake:child"
+			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
 		}
 	}
 	code, output := fixture.ride(t)
@@ -284,8 +285,9 @@ func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T)
 	fixture := newRideFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
-			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
-			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
+			fixture.fake.SnapshotValue.FocusedPaneID = "fake:child:p1"
+			fixture.fake.SnapshotValue.FocusedWorkspaceID = "fake:child"
+			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
 		}
 	}
 	if code, output := fixture.ride(t); code != 0 {
@@ -315,6 +317,7 @@ func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T)
 		t.Fatalf("focused retry task=%#v notices=%#v prompts=%d", task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 	fixture.fake.SnapshotValue.FocusedPaneID = "w1:p1"
+	fixture.fake.SnapshotValue.FocusedWorkspaceID = "w1"
 	fixture.fake.SnapshotValue.Panes[1].Focused = false
 	if err := fixture.service.retryPendingLaunches(ctx, db, fixture.project, cfg, fixture.fake.SnapshotValue); err != nil {
 		t.Fatal(err)

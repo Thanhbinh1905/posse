@@ -294,7 +294,9 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 		Panes:  snapshot.Panes,
 		Agents: []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w3:p1"}},
 		Workspaces: []herdr.Workspace{{WorkspaceID: "w3", Root: repo, Worktree: struct {
-			CheckoutPath string `json:"checkout_path"`
+			CheckoutPath     string `json:"checkout_path"`
+			RepoKey          string `json:"repo_key"`
+			IsLinkedWorktree bool   `json:"is_linked_worktree"`
 		}{CheckoutPath: repo}}},
 	}
 	service := testService(home, fake)
