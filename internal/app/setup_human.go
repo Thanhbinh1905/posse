@@ -65,6 +65,26 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 	}
 	kept := func(text string) []string { return []string{humanKept + "  " + text} }
 	switch step {
+	case "sidebar_layout":
+		switch action {
+		case "keep":
+			return kept("Posse Agents sidebar layout already present at " + displayPath(target))
+		case "installed":
+			return []string{humanDone + "  Added Posse Agents sidebar layout to " + displayPath(target)}
+		case "manual":
+			message := "Herdr Agents rows already configured at " + displayPath(target)
+			if reason, ok := row["error"].(string); ok && reason != "" {
+				message = "Cannot add Herdr Agents layout at " + displayPath(target) + ": " + reason
+			}
+			lines := []string{humanManual + "  " + message + "; reference layout:"}
+			snippet, _ := row["snippet"].(string)
+			for _, line := range strings.Split(strings.TrimSuffix(snippet, "\n"), "\n") {
+				lines = append(lines, "     "+line)
+			}
+			return lines
+		default:
+			return []string{humanManual + "  Add Posse Agents sidebar layout to " + displayPath(target) + "? Run `posse setup` to confirm."}
+		}
 	case "integration":
 		switch action {
 		case "keep":

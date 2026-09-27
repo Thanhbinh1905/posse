@@ -448,28 +448,39 @@ setup_after_install() {
   setup_plan=$("$binary" setup --check --exit-code --human 2>&1) || setup_status=$?
   print_setup_lines "$setup_plan"
   case $setup_status in
-    0)
-      status_line ok "Machine setup is already complete."
-      return
+    0) status_line ok "Machine setup is already complete." ;;
+    3)
+      ask_yes_no "Apply these changes now?" y yes
+      if [ "$PROMPT_REPLY" = y ]; then
+        if setup_result=$("$binary" setup --human --no-sidebar-layout 2>&1); then
+          printf '\n'
+          print_setup_lines "$setup_result"
+        else
+          print_setup_lines "$setup_result"
+          fail "Machine setup failed. Fix the issue above, then run the installer again."
+        fi
+      else
+        status_line skip "Machine setup was not applied."
+      fi
       ;;
-    3) ;;
     *)
       status_line skip "Machine setup was not applied."
       return
       ;;
   esac
-  ask_yes_no "Apply these changes now?" y yes
-  if [ "$PROMPT_REPLY" != y ]; then
-    status_line skip "Machine setup was not applied."
-    return
-  fi
-  if setup_result=$("$binary" setup --human 2>&1); then
-    printf '\n'
-    print_setup_lines "$setup_result"
-  else
-    print_setup_lines "$setup_result"
-    fail "Machine setup failed. Fix the issue above, then run the installer again."
-  fi
+  case $setup_plan in
+    *'Add Posse Agents sidebar layout'*)
+      ask_yes_no "Add Posse Agents sidebar layout to Herdr config?" n no
+      if [ "$PROMPT_REPLY" = y ]; then
+        if setup_result=$("$binary" setup --human --sidebar-layout 2>&1); then
+          print_setup_lines "$setup_result"
+        else
+          print_setup_lines "$setup_result"
+          fail "Could not add the Herdr sidebar layout."
+        fi
+      fi
+      ;;
+  esac
 }
 
 print_box() {

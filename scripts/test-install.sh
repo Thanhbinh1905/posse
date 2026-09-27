@@ -44,12 +44,14 @@ case $1 in
     mode=apply
     human=0
     exit_code=0
+    layout=0
     for arg in "$@"; do
       case $arg in
         --check) mode=check ;;
         --uninstall) mode=uninstall ;;
         --human) human=1 ;;
         --exit-code) exit_code=1 ;;
+        --sidebar-layout) layout=1 ;;
       esac
     done
     if [ "$human" -eq 1 ] && [ "${STUB_OLD_SETUP:-}" = 1 ]; then
@@ -59,6 +61,7 @@ case $1 in
     case $mode in
       check)
         printf 'setup-check\n' >> "$STUB_LOG"
+        if [ "${STUB_SIDEBAR_OFFER:-}" = 1 ]; then printf '%s\n' '!  Add Posse Agents sidebar layout to ~/.config/herdr/config.toml? Run `posse setup` to confirm.'; fi
         if [ "${STUB_SETUP_DONE:-}" = 1 ]; then
           printf '%s\n' '-  posse skill already installed'
           exit 0
@@ -78,6 +81,7 @@ case $1 in
         ;;
       *)
         printf 'setup-run\n' >> "$STUB_LOG"
+        if [ "$layout" -eq 1 ]; then printf 'setup-sidebar\n' >> "$STUB_LOG"; fi
         if [ "${STUB_SETUP_FAIL:-}" = 1 ]; then
           printf '%s\n' '✗  setup would overwrite an unmanaged path' '   /home/user/.agents/skills/posse'
           exit 1
@@ -163,6 +167,30 @@ contains "$output" "  -  Codex SessionStart hook already present" || fail "--yes
 assert_readable "$output" "--yes"
 assert_next_step "$output" "--yes"
 pass "$TEST_SHELL applies setup outside Herdr with --yes and a readable checklist"
+
+mkdir -p "$TEST_ROOT/home-sidebar-yes"
+sidebar_no_log=$TEST_ROOT/sidebar-no.log
+if output=$(STUB_SIDEBAR_OFFER=1 run_install "$TEST_ROOT/home-sidebar-yes" "$TEST_ROOT/prefix-sidebar-yes" "$sidebar_no_log" --yes 2>&1); then
+  :
+else
+  printf '%s\n' "$output" >&2
+  fail "installer with optional sidebar offer failed"
+fi
+contains "$output" "No TTY available; using safe default [N]." || fail "--yes silently accepted the optional sidebar layout"
+case $(cat "$sidebar_no_log") in
+  *setup-sidebar*) fail "--yes silently applied the sidebar layout" ;;
+esac
+sidebar_tty=$TEST_ROOT/sidebar-answer-yes
+printf 'y\n' > "$sidebar_tty"
+sidebar_yes_log=$TEST_ROOT/sidebar-yes.log
+if output=$(STUB_SIDEBAR_OFFER=1 POSSE_TTY=$sidebar_tty run_install "$TEST_ROOT/home-sidebar-prompt" "$TEST_ROOT/prefix-sidebar-prompt" "$sidebar_yes_log" --yes 2>&1); then
+  :
+else
+  printf '%s\n' "$output" >&2
+  fail "confirmed sidebar layout install failed"
+fi
+contains "$(cat "$sidebar_yes_log")" "setup-sidebar" || fail "installer did not apply confirmed sidebar layout"
+pass "$TEST_SHELL asks separately before installing the optional sidebar layout"
 
 mkdir -p "$TEST_ROOT/home-interactive-yes"
 yes_tty=$TEST_ROOT/answers-yes

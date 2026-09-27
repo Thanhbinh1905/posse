@@ -44,7 +44,7 @@ func (f *Fake) Snapshot(context.Context) (Snapshot, error) {
 }
 
 func NewFake() *Fake {
-	return &Fake{Results: map[string]json.RawMessage{}, Errors: map[string]error{}, ErrorQueue: map[string][]error{}, RunOut: map[string][]byte{}, RunErrors: map[string]error{}, Server: Status{Running: true, Protocol: MinimumProtocol, Compatible: true}}
+	return &Fake{Results: map[string]json.RawMessage{}, Errors: map[string]error{}, ErrorQueue: map[string][]error{}, RunOut: map[string][]byte{"--version": []byte("herdr 0.9.1")}, RunErrors: map[string]error{}, Server: Status{Running: true, Protocol: MinimumProtocol, Compatible: true}}
 }
 
 func (f *Fake) Call(_ context.Context, method string, params map[string]any) (json.RawMessage, error) {

@@ -8,8 +8,6 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-const leadTabLabel = "Lead"
-
 func riderTabLabel(name string, last bool) string {
 	branch := "├─"
 	if last {
@@ -18,9 +16,8 @@ func riderTabLabel(name string, last bool) string {
 	return branch + " " + name
 }
 
-// relabelProjectTabs restores Posse's tab labels from the current Herdr order.
-// A rename is presentation-only: failures are logged and never block the
-// command that triggered reconciliation.
+// relabelProjectTabs restores plain tab labels and the tree-shaped sidebar
+// token from Herdr tab order. Presentation failures never block the command.
 func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project store.Project) {
 	if s.Herdr == nil {
 		return
@@ -35,7 +32,7 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 		log.Printf("posse: could not reconcile tab labels for Project %s: tasks: %v", project.Name, err)
 		return
 	}
-	labels := projectTabLabels(snapshot, project, tasks)
+	labels, rows := projectTabPresentation(snapshot, project, tasks)
 	for _, tab := range snapshot.Tabs {
 		label, owned := labels[tab.TabID]
 		if !owned || tab.Label == label {
@@ -45,12 +42,22 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 			log.Printf("posse: could not label Herdr tab %s as %q: %v", tab.TabID, label, err)
 		}
 	}
+	for _, pane := range snapshot.Panes {
+		row, owned := rows[pane.PaneID]
+		if !owned || pane.Tokens["posse_row"] == row {
+			continue
+		}
+		if _, err := s.herdrCall(ctx, "pane.report_metadata", map[string]any{"pane_id": pane.PaneID, "source": "posse", "tokens": map[string]string{"posse_row": row}}); err != nil {
+			log.Printf("posse: could not label Herdr Agents row for pane %s: %v", pane.PaneID, err)
+		}
+	}
 }
 
-// projectTabLabels only claims tabs identified by a Project Lead pane or a
+// projectTabPresentation only claims tabs identified by a Project Lead pane or a
 // Task's labeled pane. Rider order follows the tab array from the snapshot.
-func projectTabLabels(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) map[string]string {
+func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) (map[string]string, map[string]string) {
 	labels := make(map[string]string)
+	rows := make(map[string]string)
 	leadLabel := project.LeadLabel
 	if leadLabel == "" {
 		leadLabel = "posse:" + project.Name + ":lead"
@@ -59,7 +66,8 @@ func projectTabLabels(snapshot herdr.Snapshot, project store.Project, tasks []st
 	leadTabID := ""
 	if found && lead.TabID != "" {
 		leadTabID = lead.TabID
-		labels[leadTabID] = leadTabLabel
+		labels[leadTabID] = "Lead"
+		rows[lead.PaneID] = leadWorkspaceLabel(project)
 	}
 
 	type owner struct {
@@ -97,7 +105,10 @@ func projectTabLabels(snapshot herdr.Snapshot, project store.Project, tasks []st
 		}{tab: tab, name: taskDisplayName(candidate.task)})
 	}
 	for index, rider := range riderTabs {
-		labels[rider.tab.TabID] = riderTabLabel(rider.name, index == len(riderTabs)-1)
+		labels[rider.tab.TabID] = rider.name
+		if pane, found := findTaskPane(snapshot.Panes, owners[rider.tab.TabID].task); found && pane.TabID == rider.tab.TabID {
+			rows[pane.PaneID] = riderTabLabel(rider.name, index == len(riderTabs)-1)
+		}
 	}
-	return labels
+	return labels, rows
 }
