@@ -289,6 +289,11 @@ func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *sy
 	literal := make([]bool, len(call.Args))
 	for index, word := range call.Args {
 		args[index], literal[index] = e.word(script, word)
+		if !literal[index] {
+			// Keep the source of an unresolved env assignment so envPrefix can
+			// track which variable is unknown without losing the next program.
+			args[index] = sourceText(script, word)
+		}
 	}
 	raw := sourceText(script, call)
 	if literal[0] {
@@ -721,6 +726,9 @@ func (g *guard) herdr(e *shellEnv, args []string, literal []bool) (bool, guardRe
 		return refuse(display, "posse cannot tell which Herdr server it reaches")
 	}
 	if g.realSocket == "" || sameSocket(socket, g.realSocket) {
+		if g.realSocket != "" && e.values["HERDR_SOCKET_PATH"] == "" {
+			return refuse(display, "the default socket reaches the User's Herdr server")
+		}
 		return refuse(display, "it changes the Herdr session this Rider runs in")
 	}
 	return false, guardReason{}
@@ -793,8 +801,20 @@ func (e *shellEnv) clone() *shellEnv {
 // and returns the command that follows, and the -S string when there is one.
 func (e *shellEnv) envPrefix(args []string, literal []bool) ([]string, []bool, string) {
 	split := ""
-	for len(args) > 0 && literal[0] {
+	for len(args) > 0 {
 		arg := args[0]
+		if !literal[0] {
+			name, _, assignment := strings.Cut(arg, "=")
+			if !assignment || !validName.MatchString(name) {
+				break
+			}
+			// The value is dynamic, but an unrelated assignment does not
+			// make a known Herdr socket or the following program unknown.
+			delete(e.values, name)
+			e.unknown[name], e.exported[name] = true, true
+			args, literal = args[1:], literal[1:]
+			continue
+		}
 		switch {
 		case arg == "-i" || arg == "--ignore-environment" || arg == "-":
 			e.values, e.exported, e.unknown = map[string]string{}, map[string]bool{}, map[string]bool{}
@@ -964,9 +984,20 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 // socket resolves the Herdr socket a herdr command reaches with this
 // environment, the way the herdr CLI does.
 func (e *shellEnv) socket() (string, bool) {
-	for _, name := range []string{"HERDR_SOCKET_PATH", "HERDR_CONFIG_PATH", "XDG_CONFIG_HOME", "HOME", "HERDR_SESSION"} {
-		if e.unknown[name] {
+	if e.unknown["HERDR_SOCKET_PATH"] {
+		return "", false
+	}
+	if e.values["HERDR_SOCKET_PATH"] == "" || !e.exported["HERDR_SOCKET_PATH"] {
+		if e.unknown["HERDR_CONFIG_PATH"] || e.unknown["HERDR_SESSION"] {
 			return "", false
+		}
+		if e.values["HERDR_CONFIG_PATH"] == "" || !e.exported["HERDR_CONFIG_PATH"] {
+			if e.unknown["XDG_CONFIG_HOME"] {
+				return "", false
+			}
+			if (e.values["XDG_CONFIG_HOME"] == "" || !e.exported["XDG_CONFIG_HOME"]) && e.unknown["HOME"] {
+				return "", false
+			}
 		}
 	}
 	env := []string{}
