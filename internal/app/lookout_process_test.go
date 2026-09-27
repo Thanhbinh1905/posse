@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"context"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -49,6 +50,23 @@ func TestLookoutProjectDiscoveryMatchesNestedWorkingDirectory(t *testing.T) {
 	}
 	if processBelongsToProject(lookoutProcess{WorkingDir: "/workspace/shopping"}, project) {
 		t.Fatal("lookout from a sibling path was matched")
+	}
+}
+
+func TestLiveLeadLookoutExcludesPollOnlyAndOtherProjects(t *testing.T) {
+	project := store.Project{Root: "/workspace/shop", HerdrWorkspaceID: "w1", LeadPaneID: "w1:p1"}
+	pid := os.Getpid()
+	if liveLeadLookout(project, []lookoutProcess{{PID: pid, PaneID: "w1:p2", WorkingDir: project.Root, PollOnly: true}}) {
+		t.Fatal("poll-only Lookout tab is not the Lead watcher")
+	}
+	if liveLeadLookout(project, []lookoutProcess{{PID: pid, PaneID: "w1:p4", WorkingDir: "/workspace/other"}}) {
+		t.Fatal("other Project's watcher in the same workspace is not this Lead's watcher")
+	}
+	if !liveLeadLookout(project, []lookoutProcess{{PID: pid, PaneID: "w1:p1", WorkingDir: project.Root}}) {
+		t.Fatal("live Lead watcher was not detected")
+	}
+	if liveLeadLookout(project, []lookoutProcess{{PID: -1, PaneID: "w1:p1", WorkingDir: project.Root}}) {
+		t.Fatal("dead watcher blocked the typed fallback")
 	}
 }
 
