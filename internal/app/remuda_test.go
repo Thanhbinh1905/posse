@@ -58,6 +58,9 @@ func TestUnsaddleFailedTaskDoesNotResetMountReusedByAnotherTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	failedTask, err := db.TaskByID(ctx, project.ID, task1ID)
+	if reason, lockErr := mountLockReason(ctx, repo, failedTask.WorktreePath); lockErr != nil || reason != "" {
+		t.Fatalf("failed spawn left Mount locked: %q, %v", reason, lockErr)
+	}
 	if err != nil || failedTask.MountID != 0 {
 		t.Fatalf("failed Task retained its released Mount: %#v, %v", failedTask, err)
 	}
@@ -72,6 +75,9 @@ func TestUnsaddleFailedTaskDoesNotResetMountReusedByAnotherTask(t *testing.T) {
 	mount, err := acquireMount(ctx, db, project, task2, home, "warm", nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if reason, lockErr := mountLockReason(ctx, repo, mount.Path); lockErr != nil || reason != "posse: held by t2" {
+		t.Fatalf("reused Mount lock: %q, %v", reason, lockErr)
 	}
 	work := filepath.Join(mount.Path, "second-task-work.txt")
 	if err := os.WriteFile(work, []byte("keep this work\n"), 0o600); err != nil {

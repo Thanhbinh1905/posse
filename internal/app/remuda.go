@@ -160,9 +160,29 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 		return store.Mount{}, err
 	}
 	for attempts := 0; attempts < 64; attempts++ {
-		mount, err := db.AcquireMount(ctx, project.ID, task.ID, base)
+		var mount store.Mount
+		err := withMountStateLock(ctx, db, func() error {
+			var claimErr error
+			mount, claimErr = db.AcquireMount(ctx, project.ID, task.ID, base)
+			if claimErr != nil {
+				return claimErr
+			}
+			// Existing checkouts may carry a stale Posse lock after a crash;
+			// reconcile must not be able to relock the former Task here.
+			if _, statErr := os.Stat(filepath.Join(mount.Path, ".git")); statErr == nil {
+				if lockErr := lockClaimedMount(ctx, db, project, mount, task); lockErr != nil {
+					// Do not leave an inaccessible, foreign-locked Mount held by a
+					// failed Task. Preserve the checkout in broken quarantine.
+					return errors.Join(lockErr, db.BreakMount(ctx, mount.ID, task.ID))
+				}
+				return nil
+			} else if !os.IsNotExist(statErr) {
+				return statErr
+			}
+			return nil
+		})
 		if err != nil {
-			return store.Mount{}, err
+			return mount, err
 		}
 		if _, statErr := os.Stat(filepath.Join(mount.Path, ".git")); os.IsNotExist(statErr) {
 			if err := os.MkdirAll(filepath.Dir(mount.Path), 0o700); err != nil {
@@ -182,7 +202,9 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 				continue
 			}
 		}
-		if err := lockMount(ctx, project.Root, mount.Path, task.Seq); err != nil {
+		if err := withMountStateLock(ctx, db, func() error {
+			return lockClaimedMount(ctx, db, project, mount, task)
+		}); err != nil {
 			return mount, err
 		}
 		if err := resetMount(ctx, mount.Path, project, cleanMode); err != nil {
@@ -468,15 +490,20 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 		}
 		return killed, err
 	}
-	if !project.IsWorkspace() {
-		if err := unlockMount(ctx, project.Root, mount.Path); err != nil {
-			return killed, err
-		}
-	}
-	if err := db.ReleaseMount(ctx, mount.ID, task.ID); err != nil {
+	if err := withMountStateLock(ctx, db, func() error {
 		if !project.IsWorkspace() {
-			return killed, errors.Join(err, lockMount(ctx, project.Root, mount.Path, task.Seq))
+			if err := unlockTaskMount(ctx, project.Root, mount.Path, task.Seq); err != nil {
+				return err
+			}
 		}
+		if err := db.ReleaseMount(ctx, mount.ID, task.ID); err != nil {
+			if !project.IsWorkspace() {
+				return errors.Join(err, lockMount(ctx, project.Root, mount.Path, task.Seq))
+			}
+			return err
+		}
+		return nil
+	}); err != nil {
 		return killed, err
 	}
 	return killed, nil
@@ -500,6 +527,17 @@ func lockMount(ctx context.Context, repo, path string, seq int) error {
 	return err
 }
 
+func unlockTaskMount(ctx context.Context, repo, path string, seq int) error {
+	reason, err := mountLockReason(ctx, repo, path)
+	if err != nil {
+		return err
+	}
+	if reason != "" && reason != fmt.Sprintf("posse: held by t%d", seq) {
+		return fmt.Errorf("refuse to release mount %s locked by %q, not t%d", path, reason, seq)
+	}
+	return unlockMount(ctx, repo, path)
+}
+
 func unlockMount(ctx context.Context, repo, path string) error {
 	reason, err := mountLockReason(ctx, repo, path)
 	if err != nil {
@@ -508,12 +546,14 @@ func unlockMount(ctx context.Context, repo, path string) error {
 	if reason == "" {
 		return nil
 	}
-	if !strings.HasPrefix(reason, "posse: held by t") {
+	if _, ok := posseLockTaskSeq(reason); !ok {
 		return fmt.Errorf("refuse to unlock Mount %s locked by %q", path, reason)
 	}
 	_, err = gitOutput(ctx, repo, "worktree", "unlock", path)
 	return err
 }
+
+var errMountNotRegistered = errors.New("mount is missing from git worktree list")
 
 func mountLockReason(ctx context.Context, repo, path string) (string, error) {
 	listing, err := gitOutput(ctx, repo, "worktree", "list", "--porcelain")
@@ -535,14 +575,43 @@ func mountLockReason(ctx context.Context, repo, path string) (string, error) {
 		}
 		return "", nil
 	}
-	return "", fmt.Errorf("mount %s is missing from git worktree list", path)
+	return "", fmt.Errorf("%w: %s", errMountNotRegistered, path)
+}
+
+func unlockRegisteredMount(ctx context.Context, repo, path string, seq int) error {
+	_, err := mountLockReason(ctx, repo, path)
+	if errors.Is(err, errMountNotRegistered) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return unlockTaskMount(ctx, repo, path, seq)
 }
 
 func breakMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, mount store.Mount, reason string) error {
 	if mount.State != "held" || mount.TaskID != task.ID {
 		return store.ErrStateRace
 	}
-	if err := db.BreakMount(ctx, mount.ID, task.ID); err != nil {
+	if err := withMountStateLock(ctx, db, func() error {
+		if !project.IsWorkspace() {
+			// A broken checkout is quarantined, not deleted. Git may still
+			// register a missing checkout; release its lock before clearing
+			// ownership. A failed worktree.add has no checkout to unlock.
+			if err := unlockRegisteredMount(ctx, project.Root, mount.Path, task.Seq); err != nil {
+				return err
+			}
+		}
+		if err := db.BreakMount(ctx, mount.ID, task.ID); err != nil {
+			if !project.IsWorkspace() {
+				if _, reasonErr := mountLockReason(ctx, project.Root, mount.Path); reasonErr == nil {
+					return errors.Join(err, lockMount(ctx, project.Root, mount.Path, task.Seq))
+				}
+			}
+			return err
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "mount_broken", Summary: fmt.Sprintf("mount-%d: %s", mount.Number, reason), DataJSON: `{}`})
