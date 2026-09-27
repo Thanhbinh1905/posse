@@ -457,7 +457,7 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 		} else {
 			out.WriteString("- Open Tasks:\n")
 			for _, task := range tasks {
-				fmt.Fprintf(&out, "  - %s [%s] %s\n", taskDisplayName(task), task.State, task.Title)
+				fmt.Fprintf(&out, "  - %s/%s (%s) [%s] %s\n", project.Name, taskIDString(task.Seq), taskDisplayName(task), task.State, task.Title)
 			}
 		}
 		if len(notices) == 0 {
@@ -465,7 +465,7 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 		} else {
 			fmt.Fprintf(&out, "- Open Notices: %d\n", len(notices))
 		}
-		fmt.Fprintf(&out, "- Last activity: %s\n\n", time.UnixMilli(project.LastActivityAt).Format(time.RFC3339))
+		fmt.Fprintf(&out, "- Last activity: %s\n\n", time.UnixMilli(project.LastActivityAt).Local().Format(time.RFC3339))
 	}
 	return writeAtomic(filepath.Join(home, "projects.md"), []byte(out.String()), 0o600)
 }

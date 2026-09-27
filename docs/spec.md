@@ -392,7 +392,7 @@ A Task in `working` is stalled when all hold for `stall_after`:
 
 ## 11. Dispatch
 
-`posse ride --brief <file> --name <slug> [--profile <name>]` resolves a Profile. `posse dispatch --brief <file>` returns the title-derived slug to pass as `--name`; unrelated nicknames are refused:
+`posse ride --brief <file> --name <slug> [--profile <name>]` resolves a Profile. `posse dispatch --brief <file> [--profile <name>]` returns the title-derived slug to pass as `--name`, even when it cannot choose among matching Profiles. An invalid `--name`, including one longer than 24 characters, reports the expected slug. A retry of the same Brief after a failed, lost or discarded Task may add a short suffix to that slug without rewriting the title; unrelated names are refused:
 
 1. `--profile` given: use it if it exists, else `profile_unknown`.
 2. Otherwise collect the rules whose structured fields match (v1: `type`). Rules with only `when` always match structurally.
@@ -402,7 +402,7 @@ A Task in `working` is stalled when all hold for `stall_after`:
 
 The Task records the Profile and the rule used. Model and effort come only from the Profile.
 
-`posse dispatch --brief <file>` prints the same resolution without spawning.
+`posse dispatch --brief <file> [--profile <name>]` prints the same resolution without spawning; if Profile selection is ambiguous, `profile_required` includes the slug and candidate Profiles in help.
 
 ## 12. Remuda
 
@@ -446,7 +446,7 @@ autonomy: { land: ask }     # optional, tighten only
 
 `posse ride`:
 
-1. Validates the required `--name` format, then the Brief. The branch slug is derived from the first three meaningful words of the Task title (lowercase kebab-case, at most 24 characters; common connecting words omitted). `--name` must equal that slug; an unrelated nickname gets `name_invalid` with the expected slug. The Task title remains the forge pull request title, without an id or slug prefix.
+1. Validates the required `--name` format, then the Brief. The branch slug is derived from the first three meaningful words of the Task title (lowercase kebab-case, at most 24 characters; common connecting words omitted). `--name` must equal that slug, except a retry after a failed, lost or discarded Task may append a short suffix. An unrelated or invalid name gets `name_invalid` with the expected slug. The Task title remains the forge pull request title, without an id or slug prefix.
 2. Checks `max_workers` (`worker_limit`).
 3. Resolves the Profile.
 4. Checks that `posse/<short>` has not been used by another Task and does not exist locally or on origin in any Project repository (otherwise `branch_exists` tells the Lead to choose another `--name` before Task creation), then inserts the Task (`spawning`, `pane_label` already set, the title-derived slug recorded) with its `seq` allocated in the same transaction (a `seq` is never reused: allocation skips any number whose `tasks/t<n>/` directory exists, independently of Git branch names), writes a `ride` intent, acquires a Mount (section 12), checks out a new branch `posse/<short>` with `git checkout -b` (never `-B`; an existing branch is a `branch_exists` error) from the fresh default branch (review: from the reviewed Task's branch), and opens the Mount as an unfocused tab of the Lead's workspace with `tab.create` (cwd = the Mount, env `POSSE_WORKER_HOME=<home>`, initial tab label `<short>`), then labels its pane in the same step ([ADR 0009](adr/0009-riders-open-as-tabs-of-the-lead-workspace.md)). Immediately after `tab.create`, Posse reports pane `display_agent` using the resolved harness, then labels the pane with its Task identity. It recomputes Rider `posse_row` tokens in Herdr tab order after recording the pane. The Lead's workspace comes from a fresh snapshot: the one holding the Lead's labeled pane, or the recorded one if it is still labeled `Lead:<project>`; otherwise `lead_missing`. It never creates a workspace and never uses `worktree.open` ([ADR 0007](adr/0007-isolate-workers-from-the-user-session.md)). The workspace cwd remains the actual Mount path.
@@ -648,7 +648,7 @@ Installing requires a User terminal outside Herdr or a live Herdr shell pane wit
 
 ## 20. CLI
 
-Every command prints TOON on stdout (JSON with `--json`), keeps lists to 3 or 4 fields per item with `--full` for more, prints explicit empty states, and ends with `help[]` next steps. Errors are `error{code,message,retryable,help}` with exit 1; usage errors exit 2. The AXI layer (command dispatch, help, structured errors, TOON encoding, session-start hook installation) is an internal package; its TOON encoder is tested against the official conformance fixtures in `toon-format/spec` (`tests/fixtures`).
+Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_case keys and ISO 8601 local timestamps, keeps lists compact with `--full` for more, prints explicit empty states, and ends with `help[]` next steps. A Task's canonical `id` is `t<n>`, with its display-only Task Name in `name`; commands accept either, and ambiguous names return `task_ambiguous` with candidate IDs in help. Cross-Project listings qualify IDs as `<project>/t<n>`. The dashboard groups failed and lost Tasks under `needs_you` with their failure reason; `roster` shows the reason too. Decisions, not automatic discards, govern recovery. Errors are `error{code,message,retryable,help}` with exit 1; usage errors exit 2. The AXI layer (command dispatch, help, structured errors, TOON encoding, session-start hook installation) is an internal package; its TOON encoder is tested against the official conformance fixtures in `toon-format/spec` (`tests/fixtures`).
 
 | Command | Caller | Purpose |
 |---|---|---|
@@ -662,7 +662,7 @@ Every command prints TOON on stdout (JSON with `--json`), keeps lists to 3 or 4 
 | `posse decisions [--all]` | Lead, User | list pending or all Decisions |
 | `posse decide <id> <option> [--user-approved <quote>]` | Lead with User quote, User | record an answer and raise a Notice |
 | `posse apply <id>` | Lead | carry out an answered Leftover or closed-PR Decision |
-| `posse dispatch --brief <f>` | Lead | preview Profile resolution |
+| `posse dispatch --brief <f> [--profile p]` | Lead | preview Profile resolution and Task Name |
 | `posse ride --brief <f> --name <short> [--profile p] [--from-leftover <decision>]` | Lead | start a Task, optionally from the approved Leftover diff rebased onto the current default branch |
 | `posse send <task> <msg> [--queue]` | Lead | steer an unfocused Worker or wait for idle with `--queue` |
 | `posse peek <task> [--lines n]` | Lead | read the Worker pane |
@@ -696,13 +696,14 @@ Example home output:
 
 ```text
 project{name,mode,autonomy,lead}: "shop-api",pr,"review=ask land=ask",idle
-notices[2]{id,task,kind,summary}:
-  7,t12,needs_decision,"Keep v1 endpoint or remove it?"
-  8,t9,task_done,"Dark mode toggle, 4 commits"
-tasks[3]{id,type,state,title}:
-  t9,ship,done,"Add dark mode"
-  t12,ship,needs-decision,"Remove legacy auth"
-  t13,scout,working,"Why is CI slow"
+notices[2]{id,task,name,kind,summary}:
+  7,t12,remove-legacy-auth,needs_decision,"Keep v1 endpoint or remove it?"
+  8,t9,add-dark-mode,task_done,"Dark mode toggle, 4 commits"
+tasks[3]{id,type,state,title,name}:
+  t9,ship,done,"Add dark mode",add-dark-mode
+  t12,ship,needs-decision,"Remove legacy auth",remove-legacy-auth
+  t13,scout,working,"Why is CI slow",why-ci-slow
+needs_you: []
 help[3]:
   Run `posse show t12` to read the question
   Run `posse land t9` to gate and watch its PR

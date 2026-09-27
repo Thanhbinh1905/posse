@@ -24,7 +24,7 @@ func noticeWakeMessage(ctx context.Context, db *store.DB, notices []store.Notice
 		summary := strings.Join(strings.Fields(notice.Summary), " ")
 		label := "project"
 		if db != nil && notice.TaskID != 0 {
-			label = noticeTaskTitle(ctx, db, notice.ProjectID, notice.TaskID)
+			label = noticeTaskID(ctx, db, notice.ProjectID, notice.TaskID)
 		}
 		if label == "" {
 			label = "project"
