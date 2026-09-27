@@ -217,7 +217,11 @@ func TestPRWatchPreservesMergedDoneTaskWithUnsafeWorktree(t *testing.T) {
 			name: "branch moved past merged head",
 			edit: func(t *testing.T, fixture *prLandingFixture) {
 				t.Helper()
-				gitTest(t, fixture.worktree, "commit", "--allow-empty", "-m", "unreviewed follow-up")
+				if err := os.WriteFile(filepath.Join(fixture.worktree, "follow-up.txt"), []byte("unreviewed\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				gitTest(t, fixture.worktree, "add", "follow-up.txt")
+				gitTest(t, fixture.worktree, "commit", "-m", "unreviewed follow-up")
 			},
 		},
 	} {

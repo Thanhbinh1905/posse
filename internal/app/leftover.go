@@ -48,7 +48,7 @@ func snapshotUnmergedMemberWork(ctx context.Context, db *store.DB, project store
 		if tipErr != nil {
 			return nil
 		}
-		if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", tip, "refs/heads/"+project.DefaultBranch); err == nil {
+		if _, err := gitOutput(ctx, project.Root, "diff", "--quiet", tip, "refs/heads/"+project.DefaultBranch); err == nil {
 			return nil
 		}
 		name := task.Branch + "-leftover"
@@ -82,6 +82,24 @@ func persistLeftoverSnapshot(ctx context.Context, db *store.DB, project store.Pr
 	}
 	name := task.Branch + "-leftover"
 	ref := "refs/heads/" + name
+	// A merge-only follow-up contains no content to carry forward. Compare
+	// both the merged head and the current default, including staged edits.
+	if _, err := gitOutput(ctx, path, "add", "-A"); err != nil {
+		return err
+	}
+	currentTree, err := gitOutput(ctx, path, "write-tree")
+	if err != nil {
+		return err
+	}
+	for _, base := range []string{task.LandedRef, "refs/heads/" + project.DefaultBranch} {
+		if base == "" {
+			continue
+		}
+		baseTree, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", base+"^{tree}")
+		if err == nil && currentTree == baseTree {
+			return nil
+		}
+	}
 	existing, existingErr := gitOutput(ctx, project.Root, "rev-parse", "--verify", ref)
 	if existingErr == nil {
 		// A retry after a crash may reuse the snapshot, but never replace another branch.
@@ -126,10 +144,66 @@ func persistLeftoverSnapshot(ctx context.Context, db *store.DB, project store.Pr
 }
 
 func raiseLeftoverDecision(ctx context.Context, db *store.DB, project store.Project, task store.Task, member, name string) error {
+	if sameLeftoverTree(ctx, project.Root, "refs/heads/"+name, "refs/heads/"+project.DefaultBranch, task.LandedRef) {
+		return nil
+	}
 	origin := "leftover:" + name
 	if member != "" {
 		origin = "leftover:" + member + ":" + name
 	}
 	_, err := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: origin, Question: "A Leftover from the merged pull request is saved on " + name + ". Open a new Task from it or discard it?", Options: []string{"open-task", "discard"}})
 	return err
+}
+
+func sameLeftoverTree(ctx context.Context, root, snapshot string, bases ...string) bool {
+	tree, err := gitOutput(ctx, root, "rev-parse", "--verify", snapshot+"^{tree}")
+	if err != nil {
+		return false
+	}
+	for _, base := range bases {
+		if base == "" {
+			continue
+		}
+		baseTree, err := gitOutput(ctx, root, "rev-parse", "--verify", base+"^{tree}")
+		if err == nil && tree == baseTree {
+			return true
+		}
+	}
+	return false
+}
+
+// Obsolete stale, unanswered Decisions created before merge-only Leftovers
+// were filtered. Never erase the saved branch or a User's recorded answer.
+func (s *Service) obsoleteEmptyLeftovers(ctx context.Context, db *store.DB, project store.Project) error {
+	decisions, err := db.Decisions(ctx, project.ID, true)
+	if err != nil {
+		return err
+	}
+	for _, decision := range decisions {
+		if decision.Kind != "leftover" || !strings.HasPrefix(decision.Origin, "leftover:") || strings.HasPrefix(decision.Origin, "leftover:unrecoverable:") {
+			continue
+		}
+		task, err := db.TaskByID(ctx, project.ID, decision.TaskID)
+		if err != nil {
+			return err
+		}
+		root, defaultBranch, ref := project.Root, project.DefaultBranch, strings.TrimPrefix(decision.Origin, "leftover:")
+		if project.IsWorkspace() {
+			member, branch, ok := strings.Cut(ref, ":")
+			if !ok {
+				continue
+			}
+			target, err := s.projectTarget(ctx, db, project, member)
+			if err != nil {
+				return err
+			}
+			root, defaultBranch, ref = target.Root, target.DefaultBranch, branch
+		}
+		if sameLeftoverTree(ctx, root, "refs/heads/"+ref, "refs/heads/"+defaultBranch, task.LandedRef) {
+			if err := db.ObsoletePendingLeftoverDecision(ctx, decision.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
