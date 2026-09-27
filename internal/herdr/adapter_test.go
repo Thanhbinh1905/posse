@@ -111,7 +111,16 @@ func TestIsolatedTestEnvironmentRedirectsAllWritableState(t *testing.T) {
 	}
 	t.Setenv("HERDR_SOCKET_PATH", "/home/user/live.sock")
 	t.Setenv("HERDR_PANE_ID", "w9:p9")
+	t.Setenv("LANG", "C")
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("TERM", "dumb")
+	t.Setenv("SHELL", "/bin/sh")
 	env := IsolatedTestEnvironment(root)
+	for key, want := range map[string]string{"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "xterm-256color", "SHELL": "/bin/bash"} {
+		if got := environmentMap(env)[key]; got != want {
+			t.Errorf("isolated %s = %q, want %q", key, got, want)
+		}
+	}
 	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")
 		if strings.HasPrefix(key, "HERDR_") {

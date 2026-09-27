@@ -64,7 +64,7 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	if !refused {
 		return 0
 	}
-	fmt.Fprintf(stderr, "posse: refused %s from a posse Rider: %s. Riders never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead: in the same command, unset every HERDR_* variable and point XDG_CONFIG_HOME and POSSE_HOME at a temp dir.\n", reason.command, reason.why)
+	fmt.Fprintf(stderr, "posse: refused %s from a posse Rider: %s. Riders never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server`, with your isolated Herdr binary on PATH.\n", reason.command, reason.why)
 	return guardExitBlocked
 }
 
