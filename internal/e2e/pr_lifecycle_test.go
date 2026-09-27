@@ -663,9 +663,25 @@ func TestPRCreateCrashRecoveryAdoptsOpenPullRequest(t *testing.T) {
 	}
 	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", task.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
-	recovered := fixture.mustTask(t, "t1")
-	if recovered.State != store.StateLanding || recovered.PRURL != "https://github.com/acme/shop/pull/17" {
-		t.Fatalf("open PR was not adopted after the create crash: %#v", recovered)
+	// The Herdr hook can claim this intent concurrently with show. Wait for its
+	// state, URL and Notice to commit before checking the recovered result.
+	if !waitForCondition(30*time.Second, func() bool {
+		task := fixture.mustTask(t, "t1")
+		if task.State != store.StateLanding || task.PRURL != "https://github.com/acme/shop/pull/17" {
+			return false
+		}
+		notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+		if err != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.TaskID == task.ID && notice.Kind == "pr_opened" {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("open PR was not fully adopted after the create crash: task=%#v", fixture.mustTask(t, "t1"))
 	}
 	calls, err := os.ReadFile(fixture.ghLog)
 	if err != nil {

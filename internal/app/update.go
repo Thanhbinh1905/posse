@@ -132,7 +132,7 @@ func newerVersion(current, latest string) bool {
 	return x > a || x == a && (y > b || y == b && z > c)
 }
 func (s *Service) update(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("update", args, map[string]flagSpec{"check": {boolean: true}, "version": {}, "force": {boolean: true}})
+	parsed, err := parseArgs("update", args, map[string]flagSpec{"check": {boolean: true}, "version": {}, "force": {boolean: true}, "stop-lookouts": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -146,30 +146,79 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 	if parsed.Bool("force") && parsed.Bool("check") {
 		return axi.Usage("--force cannot be combined with --check")
 	}
+	if parsed.Bool("stop-lookouts") && parsed.Bool("check") {
+		return axi.Usage("--stop-lookouts cannot be combined with --check")
+	}
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
 	if !parsed.Bool("check") {
-		home, err := s.homePath()
-		if err != nil {
-			return err
-		}
 		if err := s.requireUserUpdateCaller(ctx.Context, home); err != nil {
 			return err
 		}
 	}
+	lookouts, err := s.runningLookouts(ctx.Context, home)
+	if err != nil {
+		return axi.Failure("lookout_discovery_failed", err.Error(), false, "Check process-table access and run `posse update --check` again")
+	}
+	if !parsed.Bool("check") && !parsed.Bool("stop-lookouts") && len(lookouts) > 0 {
+		return lookoutsRunningFailure(lookouts)
+	}
 	release, err := s.fetchRelease(ctx.Context, tag)
 	if err != nil {
-		return axi.Failure("release_unavailable", err.Error(), true, "Retry when GitHub is reachable")
+		message := err.Error()
+		if parsed.Bool("check") && len(lookouts) > 0 {
+			message += "; running lookouts: " + formatLookoutProcesses(lookouts)
+		}
+		return axi.Failure("release_unavailable", message, true, "Retry when GitHub is reachable")
 	}
 	if parsed.Bool("check") {
-		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "help", Value: []any{updateInstallHelp}}})
+		help := []any{updateInstallHelp}
+		if len(lookouts) > 0 {
+			help = append(help, "Stop running lookouts with `posse update --stop-lookouts` before installing")
+		}
+		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "lookouts", Value: lookoutRows(lookouts, false)}, {Key: "help", Value: help}})
 	}
 	if tag == "" && s.currentVersion() != "dev" && !newerVersion(s.currentVersion(), release.Tag) {
 		return axi.Failure("already_current", "no newer release is available", false, "Use `posse update --version vX.Y.Z` to select a release")
 	}
 	var installed updateInstallResult
-	if err := s.installRelease(ctx.Context, release, parsed.Bool("force"), &installed); err != nil {
+	var stopped []lookoutProcess
+	if err := s.installRelease(ctx.Context, release, parsed.Bool("force"), parsed.Bool("stop-lookouts"), &installed, &stopped); err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "installed", Value: release.Tag}, {Key: "binary", Value: installed.binary}, {Key: "backup", Value: installed.backup}, {Key: "help", Value: []any{"Run `posse doctor` to verify the update"}}})
+	return ctx.Print(axi.Object{{Key: "installed", Value: release.Tag}, {Key: "binary", Value: installed.binary}, {Key: "backup", Value: installed.backup}, {Key: "stopped_lookouts", Value: lookoutRows(stopped, true)}, {Key: "help", Value: []any{"Run `posse doctor` to verify the update"}}})
+}
+
+func lookoutsRunningFailure(processes []lookoutProcess) error {
+	message := "Posse update is blocked while lookouts are running: " + formatLookoutProcesses(processes)
+	return axi.Failure("lookouts_running", message, false, "Run `posse update --stop-lookouts` to stop them before updating")
+}
+
+func lookoutRows(processes []lookoutProcess, includeRestart bool) []axi.Object {
+	rows := make([]axi.Object, 0, len(processes))
+	for _, process := range processes {
+		row := axi.Object{
+			{Key: "pid", Value: process.PID},
+			{Key: "project", Value: process.Project},
+			{Key: "kind", Value: process.Kind},
+		}
+		if includeRestart {
+			restart := "The Lead restarts its background lookout on its next wake"
+			if process.PollOnly {
+				restart = "The Lookout tab owner restarts this process on its next tick"
+			} else if process.QuietRoutine {
+				restart = "The Lead extension restarts this process automatically"
+			}
+			if process.ForceKilled {
+				restart += " (SIGKILL required)"
+			}
+			row = append(row, axi.Field{Key: "restart", Value: restart})
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func (s *Service) requireUserUpdateCaller(ctx context.Context, home string) error {
@@ -227,13 +276,20 @@ func (s *Service) requireUserUpdateCaller(ctx context.Context, home string) erro
 // by an interactive shell's `up` prompt.
 type updateInstallResult struct{ binary, backup string }
 
-func (s *Service) installRelease(ctx context.Context, release githubRelease, force bool, installed *updateInstallResult) error {
+func (s *Service) installRelease(ctx context.Context, release githubRelease, force, stopLookouts bool, installed *updateInstallResult, stopped *[]lookoutProcess) error {
 	home, err := s.homePath()
 	if err != nil {
 		return err
 	}
 	if err := s.requireUserUpdateCaller(ctx, home); err != nil {
 		return err
+	}
+	lookouts, err := s.runningLookouts(ctx, home)
+	if err != nil {
+		return axi.Failure("lookout_discovery_failed", err.Error(), false, "Check process-table access and run `posse update --check` again")
+	}
+	if len(lookouts) > 0 && !stopLookouts {
+		return lookoutsRunningFailure(lookouts)
 	}
 	manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName))
 	if err != nil {
@@ -348,6 +404,17 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 		}
 	} else if !errors.Is(dbErr, os.ErrNotExist) {
 		return dbErr
+	}
+	if stopLookouts {
+		current, err := s.runningLookouts(ctx, home)
+		if err != nil {
+			return axi.Failure("lookout_discovery_failed", err.Error(), false, "Check process-table access and retry the update")
+		}
+		stoppedProcesses, err := stopLookoutProcesses(ctx, home, current)
+		if err != nil {
+			return axi.Failure("lookout_stop_failed", err.Error(), false, "Inspect the listed process IDs before retrying")
+		}
+		*stopped = stoppedProcesses
 	}
 	if err := os.Rename(temp.Name(), destination); err != nil {
 		return fmt.Errorf("install binary: %w", err)

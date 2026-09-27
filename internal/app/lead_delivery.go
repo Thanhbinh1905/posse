@@ -58,7 +58,7 @@ func reportingRule(lowkey bool) string {
 func noticeRule(delivery string) string {
 	switch delivery {
 	case config.NoticeDeliveryLookout:
-		return "Keep exactly one `posse lookout` running as a background command that re-invokes you when it returns. When it returns, read the Notices in its result, then use one background `posse lookout --ack <ids>` call to acknowledge handled Notices and restart the watch; do not type into a focused pane. Read the current lowkey state and reporting rule in each lookout result. " + noPollRule + " After (re)starting it, end your turn and let it wake you."
+		return "Keep exactly one `posse lookout` running as a background command that re-invokes you when it returns. If it returns with `state=stopped` and `reason=update`, restart `posse lookout` on your next wake. Otherwise, read the Notices in its result, then use one background `posse lookout --ack <ids>` call to acknowledge handled Notices and restart the watch; do not type into a focused pane. Read the current lowkey state and reporting rule in each lookout result. " + noPollRule + " After (re)starting it, end your turn and let it wake you."
 	case config.NoticeDeliveryCodexQueue:
 		return "posse queues each batch of Notices into this conversation as a Posse Notice message, also while your pane is focused or the User is typing. Read the current lowkey state and reporting rule in each message. Do not run `posse lookout`. " + noPollRule + " End your turn and let that message wake you."
 	case config.NoticeDeliveryPiExtension:

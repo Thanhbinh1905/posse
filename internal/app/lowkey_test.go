@@ -14,7 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestNoticeWakeUsesRiderNameInsteadOfInternalTaskID(t *testing.T) {
+func TestNoticeWakeUsesCanonicalTaskID(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -31,8 +31,8 @@ func TestNoticeWakeUsesRiderNameInsteadOfInternalTaskID(t *testing.T) {
 	}
 	notice := store.Notice{ID: 12, ProjectID: project.ID, TaskID: id, Kind: "pr_merged", Summary: "Improve login: pull request merged"}
 	wake := noticeWakeMessage(ctx, db, []store.Notice{notice}, true)
-	if !strings.Contains(wake, "Improve login: pull request merged") || strings.Contains(wake, "login-cleanup pr-merged") || strings.Contains(wake, "t34") {
-		t.Fatalf("Notice wake exposes internal id: %s", wake)
+	if !strings.Contains(wake, "Improve login: pull request merged") || strings.Contains(wake, "login-cleanup pr-merged") || !strings.Contains(wake, "t34") {
+		t.Fatalf("Notice wake omitted canonical id: %s", wake)
 	}
 	task, err := db.TaskByID(ctx, project.ID, id)
 	if err != nil {

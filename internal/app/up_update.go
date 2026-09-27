@@ -76,7 +76,7 @@ func (s *Service) offerUpUpdate(ctx *axi.Context, args []string) (bool, error) {
 		return true, nil
 	}
 	var installed updateInstallResult
-	if err := s.installRelease(ctx.Context, release, false, &installed); err != nil {
+	if err := s.installRelease(ctx.Context, release, false, false, &installed, nil); err != nil {
 		return true, err
 	}
 	reexec := s.reexecUpdate

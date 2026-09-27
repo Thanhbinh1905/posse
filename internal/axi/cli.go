@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
+	"unicode"
 )
 
 type Error struct {
@@ -70,6 +72,7 @@ func (c *Context) print(value any, addDefaultHelp bool) error {
 	if err != nil {
 		return err
 	}
+	normalized = outputFields(normalized)
 	if object, ok := normalized.(Object); ok && addDefaultHelp {
 		found := false
 		for _, field := range object {
@@ -95,6 +98,67 @@ func (c *Context) print(value any, addDefaultHelp bool) error {
 		_, err = fmt.Fprintln(c.Out, encoded)
 	}
 	return err
+}
+
+// outputFields applies the CLI wire format after TOON normalization, so JSON and
+// TOON see the same keys and timestamps without changing the store's numeric times.
+func outputFields(value any) any {
+	switch v := value.(type) {
+	case Object:
+		for i := range v {
+			v[i].Key = snakeKey(v[i].Key)
+			v[i].Value = outputTime(v[i].Key, outputFields(v[i].Value))
+		}
+	case Row:
+		for i := range v {
+			v[i].Key = snakeKey(v[i].Key)
+			v[i].Value = outputTime(v[i].Key, outputFields(v[i].Value))
+		}
+	case []any:
+		for i := range v {
+			v[i] = outputFields(v[i])
+		}
+	}
+	return value
+}
+
+func snakeKey(key string) string {
+	var out []rune
+	letters := []rune(strings.NewReplacer("HTTP", "Http", "JSON", "Json", "URL", "Url", "SHA", "Sha", "API", "Api", "PR", "Pr", "ID", "Id").Replace(key))
+	for i, r := range letters {
+		if unicode.IsUpper(r) {
+			if i > 0 && letters[i-1] != '_' && (unicode.IsLower(letters[i-1]) || unicode.IsDigit(letters[i-1]) || (unicode.IsUpper(letters[i-1]) && i+1 < len(letters) && unicode.IsLower(letters[i+1]))) {
+				out = append(out, '_')
+			}
+			out = append(out, unicode.ToLower(r))
+		} else {
+			out = append(out, r)
+		}
+	}
+	return string(out)
+}
+
+func outputTime(key string, value any) any {
+	if key != "at" && key != "updated" && !strings.HasSuffix(key, "_at") {
+		return value
+	}
+	var ms int64
+	switch v := value.(type) {
+	case int:
+		ms = int64(v)
+	case int64:
+		ms = v
+	default:
+		return value
+	}
+	if ms == 0 {
+		return ""
+	}
+	// The date guard avoids treating ordinary counters as Unix milliseconds.
+	if ms < 100000000000 {
+		return value
+	}
+	return time.UnixMilli(ms).Local().Format(time.RFC3339Nano)
 }
 
 func jsonValue(value any) any {

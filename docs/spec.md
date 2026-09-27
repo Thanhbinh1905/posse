@@ -392,7 +392,7 @@ A Task in `working` is stalled when all hold for `stall_after`:
 
 ## 11. Dispatch
 
-`posse ride --brief <file> --name <slug> [--profile <name>]` resolves a Profile. `posse dispatch --brief <file>` returns the title-derived slug to pass as `--name`; unrelated nicknames are refused:
+`posse ride --brief <file> --name <slug> [--profile <name>]` resolves a Profile. `posse dispatch --brief <file> [--profile <name>]` returns the title-derived slug to pass as `--name`, even when it cannot choose among matching Profiles. An invalid `--name`, including one longer than 24 characters, reports the expected slug. A retry of the same Brief after a failed, lost or discarded Task may add a short suffix to that slug without rewriting the title; unrelated names are refused:
 
 1. `--profile` given: use it if it exists, else `profile_unknown`.
 2. Otherwise collect the rules whose structured fields match (v1: `type`). Rules with only `when` always match structurally.
@@ -402,7 +402,7 @@ A Task in `working` is stalled when all hold for `stall_after`:
 
 The Task records the Profile and the rule used. Model and effort come only from the Profile.
 
-`posse dispatch --brief <file>` prints the same resolution without spawning.
+`posse dispatch --brief <file> [--profile <name>]` prints the same resolution without spawning; if Profile selection is ambiguous, `profile_required` includes the slug and candidate Profiles in help.
 
 ## 12. Remuda
 
@@ -446,13 +446,13 @@ autonomy: { land: ask }     # optional, tighten only
 
 `posse ride`:
 
-1. Validates the required `--name` format, then the Brief. The branch slug is derived from the first three meaningful words of the Task title (lowercase kebab-case, at most 24 characters; common connecting words omitted). `--name` must equal that slug; an unrelated nickname gets `name_invalid` with the expected slug. The Task title remains the forge pull request title, without an id or slug prefix.
+1. Validates the required `--name` format, then the Brief. The branch slug is derived from the first three meaningful words of the Task title (lowercase kebab-case, at most 24 characters; common connecting words omitted). `--name` must equal that slug, except a retry after a failed, lost or discarded Task may append a short suffix. An unrelated or invalid name gets `name_invalid` with the expected slug. The Task title remains the forge pull request title, without an id or slug prefix.
 2. Checks `max_workers` (`worker_limit`).
 3. Resolves the Profile.
 4. Checks that `posse/<short>` has not been used by another Task and does not exist locally or on origin in any Project repository (otherwise `branch_exists` tells the Lead to choose another `--name` before Task creation), then inserts the Task (`spawning`, `pane_label` already set, the title-derived slug recorded) with its `seq` allocated in the same transaction (a `seq` is never reused: allocation skips any number whose `tasks/t<n>/` directory exists, independently of Git branch names), writes a `ride` intent, acquires a Mount (section 12), checks out a new branch `posse/<short>` with `git checkout -b` (never `-B`; an existing branch is a `branch_exists` error) from the fresh default branch (review: from the reviewed Task's branch), and opens the Mount as an unfocused tab of the Lead's workspace with `tab.create` (cwd = the Mount, env `POSSE_WORKER_HOME=<home>`, initial tab label `<short>`), then labels its pane in the same step ([ADR 0009](adr/0009-riders-open-as-tabs-of-the-lead-workspace.md)). Immediately after `tab.create`, Posse reports pane `display_agent` using the resolved harness, then labels the pane with its Task identity. It recomputes Rider `posse_row` tokens in Herdr tab order after recording the pane. The Lead's workspace comes from a fresh snapshot: the one holding the Lead's labeled pane, or the recorded one if it is still labeled `Lead:<project>`; otherwise `lead_missing`. It never creates a workspace and never uses `worktree.open` ([ADR 0007](adr/0007-isolate-workers-from-the-user-session.md)). The workspace cwd remains the actual Mount path.
 5. Runs the kind's `prepare` step, if any (below).
-6. Labels the root pane `posse:<project>:t<seq>` and starts the agent with `agent.start` (name `posse-<project>-t<seq>-<launch>`, cut to 32 chars and never derived from Identity, where `<launch>` counts launches of this Task so a relaunch never collides with a name Herdr has not released yet; args = kind `auto_approve_args` + `model_args`/`effort_args` filled from the Profile + Profile `args`). The canonical pane label and all internal identifiers remain unchanged. `launches` is incremented in the DB before each `agent.start`.
-7. Writes `launch.md` and sends one `agent.prompt`: `Read <launch.md path> and follow it.`
+6. Labels the root pane `posse:<project>:t<seq>`, writes `brief.md` and `launch.md`, then starts the agent with `agent.start` (name `posse-<project>-t<seq>-<launch>`, cut to 32 chars and never derived from Identity, where `<launch>` counts launches of this Task so a relaunch never collides with a name Herdr has not released yet; args = kind `auto_approve_args` + `model_args`/`effort_args` filled from the Profile + Profile `args`). The canonical pane label and all internal identifiers remain unchanged. `launches` is incremented in the DB before each `agent.start`.
+7. Codex and OpenCode receive `Read <launch.md path> and follow it.` as an opening turn in their start arguments, without typing into the composer. Other kinds receive it through `agent.prompt`. If their pane becomes focused before delivery, the Task stays `spawning`; a focus event or lookout reconciliation retries after it is unfocused. Focus alone never fails the Task. After two minutes without delivery, one `spawn_waiting` Notice is raised. A failed spawn with a written Brief keeps its initialized Mount for `posse relaunch` on the same branch.
 8. Refreshes the Rider's pane metadata after launch and relaunch. `display_agent` is set to the resolved harness (`pi`, `codex` or `claude`) before `agent.start`, never the unique internal agent name. Herdr's default Agents row renders the workspace label (`Lead:shop`), the plain tab beside it, and the harness on the next line. With the optional Posse Agents layout, the `Lead:` workspace token is hidden and `$posse_row` is the bold main text: `Lead:shop` for the Lead and the tree-labeled Rider name for each Rider. Tab bar labels remain plain. Posse reports this persistent pane token before `agent.start` and recomputes it on tab reconciliation. `identity.worker.display_prefix` remains accepted for compatibility but does not affect Herdr labels. The full Task title, visible Rider name and Mount path are submitted as the pane title, but Herdr truncates long titles and token values. Metadata tokens `posse_title` and `posse_branch` preserve the title and visible Rider name within Herdr's limits; `posse_mount` holds only the Mount basename to avoid a misleading mid-path truncation. The full Mount path remains in the pane cwd and Task record. This does not change pane cwd, the canonical pane label (`posse:<project>:t<seq>`), agent name or Task ID.
 9. Displays the title-derived slug in `posse`, `posse roster` and `posse show`; Notice rows and wake bodies lead with the full Task title. Tasks without a recorded slug display their title. Internal Task ids remain available to agents for commands and canonical pane labels.
 
@@ -590,7 +590,7 @@ Work is never lost to a crash: commits live on the recorded `posse/<short>` bran
 5. Clears stale Git state in the Mount: removes `index.lock` only when no git process runs in the Mount, and reports an in-progress merge, rebase or cherry-pick instead of touching it.
 6. Prompts one line pointing at a generated `relaunch.md`: re-read `launch.md`; inspect `git status` and `git log`; continue the Task; report with `posse holler`. It includes delivered Lead messages sent after the Brief in order, bounded to the most recent 32 messages and 1,200 bytes per message; later messages supersede earlier ones. Then moves the Task to `working`.
 
-**After a Herdr or machine restart.** Herdr's own resume reruns agents with only their session argument, so Workers lose their auto-approve flags and the Lead loses its instructions. The plugin therefore declares a `[[startup]]` hook that runs `posse recover --all` (by the absolute path recorded at `posse setup`). For every Project it reconciles, relaunches each live Worker through the relaunch path above (with full arguments and `resume_args`), restarts the Lead in its recorded pane (or a new tab if that pane is gone), and delivers one digest Notice to the Lead listing what was recovered. `posse recover [--all]` can also be run by hand. If the startup hook does not run, the next Project command or plugin event detects the changed generation and runs the same recovery inline; concurrent attempts use the recovery claim so they do not relaunch twice.
+**After a Herdr or machine restart.** Herdr's own resume reruns agents with only their session argument, so Workers lose their auto-approve flags and the Lead loses its instructions. The plugin therefore declares a `[[startup]]` hook that runs `posse recover --all` (by the absolute path recorded at `posse setup`). For every Project it reconciles, relaunches each live Worker through the relaunch path above (with full arguments and `resume_args`), restarts the Lead in its recorded pane (or a new tab if that pane is gone), and delivers one digest Notice to the Lead listing what was recovered. `posse recover [--all]` can also be run by hand. If the startup hook does not run, the next Project command or plugin event detects the changed generation and runs the same recovery inline; concurrent attempts use the recovery claim so they do not relaunch twice. If the previous generation was never recorded, `recover --all` still checks the Lookout process and replaces a restored shell-only tab.
 
 **Interrupted commands.** `ride`, `land --merge`, `unsaddle` and `relaunch` record their progress in `intents` before each step with a side effect. Reconcile finishes or undoes an abandoned intent (older than its command's timeout, with no live process holding it): a `ride` without a pane fails the Task and releases its Mount; a `land --merge` whose default branch already contains `gated_sha` moves the Task to `landed`; an `unsaddle` is simply rerun. The intent row is deleted when the command completes.
 
@@ -630,7 +630,7 @@ Skills and the hook ship inside the binary and are versioned with it.
 
 **Releases.** Releases are manual: the User chooses whether and when to publish a version. After the intended changes land on `main`, publish a `vX.Y.Z` tag on a reviewed commit with passing CI. Before 1.0, `fix:` changes imply a patch bump and `feat:` changes imply a minor bump. Pushing a version tag starts `.github/workflows/release.yml`, which runs GoReleaser and publishes Linux and macOS archives for amd64 and arm64 plus `checksums.txt`. Ordinary pushes and merges to `main` run CI only; they do not create tags or release PRs. Branch protection on `main` must require pull-request reviews and the checks `lint`, `test`, `e2e`, `installer`, and `build`, and must prohibit force-push and deletion. Do not apply branch protection from posse.
 
-**`posse update [--check] [--version vX.Y.Z]`**:
+**`posse update [--check] [--version vX.Y.Z] [--force] [--stop-lookouts]`**:
 
 Installing requires a User terminal outside Herdr or a live Herdr shell pane with no agent and no Lead or Rider binding. Posse verifies the caller before downloading and installing; an unknown pane or unavailable Herdr state blocks installation.
 
@@ -642,11 +642,13 @@ Installing requires a User terminal outside Herdr or a live Herdr shell pane wit
 6. Database migrations run forward only, on the new binary's first command, and `posse setup` applies them right after installing. Every applied migration's SHA-256 is kept in `posse_migration_checksums`. Opening a database refuses `schema_unknown` when it has migrations the build does not know (an older build after an upgrade, or a branch build), and `schema_diverged` when a known migration was applied with different contents. Pending migrations on an existing database are applied only by the installed posse (the `binary` in `setup.json`), and never by a Worker for its own home (`migration_refused`). `POSSE_FORCE_MIGRATION=1` overrides every check but the Worker rule, for the User.
 7. Mark migrations that cannot run with live Tasks with `-- posse: requires-no-live-tasks` in the SQL migration. The downloaded binary preflights those migrations before replacement; `posse update` refuses until no Task is live, or until `--force`, saying why. The migration gate enforces the same rule on first open.
 
+`posse update` refuses with `lookouts_running` while any `posse lookout` for this `POSSE_HOME` is alive, including `--poll-only` Lookout tabs and Lead watchers. The error lists each PID, Project and kind. `--check` reports the same process list without stopping anything. `--stop-lookouts` sends SIGTERM, waits five seconds, then sends SIGKILL to remaining processes before replacing the binary; the result lists what stopped and who restarts it. The Lookout tab owner recreates its process on its next tick, a Claude Lead restarts its background lookout on its next wake, and the Pi/OpenCode Lead extension restarts its watcher automatically. A Lead-side lookout stopped by an update returns `state=stopped` and `reason=update` with restart guidance. Discovery uses `/proc` on Linux and `ps` on macOS.
+
 **Update notice.** posse checks for a newer release at most once a day, cached and silent when offline. `posse` and `posse doctor` then show `update{current,latest}` with `posse update` in `help[]`, and the Lead tells the User once per new version through an `update_available` Notice. Interactive `posse up` also offers the newer release before registering a Project or starting a Lead, defaulting to No. Explicit consent verifies and installs it, then re-executes `up` with the original arguments and environment. `--yes` does not consent to updating; offline, non-interactive and declined offers continue without updating. Lead and Rider turns cannot install an update; a separate User shell pane can.
 
 ## 20. CLI
 
-Every command prints TOON on stdout (JSON with `--json`), keeps lists to 3 or 4 fields per item with `--full` for more, prints explicit empty states, and ends with `help[]` next steps. Errors are `error{code,message,retryable,help}` with exit 1; usage errors exit 2. The AXI layer (command dispatch, help, structured errors, TOON encoding, session-start hook installation) is an internal package; its TOON encoder is tested against the official conformance fixtures in `toon-format/spec` (`tests/fixtures`).
+Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_case keys and ISO 8601 local timestamps, keeps lists compact with `--full` for more, prints explicit empty states, and ends with `help[]` next steps. A Task's canonical `id` is `t<n>`, with its display-only Task Name in `name`; commands accept either, and ambiguous names return `task_ambiguous` with candidate IDs in help. Cross-Project listings qualify IDs as `<project>/t<n>`. The dashboard groups failed and lost Tasks under `needs_you` with their failure reason; `roster` shows the reason too. Decisions, not automatic discards, govern recovery. Errors are `error{code,message,retryable,help}` with exit 1; usage errors exit 2. The AXI layer (command dispatch, help, structured errors, TOON encoding, session-start hook installation) is an internal package; its TOON encoder is tested against the official conformance fixtures in `toon-format/spec` (`tests/fixtures`).
 
 | Command | Caller | Purpose |
 |---|---|---|
@@ -660,7 +662,7 @@ Every command prints TOON on stdout (JSON with `--json`), keeps lists to 3 or 4 
 | `posse decisions [--all]` | Lead, User | list pending or all Decisions |
 | `posse decide <id> <option> [--user-approved <quote>]` | Lead with User quote, User | record an answer and raise a Notice |
 | `posse apply <id>` | Lead | carry out an answered Leftover or closed-PR Decision |
-| `posse dispatch --brief <f>` | Lead | preview Profile resolution |
+| `posse dispatch --brief <f> [--profile p]` | Lead | preview Profile resolution and Task Name |
 | `posse ride --brief <f> --name <short> [--profile p] [--from-leftover <decision>]` | Lead | start a Task, optionally from the approved Leftover diff rebased onto the current default branch |
 | `posse send <task> <msg> [--queue]` | Lead | steer an unfocused Worker or wait for idle with `--queue` |
 | `posse peek <task> [--lines n]` | Lead | read the Worker pane |
@@ -684,7 +686,7 @@ Every command prints TOON on stdout (JSON with `--json`), keeps lists to 3 or 4 
 | `posse setup [--check [--exit-code]\|--uninstall] [--human]` | User | section 18 |
 | `posse _context` | SessionStart hook | section 18 |
 | `posse _guard` | PreToolUse hook, pi extension | refuse a Worker's `herdr` changes to its own session (section 13) |
-| `posse update [--check] [--version v]` | User | section 19 |
+| `posse update [--check] [--version v] [--force] [--stop-lookouts]` | User | section 19 |
 | `posse doctor` | User | check Herdr protocol, plugin, DB, config, `gh`, `glab` authentication for each GitLab host, `no-mistakes` |
 | `posse _ingest` | Herdr | section 8 |
 
@@ -694,13 +696,14 @@ Example home output:
 
 ```text
 project{name,mode,autonomy,lead}: "shop-api",pr,"review=ask land=ask",idle
-notices[2]{id,task,kind,summary}:
-  7,t12,needs_decision,"Keep v1 endpoint or remove it?"
-  8,t9,task_done,"Dark mode toggle, 4 commits"
-tasks[3]{id,type,state,title}:
-  t9,ship,done,"Add dark mode"
-  t12,ship,needs-decision,"Remove legacy auth"
-  t13,scout,working,"Why is CI slow"
+notices[2]{id,task,name,kind,summary}:
+  7,t12,remove-legacy-auth,needs_decision,"Keep v1 endpoint or remove it?"
+  8,t9,add-dark-mode,task_done,"Dark mode toggle, 4 commits"
+tasks[3]{id,type,state,title,name}:
+  t9,ship,done,"Add dark mode",add-dark-mode
+  t12,ship,needs-decision,"Remove legacy auth",remove-legacy-auth
+  t13,scout,working,"Why is CI slow",why-ci-slow
+needs_you: []
 help[3]:
   Run `posse show t12` to read the question
   Run `posse land t9` to gate and watch its PR
