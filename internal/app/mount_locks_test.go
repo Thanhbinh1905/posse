@@ -58,7 +58,7 @@ func TestHeldMountLockSurvivesReconcileAndUnlocksOnRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := releaseMount(ctx, db, project, task, "warm"); err != nil {
+	if _, err := releaseMount(ctx, db, project, task, "warm", false); err != nil {
 		t.Fatal(err)
 	}
 	reason, err = mountLockReason(ctx, repo, mount.Path)
