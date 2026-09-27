@@ -599,10 +599,13 @@ func TestLeadInstructionsReportNoticesProactivelyByKind(t *testing.T) {
 			if code := cli.Run([]string{"lead"}); code != 0 {
 				t.Fatalf("posse lead failed: %s", output.String())
 			}
-			for _, phrase := range []string{"When Posse delivers a Notice", "Run `posse`", "handle every Notice", "tell the User the outcome in your own words without waiting to be asked", "supervise Riders", "--name <short>", "then run `posse ack", "Whenever a Task resolves or partly addresses forge issues", "`issues: [<number>]`", "`refs: [<number>]`", "member#number"} {
+			for _, phrase := range []string{"When Posse delivers a Notice", "Run `posse`", "handle every Notice", "tell the User the outcome in your own words without waiting to be asked", "supervise Riders", "--name <short>", "then run `posse ack", "The optional Brief fields `issues:` and `refs:` are available for forge issue links", "`issues:` closes issues when the PR Lands", "`refs:` adds non-closing references", "qualify each issue number with its member name as `member#number`", "worker#12"} {
 				if !strings.Contains(output.String(), phrase) {
 					t.Fatalf("Lead instructions omitted %q: %s", phrase, output.String())
 				}
+			}
+			if strings.Contains(output.String(), "record each affected issue in the Brief frontmatter") {
+				t.Fatalf("Lead instructions prescribe issue links for every Task: %s", output.String())
 			}
 			if !strings.Contains(output.String(), rule) {
 				t.Fatalf("%s Lead instructions omitted its Notice rule %q: %s", kind, rule, output.String())
