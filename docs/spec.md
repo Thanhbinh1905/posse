@@ -439,10 +439,15 @@ done_when: login spec passes 20 consecutive runs in CI mode
 landing_mode: pr            # optional, tighten only
 # review_of: t12            # review only
 # repos: [backend, worker]  # workspace Projects: the members to check out (section 24)
+issues: [12, 16]            # optional: issues this Task should close
+refs: [18]                  # optional: issues this Task refers to without closing
+# Workspace Projects scope issue references to a member: issues: [worker#12]
 autonomy: { land: ask }     # optional, tighten only
 ---
 <body: goal, context, constraints, User's intent in their words>
 ```
+
+Brief `issues` and `refs` are optional lists of positive issue numbers. Repository Projects use numbers such as `[12, 16]`; Workspace Projects qualify each reference with a member, such as `[worker#12]`. A reference cannot appear in both lists. `issues` closes issues when a PR/MR Lands; `refs` adds a non-closing reference. `posse dispatch` warns when a listed issue does not exist or is already closed, and says when it cannot verify one. `posse show` and `posse roster --full` display both lists.
 
 `posse ride`:
 
@@ -496,7 +501,7 @@ A kind without a prepare step that still stops at a dialog surfaces as `blocked`
 | `pr` | verify the Worker-reported open PR and remote head; run the configured gate; verify again; Task → landing and emit `pr_opened`. Legacy completed Tasks without a PR URL still push and open a PR at Land. | `posse land <task> --merge` uses the repository's forge CLI and pins the gated head SHA |
 | `no-mistakes` | the Worker already delivered; record `pr_url`; Task → landing | same as `pr` |
 
-- `posse publish "<summary>"` validates a clean, committed PR-mode Mount on its own Task branch, pushes only that ref without force, and creates or adopts the forge PR/MR using the Brief title and supplied Rider summary. It checks the resulting URL, source repository, source branch, target branch, open state and head against the remote Task ref. `posse holler done --pr` repeats these checks; the Lead gates and verifies again before starting the watch. A workspace Rider uses `--repo <member>` to publish each changed PR member; `posse holler done` checks each recorded member PR without `--pr`. The Worker does not run the gate or merge.
+- `posse publish "<summary>"` validates a clean, committed PR-mode Mount on its own Task branch, pushes only that ref without force, and creates or adopts the forge PR/MR using the Brief title and supplied Rider summary. Its body adds one `Closes #N` line per matching `issues` entry and one `Refs #N` line per matching `refs` entry; both GitHub and GitLab recognize these keywords. Workspace references are emitted only in the PR/MR for their named member. It checks the resulting URL, source repository, source branch, target branch, open state and head against the remote Task ref. `posse holler done --pr` repeats these checks; the Lead gates and verifies again before starting the watch. A workspace Rider uses `--repo <member>` to publish each changed PR member; `posse holler done` checks each recorded member PR without `--pr`. The Worker does not run the gate or merge.
 - A failed gate creates `gate_failed` with the output tail; the Task stays `done` and the Lead decides whether to `posse send` a fix.
 - A non-fast-forwardable `local` Task refuses with `needs_rebase`.
 - `--merge` requires `autonomy.land = "auto"` or `--user-approved "<User's words>"`, stored in `approvals`. Otherwise `land_approval_required`, checked before any state change or Notice. A PR/MR merge also requires the latest observation for that request to match `gated_sha`, have checks `SUCCESS`, a review other than `CHANGES_REQUESTED` or `REVIEW_REQUIRED`, and mergeability `MERGEABLE`; otherwise refuse with `checks_not_green` and wait for `land_ready`. This check applies even with User approval or `autonomy.land = "auto"`.
@@ -655,7 +660,7 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse lowkey on\|off\|status` | Lead, User | toggle or inspect persisted lowkey mode |
 | `posse up [--<kind>] [--replace] [--yes]` | User | register Project after one confirmation and start the Lead (section 16) |
 | `posse lead` | Lead | print Lead instructions |
-| `posse roster [--all]` | Lead, User | Tasks, or every Project |
+| `posse roster [--full] [--all]` | Lead, User | Tasks, with issue links and branches under `--full`, or every Project |
 | `posse show <task> [--full]` | Lead | Task detail, PR state, last Signals, transitions |
 | `posse ask <task> <question> --option <choice> --option <choice>` | Lead | raise a Decision from a Rider question |
 | `posse decisions [--all]` | Lead, User | list pending or all Decisions |

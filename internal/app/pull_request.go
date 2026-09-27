@@ -241,7 +241,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 				}
 				openIntentActive = true
-				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge)
+				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "")
 				if openErr != nil {
 					return openErr
 				}
@@ -283,9 +283,9 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 	return s.mergePullRequest(out, db, project, cfg, task, userQuote)
 }
 
-func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, summary ...string) (string, bool, error) {
+func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member string, summary ...string) (string, bool, error) {
 	if forge.Kind == "gitlab" {
-		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, summary...)
+		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary...)
 	}
 	args := []string{"pr", "list", "--state", "open", "--base", project.DefaultBranch, "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
 	var urlValue, lastHead string
@@ -326,7 +326,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if foundOpenPR {
 		return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
 	}
-	title, body, err := prDetails(ctx, db, project, task, s.homePath, summary...)
+	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary...)
 	if err != nil {
 		return "", false, err
 	}
@@ -498,7 +498,7 @@ func ctxPrintLand(ctx *axi.Context, task store.Task, help string) error {
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landing"}, {Key: "pr_url", Value: task.PRURL}, {Key: "gated_sha", Value: task.GatedSHA}, {Key: "help", Value: []any{help}}})
 }
 
-func prDetails(ctx context.Context, db *store.DB, project store.Project, task store.Task, homeFor func() (string, error), supplied ...string) (string, string, error) {
+func prDetails(ctx context.Context, db *store.DB, project store.Project, task store.Task, homeFor func() (string, error), member string, supplied ...string) (string, string, error) {
 	summary := ""
 	if len(supplied) > 0 {
 		summary = supplied[0]
@@ -530,7 +530,11 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 	if err != nil {
 		return "", "", axi.Failure("brief_invalid", "could not parse the Task Brief for the pull request body", false, err.Error())
 	}
-	return brief.Title, "## Rider summary\n\n" + strings.TrimSpace(summary) + "\n\n## Brief intent\n\n" + brief.Body + "\n", nil
+	body := "## Rider summary\n\n" + strings.TrimSpace(summary) + "\n\n## Brief intent\n\n" + brief.Body + "\n"
+	if links := issueLinkBody(brief, member); links != "" {
+		body += "\n" + links
+	}
+	return brief.Title, body, nil
 }
 
 var osReadFile = func(path string) ([]byte, error) { return os.ReadFile(path) }

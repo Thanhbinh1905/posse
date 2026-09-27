@@ -18,6 +18,11 @@ func TestWorkspaceWorkerPublishesOnlyItsPRMemberAndLeadGates(t *testing.T) {
 	// No live Herdr pane is launched by this fixture; avoid reconciling its
 	// simulated Worker away before the CLI can publish.
 	f.service.Herdr = nil
+	briefPath := filepath.Join(f.home, "projects", "stack", "tasks", "t1", "brief.md")
+	brief := "---\ntype: ship\ntitle: Span members\ndone_when: members changed\nrepos: [worker, e2e-tool]\nissues: [worker#12, e2e-tool#13]\nrefs: [worker#14]\n---\nChange the members.\n"
+	if err := writeFile(briefPath, []byte(brief)); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateWorking, "lead", "publish test"); err != nil {
 		t.Fatal(err)
@@ -89,6 +94,14 @@ esac
 	calls, err := os.ReadFile(log)
 	if err != nil || strings.Count(string(calls), "pr create") != 1 {
 		t.Fatalf("Lead created another PR: %s (%v)", calls, err)
+	}
+	for _, expected := range []string{"Closes #12", "Refs #14"} {
+		if !strings.Contains(string(calls), expected) {
+			t.Fatalf("worker member PR omitted %q: %s", expected, calls)
+		}
+	}
+	if strings.Contains(string(calls), "Closes #13") {
+		t.Fatalf("worker member PR contained another member's issue: %s", calls)
 	}
 	if code := f.run("land", "t1", "--merge"); code == 0 || !strings.Contains(f.out.String(), "land_approval_required") {
 		t.Fatalf("merged without User approval: %d %s", code, f.out.String())

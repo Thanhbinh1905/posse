@@ -19,8 +19,23 @@ type Brief struct {
 	AutonomyReview string
 	AutonomyLand   string
 	// Repos names the workspace members the Task works on; empty for a repo Project.
-	Repos []string
-	Body  string
+	Repos  []string
+	Issues []IssueRef
+	Refs   []IssueRef
+	Body   string
+}
+
+type IssueRef struct {
+	Repository string
+	Number     int
+}
+
+func (ref IssueRef) String() string {
+	issue := "#" + strconv.Itoa(ref.Number)
+	if ref.Repository != "" {
+		return ref.Repository + issue
+	}
+	return issue
 }
 
 type BriefError struct {
@@ -65,7 +80,7 @@ func ParseBriefText(contents string) (Brief, error) {
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review_of", "autonomy", "repos") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review_of", "autonomy", "repos", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -87,6 +102,29 @@ func ParseBriefText(contents string) (Brief, error) {
 			return Brief{}, err
 		}
 		brief.Repos = repos
+	}
+	if raw, found := values["issues"]; found {
+		issues, err := parseIssueRefs(raw, "issues")
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.Issues = issues
+	}
+	if raw, found := values["refs"]; found {
+		refs, err := parseIssueRefs(raw, "refs")
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.Refs = refs
+	}
+	seenIssueRefs := make(map[IssueRef]string, len(brief.Issues)+len(brief.Refs))
+	for _, ref := range brief.Issues {
+		seenIssueRefs[ref] = "issues"
+	}
+	for _, ref := range brief.Refs {
+		if previous := seenIssueRefs[ref]; previous != "" {
+			return Brief{}, &BriefError{Field: "refs", Reason: ref.String() + " is already listed in " + previous}
+		}
 	}
 	if raw, found := values["autonomy"]; found {
 		autonomy, err := parseAutonomy(raw)
@@ -122,6 +160,50 @@ func ParseBriefText(contents string) (Brief, error) {
 }
 
 var repoName = regexp.MustCompile(`^[a-z0-9_-]+$`)
+var issueNumber = regexp.MustCompile(`^[1-9][0-9]*$`)
+
+func parseIssueRefs(raw, field string) ([]IssueRef, error) {
+	text := strings.TrimSpace(raw)
+	if strings.HasPrefix(text, "[") {
+		if !strings.HasSuffix(text, "]") {
+			return nil, &BriefError{Field: field, Reason: "must be a list such as [12, member#16]"}
+		}
+		text = strings.TrimSuffix(strings.TrimPrefix(text, "["), "]")
+	}
+	refs := []IssueRef{}
+	seen := map[IssueRef]bool{}
+	for _, item := range strings.Split(text, ",") {
+		value := unquote(strings.TrimSpace(item))
+		if value == "" {
+			continue
+		}
+		repository, numberText, found := strings.Cut(value, "#")
+		if found && (!repoName.MatchString(repository) || strings.Contains(numberText, "#")) {
+			return nil, &BriefError{Field: field, Reason: fmt.Sprintf("%q must be an issue number or member#number", value)}
+		}
+		if !found {
+			numberText = repository
+			repository = ""
+		}
+		if !issueNumber.MatchString(numberText) {
+			return nil, &BriefError{Field: field, Reason: fmt.Sprintf("%q must use a positive issue number", value)}
+		}
+		number, err := strconv.Atoi(numberText)
+		if err != nil {
+			return nil, &BriefError{Field: field, Reason: fmt.Sprintf("%q is too large", value)}
+		}
+		ref := IssueRef{Repository: repository, Number: number}
+		if seen[ref] {
+			return nil, &BriefError{Field: field, Reason: ref.String() + " is listed twice"}
+		}
+		seen[ref] = true
+		refs = append(refs, ref)
+	}
+	if len(refs) == 0 {
+		return nil, &BriefError{Field: field, Reason: "must list at least one issue"}
+	}
+	return refs, nil
+}
 
 // parseRepos reads `repos: [a, b]` or `repos: a, b`.
 func parseRepos(raw string) ([]string, error) {

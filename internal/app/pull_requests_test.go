@@ -44,6 +44,52 @@ func TestPRLandingPushesGatedBranchAndOpensPullRequest(t *testing.T) {
 	}
 }
 
+func TestPublishWritesClosingAndReferenceKeywordsToPullRequestBody(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12, 16]\nrefs: [18]\n---\nE2E intent\n"
+	briefPath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
+	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, keyword := range []string{"Closes #12", "Closes #16", "Refs #18"} {
+		if !strings.Contains(string(log), keyword) {
+			t.Fatalf("PR body omitted %q: %s", keyword, log)
+		}
+	}
+}
+
+func TestPublishAddsIssueLinksWhenReusingAnExistingPullRequest(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	briefPath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
+	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12]\nrefs: [14]\n---\nE2E intent\n"
+	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	openPR := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, fixture.headSHA)
+	if err := os.WriteFile(fixture.ghOpenPRs, []byte(openPR), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"pr edit https://github.com/acme/shop/pull/17 --body", "Existing PR description", "Closes #12", "Refs #14"} {
+		if !strings.Contains(string(log), expected) {
+			t.Fatalf("reused PR body update omitted %q: %s", expected, log)
+		}
+	}
+}
+
 func TestSendToLandingWithoutFailureNoticeReturnsToWorking(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateDone)
 	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
@@ -827,8 +873,19 @@ if [ "${POSSE_TEST_GH_FAIL:-}" != "" ]; then printf 'fake gh unavailable\n' >&2;
 case "$1 $2" in
   "api graphql") cat "$POSSE_TEST_GH_STATE"; if [ -e "$POSSE_TEST_GH_STATE.exit" ]; then printf 'GraphQL request returned errors\n' >&2; exit 1; fi ;;
   "pr list") cat "$POSSE_TEST_GH_OPEN_PRS" ;;
+  "issue view")
+    case "$3" in
+      12) printf '{"state":"CLOSED"}\n' ;;
+      13) printf 'issue not found\n' >&2; exit 1 ;;
+      *) printf '{"state":"OPEN"}\n' ;;
+    esac ;;
   "pr create") printf '%s\n' "$POSSE_TEST_GH_URL" ;;
-  "pr view") printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "${POSSE_TEST_GH_VIEW_STATE:-OPEN}" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "${POSSE_TEST_GH_BASE_BRANCH:-main}" "${POSSE_TEST_GH_SOURCE:-acme/shop}" ;;
+  "pr edit") printf 'Edited\n' ;;
+  "pr view")
+    case "$*" in
+      *"--json body"*) printf '{"body":"%s"}\n' "${POSSE_TEST_GH_BODY:-Existing PR description}" ;;
+      *) printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "${POSSE_TEST_GH_VIEW_STATE:-OPEN}" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "${POSSE_TEST_GH_BASE_BRANCH:-main}" "${POSSE_TEST_GH_SOURCE:-acme/shop}" ;;
+    esac ;;
   "pr merge") printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
 esac
@@ -842,6 +899,7 @@ esac
 	t.Setenv("POSSE_TEST_GH_OPEN_PRS", fixture.ghOpenPRs)
 	t.Setenv("POSSE_TEST_GH_HEAD", fixture.ghHead)
 	t.Setenv("POSSE_TEST_GH_URL", "https://github.com/acme/shop/pull/17")
+	t.Setenv("POSSE_TEST_GH_BODY", "Existing PR description")
 	t.Setenv("POSSE_TEST_GH_FAIL", "")
 	fixture.setGHHead(t, fixture.headSHA)
 	if err := os.WriteFile(fixture.ghOpenPRs, []byte("[]\n"), 0o600); err != nil {
