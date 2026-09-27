@@ -194,7 +194,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 			break
 		}
 	}
-	groupClosed := riderGroupClosed(snapshot, project, tasks) && !serverRestarted
+	groupClosed := riderGroupClosed(snapshot, project) && !serverRestarted
 	if !serverRestarted && !groupClosed {
 		if _, err := s.prepareProject(ctx, db, project); err != nil {
 			return 0, err
@@ -245,7 +245,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if dbErr != nil {
 			return 0, dbErr
 		}
-		if !riderGroupClosed(fresh, current, tasks) {
+		if !riderGroupClosed(fresh, current) {
 			recoveryComplete = true
 			return 0, nil
 		}
@@ -393,8 +393,8 @@ func (s *Service) claimProjectRecovery(ctx context.Context, db *store.DB, projec
 // Riders without restarting Herdr. During recovery some Rider panes may
 // already be back, but no reconciliation may mark the others lost while the
 // Lead is still absent. A lone closed Rider has a live Lead.
-func riderGroupClosed(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) bool {
-	if project.IsWorkspace() || len(tasks) == 0 || project.HerdrWorkspaceID == "" || snapshot.ServerStartedAt == "" {
+func riderGroupClosed(snapshot herdr.Snapshot, project store.Project) bool {
+	if project.IsWorkspace() || project.HerdrWorkspaceID == "" || snapshot.ServerStartedAt == "" {
 		return false
 	}
 	if project.LeadPaneID == "" || project.LeadLabel == "" {

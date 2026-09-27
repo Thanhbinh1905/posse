@@ -18,17 +18,17 @@ func ensureHeldMountLocks(ctx context.Context, db *store.DB, project store.Proje
 		return nil
 	}
 	return withMountStateLock(ctx, db, func() error {
-		tasks, err := db.LiveTasks(ctx, project.ID)
+		mounts, err := db.Mounts(ctx, project.ID)
 		if err != nil {
 			return err
 		}
-		for _, task := range tasks {
-			if task.WorktreePath == "" || task.MountID == 0 {
+		for _, mount := range mounts {
+			if mount.State != "held" || mount.TaskID == 0 {
 				continue
 			}
-			mount, err := db.MountByTask(ctx, task.ID)
-			if err != nil || mount.State != "held" || mount.TaskID != task.ID {
-				continue
+			task, err := db.TaskByID(ctx, project.ID, mount.TaskID)
+			if err != nil {
+				return err
 			}
 			if _, err := os.Stat(filepath.Join(mount.Path, ".git")); err != nil {
 				if !os.IsNotExist(err) {
@@ -64,6 +64,12 @@ func lockClaimedMount(ctx context.Context, db *store.DB, project store.Project, 
 	if claim.ID != mount.ID || claim.Path != mount.Path || claim.State != "held" || claim.TaskID != task.ID {
 		return store.ErrStateRace
 	}
+	return lockAvailableMount(ctx, db, project, mount, task)
+}
+
+// Call under withMountStateLock before claiming an idle checkout, or after
+// claiming a new checkout. Git protects the checkout before it becomes held.
+func lockAvailableMount(ctx context.Context, db *store.DB, project store.Project, mount store.Mount, task store.Task) error {
 	current, err := mountLockReason(ctx, project.Root, mount.Path)
 	if err != nil {
 		return err

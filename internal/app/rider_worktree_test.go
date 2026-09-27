@@ -88,14 +88,18 @@ func TestCrashBetweenWorktreeOpenAndPaneLabelClosesOnlyEmptyChild(t *testing.T) 
 }
 
 func TestPartlyRecoveredGroupStillNeedsRecovery(t *testing.T) {
-	project, task, adapter := linkedRiderSession(t)
+	project, _, adapter := linkedRiderSession(t)
 	adapter.snapshot.ServerStartedAt = "same-server"
 	adapter.snapshot.Panes = adapter.snapshot.Panes[2:3] // Only a Rider has been restored so far.
-	if !riderGroupClosed(adapter.snapshot, project, []store.Task{task}) {
+	if !riderGroupClosed(adapter.snapshot, project) {
 		t.Fatal("partial Rider restore was mistaken for a complete group")
 	}
 	project.LeadPaneID, project.LeadLabel = "", "" // ensureRecoveryWorkspace already created the Lead workspace.
-	if !riderGroupClosed(adapter.snapshot, project, []store.Task{task}) {
+	if !riderGroupClosed(adapter.snapshot, project) {
 		t.Fatal("partial Lead workspace hid an incomplete recovery")
+	}
+	adapter.snapshot.Panes = nil // The last Rider failed while the group was closed.
+	if !riderGroupClosed(adapter.snapshot, project) {
+		t.Fatal("closed group with no live Riders was not recovered")
 	}
 }

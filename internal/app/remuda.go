@@ -162,22 +162,45 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 	for attempts := 0; attempts < 64; attempts++ {
 		var mount store.Mount
 		err := withMountStateLock(ctx, db, func() error {
+			// Protect the oldest idle checkout before AcquireMount can expose
+			// it as held. New checkouts are created with Git's atomic --lock.
+			mounts, err := db.Mounts(ctx, project.ID)
+			if err != nil {
+				return err
+			}
+			var prelocked store.Mount
+			for _, candidate := range mounts {
+				if candidate.State == "idle" && (prelocked.ID == 0 || candidate.Number < prelocked.Number) {
+					prelocked = candidate
+				}
+			}
+			if prelocked.ID != 0 {
+				if _, statErr := os.Stat(filepath.Join(prelocked.Path, ".git")); statErr == nil {
+					if err := lockAvailableMount(ctx, db, project, prelocked, task); err != nil {
+						return err
+					}
+				} else if !os.IsNotExist(statErr) {
+					return statErr
+				}
+			}
 			var claimErr error
 			mount, claimErr = db.AcquireMount(ctx, project.ID, task.ID, base)
 			if claimErr != nil {
+				if prelocked.ID != 0 {
+					current, lookupErr := db.Mounts(ctx, project.ID)
+					if lookupErr != nil {
+						return errors.Join(claimErr, lookupErr)
+					}
+					for _, candidate := range current {
+						if candidate.ID == prelocked.ID && candidate.State == "idle" {
+							return errors.Join(claimErr, unlockTaskMount(ctx, project.Root, prelocked.Path, task.Seq))
+						}
+					}
+				}
 				return claimErr
 			}
-			// Existing checkouts may carry a stale Posse lock after a crash;
-			// reconcile must not be able to relock the former Task here.
-			if _, statErr := os.Stat(filepath.Join(mount.Path, ".git")); statErr == nil {
-				if lockErr := lockClaimedMount(ctx, db, project, mount, task); lockErr != nil {
-					// Do not leave an inaccessible, foreign-locked Mount held by a
-					// failed Task. Preserve the checkout in broken quarantine.
-					return errors.Join(lockErr, db.BreakMount(ctx, mount.ID, task.ID))
-				}
-				return nil
-			} else if !os.IsNotExist(statErr) {
-				return statErr
+			if prelocked.ID != 0 && prelocked.ID != mount.ID {
+				return fmt.Errorf("prelocked mount %d differs from claimed mount %d: %w", prelocked.ID, mount.ID, store.ErrStateRace)
 			}
 			return nil
 		})
@@ -195,7 +218,7 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 				}
 				ref = "refs/remotes/origin/" + project.DefaultBranch
 			}
-			if _, err := gitOutput(ctx, project.Root, "worktree", "add", "--detach", mount.Path, ref); err != nil {
+			if _, err := gitOutput(ctx, project.Root, "worktree", "add", "--detach", "--lock", "--reason", fmt.Sprintf("posse: held by t%d", task.Seq), mount.Path, ref); err != nil {
 				if breakErr := breakMount(ctx, db, project, task, mount, "Git could not create the Mount worktree"); breakErr != nil {
 					return mount, errors.Join(err, breakErr)
 				}
@@ -498,7 +521,7 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 		}
 		if err := db.ReleaseMount(ctx, mount.ID, task.ID); err != nil {
 			if !project.IsWorkspace() {
-				return errors.Join(err, lockMount(ctx, project.Root, mount.Path, task.Seq))
+				return errors.Join(err, relockIfStillHeld(ctx, db, project, mount, task))
 			}
 			return err
 		}
@@ -525,6 +548,19 @@ func lockMount(ctx context.Context, repo, path string, seq int) error {
 	}
 	_, err = gitOutput(ctx, repo, "worktree", "lock", "--reason", reason, path)
 	return err
+}
+
+func relockIfStillHeld(ctx context.Context, db *store.DB, project store.Project, mount store.Mount, task store.Task) error {
+	mounts, err := db.Mounts(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	for _, current := range mounts {
+		if current.ID == mount.ID && current.State == "held" && current.TaskID == task.ID {
+			return lockMount(ctx, project.Root, mount.Path, task.Seq)
+		}
+	}
+	return nil
 }
 
 func unlockTaskMount(ctx context.Context, repo, path string, seq int) error {
@@ -605,7 +641,7 @@ func breakMount(ctx context.Context, db *store.DB, project store.Project, task s
 		if err := db.BreakMount(ctx, mount.ID, task.ID); err != nil {
 			if !project.IsWorkspace() {
 				if _, reasonErr := mountLockReason(ctx, project.Root, mount.Path); reasonErr == nil {
-					return errors.Join(err, lockMount(ctx, project.Root, mount.Path, task.Seq))
+					return errors.Join(err, relockIfStillHeld(ctx, db, project, mount, task))
 				}
 			}
 			return err

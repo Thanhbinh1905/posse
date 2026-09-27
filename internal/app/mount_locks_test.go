@@ -335,6 +335,25 @@ func TestFailedTaskHeldMountIsRelockedByReconcile(t *testing.T) {
 	if err != nil || reason != "posse: held by t1" {
 		t.Fatalf("failed Task's held Mount lock = %q, %v", reason, err)
 	}
+	if _, err := gitOutput(ctx, repo, "worktree", "remove", "--force", "--force", mount.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, notice := range notices {
+		if notice.TaskID == id && notice.Kind == "mount_missing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("failed Task's missing Mount Notice absent: %#v", notices)
+	}
 }
 
 func TestMountIsLockedBeforeAcquireCanExposeHeldCheckout(t *testing.T) {
@@ -360,6 +379,25 @@ func TestMountIsLockedBeforeAcquireCanExposeHeldCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	first, err := acquireMount(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseMount(ctx, db, project, task, "warm", false); err != nil {
+		t.Fatal(err)
+	}
+	id, err = db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "ship", Title: "Lock reuse timing", LandingMode: "local", Branch: "posse/t2", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -376,11 +414,14 @@ func TestMountIsLockedBeforeAcquireCanExposeHeldCheckout(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	done := make(chan error, 1)
 	go func() { _, err := acquireMount(ctx, db, project, task, home, "warm", nil); done <- err }()
+	completed := false
 	defer func() {
 		_ = os.WriteFile(release, nil, 0600)
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
+		if !completed {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+			}
 		}
 	}()
 	deadline := time.Now().Add(5 * time.Second)
@@ -398,13 +439,27 @@ func TestMountIsLockedBeforeAcquireCanExposeHeldCheckout(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	mounts, err := db.Mounts(ctx, project.ID)
+	if err != nil || len(mounts) != 1 || mounts[0].ID != first.ID || mounts[0].State != "idle" {
+		t.Fatalf("checkout became held before lock command: %+v, %v", mounts, err)
+	}
+	reason, err := mountLockReason(ctx, repo, first.Path)
+	if err != nil || reason != "" {
+		t.Fatalf("idle checkout before lock command = %q, %v", reason, err)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	completed = true
 	mount, err := db.MountByTask(ctx, task.ID)
 	if err != nil || mount.State != "held" {
-		t.Fatalf("Mount before lock = %+v, %v", mount, err)
+		t.Fatalf("acquire did not finish: %+v %v", mount, err)
 	}
-	reason, err := mountLockReason(ctx, repo, mount.Path)
-	if err != nil || reason != "posse: held by t1" {
-		t.Fatalf("held checkout before lock command = %q, %v", reason, err)
+	if reason, err := mountLockReason(ctx, repo, mount.Path); err != nil || reason != "posse: held by t2" {
+		t.Fatalf("held checkout after acquire lock = %q, %v", reason, err)
 	}
 }
 
