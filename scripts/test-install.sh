@@ -176,9 +176,8 @@ else
   printf '%s\n' "$output" >&2
   fail "installer with optional sidebar offer failed"
 fi
-contains "$output" "No TTY available; using safe default [N]." || fail "--yes silently accepted the optional sidebar layout"
 case $(cat "$sidebar_no_log") in
-  *setup-sidebar*) fail "--yes silently applied the sidebar layout" ;;
+  *setup-sidebar*) fail "--yes silently applied the retired sidebar layout" ;;
 esac
 sidebar_tty=$TEST_ROOT/sidebar-answer-yes
 printf 'y\n' > "$sidebar_tty"
@@ -187,10 +186,12 @@ if output=$(STUB_SIDEBAR_OFFER=1 POSSE_TTY=$sidebar_tty run_install "$TEST_ROOT/
   :
 else
   printf '%s\n' "$output" >&2
-  fail "confirmed sidebar layout install failed"
+  fail "installer with a stale sidebar offer and TTY failed"
 fi
-contains "$(cat "$sidebar_yes_log")" "setup-sidebar" || fail "installer did not apply confirmed sidebar layout"
-pass "$TEST_SHELL asks separately before installing the optional sidebar layout"
+case $(cat "$sidebar_yes_log") in
+  *setup-sidebar*) fail "installer applied the retired sidebar layout with a TTY" ;;
+esac
+pass "$TEST_SHELL ignores an older build's optional sidebar offer"
 
 mkdir -p "$TEST_ROOT/home-interactive-yes"
 yes_tty=$TEST_ROOT/answers-yes

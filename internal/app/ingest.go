@@ -179,7 +179,18 @@ func (s *Service) ingestProjects(ctx context.Context, db *store.DB, event plugin
 			if err != nil {
 				return nil, false, err
 			}
-			if len(notices) > 0 || messages {
+			tasks, err := db.Tasks(ctx, project.ID, true)
+			if err != nil {
+				return nil, false, err
+			}
+			launchPending := false
+			for _, task := range tasks {
+				if task.State == store.StateSpawning && task.PaneID != "" {
+					launchPending = true
+					break
+				}
+			}
+			if len(notices) > 0 || messages || launchPending {
 				pending = append(pending, project)
 			}
 		}

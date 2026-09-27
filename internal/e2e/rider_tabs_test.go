@@ -60,9 +60,13 @@ func TestRosterRecoversRestartWithoutStartupHook(t *testing.T) {
 	}
 	grouped := false
 	for _, workspace := range fixture.snapshot(t).Workspaces {
-		if workspace.WorkspaceID == after.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == after.WorktreePath { grouped = true }
+		if workspace.WorkspaceID == after.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == after.WorktreePath {
+			grouped = true
+		}
 	}
-	if !grouped { t.Fatalf("restored Rider lost native worktree grouping: %#v", after) }
+	if !grouped {
+		t.Fatalf("restored Rider lost native worktree grouping: %#v", after)
+	}
 	db, err = store.OpenReadOnly(fixture.home)
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +75,58 @@ func TestRosterRecoversRestartWithoutStartupHook(t *testing.T) {
 	generation, err := db.ProjectServerStartedAt(context.Background(), fixture.projectID)
 	if err != nil || generation != newGeneration {
 		t.Fatalf("Project generation after command = %q, want %q: %v", generation, newGeneration, err)
+	}
+}
+
+// TestFocusedRiderLaunch focuses the new Rider child before prompt delivery,
+// then verifies the Lead can safely complete delivery after unfocusing it.
+func TestFocusedRiderLaunch(t *testing.T) {
+	f := newRiderTabsFixture(t)
+	if err := os.WriteFile(filepath.Join(f.root, "focus-spawn"), []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(f.root, "focused.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Focused rider\ndone_when: test finishes\n---\nWait.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(f.binary, "ride", "--brief", brief, "--name", "focused-rider")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var paneID string
+	if !waitForCondition(20*time.Second, func() bool {
+		for _, pane := range f.snapshot(t).Panes {
+			if pane.Label == "posse:shop:t1" {
+				paneID = pane.PaneID
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("Rider child never opened")
+	}
+	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": paneID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("focused ride: %v: %s", err, output.String())
+	}
+	if task := f.task(t, "t1"); task.State != store.StateSpawning || task.MountID == 0 {
+		t.Fatalf("focused Rider did not retain spawning Task and Mount: %#v output=%s", task, output.String())
+	}
+	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": f.leadPaneID}); err != nil {
+		t.Fatal(err)
+	}
+	focusEvent := setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", `{"event":"pane_focused","data":{"pane_id":"`+f.leadPaneID+`"}}`)
+	runPosse(t, f.binary, f.repo, focusEvent, "_ingest")
+	if task := f.task(t, "t1"); task.State != store.StateWorking {
+		t.Fatalf("unfocus did not deliver Brief: task=%#v output=%s", task, output.String())
+	}
+	if task := f.task(t, "t1"); task.MountID == 0 || task.PaneID != paneID {
+		t.Fatalf("queued launch did not use the same Mount and pane: %#v", task)
 	}
 }
 
@@ -272,6 +328,7 @@ rows = [["state_icon", "machine", { token = "workspace", rules = [{ starts_with 
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 case "$PWD/" in
   "$POSSE_E2E_WORKTREES/"*)
+    if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then sleep 3; fi
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     while IFS= read -r line; do :; done

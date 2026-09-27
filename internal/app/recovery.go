@@ -199,7 +199,17 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if _, err := s.prepareProject(ctx, db, project); err != nil {
 			return 0, err
 		}
-		return 0, db.RememberProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt)
+		if err := db.RememberProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt); err != nil {
+			return 0, err
+		}
+		// The first Lookout tick may not have recorded the previous server
+		// generation before Herdr restarted. Reconcile its process even when
+		// generation comparison cannot prove a restart: a restored tab label
+		// does not mean its poller was restored.
+		if _, found := leadWorkspace(snapshot, project); found {
+			return 0, s.ensureLookoutTab(ctx, project, snapshot)
+		}
+		return 0, nil
 	}
 	recoveryOwnerPID := os.Getpid()
 	recoveryNow := time.Now()

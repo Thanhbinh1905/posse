@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,96 @@ func TestSidebarLayoutPreservesHerdrConfigAndIsIdempotent(t *testing.T) {
 				t.Fatalf("file mode = %v", info.Mode())
 			}
 		})
+	}
+}
+
+func TestSidebarLayoutReadsThroughSymlinksWithoutWritingThem(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "no rows", content: "[theme]\nname = 'catppuccin'\n", want: "symlink"},
+		{name: "Posse rows", content: sidebarLayoutSnippet, want: "keep"},
+		{name: "custom rows", content: "[ui.sidebar.agents]\nrows = [[\"tab\"]]\n", want: "manual"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, "managed-config.toml")
+			path := filepath.Join(root, "xdg", "herdr", "config.toml")
+			if err := os.WriteFile(source, []byte(testCase.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(source, path); err != nil {
+				t.Fatal(err)
+			}
+			if state, err := sidebarLayoutState(path); state != testCase.want || err != nil {
+				t.Fatalf("state = %q, %v; want %q", state, err, testCase.want)
+			}
+			if testCase.want == "symlink" {
+				if changed, err := installSidebarLayout(path); err != nil || changed {
+					t.Fatalf("install through symlink = %t, %v", changed, err)
+				}
+				if data, err := os.ReadFile(source); err != nil || string(data) != testCase.content {
+					t.Fatalf("managed config changed through symlink: %q, %v", data, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDoctorExplainsSymlinkedSidebarConfigAndRecognizesPosseRows(t *testing.T) {
+	service, _, userHome := humanSetupFixture(t)
+	configHome := filepath.Join(userHome, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	path := filepath.Join(configHome, "herdr", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(userHome, "managed-herdr-config.toml")
+	if err := os.WriteFile(source, []byte("[theme]\nname = 'catppuccin'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(source, path); err != nil {
+		t.Fatal(err)
+	}
+	check := func() (string, string) {
+		t.Helper()
+		code, output := runCLI(t, service, "doctor", "--json")
+		if code != 0 {
+			t.Fatalf("doctor: %d %s", code, output)
+		}
+		var result struct {
+			Checks []struct {
+				Check  string `json:"check"`
+				Status string `json:"status"`
+				Detail string `json:"detail"`
+			} `json:"checks"`
+		}
+		if err := json.Unmarshal([]byte(output), &result); err != nil {
+			t.Fatalf("doctor JSON: %s: %v", output, err)
+		}
+		for _, row := range result.Checks {
+			if row.Check == "Herdr Agents sidebar layout" {
+				return row.Status, row.Detail
+			}
+		}
+		t.Fatalf("doctor omitted sidebar layout check: %s", output)
+		return "", ""
+	}
+	status, detail := check()
+	if status != "warn" || !strings.Contains(detail, "Herdr config is a symlink") || !strings.Contains(detail, sidebarLayoutSnippet) {
+		t.Fatalf("symlinked config check = %q, %q", status, detail)
+	}
+	if err := os.WriteFile(source, []byte(sidebarLayoutSnippet), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, detail = check()
+	if status != "ok" || detail != "Posse layout present" {
+		t.Fatalf("symlink with Posse rows check = %q, %q", status, detail)
 	}
 }
 

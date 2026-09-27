@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -178,7 +179,7 @@ func newRideFixture(t *testing.T) rideFixture {
 	if err := os.MkdirAll(filepath.Join(home, "projects", "shop"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	globalConfig := "[defaults]\nlanding_mode = \"local\"\n\n[profiles.codex]\nkind = \"codex\"\n\n[dispatch.default]\nuse = \"codex\"\n"
+	globalConfig := "[defaults]\nlanding_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(globalConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +236,98 @@ func (f rideFixture) onlyTask(t *testing.T) (store.Task, []store.Notice) {
 	return tasks[0], notices
 }
 
+func TestCodexLaunchCarriesBriefWithoutTypingIntoFocusedComposer(t *testing.T) {
+	fixture := newRideFixture(t)
+	cfg := "[defaults]\nlanding_mode = \"local\"\n\n[profiles.codex]\nkind = \"codex\"\n\n[dispatch.default]\nuse = \"codex\"\n"
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.fake.BeforeCall = func(method string) {
+		if method == "agent.start" {
+			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
+		}
+	}
+	if code, output := fixture.ride(t); code != 0 || !strings.Contains(output, "state: working") {
+		t.Fatalf("codex launch: %d %s", code, output)
+	}
+	if fixture.fake.CallCount("agent.prompt") != 0 {
+		t.Fatal("codex launch typed into the composer")
+	}
+	found := false
+	for _, call := range fixture.fake.Calls {
+		if call.Method == "agent.start" {
+			args := call.Params["args"].([]string)
+			found = len(args) > 0 && strings.Contains(args[len(args)-1], "launch.md")
+		}
+	}
+	if !found {
+		t.Fatal("codex did not receive the launch Brief as its opening turn")
+	}
+}
+
+func TestRideFocusedDuringLaunchRemainsSpawning(t *testing.T) {
+	fixture := newRideFixture(t)
+	fixture.fake.BeforeCall = func(method string) {
+		if method == "agent.start" {
+			fixture.fake.SnapshotValue.FocusedPaneID = "fake:child:p1"
+			fixture.fake.SnapshotValue.FocusedWorkspaceID = "fake:child"
+			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
+		}
+	}
+	code, output := fixture.ride(t)
+	task, notices := fixture.onlyTask(t)
+	if code != 0 || task.State != store.StateSpawning || len(notices) != 0 {
+		t.Fatalf("focused ride code=%d output=%s task=%#v notices=%#v", code, output, task, notices)
+	}
+}
+
+func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T) {
+	fixture := newRideFixture(t)
+	fixture.fake.BeforeCall = func(method string) {
+		if method == "agent.start" {
+			fixture.fake.SnapshotValue.FocusedPaneID = "fake:child:p1"
+			fixture.fake.SnapshotValue.FocusedWorkspaceID = "fake:child"
+			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
+		}
+	}
+	if code, output := fixture.ride(t); code != 0 {
+		t.Fatalf("ride: %d %s", code, output)
+	}
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	task, _ := fixture.onlyTask(t)
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET created_at=? WHERE id=?`, time.Now().Add(-launchDeliveryTimeout-time.Second).UnixMilli(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := fixture.service.retryPendingLaunches(ctx, db, fixture.project, cfg, fixture.fake.SnapshotValue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, notices := fixture.onlyTask(t)
+	if task.State != store.StateSpawning || len(notices) != 1 || notices[0].Kind != "spawn_waiting" || fixture.fake.CallCount("agent.prompt") != 0 {
+		t.Fatalf("focused retry task=%#v notices=%#v prompts=%d", task, notices, fixture.fake.CallCount("agent.prompt"))
+	}
+	fixture.fake.SnapshotValue.FocusedPaneID = "w1:p1"
+	fixture.fake.SnapshotValue.FocusedWorkspaceID = "w1"
+	fixture.fake.SnapshotValue.Panes[1].Focused = false
+	if err := fixture.service.retryPendingLaunches(ctx, db, fixture.project, cfg, fixture.fake.SnapshotValue); err != nil {
+		t.Fatal(err)
+	}
+	task, _ = fixture.onlyTask(t)
+	if task.State != store.StateWorking || fixture.fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("unfocused retry task=%#v prompts=%d", task, fixture.fake.CallCount("agent.prompt"))
+	}
+}
+
 func TestRideFailsTaskWhenLaunchPromptIsNeverPickedUp(t *testing.T) {
 	fixture := newRideFixture(t)
 	for range launchPromptAttempts {
@@ -249,6 +342,42 @@ func TestRideFailsTaskWhenLaunchPromptIsNeverPickedUp(t *testing.T) {
 	}
 	if len(notices) != 1 || notices[0].Kind != "task_failed" || notices[0].DeliveredAt == 0 {
 		t.Fatalf("Lead was not told about the dropped launch prompt: %#v", notices)
+	}
+}
+
+func TestFailedLaunchBeforeBriefDeliveryCanRelaunchOnSameMount(t *testing.T) {
+	fixture := newRideFixture(t)
+	for range launchPromptAttempts {
+		fixture.fake.ErrorQueue["agent.prompt"] = append(fixture.fake.ErrorQueue["agent.prompt"], stalled())
+	}
+	if code, output := fixture.ride(t); code != 1 || !strings.Contains(output, "prompt_not_delivered") {
+		t.Fatalf("ride: %d %s", code, output)
+	}
+	before, _ := fixture.onlyTask(t)
+	if before.State != store.StateFailed || before.MountID == 0 {
+		t.Fatalf("failed launch lost its Mount: %#v", before)
+	}
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "idle"}}}
+	project, err := db.ProjectByID(context.Background(), fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.service.relaunchTask(context.Background(), db, fixture.home, project, cfg, before, "")
+	if err != nil {
+		t.Fatalf("relaunch failed Task: %v", err)
+	}
+	after, err := db.TaskByID(context.Background(), fixture.project.ID, before.ID)
+	if err != nil || after.State != store.StateWorking || after.MountID != before.MountID || after.WorktreePath != before.WorktreePath || result.Pane == "" {
+		t.Fatalf("relaunch did not keep the Task Mount: before=%#v after=%#v result=%#v err=%v", before, after, result, err)
 	}
 }
 
@@ -276,8 +405,8 @@ func TestRideFailsTaskWhenNewMountShellNeverBecomesAvailable(t *testing.T) {
 		t.Fatalf("agent.start calls = %d, want retries", got)
 	}
 	task, notices := fixture.onlyTask(t)
-	if task.State != store.StateFailed || task.MountID != 0 {
-		t.Fatalf("Task after a persistently busy pane = %#v", task)
+	if task.State != store.StateFailed || task.MountID == 0 {
+		t.Fatalf("Task after a persistently busy pane lost its relaunchable Mount = %#v", task)
 	}
 	if len(notices) != 1 || notices[0].Kind != "task_failed" {
 		t.Fatalf("Lead was not told about the busy pane: %#v", notices)

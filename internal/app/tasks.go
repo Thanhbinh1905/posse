@@ -355,6 +355,22 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	launchPath := filepath.Join(taskHome, "launch.md")
 	profile := cfg.Profiles[resolution.Profile]
 	argsForAgent := workerAgentArgs(profile, kindConfig, "")
+	if err := s.runIntentStep(ctx.Context, db, intent, "brief.write", func() error { return writeFile(briefPath, briefData) }); err != nil {
+		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+		return err
+	}
+	launchContents := workerProtocol(project, task, brief, launchPath) + workspaceProtocol(project, members) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
+		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+		return err
+	}
+	// These harnesses accept an opening turn without touching the composer.
+	openingPrompt := kind == "codex" || kind == "opencode"
+	if kind == "codex" {
+		argsForAgent = append(argsForAgent, "Read "+launchPath+" and follow it.")
+	} else if kind == "opencode" {
+		argsForAgent = append(argsForAgent, "--prompt", "Read "+launchPath+" and follow it.")
+	}
 	var started json.RawMessage
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.start", func() error {
 		var callErr error
@@ -366,24 +382,35 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return err
 	}
 	_ = started
-	if err := s.waitAgentReady(ctx.Context, opened.PaneID); err != nil {
+	if openingPrompt {
+		err = s.waitAgentLaunched(ctx.Context, opened.PaneID)
+	} else {
+		err = s.waitAgentReady(ctx.Context, opened.PaneID)
+	}
+	if err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	if err := s.runIntentStep(ctx.Context, db, intent, "brief.write", func() error { return writeFile(briefPath, briefData) }); err != nil {
-		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
-		return err
-	}
-	launchContents := workerProtocol(project, task, brief, launchPath) + workspaceProtocol(project, members) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
-	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
-		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
-		return err
-	}
-	if err := s.runIntentStep(ctx.Context, db, intent, "agent.prompt", func() error {
-		return s.deliverLaunchPrompt(ctx.Context, opened.PaneID, "Read "+launchPath+" and follow it.")
-	}); err != nil {
-		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
-		return err
+	if !openingPrompt {
+		err = s.runIntentStep(ctx.Context, db, intent, "agent.prompt", func() error {
+			return s.deliverLaunchPrompt(ctx.Context, opened.PaneID, "Read "+launchPath+" and follow it.")
+		})
+		var focused *axi.Error
+		if errors.As(err, &focused) && focused.Code == "pane_focused" {
+			// The next focus event or lookout tick will submit the Brief.
+			err = nil
+			if finishErr := db.FinishIntent(ctx.Context, intent.ID, os.Getpid()); finishErr != nil {
+				return finishErr
+			}
+			if refreshErr := s.regenerateProjects(ctx.Context, db); refreshErr != nil {
+				return refreshErr
+			}
+			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "state", Value: "spawning"}, {Key: "worker", Value: workerName}, {Key: "help", Value: []any{"Brief delivery waits for the Rider pane to become unfocused"}}})
+		}
+		if err != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+			return err
+		}
 	}
 	if err := s.runIntentStep(ctx.Context, db, intent, "pane.metadata", func() error {
 		return s.refreshWorkerDisplay(ctx.Context, db, project, taskID, kind)
@@ -672,9 +699,16 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 				s.relabelProjectTabs(ctx, db, project)
 			}
 		}
-		cfg, _ := config.Load(s.Home, project.Name)
-		if _, releaseErr := releaseMount(ctx, db, project, task, cfg.Remuda.Clean); releaseErr != nil {
-			reason += "; Mount release failed: " + releaseErr.Error()
+		// A written launch Brief and an initialized Mount let relaunch resume
+		// the same Task and branch. Earlier failures still release the Mount.
+		home, homeErr := s.homePath()
+		launchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "launch.md")
+		_, launchErr := os.Stat(launchPath)
+		if task.Branch == "" || task.WorktreePath == "" || launchErr != nil || homeErr != nil {
+			cfg, _ := config.Load(home, project.Name)
+			if _, releaseErr := releaseMount(ctx, db, project, task, cfg.Remuda.Clean); releaseErr != nil {
+				reason += "; Mount release failed: " + releaseErr.Error()
+			}
 		}
 	}
 	if err := db.Transition(ctx, id, store.StateSpawning, store.StateFailed, "cli", reason); err != nil {

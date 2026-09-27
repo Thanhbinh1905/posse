@@ -3,13 +3,86 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestLeadLookoutReportsRestartAfterUpdateSignal(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(context.Background(), "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	requestStarted := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestStarted <- struct{}{}
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.1.0"})
+	}))
+	defer server.Close()
+	t.Chdir(repo)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	service := testService(home, nil)
+	service.Version, service.updateURL = "0.1.0", server.URL
+	var output strings.Builder
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	done := make(chan int, 1)
+	go func() { done <- cli.Run([]string{"lookout", "--json"}) }()
+	select {
+	case <-requestStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Lead lookout did not enter its wait loop")
+	}
+	marker := lookoutUpdateStopMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("Lead lookout exit=%d: %s", code, output.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Lead lookout did not return after SIGTERM")
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
+		t.Fatalf("Lead lookout output: %s: %v", output.String(), err)
+	}
+	if result["state"] != "stopped" || result["reason"] != "update" || !strings.Contains(output.String(), "restart `posse lookout`") {
+		t.Fatalf("Lead lookout did not tell its Lead to restart: %s", output.String())
+	}
+}
 
 func TestPiLookoutQuietRoutineAndMixedBatches(t *testing.T) {
 	ctx := context.Background()
