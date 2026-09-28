@@ -506,6 +506,44 @@ func TestUpAcceptsAtMostOneKindFlag(t *testing.T) {
 	}
 }
 
+func TestFinalizeLeadStopsWhenItsPaneCloses(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err == nil {
+		err = db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead")
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	fake := herdr.NewFake()
+	service := testService(home, fake)
+	plan := leadExecPlan{ProjectID: project.ID, PaneID: "w1:p1", WorkspaceID: "w1", AgentName: "posse-shop-lead-1", Kind: "claude"}
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.finalizeLead([]string{base64.RawURLEncoding.EncodeToString(payload)}); err != nil {
+		t.Fatalf("finalize after pane close: %v", err)
+	}
+	if len(fake.Calls) != 1 || fake.Calls[0].Method != "session.snapshot" {
+		t.Fatalf("finalizer called Herdr after its pane closed: %#v", fake.Calls)
+	}
+}
+
 func TestFinalizeLeadRenamesDetectedAgentAndDeliversFallbackInstructions(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

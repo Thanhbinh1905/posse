@@ -284,7 +284,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	crashIntentAt("ride", "before", "task.create")
 	taskID, sequence, intent, err := createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
 	if errors.Is(err, store.ErrTaskBranchExists) {
-		return branchNameTaken(name)
+		return branchNameTaken(name, "in Project "+project.Name+" Task history for ref refs/heads/posse/"+name)
 	}
 	if err != nil {
 		return err
@@ -582,12 +582,21 @@ func retryNameAllowed(ctx context.Context, db *store.DB, project store.Project, 
 	return false, nil
 }
 
-func branchNameTaken(name string) error {
+func retryNameSuggestion(name string) string {
 	prefix := name
 	if len(prefix) > 18 {
 		prefix = strings.TrimRight(prefix[:18], "-")
 	}
-	return axi.Failure("branch_exists", "Task branch posse/"+name+" already exists or was used", false, "If retrying a failed or discarded Task, keep the Brief title and use --name "+prefix+"-retry (at most 24 characters); otherwise rewrite the Task title")
+	return prefix + "-retry"
+}
+
+func branchNameTaken(name, location string) error {
+	help := "Choose a new Task title that derives an unused branch. To retry a failed, lost, or torn-down Task with the same Brief title, use --name " + retryNameSuggestion(name) + "; otherwise change the title"
+	return axi.Failure("branch_exists", "Task branch posse/"+name+" already exists or was used "+location, false, help)
+}
+
+func branchRefTaken(name, repository, ref string) error {
+	return branchNameTaken(name, "in repository "+repository+" at ref "+ref)
 }
 
 // Check every repository before inserting the Task, including members a
@@ -599,36 +608,41 @@ func taskBranchAvailable(ctx context.Context, db *store.DB, project store.Projec
 		return err
 	}
 	if used {
-		return branchNameTaken(name)
+		return branchNameTaken(name, "in Project "+project.Name+" Task history for ref refs/heads/posse/"+name)
 	}
-	roots := []string{project.Root}
+	targets := []repoTarget{{Name: project.Name, Root: project.Root}}
 	if project.IsWorkspace() {
-		roots = nil
-		targets, err := workspaceMountTargets(ctx, db, project)
+		targets = nil
+		members, err := workspaceMountTargets(ctx, db, project)
 		if err != nil {
 			return err
 		}
-		for _, target := range targets {
-			roots = append(roots, target.Root)
+		for _, member := range members {
+			targets = append(targets, member.repoTarget)
 		}
 	}
-	for _, root := range roots {
+	for _, target := range targets {
+		repository := target.Name
+		if repository == "" {
+			repository = project.Name
+		}
 		for _, ref := range []string{"refs/heads/" + branch, "refs/remotes/origin/" + branch} {
-			found, err := gitOutput(ctx, root, "for-each-ref", "--format=%(refname)", ref)
+			found, err := gitOutput(ctx, target.Root, "for-each-ref", "--format=%(refname)", ref)
 			if err != nil {
 				return err
 			}
 			if found != "" {
-				return branchNameTaken(name)
+				return branchRefTaken(name, repository, found)
 			}
 		}
-		if _, err := gitOutput(ctx, root, "remote", "get-url", "origin"); err == nil {
-			found, err := gitOutput(ctx, root, "ls-remote", "--heads", "origin", "refs/heads/"+branch)
+		if _, err := gitOutput(ctx, target.Root, "remote", "get-url", "origin"); err == nil {
+			remoteRef := "refs/heads/" + branch
+			found, err := gitOutput(ctx, target.Root, "ls-remote", "--heads", "origin", remoteRef)
 			if err != nil {
-				return axi.Failure("branch_check_failed", "could not check origin for "+branch, true, err.Error())
+				return axi.Failure("branch_check_failed", "could not check origin in repository "+repository+" for "+remoteRef, true, err.Error())
 			}
 			if found != "" {
-				return branchNameTaken(name)
+				return branchRefTaken(name, repository+" origin", remoteRef)
 			}
 		}
 	}

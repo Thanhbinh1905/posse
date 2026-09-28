@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,6 +51,33 @@ func commandOutputArgs(ctx context.Context, cwd, name string, args ...string) (s
 		return string(output), commandContext.Err()
 	}
 	return string(output), err
+}
+
+func commandStdoutArgs(ctx context.Context, cwd, name string, args ...string) (string, error) {
+	timeout := timeoutForExternalCommand(name, args)
+	commandContext := ctx
+	cancel := func() {}
+	if timeout > 0 {
+		commandContext, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+	command := execgroup.CommandContext(commandContext, name, args...)
+	command.Dir = cwd
+	command.Env = externalCommandEnvironment(name)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	if commandContext.Err() != nil {
+		if errors.Is(commandContext.Err(), context.DeadlineExceeded) {
+			return stdout.String(), fmt.Errorf("%s timed out after %s: %w", name, timeout, context.DeadlineExceeded)
+		}
+		return stdout.String(), commandContext.Err()
+	}
+	if err != nil && stderr.Len() > 0 {
+		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), err
 }
 
 func timeoutForExternalCommand(name string, args []string) time.Duration {

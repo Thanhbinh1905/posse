@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -684,6 +688,138 @@ func TestTaskSequenceDoesNotDependOnLegacyBranch(t *testing.T) {
 	}
 }
 
+func TestTaskBranchAvailabilityIgnoresRedirectWarning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/group/repo/info/refs" {
+			http.Redirect(w, r, "/group/repo.git/info/refs?service=git-upload-pack", http.StatusMovedPermanently)
+			return
+		}
+		if r.URL.Path == "/group/repo.git/info/refs" {
+			w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+			_, _ = w.Write([]byte("001e# service=git-upload-pack\n00000000"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	gitTest(t, repo, "remote", "add", "origin", server.URL+"/group/repo")
+	db, err := store.Open(filepath.Join(root, "posse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := commandOutputArgs(ctx, "", "git", "-C", repo, "ls-remote", "--heads", "origin", "refs/heads/posse/fresh-name")
+	if err != nil || !strings.Contains(output, "warning: redirecting to") {
+		t.Fatalf("ls-remote did not reproduce redirect warning: output=%q err=%v", output, err)
+	}
+	stdout, err := gitOutput(ctx, repo, "ls-remote", "--heads", "origin", "refs/heads/posse/fresh-name")
+	if err != nil || stdout != "" {
+		t.Fatalf("git output includes redirect warning: stdout=%q err=%v", stdout, err)
+	}
+	if err := taskBranchAvailable(ctx, db, project, "fresh-name"); err != nil {
+		t.Fatalf("fresh branch rejected because of redirect warning: %v", err)
+	}
+}
+
+func TestTaskBranchAvailabilityReportsUnreachableOriginAsCheckFailure(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	remote := server.URL + "/group/repo"
+	server.Close()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	gitTest(t, repo, "remote", "add", "origin", remote)
+	db, err := store.Open(filepath.Join(root, "posse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = taskBranchAvailable(ctx, db, project, "fresh-name")
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "branch_check_failed" || !strings.Contains(failure.Message, "shop") || !strings.Contains(failure.Message, "refs/heads/posse/fresh-name") {
+		t.Fatalf("unreachable origin result = %#v; want branch_check_failed for repository and ref", err)
+	}
+}
+
+func TestTaskBranchAvailabilityAllowsWorkspaceMemberWithoutOrigin(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	workspace := workspaceFixture(t, root)
+	detected, err := detectProject(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := make([]store.ProjectRepo, 0, len(detected.Repos))
+	for _, member := range detected.Repos {
+		members = append(members, store.ProjectRepo{Name: member.Name, Path: member.Path, DefaultBranch: member.DefaultBranch, Status: store.RepoActive})
+	}
+	db, err := store.Open(filepath.Join(root, "posse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateWorkspaceProject(ctx, detected.Name, workspace, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := taskBranchAvailable(ctx, db, project, "fresh-name"); err != nil {
+		t.Fatalf("fresh branch rejected for workspace with a member lacking origin: %v", err)
+	}
+}
+
+func TestRetryNameSuggestionAccepts24CharacterSlug(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	db, err := store.Open(filepath.Join(root, "posse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := "TLS overall architecture"
+	slug := taskTitleSlug(title)
+	retry := retryNameSuggestion(slug)
+	if len(slug) != 24 || len(retry) != 24 || retry != "tls-overall-archit-retry" {
+		t.Fatalf("24-character retry suggestion = %q for slug %q", retry, slug)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Type: "ship", Title: title, ShortName: slug})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateFailed, "cli", "setup failed"); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := retryNameAllowed(ctx, db, project, title, slug, retry)
+	if err != nil || !allowed {
+		t.Fatalf("suggested retry name allowed=%v err=%v", allowed, err)
+	}
+	if err := validateWorkerName(retry); err != nil {
+		t.Fatalf("suggested retry name is invalid: %v", err)
+	}
+}
+
 func TestTaskBranchAvailabilityChecksLocalAndOrigin(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -699,14 +835,15 @@ func TestTaskBranchAvailabilityChecksLocalAndOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitTest(t, repo, "branch", "posse/used-name")
-	if err := taskBranchAvailable(ctx, db, project, "used-name"); err == nil || !strings.Contains(err.Error(), "posse/used-name") {
+	if err := taskBranchAvailable(ctx, db, project, "used-name"); err == nil || !strings.Contains(err.Error(), "shop") || !strings.Contains(err.Error(), "refs/heads/posse/used-name") {
 		t.Fatalf("local branch collision = %v", err)
 	}
 	remote := filepath.Join(root, "origin.git")
 	gitTest(t, root, "init", "--bare", remote)
 	gitTest(t, repo, "remote", "add", "origin", remote)
 	gitTest(t, repo, "push", "origin", "refs/heads/main:refs/heads/posse/remote-name")
-	if err := taskBranchAvailable(ctx, db, project, "remote-name"); err == nil || !strings.Contains(err.Error(), "posse/remote-name") {
+	gitTest(t, repo, "update-ref", "-d", "refs/remotes/origin/posse/remote-name")
+	if err := taskBranchAvailable(ctx, db, project, "remote-name"); err == nil || !strings.Contains(err.Error(), "shop origin") || !strings.Contains(err.Error(), "refs/heads/posse/remote-name") {
 		t.Fatalf("origin branch collision = %v", err)
 	}
 }
