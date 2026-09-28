@@ -71,7 +71,8 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 					break
 				}
 				if time.Now().After(deadline) {
-					t.Errorf("E2E fixture processes still running for %s", root)
+					processes, processErr := fixtureProcessDetails(root)
+					t.Errorf("E2E fixture processes still running for %s: %v (inspect: %v)", root, processes, processErr)
 					break
 				}
 				time.Sleep(50 * time.Millisecond)
@@ -163,6 +164,45 @@ func reclaimAbandonedFixtures(parent string) error {
 		}
 	}
 	return nil
+}
+
+// fixtureProcessDetails identifies remaining fixture processes without exposing their full argv.
+func fixtureProcessDetails(root string) ([]string, error) {
+	if runtime.GOOS != "linux" {
+		return nil, nil
+	}
+	processes, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	var details []string
+	for _, process := range processes {
+		if !process.IsDir() || strings.Trim(process.Name(), "0123456789") != "" {
+			continue
+		}
+		environ, err := os.ReadFile(filepath.Join("/proc", process.Name(), "environ"))
+		if err != nil {
+			continue
+		}
+		belongs := false
+		for _, item := range strings.Split(string(environ), "\x00") {
+			if item == "POSSE_TEST_ROOT="+root || item == "XDG_CONFIG_HOME="+filepath.Join(root, "xdg") {
+				belongs = true
+				break
+			}
+		}
+		if !belongs {
+			continue
+		}
+		cmdline, _ := os.ReadFile(filepath.Join("/proc", process.Name(), "cmdline"))
+		args := strings.Fields(strings.ReplaceAll(string(cmdline), "\x00", " "))
+		if len(args) > 2 {
+			args = args[:2]
+		}
+		command := strings.Join(args, " ")
+		details = append(details, process.Name()+": "+command)
+	}
+	return details, nil
 }
 
 // A killed test can leave its Herdr server behind. Never delete a root while

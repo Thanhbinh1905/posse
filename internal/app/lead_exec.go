@@ -115,11 +115,24 @@ func (s *Service) finalizeLead(args []string) error {
 	for {
 		snapshot, snapshotErr := s.Herdr.Snapshot(ctx)
 		if snapshotErr == nil {
+			paneFound := false
 			for _, pane := range snapshot.Panes {
-				if pane.PaneID == plan.PaneID && pane.WorkspaceID == plan.WorkspaceID && pane.Agent != "" && pane.AgentStatus != "unknown" {
-					agent = pane
-					break
+				if pane.PaneID != plan.PaneID {
+					continue
 				}
+				if pane.WorkspaceID != plan.WorkspaceID {
+					return nil
+				}
+				paneFound = true
+				if pane.Agent != "" && pane.AgentStatus != "unknown" {
+					agent = pane
+				}
+				break
+			}
+			if !paneFound {
+				// A detached finalizer is cancelled when its pane or workspace
+				// closes before startup completes.
+				return nil
 			}
 		}
 		if agent.Agent != "" {
