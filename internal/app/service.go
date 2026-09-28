@@ -420,18 +420,24 @@ func gitTop(ctx context.Context, path string) (string, error) {
 
 func gitOutput(ctx context.Context, root string, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", root}, args...)
-	output, err := commandOutputArgs(ctx, "", "git", commandArgs...)
+	output, err := commandStdoutArgs(ctx, "", "git", commandArgs...)
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		if details := strings.TrimSpace(output); details != "" {
+			err = fmt.Errorf("%w: %s", err, details)
+		}
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
-	return strings.TrimSpace(string(output)), nil
+	return strings.TrimSpace(output), nil
 }
 
 func gitOutputRaw(ctx context.Context, root string, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", root}, args...)
-	output, err := commandOutputArgs(ctx, "", "git", commandArgs...)
+	output, err := commandStdoutArgs(ctx, "", "git", commandArgs...)
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(output))
+		if details := strings.TrimSpace(output); details != "" {
+			err = fmt.Errorf("%w: %s", err, details)
+		}
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return output, nil
 }

@@ -148,7 +148,12 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 		for _, member := range members {
 			worktree := filepath.Join(mount.Path, member.Path)
 			if _, err := gitOutput(ctx, worktree, "checkout", "-b", task.Branch, member.BaseRef); err != nil {
-				return mount, axi.Failure("branch_exists", member.Name+": could not create "+task.Branch, false, err.Error())
+				ref := "refs/heads/" + task.Branch
+				found, refErr := gitOutput(ctx, worktree, "for-each-ref", "--format=%(refname)", ref)
+				if refErr == nil && found != "" {
+					return mount, branchRefTaken(task.ShortName, member.Name, found)
+				}
+				return mount, axi.Failure("branch_check_failed", "could not create "+ref+" in repository "+member.Name, true, err.Error())
 			}
 			rows = append(rows, store.TaskRepo{Repo: member.Name, WorktreePath: worktree, BaseRef: member.BaseRef, LandingMode: member.LandingMode})
 		}
