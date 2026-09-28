@@ -885,6 +885,7 @@ esac
 	}
 	client := herdr.NewWithEnv("herdr", env)
 	startServer(t, client)
+	t.Cleanup(func() { stopLeadFinalizers(t, root, binary) })
 	if err := client.CheckProtocol(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -907,11 +908,10 @@ esac
 		}
 	} else {
 		// This mode calls up outside the pane and has no live Lead to answer
-		// its detached startup finalizer. Stop only that fixture's finalizer;
-		// it otherwise waits 30s after a Herdr restart and outlives cleanup.
+		// its detached startup finalizer. Stop it now; it otherwise waits 30s
+		// after a Herdr restart and outlives cleanup.
 		runPosse(t, binary, repo, callerEnv, "up", "--name", "shop", "--yes")
-		stopHeadlessLeadFinalizers(t, root, binary)
-		t.Cleanup(func() { stopHeadlessLeadFinalizers(t, root, binary) })
+		stopLeadFinalizers(t, root, binary)
 	}
 	opened, err := store.Open(home)
 	if err != nil {
@@ -926,6 +926,16 @@ esac
 	}
 	leadEnv := setEnv(callerEnv, "HERDR_PANE_ID", project.LeadPaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+	if liveLead {
+		var processInfo json.RawMessage
+		var processInfoErr error
+		if !waitForCondition(15*time.Second, func() bool {
+			processInfo, processInfoErr = client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": project.LeadPaneID})
+			return processInfoErr == nil && paneForegroundMatches(processInfo, "claude")
+		}) {
+			t.Fatalf("Lead agent did not reach the pane foreground: %s (%v)", processInfo, processInfoErr)
+		}
+	}
 	if _, err := client.Run(context.Background(), "pane", "report-agent", project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
 		t.Fatalf("mark isolated Lead busy: %v", err)
 	}
@@ -937,13 +947,35 @@ esac
 	}
 }
 
-// The headless PR fixture starts its Lead outside Herdr's pane. Its detached
-// finalizer has no agent to observe, so stop it before the isolated server and
-// fixture root are torn down. Never signal a process without matching both the
-// fixture binary and its exact isolated state paths.
-func stopHeadlessLeadFinalizers(t *testing.T, root, binary string) {
+func paneForegroundMatches(raw json.RawMessage, want string) bool {
+	var response struct {
+		ProcessInfo struct {
+			ForegroundProcesses []struct {
+				Name    string   `json:"name"`
+				Argv    []string `json:"argv"`
+				Cmdline string   `json:"cmdline"`
+			} `json:"foreground_processes"`
+		} `json:"process_info"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return false
+	}
+	for _, process := range response.ProcessInfo.ForegroundProcesses {
+		if filepath.Base(process.Name) == want || len(process.Argv) > 0 && filepath.Base(process.Argv[0]) == want {
+			return true
+		}
+		if fields := strings.Fields(process.Cmdline); len(fields) > 0 && filepath.Base(fields[0]) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// A detached Lead finalizer can outlive a failed fixture startup. Stop only
+// finalizers matching this fixture's binary and isolated state paths.
+func stopLeadFinalizers(t *testing.T, root, binary string) {
 	t.Helper()
-	pids, err := headlessLeadFinalizerPIDs(root, binary)
+	pids, err := leadFinalizerPIDs(root, binary)
 	if err != nil {
 		t.Errorf("find isolated Lead finalizers: %v", err)
 		return
@@ -954,7 +986,7 @@ func stopHeadlessLeadFinalizers(t *testing.T, root, binary string) {
 		}
 	}
 	if waitForCondition(2*time.Second, func() bool {
-		pids, err = headlessLeadFinalizerPIDs(root, binary)
+		pids, err = leadFinalizerPIDs(root, binary)
 		return err == nil && len(pids) == 0
 	}) {
 		return
@@ -966,14 +998,14 @@ func stopHeadlessLeadFinalizers(t *testing.T, root, binary string) {
 		}
 	}
 	if !waitForCondition(2*time.Second, func() bool {
-		pids, err = headlessLeadFinalizerPIDs(root, binary)
+		pids, err = leadFinalizerPIDs(root, binary)
 		return err == nil && len(pids) == 0
 	}) {
 		t.Errorf("isolated Lead finalizers remain after shutdown: pids=%v err=%v", pids, err)
 	}
 }
 
-func headlessLeadFinalizerPIDs(root, binary string) ([]int, error) {
+func leadFinalizerPIDs(root, binary string) ([]int, error) {
 	if runtime.GOOS != "linux" {
 		return nil, nil
 	}

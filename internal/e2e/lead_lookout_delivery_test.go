@@ -25,28 +25,31 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 	if _, err := client.Run(context.Background(), "pane", "report-agent", f.project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := client.Snapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	snapshot := herdr.Snapshot{}
+	var snapshotErr error
 	otherPane := ""
-	for _, pane := range snapshot.Panes {
-		if pane.WorkspaceID == f.project.HerdrWorkspaceID && pane.PaneID != f.project.LeadPaneID {
-			otherPane = pane.PaneID
-			break
+	if !waitForCondition(5*time.Second, func() bool {
+		snapshot, snapshotErr = client.Snapshot(context.Background())
+		if snapshotErr != nil {
+			return false
 		}
-	}
-	if otherPane == "" {
-		t.Fatal("no other pane to focus")
+		for _, pane := range snapshot.Panes {
+			if pane.WorkspaceID == f.project.HerdrWorkspaceID && pane.PaneID != f.project.LeadPaneID {
+				otherPane = pane.PaneID
+				break
+			}
+		}
+		return otherPane != ""
+	}) {
+		t.Fatalf("no other pane to focus: snapshot=%#v err=%v", snapshot.Panes, snapshotErr)
 	}
 	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": otherPane}); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err = client.Snapshot(context.Background())
-	if err != nil || snapshot.FocusedPaneID == f.project.LeadPaneID {
-		t.Fatalf("Lead is focused: %#v %v", snapshot, err)
+	snapshot, snapshotErr = client.Snapshot(context.Background())
+	if snapshotErr != nil || snapshot.FocusedPaneID == f.project.LeadPaneID {
+		t.Fatalf("Lead is focused: %#v %v", snapshot, snapshotErr)
 	}
-
 	logPath := filepath.Join(f.root, "lead-prompts.log")
 	// The poll-only tab must not suppress fallback when the Lead has never
 	// started a lookout.
