@@ -92,6 +92,7 @@ codex = "lead-codex"
 max_workers = 4
 stall_after = "20m"
 auto_unsaddle = "finished"  # finished (landed, or reported and its Notice acked) | landed | never
+auto_recover = true          # false: only `posse up` restarts the Lead and Riders after a Herdr restart or closed Lead workspace (section 17)
 pr_poll = "2m"               # how often PR state is refreshed while a Task is landing
 idle_after = "3m"            # a working Task whose agent sits idle this long with no Signal raises worker_idle
 landing_mode = "pr"          # local | pr | no-mistakes
@@ -228,6 +229,7 @@ projects(
   herdr_workspace_id TEXT,
   lead_pane_id TEXT, lead_label TEXT, lead_launches INTEGER,
   status TEXT,                                                    -- active | missing (repository moved)
+  down_at INTEGER,                                                -- set by `posse down`, cleared by `posse up` (section 16)
   created_at INTEGER, last_activity_at INTEGER)
 
 tasks(
@@ -580,6 +582,8 @@ There is at most one Lead per Project. The Lead rebuilds its picture from `posse
 
 `posse lead` prints the Lead instructions: role and hard rules (never edit the repo; every change is a Rider's; ask the User only for the User's decisions; report outcomes, not mechanics), the command loop, and Identity (name, persona, language, form of address) scoped explicitly: use it only in messages to the User; write every Brief, `posse send` message, review and decision record in English in a neutral voice, and quote the User's words verbatim where a Brief records their intent. The command loop tells the Lead to choose a short lowercase kebab-case name and always pass it with `posse ride --name <short>`; the name is not Brief frontmatter. When Posse delivers a Notice, the Lead follows the current lowkey mode rule from its wake or command output. With lowkey mode off it runs `posse`, reports every Notice and acknowledges it. With lowkey mode on it reads the Notice in the wake, reports only decisions and outcomes, and acknowledges routine Notices silently. The Notice rule matches the kind's `notice_delivery`: a `lookout` Lead keeps exactly one `posse lookout` running in the background and restarts it with `posse lookout --ack <ids>` whenever it returns, and never types into a focused pane. A `codex-queue`, `pi-extension` or `opencode-plugin` Lead is told that Notices arrive through its harness and not to run `posse lookout`. A `prompt` Lead is told that Notices arrive only while its pane is idle and unfocused, and to run `posse` before it answers the User. Every Lead is told never to poll with sleep, `posse peek`, `posse roster` or repeated `posse` calls to wait for Workers, CI or PRs, and to end its turn so its wake mechanism re-invokes it: each polling turn resends the whole context, which is most expensive for a long-lived Lead. `posse peek` is for inspecting a specific concern. The command loop describes the optional Brief fields `issues:` and `refs:` for forge issue links: `issues:` closes issues when the Task's PR Lands, and `refs:` adds non-closing references; workspace issue numbers include the member name (section 13). It also explains that `posse send --queue` waits for Rider idle instead of steering mid-turn.
 
+`posse down`, run by the User in the Project folder, stops the Project without unregistering it. It refuses with `tasks_open` while a Task is running (`spawning` through `landing`) and with `user_only` from a Rider or a live Lead pane; a Lead pane whose agent has exited is a User shell. It records the Project down first, so the close events it causes do not recover it, then stops the Lead agent, closes the Lead and Lookout tabs (only those panes when a tab holds foreign ones; the caller's own pane stays open, unlabeled) and stops the Project's Lookout processes. A down Project is never restarted by the startup hook, plugin events or other commands; `posse up` clears it.
+
 A moved repository makes its Project `missing`; `posse project move <name> <new-root>` fixes it.
 
 ## 17. Recovery
@@ -596,6 +600,8 @@ Work is never lost to a crash: commits live on the recorded `posse/<short>` bran
 6. Prompts one line pointing at a generated `relaunch.md`: re-read `launch.md`; inspect `git status` and `git log`; continue the Task; report with `posse holler`. It includes delivered Lead messages sent after the Brief in order, bounded to the most recent 32 messages and 1,200 bytes per message; later messages supersede earlier ones. Then moves the Task to `working`.
 
 **After a Herdr or machine restart.** Herdr's own resume reruns agents with only their session argument, so Workers lose their auto-approve flags and the Lead loses its instructions. The plugin therefore declares a `[[startup]]` hook that runs `posse recover --all` (by the absolute path recorded at `posse setup`). For every Project it reconciles, relaunches each live Worker through the relaunch path above (with full arguments and `resume_args`), restarts the Lead in its recorded pane (or a new tab if that pane is gone), and delivers one digest Notice to the Lead listing what was recovered. `posse recover [--all]` can also be run by hand. If the startup hook does not run, the next Project command or plugin event detects the changed generation and runs the same recovery inline; concurrent attempts use the recovery claim so they do not relaunch twice. If the previous generation was never recorded, `recover --all` still checks the Lookout process and replaces a restored shell-only tab.
+
+**Held recovery.** A Project that is down (section 16) or has `defaults.auto_recover = false` is held: `recover --all` skips it and lists it under `held_projects`, and plugin events and other commands leave its recorded panes untouched instead of recovering it or marking its Riders lost. The next `posse up` in its folder recovers it. When no Lead workspace is left, `posse up` first makes the caller's workspace the Lead workspace, so recovered Riders open beside the new Lead.
 
 **Interrupted commands.** `ride`, `land --merge`, `unsaddle` and `relaunch` record their progress in `intents` before each step with a side effect. Reconcile finishes or undoes an abandoned intent (older than its command's timeout, with no live process holding it): a `ride` without a pane fails the Task and releases its Mount; a `land --merge` whose default branch already contains `gated_sha` moves the Task to `landed`; an `unsaddle` is simply rerun. The intent row is deleted when the command completes.
 
@@ -659,6 +665,7 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse [--full] [--json]` | Lead, User | short Project summary, full dashboard with `--full`, complete JSON with `--json` (all Projects outside a Project) |
 | `posse lowkey on\|off\|status` | Lead, User | toggle or inspect persisted lowkey mode |
 | `posse up [--<kind>] [--replace] [--yes]` | User | register Project after one confirmation and start the Lead (section 16) |
+| `posse down` | User | stop the Project's Lead and Lookout until the next `posse up` (section 16) |
 | `posse lead` | Lead | print Lead instructions |
 | `posse roster [--full] [--all]` | Lead, User | Tasks, with issue links and branches under `--full`, or every Project |
 | `posse show <task> [--full]` | Lead | Task detail, PR state, last Signals, transitions |

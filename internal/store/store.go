@@ -818,6 +818,7 @@ type Project struct {
 	LeadLaunches     int    `toml:"lead_launches"`
 	LeadAbsentSince  int64  `toml:"lead_absent_since"`
 	Status           string `toml:"status"`
+	DownAt           int64  `toml:"down_at"`
 	CreatedAt        int64  `toml:"created_at"`
 	LastActivityAt   int64  `toml:"last_activity_at"`
 }
@@ -853,6 +854,19 @@ func (db *DB) CreateProject(ctx context.Context, name, root, defaultBranch strin
 		return Project{}, err
 	}
 	return Project{ID: id, Name: name, Root: root, DefaultBranch: defaultBranch, Kind: ProjectKindRepo, Status: "active", CreatedAt: now, LastActivityAt: now}, nil
+}
+
+// IsDown reports that the User stopped this Project with `posse down`.
+// Nothing restarts its Lead or Riders until `posse up`.
+func (p Project) IsDown() bool { return p.DownAt != 0 }
+
+func (db *DB) MarkProjectDown(ctx context.Context, projectID int64) error {
+	return db.queries.MarkProjectDown(ctx, dbgen.MarkProjectDownParams{DownAt: time.Now().UnixMilli(), ID: projectID})
+}
+
+// ClearDownProjectLead forgets the stopped Lead pane of a down Project.
+func (db *DB) ClearDownProjectLead(ctx context.Context, projectID int64) error {
+	return db.queries.ClearDownProjectLead(ctx, projectID)
 }
 
 func (db *DB) SetProjectLead(ctx context.Context, projectID int64, workspaceID, paneID, label string) error {
@@ -1417,7 +1431,7 @@ func (db *DB) Projects(ctx context.Context) ([]Project, error) {
 }
 
 func projectFromDB(row dbgen.Project) Project {
-	return Project{ID: row.ID, Name: row.Name, Root: row.Root, DefaultBranch: row.DefaultBranch, Kind: row.Kind, HerdrWorkspaceID: row.HerdrWorkspaceID, LeadPaneID: row.LeadPaneID, LeadLabel: row.LeadLabel, LeadLaunches: int(row.LeadLaunches), LeadAbsentSince: row.LeadAbsentSince, Status: row.Status, CreatedAt: row.CreatedAt, LastActivityAt: row.LastActivityAt}
+	return Project{ID: row.ID, Name: row.Name, Root: row.Root, DefaultBranch: row.DefaultBranch, Kind: row.Kind, HerdrWorkspaceID: row.HerdrWorkspaceID, LeadPaneID: row.LeadPaneID, LeadLabel: row.LeadLabel, LeadLaunches: int(row.LeadLaunches), LeadAbsentSince: row.LeadAbsentSince, Status: row.Status, DownAt: row.DownAt, CreatedAt: row.CreatedAt, LastActivityAt: row.LastActivityAt}
 }
 
 type AmbiguousTaskName struct {
