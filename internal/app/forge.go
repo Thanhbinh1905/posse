@@ -152,7 +152,7 @@ type gitlabMergeRequest struct {
 	} `json:"head_pipeline"`
 }
 
-func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member string, summary ...string) (string, bool, error) {
+func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string) (string, bool, error) {
 	output, err := runOutputStep(ctx, db, intent, "pr.lookup", forge.Root, "glab", "api", "--hostname", forge.Host, "projects/"+url.PathEscape(forge.Path)+"/merge_requests?state=opened&source_branch="+url.QueryEscape(task.Branch)+"&target_branch="+url.QueryEscape(project.DefaultBranch))
 	if err != nil {
 		return "", false, axi.Failure("pr_list_failed", "could not list GitLab merge requests", true, err.Error())
@@ -173,7 +173,7 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 		}
 		return mr.WebURL, false, nil
 	}
-	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary...)
+	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
 	if err != nil {
 		return "", false, err
 	}

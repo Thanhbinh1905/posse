@@ -232,7 +232,7 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 				}); err != nil {
 					return axi.Failure("pr_push_failed", repo.Repo+": could not push the gated Task branch", true, err.Error())
 				}
-				prURL, opened, err := s.findOrCreatePullRequest(ctx, db, member.project, gated, intent, forge, member.target.Name)
+				prURL, opened, err := s.findOrCreatePullRequest(ctx, db, member.project, gated, intent, forge, member.target.Name, "", "", "", "")
 				if err != nil {
 					return prefixFailure(repo.Repo, err)
 				}
