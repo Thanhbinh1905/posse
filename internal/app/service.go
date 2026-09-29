@@ -55,6 +55,7 @@ func (s *Service) commands() *axi.Command {
 	root.Handler = s.home
 	root.Subcommands = []*axi.Command{
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
+		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Lookout; nothing restarts them until `posse up`.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "roster", Usage: "$ roster [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
@@ -147,7 +148,9 @@ func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) 
 // reconcileProject recovers a real Herdr restart before proceeding with a
 // generation-mismatched snapshot. A delayed event from the old server instead
 // retries against the current server, without rolling pane ids backward.
-func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) (runtime.RunResult, error) {
+// Only userStart (`posse up`) may recover a Project whose recovery is held;
+// other callers get errRecoveryHeld and must not reconcile its stale panes.
+func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, userStart bool) (runtime.RunResult, error) {
 	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
 		return runtime.RunResult{}, err
 	}
@@ -158,6 +161,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	if !project.IsWorkspace() {
 		if snapshot, err := s.snapshot(ctx); err == nil {
 			if tasks, err := db.LiveTasks(ctx, project.ID); err == nil && riderGroupClosed(snapshot, project, tasks) {
+				if !userStart && recoveryHeld(project, cfg) {
+					return runtime.RunResult{}, errRecoveryHeld
+				}
 				home, err := s.homePath()
 				if err != nil {
 					return runtime.RunResult{}, err
@@ -170,20 +176,24 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 				if err := waitProjectRecovery(ctx, db, project); err != nil {
 					return runtime.RunResult{}, err
 				}
-				fresh, err := s.snapshot(ctx)
-				if err != nil {
-					return runtime.RunResult{}, err
-				}
-				current, err := db.ProjectByID(ctx, project.ID)
-				if err != nil {
-					return runtime.RunResult{}, err
-				}
-				currentTasks, err := db.LiveTasks(ctx, project.ID)
-				if err != nil {
-					return runtime.RunResult{}, err
-				}
-				if riderGroupClosed(fresh, current, currentTasks) {
-					return runtime.RunResult{}, fmt.Errorf("lead still missing after Herdr group recovery for %s", project.Name)
+				// `posse up` holds the Lead start claim, so recovery leaves the
+				// Lead to it and the Lead is still missing here.
+				if !userStart {
+					fresh, err := s.snapshot(ctx)
+					if err != nil {
+						return runtime.RunResult{}, err
+					}
+					current, err := db.ProjectByID(ctx, project.ID)
+					if err != nil {
+						return runtime.RunResult{}, err
+					}
+					currentTasks, err := db.LiveTasks(ctx, project.ID)
+					if err != nil {
+						return runtime.RunResult{}, err
+					}
+					if riderGroupClosed(fresh, current, currentTasks) {
+						return runtime.RunResult{}, fmt.Errorf("lead still missing after Herdr group recovery for %s", project.Name)
+					}
 				}
 			}
 		}
@@ -207,6 +217,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return result, err
 	}
 	if current.ServerStartedAt != "" && recorded != "" && current.ServerStartedAt != recorded {
+		if !userStart && recoveryHeld(project, cfg) {
+			return result, errRecoveryHeld
+		}
 		home, err := s.homePath()
 		if err != nil {
 			return result, err
@@ -267,9 +280,10 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 				return cfg, herdrError(err)
 			}
 		} else {
-			result, runErr := s.reconcileProject(ctx, db, project, cfg)
+			result, runErr := s.reconcileProject(ctx, db, project, cfg, false)
 			if runErr != nil {
-				if !isHerdrUnavailable(runErr) {
+				// A held Project keeps its recorded panes for `posse up`.
+				if !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) {
 					return cfg, herdrError(runErr)
 				}
 			} else {

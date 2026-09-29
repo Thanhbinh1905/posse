@@ -95,7 +95,10 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			return err
 		}
-		result, err := s.reconcileProject(ctx, db, project, cfg)
+		result, err := s.reconcileProject(ctx, db, project, cfg, false)
+		if errors.Is(err, errRecoveryHeld) {
+			continue
+		}
 		if err != nil {
 			if focusEvent {
 				failures = append(failures, err)

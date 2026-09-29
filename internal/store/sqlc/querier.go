@@ -19,6 +19,7 @@ type Querier interface {
 	AllocateTaskLaunch(ctx context.Context, arg AllocateTaskLaunchParams) (int64, error)
 	AllocateTaskSequence(ctx context.Context, projectID int64) (int64, error)
 	BreakMount(ctx context.Context, arg BreakMountParams) error
+	ClearDownProjectLead(ctx context.Context, id int64) error
 	ClearGatedSHALandingToDone(ctx context.Context, id int64) error
 	ClearProjectLead(ctx context.Context, id int64) error
 	ClearTaskGatedSHA(ctx context.Context, arg ClearTaskGatedSHAParams) error
@@ -39,6 +40,7 @@ type Querier interface {
 	LiveTasks(ctx context.Context, projectID int64) ([]Task, error)
 	MarkMessageDelivered(ctx context.Context, arg MarkMessageDeliveredParams) error
 	MarkNoticeDelivered(ctx context.Context, arg MarkNoticeDeliveredParams) error
+	MarkProjectDown(ctx context.Context, arg MarkProjectDownParams) error
 	MountByTask(ctx context.Context, taskID sql.NullInt64) (Mount, error)
 	Mounts(ctx context.Context, projectID int64) ([]Mount, error)
 	MoveProject(ctx context.Context, arg MoveProjectParams) error

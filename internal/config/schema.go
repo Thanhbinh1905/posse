@@ -41,6 +41,7 @@ var keySpecs = []KeySpec{
 	{Key: "defaults.stall_after", Type: TypeDuration, Default: "20m", Meaning: "Time without output or worktree progress before a Rider is stalled."},
 	{Key: "defaults.idle_after", Type: TypeDuration, Default: "3m", Meaning: "Time a Rider may be idle without a Signal before a Notice is created."},
 	{Key: "defaults.auto_unsaddle", Type: TypeString, Allowed: []string{"finished", "landed", "never"}, Default: "finished", Meaning: "Whether completed Tasks are automatically Teardown after landing or Notice acknowledgement."},
+	{Key: "defaults.auto_recover", Type: TypeBoolean, Default: true, Meaning: "Whether plugin events and the Herdr startup hook restart the Lead and Riders after a Herdr restart or a closed Lead workspace; when false, `posse up` recovers them."},
 	{Key: "defaults.landing_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Default: "pr", Meaning: "How Ship Task changes are Landed."},
 	{Key: "defaults.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Forge for this Project; auto detects from each repository remote."},
 	{Key: "repositories.<repository>.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override the forge for a member repository."},

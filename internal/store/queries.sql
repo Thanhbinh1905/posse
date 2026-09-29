@@ -34,10 +34,16 @@ VALUES (?, ?, ?, 'active', ?, ?);
 
 -- name: SetProjectLead :exec
 UPDATE projects SET herdr_workspace_id = ?, lead_pane_id = ?, lead_label = ?,
-    lead_absent_since = 0, status = 'active', last_activity_at = ? WHERE id = ?;
+    lead_absent_since = 0, down_at = 0, status = 'active', last_activity_at = ? WHERE id = ?;
 
 -- name: ClearProjectLead :exec
 UPDATE projects SET lead_pane_id = '', lead_label = '', lead_absent_since = 0, status = 'missing' WHERE id = ?;
+
+-- name: MarkProjectDown :exec
+UPDATE projects SET down_at = ? WHERE id = ?;
+
+-- name: ClearDownProjectLead :exec
+UPDATE projects SET lead_pane_id = '', lead_label = '', lead_absent_since = 0 WHERE id = ? AND down_at != 0;
 
 -- name: InsertLeadStartClaim :execresult
 INSERT INTO lead_start_claims(project_id, claimed_at) VALUES (?, ?)

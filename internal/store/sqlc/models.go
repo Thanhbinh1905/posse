@@ -146,6 +146,7 @@ type Project struct {
 	LastActivityAt   int64
 	LeadLaunches     int64
 	Kind             string
+	DownAt           int64
 }
 
 type ProjectRepo struct {

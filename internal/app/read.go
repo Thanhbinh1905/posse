@@ -28,6 +28,9 @@ type projectSummary struct {
 }
 
 func (s *Service) leadStatus(ctx context.Context, project store.Project) string {
+	if project.IsDown() {
+		return "down"
+	}
 	if s.Herdr == nil || (project.LeadPaneID == "" && project.LeadLabel == "") {
 		return project.Status
 	}

@@ -180,6 +180,15 @@ func (q *Queries) BreakMount(ctx context.Context, arg BreakMountParams) error {
 	return err
 }
 
+const clearDownProjectLead = `-- name: ClearDownProjectLead :exec
+UPDATE projects SET lead_pane_id = '', lead_label = '', lead_absent_since = 0 WHERE id = ? AND down_at != 0
+`
+
+func (q *Queries) ClearDownProjectLead(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, clearDownProjectLead, id)
+	return err
+}
+
 const clearGatedSHALandingToDone = `-- name: ClearGatedSHALandingToDone :exec
 UPDATE tasks SET gated_sha = '' WHERE id = ? AND state = 'done'
 `
@@ -620,6 +629,20 @@ func (q *Queries) MarkNoticeDelivered(ctx context.Context, arg MarkNoticeDeliver
 	return err
 }
 
+const markProjectDown = `-- name: MarkProjectDown :exec
+UPDATE projects SET down_at = ? WHERE id = ?
+`
+
+type MarkProjectDownParams struct {
+	DownAt int64
+	ID     int64
+}
+
+func (q *Queries) MarkProjectDown(ctx context.Context, arg MarkProjectDownParams) error {
+	_, err := q.db.ExecContext(ctx, markProjectDown, arg.DownAt, arg.ID)
+	return err
+}
+
 const mountByTask = `-- name: MountByTask :one
 SELECT id, project_id, n, path, state, task_id, acquired_at, released_at FROM mounts WHERE task_id = ?
 `
@@ -850,7 +873,7 @@ func (q *Queries) OpenNotices(ctx context.Context, projectID int64) ([]OpenNotic
 }
 
 const projectByID = `-- name: ProjectByID :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind FROM projects WHERE id = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE id = ?
 `
 
 func (q *Queries) ProjectByID(ctx context.Context, id int64) (Project, error) {
@@ -870,12 +893,13 @@ func (q *Queries) ProjectByID(ctx context.Context, id int64) (Project, error) {
 		&i.LastActivityAt,
 		&i.LeadLaunches,
 		&i.Kind,
+		&i.DownAt,
 	)
 	return i, err
 }
 
 const projectByLeadPane = `-- name: ProjectByLeadPane :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind FROM projects WHERE lead_pane_id = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE lead_pane_id = ?
 `
 
 func (q *Queries) ProjectByLeadPane(ctx context.Context, leadPaneID string) (Project, error) {
@@ -895,12 +919,13 @@ func (q *Queries) ProjectByLeadPane(ctx context.Context, leadPaneID string) (Pro
 		&i.LastActivityAt,
 		&i.LeadLaunches,
 		&i.Kind,
+		&i.DownAt,
 	)
 	return i, err
 }
 
 const projectByName = `-- name: ProjectByName :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind FROM projects WHERE name = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE name = ?
 `
 
 func (q *Queries) ProjectByName(ctx context.Context, name string) (Project, error) {
@@ -920,12 +945,13 @@ func (q *Queries) ProjectByName(ctx context.Context, name string) (Project, erro
 		&i.LastActivityAt,
 		&i.LeadLaunches,
 		&i.Kind,
+		&i.DownAt,
 	)
 	return i, err
 }
 
 const projectByRoot = `-- name: ProjectByRoot :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind FROM projects WHERE root = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE root = ?
 `
 
 func (q *Queries) ProjectByRoot(ctx context.Context, root string) (Project, error) {
@@ -945,12 +971,13 @@ func (q *Queries) ProjectByRoot(ctx context.Context, root string) (Project, erro
 		&i.LastActivityAt,
 		&i.LeadLaunches,
 		&i.Kind,
+		&i.DownAt,
 	)
 	return i, err
 }
 
 const projects = `-- name: Projects :many
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind FROM projects ORDER BY name
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects ORDER BY name
 `
 
 func (q *Queries) Projects(ctx context.Context) ([]Project, error) {
@@ -976,6 +1003,7 @@ func (q *Queries) Projects(ctx context.Context) ([]Project, error) {
 			&i.LastActivityAt,
 			&i.LeadLaunches,
 			&i.Kind,
+			&i.DownAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1098,7 +1126,7 @@ func (q *Queries) ResetTaskProgress(ctx context.Context, arg ResetTaskProgressPa
 
 const setProjectLead = `-- name: SetProjectLead :exec
 UPDATE projects SET herdr_workspace_id = ?, lead_pane_id = ?, lead_label = ?,
-    lead_absent_since = 0, status = 'active', last_activity_at = ? WHERE id = ?
+    lead_absent_since = 0, down_at = 0, status = 'active', last_activity_at = ? WHERE id = ?
 `
 
 type SetProjectLeadParams struct {

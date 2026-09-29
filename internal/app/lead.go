@@ -324,7 +324,27 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	defer db.ReleaseLeadStart(context.Background(), project.ID)
 	var snapshot herdr.Snapshot
 	if registered {
-		runtimeResult, err := s.reconcileProject(ctx.Context, db, project, cfg)
+		// With no Lead workspace left (`posse down`, a closed group or a
+		// held restart), the caller's workspace becomes it before recovery,
+		// so recovered Riders open beside the Lead this command starts.
+		if workspaceID := os.Getenv("HERDR_WORKSPACE_ID"); workspaceID != "" {
+			current, err := s.Herdr.Snapshot(ctx.Context)
+			if err != nil {
+				return herdrError(err)
+			}
+			if _, found := leadWorkspace(current, project); !found {
+				if err := db.SetProjectWorkspace(ctx.Context, project.ID, workspaceID); err != nil {
+					return err
+				}
+				if _, err := s.herdrCall(ctx.Context, "workspace.rename", map[string]any{"workspace_id": workspaceID, "label": leadWorkspaceLabel(project)}); err != nil {
+					return err
+				}
+				if project, err = db.ProjectByID(ctx.Context, project.ID); err != nil {
+					return err
+				}
+			}
+		}
+		runtimeResult, err := s.reconcileProject(ctx.Context, db, project, cfg, true)
 		if err != nil {
 			return herdrError(err)
 		}

@@ -126,7 +126,17 @@ func (s *Service) recover(ctx *axi.Context, args []string) error {
 	reconciled := 0
 	restarted := 0
 	failed := []any{}
+	held := []any{}
 	for _, project := range projects {
+		cfg, err := config.Load(home, project.Name)
+		if err != nil {
+			failed = append(failed, map[string]any{"project": project.Name, "error": err.Error()})
+			continue
+		}
+		if recoveryHeld(project, cfg) {
+			held = append(held, project.Name)
+			continue
+		}
 		count, err := s.recoverProject(ctx.Context, db, home, project)
 		if err != nil {
 			failed = append(failed, map[string]any{"project": project.Name, "error": err.Error()})
@@ -139,7 +149,20 @@ func (s *Service) recover(ctx *axi.Context, args []string) error {
 	if len(failed) > 0 {
 		state = "partial"
 	}
-	return ctx.Print(axi.Object{{Key: "projects", Value: reconciled}, {Key: "attempted", Value: len(projects)}, {Key: "restarted", Value: restarted}, {Key: "failed_projects", Value: failed}, {Key: "state", Value: state}})
+	result := axi.Object{{Key: "projects", Value: reconciled}, {Key: "attempted", Value: len(projects) - len(held)}, {Key: "restarted", Value: restarted}, {Key: "failed_projects", Value: failed}}
+	if len(held) > 0 {
+		result = append(result, axi.Field{Key: "held_projects", Value: held}, axi.Field{Key: "help", Value: []any{"Run `posse up` in a held Project's folder to start its Lead and recover its Riders"}})
+	}
+	return ctx.Print(append(result, axi.Field{Key: "state", Value: state}))
+}
+
+// errRecoveryHeld marks a Project that only `posse up` may restart.
+var errRecoveryHeld = errors.New("recovery is held until posse up")
+
+// recoveryHeld reports a Project that nothing but `posse up` may restart:
+// the User stopped it with `posse down` or turned off defaults.auto_recover.
+func recoveryHeld(project store.Project, cfg config.Config) bool {
+	return project.IsDown() || !cfg.Defaults.AutoRecover
 }
 
 func rebuildCallerMayBeUser(ctx context.Context, home string) bool {
