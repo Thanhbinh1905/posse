@@ -15,7 +15,7 @@ import (
 // publish is the only supported direct delivery path for a normal PR-mode Worker.
 // It never accepts a branch, remote, refspec, or merge option from the caller.
 func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
-	parsed, err := parseArgs("publish", args, map[string]flagSpec{"repo": {}})
+	parsed, err := parseArgs("publish", args, map[string]flagSpec{"repo": {}, "verify": {}, "proof": {}, "risk": {}})
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral: only the Lead's Gate may persist a gated SHA.
-	prURL, created, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Flags["repo"], parsed.Positionals[0])
+	prURL, created, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Flags["repo"], parsed.Positionals[0], parsed.Flags["verify"], parsed.Flags["proof"], parsed.Flags["risk"])
 	if err != nil {
 		return err
 	}
@@ -173,7 +173,7 @@ func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.D
 			continue
 		}
 		if member.repo.PRURL == "" {
-			return axi.Failure("signal_invalid", member.repo.Repo+": publish its PR before signalling done", false, "Run `posse publish --repo "+member.repo.Repo+" \"<summary>\"`")
+			return axi.Failure("signal_invalid", member.repo.Repo+": publish its PR before signalling done", false, "Run `posse publish --repo "+member.repo.Repo+" \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]`")
 		}
 		sha, err := gitOutput(ctx, member.repo.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 		if err != nil {

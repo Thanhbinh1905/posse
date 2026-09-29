@@ -241,7 +241,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 				}
 				openIntentActive = true
-				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "")
+				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", "", "", "", "")
 				if openErr != nil {
 					return openErr
 				}
@@ -283,9 +283,9 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 	return s.mergePullRequest(out, db, project, cfg, task, userQuote)
 }
 
-func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member string, summary ...string) (string, bool, error) {
+func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string) (string, bool, error) {
 	if forge.Kind == "gitlab" {
-		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary...)
+		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk)
 	}
 	args := []string{"pr", "list", "--state", "open", "--base", project.DefaultBranch, "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
 	var urlValue, lastHead string
@@ -326,7 +326,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if foundOpenPR {
 		return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
 	}
-	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary...)
+	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
 	if err != nil {
 		return "", false, err
 	}
@@ -498,11 +498,8 @@ func ctxPrintLand(ctx *axi.Context, task store.Task, help string) error {
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landing"}, {Key: "pr_url", Value: task.PRURL}, {Key: "gated_sha", Value: task.GatedSHA}, {Key: "help", Value: []any{help}}})
 }
 
-func prDetails(ctx context.Context, db *store.DB, project store.Project, task store.Task, homeFor func() (string, error), member string, supplied ...string) (string, string, error) {
-	summary := ""
-	if len(supplied) > 0 {
-		summary = supplied[0]
-	} else {
+func prDetails(ctx context.Context, db *store.DB, project store.Project, task store.Task, homeFor func() (string, error), member, summary, verification, proof, risk string) (string, string, error) {
+	if strings.TrimSpace(summary) == "" {
 		signals, err := db.TaskSignals(ctx, task.ID, 20)
 		if err != nil {
 			return "", "", err
@@ -530,12 +527,65 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 	if err != nil {
 		return "", "", axi.Failure("brief_invalid", "could not parse the Task Brief for the pull request body", false, err.Error())
 	}
-	body := "## Rider summary\n\n" + strings.TrimSpace(summary) + "\n\n## Brief intent\n\n" + brief.Body + "\n"
-	if links := issueLinkBody(brief, member); links != "" {
-		body += "\n" + links
+	changes, err := gitOutput(ctx, task.WorktreePath, "log", "--reverse", "--format=- %s", task.BaseRef+"..HEAD")
+	if err != nil {
+		return "", "", axi.Failure("pr_changes_failed", "could not read Task commit subjects for the pull request body", false, err.Error())
 	}
+	changes = strings.TrimSpace(changes)
+	if changes == "" {
+		return "", "", axi.Failure("pr_changes_failed", "Task branch has no commit subjects for the pull request body", false)
+	}
+	verification = verificationChecklist(verification)
+	proof = strings.TrimSpace(proof)
+	if proof == "" {
+		proof = "_No proof supplied._"
+	}
+	risk = strings.TrimSpace(risk)
+	if risk == "" {
+		risk = "Risk: not stated\nRollback: revert this PR"
+	}
+	issueLinks := strings.Join(issueLinkLines(brief, member), "\n")
+	issueSection := "## Issue Link"
+	if issueLinks != "" {
+		issueSection += "\n\n" + issueLinks
+	}
+	body := strings.Join([]string{
+		"## Summary\n\n" + strings.TrimSpace(summary),
+		issueSection,
+		"## Changes\n\n" + changes,
+		"## Verification\n\n" + verification,
+		"## Proof\n\n" + proof,
+		"## Risk And Rollback\n\n" + risk,
+		"## Documentation\n\n" + documentationChecklist,
+	}, "\n\n") + "\n"
 	return brief.Title, body, nil
 }
+
+func verificationChecklist(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "- [ ] Not run; reason: not supplied"
+	}
+	items := make([]string, 0)
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "- [ ] ") || strings.HasPrefix(line, "- [x] ") || strings.HasPrefix(line, "- [X] ") {
+			items = append(items, line)
+		} else {
+			items = append(items, "- [x] "+line)
+		}
+	}
+	if len(items) == 0 {
+		return "- [ ] Not run; reason: not supplied"
+	}
+	return strings.Join(items, "\n")
+}
+
+const documentationChecklist = `- [ ] Documentation updated for this change
+- [ ] CLAUDE.md/AGENTS.md updated if needed`
 
 var osReadFile = func(path string) ([]byte, error) { return os.ReadFile(path) }
 

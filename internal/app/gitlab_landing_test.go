@@ -200,16 +200,20 @@ func TestGitLabWatchRecognizesMergeDuringFollowUp(t *testing.T) {
 }
 
 func TestGitLabMRDescriptionMatchesGitHubPRBody(t *testing.T) {
-	f := gitlabFixture(t)
-	title, body, err := prDetails(context.Background(), f.db, f.project, f.task, f.service.homePath, "")
+	f := gitlabFixture(t, store.StateWorking)
+	summary := "Worker completion summary"
+	verification := "go test ./internal/app -> pass"
+	proof := "```text\ngo test ./internal/app\nPASS\n```"
+	risk := "Risk: low\nRollback: revert the merge commit"
+	title, body, err := prDetails(context.Background(), f.db, f.project, f.task, f.service.homePath, "", summary, verification, proof, risk)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(body, "## Rider summary\n") {
-		t.Fatalf("PR description has the wrong visible role label: %q", body)
+	if !strings.HasPrefix(body, "## Summary\n\n"+summary+"\n\n## Issue Link\n\n## Changes\n") {
+		t.Fatalf("PR description does not use the seven-section template: %q", body)
 	}
-	if code, output, stderr := f.run("land", "t1"); code != 0 {
-		t.Fatalf("land: %d %s %s", code, output, stderr)
+	if code, output, stderr := f.run("publish", summary, "--verify", verification, "--proof", proof, "--risk", risk); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
 	}
 	written, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_DESCRIPTION"))
 	if err != nil || string(written) != body {

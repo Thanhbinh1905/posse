@@ -36,11 +36,74 @@ func TestPRLandingPushesGatedBranchAndOpensPullRequest(t *testing.T) {
 		t.Fatalf("PR opened Notices = %#v, %v", notices, err)
 	}
 	log, err := os.ReadFile(fixture.ghLog)
-	if err != nil || !strings.Contains(string(log), "pr create") || !strings.Contains(string(log), "E2E intent") || !strings.Contains(string(log), "Worker completion summary") {
-		t.Fatalf("gh pr create did not receive the Brief intent and Worker summary: %q, %v", log, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"pr create", "## Summary", "Worker completion summary", "## Changes", "- worker change", "## Documentation"} {
+		if !strings.Contains(string(log), expected) {
+			t.Fatalf("gh pr create omitted %q from the structured body: %q", expected, log)
+		}
 	}
 	if !strings.Contains(string(log), "--title E2E Brief title") {
 		t.Fatalf("PR title did not come from the Brief: %q", log)
+	}
+}
+
+func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12]\nrefs: [14]\n---\nE2E intent\n"
+	briefPath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
+	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "proof.md"), []byte("proof\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", "proof.md")
+	gitTest(t, fixture.worktree, "commit", "-m", "document proof template")
+	fixture.headSHA = strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	fixture.setGHHead(t, fixture.headSHA)
+
+	verification := "go test ./internal/app -> pass\ngo vet ./... -> pass"
+	proof := "![Updated settings](https://example.com/settings.png)\n\nTests passed in CI."
+	risk := "Risk: low\nRollback: revert the merge commit"
+	if code, output, stderr := fixture.run("publish", "Worker completion summary", "--verify", verification, "--proof", proof, "--risk", risk); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedBody := "## Summary\n\nWorker completion summary\n\n" +
+		"## Issue Link\n\nCloses #12\nRefs #14\n\n" +
+		"## Changes\n\n- worker change\n- document proof template\n\n" +
+		"## Verification\n\n- [x] go test ./internal/app -> pass\n- [x] go vet ./... -> pass\n\n" +
+		"## Proof\n\n" + proof + "\n\n" +
+		"## Risk And Rollback\n\n" + risk + "\n\n" +
+		"## Documentation\n\n- [ ] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
+	if !strings.Contains(string(log), "--body "+expectedBody) {
+		t.Fatalf("PR body did not match the seven-section template: %q", log)
+	}
+}
+
+func TestPublishWithoutOptionalBodyFieldsWritesDefaults(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedBody := "## Summary\n\nWorker completion summary\n\n" +
+		"## Issue Link\n\n" +
+		"## Changes\n\n- worker change\n\n" +
+		"## Verification\n\n- [ ] Not run; reason: not supplied\n\n" +
+		"## Proof\n\n_No proof supplied._\n\n" +
+		"## Risk And Rollback\n\nRisk: not stated\nRollback: revert this PR\n\n" +
+		"## Documentation\n\n- [ ] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
+	if !strings.Contains(string(log), "--body "+expectedBody) {
+		t.Fatalf("PR body did not include the optional-field defaults: %q", log)
 	}
 }
 
@@ -756,7 +819,7 @@ func TestLeadInstructionsExplainPRNoticeActions(t *testing.T) {
 			t.Errorf("Lead instructions omit PR handling for %q: %s", expected, output)
 		}
 	}
-	for _, expected := range []string{"landing Ship Task also accepts a follow-up `posse send` before those Notices", "returns it to working until the next `posse land`", "merge `origin/<default>` into the Task branch", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists"} {
+	for _, expected := range []string{"landing Ship Task also accepts a follow-up `posse send` before those Notices", "returns it to working until the next `posse land`", "merge `origin/<default>` into the Task branch", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("Lead instructions omit recovery guidance %q: %s", expected, output)
 		}

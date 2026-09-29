@@ -704,11 +704,15 @@ func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
 	local := workerProtocol(project, store.Task{Seq: 1, Type: "ship", LandingMode: "local"}, brief, "/tmp/launch.md")
 	pr := workerProtocol(project, store.Task{Seq: 2, Type: "ship", LandingMode: "pr"}, brief, "/tmp/launch.md")
 	noMistakes := workerProtocol(project, store.Task{Seq: 3, Type: "ship", LandingMode: "no-mistakes"}, brief, "/tmp/launch.md")
+	workspace := workerProtocol(store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "ship"}, brief, "/tmp/launch.md")
 	if !strings.Contains(local, "Never git push or open a PR") {
 		t.Fatalf("normal Worker protocol does not ban push: %s", local)
 	}
-	if !strings.Contains(pr, `posse publish "<summary>"`) || !strings.Contains(pr, "--pr <url>") || !strings.Contains(pr, "Never push directly") || !strings.Contains(pr, "or merge") {
+	if !strings.Contains(pr, `posse publish "<summary>" [--verify "<command> -> <result>"] [--proof "<markdown>"] [--risk "<markdown>"]`) || !strings.Contains(pr, "screenshots/images") || !strings.Contains(pr, "test/log evidence") || !strings.Contains(pr, "risk plus rollback") || !strings.Contains(pr, "--pr <url>") || !strings.Contains(pr, "Never push directly") || !strings.Contains(pr, "or merge") {
 		t.Fatalf("PR Worker protocol has incorrect publishing rules: %s", pr)
+	}
+	if !strings.Contains(workspace, `posse publish --repo <member> "<summary>" [--verify "<command> -> <result>"] [--proof "<markdown>"] [--risk "<markdown>"]`) || !strings.Contains(workspace, "screenshots/images") || !strings.Contains(workspace, "test/log evidence") || !strings.Contains(workspace, "risk plus rollback") {
+		t.Fatalf("workspace Worker protocol has incorrect publishing rules: %s", workspace)
 	}
 	if strings.Contains(noMistakes, "git push") || !strings.Contains(noMistakes, "no-mistakes axi run --intent") {
 		t.Fatalf("no-mistakes Worker protocol has incorrect delivery rules: %s", noMistakes)

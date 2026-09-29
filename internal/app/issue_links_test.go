@@ -79,11 +79,11 @@ func TestWorkspacePRIssueLinksUseMemberIssueNumbers(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerBody := issueLinkBody(brief, "worker")
-	if workerBody != "## Linked issues\n\nCloses #12\nRefs #16\n" {
+	if workerBody != "## Issue Link\n\nCloses #12\nRefs #16\n" {
 		t.Fatalf("worker PR links = %q", workerBody)
 	}
 	apiBody := issueLinkBody(brief, "api")
-	if apiBody != "## Linked issues\n\nCloses #14\n" {
+	if apiBody != "## Issue Link\n\nCloses #14\n" {
 		t.Fatalf("api PR links = %q", apiBody)
 	}
 }

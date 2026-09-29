@@ -249,7 +249,7 @@ func issueLinkBody(brief dispatch.Brief, member string) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	return "## Linked issues\n\n" + strings.Join(lines, "\n") + "\n"
+	return "## Issue Link\n\n" + strings.Join(lines, "\n") + "\n"
 }
 
 func appendMissingIssueLinks(body string, brief dispatch.Brief, member string) (string, bool) {
@@ -270,7 +270,7 @@ func appendMissingIssueLinks(body string, brief dispatch.Brief, member string) (
 	if len(missing) == 0 {
 		return body, false
 	}
-	section := "## Linked issues\n\n" + strings.Join(missing, "\n") + "\n"
+	section := "## Issue Link\n\n" + strings.Join(missing, "\n") + "\n"
 	if strings.TrimSpace(body) == "" {
 		return section, true
 	}
