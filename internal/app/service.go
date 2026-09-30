@@ -273,6 +273,9 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 	if err != nil {
 		return config.Config{}, configError(err)
 	}
+	if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
+		return cfg, err
+	}
 	herdrReady := false
 	if s.Herdr != nil {
 		if err := s.Herdr.CheckProtocol(ctx); err != nil {

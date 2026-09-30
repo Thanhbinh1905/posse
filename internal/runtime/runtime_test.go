@@ -640,6 +640,31 @@ func TestTaskGenerationStillGetsRestartGraceAfterProjectGenerationWasRecorded(t 
 	}
 }
 
+func TestRunIgnoresPaneThatDisappearsAfterSnapshot(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Millisecond)
+	if err := db.UpdateProgress(ctx, task.ID, "previous output", "previous worktree", now.Add(-10*time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
+	fake.Errors["pane.read"] = &herdr.Error{Code: "pane_not_found", Message: "pane w1:p1 not found"}
+	if _, err := Run(ctx, db, fake, project.ID, time.Minute, 0, now, nil); err != nil {
+		t.Fatalf("snapshot pane disappearing before its read failed reconciliation: %v", err)
+	}
+
+	updated, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != store.StateWorking || updated.LastProgressAt != 0 {
+		t.Fatalf("vanished pane did not preserve working state and reset progress: %#v", updated)
+	}
+}
+
 func TestRunWithMissingGenerationPreservesLastObservedProjectAndAgentGenerations(t *testing.T) {
 	db, project, task := createWorkingTask(t)
 	defer db.Close()

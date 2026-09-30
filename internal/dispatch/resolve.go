@@ -61,8 +61,8 @@ func Resolve(cfg config.Config, taskType, requested string) (Resolution, error) 
 	}
 	matches := genericMatches
 	if len(typedMatches) > 0 {
-		// Exact-type rules isolate phase routes from generic fallbacks. A unique
-		// typed default wins; `when` alternatives remain human-selected via --profile.
+		// Exact-type rules exclude generic fallbacks. A unique typed default
+		// wins over conditional alternatives, which the Lead selects via --profile.
 		matches = typedMatches
 		var defaults []config.Rule
 		for _, rule := range typedMatches {

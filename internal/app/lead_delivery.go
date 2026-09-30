@@ -42,7 +42,7 @@ const codexOpeningPrompt = "Run `posse` and give the User a short status of the 
 // Lead's whole context.
 const noPollRule = "Never poll with sleep, `posse peek`, `posse roster` or repeated `posse` calls to wait for Riders, CI or PRs; use `posse peek` only to inspect a specific concern."
 
-const lowkeyReportingRule = "Lowkey mode on: message the User only for needs-decision, land_ready when autonomy.land=ask, failed/lost, pr_closed, persistent pr_watch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, working notes, first pr_watch_failing, restarts) silently; group them into one short line only if useful. This changes reporting, not autonomy: never answer a needs-decision Notice for the User. The wake message already contains the Notice text; do not run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
+const lowkeyReportingRule = "Lowkey mode on: message the User only for needs-decision, message_delivery_uncertain, land_ready when autonomy.land=ask, failed/lost, pr_closed, persistent pr_watch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, working notes, first pr_watch_failing, restarts) silently; group them into one short line only if useful. This changes reporting, not autonomy: never answer a needs-decision Notice for the User. The wake message already contains the Notice text; do not run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
 
 const normalReportingRule = "Lowkey mode off: handle every Notice, tell the User the outcome in your own words without waiting to be asked, then run `posse ack <id|all>`."
 
@@ -123,7 +123,10 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 	if err := writeFile(instructionsFile, []byte(instructions)); err != nil {
 		return leadLaunch{}, err
 	}
-	launch := leadLaunch{Args: make([]string, 0, len(kindConfig.LeadArgs)+len(kindConfig.SystemPromptArgs)+2)}
+	launch := leadLaunch{Args: make([]string, 0, len(kindConfig.AutoApproveArgs)+len(kindConfig.LeadArgs)+len(kindConfig.SystemPromptArgs)+2)}
+	if kindConfig.LeadAutoApprove {
+		launch.Args = append(launch.Args, kindConfig.AutoApproveArgs...)
+	}
 	launch.Args = append(launch.Args, kindConfig.LeadArgs...)
 	oneLine := strings.Join(strings.Fields(instructions), " ")
 	for _, argument := range kindConfig.SystemPromptArgs {
@@ -169,7 +172,11 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 		if profile.Kind != kind {
 			return leadLaunch{}, axi.Failure("config_invalid", "Lead Profile "+profileName+" kind does not match "+kind, false)
 		}
-		launch.Args = append(launch.Args, resolvedProfileArgs(profile, kindConfig)...)
+		profileArgs := resolvedProfileArgs(profile, kindConfig)
+		if kindConfig.LeadAutoApprove {
+			profileArgs = withoutArgumentSequence(profileArgs, kindConfig.AutoApproveArgs)
+		}
+		launch.Args = append(launch.Args, profileArgs...)
 	}
 	if kind == "opencode" {
 		// --prompt starts a turn without typing into the pane. The first turn
@@ -187,6 +194,33 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 		launch.StartsBusy = true
 	}
 	return launch, nil
+}
+
+// withoutArgumentSequence removes Profile copies of the kind's already-added
+// auto-approve arguments without changing unrelated Profile arguments.
+func withoutArgumentSequence(args, sequence []string) []string {
+	if len(sequence) == 0 || len(args) < len(sequence) {
+		return args
+	}
+	result := make([]string, 0, len(args))
+	for index := 0; index < len(args); {
+		matches := index+len(sequence) <= len(args)
+		if matches {
+			for offset, argument := range sequence {
+				if args[index+offset] != argument {
+					matches = false
+					break
+				}
+			}
+		}
+		if matches {
+			index += len(sequence)
+			continue
+		}
+		result = append(result, args[index])
+		index++
+	}
+	return result
 }
 
 func claudeNoticeDirectory(home, project string) string {

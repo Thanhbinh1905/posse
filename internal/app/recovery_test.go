@@ -120,14 +120,21 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	found, restartedWithBypass := false, false
 	for _, call := range fake.Calls {
 		if call.Method == "agent.prompt" && call.Params["target"] == "w1:p1" && strings.Contains(call.Params["text"].(string), "posse lead") {
 			found = true
 		}
+		if call.Method == "agent.start" {
+			args := call.Params["args"].([]string)
+			restartedWithBypass = len(args) >= 1 && args[0] == "--dangerously-skip-permissions"
+		}
 	}
 	if !found {
 		t.Fatalf("Profile args suppressed restart Lead instructions: %#v", fake.Calls)
+	}
+	if !restartedWithBypass {
+		t.Fatalf("restarted Claude Lead omitted its default bypass argument: %#v", fake.Calls)
 	}
 	assertLeadMetadataCall(t, fake, "w1:p1", "claude")
 	// Lookout failure must not strand the newly launched prompt-kind Lead.
@@ -151,6 +158,79 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	}
 	if !found {
 		t.Fatalf("Lookout failure produced no Notice: %#v", notices)
+	}
+}
+
+func TestRestartLeadUsesDefaultAutoApproveArgsForCodexAndOpenCode(t *testing.T) {
+	for _, kind := range []string{"codex", "opencode"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			repo := filepath.Join(root, "repo")
+			initRepo(t, repo)
+			home := filepath.Join(root, "posse")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			configText := "[lead]\nkind = \"" + kind + "\"\n"
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			db, err := store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := db.CreateProject(ctx, "shop", repo, "main")
+			if err == nil {
+				err = db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead")
+			}
+			if closeErr := db.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			project.HerdrWorkspaceID = "w1"
+			project.LeadPaneID = "w1:p1"
+			project.LeadLabel = "posse:shop:lead"
+			fake := herdr.NewFake()
+			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: kind, AgentStatus: "working"}}}
+			fake.Results["agent.get"] = []byte(`{"agent":{"agent_status":"working","launch_pending":true}}`)
+			service := testService(home, shellAfterInterruptAdapter{Fake: fake})
+			cfg, err := config.Load(home, project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db, err = store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
+				t.Fatal(err)
+			}
+
+			var args []string
+			for _, call := range fake.Calls {
+				if call.Method == "agent.start" {
+					args = call.Params["args"].([]string)
+					break
+				}
+			}
+			if len(args) == 0 {
+				t.Fatalf("restart did not start a %s Lead: %#v", kind, fake.Calls)
+			}
+			switch kind {
+			case "codex":
+				if len(args) < 4 || !equalStrings(args[:3], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access"}) || args[len(args)-1] != codexOpeningPrompt {
+					t.Fatalf("restarted Codex Lead argv = %#v", args)
+				}
+			case "opencode":
+				if !equalStrings(args, []string{"--auto", "--prompt", codexOpeningPrompt}) {
+					t.Fatalf("restarted OpenCode Lead argv = %#v", args)
+				}
+			}
+		})
 	}
 }
 
