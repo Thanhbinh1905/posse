@@ -1,0 +1,234 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/store"
+)
+
+type readinessGap struct {
+	Code          string `json:"code"`
+	Consequence   string `json:"consequence"`
+	Key           string `json:"key"`
+	UserOnly      bool   `json:"user_only"`
+	Fix           string `json:"fix"`
+	Informational bool   `json:"informational"`
+	Member        string `json:"member"` // Always present to keep TOON rows tabular.
+}
+
+// Readiness is a projection, not a first-run flag. Keep its ordering stable so
+// the same effective config and diagnostics produce the same conversation.
+func projectReadiness(cfg config.Config, checks []doctorCheck) []readinessGap {
+	gaps := []readinessGap{}
+	for _, code := range []string{"forge_auth", "gate_empty", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"} {
+		if code == "autonomy_ask" {
+			if cfg.Defaults.LandingMode == "" {
+				continue // Machine-only diagnostics have no Project authority.
+			}
+			var actions []string
+			var keys []string
+			if cfg.Autonomy.Review == "" || cfg.Autonomy.Review == "ask" {
+				actions = append(actions, "decide review findings")
+				keys = append(keys, "autonomy.review")
+			}
+			if cfg.Autonomy.Land == "" || cfg.Autonomy.Land == "ask" {
+				actions = append(actions, "Land (merge)")
+				keys = append(keys, "autonomy.land")
+			}
+			if len(actions) > 0 {
+				gaps = append(gaps, readinessGap{Code: code, Consequence: "The Lead must ask before it may " + strings.Join(actions, " or ") + ".", Key: strings.Join(keys, ", "), UserOnly: true, Fix: "Keep ask unless this request needs more authority. Record one-off approvals separately; change standing Autonomy only with the User's explicit grant.", Informational: true})
+			}
+			continue
+		}
+		for _, check := range checks {
+			if check.GapCode == code && check.Status != "ok" {
+				gaps = append(gaps, readinessGap{Code: code, Consequence: check.Detail, Key: check.Key, UserOnly: check.UserOnly, Fix: check.Action, Member: check.Member})
+			}
+		}
+	}
+	return gaps
+}
+
+func withReadiness(result axi.Object, gaps []readinessGap) axi.Object {
+	if len(gaps) != 0 {
+		result = append(result, axi.Field{Key: "readiness", Value: gaps})
+	}
+	return result
+}
+
+func (s *Service) readiness(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]readinessGap, error) {
+	checks, err := s.projectDoctorChecks(ctx, db, project, cfg)
+	if err != nil {
+		return nil, err
+	}
+	checks = append(checks, s.machineSetupCheck(ctx)...)
+	return projectReadiness(cfg, checks), nil
+}
+
+func (s *Service) projectDoctorChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]doctorCheck, error) {
+	targets, err := s.projectTargets(ctx, db, project)
+	if err != nil {
+		return nil, err
+	}
+	return repositoryDoctorChecks(ctx, cfg, targets), nil
+}
+
+// These checks use the same effective Member policies as Landing, never a
+// guessed test command or a repository script. Auth/status probes are read-only.
+func repositoryDoctorChecks(ctx context.Context, cfg config.Config, targets []repoTarget) []doctorCheck {
+	checks := []doctorCheck{}
+	for _, target := range targets {
+		mode, gate, gateKey := cfg.Defaults.LandingMode, cfg.Defaults.Gate, "defaults.gate"
+		if target.Name != "" {
+			mode = memberLandingMode(cfg, target.Name, originHost(ctx, target.Root))
+			if override, ok := cfg.Repositories[target.Name]; ok && override.Gate != nil {
+				gate = override.Gate
+			}
+			gateKey = "repositories." + target.Name + ".gate"
+		}
+		suffix := ""
+		if target.Name != "" {
+			suffix = " for Member " + target.Name
+		}
+		gateCheck := doctorCheck{Name: "Gate" + suffix, Status: "ok", Detail: "Gate configured", GapCode: "gate_empty", Key: gateKey, Member: target.Name, UserOnly: true}
+		if len(gate) == 0 {
+			gateCheck.Status = "info"
+			gateCheck.Detail = "No Project Gate commands run before Landing" + suffix + "."
+			gateCheck.Action = "Propose Gate commands found in the repository; save them only after an explicit yes with --user-approved, or continue without a Gate if the User declines."
+		}
+		checks = append(checks, gateCheck)
+		if mode == "pr" {
+			forge, err := forgeForRepository(ctx, target.Root, cfg, target.Name)
+			auth := doctorCheck{Name: "forge auth" + suffix, Status: "ok", Detail: "authenticated", GapCode: "forge_auth", Key: "defaults.forge", Member: target.Name}
+			if target.Name != "" {
+				auth.Key = "repositories." + target.Name + ".forge"
+			}
+			if err != nil {
+				auth.Status = "warn"
+				auth.Detail = "Pull requests cannot be verified or opened" + suffix + ": " + err.Error()
+				auth.Action = "Configure an origin remote and its forge, then authenticate gh or glab for that host."
+			} else {
+				cli := "gh"
+				if forge.Kind == "gitlab" {
+					cli = "glab"
+				}
+				auth.Name += " " + forge.Host
+				if _, err := commandOutputArgs(ctx, target.Root, cli, "auth", "status", "--hostname", forge.Host); err != nil {
+					auth.Status = "warn"
+					auth.Detail = "Pull requests cannot be opened" + suffix + " because " + cli + " authentication for " + forge.Host + " is missing or could not be verified."
+					auth.Action = "Run `" + cli + " auth login --hostname " + forge.Host + "`."
+				}
+			}
+			checks = append(checks, auth)
+		}
+		if mode == "no-mistakes" {
+			check := doctorCheck{Name: "no-mistakes" + suffix, Status: "ok", Detail: "initialized", GapCode: "no_mistakes_uninitialized", Key: "defaults.landing_mode", Member: target.Name}
+			if err := ensureNoMistakesInitialized(ctx, target.Root); err != nil {
+				check.Status = "warn"
+				check.Detail = "The no-mistakes pipeline cannot run" + suffix + ": " + err.Error()
+				check.Action = "Install no-mistakes if needed, then run `no-mistakes init` in the repository."
+			}
+			checks = append(checks, check)
+		}
+	}
+	return checks
+}
+
+// Reuse setup's read-only plan so readiness notices missing or changed assets,
+// not just whether setup happened at some point in the past.
+func (s *Service) machineSetupCheck(ctx context.Context) []doctorCheck {
+	check := doctorCheck{Name: "machine setup", Status: "ok", Detail: "current", GapCode: "machine_setup", Action: "Run `posse setup --check` to inspect changes, then apply `posse setup` with the User's go-ahead."}
+	inspect := func() error {
+		home, err := s.homePath()
+		if err != nil {
+			return err
+		}
+		manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName))
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("machine setup has not been applied")
+		}
+		if s.Herdr == nil {
+			return fmt.Errorf("herdr setup could not be inspected")
+		}
+		state, err := s.inspectSetup(ctx, home)
+		if err != nil {
+			return err
+		}
+		dirs, err := setupDirectories()
+		if err != nil {
+			return err
+		}
+		binary := manifest.Binary
+		if binary == "" {
+			binary, err = os.Executable()
+			if err != nil {
+				return err
+			}
+		}
+		plan := s.setupPlan(home, binary, s.binaryVersion(), dirs, manifest, found, state)
+		for _, row := range plan {
+			action, _ := row["action"].(string)
+			if action != "keep" && action != "offer" {
+				return fmt.Errorf("machine setup has remaining changes (%s: %s)", row["step"], action)
+			}
+		}
+		return nil
+	}
+	if err := inspect(); err != nil {
+		check.Status = "warn"
+		check.Detail = "Rider guards or Notice delivery may be missing: " + err.Error() + "."
+	}
+	return []doctorCheck{check}
+}
+
+func (s *Service) doctorReadiness(ctx context.Context, home string) ([]doctorCheck, []readinessGap, error) {
+	machine := s.machineSetupCheck(ctx)
+	db, _, err := s.openDB()
+	if err != nil {
+		return machine, nil, err
+	}
+	defer db.Close()
+	dir, err := currentDir()
+	if err != nil {
+		return machine, nil, err
+	}
+	project, found, err := registeredProjectFor(ctx, db, dir)
+	if err != nil {
+		return machine, nil, err
+	}
+	var targets []repoTarget
+	if found {
+		targets, err = s.projectTargets(ctx, db, project)
+		if err != nil {
+			return machine, nil, err
+		}
+	} else {
+		detected, detectErr := detectProject(ctx, dir)
+		if detectErr != nil {
+			return machine, projectReadiness(config.Config{}, machine), nil
+		}
+		project.Name = detected.Name
+		for _, repo := range detected.Repos {
+			name := repo.Name
+			if detected.Kind == store.ProjectKindRepo {
+				name = ""
+			}
+			targets = append(targets, repoTarget{Name: name, Root: filepath.Join(detected.Root, repo.Path)})
+		}
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return machine, nil, err
+	}
+	checks := append(repositoryDoctorChecks(ctx, cfg, targets), machine...)
+	return checks, projectReadiness(cfg, checks), nil
+}

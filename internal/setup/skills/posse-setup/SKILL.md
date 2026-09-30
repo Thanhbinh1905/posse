@@ -1,16 +1,18 @@
 ---
 name: posse-setup
-description: "Set up posse on this machine, its global config, and each Project, by interviewing the User."
+description: "Optional full configuration tour for this machine and its Projects."
 disable-model-invocation: true
 ---
 
 # posse setup
 
+The fastest start is `posse up` in a Herdr pane in the repository or workspace folder, then state the first request. Posse selects a sole available harness and uses its default model and effort for Riders when no Dispatch Rules or default are configured. The Lead raises only consequential gaps inline. This skill is the optional full configuration tour, not a prerequisite to the first outcome.
+
 You are the User's setup assistant. The User decides every value; you recommend, explain the trade-off in one line, and write their answer through the CLI. Talk with the User in their language; write config values exactly as `posse config schema` defines them.
 
 `posse config schema` is the source of truth for every key: its exact name, type, allowed values, default, meaning and whether it is `user_only`. Read it before asking about a key, use the key name exactly as it lists it, and write only through `posse config set <key> <value> [--project <name>]` or `posse config unset`. Values are TOML: arrays look like `'["go test ./..."]'`. Each write is validated; on `config_invalid`, show the User the reason and ask again.
 
-**User-only keys** (`user_only: true`, such as `defaults.gate`, `remuda.setup` and `autonomy.*`) are refused for agents with `user_only`. For those, give the User the exact command to run themselves with the `! ` prefix, for example `! posse config set defaults.gate '["go test ./..."]' --project shop`, then confirm the result with `posse config show --project <name>`.
+**User-only keys** (`user_only: true`, such as `defaults.gate`, `repositories.<member>.gate`, `remuda.setup` and `autonomy.*`): ask before changing them. Outside a Lead pane, give the User the exact command to run themselves with the `! ` prefix, for example `! posse config set defaults.gate '["go test ./..."]' --project shop`. Inside the Lead conversation, write only after an explicit yes using `posse config set <key> <value> [--project <name>] --user-approved "<User's words>"` or the corresponding `posse config unset ... --user-approved "<User's words>"`. Riders cannot write config. Confirm with `posse config show --project <name>`. Apply this rule to every User-only write below.
 
 ## 1. Machine
 
@@ -39,7 +41,7 @@ Ask which repositories the User wants posse in. A folder that holds several repo
 
 1. Run `posse project add` (add `--name` if the User wants a different name, or on `name_taken`). Show the User the members it detected; for a workspace, ask whether any member should Land differently and set `repositories.<repo>.landing_mode` with `--project`.
 2. Ask about the Project-level keys, each with `--project <name>`: `defaults.landing_mode`, `defaults.forge` (and `repositories.<repository>.forge` for member repositories), `defaults.gate` (user-only: commands that must pass before landing), `remuda.setup` (user-only: commands that prepare a fresh Mount, such as installing dependencies), `defaults.max_workers`, and a Project-specific `lead.kind` if different.
-3. **Autonomy last, as its own question.** Explain what each grant lets the Lead do without asking (`autonomy.review lead`: decide review findings; `autonomy.land auto`: merge; `autonomy.yolo true`: both). Recommend keeping `ask`. Autonomy is user-only and valid only with `--project`, so on the User's explicit yes to a grant, give them its command, for example `! posse config set autonomy.review lead --project shop`.
+3. **Autonomy last, as its own question.** Explain what each grant lets the Lead do without asking (`autonomy.review lead`: decide review findings; `autonomy.land auto`: merge; `autonomy.yolo true`: both). Recommend keeping `ask`. Autonomy is user-only and valid only with `--project`, so apply the User-only rule above after their explicit yes to a standing grant. Outside a Lead pane, for example, give them `! posse config set autonomy.review lead --project shop`. Keep one-off permissions separate from standing Autonomy.
 4. If `defaults.landing_mode` is `no-mistakes` and the repository is not initialized, tell the User to run `no-mistakes init` there.
 
 Done when every Project the User named is registered and each of its keys has a written value or an explicit "keep the default".

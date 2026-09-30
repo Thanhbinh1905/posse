@@ -62,7 +62,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if err := validateWorkerName(slug); err != nil {
 		return axi.Failure("brief_invalid", "Task title cannot produce a descriptive branch slug", false, "Rewrite the title to state the work")
 	}
-	resolution, err := dispatch.Resolve(cfg, brief.Type, parsed.Flags["profile"])
+	resolution, err := s.resolveDispatch(ctx.Context, project, cfg, brief.Type, parsed.Flags["profile"])
 	if err != nil {
 		var failure *axi.Error
 		if errors.As(profileError(err), &failure) {
@@ -80,6 +80,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "name", Value: slug},
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "dispatch_rule", Value: resolution.Rule},
+		{Key: "resolved_profile", Value: resolution.Resolved},
 		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
 	}
 	if len(brief.Issues)+len(brief.Refs) > 0 {
@@ -149,7 +150,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if count >= cfg.Defaults.MaxWorkers {
 		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Riders (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config")
 	}
-	resolution, err := dispatch.Resolve(cfg, brief.Type, parsed.Flags["profile"])
+	resolution, err := s.resolveDispatch(ctx.Context, project, cfg, brief.Type, parsed.Flags["profile"])
 	if err != nil {
 		return profileError(err)
 	}
@@ -339,7 +340,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	}
 	s.relabelProjectTabs(ctx.Context, db, project)
 	worktreePath := filepath.Clean(mount.Path)
-	if kindConfig, ok := cfg.Kinds[cfg.Profiles[resolution.Profile].Kind]; ok {
+	if kindConfig, ok := cfg.Kinds[resolution.Resolved.Kind]; ok {
 		prepareErr := s.runIntentStep(ctx.Context, db, intent, "repository.prepare", func() error {
 			if project.IsWorkspace() && kindConfig.Prepare == "claude-trust" {
 				worktrees := map[string]string{}
@@ -383,7 +384,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	taskHome := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(sequence))
 	briefPath := filepath.Join(taskHome, "brief.md")
 	launchPath := filepath.Join(taskHome, "launch.md")
-	profile := cfg.Profiles[resolution.Profile]
+	profile := resolution.Resolved
 	argsForAgent := workerAgentArgs(profile, kindConfig, "")
 	if err := s.runIntentStep(ctx.Context, db, intent, "brief.write", func() error { return writeFile(briefPath, briefData) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -1338,15 +1339,14 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		return failure(axi.Failure("config_invalid", "Task has no Profile", false))
 	}
 	profileName := task.Profile
+	profile, ok := dispatch.StoredProfile(cfg, profileName, task.DispatchRule)
 	if requestedProfile != "" {
-		profileName = requestedProfile
+		resolution, err := dispatch.Resolve(cfg, task.Type, requestedProfile)
+		if err != nil {
+			return failure(profileError(err))
+		}
+		profileName, profile, ok = resolution.Profile, resolution.Resolved, true
 	}
-	resolution, err := dispatch.Resolve(cfg, task.Type, profileName)
-	if err != nil {
-		return failure(profileError(err))
-	}
-	profileName = resolution.Profile
-	profile, ok := cfg.Profiles[profileName]
 	if !ok {
 		return failure(axi.Failure("config_invalid", "Task Profile "+profileName+" no longer exists", false))
 	}
@@ -1578,8 +1578,16 @@ func prepareMountForKind(kind config.Kind, mountPath, projectRoot string) error 
 	}
 }
 
+func (s *Service) resolveDispatch(ctx context.Context, project store.Project, cfg config.Config, taskType, requested string) (dispatch.Resolution, error) {
+	if requested == "" && len(cfg.Dispatch) == 0 && cfg.DispatchDefault.Use == "" {
+		// This is an effective value for this resolution only, never a config write.
+		cfg.Lead.Kind = s.currentLeadKind(ctx, project, cfg, cfg.Lead.Kind)
+	}
+	return dispatch.Resolve(cfg, taskType, requested)
+}
+
 func taskKind(cfg config.Config, task store.Task) string {
-	if profile, ok := cfg.Profiles[task.Profile]; ok && profile.Kind != "" {
+	if profile, ok := dispatch.StoredProfile(cfg, task.Profile, task.DispatchRule); ok && profile.Kind != "" {
 		return profile.Kind
 	}
 	return "claude"

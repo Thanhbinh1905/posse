@@ -224,6 +224,11 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	if !ctx.JSON && !full {
 		rule = shortReportingRule(cfg.Lowkey.Lead)
 	}
+	gaps, err := s.readiness(ctx.Context, db, project, cfg)
+	if err != nil {
+		return err
+	}
+	result = withReadiness(result, gaps)
 	result = append(result, axi.Field{Key: "lowkey", Value: cfg.Lowkey.Lead}, axi.Field{Key: "reporting_rule", Value: rule})
 	if ctx.JSON || full {
 		result = append(result, axi.Field{Key: "help", Value: help})

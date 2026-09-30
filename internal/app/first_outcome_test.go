@@ -1,0 +1,386 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
+	setupassets "github.com/thanhbinh1905/posse/internal/setup"
+	"github.com/thanhbinh1905/posse/internal/store"
+)
+
+type firstOutcomeFixture struct {
+	root, home, repo, brief string
+	service                 *Service
+	fake                    *herdr.Fake
+	db                      *store.DB
+	project                 store.Project
+}
+
+func newFirstOutcomeFixture(t *testing.T) firstOutcomeFixture {
+	t.Helper()
+	root := t.TempDir()
+	home, repo := filepath.Join(root, "posse"), filepath.Join(root, "repo")
+	initRepo(t, repo)
+	setupFollowupAgentPath(t, "pi")
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("POSSE_HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(root, "pi"))
+	if err := os.MkdirAll(filepath.Join(root, "pi"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	project, err := db.CreateProject(context.Background(), "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	project, err = db.ProjectByID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{
+		Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "Lead:shop"}},
+		Panes:      []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "pi", AgentStatus: "idle", Focused: true}},
+		Agents:     []herdr.Agent{{PaneID: "w1:p1", Kind: "pi"}},
+	}
+	fake.Results["server.agent_manifests"] = json.RawMessage(`{"agents":[{"kind":"pi","available":true}]}`)
+	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
+	fake.RunOut["plugin list --json"] = []byte(`{"plugins":[]}`)
+	fake.RunOut["integration status"] = []byte("pi: installed\n")
+	fake.RunOut["plugin log list --plugin posse.herdr"] = []byte(`{}`)
+	brief := filepath.Join(root, "brief.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: First outcome\ndone_when: verified\n---\nMake a change.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	return firstOutcomeFixture{root: root, home: home, repo: repo, brief: brief, service: testService(home, fake), fake: fake, db: db, project: project}
+}
+
+func outcomeCLI(t *testing.T, service *Service, wantCode int, args ...string) string {
+	t.Helper()
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run(args); code != wantCode {
+		t.Fatalf("%v exit=%d want=%d:\n%s", args, code, wantCode, &output)
+	}
+	return output.String()
+}
+
+func TestFirstOutcomeUpKindSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, manifests, flag, kind, source string
+		code                                int
+	}{
+		{name: "sole", manifests: `{"agents":[{"kind":"pi","available":true}]}`, kind: "pi", source: "only available kind"},
+		{name: "PATH fallback", manifests: `{}`, kind: "pi", source: "only available kind"},
+		{name: "several", manifests: `{"agents":[{"kind":"pi"},{"kind":"codex"}]}`, code: 1},
+		{name: "flag wins", manifests: `{"agents":[{"kind":"pi"},{"kind":"codex"}]}`, flag: "--pi", kind: "pi", source: "flag"},
+		{name: "none", manifests: `{"agents":[]}`, code: 1},
+		{name: "configured wins", manifests: `{"agents":[{"kind":"pi"},{"kind":"codex"}]}`, kind: "pi", source: "lead.kind"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFirstOutcomeFixture(t)
+			if tc.name == "none" {
+				setupFollowupAgentPath(t)
+			} else if tc.name != "sole" && tc.name != "PATH fallback" {
+				setupFollowupAgentPath(t, "pi", "codex")
+			}
+			if tc.name == "configured wins" {
+				outcomeCLI(t, f.service, 0, "config", "set", "lead.kind", "pi")
+			}
+			before, _ := os.ReadFile(filepath.Join(f.home, "config.toml"))
+			f.fake.Results["server.agent_manifests"] = json.RawMessage(tc.manifests)
+			f.fake.SnapshotValue.Panes[0].Agent = ""
+			f.fake.SnapshotValue.Agents = nil
+			t.Setenv("HERDR_ENV", "1")
+			t.Setenv("HERDR_PANE_ID", "w1:p1")
+			t.Setenv("HERDR_WORKSPACE_ID", "w1")
+			args := []string{"up", "--yes", "--json"}
+			if tc.flag != "" {
+				args = append(args, tc.flag)
+			}
+			output := outcomeCLI(t, f.service, tc.code, args...)
+			if tc.code != 0 {
+				if !strings.Contains(output, "lead_kind_required") {
+					t.Fatal(output)
+				}
+				if tc.name == "several" && (!strings.Contains(output, "pi") || !strings.Contains(output, "codex")) {
+					t.Fatal(output)
+				}
+				if f.service.pendingLead != nil {
+					t.Fatal("ambiguous up scheduled a Lead")
+				}
+			} else {
+				if !strings.Contains(output, tc.source) || f.service.pendingLead == nil || f.service.pendingLead.Kind != tc.kind {
+					t.Fatalf("selection: %s %#v", output, f.service.pendingLead)
+				}
+				for _, code := range []string{"gate_empty", "autonomy_ask", "machine_setup"} {
+					if !strings.Contains(output, code) {
+						t.Fatalf("up missing %s: %s", code, output)
+					}
+				}
+				instructions, err := os.ReadFile(filepath.Join(f.home, "projects", "shop", "lead.md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(instructions), "gate_empty") {
+					t.Fatalf("startup readiness absent: %s", instructions)
+				}
+			}
+			after, _ := os.ReadFile(filepath.Join(f.home, "config.toml"))
+			if !bytes.Equal(before, after) {
+				t.Fatalf("up persisted its selection: %s", after)
+			}
+		})
+	}
+}
+
+func TestFirstOutcomeDispatchPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, profile, source, kind string
+		code                                int
+	}{
+		{name: "implicit", source: "implicit: lead kind", kind: "pi"},
+		{name: "named Profiles without rules", config: "[profiles.deep]\nkind='codex'\n", source: "implicit: lead kind", kind: "pi"},
+		{name: "live Lead overrides default Lead", config: "[lead]\nkind='codex'\n", source: "implicit: lead kind", kind: "pi"},
+		{name: "default", config: "[profiles.deep]\nkind='codex'\n[dispatch.default]\nuse='deep'\n", source: "dispatch.default", kind: "codex"},
+		{name: "single rule", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\ntype='ship'\nuse='deep'\n", source: "type=ship", kind: "codex"},
+		{name: "explicit", config: "[profiles.deep]\nkind='codex'\n", profile: "deep", source: "--profile deep", kind: "codex"},
+		{name: "ambiguous", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\nwhen='hard'\nuse='deep'\n[[dispatch]]\nwhen='easy'\nuse='deep'\n[dispatch.default]\nuse='deep'\n", code: 1},
+		{name: "unmatched configured rule", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\ntype='review'\nuse='deep'\n", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFirstOutcomeFixture(t)
+			if tc.config != "" {
+				if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(tc.config), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{"dispatch", "--brief", f.brief, "--json"}
+			if tc.profile != "" {
+				args = append(args, "--profile", tc.profile)
+			}
+			output := outcomeCLI(t, f.service, tc.code, args...)
+			if tc.code != 0 {
+				if !strings.Contains(output, "profile_required") {
+					t.Fatal(output)
+				}
+				return
+			}
+			if !strings.Contains(output, tc.source) || !strings.Contains(output, `"kind":"`+tc.kind+`"`) {
+				t.Fatal(output)
+			}
+			if tc.kind == "pi" && (!strings.Contains(output, `"model":""`) || !strings.Contains(output, `"effort":""`)) {
+				t.Fatal(output)
+			}
+		})
+	}
+}
+
+func TestFirstOutcomeImplicitRideRelaunchAndRecovery(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	f.fake.BeforeCall = func(method string) {
+		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
+			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})
+		}
+	}
+	output := outcomeCLI(t, f.service, 0, "ride", "--brief", f.brief, "--name", "first-outcome")
+	if !strings.Contains(output, "implicit:pi") {
+		t.Fatal(output)
+	}
+	task, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Profile != "implicit:pi" || task.DispatchRule != "implicit: lead kind" || task.State != store.StateWorking {
+		t.Fatalf("Task: %#v", task)
+	}
+	// Changing the Lead and adding rules must not change the already resolved Rider.
+	outcomeCLI(t, f.service, 0, "config", "set", "lead.kind", "codex")
+	outcomeCLI(t, f.service, 0, "config", "set", "profiles.routing.kind", "codex")
+	outcomeCLI(t, f.service, 0, "config", "set", "dispatch", "[{type='ship', use='routing'}]")
+	output = outcomeCLI(t, f.service, 0, "relaunch", "t1")
+	if !strings.Contains(output, "working") {
+		t.Fatal(output)
+	}
+	// Recover a missing Rider pane using the same persisted implicit kind.
+	f.fake.SnapshotValue.Panes = f.fake.SnapshotValue.Panes[:1]
+	outcomeCLI(t, f.service, 0, "relaunch", "t1")
+	for _, call := range f.fake.Calls {
+		if call.Method == "agent.start" {
+			if call.Params["kind"] != "pi" {
+				t.Fatalf("relaunch changed implicit kind: %#v", call)
+			}
+			for _, arg := range call.Params["args"].([]string) {
+				if arg == "--model" || arg == "--thinking" {
+					t.Fatalf("implicit Profile supplied model/effort: %#v", call)
+				}
+			}
+		}
+	}
+	updated, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Profile != task.Profile || updated.DispatchRule != task.DispatchRule || updated.WorktreePath != task.WorktreePath {
+		t.Fatalf("resolution changed: %#v", updated)
+	}
+	outcomeCLI(t, f.service, 0, "config", "set", "profiles.named.kind", "codex")
+	outcomeCLI(t, f.service, 0, "relaunch", "t1", "--profile", "named")
+	updated, err = f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil || updated.Profile != "named" {
+		t.Fatalf("explicit switch: %#v %v", updated, err)
+	}
+}
+
+func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	for _, cli := range []string{"gh", "glab", "no-mistakes"} {
+		script := "#!/bin/sh\n[ -e '" + filepath.Join(f.root, cli+"-ready") + "' ] && exit 0\nprintf 'repo not initialized\\n'\nexit 1\n"
+		if err := os.WriteFile(filepath.Join(bin, cli), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Skip root fetches in this auth-only fixture, so it never contacts a forge.
+	if err := f.db.RecordCheckoutAttempt(context.Background(), f.project.ID, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "remote", "add", "origin", "https://github.com/example/project.git")
+	check := func(want, absent []string) {
+		t.Helper()
+		for _, args := range [][]string{{"--json"}, {"doctor", "--json"}, {"lead", "--json"}} {
+			output := outcomeCLI(t, f.service, 0, args...)
+			var result struct {
+				Readiness []readinessGap `json:"readiness"`
+			}
+			if err := json.Unmarshal([]byte(output), &result); err != nil {
+				t.Fatal(err)
+			}
+			codes := map[string]bool{}
+			for _, gap := range result.Readiness {
+				codes[gap.Code] = true
+				if gap.Consequence == "" || gap.Fix == "" {
+					t.Fatalf("incomplete gap: %#v", gap)
+				}
+				if gap.Code == "gate_empty" && (!gap.UserOnly || gap.Key != "defaults.gate") {
+					t.Fatalf("Gate authority: %#v", gap)
+				}
+			}
+			for _, code := range want {
+				if !codes[code] {
+					t.Fatalf("%v missing %s: %s", args, code, output)
+				}
+			}
+			for _, code := range absent {
+				if codes[code] {
+					t.Fatalf("%v retained %s: %s", args, code, output)
+				}
+			}
+		}
+	}
+	check([]string{"forge_auth", "gate_empty", "autonomy_ask", "machine_setup"}, []string{"no_mistakes_uninitialized"})
+	if err := os.WriteFile(filepath.Join(f.root, "gh-ready"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.gate", "['true']", "--project", "shop", "--user-approved", "Use true as the fixture Gate")
+	outcomeCLI(t, f.service, 0, "config", "set", "autonomy.yolo", "true", "--project", "shop", "--user-approved", "Grant standing fixture Autonomy")
+	check([]string{"machine_setup"}, []string{"forge_auth", "gate_empty", "autonomy_ask"})
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.forge", "gitlab", "--project", "shop")
+	gitTest(t, f.repo, "remote", "set-url", "origin", "https://gitlab.example.com/group/project.git")
+	output := outcomeCLI(t, f.service, 0, "doctor", "--json")
+	if !strings.Contains(output, "gitlab.example.com") || !strings.Contains(output, "glab auth login --hostname gitlab.example.com") {
+		t.Fatal(output)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "glab-ready"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	check([]string{"machine_setup"}, []string{"forge_auth"})
+	if err := os.WriteFile(filepath.Join(f.root, "no-mistakes-ready"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.landing_mode", "no-mistakes", "--project", "shop")
+	if err := os.Remove(filepath.Join(f.root, "no-mistakes-ready")); err != nil {
+		t.Fatal(err)
+	}
+	check([]string{"machine_setup", "no_mistakes_uninitialized"}, []string{"forge_auth"})
+	if err := os.WriteFile(filepath.Join(f.root, "no-mistakes-ready"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Applying machine setup is a User-shell action; fake its read-only Herdr responses.
+	f.fake.RunOut["plugin link "+filepath.Join(f.home, "plugin", "herdr-plugin.toml")] = []byte(`{}`)
+	outcomeCLI(t, f.service, 0, "setup", "--binary", "/usr/bin/true")
+	f.fake.RunOut["plugin list --json"] = []byte(`{"plugins":[{"id":"posse.herdr","path":"` + filepath.Join(f.home, "plugin", "herdr-plugin.toml") + `"}]}`)
+	check(nil, []string{"forge_auth", "gate_empty", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"})
+	output = outcomeCLI(t, f.service, 0, "--json")
+	if strings.Contains(output, `"readiness"`) {
+		t.Fatalf("fully ready status retained readiness: %s", output)
+	}
+	// Deleting one installed asset makes setup pending again without a first-run flag.
+	if err := os.Remove(filepath.Join(f.root, "pi", "extensions", "posse-worker-guard.ts")); err != nil {
+		t.Fatal(err)
+	}
+	check([]string{"machine_setup"}, []string{"no_mistakes_uninitialized"})
+}
+
+func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	output := outcomeCLI(t, f.service, 0, "lead")
+	for _, rule := range []string{"First outcome", "explicit yes", "--user-approved", "one-off", "deliverable", "verification", "permitted effects", "return conditions", "at most once", "language they write in", "lowkey"} {
+		if !strings.Contains(output, rule) {
+			t.Fatalf("Lead missing %q: %s", rule, output)
+		}
+	}
+	cfg, err := config.Load(f.home, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := leadText(f.project, cfg, "pi")
+	for _, rule := range []string{firstOutcomeRule, userOnlyRule, leadLanguageRule(cfg)} {
+		if !strings.Contains(text, rule) {
+			t.Fatalf("system prompt omitted rule: %s", rule)
+		}
+	}
+	skill, err := setupassets.Skill("posse-setup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"Outside a Lead pane", "Inside the Lead conversation", "--user-approved", "! posse config set", "Riders cannot write config"} {
+		if !strings.Contains(output, path) || !strings.Contains(string(skill), path) {
+			t.Fatalf("User-only paths disagree for %q", path)
+		}
+	}
+	if !strings.Contains(string(skill), "fastest start is `posse up`") || !strings.Contains(string(skill), "optional full configuration tour") {
+		t.Fatal(string(skill))
+	}
+	for _, language := range []string{"en", "vi"} {
+		outcomeCLI(t, f.service, 0, "config", "set", "identity.lead.language", language)
+		output = outcomeCLI(t, f.service, 0, "lead")
+		if !strings.Contains(output, "explicitly configured language: "+language) {
+			t.Fatal(output)
+		}
+	}
+	outcomeCLI(t, f.service, 0, "config", "unset", "identity.lead.language")
+	if output = outcomeCLI(t, f.service, 0, "lead"); !strings.Contains(output, "language they write in") {
+		t.Fatal(output)
+	}
+}
