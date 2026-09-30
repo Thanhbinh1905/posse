@@ -1,0 +1,4 @@
+# Remote checks can leave curl children after the isolated server exits.
+[update]
+version_check = false
+manifest_check = false
