@@ -183,24 +183,18 @@ func splitProcessArgs(raw string) []string {
 }
 
 func lookoutFromArgs(pid int, args []string, environment map[string]string, home string) (lookoutProcess, bool) {
-	posseIndex := -1
-	for i, arg := range args {
-		if filepath.Base(arg) == "posse" {
-			posseIndex = i
-			break
-		}
-	}
-	if posseIndex < 0 {
+	if len(args) < 2 || !sameLookoutHome(processHome(environment), home) {
 		return lookoutProcess{}, false
 	}
 	lookoutCommand := -1
-	for i := posseIndex + 1; i < len(args); i++ {
-		if args[i] == "lookout" {
-			lookoutCommand = i
-			break
-		}
+	if args[1] == "lookout" {
+		lookoutCommand = 1
+	} else if len(args) > 2 && isShellExecutable(args[0]) && args[2] == "lookout" {
+		// Linux represents an executable shell script as the interpreter plus
+		// script path before the script's command arguments.
+		lookoutCommand = 2
 	}
-	if lookoutCommand < 0 || !sameLookoutHome(processHome(environment), home) {
+	if lookoutCommand < 0 {
 		return lookoutProcess{}, false
 	}
 	process := lookoutProcess{
@@ -219,6 +213,15 @@ func lookoutFromArgs(pid int, args []string, environment map[string]string, home
 		}
 	}
 	return process, true
+}
+
+func isShellExecutable(path string) bool {
+	switch filepath.Base(path) {
+	case "sh", "bash", "dash", "zsh", "fish":
+		return true
+	default:
+		return false
+	}
 }
 
 func processHome(environment map[string]string) string {

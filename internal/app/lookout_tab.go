@@ -14,6 +14,149 @@ import (
 
 func lookoutTabLabel(project store.Project) string { return "posse:" + project.Name + ":lookout" }
 
+var lookoutStartupGracePeriod = 5 * time.Second
+var lookoutRetryBasePeriod = time.Second
+var lookoutRetryMaxPeriod = time.Minute
+
+const lookoutStartFailureNoticeAfter = 3
+
+type lookoutRecoveryState struct {
+	paneID       string
+	retryAt      time.Time
+	failedStarts int
+	noticeRaised bool
+}
+
+func (s *Service) delayLookoutReplacement(projectID int64, paneID string, now time.Time) bool {
+	s.lookoutMu.Lock()
+	defer s.lookoutMu.Unlock()
+	if s.lookoutRecovery == nil {
+		s.lookoutRecovery = make(map[int64]lookoutRecoveryState)
+	}
+	state, found := s.lookoutRecovery[projectID]
+	if !found || state.paneID != paneID {
+		state = lookoutRecoveryState{paneID: paneID, retryAt: now.Add(lookoutStartupGracePeriod)}
+		s.lookoutRecovery[projectID] = state
+		return true
+	}
+	return now.Before(state.retryAt)
+}
+
+func (s *Service) waitLookoutStartup(ctx context.Context, project store.Project, paneID, home string) (running, panePresent bool, err error) {
+	for {
+		if lookoutProcessRunning(paneID, home) {
+			s.markLookoutRunning(project.ID, paneID)
+			return true, true, nil
+		}
+		if snapshot, err := s.snapshot(ctx); err == nil {
+			panePresent := false
+			for _, pane := range snapshot.Panes {
+				if pane.PaneID == paneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == lookoutTabLabel(project) {
+					panePresent = true
+					break
+				}
+			}
+			if !panePresent {
+				return false, false, nil
+			}
+		}
+		s.lookoutMu.Lock()
+		state, found := s.lookoutRecovery[project.ID]
+		s.lookoutMu.Unlock()
+		if !found || state.paneID != paneID {
+			return false, false, nil
+		}
+		remaining := time.Until(state.retryAt)
+		if remaining <= 0 {
+			return false, true, nil
+		}
+		wait := min(100*time.Millisecond, remaining)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return false, true, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *Service) lookoutRecoveryDue(projectID int64, paneID string, now time.Time) bool {
+	s.lookoutMu.Lock()
+	defer s.lookoutMu.Unlock()
+	state, found := s.lookoutRecovery[projectID]
+	return !found || state.paneID != paneID || !now.Before(state.retryAt)
+}
+
+func (s *Service) resetLookoutRecovery(projectID int64) {
+	s.lookoutMu.Lock()
+	defer s.lookoutMu.Unlock()
+	delete(s.lookoutRecovery, projectID)
+}
+
+func (s *Service) markLookoutRunning(projectID int64, paneID string) {
+	s.lookoutMu.Lock()
+	defer s.lookoutMu.Unlock()
+	if s.lookoutRecovery == nil {
+		s.lookoutRecovery = make(map[int64]lookoutRecoveryState)
+	}
+	s.lookoutRecovery[projectID] = lookoutRecoveryState{paneID: paneID}
+}
+
+func (s *Service) markLookoutCreated(projectID int64, paneID string, failedStart bool) {
+	s.lookoutMu.Lock()
+	defer s.lookoutMu.Unlock()
+	if s.lookoutRecovery == nil {
+		s.lookoutRecovery = make(map[int64]lookoutRecoveryState)
+	}
+	previous := s.lookoutRecovery[projectID]
+	state := lookoutRecoveryState{paneID: paneID}
+	if failedStart {
+		state.failedStarts = previous.failedStarts + 1
+		state.noticeRaised = previous.noticeRaised
+	}
+	delay := lookoutStartupGracePeriod
+	if failedStart {
+		delay += lookoutRetryBackoff(state.failedStarts)
+	}
+	state.retryAt = time.Now().Add(delay)
+	s.lookoutRecovery[projectID] = state
+}
+
+func lookoutRetryBackoff(failedStarts int) time.Duration {
+	if failedStarts < 1 {
+		return 0
+	}
+	delay := lookoutRetryBasePeriod
+	for i := 1; i < failedStarts && delay < lookoutRetryMaxPeriod; i++ {
+		delay *= 2
+	}
+	if delay > lookoutRetryMaxPeriod {
+		return lookoutRetryMaxPeriod
+	}
+	return delay
+}
+
+func (s *Service) lookoutStartFailureNotice(projectID int64) (int, bool) {
+	s.lookoutMu.Lock()
+	defer s.lookoutMu.Unlock()
+	state := s.lookoutRecovery[projectID]
+	return state.failedStarts, state.noticeRaised
+}
+
+func (s *Service) markLookoutStartFailureNotice(projectID int64) {
+	s.lookoutMu.Lock()
+	defer s.lookoutMu.Unlock()
+	state := s.lookoutRecovery[projectID]
+	state.noticeRaised = true
+	s.lookoutRecovery[projectID] = state
+}
+
 // The Lookout owns only a shell tab in the Lead's workspace. It never claims
 // Notices or types into the Lead; the configured delivery integration does that.
 func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, snapshot herdr.Snapshot) error {
@@ -27,12 +170,32 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 		return err
 	}
 	command := "POSSE_HOME=" + shellQuote(home) + " " + shellQuote(binary) + " lookout --poll-only"
+	failedStart := false
 	for _, pane := range snapshot.Panes {
 		if pane.Label != label {
 			continue
 		}
 		if pane.WorkspaceID == project.HerdrWorkspaceID && (pane.PaneID == os.Getenv("HERDR_PANE_ID") || lookoutProcessRunning(pane.PaneID, home)) {
+			s.markLookoutRunning(project.ID, pane.PaneID)
 			return nil
+		}
+		if pane.WorkspaceID == project.HerdrWorkspaceID {
+			if s.delayLookoutReplacement(project.ID, pane.PaneID, time.Now()) {
+				running, panePresent, err := s.waitLookoutStartup(ctx, project, pane.PaneID, home)
+				if err != nil {
+					return err
+				}
+				if running {
+					return nil
+				}
+				if !panePresent {
+					s.resetLookoutRecovery(project.ID)
+				} else {
+					failedStart = true
+				}
+			} else {
+				failedStart = true
+			}
 		}
 		// A label is not proof that the shell is idle. Close its dedicated
 		// tab before starting a replacement; never type into a live pane.
@@ -71,6 +234,9 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 	if opened.RootPane.PaneID == "" {
 		return fmt.Errorf("lookout tab has no root pane")
 	}
+	if !failedStart {
+		s.resetLookoutRecovery(project.ID)
+	}
 	tabID := opened.RootPane.TabID
 	if tabID == "" {
 		tabID = opened.Tab.TabID
@@ -87,6 +253,7 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 	if _, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": opened.RootPane.PaneID, "text": command, "keys": []string{"enter"}}); err != nil {
 		return fail(err)
 	}
+	s.markLookoutCreated(project.ID, opened.RootPane.PaneID, failedStart)
 	return nil
 }
 

@@ -69,7 +69,7 @@ func TestLookoutRestartsAfterProcessExit(t *testing.T) {
 	}
 	panes := lookoutPanes(t, client)
 	t.Logf("Lookout panes after exit: %d", len(panes))
-	command := exec.Command(f.binary, "lookout", "--ack", "all", "--timeout", "3000")
+	command := exec.Command(f.binary, "lookout", "--ack", "all", "--timeout", "10000")
 	command.Dir, command.Env = f.repo, f.leadEnv
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -78,6 +78,104 @@ func TestLookoutRestartsAfterProcessExit(t *testing.T) {
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
 		t.Errorf("no Lookout process after Lead tick; panes labelled Lookout=%d", len(lookoutPanes(t, client)))
 	}
+}
+
+func TestLookoutDoesNotRecreateDuringSlowLoginShellStartup(t *testing.T) {
+	f := newPRLifecycleFixtureWithSlowLoginShell(t)
+	defer f.db.Close()
+	client := herdr.NewWithEnv("herdr", f.env)
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Fatalf("Lookout process not running: %v", lookoutPIDs(f.root))
+	}
+
+	marker := filepath.Join(f.root, "slow-login-enabled")
+	starts := filepath.Join(f.root, "slow-login-starts")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	panes := lookoutPanes(t, client)
+	if len(panes) != 1 {
+		t.Fatalf("Lookout tabs before close = %d, want 1", len(panes))
+	}
+	createdTabs := make(map[string]struct{})
+	stopSampling := make(chan struct{})
+	samplingDone := make(chan struct{})
+	samplingStopped := false
+	stopSampler := func() {
+		if samplingStopped {
+			return
+		}
+		close(stopSampling)
+		<-samplingDone
+		samplingStopped = true
+	}
+	go func() {
+		defer close(samplingDone)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopSampling:
+				return
+			case <-ticker.C:
+				snapshot, err := client.Snapshot(context.Background())
+				if err != nil {
+					continue
+				}
+				for _, tab := range snapshot.Tabs {
+					if tab.Label == "posse:shop:lookout" && tab.TabID != panes[0].TabID {
+						createdTabs[tab.TabID] = struct{}{}
+					}
+				}
+			}
+		}
+	}()
+	defer stopSampler()
+
+	command := exec.Command(f.binary, "lookout", "--ack", "all", "--timeout", "3500")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	output := make(chan []byte, 1)
+	commandDone := make(chan error, 1)
+	go func() {
+		result, err := command.CombinedOutput()
+		output <- result
+		commandDone <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": panes[0].TabID}); err != nil {
+		t.Fatalf("close Lookout tab: %v", err)
+	}
+	select {
+	case err := <-commandDone:
+		if err != nil {
+			t.Fatalf("Lead lookout: %v %s", err, <-output)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Lead lookout did not finish its bounded wait")
+	}
+
+	stopSampler()
+	if len(createdTabs) != 1 {
+		t.Fatalf("Lookout recovery created %d tabs, want exactly 1; login starts=%d; tab IDs=%v", len(createdTabs), lineCount(starts), createdTabs)
+	}
+	if lineCount(starts) == 0 {
+		t.Fatal("slow login shell profile did not run")
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Fatalf("Lookout process did not stay up: %v", lookoutPIDs(f.root))
+	}
+	if panes := lookoutPanes(t, client); len(panes) != 1 {
+		t.Fatalf("Lookout tabs after recovery = %d, want 1", len(panes))
+	}
+}
+
+func lineCount(path string) int {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(contents), "started\n")
 }
 
 // L2: Herdr restarts. Recovery restarts the Lead but must also restore the

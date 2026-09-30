@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -20,18 +21,20 @@ import (
 )
 
 type Service struct {
-	Home          string
-	Version       string
-	updateURL     string
-	updateClient  *http.Client
-	Herdr         herdr.Adapter
-	Progress      runtime.ProgressSource
-	herdrContext  func() bool
-	removeMount   func(context.Context, string, string) error
-	pendingLead   *leadExecPlan
-	confirm       confirmFunc
-	updateConfirm confirmFunc
-	reexecUpdate  func(string, []string, []string) error
+	Home            string
+	Version         string
+	updateURL       string
+	updateClient    *http.Client
+	Herdr           herdr.Adapter
+	Progress        runtime.ProgressSource
+	herdrContext    func() bool
+	removeMount     func(context.Context, string, string) error
+	pendingLead     *leadExecPlan
+	confirm         confirmFunc
+	updateConfirm   confirmFunc
+	reexecUpdate    func(string, []string, []string) error
+	lookoutMu       sync.Mutex
+	lookoutRecovery map[int64]lookoutRecoveryState
 }
 
 func New(home string, adapter herdr.Adapter) *Service {

@@ -45,12 +45,16 @@ func IsolatedTestEnvironment(root string) []string {
 }
 
 func WriteIsolatedConfig(root string) (string, error) {
+	return WriteIsolatedConfigWithShell(root, "/bin/sh")
+}
+
+func WriteIsolatedConfigWithShell(root, shell string) (string, error) {
 	configDir := filepath.Join(root, "xdg", "herdr")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return "", err
 	}
 	configPath := filepath.Join(configDir, "config.toml")
-	contents := "[terminal]\ndefault_shell = \"/bin/sh\"\n\n[worktrees]\ndirectory = " + strconv.Quote(filepath.Join(root, "worktrees")) + "\n"
+	contents := "[terminal]\ndefault_shell = " + strconv.Quote(shell) + "\n\n[worktrees]\ndirectory = " + strconv.Quote(filepath.Join(root, "worktrees")) + "\n"
 	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 		return "", err
 	}
@@ -83,10 +87,32 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 	}
 	configPath := filepath.Join(env["XDG_CONFIG_HOME"], "herdr", "config.toml")
 	config, err := os.ReadFile(configPath)
-	if err != nil || !strings.Contains(string(config), `default_shell = "/bin/sh"`) || !strings.Contains(string(config), strconv.Quote(filepath.Join(root, "worktrees"))) {
-		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr config must use /bin/sh and a test-root worktrees directory", Cause: err}
+	configuredShell := isolatedDefaultShell(string(config))
+	validShell := configuredShell == "/bin/sh"
+	if !validShell && inside(root, configuredShell) {
+		if info, statErr := os.Lstat(configuredShell); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			validShell = true
+		}
+	}
+	if err != nil || !validShell || !strings.Contains(string(config), strconv.Quote(filepath.Join(root, "worktrees"))) {
+		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr config must use /bin/sh or an executable shell inside the test root, and a test-root worktrees directory", Cause: err}
 	}
 	return root, nil
+}
+
+func isolatedDefaultShell(config string) string {
+	for _, line := range strings.Split(config, "\n") {
+		key, value, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(key) != "default_shell" {
+			continue
+		}
+		shell, err := strconv.Unquote(strings.TrimSpace(value))
+		if err == nil {
+			return shell
+		}
+		return ""
+	}
+	return ""
 }
 
 func inside(root, path string) bool {

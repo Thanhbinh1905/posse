@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -23,16 +24,25 @@ func TestLookoutProcessListingMatchesPaneAndPosseHome(t *testing.T) {
 	}
 }
 
-func TestLookoutProcessListingRecognizesLeadWatchersAndDefaultHome(t *testing.T) {
+func TestLookoutProcessListingRecognizesLeadWatchersRenamedBinariesAndDefaultHome(t *testing.T) {
 	listing := "21 /nix/store/posse/bin/posse lookout --json --quiet-routine HERDR_PANE_ID=w1:p1 POSSE_HOME=/tmp/shop HOME=/tmp PWD=/tmp/shop\n" +
 		"22 /usr/local/bin/posse lookout --ack 9 HOME=/home/user POSSE_HOME=/home/user/.posse PWD=/repo\n" +
-		"23 /usr/local/bin/other lookout --poll-only POSSE_HOME=/tmp/shop HOME=/tmp\n"
+		"23 /usr/local/bin/renamed-posse lookout --poll-only POSSE_HOME=/tmp/shop HOME=/tmp\n"
 	processes := lookoutProcessesInListing(listing, "/tmp/shop")
-	if len(processes) != 1 {
-		t.Fatalf("found %d lookouts, want only the matching-home Posse process: %#v", len(processes), processes)
+	if len(processes) != 2 {
+		t.Fatalf("found %d lookouts, want the matching-home Lead and renamed poll-only binary: %#v", len(processes), processes)
 	}
 	if processes[0].PID != 21 || processes[0].Kind != "lead" || !processes[0].QuietRoutine || processes[0].PaneID != "w1:p1" {
 		t.Fatalf("Lead watcher = %#v", processes[0])
+	}
+	if processes[1].PID != 23 || processes[1].Kind != "lookout_tab" || !processes[1].PollOnly {
+		t.Fatalf("renamed poll-only watcher = %#v", processes[1])
+	}
+	if _, found := lookoutFromArgs(24, []string{"/bin/sh", "/tmp/renamed-posse", "lookout", "--poll-only"}, map[string]string{"POSSE_HOME": "/tmp/shop"}, "/tmp/shop"); !found {
+		t.Fatal("missed a renamed Lookout executable invoked through a shell script")
+	}
+	if _, found := lookoutFromArgs(25, []string{"/bin/sh", "-c", "posse lookout --poll-only"}, map[string]string{"POSSE_HOME": "/tmp/shop"}, "/tmp/shop"); found {
+		t.Fatal("matched a shell whose command text contains a Lookout invocation")
 	}
 	if got := processHome(map[string]string{"HOME": "/home/user"}); got != "/home/user/.posse" {
 		t.Fatalf("default process home = %q", got)
@@ -98,6 +108,58 @@ func TestStopLookoutsEscalatesToSIGKILL(t *testing.T) {
 	}
 }
 
+func TestFreshLookoutPaneIsNotReplacedBeforeStartupGraceExpires(t *testing.T) {
+	previousGrace := lookoutStartupGracePeriod
+	lookoutStartupGracePeriod = 50 * time.Millisecond
+	t.Cleanup(func() { lookoutStartupGracePeriod = previousGrace })
+	home := t.TempDir()
+	fake := herdr.NewFake()
+	project := store.Project{Name: "shop", Root: home, HerdrWorkspaceID: "w1"}
+	pane := herdr.Pane{PaneID: "fresh:p1", TabID: "fresh:t1", WorkspaceID: "w1", Label: lookoutTabLabel(project)}
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{pane}}
+	service := testService(home, fake)
+	t.Setenv("HERDR_PANE_ID", "")
+	startedAt := time.Now()
+	if err := service.ensureLookoutTab(context.Background(), project, fake.SnapshotValue); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(startedAt); elapsed < lookoutStartupGracePeriod {
+		t.Fatalf("fresh startup pane replaced after %s, before grace period %s", elapsed, lookoutStartupGracePeriod)
+	}
+	if fake.CallCount("tab.close") != 1 || fake.CallCount("tab.create") != 1 {
+		t.Fatalf("stale pane was not replaced after grace expired: %#v", fake.Calls)
+	}
+}
+
+func TestLookoutRetryBackoffIsExponentialAndBounded(t *testing.T) {
+	if got := lookoutRetryBackoff(1); got != lookoutRetryBasePeriod {
+		t.Fatalf("first retry backoff = %s, want %s", got, lookoutRetryBasePeriod)
+	}
+	if got := lookoutRetryBackoff(2); got != 2*lookoutRetryBasePeriod {
+		t.Fatalf("second retry backoff = %s, want %s", got, 2*lookoutRetryBasePeriod)
+	}
+	if got := lookoutRetryBackoff(100); got != lookoutRetryMaxPeriod {
+		t.Fatalf("retry backoff = %s, want cap %s", got, lookoutRetryMaxPeriod)
+	}
+}
+
+func TestRepeatedLookoutStartupFailuresRaiseOneNotice(t *testing.T) {
+	service := &Service{}
+	const projectID = int64(7)
+	for attempt := 1; attempt <= lookoutStartFailureNoticeAfter; attempt++ {
+		service.markLookoutCreated(projectID, fmt.Sprintf("pane-%d", attempt), true)
+	}
+	failures, noticeRaised := service.lookoutStartFailureNotice(projectID)
+	if failures != lookoutStartFailureNoticeAfter || noticeRaised {
+		t.Fatalf("repeated failure state = (%d, %v), want (%d, false)", failures, noticeRaised, lookoutStartFailureNoticeAfter)
+	}
+	service.markLookoutStartFailureNotice(projectID)
+	failures, noticeRaised = service.lookoutStartFailureNotice(projectID)
+	if failures != lookoutStartFailureNoticeAfter || !noticeRaised {
+		t.Fatalf("notice state = (%d, %v), want (%d, true)", failures, noticeRaised, lookoutStartFailureNoticeAfter)
+	}
+}
+
 func TestUnknownLookoutProcessIsReplacedWithoutTypingIntoOldPane(t *testing.T) {
 	home := t.TempDir()
 	fake := herdr.NewFake()
@@ -105,6 +167,7 @@ func TestUnknownLookoutProcessIsReplacedWithoutTypingIntoOldPane(t *testing.T) {
 	pane := herdr.Pane{PaneID: "stale:p9", TabID: "stale:t9", WorkspaceID: "w1", Label: lookoutTabLabel(project)}
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{pane}}
 	service := testService(home, fake)
+	service.lookoutRecovery = map[int64]lookoutRecoveryState{project.ID: {paneID: pane.PaneID, retryAt: time.Now().Add(-time.Second)}}
 	t.Setenv("HERDR_PANE_ID", "")
 	if err := service.ensureLookoutTab(context.Background(), project, fake.SnapshotValue); err != nil {
 		t.Fatal(err)

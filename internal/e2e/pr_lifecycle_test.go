@@ -731,10 +731,18 @@ type prLifecycleFixture struct {
 }
 
 func newPRLifecycleFixture(t *testing.T) *prLifecycleFixture {
-	return newPRLifecycleFixtureWithLead(t, false)
+	return newPRLifecycleFixtureWithLeadAndShell(t, false, false)
 }
 
 func newPRLifecycleFixtureWithLead(t *testing.T, liveLead bool) *prLifecycleFixture {
+	return newPRLifecycleFixtureWithLeadAndShell(t, liveLead, false)
+}
+
+func newPRLifecycleFixtureWithSlowLoginShell(t *testing.T) *prLifecycleFixture {
+	return newPRLifecycleFixtureWithLeadAndShell(t, false, true)
+}
+
+func newPRLifecycleFixtureWithLeadAndShell(t *testing.T, liveLead, slowLoginShell bool) *prLifecycleFixture {
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("pr-"))
 	binDir := filepath.Join(root, "bin")
@@ -769,7 +777,18 @@ func newPRLifecycleFixtureWithLead(t *testing.T, liveLead bool) *prLifecycleFixt
 	} {
 		env = setEnv(env, key, value)
 	}
-	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
+	if slowLoginShell {
+		shell := filepath.Join(binDir, "slow-login-shell")
+		marker := filepath.Join(root, "slow-login-enabled")
+		starts := filepath.Join(root, "slow-login-starts")
+		script := "#!/bin/sh\nif [ -e " + shellQuote(marker) + " ]; then printf 'started\\n' >> " + shellQuote(starts) + "; sleep 1.5; fi\nexec /bin/sh -l\n"
+		if err := os.WriteFile(shell, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := herdr.WriteIsolatedConfigWithShell(root, shell); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}
 

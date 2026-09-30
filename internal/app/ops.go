@@ -116,8 +116,28 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				// reconciliation on every tick. Only a dead known Lookout
 				// needs a new snapshot and replacement tab.
 				if lookoutPaneID != "" {
-					if home, err := s.homePath(); err == nil && !lookoutProcessRunning(lookoutPaneID, home) {
-						if snapshot, err := s.snapshot(ctx.Context); err == nil {
+					home, err := s.homePath()
+					if err != nil {
+						return err
+					}
+					if lookoutProcessRunning(lookoutPaneID, home) {
+						s.markLookoutRunning(project.ID, lookoutPaneID)
+					} else if snapshot, err := s.snapshot(ctx.Context); err == nil {
+						paneID := ""
+						for _, pane := range snapshot.Panes {
+							if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
+								paneID = pane.PaneID
+								break
+							}
+						}
+						if paneID == "" {
+							// A closed tab is not a failed startup. Recreate it at once
+							// and begin a fresh startup grace period.
+							s.resetLookoutRecovery(project.ID)
+						} else {
+							lookoutPaneID = paneID
+						}
+						if paneID == "" || !lookoutProcessRunning(paneID, home) && s.lookoutRecoveryDue(project.ID, paneID, time.Now()) {
 							if err := s.ensureLookoutTab(ctx.Context, project, snapshot); err != nil {
 								return err
 							}
@@ -128,6 +148,13 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 										break
 									}
 								}
+							}
+							if failures, noticeRaised := s.lookoutStartFailureNotice(project.ID); failures >= lookoutStartFailureNoticeAfter && !noticeRaised {
+								_, err := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout failed to start after repeated retries; recovery will continue with backoff", DataJSON: `{}`})
+								if err != nil {
+									return err
+								}
+								s.markLookoutStartFailureNotice(project.ID)
 							}
 						}
 					}
