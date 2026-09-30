@@ -92,6 +92,10 @@ func TestTaskTitleSlugNamesTheWork(t *testing.T) {
 		"Hide tool calls in the Pi Lead while lowkey is on": "hide-tool-calls",
 		"Span backend and worker":                           "span-backend-worker",
 		"Fix the flaky login test":                          "fix-flaky-login",
+		"feat(app): enable outcome-first first runs":        "outcome-first-runs",
+		"Outcome-first first runs":                          "outcome-first-runs",
+		"first-first runs":                                  "first-runs",
+		"fix(auth)!: repair the flaky login test":           "repair-flaky-login",
 	} {
 		if got := taskTitleSlug(title); got != want {
 			t.Errorf("slug for %q = %q, want %q", title, got, want)

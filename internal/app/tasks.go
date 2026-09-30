@@ -517,14 +517,17 @@ func (s *Service) refreshWorkerDisplay(ctx context.Context, db *store.DB, projec
 }
 
 var workerNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
-var titleWordPattern = regexp.MustCompile(`[a-z0-9]+`)
+var conventionalCommitPrefix = regexp.MustCompile(`^[a-z]+(?:\([^)]*\))?!?:\s*`)
+var titleWordPattern = regexp.MustCompile(`[a-z0-9]+(?:-[a-z0-9]+)*`)
 
 // A visible Rider name is derived from the first three meaningful title words.
 // This keeps the branch brief and recognizable without accepting an unrelated nickname.
 func taskTitleSlug(title string) string {
+	title = conventionalCommitPrefix.ReplaceAllString(strings.ToLower(strings.TrimSpace(title)), "")
 	var words []string
-	for _, word := range titleWordPattern.FindAllString(strings.ToLower(title), -1) {
-		if titleStopWords[word] {
+	for _, word := range titleWordPattern.FindAllString(title, -1) {
+		word = collapseTitleToken(word, words)
+		if word == "" || titleStopWords[word] {
 			continue
 		}
 		candidate := strings.Join(append(words, word), "-")
@@ -539,7 +542,41 @@ func taskTitleSlug(title string) string {
 	return strings.Join(words, "-")
 }
 
-var titleStopWords = map[string]bool{"a": true, "an": true, "and": true, "for": true, "in": true, "is": true, "of": true, "on": true, "the": true, "to": true, "while": true, "with": true}
+// collapseTitleToken keeps hyphenated compounds intact while removing a repeated
+// word at a compound boundary, such as "outcome-first first".
+func collapseTitleToken(token string, words []string) string {
+	parts := strings.Split(token, "-")
+	for i := 1; i < len(parts); i++ {
+		if parts[i] == parts[i-1] {
+			parts = append(parts[:i], parts[i+1:]...)
+			i--
+		}
+	}
+	if len(words) == 0 {
+		return strings.Join(parts, "-")
+	}
+	previous := strings.Split(words[len(words)-1], "-")
+	maxOverlap := len(previous)
+	if len(parts) < maxOverlap {
+		maxOverlap = len(parts)
+	}
+	for overlap := maxOverlap; overlap > 0; overlap-- {
+		matches := true
+		for i := 0; i < overlap; i++ {
+			if previous[len(previous)-overlap+i] != parts[i] {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			parts = parts[overlap:]
+			break
+		}
+	}
+	return strings.Join(parts, "-")
+}
+
+var titleStopWords = map[string]bool{"a": true, "an": true, "and": true, "enable": true, "for": true, "in": true, "is": true, "of": true, "on": true, "the": true, "to": true, "while": true, "with": true}
 var taskIDNamePattern = regexp.MustCompile(`^t[0-9]+$`)
 
 func validateWorkerName(name string) error {
