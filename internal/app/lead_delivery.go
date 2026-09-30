@@ -123,7 +123,10 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 	if err := writeFile(instructionsFile, []byte(instructions)); err != nil {
 		return leadLaunch{}, err
 	}
-	launch := leadLaunch{Args: make([]string, 0, len(kindConfig.LeadArgs)+len(kindConfig.SystemPromptArgs)+2)}
+	launch := leadLaunch{Args: make([]string, 0, len(kindConfig.AutoApproveArgs)+len(kindConfig.LeadArgs)+len(kindConfig.SystemPromptArgs)+2)}
+	if kindConfig.LeadAutoApprove {
+		launch.Args = append(launch.Args, kindConfig.AutoApproveArgs...)
+	}
 	launch.Args = append(launch.Args, kindConfig.LeadArgs...)
 	oneLine := strings.Join(strings.Fields(instructions), " ")
 	for _, argument := range kindConfig.SystemPromptArgs {

@@ -120,14 +120,21 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	found, restartedWithBypass := false, false
 	for _, call := range fake.Calls {
 		if call.Method == "agent.prompt" && call.Params["target"] == "w1:p1" && strings.Contains(call.Params["text"].(string), "posse lead") {
 			found = true
 		}
+		if call.Method == "agent.start" {
+			args := call.Params["args"].([]string)
+			restartedWithBypass = len(args) >= 1 && args[0] == "--dangerously-skip-permissions"
+		}
 	}
 	if !found {
 		t.Fatalf("Profile args suppressed restart Lead instructions: %#v", fake.Calls)
+	}
+	if !restartedWithBypass {
+		t.Fatalf("restarted Claude Lead omitted its default bypass argument: %#v", fake.Calls)
 	}
 	assertLeadMetadataCall(t, fake, "w1:p1", "claude")
 	// Lookout failure must not strand the newly launched prompt-kind Lead.

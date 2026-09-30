@@ -9,7 +9,9 @@ A Lead must receive every Notice without the User prompting it, including while 
 
 Lead instructions reach codex and pi as a system prompt, so they survive compaction. `kinds.<kind>.system_prompt_args` is a template with `{file}` (the path of `lead.md`) and `{text}` (its contents on one line): claude `--append-system-prompt-file {file}`, pi `--append-system-prompt {file}`, codex `-c developer_instructions={text}`.
 
-A Lead must also be able to run posse. codex's default `workspace-write` sandbox cannot write the posse home, where SQLite in WAL mode needs write access even to read. It also cannot write the Mounts or the trust files that `posse ride` prepares. So `kinds.codex.lead_args = ["--sandbox", "danger-full-access"]` gives a codex Lead the host access a claude or pi Lead already has, with codex's approval policy left as the User configured it. pi has no sandbox.
+A Lead must also be able to run posse. codex's default `workspace-write` sandbox cannot write the posse home, where SQLite in WAL mode needs write access even to read. It also cannot write the Mounts or the trust files that `posse ride` prepares. So `kinds.codex.lead_args = ["--sandbox", "danger-full-access"]` gives a codex Lead the host access a claude or pi Lead already has. pi has no sandbox.
+
+The earlier approval-policy decision in this ADR is superseded: claude, codex and OpenCode Leads now receive the same per-kind `auto_approve_args` as Workers by default. `kinds.<kind>.lead_auto_approve = false` preserves approval prompts for a kind; Pi remains unchanged because it has no permission system. This harness permission default does not grant Posse review or landing autonomy, which remain separate User-controlled settings.
 
 Every Lead is told to end its turn and let its wake mechanism re-invoke it, never to poll with sleep, `posse peek`, `posse roster` or repeated `posse` calls: each polling turn resends the whole context. Workers of kinds with `background_commands` background long commands and never poll them, and no Worker waits for PR CI.
 
