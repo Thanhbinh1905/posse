@@ -408,10 +408,6 @@ func removeLookoutUpdateMarkers(markers []string) {
 	}
 }
 
-func lookoutProcessInListing(listing, paneID, home string) bool {
-	return lookoutProcessInListingWithVerifier(listing, paneID, home, lookoutExecutableVerifier)
-}
-
 func lookoutProcessInListingWithVerifier(listing, paneID, home string, isPosseExecutable func(string) bool) bool {
 	for _, process := range lookoutProcessesInListingWithVerifier(listing, home, isPosseExecutable) {
 		if process.PaneID == paneID && process.PollOnly {
