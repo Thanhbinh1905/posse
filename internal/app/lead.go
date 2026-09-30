@@ -187,6 +187,25 @@ func (s *Service) currentLeadKind(ctx context.Context, project store.Project, cf
 	return ""
 }
 
+// The role belongs in the title and posse_row, not in Herdr's harness field.
+// Like Riders, Leads show the resolved kind before start and detection afterward.
+func leadDisplayMetadata(project store.Project, paneID, detectedAgent, expectedAgent string) map[string]any {
+	metadata := map[string]any{
+		"pane_id": paneID, "source": "posse", "title": "Lead: " + project.Name,
+		"tokens": map[string]string{"posse_row": leadWorkspaceLabel(project)},
+	}
+	displayAgent := detectedAgent
+	if displayAgent == "" {
+		displayAgent = expectedAgent
+	}
+	if displayAgent != "" {
+		metadata["display_agent"] = displayAgent
+	} else {
+		metadata["clear_display_agent"] = true
+	}
+	return metadata
+}
+
 func (s *Service) availableLeadKinds(ctx context.Context, cfg config.Config) []string {
 	available := []string{}
 	if s.Herdr != nil {
@@ -485,8 +504,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	if _, err := s.herdrCall(ctx.Context, "workspace.rename", map[string]any{"workspace_id": callerWorkspaceID, "label": leadWorkspaceLabel(project)}); err != nil {
 		return err
 	}
-	leadName := "Lead"
-	if _, err := s.herdrCall(ctx.Context, "pane.report_metadata", map[string]any{"pane_id": leadPane.PaneID, "source": "posse", "title": "Lead: " + name, "display_agent": leadName, "tokens": map[string]string{"posse_row": "Lead:" + name}}); err != nil {
+	if _, err := s.herdrCall(ctx.Context, "pane.report_metadata", leadDisplayMetadata(project, leadPane.PaneID, "", kind)); err != nil {
 		return err
 	}
 	gaps, err := s.readiness(ctx.Context, db, project, cfg)

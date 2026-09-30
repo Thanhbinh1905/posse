@@ -107,8 +107,10 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 	}
 	task.PaneID = opened.PaneID
 	metadata := workerDisplayMetadata(task, "", displayAgent)
-	row := workerTabLabel(task)
+	// Linked repository workspaces already supply the visible Rider name.
+	row := ""
 	if project.IsWorkspace() {
+		row = workerTabLabel(task)
 		row = riderTabLabel(row, true)
 	}
 	metadata["tokens"].(map[string]string)["posse_row"] = row

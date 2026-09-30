@@ -16,8 +16,8 @@ func riderTabLabel(name string, last bool) string {
 	return branch + " " + name
 }
 
-// relabelProjectTabs restores plain tab labels and the tree-shaped sidebar
-// token from Herdr tab order. Presentation failures never block the command.
+// relabelProjectTabs restores sidebar placement, plain tab labels and row
+// metadata. Presentation failures never block the command.
 func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project store.Project) {
 	if s.Herdr == nil {
 		return
@@ -32,6 +32,7 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 		log.Printf("posse: could not reconcile tab labels for Project %s: tasks: %v", project.Name, err)
 		return
 	}
+	s.groupRiderWorkspaces(ctx, snapshot, project, tasks)
 	labels, rows := projectTabPresentation(snapshot, project, tasks)
 	for _, tab := range snapshot.Tabs {
 		label, owned := labels[tab.TabID]
@@ -44,10 +45,18 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 	}
 	for _, pane := range snapshot.Panes {
 		row, owned := rows[pane.PaneID]
-		if !owned || pane.Tokens["posse_row"] == row {
+		if !owned {
 			continue
 		}
-		if _, err := s.herdrCall(ctx, "pane.report_metadata", map[string]any{"pane_id": pane.PaneID, "source": "posse", "tokens": map[string]string{"posse_row": row}}); err != nil {
+		metadata := map[string]any{"pane_id": pane.PaneID, "source": "posse", "tokens": map[string]string{"posse_row": row}}
+		refreshLead := row == leadWorkspaceLabel(project) && pane.Agent != "" && pane.DisplayAgent != pane.Agent
+		if pane.Tokens["posse_row"] == row && !refreshLead {
+			continue
+		}
+		if refreshLead {
+			metadata = leadDisplayMetadata(project, pane.PaneID, pane.Agent, "")
+		}
+		if _, err := s.herdrCall(ctx, "pane.report_metadata", metadata); err != nil {
 			log.Printf("posse: could not label Herdr Agents row for pane %s: %v", pane.PaneID, err)
 		}
 	}
@@ -109,6 +118,9 @@ func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, task
 			}
 		}
 		if linked {
+			if pane, found := findTaskPane(snapshot.Panes, candidate.task); found && pane.TabID == tab.TabID {
+				rows[pane.PaneID] = ""
+			}
 			continue
 		}
 		riderTabs = append(riderTabs, struct {

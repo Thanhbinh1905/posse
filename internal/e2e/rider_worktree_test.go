@@ -212,11 +212,11 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 
 // A real attached Herdr 0.9.0 client must render the grouped names without
 // any Posse-specific sidebar configuration.
-func assertNativeWorktreeSidebar(t *testing.T, f *riderTabsFixture, names ...string) {
+func assertNativeWorktreeSidebar(t *testing.T, f *riderTabsFixture, names ...string) []byte {
 	t.Helper()
 	if _, err := exec.LookPath("script"); err != nil {
 		t.Log("script unavailable; snapshot still verifies grouping")
-		return
+		return nil
 	}
 	var output []byte
 	for attempt := 0; attempt < 3; attempt++ {
@@ -244,6 +244,7 @@ func assertNativeWorktreeSidebar(t *testing.T, f *riderTabsFixture, names ...str
 			t.Fatalf("Herdr client did not render %q after retries; output tail: %q client log tail: %q", name, output[max(0, len(output)-4000):], log[max(0, len(log)-2500):])
 		}
 	}
+	return output
 }
 
 func findLeadInSnapshot(snap herdr.Snapshot) (herdr.Pane, bool) {

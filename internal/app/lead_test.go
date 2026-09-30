@@ -98,6 +98,7 @@ func TestConcurrentUpStartsAtMostOneLead(t *testing.T) {
 	if got := fake.CallCount("agent.start"); got != 0 {
 		t.Fatalf("concurrent up invoked Herdr agent.start %d times", got)
 	}
+	assertLeadMetadataCall(t, fake, "w1:p1", "claude")
 	wantArgs := []string{"--append-system-prompt-file", filepath.Join(home, "projects", "shop", "lead.md"), "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--profile-extra", "--model=opus", "--effort", "high"}
 	if service.pendingLead == nil || service.pendingLead.PaneID != "w1:p1" || !equalStrings(service.pendingLead.Args, wantArgs) {
 		t.Fatalf("pending Lead launch = %#v, want pane w1:p1 and args %#v", service.pendingLead, wantArgs)
@@ -578,7 +579,7 @@ func TestFinalizeLeadRenamesDetectedAgentAndDeliversFallbackInstructions(t *test
 	fake.SnapshotValue = herdr.Snapshot{FocusedPaneID: "w1:p1", Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Agent: "claude", AgentStatus: "idle", Focused: true}}}
 	fake.ErrorQueue["agent.prompt"] = []error{stalled(), nil}
 	service := testService(home, fake)
-	plan := leadExecPlan{ProjectID: project.ID, PaneID: "w1:p1", WorkspaceID: "w1", AgentName: "posse-shop-lead-1", Kind: "claude", NeedsPrompt: true}
+	plan := leadExecPlan{ProjectID: project.ID, PaneID: "w1:p1", WorkspaceID: "w1", AgentName: "posse-shop-lead-1", Kind: "codex", NeedsPrompt: true}
 	payload, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatal(err)
@@ -595,6 +596,7 @@ func TestFinalizeLeadRenamesDetectedAgentAndDeliversFallbackInstructions(t *test
 			prompts++
 		}
 	}
+	assertLeadMetadataCall(t, fake, "w1:p1", "claude")
 	// The focused calling pane still gets the prompt, resent after one dropped submission.
 	if !renamed || prompts != 2 {
 		t.Fatalf("finalizer did not track and initialize the Lead: %#v", fake.Calls)
@@ -653,6 +655,19 @@ func TestLeadInstructionsReportNoticesProactivelyByKind(t *testing.T) {
 			}
 		})
 	}
+}
+
+func assertLeadMetadataCall(t *testing.T, fake *herdr.Fake, paneID, harness string) {
+	t.Helper()
+	for _, call := range fake.Calls {
+		if call.Method != "pane.report_metadata" || call.Params["pane_id"] != paneID || call.Params["title"] != "Lead: shop" {
+			continue
+		}
+		if call.Params["display_agent"] == harness && call.Params["tokens"].(map[string]string)["posse_row"] == "Lead:shop" {
+			return
+		}
+	}
+	t.Fatalf("Lead metadata did not preserve its role and show harness %q: %#v", harness, fake.Calls)
 }
 
 func installFakeLeadAgents(t *testing.T, kinds ...string) {

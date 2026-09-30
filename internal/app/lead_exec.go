@@ -147,6 +147,9 @@ func (s *Service) finalizeLead(args []string) error {
 	if _, err := s.herdrCall(ctx, "agent.rename", map[string]any{"target": plan.PaneID, "name": plan.AgentName}); err != nil {
 		return err
 	}
+	if _, err := s.herdrCall(ctx, "pane.report_metadata", leadDisplayMetadata(project, agent.PaneID, agent.Agent, plan.Kind)); err != nil {
+		return err
+	}
 	if plan.NeedsPrompt {
 		if err := s.deliverLeadPrompt(ctx, plan.PaneID, "Run `posse lead` and follow it."); err != nil {
 			return err
