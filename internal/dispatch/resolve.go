@@ -51,10 +51,27 @@ func Resolve(cfg config.Config, taskType, requested string) (Resolution, error) 
 		}
 		return resolve(requested, "--profile "+requested), nil
 	}
-	var matches []config.Rule
+	var typedMatches, genericMatches []config.Rule
 	for _, rule := range cfg.Dispatch {
-		if rule.Type == "" || rule.Type == taskType {
-			matches = append(matches, rule)
+		if rule.Type == taskType {
+			typedMatches = append(typedMatches, rule)
+		} else if rule.Type == "" {
+			genericMatches = append(genericMatches, rule)
+		}
+	}
+	matches := genericMatches
+	if len(typedMatches) > 0 {
+		// Exact-type rules isolate phase routes from generic fallbacks. A unique
+		// typed default wins; `when` alternatives remain human-selected via --profile.
+		matches = typedMatches
+		var defaults []config.Rule
+		for _, rule := range typedMatches {
+			if rule.When == "" {
+				defaults = append(defaults, rule)
+			}
+		}
+		if len(defaults) == 1 {
+			return resolve(defaults[0].Use, ruleDescription(defaults[0])), nil
 		}
 	}
 	if len(matches) == 1 && matches[0].When == "" {
