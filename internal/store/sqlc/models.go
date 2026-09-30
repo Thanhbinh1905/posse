@@ -161,11 +161,15 @@ type ProjectRepo struct {
 }
 
 type ProjectRuntime struct {
-	ProjectID          int64
-	ServerStartedAt    string
-	RecoveryGeneration string
-	RecoveryOwnerPid   int64
-	RecoveryClaimedAt  int64
+	ProjectID           int64
+	ServerStartedAt     string
+	RecoveryGeneration  string
+	RecoveryOwnerPid    int64
+	RecoveryClaimedAt   int64
+	LookoutPaneID       string
+	LookoutRetryAt      int64
+	LookoutFailedStarts int64
+	LookoutNoticeRaised int64
 }
 
 type ProjectWatchState struct {
