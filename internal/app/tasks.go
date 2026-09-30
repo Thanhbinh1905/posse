@@ -1059,7 +1059,21 @@ func (s *Service) brief(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "brief", Value: string(contents)}, {Key: "help", Value: []any{"Use `posse holler` to report this Rider's state"}}})
 }
 
-func (s *Service) send(ctx *axi.Context, args []string) error {
+func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		var structured *axi.Error
+		if errors.As(returnErr, &structured) {
+			return
+		}
+		if store.IsBusy(returnErr) {
+			returnErr = axi.Failure("store_busy", "the message store was busy and the instruction outcome could not be recorded", true, "Retry `posse send` after the store is available")
+		} else if store.IsStorageError(returnErr) {
+			returnErr = axi.Failure("store_error", "the message store could not read or update this instruction", false, "Run `posse doctor` to inspect the local store")
+		}
+	}()
 	parsed, err := parseArgs("send", args, map[string]flagSpec{"queue": {boolean: true}})
 	if err != nil {
 		return err
@@ -1144,46 +1158,93 @@ func (s *Service) send(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	message, err := db.OldestQueuedMessage(ctx.Context, task.ID)
+	message, err := db.MessageByID(ctx.Context, messageID)
+	if store.IsNotFound(err) {
+		return axi.Failure("message_not_found", "queued message no longer exists", false)
+	}
 	if err != nil {
 		return err
 	}
 	reason := "agent_not_ready"
-	if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found {
-		reason = queuedMessageReason(task, message, pane, snapshot, cfg)
-		if reason == "" {
-			wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, message, pane.PaneID, cfg)
-			if err != nil {
-				return err
-			}
-			if wasDelivered {
-				if task.State == store.StateNeedsDecision {
-					if err := db.Transition(ctx.Context, task.ID, store.StateNeedsDecision, store.StateWorking, "lead", "Lead delivered a response"); err != nil {
+	switch message.Status {
+	case "delivered":
+		delivered = true
+		reason = "agent_ready_and_unfocused"
+	case "claimed":
+		reason = "delivery_in_progress"
+	case "submitting":
+		return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
+	case "queued":
+		queued, queueErr := db.OldestQueuedMessage(ctx.Context, task.ID)
+		if queueErr == nil && queued.ID > messageID {
+			// Do not let this send skip its own row if another dispatcher
+			// claimed it after the status read and submit a later instruction.
+			queueErr = store.ErrNotFound
+		}
+		if queueErr != nil && !store.IsNotFound(queueErr) {
+			return queueErr
+		}
+		if queueErr == nil {
+			if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found {
+				reason = queuedMessageReason(task, queued, pane, snapshot, cfg)
+				if reason == "" {
+					wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, queued, pane.PaneID, cfg)
+					if err != nil {
 						return err
 					}
-				} else if task.State == store.StateDone && task.Type == "ship" {
-					if err := db.Transition(ctx.Context, task.ID, store.StateDone, store.StateWorking, "lead", "Lead delivered a fix instruction"); err != nil {
-						return err
-					}
-					if err := db.ClearTaskGatedSHA(ctx.Context, task.ID); err != nil {
-						return err
-					}
-				} else if task.State == store.StateLanding && task.Type == "ship" {
-					if err := db.Transition(ctx.Context, task.ID, store.StateLanding, store.StateWorking, "lead", "Lead delivered a pull request fix instruction"); err != nil {
-						return err
-					}
-					if err := db.ClearTaskGatedSHA(ctx.Context, task.ID); err != nil {
-						return err
+					if wasDelivered {
+						if task.State == store.StateNeedsDecision {
+							if err := db.Transition(ctx.Context, task.ID, store.StateNeedsDecision, store.StateWorking, "lead", "Lead delivered a response"); err != nil {
+								return err
+							}
+						} else if task.State == store.StateDone && task.Type == "ship" {
+							if err := db.Transition(ctx.Context, task.ID, store.StateDone, store.StateWorking, "lead", "Lead delivered a fix instruction"); err != nil {
+								return err
+							}
+							if err := db.ClearTaskGatedSHA(ctx.Context, task.ID); err != nil {
+								return err
+							}
+						} else if task.State == store.StateLanding && task.Type == "ship" {
+							if err := db.Transition(ctx.Context, task.ID, store.StateLanding, store.StateWorking, "lead", "Lead delivered a pull request fix instruction"); err != nil {
+								return err
+							}
+							if err := db.ClearTaskGatedSHA(ctx.Context, task.ID); err != nil {
+								return err
+							}
+						}
+						if queued.ID != messageID {
+							reason = "earlier_message_delivered_first"
+						}
+					} else if deliveryReason != "" {
+						reason = deliveryReason
 					}
 				}
-				delivered = message.ID == messageID
-				if !delivered {
-					reason = "earlier_message_delivered_first"
-				}
-			} else {
-				reason = deliveryReason
 			}
 		}
+		message, err = db.MessageByID(ctx.Context, messageID)
+		if store.IsNotFound(err) {
+			return axi.Failure("message_not_found", "queued message no longer exists", false)
+		}
+		if err != nil {
+			return err
+		}
+		switch message.Status {
+		case "delivered":
+			delivered = true
+			reason = "agent_ready_and_unfocused"
+		case "claimed":
+			reason = "delivery_in_progress"
+		case "submitting":
+			return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
+		case "queued":
+			if reason == "" {
+				reason = "delivery_in_progress"
+			}
+		default:
+			return axi.Failure("message_not_ready", "message is no longer available for delivery", true, "Run `posse show "+taskIDString(task.Seq)+"` to inspect the Task")
+		}
+	default:
+		return axi.Failure("message_not_ready", "message is no longer available for delivery", true, "Run `posse show "+taskIDString(task.Seq)+"` to inspect the Task")
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
@@ -1193,7 +1254,9 @@ func (s *Service) send(ctx *axi.Context, args []string) error {
 		state = "delivered"
 	} else {
 		help := "The message will be delivered when the Rider is ready and unfocused"
-		if reason == "blocked" || reason == "agent_ui_unknown" {
+		if reason == "delivery_in_progress" {
+			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"
+		} else if reason == "blocked" || reason == "agent_ui_unknown" {
 			help = "Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's dialog before retrying; use `posse keys " + taskIDString(task.Seq) + " <key...>` for a blocked permission prompt"
 		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})

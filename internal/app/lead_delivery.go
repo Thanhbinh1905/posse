@@ -42,7 +42,7 @@ const codexOpeningPrompt = "Run `posse` and give the User a short status of the 
 // Lead's whole context.
 const noPollRule = "Never poll with sleep, `posse peek`, `posse roster` or repeated `posse` calls to wait for Riders, CI or PRs; use `posse peek` only to inspect a specific concern."
 
-const lowkeyReportingRule = "Lowkey mode on: message the User only for needs-decision, land_ready when autonomy.land=ask, failed/lost, pr_closed, persistent pr_watch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, working notes, first pr_watch_failing, restarts) silently; group them into one short line only if useful. This changes reporting, not autonomy: never answer a needs-decision Notice for the User. The wake message already contains the Notice text; do not run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
+const lowkeyReportingRule = "Lowkey mode on: message the User only for needs-decision, message_delivery_uncertain, land_ready when autonomy.land=ask, failed/lost, pr_closed, persistent pr_watch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, working notes, first pr_watch_failing, restarts) silently; group them into one short line only if useful. This changes reporting, not autonomy: never answer a needs-decision Notice for the User. The wake message already contains the Notice text; do not run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
 
 const normalReportingRule = "Lowkey mode off: handle every Notice, tell the User the outcome in your own words without waiting to be asked, then run `posse ack <id|all>`."
 
