@@ -58,6 +58,161 @@ func TestFailedLandIntentDoesNotPoisonNextCLICommand(t *testing.T) {
 	}
 }
 
+func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
+	harness := newIntentCLIHarness(t)
+	for _, scenario := range []struct {
+		name         string
+		failTeardown bool
+	}{
+		{name: "competing teardown fails", failTeardown: true},
+		{name: "competing teardown finishes before claim"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := harness.newProject(t, strings.ReplaceAll(scenario.name, " ", "-"))
+			taskID, err := fixture.addShipTask(t, store.StateDone)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.attachTaskPane(t, taskID, false); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(fixture.home, "config.toml")
+			configText, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configText = []byte(strings.Replace(string(configText), `auto_unsaddle = "never"`, `auto_unsaddle = "finished"`, 1))
+			if err := os.WriteFile(configPath, configText, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			startCLI := func(env []string, args ...string) (*bytes.Buffer, <-chan error) {
+				t.Helper()
+				command := exec.Command(fixture.harness.binary, args...)
+				command.Dir, command.Env = fixture.repo, env
+				output := &bytes.Buffer{}
+				command.Stdout, command.Stderr = output, output
+				if err := command.Start(); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = command.Process.Kill() })
+				done := make(chan error, 1)
+				go func() { done <- command.Wait() }()
+				return output, done
+			}
+			waitCLI := func(name string, done <-chan error, output *bytes.Buffer) error {
+				t.Helper()
+				select {
+				case err := <-done:
+					return err
+				case <-time.After(30 * time.Second):
+					t.Fatalf("%s timed out: %s", name, output.String())
+					return nil
+				}
+			}
+			waitMarker := func(marker string) {
+				t.Helper()
+				if !waitForCondition(20*time.Second, func() bool { _, err := os.Stat(marker); return err == nil }) {
+					t.Fatalf("timed out waiting for pause marker %s", marker)
+				}
+			}
+			continueAt := func(marker string) {
+				t.Helper()
+				if err := os.WriteFile(marker+".continue", []byte("continue\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			landMarker := filepath.Join(fixture.root, "land-teardown-ready")
+			landEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "land:after:teardown.ready")
+			landEnv = setEnv(landEnv, "POSSE_INTENT_PAUSE_FILE", landMarker)
+			landOutput, landDone := startCLI(landEnv, "land", taskID, "--merge", "--user-approved", "User approved this local merge")
+			waitMarker(landMarker)
+
+			var landErr error
+			if scenario.failTeardown {
+				otherMarker := filepath.Join(fixture.root, "automatic-teardown-ready")
+				otherEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "unsaddle:after:panes.close")
+				otherEnv = setEnv(otherEnv, "POSSE_INTENT_PAUSE_FILE", otherMarker)
+				otherOutput, otherDone := startCLI(otherEnv, "roster")
+				waitMarker(otherMarker)
+				continueAt(landMarker)
+				time.Sleep(time.Second)
+				var task store.Task
+				if err := fixture.openDB(t, func(db *store.DB) error {
+					var readErr error
+					task, readErr = db.Task(context.Background(), fixture.project.ID, taskID)
+					return readErr
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(task.WorktreePath, ".git"), []byte("invalid git worktree metadata\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				continueAt(otherMarker)
+				if err := waitCLI("automatic Teardown", otherDone, otherOutput); err != nil {
+					t.Fatalf("automatic Teardown reconcile failed: %v output=%s", err, otherOutput.String())
+				}
+				landErr = waitCLI("local Land", landDone, landOutput)
+			} else {
+				if code, output := fixture.run(t, "", "roster"); code != 0 {
+					t.Fatalf("automatic Teardown failed: code=%d output=%s", code, output)
+				}
+				continueAt(landMarker)
+				landErr = waitCLI("local Land", landDone, landOutput)
+			}
+			if (landErr != nil) != scenario.failTeardown {
+				t.Fatalf("local Land error=%v, want error=%v; output=%s", landErr, scenario.failTeardown, landOutput.String())
+			}
+			teardownSuccessCount := strings.Count(landOutput.String(), "teardown: torn-down")
+			wantTeardownSuccessCount := 1
+			if scenario.failTeardown {
+				wantTeardownSuccessCount = 0
+			}
+			if teardownSuccessCount != wantTeardownSuccessCount {
+				t.Fatalf("Land teardown success count=%d, want %d: %s", teardownSuccessCount, wantTeardownSuccessCount, landOutput.String())
+			}
+
+			var task store.Task
+			var mount store.Mount
+			var landedCount, tornDownCount, approvalCount, intentCount, incompleteCount int
+			if err := fixture.openDB(t, func(db *store.DB) error {
+				var err error
+				task, err = db.Task(context.Background(), fixture.project.ID, taskID)
+				if err != nil {
+					return err
+				}
+				mounts, err := db.Mounts(context.Background(), fixture.project.ID)
+				if err != nil {
+					return err
+				}
+				for _, candidate := range mounts {
+					if candidate.Path == task.WorktreePath {
+						mount = candidate
+						break
+					}
+				}
+				query := `SELECT
+				 (SELECT COUNT(*) FROM transitions WHERE task_id=? AND to_state='landed'),
+				 (SELECT COUNT(*) FROM transitions WHERE task_id=? AND to_state='torn-down'),
+				 (SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='merge'),
+				 (SELECT COUNT(*) FROM intents WHERE task_id=?),
+				 (SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='unsaddle_incomplete')`
+				return db.QueryRowContext(context.Background(), query, task.ID, task.ID, task.ID, task.ID, task.ID).Scan(&landedCount, &tornDownCount, &approvalCount, &intentCount, &incompleteCount)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			wantState, wantMount, wantTornDown, wantIncomplete := store.StateTornDown, "idle", 1, 0
+			if scenario.failTeardown {
+				wantState, wantMount, wantTornDown, wantIncomplete = store.StateLanded, "broken", 0, 1
+			}
+			if task.State != wantState || mount.State != wantMount || landedCount != 1 || tornDownCount != wantTornDown || approvalCount != 1 || intentCount != 0 || incompleteCount != wantIncomplete {
+				t.Fatalf("unexpected exactly-once outcome: state=%s mount=%s landed=%d torn-down=%d approvals=%d intents=%d incomplete=%d", task.State, mount.State, landedCount, tornDownCount, approvalCount, intentCount, incompleteCount)
+			}
+		})
+	}
+}
+
 func TestRideCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
 	harness := newIntentCLIHarness(t)
 	fixture := harness.newProject(t, "ride-crash")
