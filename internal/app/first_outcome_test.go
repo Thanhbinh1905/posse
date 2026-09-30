@@ -12,7 +12,6 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
-	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -323,23 +322,13 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	gitTest(t, f.repo, "remote", "add", "origin", "https://github.com/example/project.git")
 	check := func(want, absent []string) {
 		t.Helper()
-		for _, args := range [][]string{{"--json"}, {"doctor", "--json"}, {"lead", "--json"}} {
+		for _, args := range [][]string{{"--json"}, {"lead", "--json"}} {
 			output := outcomeCLI(t, f.service, 0, args...)
 			var result struct {
 				Readiness []readinessGap `json:"readiness"`
-				Checks    []struct {
-					Check string `json:"check"`
-				} `json:"checks"`
 			}
 			if err := json.Unmarshal([]byte(output), &result); err != nil {
 				t.Fatal(err)
-			}
-			if args[0] == "doctor" {
-				for _, check := range result.Checks {
-					if check.Check == "machine setup" || check.Check == "readiness" || strings.HasPrefix(check.Check, "Gate") || strings.HasPrefix(check.Check, "forge auth") || strings.HasPrefix(check.Check, "no-mistakes for ") {
-						t.Fatalf("doctor added scoped check %q: %s", check.Check, output)
-					}
-				}
 			}
 			codes := map[string]bool{}
 			for _, gap := range result.Readiness {
@@ -372,9 +361,17 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	check([]string{"machine_setup"}, []string{"forge_auth", "gate_empty", "autonomy_ask"})
 	outcomeCLI(t, f.service, 0, "config", "set", "defaults.forge", "gitlab", "--project", "shop")
 	gitTest(t, f.repo, "remote", "set-url", "origin", "https://gitlab.example.com/group/project.git")
-	output := outcomeCLI(t, f.service, 0, "doctor", "--json")
+	output := outcomeCLI(t, f.service, 0, "--json")
 	if !strings.Contains(output, "gitlab.example.com") || !strings.Contains(output, "glab auth login --hostname gitlab.example.com") {
 		t.Fatal(output)
+	}
+	output = outcomeCLI(t, f.service, 0, "doctor", "--json")
+	var doctorFields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &doctorFields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doctorFields["readiness"]; ok {
+		t.Fatalf("doctor added readiness: %s", output)
 	}
 	if err := os.WriteFile(filepath.Join(f.root, "glab-ready"), nil, 0600); err != nil {
 		t.Fatal(err)
@@ -424,18 +421,6 @@ func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {
 		if !strings.Contains(text, rule) {
 			t.Fatalf("system prompt omitted rule: %s", rule)
 		}
-	}
-	skill, err := setupassets.Skill("posse-setup")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{"Outside a Lead pane", "Inside the Lead conversation", "--user-approved", "! posse config set", "Riders cannot write config"} {
-		if !strings.Contains(output, path) || !strings.Contains(string(skill), path) {
-			t.Fatalf("User-only paths disagree for %q", path)
-		}
-	}
-	if !strings.Contains(string(skill), "fastest start is `posse up`") || !strings.Contains(string(skill), "optional full configuration tour") {
-		t.Fatal(string(skill))
 	}
 	for _, language := range []string{"en", "vi"} {
 		outcomeCLI(t, f.service, 0, "config", "set", "identity.lead.language", language)

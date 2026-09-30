@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -29,7 +28,7 @@ func TestFirstOutcomeWorkspaceReadinessUsesEffectiveMemberPolicies(t *testing.T)
 	outcomeCLI(t, f.service, 0, "config", "set", "repositories.worker.gate", "[]", "--project", "stack", "--user-approved", "No Gate for worker")
 	check := func(wantGate, wantForge bool) {
 		t.Helper()
-		for _, args := range [][]string{{"--json"}, {"doctor", "--json"}} {
+		for _, args := range [][]string{{"--json"}} {
 			output := outcomeCLI(t, f.service, 0, args...)
 			var result struct {
 				Readiness []readinessGap `json:"readiness"`
@@ -67,8 +66,4 @@ func TestFirstOutcomeWorkspaceReadinessUsesEffectiveMemberPolicies(t *testing.T)
 		t.Fatal(err)
 	}
 	check(false, false)
-	output := outcomeCLI(t, f.service, 0, "doctor")
-	if strings.Contains(output, "no_mistakes_uninitialized") {
-		t.Fatal(output)
-	}
 }

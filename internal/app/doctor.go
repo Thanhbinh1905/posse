@@ -29,7 +29,6 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 	}
 	checks, help := doctorRows(result.Checks)
 	output := axi.Object{{Key: "checks", Value: checks}, {Key: "help", Value: help}}
-	output = withReadiness(output, result.Readiness)
 	if parsed.Bool("full") && len(result.Manifests) > 0 {
 		output = append(output, axi.Field{Key: "agent_manifests", Value: jsonRaw(result.Manifests)})
 	}
@@ -46,7 +45,6 @@ type doctorCheck struct {
 type doctorResult struct {
 	Checks    []doctorCheck
 	Manifests json.RawMessage
-	Readiness []readinessGap
 }
 
 func doctorRows(checks []doctorCheck) ([]axi.Object, []axi.Object) {
@@ -295,8 +293,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck(tool, "warn", "not installed", "Install "+tool+" to use the corresponding Landing Mode")
 		}
 	}
-	gaps, _ := s.doctorReadiness(ctx.Context, home)
-	return doctorResult{Checks: checks, Manifests: manifests, Readiness: gaps}, nil
+	return doctorResult{Checks: checks, Manifests: manifests}, nil
 }
 
 func stringListContains(values []string, wanted string) bool {

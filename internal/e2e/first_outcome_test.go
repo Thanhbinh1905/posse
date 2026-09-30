@@ -122,7 +122,7 @@ done
 	leadEnv := setEnv(env, "HERDR_ENV", "1")
 	leadEnv = setEnv(leadEnv, "HERDR_PANE_ID", project.LeadPaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
-	for _, command := range [][]string{nil, {"doctor"}, {"lead"}} {
+	for _, command := range [][]string{nil, {"lead"}} {
 		output := runPosse(t, binary, repo, leadEnv, command...)
 		for _, want := range []string{"gate_empty", "autonomy_ask"} {
 			if !strings.Contains(output, want) {
