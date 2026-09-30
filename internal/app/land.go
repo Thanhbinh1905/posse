@@ -228,9 +228,12 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	task.State = store.StateLanded
 	if shouldAutoUnsaddleLanded(cfg) {
-		result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, false, "")
+		result, completedElsewhere, err := s.teardownLandedTask(ctx.Context, db, project, cfg, task)
 		if err != nil {
 			return err
+		}
+		if completedElsewhere {
+			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landed"}, {Key: "teardown", Value: "torn-down"}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landed"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 	}
@@ -238,6 +241,29 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 		return err
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landed"}, {Key: "landed_ref", Value: landedRef}, {Key: "help", Value: []any{"Run `posse unsaddle " + taskIDString(task.Seq) + "` to release the Mount"}}})
+}
+
+// teardownLandedTask treats another process's completed Teardown as success.
+func (s *Service) teardownLandedTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) (unsaddleResult, bool, error) {
+	result, err := s.unsaddleTask(ctx, db, project, cfg, task, false, "")
+	if err == nil {
+		return result, false, nil
+	}
+	var commandError *axi.Error
+	if !errors.As(err, &commandError) || commandError.Code != "intent_active" {
+		return result, false, err
+	}
+	if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
+		return result, false, err
+	}
+	current, err := db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return result, false, err
+	}
+	if current.State == store.StateTornDown {
+		return result, true, nil
+	}
+	return result, false, err
 }
 
 func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent) error {

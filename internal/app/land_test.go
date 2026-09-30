@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -136,6 +137,83 @@ func TestLocalLandingRequiresApprovalAndTeardownAudits(t *testing.T) {
 	}
 	if mergeApprovals != 1 || tornTransitions != 1 {
 		t.Fatalf("approval and teardown transition counts = %d, %d", mergeApprovals, tornTransitions)
+	}
+}
+
+func TestLandTreatsConcurrentAutoTeardownAsSuccess(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateDone)
+	defer fixture.db.Close()
+	attachPRFixtureMount(t, fixture)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(`[defaults]
+landing_mode = "local"
+auto_unsaddle = "finished"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "merge", "--ff-only", "refs/heads/posse/t1")
+	ctx := context.Background()
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateLanding, "cli", "gate passed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateLanding, store.StateLanded, "cli", "merged"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model the other CLI that owns teardown with a live parent process id.
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, task.ID, "unsaddle", "in_progress:panes.close", `{"discard":false}`, os.Getppid()); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := fixture.db.IntentByTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	finishDone := make(chan error, 1)
+	go func() {
+		<-release
+		if err := fixture.db.Transition(ctx, task.ID, store.StateLanded, store.StateTornDown, "cli", "automatic teardown completed"); err != nil {
+			finishDone <- err
+			return
+		}
+		finishDone <- fixture.db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+	}()
+	defer releaseOnce.Do(func() { close(release) })
+
+	type teardownOutcome struct {
+		completedElsewhere bool
+		err                error
+	}
+	helpDone := make(chan teardownOutcome, 1)
+	go func() {
+		_, completedElsewhere, err := fixture.service.teardownLandedTask(ctx, fixture.db, fixture.project, cfg, task)
+		helpDone <- teardownOutcome{completedElsewhere: completedElsewhere, err: err}
+	}()
+	var outcome teardownOutcome
+	select {
+	case outcome = <-helpDone:
+	case <-time.After(time.Second):
+	}
+	releaseOnce.Do(func() { close(release) })
+	if outcome.err == nil && !outcome.completedElsewhere {
+		outcome = <-helpDone
+	}
+	if err := <-finishDone; err != nil {
+		t.Fatalf("concurrent Teardown completion failed: %v", err)
+	}
+	if outcome.err != nil || !outcome.completedElsewhere {
+		t.Fatalf("concurrent local Land Teardown = completedElsewhere %v, err %v", outcome.completedElsewhere, outcome.err)
+	}
+	landed, err := fixture.db.TaskByID(ctx, fixture.project.ID, task.ID)
+	if err != nil || landed.State != store.StateTornDown {
+		t.Fatalf("Task after concurrent Teardown = %#v, %v", landed, err)
 	}
 }
 
