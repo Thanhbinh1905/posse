@@ -21,4 +21,4 @@ The step is done when you are following `posse lead` or `posse brief`, or the Us
 - Output is TOON. Add `--json` only when you must parse strictly.
 - Errors arrive as `error{code,message,retryable,help}`. Act on `help`, and retry only when `retryable` is true.
 - Read and write config only through `posse config` (`schema`, `show --effective`, `set`, `unset`), so every value is validated.
-- `gate`, `remuda.setup` and every `autonomy.*` key belong to the User. As a Lead or Worker, ask the User and let them set it.
+- `gate`, `remuda.setup`, `kinds.<kind>.lead_auto_approve` and every `autonomy.*` key belong to the User. As a Lead or Worker, ask the User and let them set it.

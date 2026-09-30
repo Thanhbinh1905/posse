@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,6 +17,35 @@ import (
 )
 
 const deliveryClaimTimeout = 2 * time.Minute
+
+func (s *Service) raiseExpiredMessageDeliveryNotices(ctx context.Context, db *store.DB, project store.Project) (bool, error) {
+	submissions, err := db.ExpiredMessageSubmissions(ctx, project.ID, 0, currentTime()-deliveryClaimTimeout.Milliseconds())
+	if err != nil {
+		return false, err
+	}
+	createdAny := false
+	for _, submission := range submissions {
+		created, err := s.createMessageDeliveryUncertainNotice(ctx, db, project.ID, submission.TaskSeq, submission.Message)
+		if err != nil {
+			return createdAny, err
+		}
+		createdAny = createdAny || created
+	}
+	if createdAny {
+		if err := s.regenerateProjects(ctx, db); err != nil {
+			return true, err
+		}
+	}
+	return createdAny, nil
+}
+
+func (s *Service) createMessageDeliveryUncertainNotice(ctx context.Context, db *store.DB, projectID int64, taskSeq int, message store.Message) (bool, error) {
+	task := taskIDString(taskSeq)
+	preview := clipRunes(strings.Join(strings.Fields(message.Body), " "), 48)
+	summary := fmt.Sprintf("Message #%d for %s may not have reached the Rider. Inspect with `posse peek %s` and `posse show %s --full`; send a replacement only if absent. Instruction: %q", message.ID, task, task, task, preview)
+	created, err := db.CreateMessageDeliveryUncertainNotice(ctx, projectID, message.TaskID, message.ID, summary, message.Body)
+	return created, err
+}
 
 // An empty reason means it is safe to submit now. The persisted message policy
 // is checked on every retry so --queue cannot turn into a mid-turn steer.
@@ -119,7 +149,25 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 		}
 		return nil
 	}
-	if err := s.safePromptWhen(ctx, paneID, workerInstruction(task, message), check); err != nil {
+	submitting := false
+	if err := s.safePromptWhenBefore(ctx, paneID, workerInstruction(task, message), check, func() error {
+		if err := db.MarkMessageSubmitting(ctx, message.ID, token); err != nil {
+			return err
+		}
+		submitting = true
+		return nil
+	}); err != nil {
+		if submitting {
+			created, noticeErr := s.createMessageDeliveryUncertainNotice(ctx, db, task.ProjectID, task.Seq, message)
+			if noticeErr == nil && created {
+				noticeErr = s.regenerateProjects(ctx, db)
+			}
+			uncertainErr := axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
+			if noticeErr != nil {
+				return false, "", errors.Join(uncertainErr, noticeErr)
+			}
+			return false, "", uncertainErr
+		}
 		rollbackErr := db.RollbackMessageClaim(ctx, message.ID, token)
 		if failure, ok := err.(*axi.Error); ok {
 			switch failure.Code {

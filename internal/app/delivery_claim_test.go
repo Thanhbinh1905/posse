@@ -4,9 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -15,6 +21,71 @@ type promptGateAdapter struct {
 	herdr.Adapter
 	entered chan struct{}
 	release chan struct{}
+}
+
+func exitMessageCrashHelper(code int) {
+	for name, prefix := range map[string]string{"POSSE_HOME": "posse-app-test-home-", "CODEX_HOME": "posse-app-test-codex-"} {
+		path := os.Getenv(name)
+		if filepath.Dir(path) == os.TempDir() && strings.HasPrefix(filepath.Base(path), prefix) {
+			_ = os.RemoveAll(path)
+		}
+	}
+	os.Exit(code)
+}
+
+type acceptedPromptLostAckAdapter struct {
+	herdr.Adapter
+}
+
+func (a acceptedPromptLostAckAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	result, err := a.Adapter.Call(ctx, method, params)
+	if method == "agent.prompt" && err == nil {
+		return nil, errors.New("simulated lost acknowledgment after Herdr accepted the prompt")
+	}
+	return result, err
+}
+
+type crashAfterAcceptedPromptAdapter struct {
+	*herdr.Fake
+	marker string
+}
+
+func (a crashAfterAcceptedPromptAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	result, err := a.Fake.Call(ctx, method, params)
+	if method == "agent.prompt" && err == nil {
+		if err := os.WriteFile(a.marker, []byte("accepted\n"), 0o600); err != nil {
+			exitMessageCrashHelper(85)
+		}
+		exitMessageCrashHelper(86)
+	}
+	return result, err
+}
+
+func TestMessageDeliveryCrashHelperProcess(t *testing.T) {
+	if os.Getenv("POSSE_MESSAGE_CRASH_HELPER") != "1" {
+		return
+	}
+	ctx := context.Background()
+	db, err := store.Open(os.Getenv("POSSE_MESSAGE_CRASH_HOME"))
+	if err != nil {
+		exitMessageCrashHelper(2)
+	}
+	projectID, _ := strconv.ParseInt(os.Getenv("POSSE_MESSAGE_CRASH_PROJECT"), 10, 64)
+	project, err := db.ProjectByID(ctx, projectID)
+	if err != nil {
+		exitMessageCrashHelper(3)
+	}
+	task, err := db.Task(ctx, projectID, "t1")
+	if err != nil {
+		exitMessageCrashHelper(4)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
+	service := testService(os.Getenv("POSSE_MESSAGE_CRASH_HOME"), crashAfterAcceptedPromptAdapter{Fake: fake, marker: os.Getenv("POSSE_MESSAGE_CRASH_MARKER")})
+	if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+		exitMessageCrashHelper(5)
+	}
+	exitMessageCrashHelper(0)
 }
 
 func TestConcurrentMessageDeliveryClaimsBeforePrompt(t *testing.T) {
@@ -82,6 +153,74 @@ func TestConcurrentMessageDeliveryClaimsBeforePrompt(t *testing.T) {
 	}
 }
 
+func TestMessageDeliveryDoesNotDuplicateAfterOwnerCrash(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.QueueMessage(ctx, taskID, "Do not duplicate this instruction", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "prompt-accepted")
+	command := exec.Command(os.Args[0], "-test.run=^TestMessageDeliveryCrashHelperProcess$")
+	command.Env = append(os.Environ(),
+		"POSSE_MESSAGE_CRASH_HELPER=1",
+		"POSSE_MESSAGE_CRASH_HOME="+home,
+		"POSSE_MESSAGE_CRASH_PROJECT="+strconv.FormatInt(project.ID, 10),
+		"POSSE_MESSAGE_CRASH_MARKER="+marker,
+	)
+	output, err := command.CombinedOutput()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 86 {
+		t.Fatalf("delivery owner did not crash after prompt acceptance: err=%v output=%s", err, output)
+	}
+	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "accepted\n" {
+		t.Fatalf("Herdr prompt was not accepted before owner crash: contents=%q err=%v", contents, err)
+	}
+
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET claimed_at=? WHERE task_id=?`, time.Now().Add(-deliveryClaimTimeout-time.Second).UnixMilli(), taskID); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
+	service := testService(home, fake)
+	for range 3 {
+		if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var status string
+	if err := db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=?`, taskID).Scan(&status); err != nil || status != "submitting" || fake.CallCount("agent.prompt") != 0 {
+		t.Fatalf("recovery retried accepted instruction: status=%q err=%v prompts=%d", status, err, fake.CallCount("agent.prompt"))
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "message_delivery_uncertain" || !strings.Contains(notices[0].Summary, "Do not duplicate this instruction") {
+		t.Fatalf("recovery did not raise one instruction-specific Notice: %#v, %v", notices, err)
+	}
+}
+
 func TestNoticeClaimRollsBackWhenPromptFails(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
@@ -125,7 +264,63 @@ func TestNoticeClaimRollsBackWhenPromptFails(t *testing.T) {
 	}
 }
 
-func TestMessageClaimRollsBackWhenPromptFails(t *testing.T) {
+func TestLegacyClaimMigrationRaisesDeliveryNotice(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if db != nil {
+			_ = db.Close()
+		}
+	}()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := db.QueueMessage(ctx, taskID, "Legacy claimed instruction", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET status='claimed',claim_token='legacy',claimed_at=? WHERE id=?`, time.Now().Add(-deliveryClaimTimeout-time.Second).UnixMilli(), messageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id=21`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := db.MessageByID(ctx, messageID)
+	if err != nil || message.Status != "submitting" {
+		t.Fatalf("legacy claim migration did not make the message uncertain: %#v, %v", message, err)
+	}
+	service := testService(home, herdr.NewFake())
+	created, err := service.raiseExpiredMessageDeliveryNotices(ctx, db, project)
+	if err != nil || !created {
+		t.Fatalf("migration recovery did not create its Notice: created=%t err=%v", created, err)
+	}
+	created, err = service.raiseExpiredMessageDeliveryNotices(ctx, db, project)
+	if err != nil || created {
+		t.Fatalf("migration recovery duplicated its Notice: created=%t err=%v", created, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "message_delivery_uncertain" || !strings.Contains(notices[0].Summary, "#"+strconv.FormatInt(messageID, 10)) || !strings.Contains(notices[0].DataJSON, message.Body) {
+		t.Fatalf("legacy migration Notice did not identify the instruction: %#v, %v", notices, err)
+	}
+}
+
+func TestMessageClaimDoesNotRetryAfterAmbiguousPromptError(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := store.Open(home)
@@ -150,21 +345,37 @@ func TestMessageClaimRollsBackWhenPromptFails(t *testing.T) {
 	}
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle"}}}
-	fake.Errors["agent.prompt"] = errors.New("prompt failed")
-	service := testService(home, fake)
-	if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err == nil {
-		t.Fatal("prompt failure was not returned")
+	service := testService(home, acceptedPromptLostAckAdapter{Adapter: fake})
+	sendErr := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue)
+	var failure *axi.Error
+	if !errors.As(sendErr, &failure) || failure.Code != "message_delivery_uncertain" {
+		t.Fatalf("ambiguous prompt error = %v, want message_delivery_uncertain", sendErr)
 	}
 	var status, token string
-	if err := db.QueryRowContext(ctx, `SELECT status,claim_token FROM messages WHERE id=?`, messageID).Scan(&status, &token); err != nil || status != "queued" || token != "" {
-		t.Fatalf("failed prompt left message claim state %q/%q, %v", status, token, err)
+	if err := db.QueryRowContext(ctx, `SELECT status,claim_token FROM messages WHERE id=?`, messageID).Scan(&status, &token); err != nil || status != "submitting" || token == "" {
+		t.Fatalf("uncertain prompt lost its durable no-retry state %q/%q, %v", status, token, err)
 	}
-	fake.Errors["agent.prompt"] = nil
-	if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+	recoveredDB, err := store.Open(home)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRowContext(ctx, `SELECT status,claim_token FROM messages WHERE id=?`, messageID).Scan(&status, &token); err != nil || status != "delivered" || token != "" {
-		t.Fatalf("message retry state = %q/%q, %v", status, token, err)
+	defer recoveredDB.Close()
+	recoveredService := testService(home, fake)
+	for range 3 {
+		if err := recoveredService.deliverQueuedMessages(ctx, recoveredDB, project, fake.SnapshotValue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.QueryRowContext(ctx, `SELECT status,claim_token FROM messages WHERE id=?`, messageID).Scan(&status, &token); err != nil || status != "submitting" || token == "" || fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("uncertain message was retried: status=%q token=%q err=%v prompts=%d", status, token, err, fake.CallCount("agent.prompt"))
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "message_delivery_uncertain" || !strings.Contains(notices[0].Summary, "#"+strconv.FormatInt(messageID, 10)) || !strings.Contains(notices[0].DataJSON, "Please check the tests") {
+		t.Fatalf("ambiguous prompt error did not create an instruction-specific Notice: %#v, %v", notices, err)
+	}
+	uncertain, err := db.UncertainTaskMessages(ctx, project.ID, taskID, currentTime()-deliveryClaimTimeout.Milliseconds())
+	if err != nil || len(uncertain) != 1 || uncertain[0].ID != messageID {
+		t.Fatalf("Task inspection omitted a fresh ambiguous instruction: %#v, %v", uncertain, err)
 	}
 }
 
