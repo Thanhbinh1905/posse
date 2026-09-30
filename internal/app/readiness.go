@@ -62,6 +62,20 @@ func withReadiness(result axi.Object, gaps []readinessGap) axi.Object {
 	return result
 }
 
+func withReadinessHelp(err error, gaps []readinessGap) error {
+	failure, ok := err.(*axi.Error)
+	if !ok {
+		return err
+	}
+	for _, gap := range gaps {
+		if gap.Code == "no_mistakes_uninitialized" {
+			failure.Help = append(failure.Help, "Readiness gap: "+gap.Code+" - "+gap.Consequence, "Readiness fix: "+gap.Fix)
+			break
+		}
+	}
+	return failure
+}
+
 func (s *Service) readiness(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]readinessGap, error) {
 	checks, err := s.projectDoctorChecks(ctx, db, project, cfg)
 	if err != nil {

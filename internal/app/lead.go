@@ -309,6 +309,14 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 			return axi.Failure("config_invalid", "no-mistakes landing is not available for workspace Projects", false, "Set `landing_mode` to local or pr for Project "+name)
 		}
 		if err := ensureNoMistakesInitialized(ctx.Context, root); err != nil {
+			readinessProject := project
+			if !registered {
+				readinessProject = store.Project{Name: name, Root: root, Kind: detected.Kind, DefaultBranch: detected.DefaultBranch}
+			}
+			gaps, readinessErr := s.readiness(ctx.Context, db, readinessProject, cfg)
+			if readinessErr == nil {
+				return withReadinessHelp(err, gaps)
+			}
 			return err
 		}
 	}

@@ -172,6 +172,30 @@ func TestFirstOutcomeConfiguredCursorUsesMappedCLI(t *testing.T) {
 	}
 }
 
+func TestFirstOutcomeUpReportsNoMistakesReadinessOnRefusal(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	if err := os.WriteFile(filepath.Join(bin, "no-mistakes"), []byte("#!/bin/sh\necho 'error: repo not initialized (run no-mistakes init first)'\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := filepath.Join(f.home, "projects", f.project.Name, "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("[defaults]\nlanding_mode='no-mistakes'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	output := outcomeCLI(t, f.service, 1, "up", "--pi", "--json")
+	for _, want := range []string{"no_mistakes_uninitialized", "Readiness gap: no_mistakes_uninitialized", "no-mistakes init"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("up omitted %q: %s", want, output)
+		}
+	}
+}
+
 func TestFirstOutcomeDispatchPrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name, config, profile, source, expectedProfile string
