@@ -447,6 +447,37 @@ func TestLeadLaunchAutoApprovalCanBeDisabledPerKind(t *testing.T) {
 	}
 }
 
+func TestLeadLaunchDoesNotDuplicateProfileAutoApproveArgs(t *testing.T) {
+	home := t.TempDir()
+	service := testService(home, nil)
+	cfg, err := config.Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, kind := range []string{"claude", "codex", "opencode"} {
+		t.Run(kind, func(t *testing.T) {
+			approvalArgs := cfg.Kinds[kind].AutoApproveArgs
+			profileName := "lead-" + kind
+			cfg.Profiles[profileName] = config.Profile{Kind: kind, Args: append([]string(nil), approvalArgs...)}
+			cfg.Lead.Profiles[kind] = profileName
+			launch, err := service.prepareLeadLaunch(home, store.Project{Name: "shop"}, cfg, kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for start := 0; start+len(approvalArgs) <= len(launch.Args); start++ {
+				if equalStrings(launch.Args[start:start+len(approvalArgs)], approvalArgs) {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("auto-approve args occur %d times in Lead argv: %#v", count, launch.Args)
+			}
+		})
+	}
+}
+
 func TestClaudeLowkeyVersionEvidence(t *testing.T) {
 	for version, verified := range map[string]bool{
 		"2.1.272 (Claude Code)": true, "2.1.280 (Claude Code)": true,
