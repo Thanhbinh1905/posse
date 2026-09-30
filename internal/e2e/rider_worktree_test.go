@@ -170,6 +170,24 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	if panes, processes := lookoutPanes(t, f.client), lookoutPIDs(f.root); len(panes) != 1 || len(processes) != 1 {
 		t.Fatalf("Lead group close left Lookouts: panes=%d processes=%d", len(panes), len(processes))
 	}
+	db, err = store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []store.Task{firstBeforeLeadClose, secondBeforeLeadClose} {
+		transitions, err := db.TaskTransitions(context.Background(), task.ID, 20)
+		if err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		for _, transition := range transitions {
+			if transition.To == string(store.StateLost) {
+				_ = db.Close()
+				t.Fatalf("Rider %s was marked lost during group recovery: %#v", task.ShortName, transitions)
+			}
+		}
+	}
+	_ = db.Close()
 	if data, err := os.ReadFile(changed); err != nil || string(data) != "keep this work" {
 		t.Fatalf("Lead group close lost unfinished work: %q %v", data, err)
 	}
