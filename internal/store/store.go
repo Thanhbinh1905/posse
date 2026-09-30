@@ -18,7 +18,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 	dbgen "github.com/thanhbinh1905/posse/internal/store/sqlc"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
@@ -39,6 +39,13 @@ var ErrBusy = errors.New("database busy after bounded retry")
 // write is invalid" and "retry me".
 func IsBusy(err error) bool {
 	return errors.Is(err, ErrBusy) || isBusyErr(err)
+}
+
+// IsStorageError identifies SQLite and database/sql no-row errors so command
+// boundaries can return a typed storage failure instead of an internal error.
+func IsStorageError(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) || errors.Is(err, sql.ErrNoRows)
 }
 
 func isBusyErr(err error) bool {
@@ -1182,13 +1189,31 @@ func (db *DB) ClaimMessage(ctx context.Context, messageID int64, token string, a
 	return count == 1, err
 }
 
+// MarkMessageSubmitting persists the external side-effect boundary. Once this
+// succeeds, recovery must not submit the message again because Herdr may have
+// accepted it even if Posse crashes before recording delivery.
+func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token string) error {
+	result, err := db.ExecContext(ctx, `UPDATE messages SET status='submitting' WHERE id=? AND status='claimed' AND claim_token=?`, messageID, token)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrStateRace
+	}
+	return nil
+}
+
 func (db *DB) RollbackMessageClaim(ctx context.Context, messageID int64, token string) error {
 	_, err := db.ExecContext(ctx, `UPDATE messages SET status='queued',claim_token='',claimed_at=0 WHERE id=? AND status='claimed' AND claim_token=?`, messageID, token)
 	return err
 }
 
 func (db *DB) MarkClaimedMessageDelivered(ctx context.Context, messageID int64, token string, at int64) error {
-	result, err := db.ExecContext(ctx, `UPDATE messages SET status='delivered',delivered_at=?,claim_token='',claimed_at=0 WHERE id=? AND status='claimed' AND claim_token=?`, at, messageID, token)
+	result, err := db.ExecContext(ctx, `UPDATE messages SET status='delivered',delivered_at=?,claim_token='',claimed_at=0 WHERE id=? AND status='submitting' AND claim_token=?`, at, messageID, token)
 	if err != nil {
 		return err
 	}
@@ -1336,6 +1361,8 @@ func (db *DB) MarkClaimedNoticesDelivered(ctx context.Context, projectID int64, 
 }
 
 func (db *DB) ReleaseExpiredDeliveryClaims(ctx context.Context, before int64) error {
+	// Only pre-submission claims are safe to retry. `submitting` rows represent
+	// an ambiguous external outcome and intentionally remain held for review.
 	if _, err := db.ExecContext(ctx, `UPDATE messages SET status='queued',claim_token='',claimed_at=0 WHERE status='claimed' AND claimed_at>0 AND claimed_at<=?`, before); err != nil {
 		return err
 	}

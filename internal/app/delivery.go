@@ -119,7 +119,17 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 		}
 		return nil
 	}
-	if err := s.safePromptWhen(ctx, paneID, workerInstruction(task, message), check); err != nil {
+	submitting := false
+	if err := s.safePromptWhenBefore(ctx, paneID, workerInstruction(task, message), check, func() error {
+		if err := db.MarkMessageSubmitting(ctx, message.ID, token); err != nil {
+			return err
+		}
+		submitting = true
+		return nil
+	}); err != nil {
+		if submitting {
+			return false, "", axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
+		}
 		rollbackErr := db.RollbackMessageClaim(ctx, message.ID, token)
 		if failure, ok := err.(*axi.Error); ok {
 			switch failure.Code {

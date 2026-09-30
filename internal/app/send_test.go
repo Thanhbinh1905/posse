@@ -156,11 +156,13 @@ func TestSendDeliveryPolicy(t *testing.T) {
 func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 	for _, tc := range []struct {
 		name, wantState, wantReason, wantStatus string
-		claimOnly                               bool
+		claimOnly, queueLater                   bool
 		wantPrompts                             int
 	}{
-		{"delivered", "delivered", "agent_ready_and_unfocused", "delivered", false, 1},
-		{"claimed", "queued", "delivery_in_progress", "claimed", true, 0},
+		{"delivered", "delivered", "agent_ready_and_unfocused", "delivered", false, false, 1},
+		{"claimed", "queued", "delivery_in_progress", "claimed", true, false, 0},
+		{"claimed with later queued message", "queued", "delivery_in_progress", "claimed", true, true, 0},
+		{"delivered with later queued message", "delivered", "agent_ready_and_unfocused", "delivered", false, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -215,9 +217,15 @@ func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 				deliveryStarted = true
 				if tc.claimOnly {
 					_, deliveryErr = deliveryDB.ClaimMessage(ctx, message.ID, "concurrent-delivery", currentTime())
+					if deliveryErr == nil && tc.queueLater {
+						_, deliveryErr = deliveryDB.QueueMessage(ctx, taskID, "Later queued instruction", true)
+					}
 					return
 				}
 				deliveryErr = service.deliverQueuedMessages(ctx, deliveryDB, project, fake.SnapshotValue)
+				if deliveryErr == nil && tc.queueLater {
+					_, deliveryErr = deliveryDB.QueueMessage(ctx, taskID, "Later queued instruction", true)
+				}
 			}
 
 			t.Chdir(repo)
@@ -243,6 +251,69 @@ func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 				t.Fatalf("raced message status = %q, %v", status, err)
 			}
 		})
+	}
+}
+
+func TestSendReturnsTypedErrorForSQLiteStorageFailure(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := herdr.NewFake()
+	fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
+	adapter := &snapshotHookAdapter{Fake: fake}
+	injected := false
+	var faultErr error
+	adapter.beforeSnapshot = func(ctx context.Context) {
+		if injected {
+			return
+		}
+		faultDB, err := store.Open(home)
+		if err != nil {
+			faultErr = err
+			return
+		}
+		defer faultDB.Close()
+		if _, err := faultDB.OldestQueuedMessage(ctx, taskID); store.IsNotFound(err) {
+			return
+		} else if err != nil {
+			faultErr = err
+			return
+		}
+		_, faultErr = faultDB.ExecContext(ctx, `DROP TABLE messages`)
+		injected = faultErr == nil
+	}
+	service := testService(home, adapter)
+	t.Chdir(repo)
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	if code := cli.Run([]string{"send", "t1", "Check the tests"}); code != 1 || !strings.Contains(output.String(), `"store_error"`) || strings.Contains(output.String(), `"internal_error"`) {
+		t.Fatalf("send did not type the SQLite failure: exit=%d output=%s", code, output.String())
+	}
+	if !injected || faultErr != nil {
+		t.Fatalf("SQLite fault was not injected: injected=%t err=%v", injected, faultErr)
 	}
 }
 
