@@ -307,7 +307,9 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if err != nil {
 			return len(recovered), err
 		}
-		if !recoverableTaskState(task.State) {
+		// A failed Signal can arrive after enumeration. Lost Riders remain
+		// recoverable, but Failed Tasks still require an explicit relaunch.
+		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
 		}
 		if _, err := s.relaunchTask(ctx, db, home, project, cfg, task, ""); err != nil {
