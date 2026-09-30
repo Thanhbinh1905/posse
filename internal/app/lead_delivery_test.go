@@ -364,7 +364,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 
 	claude := launch("claude")
 	plugin := filepath.Join(home, "projects", "shop", "lead-claude-lowkey")
-	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin}) || claude.TypedPrompt != "" ||
+	if !equalStrings(claude.Args, []string{"--append-system-prompt-file", instructions, "--plugin-dir", plugin}) || claude.TypedPrompt != "" ||
 		claude.Env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] != "1" || claude.Env["POSSE_LOWKEY_CONFIG"] != config.ConfigPath(home, "shop") ||
 		claude.Env["POSSE_LOWKEY_GLOBAL_CONFIG"] != config.ConfigPath(home, "") || claude.Env["POSSE_LOWKEY_NOTICES_DIR"] != claudeNoticeDirectory(home, "shop") {
 		t.Fatalf("claude launch = %#v", claude)
@@ -376,14 +376,20 @@ func TestLeadLaunchByKind(t *testing.T) {
 	}
 
 	codex := launch("codex")
-	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=You are the Lead for Project shop.") || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
+	if len(codex.Args) != 5 || !equalStrings(codex.Args[:3], []string{"--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[3], "developer_instructions=You are the Lead for Project shop.") || strings.Contains(codex.Args[3], "\n") || codex.Args[4] != codexOpeningPrompt || codex.TypedPrompt != "" {
 		t.Fatalf("codex launch = %#v", codex)
 	}
 	for _, rule := range []string{"posse queues each batch of Notices", noPollRule, "End your turn and let that message wake you."} {
-		if !strings.Contains(codex.Args[4], rule) {
-			t.Fatalf("codex instructions omitted %q: %s", rule, codex.Args[4])
+		if !strings.Contains(codex.Args[3], rule) {
+			t.Fatalf("codex instructions omitted %q: %s", rule, codex.Args[3])
 		}
 	}
+	for _, arg := range codex.Args {
+		if strings.Contains(arg, "dangerously") {
+			t.Fatalf("codex Lead got an auto-approve argument: %#v", codex.Args)
+		}
+	}
+
 	pi := launch("pi")
 	extension := filepath.Join(home, "projects", "shop", "lead-pi-extension.ts")
 	if !equalStrings(pi.Args, []string{"--append-system-prompt", instructions, "--extension", extension}) || pi.TypedPrompt != "" {
@@ -413,68 +419,6 @@ func TestLeadLaunchByKind(t *testing.T) {
 	}
 	if strings.Contains(string(contents), "tui.appendPrompt") {
 		t.Fatal("pi extension touches the composer")
-	}
-}
-
-func TestLeadLaunchAutoApprovalCanBeDisabledPerKind(t *testing.T) {
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[kinds.claude]\nlead_auto_approve = false\n\n[kinds.codex]\nlead_auto_approve = false\n\n[kinds.opencode]\nlead_auto_approve = false\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	service := testService(home, nil)
-	cfg, err := config.Load(home, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, kind := range []string{"claude", "codex", "opencode"} {
-		t.Run(kind, func(t *testing.T) {
-			if cfg.Kinds[kind].LeadAutoApprove {
-				t.Fatalf("%s lead_auto_approve = true after config opt-out", kind)
-			}
-			launch, err := service.prepareLeadLaunch(home, store.Project{Name: "shop"}, cfg, kind)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, arg := range cfg.Kinds[kind].AutoApproveArgs {
-				for _, launchArg := range launch.Args {
-					if launchArg == arg {
-						t.Fatalf("Lead auto-approve argument %q remained after opt-out: %#v", arg, launch.Args)
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestLeadLaunchDoesNotDuplicateProfileAutoApproveArgs(t *testing.T) {
-	home := t.TempDir()
-	service := testService(home, nil)
-	cfg, err := config.Load(home, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, kind := range []string{"claude", "codex", "opencode"} {
-		t.Run(kind, func(t *testing.T) {
-			approvalArgs := cfg.Kinds[kind].AutoApproveArgs
-			profileName := "lead-" + kind
-			cfg.Profiles[profileName] = config.Profile{Kind: kind, Args: append([]string(nil), approvalArgs...)}
-			cfg.Lead.Profiles[kind] = profileName
-			launch, err := service.prepareLeadLaunch(home, store.Project{Name: "shop"}, cfg, kind)
-			if err != nil {
-				t.Fatal(err)
-			}
-			count := 0
-			for start := 0; start+len(approvalArgs) <= len(launch.Args); start++ {
-				if equalStrings(launch.Args[start:start+len(approvalArgs)], approvalArgs) {
-					count++
-				}
-			}
-			if count != 1 {
-				t.Fatalf("auto-approve args occur %d times in Lead argv: %#v", count, launch.Args)
-			}
-		})
 	}
 }
 
@@ -556,11 +500,11 @@ func TestOpenCodeLeadLaunchAndPluginConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !equalStrings(launch.Args, []string{"--auto", "--mini", "--model", "provider/model", "--prompt", codexOpeningPrompt}) || !launch.StartsBusy || launch.TypedPrompt != "" {
+	if !equalStrings(launch.Args, []string{"--mini", "--model", "provider/model", "--prompt", codexOpeningPrompt}) || !launch.StartsBusy || launch.TypedPrompt != "" {
 		t.Fatalf("OpenCode launch = %#v", launch)
 	}
-	if !strings.Contains(strings.Join(launch.Args, " "), "--auto") {
-		t.Fatalf("OpenCode Lead did not receive its default auto-approve flag: %#v", launch.Args)
+	if strings.Contains(strings.Join(launch.Args, " "), "--auto") {
+		t.Fatalf("Lead received Worker approval flag: %#v", launch.Args)
 	}
 	var inline struct {
 		Plugin []string `json:"plugin"`
@@ -732,7 +676,7 @@ func TestUpCodexExecsWithItsOpeningPromptAndTypesNothing(t *testing.T) {
 		t.Fatalf("up --codex: code=%d output=%s", code, output.String())
 	}
 	plan := service.pendingLead
-	if plan == nil || plan.NeedsPrompt || len(plan.Args) < 2 || plan.Args[len(plan.Args)-1] != codexOpeningPrompt || !equalStrings(plan.Args[:2], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox"}) {
+	if plan == nil || plan.NeedsPrompt || len(plan.Args) == 0 || plan.Args[len(plan.Args)-1] != codexOpeningPrompt || plan.Args[0] != "--sandbox" {
 		t.Fatalf("codex Lead exec plan = %#v", plan)
 	}
 	if fake.CallCount("agent.prompt") != 0 {

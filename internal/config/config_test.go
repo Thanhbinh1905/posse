@@ -75,19 +75,18 @@ func TestLeadDeliveryDefaultsByKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]struct {
-		delivery        string
-		systemPrompt    []string
-		leadAutoApprove bool
+		delivery     string
+		systemPrompt []string
 	}{
-		"claude":   {NoticeDeliveryLookout, []string{"--append-system-prompt-file", "{file}"}, true},
-		"codex":    {NoticeDeliveryCodexQueue, []string{"-c", "developer_instructions={text}"}, true},
-		"pi":       {NoticeDeliveryPiExtension, []string{"--append-system-prompt", "{file}"}, false},
-		"opencode": {NoticeDeliveryOpenCodePlugin, nil, true},
+		"claude":   {NoticeDeliveryLookout, []string{"--append-system-prompt-file", "{file}"}},
+		"codex":    {NoticeDeliveryCodexQueue, []string{"-c", "developer_instructions={text}"}},
+		"pi":       {NoticeDeliveryPiExtension, []string{"--append-system-prompt", "{file}"}},
+		"opencode": {NoticeDeliveryOpenCodePlugin, nil},
 	}
 	for kind, expected := range want {
 		got := cfg.Kinds[kind]
-		if got.NoticeDelivery != expected.delivery || !reflect.DeepEqual(got.SystemPromptArgs, expected.systemPrompt) || got.LeadAutoApprove != expected.leadAutoApprove {
-			t.Errorf("%s Lead defaults = delivery %q system prompt %#v lead auto-approve %t, want %q %#v %t", kind, got.NoticeDelivery, got.SystemPromptArgs, got.LeadAutoApprove, expected.delivery, expected.systemPrompt, expected.leadAutoApprove)
+		if got.NoticeDelivery != expected.delivery || !reflect.DeepEqual(got.SystemPromptArgs, expected.systemPrompt) {
+			t.Errorf("%s Lead delivery = %q %#v, want %q %#v", kind, got.NoticeDelivery, got.SystemPromptArgs, expected.delivery, expected.systemPrompt)
 		}
 	}
 }
@@ -104,28 +103,8 @@ func TestHarnessCapabilityDefaultsByKind(t *testing.T) {
 		t.Fatalf("lead_args defaults = %#v", cfg.Kinds)
 	}
 	open := cfg.Kinds["opencode"]
-	if !reflect.DeepEqual(open.ModelArgs, []string{"--model", "{model}"}) || !reflect.DeepEqual(open.ResumeArgs, []string{"--session", "{session}"}) || !reflect.DeepEqual(open.AutoApproveArgs, []string{"--auto"}) || !open.LeadAutoApprove || len(open.EffortArgs) != 0 || open.Prepare != "" || open.Steer || open.BackgroundCommands {
+	if !reflect.DeepEqual(open.ModelArgs, []string{"--model", "{model}"}) || !reflect.DeepEqual(open.ResumeArgs, []string{"--session", "{session}"}) || !reflect.DeepEqual(open.AutoApproveArgs, []string{"--auto"}) || len(open.EffortArgs) != 0 || open.Prepare != "" || open.Steer || open.BackgroundCommands {
 		t.Fatalf("OpenCode capability defaults = %#v", open)
-	}
-}
-
-func TestLeadAutoApproveCanBeDisabledInConfig(t *testing.T) {
-	home := t.TempDir()
-	writeConfig(t, filepath.Join(home, "config.toml"), "[kinds.claude]\nlead_auto_approve = false\n\n[kinds.codex]\nlead_auto_approve = false\n\n[kinds.opencode]\nlead_auto_approve = false\n")
-	cfg, err := Load(home, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, kind := range []string{"claude", "codex", "opencode"} {
-		if cfg.Kinds[kind].LeadAutoApprove {
-			t.Errorf("%s lead_auto_approve = true, want false", kind)
-		}
-		if len(cfg.Kinds[kind].AutoApproveArgs) == 0 {
-			t.Errorf("%s auto_approve_args were lost when opting out: %#v", kind, cfg.Kinds[kind])
-		}
-	}
-	if cfg.Kinds["pi"].LeadAutoApprove {
-		t.Fatal("Pi unexpectedly enables Lead auto-approval")
 	}
 }
 

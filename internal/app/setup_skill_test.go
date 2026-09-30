@@ -51,7 +51,7 @@ func TestPosseSetupSkillNamesOnlySchemaKeys(t *testing.T) {
 		}
 		checked[key] = true
 	}
-	for _, key := range []string{"defaults.gate", "remuda.setup", "kinds.<kind>.lead_auto_approve", "autonomy.review", "autonomy.land", "autonomy.yolo"} {
+	for _, key := range []string{"defaults.gate", "remuda.setup", "autonomy.review", "autonomy.land", "autonomy.yolo"} {
 		if !checked[key] {
 			t.Errorf("skill no longer names User-only key %s", key)
 		}

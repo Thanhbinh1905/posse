@@ -24,7 +24,6 @@ type unsaddleResult struct {
 	Panes            teardownPanes
 	BranchRemoved    bool
 	StoppedProcesses []string
-	AlreadyTornDown  bool
 }
 
 func autoUnsaddleMode(cfg config.Config) string {

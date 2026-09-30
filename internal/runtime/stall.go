@@ -50,14 +50,6 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 		}
 		output, err := progress.ReadPane(ctx, adapter, pane.PaneID, 200)
 		if err != nil {
-			if missingPaneReadError(err) {
-				if task.State == store.StateWorking {
-					if err := db.ResetProgress(ctx, task.ID); err != nil {
-						failures = append(failures, err)
-					}
-				}
-				continue
-			}
 			failures = append(failures, fmt.Errorf("read Rider pane %s: %w", taskID(task.Seq), err))
 			continue
 		}
@@ -103,19 +95,6 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 		}
 	}
 	return notices, errors.Join(failures...)
-}
-
-func missingPaneReadError(err error) bool {
-	var apiError *herdr.Error
-	if !errors.As(err, &apiError) {
-		return false
-	}
-	switch apiError.Code {
-	case "pane_not_found", "tab_not_found", "workspace_not_found", "not_found":
-		return true
-	default:
-		return false
-	}
 }
 
 func (SystemProgress) ReadPane(ctx context.Context, adapter herdr.Adapter, paneID string, lines int) (string, error) {

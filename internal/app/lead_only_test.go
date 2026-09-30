@@ -98,7 +98,7 @@ func TestLeadInstructionsCheckRoleAndConfigSetKeepsShellSettingsUserOnly(t *test
 		t.Fatalf("Lead instructions bypassed pane check: code=%d output=%s", code, output.String())
 	}
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
-	for _, setting := range []struct{ key, value string }{{"defaults.gate", "[]"}, {"remuda.setup", "[]"}, {"kinds.claude.lead_auto_approve", "false"}} {
+	for _, setting := range []struct{ key, value string }{{"defaults.gate", "[]"}, {"remuda.setup", "[]"}} {
 		output.Reset()
 		if code := cli.Run([]string{"config", "set", setting.key, setting.value, "--project", "shop"}); code != 1 || !strings.Contains(output.String(), "user_only") {
 			t.Errorf("config set %s was not User-only: code=%d output=%s", setting.key, code, output.String())

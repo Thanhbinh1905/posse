@@ -46,25 +46,13 @@ func (s *Service) safePromptWhen(ctx context.Context, paneID, text string, allow
 	return s.prompt(ctx, paneID, map[string]any{"target": paneID, "text": text}, allowed)
 }
 
-func (s *Service) safePromptWhenBefore(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error, beforePrompt func() error) error {
-	return s.promptBefore(ctx, paneID, map[string]any{"target": paneID, "text": text}, allowed, beforePrompt)
-}
-
 func (s *Service) prompt(ctx context.Context, paneID string, params map[string]any, allowed func(herdr.Snapshot) error) error {
-	return s.promptBefore(ctx, paneID, params, allowed, nil)
-}
-
-func (s *Service) promptBefore(ctx context.Context, paneID string, params map[string]any, allowed func(herdr.Snapshot) error, beforePrompt func() error) error {
-	return s.typeIntoBefore(ctx, paneID, "agent.prompt", params, allowed, beforePrompt)
+	return s.typeInto(ctx, paneID, "agent.prompt", params, allowed)
 }
 
 // typeInto sends input to an agent pane unless the User is in it or the agent
 // waits at a dialog.
 func (s *Service) typeInto(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error) error {
-	return s.typeIntoBefore(ctx, paneID, method, params, allowed, nil)
-}
-
-func (s *Service) typeIntoBefore(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error) error {
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return err
@@ -84,14 +72,6 @@ func (s *Service) typeIntoBefore(ctx context.Context, paneID, method string, par
 		if err := allowed(snapshot); err != nil {
 			return err
 		}
-	}
-	if beforeSend != nil {
-		if err := beforeSend(); err != nil {
-			return err
-		}
-	}
-	if method == "agent.prompt" {
-		crashIntentAt("send", "before", "message.prompt")
 	}
 	_, err = s.herdrCall(ctx, method, params)
 	return err

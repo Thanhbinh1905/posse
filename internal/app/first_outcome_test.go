@@ -333,67 +333,6 @@ use='pi-luna'
 	}
 }
 
-func TestFirstOutcomeDispatchUsesTypedDefaultFromMergedProjectAndGlobalRules(t *testing.T) {
-	f := newFirstOutcomeFixture(t)
-	globalConfig := `[profiles.pi-luna]
-kind='pi'
-[profiles.pi-sol]
-kind='pi'
-[profiles.claude-opus]
-kind='claude'
-[profiles.codex-sol]
-kind='codex'
-[[dispatch]]
-when='image work'
-use='codex-sol'
-[[dispatch]]
-when='simple, well-known bug fix'
-use='pi-luna'
-`
-	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(globalConfig), 0600); err != nil {
-		t.Fatal(err)
-	}
-	projectConfig := `[[dispatch]]
-type='scout'
-use='pi-luna'
-[[dispatch]]
-type='scout'
-when='science-heavy research'
-use='pi-sol'
-[[dispatch]]
-type='scout'
-when='exceptionally technical research'
-use='claude-opus'
-`
-	projectConfigPath := filepath.Join(f.home, "projects", f.project.Name, "config.toml")
-	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(projectConfigPath, []byte(projectConfig), 0600); err != nil {
-		t.Fatal(err)
-	}
-	brief := "---\ntype: scout\ntitle: Scout resolver merge\ndone_when: the phase default resolves\n---\nInvestigate dispatch behavior.\n"
-	if err := os.WriteFile(f.brief, []byte(brief), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HERDR_ENV", "1")
-	t.Setenv("HERDR_PANE_ID", "w1:p1")
-	t.Setenv("HERDR_WORKSPACE_ID", "w1")
-
-	output := outcomeCLI(t, f.service, 0, "dispatch", "--brief", f.brief, "--json")
-	var result struct {
-		TaskType     string `json:"task_type"`
-		Profile      string `json:"profile"`
-		DispatchRule string `json:"dispatch_rule"`
-	}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("dispatch output is not JSON: %v\n%s", err, output)
-	}
-	if result.TaskType != "scout" || result.Profile != "pi-luna" || result.DispatchRule != "type=scout" {
-		t.Fatalf("merged dispatch resolution = %#v, want scout phase default pi-luna: %s", result, output)
-	}
-}
-
 func TestFirstOutcomeTypedDispatchKeepsConditionalChoicesAndIgnoresGenericRules(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	configText := `[profiles.pi-luna]

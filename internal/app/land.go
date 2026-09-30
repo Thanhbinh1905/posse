@@ -228,13 +228,9 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	task.State = store.StateLanded
 	if shouldAutoUnsaddleLanded(cfg) {
-		crashIntentAt("land", "after", "teardown.ready")
-		result, completedElsewhere, err := s.teardownLandedTask(ctx.Context, db, project, cfg, task)
+		result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, false, "")
 		if err != nil {
 			return err
-		}
-		if completedElsewhere {
-			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landed"}, {Key: "teardown", Value: "torn-down"}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landed"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 	}
@@ -242,37 +238,6 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 		return err
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landed"}, {Key: "landed_ref", Value: landedRef}, {Key: "help", Value: []any{"Run `posse unsaddle " + taskIDString(task.Seq) + "` to release the Mount"}}})
-}
-
-// teardownLandedTask reports success only after the Task reaches torn-down.
-func (s *Service) teardownLandedTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) (unsaddleResult, bool, error) {
-	current, err := db.TaskByID(ctx, project.ID, task.ID)
-	if err != nil {
-		return unsaddleResult{}, false, err
-	}
-	if current.State == store.StateTornDown {
-		return unsaddleResult{AlreadyTornDown: true}, true, nil
-	}
-	result, err := s.unsaddleTask(ctx, db, project, cfg, current, false, "")
-	if err == nil {
-		return result, result.AlreadyTornDown, nil
-	}
-	var commandError *axi.Error
-	if !errors.As(err, &commandError) || commandError.Code != "intent_active" {
-		return result, false, err
-	}
-	activeError := err
-	if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
-		return result, false, err
-	}
-	current, err = db.TaskByID(ctx, project.ID, task.ID)
-	if err != nil {
-		return result, false, err
-	}
-	if current.State == store.StateTornDown {
-		return unsaddleResult{AlreadyTornDown: true}, true, nil
-	}
-	return result, false, activeError
 }
 
 func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent) error {
@@ -431,18 +396,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
 	defer func() { _ = db.FinishIntent(ctx, intent.ID, intent.ProcessID) }()
-	current, err := db.TaskByID(ctx, project.ID, task.ID)
-	if err != nil {
-		return result, err
-	}
-	if current.State == store.StateTornDown {
-		result.AlreadyTornDown = true
-		return result, nil
-	}
-	if current.State != task.State {
-		return result, fmt.Errorf("%w: Task %d is not in %q", store.ErrStateRace, task.ID, task.State)
-	}
-	task = current
 	if discardable {
 		branchSHA := ""
 		if project.IsWorkspace() {

@@ -384,7 +384,7 @@ func TestConfigSchemaRunsThroughCLIInToonAndJSON(t *testing.T) {
 	for _, row := range decoded.Keys {
 		userOnly[row.Key] = row.UserOnly
 	}
-	for key, want := range map[string]bool{"defaults.gate": true, "remuda.setup": true, "kinds.<kind>.lead_auto_approve": true, "autonomy.yolo": true, "autonomy.review": true, "autonomy.land": true, "defaults.landing_mode": false} {
+	for key, want := range map[string]bool{"defaults.gate": true, "remuda.setup": true, "autonomy.yolo": true, "autonomy.review": true, "autonomy.land": true, "defaults.landing_mode": false} {
 		if userOnly[key] != want {
 			t.Fatalf("config schema user_only for %s = %v, want %v", key, userOnly[key], want)
 		}

@@ -507,21 +507,6 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		help = append(help, "Run `posse send "+commandName+" <message>` to answer or steer this Rider")
 	}
 	if parsed.Bool("full") {
-		uncertainMessages, err := db.UncertainTaskMessages(ctx.Context, project.ID, task.ID, currentTime()-deliveryClaimTimeout.Milliseconds())
-		if err != nil {
-			return err
-		}
-		if len(uncertainMessages) > 0 {
-			rows := make([]any, 0, len(uncertainMessages))
-			for _, message := range uncertainMessages {
-				rows = append(rows, map[string]any{
-					"id": message.ID, "status": "uncertain", "instruction": message.Body,
-					"help": "Inspect `posse peek " + commandName + "`; send a replacement only if the instruction is absent",
-				})
-			}
-			view["uncertain_messages"] = rows
-			help = append(help, "Inspect uncertain instructions with `posse peek "+commandName+"`; send a replacement only if the instruction is absent")
-		}
 		signals, err := db.TaskSignals(ctx.Context, task.ID, 5)
 		if err != nil {
 			return err
