@@ -140,9 +140,10 @@ func TestLocalLandingRequiresApprovalAndTeardownAudits(t *testing.T) {
 	}
 }
 
-func TestLandTreatsConcurrentAutoTeardownAsSuccess(t *testing.T) {
+func newLandedLocalTeardownFixture(t *testing.T) (*prLandingFixture, store.Task, config.Config) {
+	t.Helper()
 	fixture := newPRLandingFixture(t, "local", store.StateDone)
-	defer fixture.db.Close()
+	t.Cleanup(func() { _ = fixture.db.Close() })
 	attachPRFixtureMount(t, fixture)
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(`[defaults]
 landing_mode = "local"
@@ -166,6 +167,12 @@ auto_unsaddle = "finished"
 	if err != nil {
 		t.Fatal(err)
 	}
+	return fixture, task, cfg
+}
+
+func TestLandTreatsConcurrentAutoTeardownAsSuccess(t *testing.T) {
+	fixture, task, cfg := newLandedLocalTeardownFixture(t)
+	ctx := context.Background()
 	// Model the other CLI that owns teardown with a live parent process id.
 	if err := fixture.db.StartIntent(ctx, fixture.project.ID, task.ID, "unsaddle", "in_progress:panes.close", `{"discard":false}`, os.Getppid()); err != nil {
 		t.Fatal(err)
@@ -214,6 +221,94 @@ auto_unsaddle = "finished"
 	landed, err := fixture.db.TaskByID(ctx, fixture.project.ID, task.ID)
 	if err != nil || landed.State != store.StateTornDown {
 		t.Fatalf("Task after concurrent Teardown = %#v, %v", landed, err)
+	}
+}
+
+func TestLandReturnsErrorWhenConcurrentTeardownFails(t *testing.T) {
+	fixture, task, cfg := newLandedLocalTeardownFixture(t)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, task.ID, "unsaddle", "in_progress:panes.close", `{"discard":false}`, os.Getppid()); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := fixture.db.IntentByTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		completedElsewhere bool
+		err                error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		_, completedElsewhere, err := fixture.service.teardownLandedTask(ctx, fixture.db, fixture.project, cfg, task)
+		done <- outcome{completedElsewhere: completedElsewhere, err: err}
+	}()
+	select {
+	case got := <-done:
+		t.Fatalf("Land returned before the competing Teardown finished: %#v", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// Model a failed Teardown owner finishing its intent without the state transition.
+	if err := fixture.db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {
+		t.Fatal(err)
+	}
+	got := <-done
+	current, err := fixture.db.TaskByID(ctx, fixture.project.ID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mount, err := fixture.db.MountByTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tornDown int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM transitions WHERE task_id=? AND to_state='torn-down'`, task.ID).Scan(&tornDown); err != nil {
+		t.Fatal(err)
+	}
+	if got.err == nil || got.completedElsewhere || current.State != store.StateLanded || mount.State != "held" || tornDown != 0 {
+		t.Fatalf("failed competing Teardown result=%#v state=%s Mount=%s torn-down transitions=%d", got, current.State, mount.State, tornDown)
+	}
+}
+
+func TestLandAcceptsTeardownCompletedBeforeClaim(t *testing.T) {
+	fixture, task, cfg := newLandedLocalTeardownFixture(t)
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	snapshot := fake.SnapshotValue
+	snapshot.Panes[1].Agent = ""
+	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: snapshot}
+	fixture.service.Herdr = adapter
+	ctx := context.Background()
+	first, err := fixture.service.unsaddleTask(ctx, fixture.db, fixture.project, cfg, task, false, "")
+	if err != nil || first.AlreadyTornDown {
+		t.Fatalf("competing Teardown result=%#v err=%v", first, err)
+	}
+	_, completedElsewhere, landErr := fixture.service.teardownLandedTask(ctx, fixture.db, fixture.project, cfg, task)
+	paneCloses := fake.CallCount("pane.close")
+	staleRetry, retryErr := fixture.service.unsaddleTask(ctx, fixture.db, fixture.project, cfg, task, false, "")
+	if retryErr != nil || !staleRetry.AlreadyTornDown || fake.CallCount("pane.close") != paneCloses {
+		t.Fatalf("stale Teardown claim repeated side effects: result=%#v err=%v pane closes before=%d after=%d", staleRetry, retryErr, paneCloses, fake.CallCount("pane.close"))
+	}
+	current, readErr := fixture.db.TaskByID(ctx, fixture.project.ID, task.ID)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	mounts, err := fixture.db.Mounts(ctx, fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mount store.Mount
+	for _, candidate := range mounts {
+		if candidate.ID == task.MountID {
+			mount = candidate
+			break
+		}
+	}
+	var tornDown int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM transitions WHERE task_id=? AND to_state='torn-down'`, task.ID).Scan(&tornDown); err != nil {
+		t.Fatal(err)
+	}
+	if landErr != nil || !completedElsewhere || current.State != store.StateTornDown || mount.State != "idle" || tornDown != 1 {
+		t.Fatalf("completed competing Teardown result=%v err=%v state=%s Mount=%s torn-down transitions=%d", completedElsewhere, landErr, current.State, mount.State, tornDown)
 	}
 }
 
