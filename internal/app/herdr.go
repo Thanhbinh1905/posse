@@ -43,7 +43,7 @@ func (s *Service) safePrompt(ctx context.Context, paneID, text string) error {
 }
 
 func (s *Service) safePromptWhen(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error) error {
-	return s.safePromptWhenBefore(ctx, paneID, text, allowed, nil)
+	return s.prompt(ctx, paneID, map[string]any{"target": paneID, "text": text}, allowed)
 }
 
 func (s *Service) safePromptWhenBefore(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error, beforePrompt func() error) error {
