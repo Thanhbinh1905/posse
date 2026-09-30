@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -98,6 +99,17 @@ func TestLookoutDoesNotRecreateDuringSlowLoginShellStartup(t *testing.T) {
 	if len(panes) != 1 {
 		t.Fatalf("Lookout tabs before close = %d, want 1", len(panes))
 	}
+	for _, pid := range lookoutPIDs(f.root) {
+		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 0 }) {
+		t.Fatal("initial poll-only process did not stop")
+	}
+	if err := f.db.ResetLookoutRecovery(context.Background(), f.project.ID); err != nil {
+		t.Fatal(err)
+	}
 	createdTabs := make(map[string]struct{})
 	stopSampling := make(chan struct{})
 	samplingDone := make(chan struct{})
@@ -142,7 +154,12 @@ func TestLookoutDoesNotRecreateDuringSlowLoginShellStartup(t *testing.T) {
 		output <- result
 		commandDone <- err
 	}()
-	time.Sleep(300 * time.Millisecond)
+	if !waitForCondition(5*time.Second, func() bool {
+		state, err := f.db.LookoutRecovery(context.Background(), f.project.ID)
+		return err == nil && state.PaneID == panes[0].PaneID && state.RetryAt > time.Now().UnixMilli()
+	}) {
+		t.Fatal("Lead lookout did not record its observed startup grace before tab close")
+	}
 	if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": panes[0].TabID}); err != nil {
 		t.Fatalf("close Lookout tab: %v", err)
 	}

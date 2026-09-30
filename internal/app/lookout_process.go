@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"os"
@@ -29,6 +30,7 @@ type lookoutProcess struct {
 }
 
 var lookoutStopGracePeriod = 5 * time.Second
+var lookoutExecutableVerifier = isPosseExecutable
 
 var lookoutProcRoot = "/proc"
 
@@ -72,6 +74,9 @@ func linuxLookoutProcessRunning(paneID, home string) bool {
 		if err != nil {
 			continue
 		}
+		if !lookoutExecutableVerifier(filepath.Join(root, "exe")) {
+			continue
+		}
 		process, found := lookoutFromArgs(pid, splitProcessArgs(string(command)), env, home)
 		if found && process.PollOnly {
 			return true
@@ -110,7 +115,7 @@ func systemLookoutProcesses(home string) ([]lookoutProcess, error) {
 		if err != nil {
 			continue
 		}
-		if process, found := lookoutFromArgs(pid, splitProcessArgs(string(command)), parseProcessEnvironment(string(environment)), home); found {
+		if process, found := lookoutFromArgs(pid, splitProcessArgs(string(command)), parseProcessEnvironment(string(environment)), home); found && lookoutExecutableVerifier(filepath.Join(root, "exe")) {
 			if workingDir, err := os.Readlink(filepath.Join(root, "cwd")); err == nil {
 				process.WorkingDir = workingDir
 			}
@@ -122,6 +127,10 @@ func systemLookoutProcesses(home string) ([]lookoutProcess, error) {
 }
 
 func lookoutProcessesInListing(listing, home string) []lookoutProcess {
+	return lookoutProcessesInListingWithVerifier(listing, home, lookoutExecutableVerifier)
+}
+
+func lookoutProcessesInListingWithVerifier(listing, home string, isPosseExecutable func(string) bool) []lookoutProcess {
 	var processes []lookoutProcess
 	for _, line := range strings.Split(listing, "\n") {
 		fields := strings.Fields(line)
@@ -142,7 +151,7 @@ func lookoutProcessesInListing(listing, home string) []lookoutProcess {
 		}
 		args := commandAndEnvironment[:environmentAt]
 		environment := parseProcessEnvironment(strings.Join(commandAndEnvironment[environmentAt:], "\x00"))
-		if process, found := lookoutFromArgs(pid, args, environment, home); found {
+		if process, found := lookoutFromArgs(pid, args, environment, home); found && isPosseExecutable(args[0]) {
 			processes = append(processes, process)
 		}
 	}
@@ -183,18 +192,7 @@ func splitProcessArgs(raw string) []string {
 }
 
 func lookoutFromArgs(pid int, args []string, environment map[string]string, home string) (lookoutProcess, bool) {
-	if len(args) < 2 || !sameLookoutHome(processHome(environment), home) {
-		return lookoutProcess{}, false
-	}
-	lookoutCommand := -1
-	if args[1] == "lookout" {
-		lookoutCommand = 1
-	} else if len(args) > 2 && isShellExecutable(args[0]) && args[2] == "lookout" {
-		// Linux represents an executable shell script as the interpreter plus
-		// script path before the script's command arguments.
-		lookoutCommand = 2
-	}
-	if lookoutCommand < 0 {
+	if len(args) < 2 || args[1] != "lookout" || !sameLookoutHome(processHome(environment), home) {
 		return lookoutProcess{}, false
 	}
 	process := lookoutProcess{
@@ -203,7 +201,7 @@ func lookoutFromArgs(pid int, args []string, environment map[string]string, home
 		WorkingDir: environment["PWD"],
 		Kind:       "lead",
 	}
-	for _, arg := range args[lookoutCommand+1:] {
+	for _, arg := range args[2:] {
 		switch arg {
 		case "--poll-only":
 			process.PollOnly = true
@@ -215,13 +213,9 @@ func lookoutFromArgs(pid int, args []string, environment map[string]string, home
 	return process, true
 }
 
-func isShellExecutable(path string) bool {
-	switch filepath.Base(path) {
-	case "sh", "bash", "dash", "zsh", "fish":
-		return true
-	default:
-		return false
-	}
+func isPosseExecutable(path string) bool {
+	info, err := buildinfo.ReadFile(path)
+	return err == nil && info.Main.Path == "github.com/thanhbinh1905/posse"
 }
 
 func processHome(environment map[string]string) string {
@@ -415,7 +409,11 @@ func removeLookoutUpdateMarkers(markers []string) {
 }
 
 func lookoutProcessInListing(listing, paneID, home string) bool {
-	for _, process := range lookoutProcessesInListing(listing, home) {
+	return lookoutProcessInListingWithVerifier(listing, paneID, home, lookoutExecutableVerifier)
+}
+
+func lookoutProcessInListingWithVerifier(listing, paneID, home string, isPosseExecutable func(string) bool) bool {
+	for _, process := range lookoutProcessesInListingWithVerifier(listing, home, isPosseExecutable) {
 		if process.PaneID == paneID && process.PollOnly {
 			return true
 		}

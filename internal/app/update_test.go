@@ -84,13 +84,34 @@ type updateLookoutHelper struct {
 
 func startUpdateLookoutProcess(t *testing.T, home string, args ...string) updateLookoutHelper {
 	t.Helper()
+	previousVerifier := lookoutExecutableVerifier
+	lookoutExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { lookoutExecutableVerifier = previousVerifier })
 	directory := t.TempDir()
 	binary := filepath.Join(directory, "posse")
+	source := filepath.Join(directory, "helper.go")
 	ready := filepath.Join(directory, "ready")
 	stop := filepath.Join(directory, "stop")
-	script := "#!/bin/sh\ntrap 'printf stopped > \"$POSSE_TEST_STOP_FILE\"; exit 0' TERM\nprintf ready > \"$POSSE_TEST_READY_FILE\"\nwhile :; do sleep 0.05; done\n"
-	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+	program := `package main
+import (
+	"os"
+	"os/signal"
+	"syscall"
+)
+func main() {
+	_ = os.WriteFile(os.Getenv("POSSE_TEST_READY_FILE"), []byte("ready"), 0600)
+	stopped := make(chan os.Signal, 1)
+	signal.Notify(stopped, syscall.SIGTERM)
+	<-stopped
+	_ = os.WriteFile(os.Getenv("POSSE_TEST_STOP_FILE"), []byte("stopped"), 0600)
+}`
+	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	build := exec.Command("go", "build", "-o", binary, source)
+	build.Dir = directory
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build native Lookout test process: %v\n%s", err, output)
 	}
 	command := exec.Command(binary, args...)
 	command.Dir = home

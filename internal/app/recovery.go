@@ -230,7 +230,19 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		// generation comparison cannot prove a restart: a restored tab label
 		// does not mean its poller was restored.
 		if _, found := leadWorkspace(snapshot, project); found {
-			return 0, s.ensureLookoutTab(ctx, project, snapshot)
+			replaceUnstarted := false
+			for _, pane := range snapshot.Panes {
+				if pane.Label != lookoutTabLabel(project) || pane.WorkspaceID != project.HerdrWorkspaceID || lookoutProcessRunning(pane.PaneID, home) {
+					continue
+				}
+				running, err := s.waitLookoutRecovery(ctx, project, pane.PaneID, home)
+				if err != nil {
+					return 0, err
+				}
+				replaceUnstarted = !running
+				break
+			}
+			return 0, s.ensureLookoutTab(ctx, db, project, snapshot, replaceUnstarted)
 		}
 		return 0, nil
 	}
@@ -609,7 +621,7 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	s.relabelProjectTabs(ctx, db, project)
 	freshSnapshot, lookoutErr := s.snapshot(ctx)
 	if lookoutErr == nil {
-		lookoutErr = s.ensureLookoutTab(ctx, project, freshSnapshot)
+		lookoutErr = s.ensureLookoutTab(ctx, db, project, freshSnapshot, true)
 	}
 	if lookoutErr != nil {
 		_, _ = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout restart failed: " + truncate(lookoutErr.Error(), 240), DataJSON: `{}`})
