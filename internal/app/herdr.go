@@ -90,6 +90,9 @@ func (s *Service) typeIntoBefore(ctx context.Context, paneID, method string, par
 			return err
 		}
 	}
+	if method == "agent.prompt" {
+		crashIntentAt("send", "before", "message.prompt")
+	}
 	_, err = s.herdrCall(ctx, method, params)
 	return err
 }

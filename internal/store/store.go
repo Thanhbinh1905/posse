@@ -1176,6 +1176,77 @@ func (db *DB) MessageByID(ctx context.Context, messageID int64) (Message, error)
 	return message, err
 }
 
+type ExpiredMessageSubmission struct {
+	Message
+	TaskSeq int
+}
+
+func (db *DB) ExpiredMessageSubmissions(ctx context.Context, projectID, taskID, before int64) ([]ExpiredMessageSubmission, error) {
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.task_id, m.body, m.created_at, COALESCE(m.delivered_at, 0), m.status, m.wait_for_idle, t.seq
+FROM messages m JOIN tasks t ON t.id=m.task_id
+WHERE t.project_id=? AND (?=0 OR t.id=?) AND m.status='submitting' AND m.claimed_at>0 AND m.claimed_at<=?
+ORDER BY m.claimed_at, m.id`, projectID, taskID, taskID, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var submissions []ExpiredMessageSubmission
+	for rows.Next() {
+		var submission ExpiredMessageSubmission
+		if err := rows.Scan(&submission.ID, &submission.TaskID, &submission.Body, &submission.CreatedAt, &submission.DeliveredAt, &submission.Status, &submission.WaitForIdle, &submission.TaskSeq); err != nil {
+			return nil, err
+		}
+		submissions = append(submissions, submission)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return submissions, nil
+}
+
+func (db *DB) UncertainTaskMessages(ctx context.Context, projectID, taskID, before int64) ([]Message, error) {
+	rows, err := db.QueryContext(ctx, `SELECT m.id, m.task_id, m.body, m.created_at, COALESCE(m.delivered_at, 0), m.status, m.wait_for_idle
+FROM messages m JOIN tasks t ON t.id=m.task_id
+WHERE t.project_id=? AND t.id=? AND m.status='submitting'
+  AND ((m.claimed_at>0 AND m.claimed_at<=?) OR EXISTS (
+    SELECT 1 FROM notices n WHERE n.project_id=t.project_id AND n.task_id=t.id
+      AND n.kind='message_delivery_uncertain' AND json_extract(n.data_json, '$.message_id')=m.id
+  ))
+ORDER BY m.claimed_at, m.id`, projectID, taskID, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []Message
+	for rows.Next() {
+		var message Message
+		if err := rows.Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func (db *DB) CreateMessageDeliveryUncertainNotice(ctx context.Context, projectID, taskID, messageID int64, summary, body string) (bool, error) {
+	data, err := json.Marshal(map[string]any{"message_id": messageID, "instruction": body})
+	if err != nil {
+		return false, err
+	}
+	result, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO notices(project_id, task_id, kind, summary, data_json, created_at)
+SELECT t.project_id, t.id, 'message_delivery_uncertain', ?, ?, ?
+FROM tasks t JOIN messages m ON m.task_id=t.id
+WHERE t.project_id=? AND t.id=? AND m.id=? AND m.status='submitting'`, summary, string(data), time.Now().UnixMilli(), projectID, taskID, messageID)
+	if err != nil {
+		return false, err
+	}
+	created, err := result.RowsAffected()
+	return created == 1, err
+}
+
 func (db *DB) MarkMessageDelivered(ctx context.Context, messageID int64, token string, at int64) error {
 	return db.MarkClaimedMessageDelivered(ctx, messageID, token, at)
 }
@@ -1213,7 +1284,12 @@ func (db *DB) RollbackMessageClaim(ctx context.Context, messageID int64, token s
 }
 
 func (db *DB) MarkClaimedMessageDelivered(ctx context.Context, messageID int64, token string, at int64) error {
-	result, err := db.ExecContext(ctx, `UPDATE messages SET status='delivered',delivered_at=?,claim_token='',claimed_at=0 WHERE id=? AND status='submitting' AND claim_token=?`, at, messageID, token)
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE messages SET status='delivered',delivered_at=?,claim_token='',claimed_at=0 WHERE id=? AND status='submitting' AND claim_token=?`, at, messageID, token)
 	if err != nil {
 		return err
 	}
@@ -1224,7 +1300,10 @@ func (db *DB) MarkClaimedMessageDelivered(ctx context.Context, messageID int64, 
 	if count != 1 {
 		return ErrStateRace
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `UPDATE notices SET acked_at=COALESCE(acked_at,?) WHERE kind='message_delivery_uncertain' AND json_extract(data_json,'$.message_id')=?`, at, messageID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (db *DB) Notices(ctx context.Context, projectID int64, openOnly bool) ([]Notice, error) {

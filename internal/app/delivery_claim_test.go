@@ -200,6 +200,9 @@ func TestMessageDeliveryDoesNotDuplicateAfterOwnerCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET claimed_at=? WHERE task_id=?`, time.Now().Add(-deliveryClaimTimeout-time.Second).UnixMilli(), taskID); err != nil {
+		t.Fatal(err)
+	}
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
 	service := testService(home, fake)
@@ -211,6 +214,10 @@ func TestMessageDeliveryDoesNotDuplicateAfterOwnerCrash(t *testing.T) {
 	var status string
 	if err := db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=?`, taskID).Scan(&status); err != nil || status != "submitting" || fake.CallCount("agent.prompt") != 0 {
 		t.Fatalf("recovery retried accepted instruction: status=%q err=%v prompts=%d", status, err, fake.CallCount("agent.prompt"))
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "message_delivery_uncertain" || !strings.Contains(notices[0].Summary, "Do not duplicate this instruction") {
+		t.Fatalf("recovery did not raise one instruction-specific Notice: %#v, %v", notices, err)
 	}
 }
 
@@ -305,6 +312,14 @@ func TestMessageClaimDoesNotRetryAfterAmbiguousPromptError(t *testing.T) {
 	}
 	if err := db.QueryRowContext(ctx, `SELECT status,claim_token FROM messages WHERE id=?`, messageID).Scan(&status, &token); err != nil || status != "submitting" || token == "" || fake.CallCount("agent.prompt") != 1 {
 		t.Fatalf("uncertain message was retried: status=%q token=%q err=%v prompts=%d", status, token, err, fake.CallCount("agent.prompt"))
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "message_delivery_uncertain" || !strings.Contains(notices[0].Summary, "#"+strconv.FormatInt(messageID, 10)) || !strings.Contains(notices[0].DataJSON, "Please check the tests") {
+		t.Fatalf("ambiguous prompt error did not create an instruction-specific Notice: %#v, %v", notices, err)
+	}
+	uncertain, err := db.UncertainTaskMessages(ctx, project.ID, taskID, currentTime()-deliveryClaimTimeout.Milliseconds())
+	if err != nil || len(uncertain) != 1 || uncertain[0].ID != messageID {
+		t.Fatalf("Task inspection omitted a fresh ambiguous instruction: %#v, %v", uncertain, err)
 	}
 }
 

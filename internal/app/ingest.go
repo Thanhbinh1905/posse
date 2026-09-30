@@ -120,6 +120,14 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			return err
 		}
+		messageNoticeRaised, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project)
+		if err != nil {
+			if focusEvent {
+				failures = append(failures, err)
+				continue
+			}
+			return err
+		}
 		status := valueString(event.Data, "agent_status")
 		if focusEvent || worker && eventIs(event.Event, "pane.agent_status_changed") && (status == "idle" || status == "done" || status == "working") {
 			if err := s.deliverQueuedMessagesWithConfig(ctx, db, project, result.Snapshot, cfg); err != nil {
@@ -131,7 +139,7 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 		}
 		leadIdle := paneID != "" && paneID == project.LeadPaneID && (status == "idle" || status == "done")
-		if leadIdle || focusEvent || len(result.Notices) > 0 {
+		if leadIdle || focusEvent || len(result.Notices) > 0 || messageNoticeRaised {
 			if err := s.deliverNoticesWithSnapshot(ctx, db, project, result.Snapshot); err != nil {
 				if focusEvent {
 					failures = append(failures, err)
@@ -224,6 +232,9 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 		return err
 	}
 	if err := db.ReleaseExpiredDeliveryClaims(ctx, currentTime()-deliveryClaimTimeout.Milliseconds()); err != nil {
+		return err
+	}
+	if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
 		return err
 	}
 	notices, err := db.UndeliveredNotices(ctx, project.ID)
@@ -417,6 +428,9 @@ func (s *Service) deliverQueuedMessages(ctx context.Context, db *store.DB, proje
 
 func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot, cfg config.Config) error {
 	if err := db.ReleaseExpiredDeliveryClaims(ctx, currentTime()-deliveryClaimTimeout.Milliseconds()); err != nil {
+		return err
+	}
+	if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
 		return err
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)

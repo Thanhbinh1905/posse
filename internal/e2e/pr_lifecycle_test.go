@@ -131,6 +131,127 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 }
 
+func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer func() {
+		if fixture.db != nil {
+			_ = fixture.db.Close()
+		}
+	}()
+	brief := filepath.Join(fixture.root, "queued-crash.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCommit one change for queued message crash recovery.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.rideAndComplete(t, brief, "t1")
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
+		t.Fatalf("Task did not enter landing: %s", output)
+	}
+	landing := fixture.mustTask(t, "t1")
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", landing.GatedSHA)
+
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if _, err := client.Run(context.Background(), "pane", "report-agent", landing.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+		t.Fatal(err)
+	}
+	const body = "Check the queued crash recovery"
+	queued := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", body, "--queue")
+	if !strings.Contains(queued, "state: queued") {
+		t.Fatalf("send did not finish with a queued instruction: %s", queued)
+	}
+	if _, err := client.Run(context.Background(), "pane", "report-agent", landing.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+
+	owner := exec.Command(fixture.binary, "roster")
+	owner.Dir = fixture.repo
+	owner.Env = setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "send:before:message.prompt")
+	output, err := owner.CombinedOutput()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 86 {
+		t.Fatalf("delivery owner did not crash before agent.prompt: err=%v output=%s", err, output)
+	}
+	message, err := fixture.db.OldestQueuedMessage(context.Background(), landing.ID)
+	if !store.IsNotFound(err) {
+		t.Fatalf("crashed message remained queued: %#v, %v", message, err)
+	}
+	var messageID int64
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT id FROM messages WHERE task_id=? AND body=? AND status='submitting'`, landing.ID, body).Scan(&messageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE messages SET claimed_at=? WHERE id=?`, time.Now().Add(-3*time.Minute).UnixMilli(), messageID); err != nil {
+		t.Fatal(err)
+	}
+	legacyBody := "Legacy claimed instruction after migration 21"
+	legacyMessageID, err := fixture.db.QueueMessage(context.Background(), landing.ID, legacyBody, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE messages SET status='claimed',claim_token='legacy',claimed_at=? WHERE id=?`, time.Now().Add(-3*time.Minute).UnixMilli(), legacyMessageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `DELETE FROM goose_db_version WHERE version_id=21`); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "roster")
+	fixture.db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "roster")
+	}
+	show := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "--json", "show", "t1", "--full")
+	for _, expected := range []string{"uncertain_messages", strconv.FormatInt(messageID, 10), strconv.FormatInt(legacyMessageID, 10), body, legacyBody} {
+		if !strings.Contains(show, expected) {
+			t.Fatalf("Task inspection omitted uncertain instruction %q: %s", expected, show)
+		}
+	}
+	lookout := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "lookout", "--timeout", "1")
+	for _, expected := range []string{"message_delivery_uncertain", "#" + strconv.FormatInt(messageID, 10), body, "#" + strconv.FormatInt(legacyMessageID, 10), legacyBody, "posse peek t1", "posse show t1 --full"} {
+		if !strings.Contains(lookout, expected) {
+			t.Fatalf("Lookout omitted actionable uncertainty %q: %s", expected, lookout)
+		}
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInstructions := map[int64]string{messageID: body, legacyMessageID: legacyBody}
+	uncertain := 0
+	for _, notice := range notices {
+		if notice.Kind != "message_delivery_uncertain" || notice.TaskID != landing.ID {
+			continue
+		}
+		uncertain++
+		var data struct {
+			MessageID   int64  `json:"message_id"`
+			Instruction string `json:"instruction"`
+		}
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+			t.Fatalf("decode uncertainty Notice: %v", err)
+		}
+		if expected, ok := wantInstructions[data.MessageID]; !ok || expected != data.Instruction {
+			t.Fatalf("uncertainty Notice identified the wrong instruction: %#v", notice)
+		}
+		delete(wantInstructions, data.MessageID)
+	}
+	if uncertain != 2 || len(wantInstructions) != 0 {
+		t.Fatalf("uncertainty Notices = %d, missing instructions %#v", uncertain, wantInstructions)
+	}
+	for _, id := range []int64{messageID, legacyMessageID} {
+		var status string
+		if err := fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE id=?`, id).Scan(&status); err != nil || status != "submitting" {
+			t.Fatalf("ambiguous submission %d was retried or lost: status=%q err=%v", id, status, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(landing.WorktreePath, "e2e-fix-t1.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crashed instruction was delivered despite the no-retry guarantee: err=%v", err)
+	}
+}
+
 func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
