@@ -86,7 +86,35 @@ func TestLiveLeadLookoutExcludesPollOnlyAndOtherProjects(t *testing.T) {
 	}
 }
 
+func TestStopLookoutsRefusesUnverifiedExecutableIdentity(t *testing.T) {
+	command := exec.Command("/bin/sh", "-c", "trap '' TERM; printf 'ready\\n'; while :; do :; done")
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || line != "ready\n" {
+		t.Fatalf("process readiness = %q, %v", line, err)
+	}
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	})
+	_, err = stopLookoutProcesses(context.Background(), t.TempDir(), []lookoutProcess{{PID: command.Process.Pid, Project: "shop", Kind: "lead"}})
+	if err == nil {
+		t.Fatal("stopLookoutProcesses accepted a process without verified executable identity")
+	}
+	if !lookoutPIDRunning(command.Process.Pid) {
+		t.Fatalf("refusing the unverified process still terminated PID %d", command.Process.Pid)
+	}
+}
+
 func TestStopLookoutsEscalatesToSIGKILL(t *testing.T) {
+	previousVerifier := lookoutExecutableVerifier
+	lookoutExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { lookoutExecutableVerifier = previousVerifier })
 	previousGracePeriod := lookoutStopGracePeriod
 	lookoutStopGracePeriod = 50 * time.Millisecond
 	t.Cleanup(func() { lookoutStopGracePeriod = previousGracePeriod })
@@ -105,7 +133,11 @@ func TestStopLookoutsEscalatesToSIGKILL(t *testing.T) {
 		_ = command.Process.Kill()
 		_ = command.Wait()
 	})
-	processes, err := stopLookoutProcesses(context.Background(), t.TempDir(), []lookoutProcess{{PID: command.Process.Pid, Project: "shop", Kind: "lead"}})
+	executable, ok := inspectLookoutExecutable(command.Process.Pid)
+	if !ok {
+		t.Fatal("could not inspect the test process executable")
+	}
+	processes, err := stopLookoutProcesses(context.Background(), t.TempDir(), []lookoutProcess{{PID: command.Process.Pid, Executable: executable, Project: "shop", Kind: "lead"}})
 	if err != nil {
 		t.Fatal(err)
 	}

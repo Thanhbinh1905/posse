@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"debug/buildinfo"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +86,68 @@ func main() {
 		t.Fatalf("posse down failed to stop renamed Posse executable %q\n%s", renamed, output)
 	}
 	_ = lookout.Wait()
+}
+
+func TestDownDoesNotSignalDifferentMainPackageInPosseModule(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+
+	module := moduleRoot(t)
+	helperDir, err := os.MkdirTemp(filepath.Join(module, "cmd"), "review-unrelated-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(helperDir)
+	source := `package main
+import ("os"; "time")
+func main() {
+	_ = os.WriteFile(os.Getenv("UNRELATED_READY"), []byte("ready"), 0600)
+	for { time.Sleep(time.Hour) }
+}
+`
+	if err := os.WriteFile(filepath.Join(helperDir, "main.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(module, helperDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(f.root, "bin", "other-command")
+	compile := exec.Command("go", "build", "-o", helper, "./"+filepath.ToSlash(relative))
+	compile.Dir, compile.Env = module, f.env
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("build unrelated main package: %v\n%s", err, output)
+	}
+	info, err := buildinfo.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Main.Path != "github.com/thanhbinh1905/posse" || info.Path == "github.com/thanhbinh1905/posse/cmd/posse" {
+		t.Fatalf("unrelated helper build identity = Main.Path %q, Path %q", info.Main.Path, info.Path)
+	}
+	ready := filepath.Join(f.root, "other-command.ready")
+	unrelated := exec.Command(helper, "lookout")
+	unrelated.Dir, unrelated.Env = f.repo, append(f.env, "UNRELATED_READY="+ready)
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = unrelated.Process.Kill()
+		_ = unrelated.Wait()
+	}()
+	if !waitForCondition(5*time.Second, func() bool { _, err := os.Stat(ready); return err == nil }) {
+		t.Fatal("unrelated command did not start")
+	}
+
+	command := exec.Command(f.binary, "down")
+	command.Dir, command.Env = f.repo, f.env
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("posse down: %v\n%s", err, output)
+	}
+	if !processIsAlive(unrelated.Process.Pid) {
+		t.Fatalf("posse down signaled another main package from the Posse module (Path=%q)\n%s", info.Path, output)
+	}
 }
 
 func processIsAlive(pid int) bool {
