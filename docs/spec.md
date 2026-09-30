@@ -398,7 +398,7 @@ A Task in `working` is stalled when all hold for `stall_after`:
 
 1. `--profile` given: use it if it exists, else `profile_unknown`.
 2. Otherwise, if any rule has an exact `type` match, consider only those rules. If none match, consider rules with no `type`; their `when` text is descriptive and does not filter structurally.
-3. When exact-type rules contain exactly one rule with no `when`, use it as the phase default. The Lead can select a conditional alternative with `--profile` when its `when` judgment applies.
+3. When exact-type rules contain exactly one rule with no `when`, use it as the phase default despite any typed `when` alternatives. Untyped rules, including global rules merged behind project rules, do not compete when an exact-type rule exists. The resolver does not evaluate `when`; the Lead can select a conditional alternative with `--profile` when its judgment applies.
 4. Otherwise, exactly one matching rule with no `when`: use it.
 5. Otherwise refuse with `profile_required`, listing the matching rules' `when` text and Profiles, so the Lead chooses by judgment.
 6. No rule matches: use `dispatch.default.use` when configured.
