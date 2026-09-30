@@ -13,6 +13,18 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+type snapshotHookAdapter struct {
+	*herdr.Fake
+	beforeSnapshot func(context.Context)
+}
+
+func (a *snapshotHookAdapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
+	if a.beforeSnapshot != nil {
+		a.beforeSnapshot(ctx)
+	}
+	return a.Fake.Snapshot(ctx)
+}
+
 func TestSendDeliveryPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		name, kind, status, wantState, wantReason string
@@ -136,6 +148,99 @@ func TestSendDeliveryPolicy(t *testing.T) {
 				if err := json.Unmarshal([]byte(strings.SplitN(text, "\nbody: ", 2)[1]), &decoded); err != nil || decoded != body {
 					t.Fatalf("instruction changed: %q %v", text, err)
 				}
+			}
+		})
+	}
+}
+
+func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantState, wantReason, wantStatus string
+		claimOnly                               bool
+		wantPrompts                             int
+	}{
+		{"delivered", "delivered", "agent_ready_and_unfocused", "delivered", false, 1},
+		{"claimed", "queued", "delivery_in_progress", "claimed", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			repo := filepath.Join(root, "repo")
+			initRepo(t, repo)
+			home := filepath.Join(root, "posse")
+			db, err := store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := db.CreateProject(ctx, "shop", repo, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			fake := herdr.NewFake()
+			fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
+			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
+			adapter := &snapshotHookAdapter{Fake: fake}
+			service := testService(home, adapter)
+			deliveryStarted := false
+			var deliveryErr error
+			adapter.beforeSnapshot = func(ctx context.Context) {
+				if deliveryStarted {
+					return
+				}
+				deliveryDB, err := store.Open(home)
+				if err != nil {
+					deliveryErr = err
+					return
+				}
+				defer deliveryDB.Close()
+				message, err := deliveryDB.OldestQueuedMessage(ctx, taskID)
+				if store.IsNotFound(err) {
+					return
+				}
+				if err != nil {
+					deliveryErr = err
+					return
+				}
+				deliveryStarted = true
+				if tc.claimOnly {
+					_, deliveryErr = deliveryDB.ClaimMessage(ctx, message.ID, "concurrent-delivery", currentTime())
+					return
+				}
+				deliveryErr = service.deliverQueuedMessages(ctx, deliveryDB, project, fake.SnapshotValue)
+			}
+
+			t.Chdir(repo)
+			var output bytes.Buffer
+			cli := service.CLI()
+			cli.Out = &output
+			if code := cli.Run([]string{"send", "t1", "Check the tests"}); code != 0 || !strings.Contains(output.String(), "state: "+tc.wantState) || !strings.Contains(output.String(), "reason: "+tc.wantReason) {
+				t.Fatalf("send raced with concurrent delivery: exit=%d output=%s", code, output.String())
+			}
+			if deliveryErr != nil || !deliveryStarted {
+				t.Fatalf("concurrent delivery did not run: started=%t err=%v", deliveryStarted, deliveryErr)
+			}
+			if fake.CallCount("agent.prompt") != tc.wantPrompts {
+				t.Fatalf("agent.prompt calls = %d, want %d", fake.CallCount("agent.prompt"), tc.wantPrompts)
+			}
+			db, err = store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var status string
+			if err := db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=?`, taskID).Scan(&status); err != nil || status != tc.wantStatus {
+				t.Fatalf("raced message status = %q, %v", status, err)
 			}
 		})
 	}

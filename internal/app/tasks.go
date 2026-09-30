@@ -1145,11 +1145,28 @@ func (s *Service) send(ctx *axi.Context, args []string) error {
 		return err
 	}
 	message, err := db.OldestQueuedMessage(ctx.Context, task.ID)
+	if store.IsNotFound(err) {
+		// A concurrent Herdr event may deliver the just-queued message while
+		// this command is taking its snapshot. In that case it is no longer
+		// eligible for the queued-message query, but send still needs to report
+		// its actual outcome instead of leaking sql.ErrNoRows.
+		message, err = db.MessageByID(ctx.Context, messageID)
+		if store.IsNotFound(err) {
+			return axi.Failure("message_not_found", "queued message no longer exists", false)
+		}
+	}
 	if err != nil {
 		return err
 	}
 	reason := "agent_not_ready"
-	if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found {
+	if message.Status == "delivered" {
+		delivered = message.ID == messageID
+		reason = "agent_ready_and_unfocused"
+	} else if message.Status == "claimed" {
+		reason = "delivery_in_progress"
+	} else if message.Status != "queued" {
+		return axi.Failure("message_not_ready", "message is no longer available for delivery", true, "Run `posse show "+taskIDString(task.Seq)+"` to inspect the Task")
+	} else if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found {
 		reason = queuedMessageReason(task, message, pane, snapshot, cfg)
 		if reason == "" {
 			wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, message, pane.PaneID, cfg)
@@ -1193,7 +1210,9 @@ func (s *Service) send(ctx *axi.Context, args []string) error {
 		state = "delivered"
 	} else {
 		help := "The message will be delivered when the Rider is ready and unfocused"
-		if reason == "blocked" || reason == "agent_ui_unknown" {
+		if reason == "delivery_in_progress" {
+			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"
+		} else if reason == "blocked" || reason == "agent_ui_unknown" {
 			help = "Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's dialog before retrying; use `posse keys " + taskIDString(task.Seq) + " <key...>` for a blocked permission prompt"
 		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})

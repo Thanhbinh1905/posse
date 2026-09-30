@@ -1159,6 +1159,16 @@ func (db *DB) OldestQueuedMessage(ctx context.Context, taskID int64) (Message, e
 	return message, err
 }
 
+func (db *DB) MessageByID(ctx context.Context, messageID int64) (Message, error) {
+	var message Message
+	err := db.QueryRowContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle FROM messages WHERE id=?`, messageID).
+		Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Message{}, ErrNotFound
+	}
+	return message, err
+}
+
 func (db *DB) MarkMessageDelivered(ctx context.Context, messageID int64, token string, at int64) error {
 	return db.MarkClaimedMessageDelivered(ctx, messageID, token, at)
 }
