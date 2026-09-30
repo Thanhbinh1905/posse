@@ -397,11 +397,14 @@ A Task in `working` is stalled when all hold for `stall_after`:
 `posse ride --brief <file> --name <slug> [--profile <name>]` resolves a Profile. `posse dispatch --brief <file> [--profile <name>]` returns the title-derived slug to pass as `--name`, even when it cannot choose among matching Profiles. An invalid `--name`, including one longer than 24 characters, reports the expected slug. A retry of the same Brief after a failed, lost or discarded Task may add a short suffix to that slug without rewriting the title; unrelated names are refused:
 
 1. `--profile` given: use it if it exists, else `profile_unknown`.
-2. Otherwise collect the rules whose structured fields match (v1: `type`). Rules with only `when` always match structurally.
-3. Exactly one match with no `when`: use it.
-4. Otherwise refuse with `profile_required`, listing the candidate rules with their `when` text and Profiles, so the Lead chooses by judgment.
-5. No rule matches: `dispatch.default.use` when configured.
-6. With no Dispatch Rules at all and no default, use an implicit Profile of the running Lead's kind, with no model or effort arguments. Configured but unmatched rules still require a Profile.
+2. Otherwise, if any rule has an exact `type` match, consider only those rules. If none match, consider rules with no `type`; their `when` text is descriptive and does not filter structurally.
+3. When exact-type rules contain exactly one rule with no `when`, use it as the phase default. The Lead can select a conditional alternative with `--profile` when its `when` judgment applies.
+4. Otherwise, exactly one matching rule with no `when`: use it.
+5. Otherwise refuse with `profile_required`, listing the matching rules' `when` text and Profiles, so the Lead chooses by judgment.
+6. No rule matches: use `dispatch.default.use` when configured.
+7. With no Dispatch Rules at all and no default, use an implicit Profile of the running Lead's kind, with no model or effort arguments. Configured but unmatched rules still require a Profile.
+
+For work that needs multiple phases, create a separate Brief and Rider for each phase needed: research (`type: scout`), plan/design (a plan-only `type: scout`), implementation (`type: ship`), and validation (a separate `type: review` with `review_of` set to the implementation Task). Never give one Rider multiple phases, and skip phases the request does not need. Use pi-luna for research by default, pi-sol for science-heavy research, and claude-opus only for exceptionally technical research or after pi-sol failed. Use pi-sol for plan/design by default and keep the existing heavy-work rule: "Heavy work: technical design, product design, architecture (prefer pi-sol; claude-opus only when the work is exceptionally technical or pi-sol already failed at it)." For implementation and validation, choose either pi-luna or claude-sonnet based on load and fit. Pass `--profile` when Brief `type` alone cannot distinguish the phase. Keep image generation on codex-sol and simple, well-known bug fixes on pi-luna.
 
 The Task records the Profile and the rule used. Implicit resolutions report `implicit: lead kind` and store `implicit:<kind>` as the Profile reference, so relaunch and recovery retain that kind without a named Profile. This writes no config; explicit Profiles and defaults retain precedence. Model and effort come only from the Profile.
 
