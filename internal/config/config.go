@@ -111,18 +111,19 @@ type Lowkey struct {
 }
 
 type Config struct {
-	Repositories    map[string]Repository `toml:"repositories" json:"repositories"`
-	Lowkey          Lowkey                `toml:"lowkey" json:"lowkey"`
-	Identity        Identity              `toml:"identity" json:"identity"`
-	Lead            Lead                  `toml:"lead" json:"lead"`
-	Defaults        Defaults              `toml:"defaults" json:"defaults"`
-	Remuda          Remuda                `toml:"remuda" json:"remuda"`
-	Kinds           map[string]Kind       `toml:"kinds" json:"kinds"`
-	Profiles        map[string]Profile    `toml:"profiles" json:"profiles"`
-	Dispatch        []Rule                `toml:"dispatch_rules" json:"dispatch"`
-	DispatchDefault DispatchDefault       `toml:"dispatch_default" json:"dispatch_default"`
-	Autonomy        Autonomy              `toml:"autonomy" json:"autonomy"`
-	Files           []string              `toml:"-" json:"-"`
+	Repositories        map[string]Repository `toml:"repositories" json:"repositories"`
+	Lowkey              Lowkey                `toml:"lowkey" json:"lowkey"`
+	Identity            Identity              `toml:"identity" json:"identity"`
+	Lead                Lead                  `toml:"lead" json:"lead"`
+	Defaults            Defaults              `toml:"defaults" json:"defaults"`
+	Remuda              Remuda                `toml:"remuda" json:"remuda"`
+	Kinds               map[string]Kind       `toml:"kinds" json:"kinds"`
+	Profiles            map[string]Profile    `toml:"profiles" json:"profiles"`
+	Dispatch            []Rule                `toml:"dispatch_rules" json:"dispatch"`
+	DispatchDefault     DispatchDefault       `toml:"dispatch_default" json:"dispatch_default"`
+	Autonomy            Autonomy              `toml:"autonomy" json:"autonomy"`
+	Files               []string              `toml:"-" json:"-"`
+	LeadLanguageDefault bool                  `toml:"-" json:"-"`
 }
 
 type DispatchDefault struct {
@@ -218,6 +219,7 @@ func Load(home, projectName string) (Config, error) {
 		field := undecoded[0]
 		return Config{}, &InvalidError{File: globalPath, Key: field.String(), Reason: "unknown configuration key"}
 	}
+	cfg.LeadLanguageDefault = !hasLeadLanguage(global) && !hasLeadLanguage(project)
 	cfg.Files = []string{globalPath}
 	if projectPath != "" {
 		cfg.Files = append(cfg.Files, projectPath)
@@ -231,6 +233,13 @@ func Load(home, projectName string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func hasLeadLanguage(values map[string]any) bool {
+	identity, _ := values["identity"].(map[string]any)
+	lead, _ := identity["lead"].(map[string]any)
+	_, found := lead["language"]
+	return found
 }
 
 func readMap(path string) (map[string]any, error) {

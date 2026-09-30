@@ -578,7 +578,11 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	if _, ok := cfg.Kinds[kind]; !ok {
 		return axi.Failure("config_invalid", "unknown Lead agent kind "+kind, false)
 	}
-	leadStart, err := s.prepareLeadLaunch(home, project, cfg, kind)
+	gaps, err := s.readiness(ctx, db, project, cfg)
+	if err != nil {
+		return err
+	}
+	leadStart, err := s.prepareLeadLaunch(home, project, cfg, kind, gaps)
 	if err != nil {
 		return err
 	}

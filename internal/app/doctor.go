@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,18 +23,52 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("doctor does not take positional arguments")
 	}
-	home, err := s.homePath()
+	result, err := s.collectDoctorChecks(ctx)
 	if err != nil {
 		return err
 	}
-	checks := []axi.Object{}
-	help := []axi.Object{}
+	checks, help := doctorRows(result.Checks)
+	output := axi.Object{{Key: "checks", Value: checks}, {Key: "help", Value: help}}
+	if parsed.Bool("full") && len(result.Manifests) > 0 {
+		output = append(output, axi.Field{Key: "agent_manifests", Value: jsonRaw(result.Manifests)})
+	}
+	update, _ := s.availableUpdate(ctx.Context, nil, nil)
+	return ctx.Print(addUpdateHelp(output, update))
+}
+
+type doctorCheck struct {
+	Name, Status, Detail, Action string
+	GapCode, Key, Member         string
+	UserOnly                     bool
+}
+
+type doctorResult struct {
+	Checks    []doctorCheck
+	Manifests json.RawMessage
+}
+
+func doctorRows(checks []doctorCheck) ([]axi.Object, []axi.Object) {
+	rows, help := []axi.Object{}, []axi.Object{}
+	for _, check := range checks {
+		rows = append(rows, axi.Object{{Key: "check", Value: check.Name}, {Key: "status", Value: check.Status}, {Key: "detail", Value: check.Detail}})
+		if check.Status != "ok" {
+			help = append(help, axi.Object{{Key: "check", Value: check.Name}, {Key: "action", Value: check.Action}})
+		}
+	}
+	return rows, help
+}
+
+// Collect diagnostics without printing or applying setup. The scoped check
+// collectors below are also used by status and the Lead's startup context.
+func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
+	home, err := s.homePath()
+	if err != nil {
+		return doctorResult{}, err
+	}
+	checks := []doctorCheck{}
 	var registeredProjects []store.Project
 	addCheck := func(name, status, detail, action string) {
-		checks = append(checks, axi.Object{{Key: "check", Value: name}, {Key: "status", Value: status}, {Key: "detail", Value: detail}})
-		if status != "ok" {
-			help = append(help, axi.Object{{Key: "check", Value: name}, {Key: "action", Value: action}})
-		}
+		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail, Action: action})
 	}
 
 	cfg, configErr := config.Load(home, "")
@@ -258,11 +293,7 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 			addCheck(tool, "warn", "not installed", "Install "+tool+" to use the corresponding Landing Mode")
 		}
 	}
-	update, _ := s.availableUpdate(ctx.Context, nil, nil)
-	if parsed.Bool("full") && len(manifests) > 0 {
-		return ctx.Print(addUpdateHelp(axi.Object{{Key: "checks", Value: checks}, {Key: "help", Value: help}, {Key: "agent_manifests", Value: jsonRaw(manifests)}}, update))
-	}
-	return ctx.Print(addUpdateHelp(axi.Object{{Key: "checks", Value: checks}, {Key: "help", Value: help}}, update))
+	return doctorResult{Checks: checks, Manifests: manifests}, nil
 }
 
 func stringListContains(values []string, wanted string) bool {

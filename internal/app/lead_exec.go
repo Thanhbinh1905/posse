@@ -162,7 +162,7 @@ func directAgentCommand(kind string) (string, error) {
 	if strings.TrimSpace(kind) == "" {
 		return "", errors.New("lead agent kind is empty")
 	}
-	binary, err := exec.LookPath(kind)
+	binary, err := exec.LookPath(agentCLIName(kind))
 	if err != nil {
 		return "", fmt.Errorf("find Lead agent %s: %w", kind, err)
 	}

@@ -105,9 +105,16 @@ func (s *Service) waitLeadStarted(ctx context.Context, paneID string, launch lea
 	return s.waitAgentReady(ctx, paneID)
 }
 
-func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg config.Config, kind string) (leadLaunch, error) {
+func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg config.Config, kind string, readiness ...[]readinessGap) (leadLaunch, error) {
 	kindConfig := cfg.Kinds[kind]
 	instructions := leadText(project, cfg, kind)
+	if len(readiness) > 0 && len(readiness[0]) > 0 {
+		context, err := axi.Encode(withReadiness(axi.Object{}, readiness[0]))
+		if err != nil {
+			return leadLaunch{}, err
+		}
+		instructions += "\nStartup readiness (recheck with `posse` after changes):\n" + context + "\n"
+	}
 	if size := len(instructions); size > leadInstructionMaxBytes {
 		message := fmt.Sprintf("Lead instructions exceed the %d-token budget: %d bytes (maximum %d bytes at %d bytes per token)", leadInstructionTokenBudget, size, leadInstructionMaxBytes, leadInstructionBytesPerToken)
 		return leadLaunch{}, axi.Failure("lead_instructions_too_large", message, false)

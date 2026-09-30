@@ -31,9 +31,18 @@ func TestSetupWithoutHerdrServer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	herdrBinary, err := exec.LookPath("herdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(herdrBinary, filepath.Join(binDir, "herdr")); err != nil {
+		t.Fatal(err)
+	}
 	env := isolatedE2EEnv(t, root)
 	env = setEnv(env, "POSSE_TEST_ROOT", root)
-	env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Zero-config setup discovers installed harnesses. Keep the fixture's
+	// fake Claude as its only harness, rather than leaking the caller's PATH.
+	env = setEnv(env, "PATH", binDir+":/usr/bin:/bin")
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}

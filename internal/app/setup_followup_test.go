@@ -14,15 +14,15 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
-func TestFreshSetupProfilesResolveShipDispatch(t *testing.T) {
+func TestFreshSetupLeavesLeadAndProfilesImplicit(t *testing.T) {
 	for _, testCase := range []struct {
-		name      string
-		kinds     []string
-		leadKind  string
-		wantKinds []string
+		name     string
+		kinds    []string
+		leadKind string
 	}{
-		{name: "claude preferred", kinds: []string{"claude", "codex"}, leadKind: "claude", wantKinds: []string{"claude", "codex"}},
-		{name: "codex fallback", kinds: []string{"codex"}, leadKind: "codex", wantKinds: []string{"codex"}},
+		{name: "explicit claude with several available", kinds: []string{"claude", "codex"}, leadKind: "claude"},
+		{name: "codex only", kinds: []string{"codex"}, leadKind: "codex"},
+		{name: "pi only", kinds: []string{"pi"}, leadKind: "pi"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -54,21 +54,13 @@ func TestFreshSetupProfilesResolveShipDispatch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load generated config: %v", err)
 			}
-			if cfg.Lead.Kind != testCase.leadKind || cfg.DispatchDefault.Use != testCase.leadKind {
-				t.Fatalf("generated Lead/default Profile = %q/%q, want %q", cfg.Lead.Kind, cfg.DispatchDefault.Use, testCase.leadKind)
+			if cfg.Lead.Kind != "" || cfg.DispatchDefault.Use != "" || len(cfg.Profiles) != 0 || len(cfg.Dispatch) != 0 {
+				t.Fatalf("setup persisted detected selections: %#v", cfg)
 			}
-			if len(cfg.Profiles) != len(testCase.wantKinds) {
-				t.Fatalf("generated Profiles = %#v, want kinds %v", cfg.Profiles, testCase.wantKinds)
+			if !cfg.LeadLanguageDefault {
+				t.Fatal("setup persisted a language preference")
 			}
-			for _, kind := range testCase.wantKinds {
-				profile, ok := cfg.Profiles[kind]
-				if !ok || profile.Kind != kind || profile.Model != "" || profile.Effort != "" {
-					t.Fatalf("generated Profile %q = %#v, found=%v", kind, profile, ok)
-				}
-			}
-			if cfg.Identity.Lead.Name != "Sheriff" || cfg.Identity.Worker.DisplayPrefix != "rider" {
-				t.Fatalf("generated Identity defaults = %#v", cfg.Identity)
-			}
+			adapter.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1"}}}
 
 			cli = service.CLI()
 			projectOutput := &bytes.Buffer{}
@@ -77,8 +69,16 @@ func TestFreshSetupProfilesResolveShipDispatch(t *testing.T) {
 			if code := cli.Run([]string{"project", "add", "--name", "fresh"}); code != 0 {
 				t.Fatalf("register Project exit=%d output=%s", code, projectOutput)
 			}
+			t.Setenv("HERDR_ENV", "1")
+			t.Setenv("HERDR_PANE_ID", "w1:p1")
+			t.Setenv("HERDR_WORKSPACE_ID", "w1")
+			if code := cli.Run([]string{"up", "--" + testCase.leadKind}); code != 0 {
+				t.Fatalf("start explicit Lead: %s", projectOutput)
+			}
+			adapter.SnapshotValue.Panes[0].Agent = testCase.leadKind
+			adapter.SnapshotValue.Panes[0].Label = "posse:fresh:lead"
 			briefPath := filepath.Join(root, "ship-brief.md")
-			brief := "---\ntype: ship\ntitle: First run\ndone_when: dispatch resolves the generated Profile\n---\nRun the first Worker.\n"
+			brief := "---\ntype: ship\ntitle: First run\ndone_when: dispatch resolves the implicit Profile\n---\nRun the first Rider.\n"
 			if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -95,14 +95,14 @@ func TestFreshSetupProfilesResolveShipDispatch(t *testing.T) {
 			if err := json.Unmarshal(dispatchOutput.Bytes(), &result); err != nil {
 				t.Fatalf("dispatch output is not JSON: %s: %v", dispatchOutput, err)
 			}
-			if result.Profile != testCase.leadKind || result.DispatchRule != "dispatch.default" {
-				t.Fatalf("fresh ship dispatch = %#v, want default Profile %q", result, testCase.leadKind)
+			if result.Profile != "implicit:"+testCase.leadKind || result.DispatchRule != "implicit: lead kind" {
+				t.Fatalf("fresh ship dispatch = %#v, want implicit Profile of %q", result, testCase.leadKind)
 			}
 		})
 	}
 }
 
-func TestRideAndDispatchExplainHowToConfigureMissingDefault(t *testing.T) {
+func TestRideAndDispatchExplainMissingDefaultWithUnmatchedConfiguredRules(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
@@ -114,6 +114,9 @@ func TestRideAndDispatchExplainHowToConfigureMissingDefault(t *testing.T) {
 	cli.Out, cli.ErrOut = projectOutput, projectOutput
 	if code := cli.Run([]string{"project", "add", "--name", "missing-default"}); code != 0 {
 		t.Fatalf("register Project exit=%d output=%s", code, projectOutput)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[profiles.review]\nkind='claude'\n[[dispatch]]\ntype='review'\nuse='review'\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	briefPath := filepath.Join(root, "ship-brief.md")
 	brief := "---\ntype: ship\ntitle: Missing default\ndone_when: report setup guidance\n---\nThis should not start without a Profile.\n"
