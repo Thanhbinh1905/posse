@@ -880,6 +880,11 @@ func newPRLandingFixture(t *testing.T, mode string, state store.State) *prLandin
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close PR fixture database: %v", err)
+		}
+	})
 	project, err := db.CreateProject(context.Background(), "shop", repo, "main")
 	if err != nil {
 		t.Fatal(err)
