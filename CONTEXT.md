@@ -115,7 +115,7 @@ One repository of a Workspace, with its own default branch, remote and Landing M
 _Avoid_: Subproject, submodule, child repo
 
 **Profile**:
-A named way to run a Worker: its agent kind, model, effort and arguments.
+A named Worker configuration, or an implicit resolution to the Lead's agent kind; a named Profile can also provide model, effort and arguments.
 _Avoid_: Preset, agent config
 
 **Dispatch Rule**:
