@@ -264,6 +264,62 @@ func TestNoticeClaimRollsBackWhenPromptFails(t *testing.T) {
 	}
 }
 
+func TestLegacyClaimMigrationRaisesDeliveryNotice(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if db != nil {
+			_ = db.Close()
+		}
+	}()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := db.QueueMessage(ctx, taskID, "Legacy claimed instruction", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET status='claimed',claim_token='legacy',claimed_at=? WHERE id=?`, time.Now().Add(-deliveryClaimTimeout-time.Second).UnixMilli(), messageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id=21`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := db.MessageByID(ctx, messageID)
+	if err != nil || message.Status != "submitting" {
+		t.Fatalf("legacy claim migration did not make the message uncertain: %#v, %v", message, err)
+	}
+	service := testService(home, herdr.NewFake())
+	created, err := service.raiseExpiredMessageDeliveryNotices(ctx, db, project)
+	if err != nil || !created {
+		t.Fatalf("migration recovery did not create its Notice: created=%t err=%v", created, err)
+	}
+	created, err = service.raiseExpiredMessageDeliveryNotices(ctx, db, project)
+	if err != nil || created {
+		t.Fatalf("migration recovery duplicated its Notice: created=%t err=%v", created, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "message_delivery_uncertain" || !strings.Contains(notices[0].Summary, "#"+strconv.FormatInt(messageID, 10)) || !strings.Contains(notices[0].DataJSON, message.Body) {
+		t.Fatalf("legacy migration Notice did not identify the instruction: %#v, %v", notices, err)
+	}
+}
+
 func TestMessageClaimDoesNotRetryAfterAmbiguousPromptError(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
