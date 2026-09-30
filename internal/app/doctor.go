@@ -295,11 +295,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck(tool, "warn", "not installed", "Install "+tool+" to use the corresponding Landing Mode")
 		}
 	}
-	scoped, gaps, err := s.doctorReadiness(ctx.Context, home)
-	if err != nil {
-		addCheck("readiness", "warn", err.Error(), "Fix the reported Project configuration")
-	}
-	checks = append(checks, scoped...)
+	gaps, _ := s.doctorReadiness(ctx.Context, home)
 	return doctorResult{Checks: checks, Manifests: manifests, Readiness: gaps}, nil
 }
 

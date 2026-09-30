@@ -80,7 +80,6 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "name", Value: slug},
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "dispatch_rule", Value: resolution.Rule},
-		{Key: "resolved_profile", Value: resolution.Resolved},
 		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
 	}
 	if len(brief.Issues)+len(brief.Refs) > 0 {

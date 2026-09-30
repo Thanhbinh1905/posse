@@ -190,31 +190,31 @@ func (s *Service) machineSetupCheck(ctx context.Context) []doctorCheck {
 	return []doctorCheck{check}
 }
 
-func (s *Service) doctorReadiness(ctx context.Context, home string) ([]doctorCheck, []readinessGap, error) {
+func (s *Service) doctorReadiness(ctx context.Context, home string) ([]readinessGap, error) {
 	machine := s.machineSetupCheck(ctx)
 	db, _, err := s.openDB()
 	if err != nil {
-		return machine, nil, err
+		return nil, err
 	}
 	defer db.Close()
 	dir, err := currentDir()
 	if err != nil {
-		return machine, nil, err
+		return nil, err
 	}
 	project, found, err := registeredProjectFor(ctx, db, dir)
 	if err != nil {
-		return machine, nil, err
+		return nil, err
 	}
 	var targets []repoTarget
 	if found {
 		targets, err = s.projectTargets(ctx, db, project)
 		if err != nil {
-			return machine, nil, err
+			return nil, err
 		}
 	} else {
 		detected, detectErr := detectProject(ctx, dir)
 		if detectErr != nil {
-			return machine, projectReadiness(config.Config{}, machine), nil
+			return projectReadiness(config.Config{}, machine), nil
 		}
 		project.Name = detected.Name
 		for _, repo := range detected.Repos {
@@ -227,8 +227,8 @@ func (s *Service) doctorReadiness(ctx context.Context, home string) ([]doctorChe
 	}
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
-		return machine, nil, err
+		return nil, err
 	}
 	checks := append(repositoryDoctorChecks(ctx, cfg, targets), machine...)
-	return checks, projectReadiness(cfg, checks), nil
+	return projectReadiness(cfg, checks), nil
 }

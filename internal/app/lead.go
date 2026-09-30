@@ -196,7 +196,7 @@ func (s *Service) availableLeadKinds(ctx context.Context, cfg config.Config) []s
 	}
 	if len(available) == 0 {
 		for kind := range cfg.Kinds {
-			if _, err := exec.LookPath(kind); err == nil {
+			if _, err := exec.LookPath(agentCLIName(kind)); err == nil {
 				available = append(available, kind)
 			}
 		}

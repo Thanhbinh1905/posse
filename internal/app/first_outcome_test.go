@@ -154,17 +154,35 @@ func TestFirstOutcomeUpKindSelection(t *testing.T) {
 	}
 }
 
+func TestFirstOutcomeConfiguredCursorUsesMappedCLI(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	setupFollowupAgentPath(t, "cursor-agent")
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[kinds.cursor]\nnotice_delivery='prompt'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.fake.Results["server.agent_manifests"] = json.RawMessage(`{}`)
+	f.fake.SnapshotValue.Panes[0].Agent = ""
+	f.fake.SnapshotValue.Agents = nil
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	output := outcomeCLI(t, f.service, 0, "up", "--yes", "--json")
+	if f.service.pendingLead == nil || f.service.pendingLead.Kind != "cursor" || !strings.Contains(output, "only available kind") {
+		t.Fatalf("selection: %s %#v", output, f.service.pendingLead)
+	}
+}
+
 func TestFirstOutcomeDispatchPrecedence(t *testing.T) {
 	for _, tc := range []struct {
-		name, config, profile, source, kind string
-		code                                int
+		name, config, profile, source, expectedProfile string
+		code                                           int
 	}{
-		{name: "implicit", source: "implicit: lead kind", kind: "pi"},
-		{name: "named Profiles without rules", config: "[profiles.deep]\nkind='codex'\n", source: "implicit: lead kind", kind: "pi"},
-		{name: "live Lead overrides default Lead", config: "[lead]\nkind='codex'\n", source: "implicit: lead kind", kind: "pi"},
-		{name: "default", config: "[profiles.deep]\nkind='codex'\n[dispatch.default]\nuse='deep'\n", source: "dispatch.default", kind: "codex"},
-		{name: "single rule", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\ntype='ship'\nuse='deep'\n", source: "type=ship", kind: "codex"},
-		{name: "explicit", config: "[profiles.deep]\nkind='codex'\n", profile: "deep", source: "--profile deep", kind: "codex"},
+		{name: "implicit", source: "implicit: lead kind", expectedProfile: "implicit:pi"},
+		{name: "named Profiles without rules", config: "[profiles.deep]\nkind='codex'\n", source: "implicit: lead kind", expectedProfile: "implicit:pi"},
+		{name: "live Lead overrides default Lead", config: "[lead]\nkind='codex'\n", source: "implicit: lead kind", expectedProfile: "implicit:pi"},
+		{name: "default", config: "[profiles.deep]\nkind='codex'\n[dispatch.default]\nuse='deep'\n", source: "dispatch.default", expectedProfile: "deep"},
+		{name: "single rule", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\ntype='ship'\nuse='deep'\n", source: "type=ship", expectedProfile: "deep"},
+		{name: "explicit", config: "[profiles.deep]\nkind='codex'\n", profile: "deep", source: "--profile deep", expectedProfile: "deep"},
 		{name: "ambiguous", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\nwhen='hard'\nuse='deep'\n[[dispatch]]\nwhen='easy'\nuse='deep'\n[dispatch.default]\nuse='deep'\n", code: 1},
 		{name: "unmatched configured rule", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\ntype='review'\nuse='deep'\n", code: 1},
 	} {
@@ -186,13 +204,26 @@ func TestFirstOutcomeDispatchPrecedence(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(output, tc.source) || !strings.Contains(output, `"kind":"`+tc.kind+`"`) {
-				t.Fatal(output)
-			}
-			if tc.kind == "pi" && (!strings.Contains(output, `"model":""`) || !strings.Contains(output, `"effort":""`)) {
+			if !strings.Contains(output, tc.source) || !strings.Contains(output, `"profile":"`+tc.expectedProfile+`"`) {
 				t.Fatal(output)
 			}
 		})
+	}
+}
+
+func TestFirstOutcomeDispatchOmitsProfileArguments(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[profiles.deep]\nkind='pi'\nargs=['--api-key','secret']\n[dispatch.default]\nuse='deep'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	output := outcomeCLI(t, f.service, 0, "dispatch", "--brief", f.brief, "--json")
+	if !strings.Contains(output, `"profile":"deep"`) {
+		t.Fatal(output)
+	}
+	for _, leaked := range []string{"resolved_profile", "--api-key", "secret"} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("dispatch exposed %q: %s", leaked, output)
+		}
 	}
 }
 
@@ -272,9 +303,19 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 			output := outcomeCLI(t, f.service, 0, args...)
 			var result struct {
 				Readiness []readinessGap `json:"readiness"`
+				Checks    []struct {
+					Check string `json:"check"`
+				} `json:"checks"`
 			}
 			if err := json.Unmarshal([]byte(output), &result); err != nil {
 				t.Fatal(err)
+			}
+			if args[0] == "doctor" {
+				for _, check := range result.Checks {
+					if check.Check == "machine setup" || check.Check == "readiness" || strings.HasPrefix(check.Check, "Gate") || strings.HasPrefix(check.Check, "forge auth") || strings.HasPrefix(check.Check, "no-mistakes for ") {
+						t.Fatalf("doctor added scoped check %q: %s", check.Check, output)
+					}
+				}
 			}
 			codes := map[string]bool{}
 			for _, gap := range result.Readiness {
