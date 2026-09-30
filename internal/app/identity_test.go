@@ -13,6 +13,30 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestLeadDisplayMetadataShowsHarness(t *testing.T) {
+	for _, tt := range []struct{ detected, expected, want string }{
+		{expected: "pi", want: "pi"},
+		{expected: "codex", want: "codex"},
+		{expected: "claude", want: "claude"},
+		{detected: "pi", expected: "codex", want: "pi"},
+		{},
+	} {
+		t.Run(tt.detected+"/"+tt.expected, func(t *testing.T) {
+			metadata := leadDisplayMetadata(store.Project{Name: "shop"}, "w1:p1", tt.detected, tt.expected)
+			if metadata["pane_id"] != "w1:p1" || metadata["title"] != "Lead: shop" || metadata["tokens"].(map[string]string)["posse_row"] != "Lead:shop" {
+				t.Fatalf("Lead role changed: %#v", metadata)
+			}
+			if tt.want == "" {
+				if metadata["clear_display_agent"] != true || metadata["display_agent"] != nil {
+					t.Fatalf("unknown harness retained a stale display name: %#v", metadata)
+				}
+			} else if metadata["display_agent"] != tt.want || metadata["clear_display_agent"] != nil {
+				t.Fatalf("Lead harness metadata = %#v, want %s", metadata, tt.want)
+			}
+		})
+	}
+}
+
 func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -51,6 +75,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		agentName    string
 		paneLabel    string
 		display      []byte
+		leadDisplay  []byte
 		notice       []byte
 		home         []byte
 		workerPrefix string
@@ -98,7 +123,11 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		renders = append(renders, rendered{launch: launch, agentName: agentName(project.Name, sequence, 1), paneLabel: task.PaneLabel, display: display, notice: notice, home: append([]byte(nil), output.Bytes()...), workerPrefix: cfg.Identity.Worker.DisplayPrefix})
+		leadDisplay, err := json.Marshal(leadDisplayMetadata(project, "w1:p1", "pi", "codex"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		renders = append(renders, rendered{leadDisplay: leadDisplay, launch: launch, agentName: agentName(project.Name, sequence, 1), paneLabel: task.PaneLabel, display: display, notice: notice, home: append([]byte(nil), output.Bytes()...), workerPrefix: cfg.Identity.Worker.DisplayPrefix})
 	}
 	if renders[0].workerPrefix == renders[1].workerPrefix {
 		t.Fatal("Identity fixtures did not use distinct display prefixes")
@@ -107,7 +136,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		name  string
 		left  []byte
 		right []byte
-	}{{"launch.md", renders[0].launch, renders[1].launch}, {"agent name", []byte(renders[0].agentName), []byte(renders[1].agentName)}, {"pane label", []byte(renders[0].paneLabel), []byte(renders[1].paneLabel)}, {"Notice", renders[0].notice, renders[1].notice}, {"home output", renders[0].home, renders[1].home}} {
+	}{{"launch.md", renders[0].launch, renders[1].launch}, {"agent name", []byte(renders[0].agentName), []byte(renders[1].agentName)}, {"pane label", []byte(renders[0].paneLabel), []byte(renders[1].paneLabel)}, {"Lead sidebar", renders[0].leadDisplay, renders[1].leadDisplay}, {"Notice", renders[0].notice, renders[1].notice}, {"home output", renders[0].home, renders[1].home}} {
 		if !bytes.Equal(field.left, field.right) {
 			t.Errorf("%s changed with Identity:\nfirst:  %q\nsecond: %q", field.name, field.left, field.right)
 		}
@@ -127,6 +156,13 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	}
 	if display.Tab != "stable-output" || display.Pane["title"] != "Stable output · stable-output · " || display.Pane["clear_display_agent"] != nil || display.Pane["display_agent"] != "pi" {
 		t.Fatalf("Worker display metadata = %#v", display)
+	}
+	var lead map[string]any
+	if err := json.Unmarshal(renders[0].leadDisplay, &lead); err != nil {
+		t.Fatal(err)
+	}
+	if lead["title"] != "Lead: shop" || lead["display_agent"] != "pi" || lead["tokens"].(map[string]any)["posse_row"] != "Lead:shop" {
+		t.Fatalf("Lead display metadata = %#v", lead)
 	}
 	if got := leadAgentName("shop", 3); got != "posse-shop-lead-3" {
 		t.Fatalf("Lead agent name = %q", got)

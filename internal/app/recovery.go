@@ -571,12 +571,12 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	if _, err := s.herdrCall(ctx, "workspace.rename", map[string]any{"workspace_id": current.WorkspaceID, "label": leadWorkspaceLabel(project)}); err != nil {
 		return err
 	}
-	if _, err := s.herdrCall(ctx, "pane.report_metadata", map[string]any{"pane_id": current.PaneID, "source": "posse", "title": "Lead: " + project.Name, "display_agent": "Lead", "tokens": map[string]string{"posse_row": leadWorkspaceLabel(project)}}); err != nil {
-		return err
-	}
 	kind := s.currentLeadKind(ctx, project, cfg, cfg.Lead.Kind)
 	if _, ok := cfg.Kinds[kind]; !ok {
 		return axi.Failure("config_invalid", "unknown Lead agent kind "+kind, false)
+	}
+	if _, err := s.herdrCall(ctx, "pane.report_metadata", leadDisplayMetadata(project, current.PaneID, "", kind)); err != nil {
+		return err
 	}
 	gaps, err := s.readiness(ctx, db, project, cfg)
 	if err != nil {

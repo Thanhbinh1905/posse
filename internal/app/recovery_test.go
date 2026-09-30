@@ -129,6 +129,7 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	if !found {
 		t.Fatalf("Profile args suppressed restart Lead instructions: %#v", fake.Calls)
 	}
+	assertLeadMetadataCall(t, fake, "w1:p1", "claude")
 	// Lookout failure must not strand the newly launched prompt-kind Lead.
 	fake.Errors["tab.create"] = errors.New("Lookout unavailable")
 	before := fake.CallCount("agent.prompt")

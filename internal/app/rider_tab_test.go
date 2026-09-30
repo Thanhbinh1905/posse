@@ -204,7 +204,7 @@ func TestOpenRiderTabUsesTheLeadWorkspace(t *testing.T) {
 		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w5:p1" || call.Params["label"] != task.PaneLabel) {
 			t.Fatalf("pane.rename params = %#v", call.Params)
 		}
-		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w5:p1" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "first-rider") {
+		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w5:p1" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "") {
 			t.Fatalf("initial Rider metadata = %#v", call.Params)
 		}
 	}

@@ -67,6 +67,17 @@ func TestRosterRecoversRestartWithoutStartupHook(t *testing.T) {
 	if !grouped {
 		t.Fatalf("restored Rider lost native worktree grouping: %#v", after)
 	}
+	recoveredSnapshot := fixture.snapshot(t)
+	lead, found := findLeadInSnapshot(recoveredSnapshot)
+	if !found {
+		t.Fatal("recovered Lead is missing")
+	}
+	assertLeadSidebarPresentation(t, fixture.client, lead.WorkspaceID, lead.PaneID, "Lead:shop")
+	for i, workspace := range recoveredSnapshot.Workspaces {
+		if workspace.WorkspaceID == lead.WorkspaceID && (i+1 >= len(recoveredSnapshot.Workspaces) || recoveredSnapshot.Workspaces[i+1].WorkspaceID != after.HerdrWorkspaceID) {
+			t.Fatalf("recovered Rider is not directly below its Lead: %#v", recoveredSnapshot.Workspaces)
+		}
+	}
 	db, err = store.OpenReadOnly(fixture.home)
 	if err != nil {
 		t.Fatal(err)
