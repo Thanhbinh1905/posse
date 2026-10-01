@@ -1,6 +1,7 @@
 package herdr
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,13 +45,16 @@ func IsolatedTestEnvironment(root string) []string {
 	)
 }
 
+//go:embed isolated_update_config.toml
+var isolatedUpdateConfig string
+
 func WriteIsolatedConfig(root string) (string, error) {
 	configDir := filepath.Join(root, "xdg", "herdr")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return "", err
 	}
 	configPath := filepath.Join(configDir, "config.toml")
-	contents := "[terminal]\ndefault_shell = \"/bin/sh\"\n\n[worktrees]\ndirectory = " + strconv.Quote(filepath.Join(root, "worktrees")) + "\n"
+	contents := "[terminal]\ndefault_shell = \"/bin/sh\"\n\n[worktrees]\ndirectory = " + strconv.Quote(filepath.Join(root, "worktrees")) + "\n\n" + strings.TrimSpace(isolatedUpdateConfig) + "\n"
 	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 		return "", err
 	}
@@ -85,6 +89,9 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 	config, err := os.ReadFile(configPath)
 	if err != nil || !strings.Contains(string(config), `default_shell = "/bin/sh"`) || !strings.Contains(string(config), strconv.Quote(filepath.Join(root, "worktrees"))) {
 		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr config must use /bin/sh and a test-root worktrees directory", Cause: err}
+	}
+	if !strings.Contains(string(config), strings.TrimSpace(isolatedUpdateConfig)) {
+		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr config must disable background update network checks"}
 	}
 	return root, nil
 }

@@ -5,17 +5,41 @@ Requires herdr, pi, Go and Python 3. No external model or credentials are used.
 """
 import json
 import os
-from pathlib import Path
 import re
 import sqlite3
-from contextlib import closing
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+ISOLATED_HERDR_CONFIG = ROOT / "internal" / "herdr" / "isolated_update_config.toml"
+
+
+def fixture_curl_processes(xdg_config):
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return []
+    expected_config = f"XDG_CONFIG_HOME={xdg_config}".encode()
+    remaining = []
+    for process in proc_root.iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            environment = (process / "environ").read_bytes().split(b"\0")
+            if expected_config not in environment:
+                continue
+            argv = (process / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if argv and argv[0].rsplit(b"/", 1)[-1] == b"curl":
+            arguments = " ".join(value.decode(errors="replace") for value in argv if value)
+            remaining.append(f"{process.name}: {arguments}")
+    return remaining
 
 
 class Model(BaseHTTPRequestHandler):
@@ -93,7 +117,9 @@ def main():
         env.update(HOME=str(tmp), XDG_CONFIG_HOME=str(tmp / "config"), POSSE_HOME=str(tmp / "home"), PI_CODING_AGENT_DIR=str(tmp / "pi"), PI_OFFLINE="1")
         for name in ("GOMODCACHE", "GOCACHE"):
             env[name] = subprocess.check_output(("go", "env", name), text=True).strip()
-        (tmp / "config").mkdir()
+        herdr_config = tmp / "config" / "herdr"
+        herdr_config.mkdir(parents=True)
+        (herdr_config / "config.toml").write_text(ISOLATED_HERDR_CONFIG.read_text())
         (tmp / ".zshrc").write_text("# isolated test shell\n")
         (tmp / "pi").mkdir()
         (tmp / "bin").mkdir()
@@ -244,6 +270,9 @@ export default function (pi) {
             process.wait(timeout=10)
             log.close()
             server.shutdown()
+            if sys.exc_info()[0] is None:
+                curls = fixture_curl_processes(tmp / "config")
+                assert not curls, f"isolated Herdr left curl children after shutdown: {curls}"
 
 
 if __name__ == "__main__":
