@@ -170,6 +170,10 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	baseRef := project.DefaultBranch
 	var reviewsTaskID int64
 	var reviewedTask *store.Task
+	var reviewIdentityDetails map[string]any
+	var reviewLaunchIdentity store.TaskLaunchIdentity
+	var authorLaunchIdentities []store.TaskLaunchIdentity
+	var authorIdentityHistoryKnown bool
 	if brief.Type == "review" {
 		reviewed, err := s.currentTask(ctx.Context, db, project, brief.ReviewOf)
 		if err != nil {
@@ -184,6 +188,21 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		reviewsTaskID = reviewed.ID
 		baseRef = reviewed.Branch
 		reviewedTask = &reviewed
+		authorLaunchIdentities, err = db.TaskLaunchIdentities(ctx.Context, reviewed.ID)
+		if err != nil {
+			return err
+		}
+		authorIdentityHistoryKnown = reviewed.Launches > 0 && launchHistoryComplete(reviewed, authorLaunchIdentities)
+		kindConfig, found := cfg.Kinds[resolution.Resolved.Kind]
+		if !found {
+			return axi.Failure("config_invalid", "Review Task Profile uses unknown agent kind "+resolution.Resolved.Kind, false)
+		}
+		reviewLaunchIdentity = configuredLaunchIdentity(resolution.Profile, resolution.Resolved, kindConfig)
+		if check := compareReviewIdentity(authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity); !check.Eligible {
+			return reviewIdentityFailure(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity)
+		}
+		reviewLaunchIdentity.LaunchNumber = 1
+		reviewIdentityDetails = reviewIdentityResult(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity)
 	}
 	members, workspaceMode, err := s.planTaskMembers(ctx.Context, db, project, cfg, brief, reviewedTask)
 	if err != nil {
@@ -358,7 +377,8 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	launch := 0
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.sequence", func() error {
 		var launchErr error
-		launch, launchErr = db.NextTaskLaunch(ctx.Context, taskID)
+		identity := configuredLaunchIdentity(resolution.Profile, resolution.Resolved, cfg.Kinds[resolution.Resolved.Kind])
+		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx.Context, taskID, resolution.Profile, identity.ConfiguredModel, identity.ModelKnown)
 		return launchErr
 	})
 	if err != nil {
@@ -459,14 +479,18 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{
+	result := axi.Object{
 		{Key: "task", Value: taskIDString(sequence)},
 		{Key: "type", Value: brief.Type},
 		{Key: "state", Value: string(store.StateWorking)},
 		{Key: "worker", Value: workerName},
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "help", Value: []any{"Run `posse show " + taskIDString(sequence) + "` to inspect the Rider", "Run `posse peek " + taskIDString(sequence) + "` to read Rider output"}},
-	})
+	}
+	if reviewIdentityDetails != nil {
+		result = append(result, axi.Field{Key: "review_identity", Value: reviewIdentityDetails})
+	}
+	return ctx.Print(result)
 }
 
 // Herdr otherwise prefers the unique agent.start name over its detected
@@ -1455,6 +1479,37 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		return failure(axi.Failure("config_invalid", "Task Profile uses unknown agent kind "+kind, false))
 	}
 	kindChanged := kind != taskKind(cfg, task)
+	launchIdentity := configuredLaunchIdentity(profileName, profile, kindConfig)
+	if task.Type == "review" {
+		if task.ReviewsTaskID == 0 {
+			return failure(axi.Failure("review_identity_ineligible", "Review Task has no recorded Ship Task", false))
+		}
+		author, err := db.TaskByID(ctx, project.ID, task.ReviewsTaskID)
+		if err != nil {
+			return failure(err)
+		}
+		if author.Type != "ship" {
+			return failure(axi.Failure("review_identity_ineligible", "Review Task does not reference a Ship Task", false))
+		}
+		authorLaunches, err := db.TaskLaunchIdentities(ctx, author.ID)
+		if err != nil {
+			return failure(err)
+		}
+		reviewerLaunches, err := db.TaskLaunchIdentities(ctx, task.ID)
+		if err != nil {
+			return failure(err)
+		}
+		authorHistoryKnown := author.Launches > 0 && launchHistoryComplete(author, authorLaunches)
+		reviewerHistoryKnown := launchHistoryComplete(task, reviewerLaunches)
+		if check := compareReviewIdentity(authorLaunches, authorHistoryKnown, launchIdentity); !check.Eligible || !reviewerHistoryKnown {
+			return failure(reviewRelaunchIdentityFailure(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown, launchIdentity))
+		}
+		for _, previous := range reviewerLaunches {
+			if check := compareReviewIdentity(authorLaunches, authorHistoryKnown, previous); !check.Eligible {
+				return failure(reviewRelaunchIdentityFailure(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown, launchIdentity))
+			}
+		}
+	}
 	mount, err := db.MountByTask(ctx, task.ID)
 	if err != nil || mount.State != "held" || mount.TaskID != task.ID {
 		return failure(axi.Failure("relaunch_mount_missing", "Task Mount is not held", false, "Inspect the Task and its Remuda Mount before relaunching"))
@@ -1534,7 +1589,7 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	launch := 0
 	if err := track("agent.sequence", func() error {
 		var launchErr error
-		launch, launchErr = db.NextTaskLaunch(ctx, task.ID)
+		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx, task.ID, profileName, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown)
 		return launchErr
 	}); err != nil {
 		return failure(err)

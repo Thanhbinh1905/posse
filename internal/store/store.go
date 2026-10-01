@@ -475,6 +475,14 @@ func oneOfSource(source string) bool {
 	}
 }
 
+type TaskLaunchIdentity struct {
+	TaskID          int64  `toml:"task_id" json:"task_id"`
+	LaunchNumber    int    `toml:"launch_number" json:"launch_number"`
+	Profile         string `toml:"profile" json:"profile"`
+	ConfiguredModel string `toml:"configured_model" json:"configured_model"`
+	ModelKnown      bool   `toml:"model_known" json:"model_known"`
+}
+
 type Task struct {
 	ID                   int64  `toml:"id"`
 	ProjectID            int64  `toml:"project_id"`
@@ -831,12 +839,60 @@ type Project struct {
 }
 
 func (db *DB) NextTaskLaunch(ctx context.Context, taskID int64) (int, error) {
-	var launches int
-	err := db.QueryRowContext(ctx, `UPDATE tasks SET launches=launches+1,updated_at=? WHERE id=? RETURNING launches`, time.Now().UnixMilli(), taskID).Scan(&launches)
+	var profile string
+	if err := db.QueryRowContext(ctx, `SELECT profile FROM tasks WHERE id=?`, taskID).Scan(&profile); err != nil {
+		return 0, err
+	}
+	return db.NextTaskLaunchWithIdentity(ctx, taskID, profile, "", false)
+}
+
+// NextTaskLaunchWithIdentity atomically allocates a launch number and records
+// the configured identity that Posse supplied to that launch. modelKnown is
+// false when the configured model is absent or an override prevents Posse from
+// identifying the effective configured value.
+func (db *DB) NextTaskLaunchWithIdentity(ctx context.Context, taskID int64, profile, configuredModel string, modelKnown bool) (int, error) {
+	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
-		return launches, err
+		return 0, err
+	}
+	defer tx.Rollback()
+	now := time.Now().UnixMilli()
+	var launches int
+	if err := tx.QueryRowContext(ctx, `UPDATE tasks SET launches=launches+1,updated_at=? WHERE id=? RETURNING launches`, now, taskID).Scan(&launches); err != nil {
+		return 0, err
+	}
+	if modelKnown && strings.TrimSpace(configuredModel) == "" {
+		modelKnown = false
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known) VALUES(?,?,?,?,?)`, taskID, launches, profile, configuredModel, modelKnown); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return launches, db.PersistTask(ctx, taskID)
+}
+
+// TaskLaunchIdentities returns the configured Profile and model values recorded
+// for each launch. Missing rows remain visible through the caller's comparison
+// of these rows with Task.Launches; they are not reconstructed from current config.
+func (db *DB) TaskLaunchIdentities(ctx context.Context, taskID int64) ([]TaskLaunchIdentity, error) {
+	rows, err := db.QueryContext(ctx, `SELECT task_id,launch_number,profile_name,configured_model,model_known FROM task_launch_identities WHERE task_id=? ORDER BY launch_number`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	identities := []TaskLaunchIdentity{}
+	for rows.Next() {
+		var identity TaskLaunchIdentity
+		var modelKnown int
+		if err := rows.Scan(&identity.TaskID, &identity.LaunchNumber, &identity.Profile, &identity.ConfiguredModel, &modelKnown); err != nil {
+			return nil, err
+		}
+		identity.ModelKnown = modelKnown == 1
+		identities = append(identities, identity)
+	}
+	return identities, rows.Err()
 }
 
 func (db *DB) NextLeadLaunch(ctx context.Context, projectID int64) (int, error) {
