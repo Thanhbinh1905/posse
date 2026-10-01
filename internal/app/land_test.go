@@ -496,6 +496,49 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 	}
 }
 
+func TestApprovedDiscardTeardownSurvivesAgentNotReadyDuringPreflightNoticeDelivery(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	ctx := context.Background()
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateFailed, "worker", "Rider failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, TaskID: fixture.task.ID, Kind: "worker_failed", Summary: "Rider failed", DataJSON: `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &changingSnapshotAdapter{
+		Fake: herdr.NewFake(),
+		snapshot: herdr.Snapshot{Panes: []herdr.Pane{
+			{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "idle"},
+			{PaneID: fixture.task.PaneID, WorkspaceID: fixture.task.HerdrWorkspaceID, TabID: "w2:t1", Label: fixture.task.PaneLabel, CWD: fixture.worktree, Agent: "claude", AgentStatus: "working"},
+		}, Agents: []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: fixture.task.PaneID}}},
+	}
+	adapter.Errors["agent.prompt"] = &herdr.Error{Code: "agent_not_ready", Message: "agent w2:p1 is no longer the pane foreground process"}
+	fixture.service.Herdr = adapter
+	t.Chdir(fixture.repo)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	var output, errorsOut bytes.Buffer
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = &output, &errorsOut
+	if code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"}); code != 0 {
+		t.Fatalf("approved discard exit = %d; output=%s error=%s", code, output.String(), errorsOut.String())
+	}
+	updated, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || updated.State != store.StateTornDown {
+		t.Fatalf("Task after approved discard = %#v, %v", updated, err)
+	}
+	if adapter.CallCount("agent.prompt") != 1 {
+		t.Fatalf("agent.prompt calls = %d, want 1", adapter.CallCount("agent.prompt"))
+	}
+	if adapter.CallCount("tab.close") != 1 {
+		t.Fatalf("tab.close calls = %d, want 1", adapter.CallCount("tab.close"))
+	}
+	notices, err := fixture.db.UndeliveredNotices(ctx, fixture.project.ID)
+	if err != nil || len(notices) != 1 {
+		t.Fatalf("failed preflight Notice delivery was not preserved: %#v, %v", notices, err)
+	}
+}
+
 type changingSnapshotAdapter struct {
 	*herdr.Fake
 	mu         sync.Mutex

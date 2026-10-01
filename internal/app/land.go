@@ -404,7 +404,14 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	}
 	cfg, err := s.prepareProject(ctx.Context, db, project)
 	if err != nil {
-		return err
+		var commandError *axi.Error
+		approvedDiscard := parsed.Bool("discard") && strings.TrimSpace(parsed.Flags["user-approved"]) != ""
+		if !approvedDiscard || !errors.As(err, &commandError) || commandError.Code != "agent_not_ready" {
+			return err
+		}
+		// Project preparation can fail while delivering to an agent that is
+		// already exiting. For an explicitly approved discard, that readiness
+		// failure must not block Teardown, which takes a fresh ownership snapshot.
 	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
