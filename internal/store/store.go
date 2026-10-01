@@ -37,9 +37,10 @@ var ErrBusy = errors.New("database contention; retry the operation")
 
 const sqliteBusyTimeoutMillis = 5000
 
-// Reconciliation may persist several independent observations in one short
-// budget. Bound each wait so repeated writes cannot consume the whole budget.
-const reconcileWriteBusyTimeoutMillis = 250
+// Each observation write gets its own reconcile budget. Its SQLite lock wait
+// must stay below that budget so a busy Task cannot expire later Task writes.
+const ObservationWriteBusyTimeout = 250 * time.Millisecond
+const reconcileWriteBusyTimeoutMillis = int(ObservationWriteBusyTimeout / time.Millisecond)
 
 // IsBusy reports whether err represents SQLite lock contention, so callers can
 // distinguish an invalid write from one that should be retried.

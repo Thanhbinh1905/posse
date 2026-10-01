@@ -905,7 +905,12 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	_, err = s.prepareProject(ctx.Context, db, project)
 	if err != nil {
-		return err
+		if !runtime.IsObservationContention(err) {
+			return err
+		}
+		// An unrelated observation must not veto this Rider's own Signal.
+		// Its transaction still has to acquire the write lock independently.
+		fmt.Fprintln(ctx.ErrOut, "Project observations deferred by store contention; recording this Rider's Signal")
 	}
 	task, err = db.TaskByID(ctx.Context, project.ID, task.ID)
 	if err != nil {

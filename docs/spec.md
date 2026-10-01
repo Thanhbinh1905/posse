@@ -336,9 +336,9 @@ Every Signal is one transaction: the `signals` row, the resulting transition(s) 
 
 ## 7. Reconcile
 
-Runs at the start of every `posse` command for the Project in scope (all Projects for `posse roster --all`), under a 3 second budget, using one `session.snapshot` call.
+Runs at the start of every `posse` command for the Project in scope (all Projects for `posse roster --all`), using one `session.snapshot` call. Snapshot acquisition, each Task, Lead observation and stall evaluation have separate 3 second budgets. Observation writes wait at most 250 ms for a SQLite lock; one contended Task cannot expire another Task's context.
 
-A reconcile that loses a compare-and-set race on a Task skips that Task (another process already moved it); it never fails the command. One Project's failure (missing repository, invalid config) is reported for that Project and does not stop commands for other Projects.
+A reconcile that loses a compare-and-set race on a Task skips that Task (another process already moved it); it never fails the command. One Project's failure (missing repository, invalid config) is reported for that Project and does not stop commands for other Projects. Store contention returns retryable `store_busy`. `posse holler` defers observation-contention failures with a diagnostic and records its own Signal independently; other preparation failures still block it.
 
 For each live Task:
 
