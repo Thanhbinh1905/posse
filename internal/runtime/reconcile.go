@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-const ReconcileBudget = 3 * time.Second
+const ReconcileBudget = store.ObservationWriteBudget
 const AgentAbsentGrace = 2 * time.Minute
 
 type RunResult struct {
@@ -28,66 +29,14 @@ type ProgressSource interface {
 
 type SystemProgress struct{}
 
-type observationWriteError struct {
-	description string
-	err         error
-}
-
-func (e *observationWriteError) Error() string {
-	return e.description + ": " + e.err.Error()
-}
-
-func (e *observationWriteError) Unwrap() error { return e.err }
-
-// IsObservationContention reports whether err contains only retryable
-// observation-write contention. A Rider Signal may proceed when unrelated
-// Project observations are blocked, but must not hide other reconcile failures.
-func IsObservationContention(err error) bool {
-	if err == nil {
-		return false
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		failures := joined.Unwrap()
-		if len(failures) == 0 {
-			return false
-		}
-		for _, failure := range failures {
-			if !IsObservationContention(failure) {
-				return false
-			}
-		}
-		return true
-	}
-	if observationErr, ok := err.(*observationWriteError); ok {
-		return store.IsBusy(observationErr.err)
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return IsObservationContention(wrapped.Unwrap())
-	}
-	return false
-}
-
 func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int64, stallAfter, idleAfter time.Duration, now time.Time, progress ProgressSource) (result RunResult, returnedErr error) {
 	budgetCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
 	defer cancel()
+	defer func() { returnedErr = reconcileError(returnedErr) }()
 	snapshot, err := adapter.Snapshot(budgetCtx)
 	if err != nil {
 		return RunResult{}, err
 	}
-	defer func() {
-		if snapshot.ServerStartedAt == "" {
-			return
-		}
-		// Leave a changed generation pending until recover --all handles it.
-		// A Herdr event can run before the startup hook and must not consume the
-		// restart signal that the hook uses to relaunch Workers and the Lead.
-		writeCtx, cancelWrite := context.WithTimeout(ctx, ReconcileBudget)
-		err := db.RememberProjectServerStartedAt(writeCtx, projectID, snapshot.ServerStartedAt)
-		cancelWrite()
-		if err != nil {
-			returnedErr = errors.Join(returnedErr, &observationWriteError{description: "remember Project server observation", err: err})
-		}
-	}()
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -100,25 +49,33 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 		result.GenerationMismatch = err == nil && !matches
 		return result, err
 	}
-	cancel()
-	notices, err := ReconcileSnapshot(ctx, db, projectID, snapshot, now, idleAfter)
+	if err := reconcileWorkDeferred(budgetCtx); err != nil {
+		return result, err
+	}
+	if snapshot.ServerStartedAt != "" {
+		writeCtx, cancelWrite := context.WithTimeout(budgetCtx, ReconcileBudget)
+		err := db.RememberProjectServerStartedAt(writeCtx, projectID, snapshot.ServerStartedAt)
+		cancelWrite()
+		if err != nil {
+			returnedErr = fmt.Errorf("remember Project server observation: %w", err)
+		}
+	}
+	notices, err := ReconcileSnapshot(budgetCtx, db, projectID, snapshot, now, idleAfter)
 	result.Notices = append(result.Notices, notices...)
 	if err != nil {
-		return result, err
+		return result, errors.Join(returnedErr, err)
 	}
 	if stallAfter > 0 {
 		if progress == nil {
 			progress = SystemProgress{}
 		}
-		stallCtx, cancelStalls := context.WithTimeout(ctx, ReconcileBudget)
-		stalled, err := evaluateStallsSnapshot(stallCtx, db, adapter, projectID, snapshot, stallAfter, now, progress)
-		cancelStalls()
+		stalled, err := evaluateStallsSnapshot(budgetCtx, db, adapter, projectID, snapshot, stallAfter, now, progress)
 		result.Notices = append(result.Notices, stalled...)
 		if err != nil {
-			return result, err
+			return result, errors.Join(returnedErr, err)
 		}
 	}
-	return result, nil
+	return result, returnedErr
 }
 
 func snapshotMatchesProjectGeneration(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot) (bool, error) {
@@ -126,7 +83,10 @@ func snapshotMatchesProjectGeneration(ctx context.Context, db *store.DB, project
 	return generation == "" || snapshot.ServerStartedAt == "" || generation == snapshot.ServerStartedAt, err
 }
 
-func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot, now time.Time, idleAfterValues ...time.Duration) ([]store.Notice, error) {
+func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot, now time.Time, idleAfterValues ...time.Duration) (notices []store.Notice, returnedErr error) {
+	defer func() { returnedErr = reconcileError(returnedErr) }()
+	ctx, cancelBudget := context.WithTimeout(ctx, ReconcileBudget)
+	defer cancelBudget()
 	idleAfter := time.Duration(0)
 	if len(idleAfterValues) > 0 {
 		idleAfter = idleAfterValues[0]
@@ -152,10 +112,26 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 	if err != nil {
 		return nil, err
 	}
-	var notices []store.Notice
 	var failures []error
+	if project.LeadPaneID != "" || project.LeadLabel != "" {
+		if err := reconcileWorkDeferred(ctx); err != nil {
+			return notices, err
+		}
+		projectCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
+		err := reconcileLeadObservation(projectCtx, db, project, snapshot, now)
+		cancel()
+		if err != nil {
+			failures = append(failures, fmt.Errorf("update Project observation: %w", err))
+		}
+	}
+	// Prefer observations left stale by the previous bounded pass.
+	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].UpdatedAt < tasks[j].UpdatedAt })
 	for _, task := range tasks {
-		// Never derive a Task's budget from another Task's expiring context.
+		if err := reconcileWorkDeferred(ctx); err != nil {
+			return notices, errors.Join(append(failures, err)...)
+		}
+		// Each admitted Task gets a fresh short context. Never start work with
+		// an expired pass context, or give it a budget beyond the pass deadline.
 		taskCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
 		taskNotices, err := reconcileTask(taskCtx, db, project, task, snapshot, now, idleAfter)
 		cancel()
@@ -164,15 +140,29 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 			failures = append(failures, err)
 		}
 	}
-	if project.LeadPaneID != "" || project.LeadLabel != "" {
-		projectCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
-		err := reconcileLeadObservation(projectCtx, db, project, snapshot, now)
-		cancel()
-		if err != nil {
-			failures = append(failures, &observationWriteError{description: "update Project observation", err: err})
-		}
-	}
 	return notices, errors.Join(failures...)
+}
+
+func reconcileError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: reconciliation work deferred: %v", store.ErrBusy, err)
+	}
+	return err
+}
+
+// Leave enough time for one SQLite lock wait and its cleanup. Work that does
+// not fit is retried on the next pass rather than consuming an expired context.
+func reconcileWorkDeferred(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		return fmt.Errorf("%w: reconciliation budget spent; remaining work deferred", store.ErrBusy)
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < store.ObservationWriteBusyTimeout+25*time.Millisecond {
+		return fmt.Errorf("%w: reconciliation budget spent; remaining work deferred", store.ErrBusy)
+	}
+	return nil
 }
 
 func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration) ([]store.Notice, error) {
@@ -184,7 +174,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		if err == nil {
 			return nil
 		}
-		return &observationWriteError{description: fmt.Sprintf("update Task %s observation", taskID(task.Seq)), err: err}
+		return fmt.Errorf("update Task %s observation: %w", taskID(task.Seq), err)
 	}
 	pane, found := findPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 	if !found {

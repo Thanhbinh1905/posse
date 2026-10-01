@@ -293,7 +293,7 @@ func (db *DB) SettleWorkspaceTask(ctx context.Context, taskID int64) (bool, erro
 	return false, nil
 }
 
-func settleWorkspaceTaskTx(ctx context.Context, db *DB, tx *sql.Tx, taskID int64, reopen bool, reopenNote string) (bool, error) {
+func settleWorkspaceTaskTx(ctx context.Context, db *DB, tx *writeTx, taskID int64, reopen bool, reopenNote string) (bool, error) {
 	var state State
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=?`, taskID).Scan(&state); err != nil {
 		return false, err
@@ -302,7 +302,7 @@ func settleWorkspaceTaskTx(ctx context.Context, db *DB, tx *sql.Tx, taskID int64
 		return false, nil
 	}
 	if reopen {
-		return true, transitionTx(ctx, db.queries.WithTx(tx), taskID, StateLanding, StateDone, "cli", reopenNote)
+		return true, transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, StateLanding, StateDone, "cli", reopenNote)
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT repo, state, landed_ref FROM task_repos WHERE task_id=? ORDER BY repo`, taskID)
 	if err != nil {
@@ -335,5 +335,5 @@ func settleWorkspaceTaskTx(ctx context.Context, db *DB, tx *sql.Tx, taskID int64
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, strings.Join(landed, ","), time.Now().UnixMilli(), taskID); err != nil {
 		return false, err
 	}
-	return true, transitionTx(ctx, db.queries.WithTx(tx), taskID, state, StateLanded, "cli", note)
+	return true, transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, state, StateLanded, "cli", note)
 }

@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +16,85 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestHollerCommitsBeforeUnrelatedPreparationFailure(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET type='scout' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "report.md"), []byte("Review complete\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	t.Setenv(workerHomeEnv, fixture.home)
+	fixture.service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = errors.New("unrelated snapshot failed")
+	code, out, errOut := fixture.run("holler", "done", "Review complete", "--report", "report.md")
+	if code != 0 {
+		t.Fatalf("unrelated preparation rejected Signal: exit=%d output=%s stderr=%s", code, out, errOut)
+	}
+	updated, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil || updated.State != store.StateReported {
+		t.Fatalf("Signal did not commit: state=%s error=%v", updated.State, err)
+	}
+}
+
+func TestHollerOwnTransactionContentionIsRetryable(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	t.Setenv(workerHomeEnv, fixture.home)
+	writer, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var out, errOut bytes.Buffer
+	err = fixture.service.signal(&axi.Context{Context: ctx, Out: &out, ErrOut: &errOut}, []string{"working", "Still working"})
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "store_busy" || !failure.Retryable {
+		t.Fatalf("Signal contention = %v, want retryable store_busy", err)
+	}
+	task, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil || task.State != store.StateWorking {
+		t.Fatalf("uncommitted Signal changed state: %s, %v", task.State, err)
+	}
+	signals, err := fixture.db.TaskSignals(context.Background(), fixture.task.ID, 10)
+	if err != nil || len(signals) != 0 {
+		t.Fatalf("contended Signal committed: %#v, %v", signals, err)
+	}
+}
+
+func TestLookoutRemainsArmedDuringObservationContention(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	for i := range fake.SnapshotValue.Panes {
+		if fake.SnapshotValue.Panes[i].PaneID != fixture.task.PaneID {
+			fake.SnapshotValue.Panes[i].AgentStatus = "working"
+		}
+	}
+	writer, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.ExecContext(context.Background(), `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'task_done','Writer released','{}',?)`, fixture.project.ID, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() { time.Sleep(1500 * time.Millisecond); released <- writer.Commit() }()
+	started := time.Now()
+	code, out, errOut := fixture.run("lookout", "--timeout", "10000")
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || !bytes.Contains([]byte(out), []byte("Writer released")) {
+		t.Fatalf("Lookout did not recover without restarting: exit=%d output=%s stderr=%s", code, out, errOut)
+	}
+	if time.Since(started) < 1500*time.Millisecond {
+		t.Fatal("Lookout returned before writer release")
+	}
+}
 
 func TestRosterObservationContentionIsRetryable(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
@@ -28,13 +109,15 @@ func TestRosterObservationContentionIsRetryable(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	code, output, errOut := fixture.run("roster", "--json")
-	var failure axi.Error
-	if err := json.Unmarshal([]byte(output), &failure); err != nil {
-		t.Fatalf("invalid CLI failure: %s (stderr: %s): %v", output, errOut, err)
-	}
-	if code != 1 || failure.Code != "store_busy" || !failure.Retryable {
-		t.Fatalf("observation contention failure = %#v, exit=%d; want retryable store_busy", failure, code)
+	for _, args := range [][]string{{"roster", "--json"}, {"--json"}} {
+		code, output, errOut := fixture.run(args...)
+		var failure axi.Error
+		if err := json.Unmarshal([]byte(output), &failure); err != nil {
+			t.Fatalf("invalid CLI failure: %s (stderr: %s): %v", output, errOut, err)
+		}
+		if code != 1 || failure.Code != "store_busy" || !failure.Retryable {
+			t.Fatalf("%v observation contention failure = %#v, exit=%d; want retryable store_busy", args, failure, code)
+		}
 	}
 }
 
@@ -72,7 +155,7 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{
-		PaneID: "w3:p1", WorkspaceID: "w3", Label: "posse:shop:t2", Agent: "claude", AgentStatus: "working",
+		PaneID: "w3:p1", WorkspaceID: "w3", Label: "posse:shop:t2", Agent: "claude", AgentStatus: "idle",
 	})
 	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
 	t.Setenv(workerHomeEnv, fixture.home)
@@ -154,6 +237,12 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 		t.Fatal("timed out waiting for independent writer to acquire the observation lock")
 	}
 
+	// The writer observes Task 1 changing before it blocks unrelated writes.
+	// That change must already be the Signal, not a preparation observation.
+	whileLocked, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil || whileLocked.State != store.StateReported {
+		t.Errorf("Task 1 transition had not committed before unrelated reconciliation: state=%s err=%v", whileLocked.State, err)
+	}
 	result := <-commandDone
 	release()
 	if err := <-writerResult; err != nil {
@@ -171,7 +260,23 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	if err := fixture.db.QueryRowContext(ctx, `SELECT updated_at FROM tasks WHERE project_id=? AND seq=?`, fixture.project.ID, taskCount).Scan(&lastObservationAt); err != nil {
 		t.Fatal(err)
 	}
+	if lastObservationAt != 1 {
+		t.Fatal("reconcile overran its budget instead of deferring later observations")
+	}
+	t.Setenv(workerHomeEnv, "")
+	t.Setenv("HERDR_PANE_ID", "")
+	for pass := 0; pass < 8 && lastObservationAt <= 1; pass++ {
+		if code, out, errOut := fixture.run("roster", "--json"); code != 0 {
+			var failure axi.Error
+			if err := json.Unmarshal([]byte(out), &failure); err != nil || failure.Code != "store_busy" || !failure.Retryable {
+				t.Fatalf("deferred observations failed after release: exit=%d output=%s stderr=%s", code, out, errOut)
+			}
+		}
+		if err := fixture.db.QueryRowContext(ctx, `SELECT updated_at FROM tasks WHERE project_id=? AND seq=?`, fixture.project.ID, taskCount).Scan(&lastObservationAt); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if lastObservationAt <= 1 {
-		t.Fatal("the final Task observation inherited the expired whole-Project reconcile context")
+		t.Fatal("later observations did not progress on fresh bounded reconcile passes")
 	}
 }

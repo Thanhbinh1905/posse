@@ -39,6 +39,9 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 	var notices []store.Notice
 	var failures []error
 	for _, task := range tasks {
+		if err := reconcileWorkDeferred(ctx); err != nil {
+			return notices, errors.Join(append(failures, err)...)
+		}
 		pane, found := findPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 		if !found || pane.Agent == "" || (task.State == store.StateWorking && pane.AgentStatus != "working") {
 			if task.State == store.StateWorking {

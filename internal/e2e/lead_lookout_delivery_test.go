@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -119,11 +121,20 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The same ordinary Project command that triggers the typed idle fallback.
-	wake := exec.Command(f.binary)
+	wakeCtx, cancelWake := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancelWake()
+	wake := exec.CommandContext(wakeCtx, f.binary, "--json")
+	wake.WaitDelay = time.Second
 	wake.Dir, wake.Env = f.repo, f.leadEnv
 	if result, err := wake.CombinedOutput(); err != nil {
-		latest, _ := client.Snapshot(context.Background())
-		t.Fatalf("wake failed: %v %s snapshot=%#v", err, result, latest.Panes)
+		// STOP can catch the watcher owning the Mount or fetch flock, even
+		// though the transaction above excludes it owning SQLite's write lock.
+		// A bounded, retryable refusal is safe; an indefinite wait is not.
+		var failure axi.Error
+		if wakeCtx.Err() != nil || json.Unmarshal(result, &failure) != nil || failure.Code != "store_busy" || !failure.Retryable {
+			latest, _ := client.Snapshot(context.Background())
+			t.Fatalf("wake failed: %v %s snapshot=%#v", err, result, latest.Panes)
+		}
 	}
 	// If the fallback stole the Notice, it is no longer pending before
 	// the watcher resumes. That is the user-visible failure in issue #64.

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -248,7 +247,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 	return err
 }
 
-func decisionObsoleteReason(ctx context.Context, tx *sql.Tx, decision Decision) (string, error) {
+func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
 	if decision.Kind != "land_ready" && decision.Kind != "recovery" && decision.Kind != "pr_closed" && decision.Kind != "leftover" {
 		return "", nil
 	}

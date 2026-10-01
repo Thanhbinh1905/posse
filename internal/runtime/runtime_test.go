@@ -14,30 +14,6 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestObservationContentionDoesNotHideOtherFailures(t *testing.T) {
-	busy := &observationWriteError{description: "update Task t1 observation", err: store.ErrBusy}
-	for _, testCase := range []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"busy observation", busy, true},
-		{"wrapped observation", fmt.Errorf("reconcile: %w", busy), true},
-		{"joined observations", errors.Join(busy, busy), true},
-		{"unrelated busy", store.ErrBusy, false},
-		{"invalid observation", &observationWriteError{description: "invalid", err: errors.New("invalid schema")}, false},
-		{"mixed failures", errors.Join(busy, errors.New("recovery failed")), false},
-		{"wrapped mixed failures", fmt.Errorf("reconcile: %w", errors.Join(busy, errors.New("recovery failed"))), false},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			if got := IsObservationContention(testCase.err); got != testCase.want {
-				t.Fatalf("IsObservationContention(%v) = %t, want %t", testCase.err, got, testCase.want)
-			}
-		})
-	}
-}
-
 func TestReconcileObservationWritesReturnRetryableBusyUnderConcurrentWriter(t *testing.T) {
 	db, project, first := createWorkingTask(t)
 	defer db.Close()

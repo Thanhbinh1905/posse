@@ -57,17 +57,20 @@ func structureStoreErrors(command *axi.Command) {
 	if command.Handler != nil {
 		handler := command.Handler
 		command.Handler = func(ctx *axi.Context, args []string) error {
-			err := handler(ctx, args)
-			var structured *axi.Error
-			if errors.As(err, &structured) || !store.IsBusy(err) {
-				return err
-			}
-			return axi.Failure("store_busy", err.Error(), true, "Retry the command after the store is available")
+			return normalizeCommandError(handler(ctx, args))
 		}
 	}
 	for _, subcommand := range command.Subcommands {
 		structureStoreErrors(subcommand)
 	}
+}
+
+func normalizeCommandError(err error) error {
+	var structured *axi.Error
+	if errors.As(err, &structured) || !store.IsBusy(err) {
+		return err
+	}
+	return axi.Failure("store_busy", err.Error(), true, "Retry the command after the store is available")
 }
 
 func (s *Service) commands() *axi.Command {

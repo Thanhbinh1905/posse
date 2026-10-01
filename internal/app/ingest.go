@@ -452,31 +452,8 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 		if !found || queuedMessageReason(task, message, pane, snapshot, cfg) != "" {
 			continue
 		}
-		delivered, _, err := s.deliverClaimedMessage(ctx, db, task, message, pane.PaneID, cfg)
-		if err != nil {
+		if _, _, err := s.deliverClaimedMessage(ctx, db, task, message, pane.PaneID, cfg); err != nil {
 			return err
-		}
-		if !delivered {
-			continue
-		}
-		if task.State == store.StateNeedsDecision {
-			if err := db.Transition(ctx, task.ID, store.StateNeedsDecision, store.StateWorking, "lead", "Lead delivered a response"); err != nil {
-				return err
-			}
-		} else if task.State == store.StateDone && task.Type == "ship" {
-			if err := db.Transition(ctx, task.ID, store.StateDone, store.StateWorking, "lead", "Lead delivered a fix instruction"); err != nil {
-				return err
-			}
-			if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
-				return err
-			}
-		} else if task.State == store.StateLanding && task.Type == "ship" {
-			if err := db.Transition(ctx, task.ID, store.StateLanding, store.StateWorking, "lead", "Lead delivered a pull request fix instruction"); err != nil {
-				return err
-			}
-			if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
-				return err
-			}
 		}
 	}
 	return nil

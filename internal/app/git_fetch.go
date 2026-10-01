@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,26 +53,7 @@ func acquireRepositoryFetchLock(ctx context.Context, root string) (*os.File, err
 	if commonDir, err = filepath.EvalSymlinks(commonDir); err != nil {
 		return nil, fmt.Errorf("resolve Git common directory for fetch lock: %w", err)
 	}
-	file, err := os.OpenFile(filepath.Join(commonDir, "posse-fetch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open repository fetch lock: %w", err)
-	}
-	for {
-		err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return file, nil
-		}
-		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EINTR) {
-			_ = file.Close()
-			return nil, fmt.Errorf("lock repository fetches: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			_ = file.Close()
-			return nil, ctx.Err()
-		case <-time.After(25 * time.Millisecond):
-		}
-	}
+	return acquireFileLock(ctx, filepath.Join(commonDir, "posse-fetch.lock"))
 }
 
 func isTransientGitFetchLock(err error) bool {

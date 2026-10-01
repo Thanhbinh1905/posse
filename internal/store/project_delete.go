@@ -181,7 +181,7 @@ func matchingTable(name string, tables map[string]projectReference) string {
 	return ""
 }
 
-func deleteProjectReferences(ctx context.Context, tx *sql.Tx, projectID int64) error {
+func deleteProjectReferences(ctx context.Context, tx *writeTx, projectID int64) error {
 	references, err := projectReferenceTables(ctx, tx)
 	if err != nil {
 		return err
