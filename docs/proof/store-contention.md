@@ -6,7 +6,7 @@ Addresses #120 and #119. The quoted User intent remains "yes do all what u sugge
 
 ### Signal coupling and complete-Run budget
 
-Read both adversarial reports, t150 and t152. Their saved harnesses are at
+Read the adversarial reports from t150, t152 and t154. The t150/t152 harnesses are at
 `29af740` and `aeb0a82`. The t150 counterexample commits t1's observation, then
 holds an independent SQLite writer for seven seconds while 255 unrelated Tasks,
 a Lead Lookout and eight `roster` processes share an isolated POSSE_HOME.
@@ -64,6 +64,29 @@ detector. Its timeout-restoration harness passes five times: a blocked Project
 observation takes about 252 ms, restores the pooled connection to 5000 ms, and
 succeeds after writer release. Its eight-process migration-flock harness also
 passes, returning retryable `store_busy` within the unchanged Open deadline.
+
+### t154 many-Task follow-up
+
+The independent t154 review exercised `aa7fb88`, before the Signal-first and
+whole-pass rework in `51745ff`. Its exact 16-Task counterexample is now retained
+as `TestReviewRunBudgetWithManyContendedTasks`, with an additional typed-error
+assertion and a tighter 250 ms scheduling allowance. Re-running it confirms the
+review finding on the old revision and the enclosing deadline on the new one:
+
+```text
+aa7fb88: 16 Tasks, held writer, Run=4.023854719s, FAIL
+51745ff plus new regressions: 20 race-enabled passes under parallel load
+Run=2.792140549-2.815011529s; retryable contention and remaining work deferred
+Both new tests: PASS, 106.442s
+```
+
+`TestRunPrioritizesDeferredTaskObservations` audits actual SQLite observation
+writes. It starts with t1/t2 recently observed and t3/t4 still older, then checks
+that the pass writes `[4,3,1,2]`. After making t2 stale, the next pass starts with
+t2. The old revision fails with `[1,2,3,4]`; the new revision passes all twenty
+repetitions. Combined with the 32-Task budget/release regression, this covers
+bounded admission, deferred progress and oldest-first scheduling. No additional
+production change was needed for this follow-up.
 
 ### Stopped process holding a file lock
 
@@ -126,7 +149,7 @@ while paused; its Notice-ownership assertions are unchanged.
   do not remove or steal another process's lock. Propagate local contention
   instead of treating it as evidence that the Project checkout is behind origin.
 
-## Final verification
+## Verification at 51745ff
 
 All final checks passed. The store stress suite overlapped the full race suite,
 E2E runs and real-CLI reproductions.
@@ -155,6 +178,38 @@ checks, stopped-owner CLI tests and immediate-Signal regression passed.
 Formatting, `git diff --check`, vet and staticcheck with `e2e,perf`, generation
 with no generated changes, ShellCheck, installer tests under dash/bash and
 CGO-disabled cross-builds for Linux/macOS amd64/arm64 also passed.
+
+## t154 follow-up verification
+
+This follow-up changes only tests and this proof document. Production code is
+unchanged from `51745ff`. Fresh checks all passed:
+
+```text
+GOMAXPROCS=4 go test -race -count=1 -timeout=15m ./...
+all packages passed; internal/app 454.195s, internal/runtime 40.634s
+
+GOMAXPROCS=4 go test -race -count=20 -timeout=10m ./internal/runtime \
+  -run '^(TestReviewRunBudgetWithManyContendedTasks|TestRunPrioritizesDeferredTaskObservations)$'
+20 passes of each regression under parallel load: 106.442s
+
+go test -tags=e2e -count=1 -timeout=20m ./internal/e2e
+passed twice: 453.510s and 421.703s
+
+go test -tags=e2e -count=30 -timeout=10m ./internal/e2e \
+  -run '^TestLeadLookoutOwnsNoticeUntilItExits$'
+30 consecutive passes: 110.033s
+
+go test -tags='e2e perf' -count=1 ./internal/e2e \
+  -run '^TestCommandPerformanceBudgets$'
+passed: 1.599s
+```
+
+Formatting, vet, staticcheck, generation/no generated changes, ShellCheck,
+installer tests under dash/bash and all four release cross-builds passed again.
+The earlier 20-run store race result remains evidence for the unchanged store
+implementation; the fresh full race suite also passed its store package in
+62.362s. Herdr/CLI tests used isolated fixture homes and servers without inherited
+`HERDR_*` variables.
 
 ## Risk and rollback
 
