@@ -18,13 +18,26 @@ import (
 type repositoryForge struct{ Kind, Host, Path, Root string }
 
 func forgeForRepository(ctx context.Context, root string, cfg config.Config, member string) (repositoryForge, error) {
+	forge, _, err := resolveForgeForRepository(ctx, root, cfg, member)
+	return forge, err
+}
+
+func resolveForgeForRepository(ctx context.Context, root string, cfg config.Config, member string) (repositoryForge, *forgeProbeOutcome, error) {
+	return resolveForgeForRepositoryWithCache(ctx, root, cfg, member, true)
+}
+
+func resolveForgeForRepositoryFresh(ctx context.Context, root string, cfg config.Config, member string) (repositoryForge, *forgeProbeOutcome, error) {
+	return resolveForgeForRepositoryWithCache(ctx, root, cfg, member, false)
+}
+
+func resolveForgeForRepositoryWithCache(ctx context.Context, root string, cfg config.Config, member string, useCache bool) (repositoryForge, *forgeProbeOutcome, error) {
 	remote, err := gitOutput(ctx, root, "config", "--get", "remote.origin.url")
 	if err != nil {
-		return repositoryForge{}, err
+		return repositoryForge{}, nil, err
 	}
 	host, path, err := remoteRepository(remote)
 	if err != nil {
-		return repositoryForge{}, axi.Failure("pr_origin_invalid", err.Error(), false)
+		return repositoryForge{}, nil, axi.Failure("pr_origin_invalid", err.Error(), false)
 	}
 	kind := cfg.Defaults.Forge
 	if member != "" {
@@ -32,6 +45,7 @@ func forgeForRepository(ctx context.Context, root string, cfg config.Config, mem
 			kind = override.Forge
 		}
 	}
+	var probe *forgeProbeOutcome
 	if kind == "" || kind == "auto" {
 		switch host {
 		case "github.com":
@@ -39,23 +53,39 @@ func forgeForRepository(ctx context.Context, root string, cfg config.Config, mem
 		case "gitlab.com":
 			kind = "gitlab"
 		default:
-			// An enterprise host must be authenticated with exactly one forge CLI.
-			_, glabErr := commandOutputArgs(ctx, root, "glab", "auth", "status", "--hostname", host)
-			_, ghErr := commandOutputArgs(ctx, root, "gh", "auth", "status", "--hostname", host)
+			// Enterprise auto-detection is a bounded, shared probe. Explicit
+			// forge configuration never reaches this branch.
+			var result forgeProbeOutcome
+			var probeErr error
+			if useCache {
+				result, probeErr = cachedForgeProbe(ctx, root, host, cfg, "auto")
+			} else {
+				result, probeErr = runForgeProbe(ctx, root, host, "auto")
+			}
+			probe = &result
+			if probeErr != nil {
+				return repositoryForge{Host: host, Path: path, Root: root}, probe, probeErr
+			}
 			switch {
-			case glabErr == nil && ghErr == nil:
-				return repositoryForge{}, axi.Failure("pr_forge_ambiguous", "origin host is authenticated with both gh and glab: "+host, false, "Set defaults.forge or repositories.<repository>.forge")
-			case glabErr == nil:
+			case result.GitLabAuthenticated && result.GitHubAuthenticated:
+				return repositoryForge{Host: host, Path: path, Root: root}, probe, axi.Failure("pr_forge_ambiguous", "origin host is authenticated with both gh and glab: "+host, false, "Set defaults.forge or repositories.<repository>.forge")
+			case result.GitLabAuthenticated:
 				kind = "gitlab"
-			case ghErr == nil:
+			case result.GitHubAuthenticated:
 				kind = "github"
+			case result.anyTimedOut():
+				return repositoryForge{Host: host, Path: path, Root: root}, probe, forgeProbeTimeoutError(host)
 			}
 		}
 	}
 	if kind != "github" && kind != "gitlab" {
-		return repositoryForge{}, axi.Failure("pr_forge_unknown", "origin host has no configured forge: "+host, false, "Set defaults.forge to github or gitlab for this Project")
+		return repositoryForge{Host: host, Path: path, Root: root}, probe, axi.Failure("pr_forge_unknown", "origin host has no configured forge: "+host, false, "Set defaults.forge to github or gitlab for this Project")
 	}
-	return repositoryForge{Kind: kind, Host: host, Path: path, Root: root}, nil
+	return repositoryForge{Kind: kind, Host: host, Path: path, Root: root}, probe, nil
+}
+
+func forgeProbeTimeoutError(host string) error {
+	return axi.Failure("pr_forge_probe_timeout", "forge CLI timed out for host "+host, true, "Check forge CLI connectivity and authentication for this host")
 }
 
 func validateForgeMergeMethod(forge repositoryForge, cfg config.Config) error {

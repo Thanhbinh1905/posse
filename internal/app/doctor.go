@@ -98,9 +98,13 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 					addCheck("forge "+project.Name, "warn", err.Error(), "Fix the Project config")
 					continue
 				}
-				forge, err := forgeForRepository(ctx.Context, project.Root, projectCfg, "")
+				forge, _, err := resolveForgeForRepositoryFresh(ctx.Context, project.Root, projectCfg, "")
 				if err != nil {
-					addCheck("forge "+project.Name, "warn", err.Error(), "Set defaults.forge for this Project")
+					action := "Set defaults.forge for this Project"
+					if strings.Contains(err.Error(), "forge CLI timed out") {
+						action = "Check forge CLI connectivity and authentication for this host"
+					}
+					addCheck("forge "+project.Name, "warn", err.Error(), action)
 					continue
 				}
 				if forge.Kind == "gitlab" {
@@ -117,9 +121,15 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 					}
 					sort.Strings(ordered)
 					for _, host := range ordered {
-						output, err := commandOutputArgs(ctx.Context, "", "glab", "auth", "status", "--hostname", host)
+						output, err := commandOutputArgsWithTimeout(ctx.Context, forgeProbeTimeout, "", "glab", "auth", "status", "--hostname", host)
 						if err != nil {
-							addCheck("glab auth "+host, "warn", strings.TrimSpace(output), "Run `glab auth login --hostname "+host+"`")
+							detail := strings.TrimSpace(output)
+							action := "Run `glab auth login --hostname " + host + "`"
+							if strings.Contains(err.Error(), "timed out") {
+								detail = err.Error()
+								action = "Check forge CLI connectivity and authentication for this host"
+							}
+							addCheck("glab auth "+host, "warn", detail, action)
 						} else {
 							addCheck("glab auth "+host, "ok", "authenticated", "")
 						}
