@@ -133,10 +133,19 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 		launch.Args = append(launch.Args, kindConfig.AutoApproveArgs...)
 	}
 	launch.Args = append(launch.Args, kindConfig.LeadArgs...)
-	oneLine := strings.Join(strings.Fields(instructions), " ")
+	text := instructions
+	if kind == "codex" {
+		// Codex parses -c values as TOML. A JSON string is also a valid TOML
+		// basic string, preserving every instruction byte after Codex parses it.
+		encoded, err := json.Marshal(instructions)
+		if err != nil {
+			return leadLaunch{}, err
+		}
+		text = string(encoded)
+	}
 	for _, argument := range kindConfig.SystemPromptArgs {
 		argument = strings.ReplaceAll(argument, "{file}", instructionsFile)
-		launch.Args = append(launch.Args, strings.ReplaceAll(argument, "{text}", oneLine))
+		launch.Args = append(launch.Args, strings.ReplaceAll(argument, "{text}", text))
 	}
 	if kind == "claude" {
 		plugin, err := s.writeLeadClaudeLowkey(home, project)

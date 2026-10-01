@@ -50,14 +50,18 @@ func playbookSources(home string, project store.Project, role string) ([]playboo
 func renderedPlaybook(sources []playbookSource) string {
 	var rendered strings.Builder
 	for _, source := range sources {
-		content := strings.TrimSpace(source.Content)
-		if content == "" {
+		content := source.Content
+		if strings.TrimSpace(content) == "" {
 			continue
 		}
 		if rendered.Len() > 0 {
 			rendered.WriteString("\n\n")
 		}
-		fmt.Fprintf(&rendered, "### %s Playbook (`%s`)\n\n%s", source.Layer, source.Path, content)
+		fmt.Fprintf(&rendered, "### %s Playbook (`%s`)\n\n", source.Layer, source.Path)
+		rendered.WriteString(content)
+		if !strings.HasSuffix(content, "\n") {
+			rendered.WriteByte('\n')
+		}
 	}
 	return rendered.String()
 }

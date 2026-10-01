@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -167,6 +168,68 @@ func TestDoctorWarnsWhenEffectivePlaybookExceedsAdvisorySize(t *testing.T) {
 		}
 	}
 	t.Fatalf("doctor omitted the large effective Playbook warning: %s", output.String())
+}
+
+func TestLeadPlaybookDeliveryPreservesMarkdownForEveryKind(t *testing.T) {
+	const quotedMarkdown = "```sh\nprintf 'two  spaces\\n'\n# Explain why verification is needed.\ngo test ./...\n```\n"
+	const userPlaybook = "\n" + quotedMarkdown + "\n  "
+	for _, kind := range []string{"claude", "codex", "pi", "opencode"} {
+		t.Run(kind, func(t *testing.T) {
+			home := t.TempDir()
+			writePlaybook(t, home, "playbook/lead.md", userPlaybook)
+			cfg, err := config.Load(home, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := testService(home, nil)
+			project := store.Project{Name: "shop"}
+			launch, err := service.prepareLeadLaunch(home, project, cfg, kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instructionsPath := filepath.Join(home, "projects", project.Name, "lead.md")
+			instructions, err := os.ReadFile(instructionsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(instructions), userPlaybook) {
+				t.Fatalf("stored instructions changed the Playbook Markdown: got %q, want exact bytes %q", instructions, userPlaybook)
+			}
+
+			switch kind {
+			case "codex":
+				var injected string
+				for _, arg := range launch.Args {
+					if !strings.HasPrefix(arg, "developer_instructions=") {
+						continue
+					}
+					var config map[string]string
+					if _, err := toml.Decode(arg, &config); err != nil {
+						t.Fatalf("Codex developer_instructions override is not a valid TOML string: %q: %v", arg, err)
+					}
+					injected = config["developer_instructions"]
+					break
+				}
+				if injected != string(instructions) {
+					t.Fatalf("Codex injected %q, want byte-for-byte instructions %q", injected, instructions)
+				}
+			case "claude", "pi":
+				if !stringListContains(launch.Args, instructionsPath) {
+					t.Fatalf("%s launch does not inject the exact instructions file: %#v", kind, launch.Args)
+				}
+			case "opencode":
+				pluginPath := filepath.Join(home, "projects", project.Name, "lead-opencode-plugin.js")
+				plugin, err := os.ReadFile(pluginPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				quotedPath, _ := json.Marshal(instructionsPath)
+				if !strings.Contains(string(plugin), "const leadFile = "+string(quotedPath)+";") || !strings.Contains(string(plugin), `readFile(leadFile, "utf8")`) {
+					t.Fatalf("OpenCode plugin does not read the exact instructions file: %s", plugin)
+				}
+			}
+		})
+	}
 }
 
 func TestPlaybookContentHasNoSeparateLeadCap(t *testing.T) {

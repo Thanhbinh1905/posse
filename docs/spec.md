@@ -120,7 +120,7 @@ lead_auto_approve = true     # default; set false to keep Claude's approval prom
 model_args = ["--model", "{model}"]
 effort_args = ["--effort", "{effort}"]
 resume_args = ["--resume", "{session}"]
-system_prompt_args = ["--append-system-prompt-file", "{file}"]  # Lead instructions; {file} or {text} (one line)
+system_prompt_args = ["--append-system-prompt-file", "{file}"]  # Lead instructions; {file} or {text} (complete, whitespace-preserving text)
 prepare = "claude-trust"     # built-in pre-launch step, see section 13
 notice_delivery = "lookout"  # how Notices reach the Lead, see section 9
 background_commands = true   # can run a background command and be re-invoked when it exits
@@ -132,7 +132,7 @@ lead_auto_approve = true     # default; set false to keep Codex's approval promp
 model_args = ["-m", "{model}"]
 effort_args = ["-c", "model_reasoning_effort={effort}"]
 resume_args = ["resume", "{session}"]
-system_prompt_args = ["-c", "developer_instructions={text}"]
+system_prompt_args = ["-c", "developer_instructions={text}"] # {text} is TOML-quoted for Codex
 lead_args = ["--sandbox", "danger-full-access"]  # every Lead of this kind; posse needs the posse home
 prepare = "codex-trust"
 notice_delivery = "codex-queue"
