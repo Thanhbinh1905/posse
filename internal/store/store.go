@@ -100,6 +100,10 @@ func Open(home string) (*DB, error) {
 }
 
 func OpenAt(path string) (*DB, error) {
+	return openAt(path, 5*time.Second)
+}
+
+func openAt(path string, timeout time.Duration) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
@@ -111,7 +115,7 @@ func OpenAt(path string) (*DB, error) {
 	}
 	database.SetMaxOpenConns(4)
 	database.SetMaxIdleConns(2)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	result := &DB{DB: database, Path: path, queries: dbgen.New(database)}
 	if err := result.MigrateIfNeeded(ctx); err != nil {
@@ -121,7 +125,16 @@ func OpenAt(path string) (*DB, error) {
 	return result, nil
 }
 
-func (db *DB) MigrateIfNeeded(ctx context.Context) error {
+func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
+	defer func() {
+		if migrationErr == nil || errors.Is(migrationErr, ErrBusy) {
+			return
+		}
+		if !isBusyErr(migrationErr) && !errors.Is(migrationErr, context.DeadlineExceeded) {
+			return
+		}
+		migrationErr = fmt.Errorf("%w: database migration contention", ErrBusy)
+	}()
 	lock, err := acquireMigrationLock(ctx, db.Path)
 	if err != nil {
 		return err

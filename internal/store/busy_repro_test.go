@@ -2,13 +2,83 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// TestConcurrentOpenersReturnRetryableContentionUnderWriterLoad reproduces
+// migration-lock contention while other connections continue writing. Openers
+// must fail with the store's retryable busy error, not context.DeadlineExceeded.
+func TestConcurrentOpenersReturnRetryableContentionUnderWriterLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(context.Background(), `CREATE TABLE contention_writes (value INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+
+	lock, err := acquireMigrationLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	const openers = 12
+	const writers = 4
+	const writesPerWriter = 25
+	start := make(chan struct{})
+	errorsByOpener := make(chan error, openers)
+	var openerGroup sync.WaitGroup
+	for range openers {
+		openerGroup.Add(1)
+		go func() {
+			defer openerGroup.Done()
+			<-start
+			opened, err := openAt(path, 100*time.Millisecond)
+			if err == nil {
+				err = opened.Close()
+			}
+			errorsByOpener <- err
+		}()
+	}
+
+	var writerGroup sync.WaitGroup
+	for writer := range writers {
+		writerGroup.Add(1)
+		go func(writer int) {
+			defer writerGroup.Done()
+			<-start
+			for i := range writesPerWriter {
+				if _, err := db.ExecContext(context.Background(), `INSERT INTO contention_writes(value) VALUES (?)`, writer*writesPerWriter+i); err != nil {
+					t.Errorf("write during concurrent opens: %v", err)
+					return
+				}
+			}
+		}(writer)
+	}
+
+	close(start)
+	openerGroup.Wait()
+	writerGroup.Wait()
+	close(errorsByOpener)
+	for err := range errorsByOpener {
+		if !errors.Is(err, ErrBusy) {
+			t.Errorf("contended OpenAt error = %v, want retryable ErrBusy", err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("contended OpenAt error still exposes context.DeadlineExceeded: %v", err)
+		}
+	}
+}
 
 // TestConcurrentWritesNeverReturnBusy reproduces the load posse holler hit under
 // t1's stress harness: many Workers hammering write paths concurrently while the
