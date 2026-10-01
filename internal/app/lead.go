@@ -76,7 +76,7 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 	if len(args) != 0 {
 		return axi.Usage("lead does not take arguments")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -93,6 +93,10 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 		return err
 	}
 	kind := s.currentLeadKind(ctx.Context, project, cfg, cfg.Lead.Kind)
+	playbook, err := playbookSources(home, project, "lead")
+	if err != nil {
+		return err
+	}
 	gaps, err := s.readiness(ctx.Context, db, project, cfg)
 	if err != nil {
 		return err
@@ -153,6 +157,7 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 			"Only a Rider's Signal marks its Task done. Herdr idle is not completion.",
 			"Never Land or discard unlanded work without the required approval.",
 		}},
+		axi.Field{Key: "playbook", Value: appendPlaybookInstructions("", "lead", playbook)},
 		axi.Field{Key: "loop", Value: loop},
 		axi.Field{Key: "help", Value: []any{"Continue the Lead conversation with the User, then delegate code changes with `posse ride --name <short>`"}},
 	))

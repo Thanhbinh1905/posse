@@ -108,6 +108,11 @@ func (s *Service) waitLeadStarted(ctx context.Context, paneID string, launch lea
 func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg config.Config, kind string, readiness ...[]readinessGap) (leadLaunch, error) {
 	kindConfig := cfg.Kinds[kind]
 	instructions := leadText(project, cfg, kind)
+	sources, err := playbookSources(home, project, "lead")
+	if err != nil {
+		return leadLaunch{}, err
+	}
+	instructions = appendPlaybookInstructions(instructions, "lead", sources)
 	if len(readiness) > 0 && len(readiness[0]) > 0 {
 		context, err := axi.Encode(withReadiness(axi.Object{}, readiness[0]))
 		if err != nil {
