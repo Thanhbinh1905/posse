@@ -408,6 +408,7 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
 	project, err := db.CreateProject(ctx, "shop", repo, "main")
 	if err != nil {
 		t.Fatal(err)

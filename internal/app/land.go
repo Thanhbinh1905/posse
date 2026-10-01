@@ -371,9 +371,13 @@ func mergeLocal(ctx context.Context, project store.Project, task store.Task) err
 		}
 		return nil
 	}
-	output, err := commandOutputArgs(ctx, "", "git", "-C", project.Root, "fetch", ".", task.GatedSHA+":refs/heads/"+project.DefaultBranch)
+	output, err := gitFetch(ctx, project.Root, ".", task.GatedSHA+":refs/heads/"+project.DefaultBranch)
 	if err != nil {
-		return axi.Failure("needs_rebase", "local fast-forward update failed", false, strings.TrimSpace(string(output)))
+		details := strings.TrimSpace(output)
+		if details == "" {
+			details = strings.TrimSpace(err.Error())
+		}
+		return axi.Failure("needs_rebase", "local fast-forward update failed", false, details)
 	}
 	return nil
 }

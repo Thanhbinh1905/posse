@@ -526,7 +526,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	}
 	project.HerdrWorkspaceID = callerWorkspaceID
 	s.relabelProjectTabs(ctx.Context, db, project)
-	if err := s.ensureLookoutTab(ctx.Context, project, snapshot); err != nil {
+	if err := s.ensureLookoutTab(ctx.Context, db, project, snapshot, false); err != nil {
 		return err
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {

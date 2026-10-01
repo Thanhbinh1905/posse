@@ -113,28 +113,82 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				}
 			} else {
 				// Poll PRs at their configured cadence, without a full Herdr
-				// reconciliation on every tick. Only a dead known Lookout
-				// needs a new snapshot and replacement tab.
-				if lookoutPaneID != "" {
-					if home, err := s.homePath(); err == nil && !lookoutProcessRunning(lookoutPaneID, home) {
+				// reconciliation on every tick. Recheck the Lookout tab when its
+				// process is absent or its pane has not been observed yet.
+				home, err := s.homePath()
+				if err != nil {
+					return err
+				}
+				processRunning := lookoutPaneID != "" && lookoutProcessRunning(lookoutPaneID, home)
+				if processRunning {
+					if err := markLookoutRunning(ctx.Context, db, project.ID, lookoutPaneID); err != nil {
+						return err
+					}
+				} else {
+					needsSnapshot := lookoutPaneID != ""
+					if !needsSnapshot {
+						state, err := db.LookoutRecovery(ctx.Context, project.ID)
+						if err != nil {
+							return err
+						}
+						needsSnapshot = state.PaneID != ""
+					}
+					if needsSnapshot {
 						if snapshot, err := s.snapshot(ctx.Context); err == nil {
-							if err := s.ensureLookoutTab(ctx.Context, project, snapshot); err != nil {
-								return err
+							paneID := ""
+							for _, pane := range snapshot.Panes {
+								if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
+									paneID = pane.PaneID
+									break
+								}
 							}
-							if fresh, err := s.snapshot(ctx.Context); err == nil {
-								for _, pane := range fresh.Panes {
-									if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
-										lookoutPaneID = pane.PaneID
-										break
+							lookoutPaneID = paneID
+							if paneID == "" {
+								// A closed tab is not a failed startup. Recreate it at once
+								// and begin a fresh startup grace period.
+								if err := resetLookoutRecovery(ctx.Context, db, project.ID); err != nil {
+									return err
+								}
+							} else if lookoutProcessRunning(paneID, home) {
+								if err := markLookoutRunning(ctx.Context, db, project.ID, paneID); err != nil {
+									return err
+								}
+								processRunning = true
+							}
+							due := paneID == ""
+							if !due {
+								due, err = lookoutRecoveryDue(ctx.Context, db, project.ID, paneID, time.Now())
+								if err != nil {
+									return err
+								}
+							}
+							if !processRunning && due {
+								if err := s.ensureLookoutTab(ctx.Context, db, project, snapshot, false); err != nil {
+									return err
+								}
+								if fresh, err := s.snapshot(ctx.Context); err == nil {
+									for _, pane := range fresh.Panes {
+										if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
+											lookoutPaneID = pane.PaneID
+											break
+										}
+									}
+								}
+								failures, noticeRaised, err := lookoutStartFailureNotice(ctx.Context, db, project.ID)
+								if err != nil {
+									return err
+								}
+								if failures >= lookoutStartFailureNoticeAfter && !noticeRaised {
+									if _, err := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout failed to start after repeated retries; recovery will continue with backoff", DataJSON: `{}`}); err != nil {
+										return err
+									}
+									if err := markLookoutStartFailureNotice(ctx.Context, db, project.ID); err != nil {
+										return err
 									}
 								}
 							}
 						}
 					}
-				}
-				home, err := s.homePath()
-				if err != nil {
-					return err
 				}
 				cfg, err := config.Load(home, project.Name)
 				if err != nil {

@@ -14,9 +14,131 @@ import (
 
 func lookoutTabLabel(project store.Project) string { return "posse:" + project.Name + ":lookout" }
 
+var lookoutStartupGracePeriod = 5 * time.Second
+var lookoutRetryBasePeriod = time.Second
+var lookoutRetryMaxPeriod = time.Minute
+
+const lookoutStartFailureNoticeAfter = 3
+
+func delayLookoutReplacement(ctx context.Context, db *store.DB, projectID int64, paneID string, now time.Time) (bool, error) {
+	state, err := db.LookoutRecovery(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	if state.PaneID != paneID || state.RetryAt == 0 {
+		state = store.LookoutRecovery{PaneID: paneID, RetryAt: now.Add(lookoutStartupGracePeriod).UnixMilli()}
+		return true, db.SetLookoutRecovery(ctx, projectID, state)
+	}
+	return now.UnixMilli() < state.RetryAt, nil
+}
+
+func lookoutRecoveryDue(ctx context.Context, db *store.DB, projectID int64, paneID string, now time.Time) (bool, error) {
+	state, err := db.LookoutRecovery(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	return state.PaneID != paneID || state.RetryAt == 0 || now.UnixMilli() >= state.RetryAt, nil
+}
+
+func resetLookoutRecovery(ctx context.Context, db *store.DB, projectID int64) error {
+	return db.ResetLookoutRecovery(ctx, projectID)
+}
+
+func markLookoutRunning(ctx context.Context, db *store.DB, projectID int64, paneID string) error {
+	state, err := db.LookoutRecovery(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if state.PaneID == paneID && state.RetryAt == 0 && state.FailedStarts == 0 && !state.NoticeRaised {
+		return nil
+	}
+	state.PaneID = paneID
+	state.RetryAt = 0
+	state.FailedStarts = 0
+	state.NoticeRaised = false
+	return db.SetLookoutRecovery(ctx, projectID, state)
+}
+
+func markLookoutCreated(ctx context.Context, db *store.DB, projectID int64, paneID string, failedStart bool) error {
+	state := store.LookoutRecovery{PaneID: paneID}
+	if failedStart {
+		previous, err := db.LookoutRecovery(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		state.FailedStarts = previous.FailedStarts + 1
+		state.NoticeRaised = previous.NoticeRaised
+	}
+	delay := lookoutStartupGracePeriod
+	if failedStart {
+		delay += lookoutRetryBackoff(state.FailedStarts)
+	}
+	state.RetryAt = time.Now().Add(delay).UnixMilli()
+	return db.SetLookoutRecovery(ctx, projectID, state)
+}
+
+func (s *Service) waitLookoutRecovery(ctx context.Context, project store.Project, paneID, home string) (bool, error) {
+	timer := time.NewTimer(lookoutStartupGracePeriod)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer timer.Stop()
+	defer ticker.Stop()
+	for {
+		if lookoutProcessRunning(paneID, home) {
+			return true, nil
+		}
+		if snapshot, err := s.snapshot(ctx); err == nil {
+			present := false
+			for _, pane := range snapshot.Panes {
+				if pane.PaneID == paneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == lookoutTabLabel(project) {
+					present = true
+					break
+				}
+			}
+			if !present {
+				return false, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-timer.C:
+			return lookoutProcessRunning(paneID, home), nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func lookoutRetryBackoff(failedStarts int) time.Duration {
+	if failedStarts < 1 {
+		return 0
+	}
+	delay := lookoutRetryBasePeriod
+	for i := 1; i < failedStarts && delay < lookoutRetryMaxPeriod; i++ {
+		delay *= 2
+	}
+	if delay > lookoutRetryMaxPeriod {
+		return lookoutRetryMaxPeriod
+	}
+	return delay
+}
+
+func lookoutStartFailureNotice(ctx context.Context, db *store.DB, projectID int64) (int, bool, error) {
+	state, err := db.LookoutRecovery(ctx, projectID)
+	return state.FailedStarts, state.NoticeRaised, err
+}
+
+func markLookoutStartFailureNotice(ctx context.Context, db *store.DB, projectID int64) error {
+	state, err := db.LookoutRecovery(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	state.NoticeRaised = true
+	return db.SetLookoutRecovery(ctx, projectID, state)
+}
+
 // The Lookout owns only a shell tab in the Lead's workspace. It never claims
 // Notices or types into the Lead; the configured delivery integration does that.
-func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, snapshot herdr.Snapshot) error {
+func (s *Service) ensureLookoutTab(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot, replaceUnstarted bool) error {
 	label := lookoutTabLabel(project)
 	home, err := s.homePath()
 	if err != nil {
@@ -27,12 +149,29 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 		return err
 	}
 	command := "POSSE_HOME=" + shellQuote(home) + " " + shellQuote(binary) + " lookout --poll-only"
+	failedStart := false
 	for _, pane := range snapshot.Panes {
 		if pane.Label != label {
 			continue
 		}
 		if pane.WorkspaceID == project.HerdrWorkspaceID && (pane.PaneID == os.Getenv("HERDR_PANE_ID") || lookoutProcessRunning(pane.PaneID, home)) {
-			return nil
+			return markLookoutRunning(ctx, db, project.ID, pane.PaneID)
+		}
+		if pane.WorkspaceID == project.HerdrWorkspaceID {
+			if replaceUnstarted {
+				if err := resetLookoutRecovery(ctx, db, project.ID); err != nil {
+					return err
+				}
+			} else {
+				delayed, err := delayLookoutReplacement(ctx, db, project.ID, pane.PaneID, time.Now())
+				if err != nil {
+					return err
+				}
+				if delayed {
+					return nil
+				}
+				failedStart = true
+			}
 		}
 		// A label is not proof that the shell is idle. Close its dedicated
 		// tab before starting a replacement; never type into a live pane.
@@ -71,6 +210,11 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 	if opened.RootPane.PaneID == "" {
 		return fmt.Errorf("lookout tab has no root pane")
 	}
+	if !failedStart {
+		if err := resetLookoutRecovery(ctx, db, project.ID); err != nil {
+			return err
+		}
+	}
 	tabID := opened.RootPane.TabID
 	if tabID == "" {
 		tabID = opened.Tab.TabID
@@ -87,7 +231,7 @@ func (s *Service) ensureLookoutTab(ctx context.Context, project store.Project, s
 	if _, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": opened.RootPane.PaneID, "text": command, "keys": []string{"enter"}}); err != nil {
 		return fail(err)
 	}
-	return nil
+	return markLookoutCreated(ctx, db, project.ID, opened.RootPane.PaneID, failedStart)
 }
 
 func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal) error {
