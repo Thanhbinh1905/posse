@@ -177,6 +177,10 @@ func TestForgeProbeCacheHasShortTTLAndInvalidatesOnConfigChange(t *testing.T) {
 	if _, err := cachedForgeProbe(context.Background(), root, "git.example", cfg, "auto"); err != nil {
 		t.Fatal(err)
 	}
+	// A later CLI process shares only the on-disk cache, not this memory map.
+	forgeProbeState.Lock()
+	forgeProbeState.memory = map[string]forgeProbeCacheEntry{}
+	forgeProbeState.Unlock()
 	if _, err := cachedForgeProbe(context.Background(), root, "git.example", cfg, "auto"); err != nil {
 		t.Fatal(err)
 	}
