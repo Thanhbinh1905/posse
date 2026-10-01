@@ -3,14 +3,62 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestReconcileObservationWritesReturnRetryableBusyUnderConcurrentWriter(t *testing.T) {
+	db, project, first := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	tasks := []store.Task{first}
+	for seq := 2; seq <= 4; seq++ {
+		task := store.Task{Seq: seq, Type: "ship", Title: fmt.Sprintf("Task %d", seq), LandingMode: "local", WorktreePath: first.WorktreePath, PaneID: fmt.Sprintf("w1:p%d", seq), PaneLabel: fmt.Sprintf("posse:shop:t%d", seq), HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyLand: "ask"}
+		id, err := db.CreateTask(ctx, project.ID, task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Transition(ctx, id, store.StateSpawning, store.StateWorking, "cli", "agent ready"); err != nil {
+			t.Fatal(err)
+		}
+		task.ID, task.ProjectID, task.State = id, project.ID, store.StateWorking
+		tasks = append(tasks, task)
+	}
+
+	writer, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+
+	panes := make([]herdr.Pane, 0, len(tasks))
+	for _, task := range tasks {
+		panes = append(panes, herdr.Pane{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"})
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
+	defer cancel()
+	started := time.Now()
+	_, err = ReconcileSnapshot(writeCtx, db, project.ID, herdr.Snapshot{Panes: panes}, time.Now())
+	if !store.IsBusy(err) {
+		t.Fatalf("reconcile error = %v, want typed retryable store contention", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("reconcile still exposed context deadline: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= ReconcileBudget {
+		t.Fatalf("reconcile waited %s, want a result within its %s budget", elapsed, ReconcileBudget)
+	}
+	if got := strings.Count(err.Error(), "update Task t"); got != len(tasks) {
+		t.Fatalf("failed observation updates = %d, want all %d Tasks: %v", got, len(tasks), err)
+	}
+}
 
 func TestReconcileReAdoptsPaneByLabelAndHerdrIdleIsNotDone(t *testing.T) {
 	db, project, _ := createWorkingTask(t)

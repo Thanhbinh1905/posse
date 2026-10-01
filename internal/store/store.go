@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -32,11 +33,16 @@ type DB struct {
 
 var ErrNotFound = sql.ErrNoRows
 var ErrStateRace = errors.New("Task state changed concurrently")
-var ErrBusy = errors.New("database busy after bounded retry")
+var ErrBusy = errors.New("database contention; retry the operation")
 
-// IsBusy reports whether err is (or wraps) a SQLite busy/locked condition that
-// survived bounded retry, so a caller can tell the difference between "this
-// write is invalid" and "retry me".
+const sqliteBusyTimeoutMillis = 5000
+
+// Reconciliation may persist several independent observations in one short
+// budget. Bound each wait so repeated writes cannot consume the whole budget.
+const reconcileWriteBusyTimeoutMillis = 250
+
+// IsBusy reports whether err represents SQLite lock contention, so callers can
+// distinguish an invalid write from one that should be retried.
 func IsBusy(err error) bool {
 	return errors.Is(err, ErrBusy) || isBusyErr(err)
 }
@@ -56,6 +62,43 @@ func isBusyErr(err error) bool {
 	return strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "database is locked")
 }
 
+func retryableContention(err error) error {
+	if err == nil || errors.Is(err, ErrBusy) {
+		return err
+	}
+	if !isBusyErr(err) && !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w: database contention", ErrBusy)
+}
+
+func (db *DB) withBusyTimeout(ctx context.Context, timeoutMillis int, operation func(*sql.Conn) error) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return retryableContention(err)
+	}
+	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout="+strconv.Itoa(timeoutMillis)); err != nil {
+		_ = conn.Close()
+		return retryableContention(err)
+	}
+
+	operationErr := operation(conn)
+	restoreCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, restoreErr := conn.ExecContext(restoreCtx, "PRAGMA busy_timeout="+strconv.Itoa(sqliteBusyTimeoutMillis))
+	cancel()
+	if restoreErr != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	closeErr := conn.Close()
+	if operationErr != nil {
+		return retryableContention(operationErr)
+	}
+	if restoreErr != nil {
+		return fmt.Errorf("restore SQLite busy timeout: %w", restoreErr)
+	}
+	return closeErr
+}
+
 // beginTxWithRetry begins a write transaction, retrying with backoff on SQLITE_BUSY.
 // Every write transaction in this package uses BEGIN IMMEDIATE (see the _txlock=immediate
 // DSN option in OpenAt) so two deferred readers never race to upgrade to a write lock and
@@ -70,13 +113,16 @@ func (db *DB) beginTxWithRetry(ctx context.Context) (*sql.Tx, error) {
 		if err == nil {
 			return tx, nil
 		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, retryableContention(err)
+		}
 		if !isBusyErr(err) {
 			return nil, err
 		}
 		lastErr = err
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, retryableContention(ctx.Err())
 		case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
 		}
 	}
@@ -108,7 +154,7 @@ func openAt(path string, timeout time.Duration) (*DB, error) {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
 	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
-	dsn := fileURL + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate"
+	dsn := fileURL + "?_pragma=busy_timeout(" + strconv.Itoa(sqliteBusyTimeoutMillis) + ")&_pragma=foreign_keys(1)&_txlock=immediate"
 	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -126,15 +172,7 @@ func openAt(path string, timeout time.Duration) (*DB, error) {
 }
 
 func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
-	defer func() {
-		if migrationErr == nil || errors.Is(migrationErr, ErrBusy) {
-			return
-		}
-		if !isBusyErr(migrationErr) && !errors.Is(migrationErr, context.DeadlineExceeded) {
-			return
-		}
-		migrationErr = fmt.Errorf("%w: database migration contention", ErrBusy)
-	}()
+	defer func() { migrationErr = retryableContention(migrationErr) }()
 	lock, err := acquireMigrationLock(ctx, db.Path)
 	if err != nil {
 		return err
@@ -1676,14 +1714,20 @@ func taskFromDB(row dbgen.Task) Task {
 }
 
 func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {
-	if err := db.queries.UpdateTaskObservation(ctx, dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
+	params := dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}
+	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+		return dbgen.New(conn).UpdateTaskObservation(ctx, params)
+	}); err != nil {
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) UpdateProjectObservation(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) error {
-	return db.queries.UpdateProjectObservation(ctx, dbgen.UpdateProjectObservationParams{LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID})
+	params := dbgen.UpdateProjectObservationParams{LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID}
+	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+		return dbgen.New(conn).UpdateProjectObservation(ctx, params)
+	})
 }
 
 func (db *DB) UpdateProjectStatus(ctx context.Context, projectID int64, status string) error {
