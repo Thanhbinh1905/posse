@@ -70,6 +70,7 @@ func TestLaunchArgumentAnalysisClassifiesPerHarnessSpellings(t *testing.T) {
 		{name: "Codex attached config model", kind: "codex", args: []string{`-cmodel="model-a"`}, wantModels: []string{"model-a"}},
 		{name: "Codex separated config model", kind: "codex", args: []string{"-c", `model="model-a"`}, wantModels: []string{"model-a"}},
 		{name: "Codex effort config is not a model", kind: "codex", args: []string{"-c", "model_reasoning_effort=high"}},
+		{name: "case-variant Codex model key fails closed", kind: "codex", args: []string{"-c", `Model="model-a"`}, wantUnknown: true},
 		{name: "unclassified Codex config fails closed", kind: "codex", args: []string{"-c", "model_provider=local"}, wantUnknown: true},
 		{name: "unknown model alias fails closed", kind: "claude", args: []string{"--model-id", "model-a"}, wantModels: []string{"<unclassified>"}, wantUnknown: true},
 		{name: "Unclassified option fails closed", kind: "claude", args: []string{"--unknown-session-option", "value"}, wantUnknown: true},

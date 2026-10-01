@@ -6,11 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // reviewIdentityFixture exercises review admission through the real CLI and an
@@ -248,4 +252,149 @@ func TestReviewRejectsMalformedModelAliasOverride(t *testing.T) {
 		t.Logf("agent.start argument evidence:\n%s", args)
 	}
 	requireReviewIdentityRefusal(t, code, output)
+}
+
+func TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args string
+	}{
+		{name: "separated mixed-case key", args: `["-c","Model=\"{model}\""]`},
+		{name: "attached uppercase key", args: `["-cMODEL=\"{model}\""]`},
+		{name: "long equals mixed-case key", args: `["--config=mOdEl=\"{model}\""]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := reviewIdentityFixture(t)
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.kind", "codex")
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
+			if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+				t.Fatalf("author spawn: code=%d %s", code, output)
+			}
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", "model-c")
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", test.args)
+
+			code, output := rideReviewIdentityTask(t, fixture, "Case-variant spawn", "reviewer", "t1")
+			requireReviewIdentityRefusal(t, code, output)
+			tasks, err := fixture.db.Tasks(context.Background(), fixture.project.ID, true)
+			if err != nil || len(tasks) != 1 {
+				t.Fatalf("refused spawn allocated a Review Task: tasks=%d err=%v", len(tasks), err)
+			}
+
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-c","model=\"{model}\""]`)
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.effort_args", `["-c","model_reasoning_effort={effort}"]`)
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.effort", "high")
+			if code, output := rideReviewIdentityTask(t, fixture, "Independent reviewer", "reviewer", "t1"); code != 0 {
+				t.Fatalf("valid Codex Review spawn: code=%d %s", code, output)
+			}
+			reviewer := fixture.mustTask(t, "t2")
+			before, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
+			if err != nil || len(before) != 1 || !before[0].ModelKnown || before[0].ConfiguredModel != "model-c" {
+				t.Fatalf("initial Review launch identities = %#v, err=%v", before, err)
+			}
+
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", test.args)
+			code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
+			requireReviewIdentityRefusal(t, code, output)
+			after, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
+			if err != nil || len(after) != len(before) {
+				t.Fatalf("refused relaunch recorded another launch: before=%#v after=%#v err=%v", before, after, err)
+			}
+		})
+	}
+}
+
+func TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault(t *testing.T) {
+	codex, err := exec.LookPath("codex")
+	if err != nil {
+		t.Skip("Codex CLI is not installed")
+	}
+	root := newFixtureRoot(t, fixturePrefix("codex-case-loopback-"))
+	home := filepath.Join(root, "home")
+	codexHome := filepath.Join(root, "codex")
+	for _, dir := range []string{home, codexHome, filepath.Join(root, "xdg"), filepath.Join(root, "posse")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mu sync.Mutex
+	var models []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode loopback request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		models = append(models, request.Model)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"loopback probe stops before completion"}}`))
+	}))
+	defer server.Close()
+
+	codexConfig := fmt.Sprintf(`model = "model-a"
+model_provider = "posse-loopback"
+[model_providers.posse-loopback]
+name = "Posse loopback probe"
+base_url = %q
+wire_api = "responses"
+requires_openai_auth = false
+`, server.URL+"/v1")
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(codexConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"HOME=" + home,
+		"CODEX_HOME=" + codexHome,
+		"XDG_CONFIG_HOME=" + filepath.Join(root, "xdg"),
+		"POSSE_HOME=" + filepath.Join(root, "posse"),
+		"PATH=" + os.Getenv("PATH"),
+		"LANG=C.UTF-8",
+		"NO_COLOR=1",
+	}
+	for _, test := range []struct {
+		name      string
+		args      []string
+		wantModel string
+	}{
+		{name: "configured default", wantModel: "model-a"},
+		{name: "valid lowercase model key", args: []string{"-c", `model="model-c"`}, wantModel: "model-c"},
+		{name: "separated mixed-case model key is ignored", args: []string{"-c", `Model="model-c"`}, wantModel: "model-a"},
+		{name: "attached uppercase model key is ignored", args: []string{`-cMODEL="model-c"`}, wantModel: "model-a"},
+		{name: "long equals mixed-case model key is ignored", args: []string{`--config=mOdEl="model-c"`}, wantModel: "model-a"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mu.Lock()
+			models = nil
+			mu.Unlock()
+			args := append([]string{}, test.args...)
+			args = append(args, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--json", "-")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, codex, args...)
+			command.Dir, command.Env = home, env
+			command.Stdin = strings.NewReader("Reply with ok.\n")
+			output, runErr := command.CombinedOutput()
+			t.Logf("codex exit=%v output=%s", runErr, output)
+			mu.Lock()
+			got := append([]string(nil), models...)
+			mu.Unlock()
+			if len(got) == 0 {
+				t.Fatalf("Codex made no loopback request; err=%v output=%s", runErr, output)
+			}
+			for _, model := range got {
+				if model != test.wantModel {
+					t.Errorf("Codex loopback selected model %q, want %q; requests=%#v", model, test.wantModel, got)
+				}
+			}
+		})
+		if t.Failed() {
+			return
+		}
+	}
 }

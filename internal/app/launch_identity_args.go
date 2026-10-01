@@ -312,7 +312,8 @@ func classifyCodexConfig(value string, result *launchArgAnalysis) bool {
 	if !ok {
 		return false
 	}
-	key = strings.TrimSpace(strings.ToLower(key))
+	// Codex configuration keys are case-sensitive. Unknown spellings fail closed.
+	key = strings.TrimSpace(key)
 	raw = strings.TrimSpace(raw)
 	switch key {
 	case "model":
