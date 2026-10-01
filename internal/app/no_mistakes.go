@@ -33,7 +33,10 @@ func ensureNoMistakesInitialized(ctx context.Context, root string) error {
 }
 
 func commandOutputArgs(ctx context.Context, cwd, name string, args ...string) (string, error) {
-	timeout := timeoutForExternalCommand(name, args)
+	return commandOutputArgsWithTimeout(ctx, timeoutForExternalCommand(name, args), cwd, name, args...)
+}
+
+func commandOutputArgsWithTimeout(ctx context.Context, timeout time.Duration, cwd, name string, args ...string) (string, error) {
 	commandContext := ctx
 	cancel := func() {}
 	if timeout > 0 {

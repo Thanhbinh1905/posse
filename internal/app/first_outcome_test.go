@@ -516,6 +516,9 @@ func TestFirstOutcomeImplicitRideRelaunchAndRecovery(t *testing.T) {
 }
 
 func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
+	previousTTL := forgeProbeCacheTTL
+	forgeProbeCacheTTL = 0 // This test changes fake CLI state between checks.
+	t.Cleanup(func() { forgeProbeCacheTTL = previousTTL })
 	f := newFirstOutcomeFixture(t)
 	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
 	for _, cli := range []string{"gh", "glab", "no-mistakes"} {

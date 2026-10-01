@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -365,6 +366,32 @@ func TestGitLabDoctorChecksHostAuthentication(t *testing.T) {
 	code, output, stderr := f.run("doctor")
 	if code != 0 || !strings.Contains(output, "glab auth git.example.com") || !strings.Contains(output, "authenticated") {
 		t.Fatalf("doctor: %d %s %s", code, output, stderr)
+	}
+
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repositoryForgeReadiness(context.Background(), f.repo, cfg, ""); err != nil {
+		t.Fatalf("populate the readiness cache: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.bin, "glab"), []byte("#!/bin/sh\nprintf 'authentication missing\\n' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code, output, stderr = f.run("doctor")
+	if code != 0 || !strings.Contains(output, "glab auth git.example.com,warn") || !strings.Contains(output, "authentication missing") {
+		t.Fatalf("doctor trusted cached authentication instead of checking current state: %d %s %s", code, output, stderr)
+	}
+	if err := os.WriteFile(filepath.Join(f.bin, "glab"), []byte("#!/bin/sh\n/bin/sleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	code, output, stderr = f.run("doctor")
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("doctor waited %s for a hanging forge CLI: %d %s %s", elapsed, code, output, stderr)
+	}
+	if code != 0 || !strings.Contains(output, "glab auth git.example.com,warn") || !strings.Contains(output, "timed out after 500ms") {
+		t.Fatalf("doctor did not report the forge CLI timeout: %d %s %s", code, output, stderr)
 	}
 }
 
