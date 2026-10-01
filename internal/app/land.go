@@ -403,6 +403,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		return err
 	}
 	cfg, err := s.prepareProject(ctx.Context, db, project)
+	preflightAgentNotReady := false
 	if err != nil {
 		var commandError *axi.Error
 		approvedDiscard := parsed.Bool("discard") && strings.TrimSpace(parsed.Flags["user-approved"]) != ""
@@ -410,8 +411,9 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 			return err
 		}
 		// Project preparation can fail while delivering to an agent that is
-		// already exiting. For an explicitly approved discard, that readiness
-		// failure must not block Teardown, which takes a fresh ownership snapshot.
+		// already exiting. Teardown verifies foreground process ownership before
+		// releasing the Mount.
+		preflightAgentNotReady = true
 	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
@@ -428,7 +430,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if discardable && quote == "" {
 		return axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
 	}
-	result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, discardable, quote)
+	result, err := s.unsaddleTaskWithMountOwnershipCheck(ctx.Context, db, project, cfg, task, discardable, quote, preflightAgentNotReady)
 	if err != nil {
 		return err
 	}
@@ -436,6 +438,10 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string) (unsaddleResult, error) {
+	return s.unsaddleTaskWithMountOwnershipCheck(ctx, db, project, cfg, task, discardable, quote, false)
+}
+
+func (s *Service) unsaddleTaskWithMountOwnershipCheck(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string, verifyMountOwnership bool) (unsaddleResult, error) {
 	result := unsaddleResult{}
 	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "unsaddle", marshalJSON(map[string]any{"discard": discardable}))
 	if err != nil {
@@ -572,6 +578,11 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
+		if verifyMountOwnership {
+			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
+				return err
+			}
+		}
 		var releaseErr error
 		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean, discardable)
 		return releaseErr
