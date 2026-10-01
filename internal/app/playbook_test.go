@@ -232,6 +232,143 @@ func TestLeadPlaybookDeliveryPreservesMarkdownForEveryKind(t *testing.T) {
 	}
 }
 
+type playbookSetFixture struct {
+	root, home, repo string
+	project          store.Project
+	service          *Service
+}
+
+func newPlaybookSetFixture(t *testing.T) playbookSetFixture {
+	t.Helper()
+	root := t.TempDir()
+	repo, home := filepath.Join(root, "repo"), filepath.Join(root, "posse-home")
+	initRepo(t, repo)
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(context.Background(), "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return playbookSetFixture{root: root, home: home, repo: repo, project: project, service: testService(home, nil)}
+}
+
+func runPlaybookSetCLI(t *testing.T, service *Service, wantCode int, args ...string) string {
+	t.Helper()
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run(args); code != wantCode {
+		t.Fatalf("%v exit=%d want=%d:\n%s", args, code, wantCode, output.String())
+	}
+	return output.String()
+}
+
+func TestPlaybookSetWritesUserAndProjectLayersWithoutQuote(t *testing.T) {
+	f := newPlaybookSetFixture(t)
+	source := filepath.Join(f.root, "new-lead.md")
+	const userContent = "Ask about the outcome before drafting.  Keep spacing.\n"
+	if err := os.WriteFile(source, []byte(userContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(f.root)
+	output := runPlaybookSetCLI(t, f.service, 0, "playbook", "set", "lead", "--file", source)
+	globalPath := filepath.Join(f.home, "playbook", "lead.md")
+	written, err := os.ReadFile(globalPath)
+	if err != nil || string(written) != userContent || !strings.Contains(output, "approval_recorded: false") {
+		t.Fatalf("User Playbook write = %q, err=%v, output=%s", written, err, output)
+	}
+	info, err := os.Stat(globalPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("User Playbook permissions = %v, err=%v", info, err)
+	}
+
+	const projectContent = "Project Rider instructions.\n"
+	if err := os.WriteFile(source, []byte(projectContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPlaybookSetCLI(t, f.service, 0, "playbook", "set", "rider", "--file", source, "--project", "shop")
+	projectPath := filepath.Join(f.home, "projects", "shop", "playbook", "rider.md")
+	written, err = os.ReadFile(projectPath)
+	if err != nil || string(written) != projectContent {
+		t.Fatalf("Project Playbook write = %q, err=%v", written, err)
+	}
+
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var approvals int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM config_approvals`).Scan(&approvals); err != nil || approvals != 0 {
+		t.Fatalf("User-shell Playbook writes recorded %d approvals, err=%v", approvals, err)
+	}
+}
+
+func TestPlaybookSetRequiresAndRecordsLeadConsent(t *testing.T) {
+	f := newPlaybookSetFixture(t)
+	source := filepath.Join(f.root, "lead.md")
+	if err := os.WriteFile(source, []byte("Approved instructions.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(f.repo)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	target := filepath.Join(f.home, "projects", "shop", "playbook", "lead.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("Previous instructions.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := runPlaybookSetCLI(t, f.service, 1, "playbook", "set", "lead", "--file", source)
+	previous, err := os.ReadFile(target)
+	if err != nil || string(previous) != "Previous instructions.\n" || !strings.Contains(output, "user_only") {
+		t.Fatalf("unapproved Lead write changed the Playbook: contents=%q err=%v output=%s", previous, err, output)
+	}
+
+	const quote = "Please update the Lead instructions for this Project."
+	output = runPlaybookSetCLI(t, f.service, 0, "playbook", "set", "lead", "--file", source, "--project", "shop", "--user-approved", quote)
+	written, err := os.ReadFile(target)
+	if err != nil || string(written) != "Approved instructions.\n" || !strings.Contains(output, "approval_recorded: true") {
+		t.Fatalf("approved Lead write = %q, err=%v, output=%s", written, err, output)
+	}
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var key, action, value, recordedQuote string
+	if err := db.QueryRowContext(context.Background(), `SELECT key,action,value,user_quote FROM config_approvals WHERE project_id=?`, f.project.ID).Scan(&key, &action, &value, &recordedQuote); err != nil {
+		t.Fatal(err)
+	}
+	if key != "playbook.lead" || action != "set" || value != target || recordedQuote != quote {
+		t.Fatalf("Playbook approval = key %q action %q value %q quote %q", key, action, value, recordedQuote)
+	}
+}
+
+func TestRiderCannotWritePlaybooks(t *testing.T) {
+	f := newPlaybookSetFixture(t)
+	source := filepath.Join(f.root, "rider.md")
+	if err := os.WriteFile(source, []byte("forbidden\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(f.repo)
+	t.Setenv(workerHomeEnv, f.home)
+	output := runPlaybookSetCLI(t, f.service, 1, "playbook", "set", "rider", "--file", source)
+	target := filepath.Join(f.home, "projects", "shop", "playbook", "rider.md")
+	if _, err := os.Stat(target); !os.IsNotExist(err) || !strings.Contains(output, "worker_forbidden") {
+		t.Fatalf("Rider wrote a Playbook: stat err=%v output=%s", err, output)
+	}
+}
+
 func TestPlaybookContentHasNoSeparateLeadCap(t *testing.T) {
 	home := t.TempDir()
 	writePlaybook(t, home, "playbook/lead.md", strings.Repeat("x", playbookWarningBytes+100))

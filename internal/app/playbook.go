@@ -1,12 +1,14 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -212,6 +214,113 @@ func (s *Service) playbookShow(ctx *axi.Context, args []string) error {
 		{Key: "playbooks", Value: roles},
 		{Key: "help", Value: []any{"Run `posse playbook path lead|rider` to locate source files"}},
 	})
+}
+
+func (s *Service) playbookSet(ctx *axi.Context, args []string) error {
+	parsed, err := parseArgs("playbook set", args, map[string]flagSpec{"file": {}, "project": {}, "user-approved": {}})
+	if err != nil {
+		return err
+	}
+	if len(parsed.Positionals) != 1 || (parsed.Positionals[0] != "lead" && parsed.Positionals[0] != "rider") {
+		return axi.Usage("playbook set requires lead|rider")
+	}
+	role := parsed.Positionals[0]
+	sourcePath := parsed.Flags["file"]
+	if strings.TrimSpace(sourcePath) == "" {
+		return axi.Usage("playbook set requires --file <file>")
+	}
+
+	db, home, err := s.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := s.requireConfigCaller(ctx.Context, db); err != nil {
+		return err
+	}
+
+	projectName := parsed.Flags["project"]
+	var project store.Project
+	if projectName != "" {
+		project, err = s.projectByName(ctx.Context, db, projectName)
+		if err != nil {
+			return err
+		}
+	} else if dir, dirErr := currentDir(); dirErr != nil {
+		return dirErr
+	} else {
+		project, _, err = registeredProjectFor(ctx.Context, db, dir)
+		if err != nil {
+			return err
+		}
+	}
+
+	targetPath := filepath.Join(home, "playbook", role+".md")
+	scope := "user"
+	if project.Name != "" {
+		targetPath = filepath.Join(home, "projects", project.Name, "playbook", role+".md")
+		scope = "project:" + project.Name
+	}
+	approvalProjectID, err := s.playbookApprovalProject(ctx.Context, db, project, projectName, parsed.Flags["user-approved"])
+	if err != nil {
+		return err
+	}
+	contents, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return fmt.Errorf("read Playbook source %s: %w", sourcePath, err)
+	}
+	original, mode, existed, err := configSnapshot(targetPath)
+	if err != nil {
+		return err
+	}
+	if err := atomicfile.Write(targetPath, contents, mode); err != nil {
+		return fmt.Errorf("write Playbook %s: %w", targetPath, err)
+	}
+	if approvalProjectID != 0 {
+		quote := parsed.Flags["user-approved"]
+		if err := db.RecordConfigApproval(ctx.Context, approvalProjectID, "playbook."+role, "set", targetPath, quote); err != nil {
+			if rollbackErr := restoreConfigFile(targetPath, original, existed, mode); rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("restore previous Playbook: %w", rollbackErr))
+			}
+			return err
+		}
+	}
+	help := "Run `posse playbook show"
+	if project.Name != "" {
+		help += " --project " + project.Name
+	}
+	help += "` to inspect the effective Playbooks"
+	return ctx.Print(axi.Object{
+		{Key: "scope", Value: scope},
+		{Key: "role", Value: role},
+		{Key: "file", Value: targetPath},
+		{Key: "bytes", Value: len(contents)},
+		{Key: "approval_recorded", Value: approvalProjectID != 0},
+		{Key: "help", Value: []any{help}},
+	})
+}
+
+func (s *Service) playbookApprovalProject(ctx context.Context, db *store.DB, project store.Project, projectName, quote string) (int64, error) {
+	switch s.configCallerRole(ctx, db) {
+	case "user":
+		return 0, nil
+	case "worker":
+		return 0, axi.Failure("worker_forbidden", "Riders cannot write Playbooks", false)
+	case "lead":
+		if strings.TrimSpace(quote) == "" {
+			return 0, axi.Failure("user_only", "writing a Playbook from the Lead requires the User's approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
+		}
+		if projectName != "" {
+			return project.ID, nil
+		}
+		leadProject, err := db.ProjectByLeadPane(ctx, os.Getenv("HERDR_PANE_ID"))
+		if err != nil {
+			return 0, err
+		}
+		return leadProject.ID, nil
+	default:
+		return 0, axi.Failure("user_only", "only the User can write Playbooks", false)
+	}
 }
 
 func (s *Service) playbookPath(ctx *axi.Context, args []string) error {

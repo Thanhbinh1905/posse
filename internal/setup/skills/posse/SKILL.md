@@ -13,6 +13,8 @@ Your role comes from the pane you run in, not from your own judgment. Find it be
    - **Worker**: run `posse brief` and follow your launch Brief. Report progress and results only through `posse holler`.
    - **Neither, and the User wants posse here**: run `posse doctor`, then run `posse up` inside Herdr from the repository, or from a folder whose subfolders are the repositories of one stack; it asks the User once before registering. Setup is optional for the first outcome; use `/posse-setup` for the full configuration tour.
 
+Before writing a Brief for substantive work, discuss intent, scope, trade-offs and acceptance with the User when consequential details need clarification, following their Playbook. Resolve mechanics silently; optional setup and personalization are not prerequisites to the first outcome.
+
 The step is done when you are following `posse lead` or `posse brief`, or the User has the next command.
 
 ## Working with the CLI
