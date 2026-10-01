@@ -297,6 +297,8 @@ func forgeProbeCacheFresh(entry forgeProbeCacheEntry, now time.Time) bool {
 	return !entry.CheckedAt.IsZero() && age >= 0 && age < forgeProbeCacheTTL
 }
 
+// readForgeProbeCache returns only fresh outcomes so a partial refresh cannot
+// merge with the unprobed portion of an expired result.
 func readForgeProbeCache(home, key string, now time.Time) (forgeProbeCacheEntry, bool) {
 	if home == "" {
 		return forgeProbeCacheEntry{}, false
@@ -310,7 +312,10 @@ func readForgeProbeCache(home, key string, now time.Time) (forgeProbeCacheEntry,
 		return forgeProbeCacheEntry{}, false
 	}
 	entry, ok := cache.Entries[key]
-	return entry, ok && forgeProbeCacheFresh(entry, now)
+	if !ok || !forgeProbeCacheFresh(entry, now) {
+		return forgeProbeCacheEntry{}, false
+	}
+	return entry, true
 }
 
 func writeForgeProbeCache(home, key string, entry forgeProbeCacheEntry) {

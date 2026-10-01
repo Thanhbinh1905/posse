@@ -232,6 +232,105 @@ func TestForgeProbeCacheHasShortTTLAndInvalidatesOnConfigChange(t *testing.T) {
 	}
 }
 
+func TestExpiredPartialRefreshDoesNotReuseUnprobedCLIInReadiness(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "probe.log")
+	t.Setenv("POSSE_HOME", filepath.Join(root, "posse"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("POSSE_PROBE_LOG", logPath)
+	t.Setenv("POSSE_PROBE_EXIT", "0")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, cli := range []string{"glab", "gh"} {
+		script := `#!/bin/sh
+printf '%s\n' "${0##*/}" >> "$POSSE_PROBE_LOG"
+exit "$POSSE_PROBE_EXIT"
+`
+		if err := os.WriteFile(filepath.Join(bin, cli), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := config.Config{
+		Defaults: config.Defaults{LandingMode: "pr"},
+		Repositories: map[string]config.Repository{
+			"api":      {Forge: "gitlab"},
+			"frontend": {Forge: "github"},
+		},
+	}
+	targets := map[string]repoTarget{}
+	for _, member := range []string{"api", "frontend", "tools"} {
+		repo := filepath.Join(root, member)
+		initRepo(t, repo)
+		gitTest(t, repo, "remote", "add", "origin", "https://git.example/acme/"+member+".git")
+		targets[member] = repoTarget{Name: member, Root: repo, DefaultBranch: "main"}
+	}
+	checkMember := func(member string, wantGap bool) {
+		t.Helper()
+		checks := repositoryDoctorChecks(context.Background(), cfg, []repoTarget{targets[member]})
+		for _, check := range checks {
+			if check.GapCode == "forge_auth" && check.Status != "ok" {
+				if !wantGap {
+					t.Errorf("Member %s unexpectedly has a forge auth gap: %+v", member, check)
+				}
+				return
+			}
+		}
+		if wantGap {
+			t.Errorf("Member %s did not report its current forge authentication failure: %+v", member, checks)
+		}
+	}
+
+	checkMember("api", false)
+	checkMember("frontend", false)
+	checkMember("tools", true) // Auto-detection is ambiguous when both CLIs authenticate.
+	key, home, err := forgeProbeCacheKey("git.example", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(home, forgeProbeCache)
+	cacheBytes, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diskCache forgeProbeDiskCache
+	if err := json.Unmarshal(cacheBytes, &diskCache); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := diskCache.Entries[key]
+	if !ok {
+		t.Fatal("cold readiness checks did not cache their shared host outcome")
+	}
+	entry.CheckedAt = time.Now().Add(-forgeProbeCacheTTL - time.Second)
+	diskCache.Entries[key] = entry
+	cacheBytes, err = json.Marshal(diskCache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, cacheBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forgeProbeState.Lock()
+	forgeProbeState.memory = map[string]forgeProbeCacheEntry{}
+	forgeProbeState.Unlock()
+	t.Setenv("POSSE_PROBE_EXIT", "1")
+
+	checkMember("api", true)      // Explicit GitLab causes a partial refresh.
+	checkMember("frontend", true) // Explicit GitHub must recheck its expired result.
+	checkMember("tools", true)    // Auto-detection must not consume the old GitHub success.
+
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(calls) != "glab\ngh\nglab\ngh\n" {
+		t.Fatalf("expired partial refresh should reprobe each CLI once, got %q", calls)
+	}
+}
+
 func TestForgeProbeTimeoutIsDistinctFromUnknownForge(t *testing.T) {
 	host := "git.example"
 	err := forgeProbeTimeoutError(host)
