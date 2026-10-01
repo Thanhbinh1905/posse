@@ -3,35 +3,115 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestConfiguredModelIdentityUsesOnlyDeterminableConfiguredValues(t *testing.T) {
+func TestConfiguredModelIdentityFailsClosedOnOverrides(t *testing.T) {
 	kind := config.Kind{ModelArgs: []string{"--model", "{model}"}}
 	for _, test := range []struct {
 		name      string
 		profile   config.Profile
+		kind      config.Kind
 		wantModel string
 		wantKnown bool
 	}{
-		{name: "profile model", profile: config.Profile{Model: "model-a"}, wantModel: "model-a", wantKnown: true},
-		{name: "explicit override", profile: config.Profile{Model: "model-a", Args: []string{"--model", "model-b"}}, wantModel: "model-b", wantKnown: true},
-		{name: "joined override", profile: config.Profile{Model: "model-a", Args: []string{"--model=model-b"}}, wantModel: "model-b", wantKnown: true},
-		{name: "multiple overrides", profile: config.Profile{Model: "model-a", Args: []string{"--model", "model-b", "--model", "model-c"}}, wantModel: "model-a", wantKnown: false},
-		{name: "missing override value", profile: config.Profile{Model: "model-a", Args: []string{"--model"}}, wantModel: "model-a", wantKnown: false},
-		{name: "unconfigured model", profile: config.Profile{}, wantModel: "", wantKnown: false},
-		{name: "explicitly configured model override", profile: config.Profile{Args: []string{"--model", "model-b"}}, wantModel: "model-b", wantKnown: true},
+		{name: "profile model", profile: config.Profile{Model: "model-a"}, kind: kind, wantModel: "model-a", wantKnown: true},
+		{name: "separate model override", profile: config.Profile{Model: "model-a", Args: []string{"--model", "model-b"}}, kind: kind, wantModel: "model-a"},
+		{name: "joined model override", profile: config.Profile{Model: "model-a", Args: []string{"--model=model-b"}}, kind: kind, wantModel: "model-a"},
+		{name: "Codex alias override", profile: config.Profile{Model: "model-a", Args: []string{"-m", "model-b"}}, kind: kind, wantModel: "model-a"},
+		{name: "quoted config override", profile: config.Profile{Model: "model-a", Args: []string{"-c", `model="model-a"`}}, kind: config.Kind{ModelArgs: []string{"-c", `model="{model}"`}}, wantModel: "model-a"},
+		{name: "malformed model alias", profile: config.Profile{Model: "model-a", Args: []string{"--model"}}, kind: kind, wantModel: "model-a"},
+		{name: "effort setting does not override model", profile: config.Profile{Model: "model-a"}, kind: config.Kind{ModelArgs: kind.ModelArgs, EffortArgs: []string{"-c", "model_reasoning_effort={effort}"}}, wantModel: "model-a", wantKnown: true},
+		{name: "kind auto arguments can override model", profile: config.Profile{Model: "model-a"}, kind: config.Kind{ModelArgs: kind.ModelArgs, AutoApproveArgs: []string{"--model", "model-b"}}, wantModel: "model-a"},
+		{name: "model template must set one model", profile: config.Profile{Model: "model-a"}, kind: config.Kind{ModelArgs: []string{"--model"}}, wantModel: "model-a"},
+		{name: "model template cannot replace its own value", profile: config.Profile{Model: "model-a"}, kind: config.Kind{ModelArgs: []string{"--model", "{model}", "--model", "hardcoded"}}, wantModel: "model-a"},
+		{name: "unconfigured model", profile: config.Profile{}, kind: kind, wantModel: ""},
+		{name: "override without configured model", profile: config.Profile{Args: []string{"--model", "model-b"}}, kind: kind, wantModel: ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			model, known := configuredModelIdentity(test.profile, kind)
+			model, known := configuredModelIdentity(test.profile, test.kind)
 			if model != test.wantModel || known != test.wantKnown {
 				t.Fatalf("configured model = %q known=%t, want %q known=%t", model, known, test.wantModel, test.wantKnown)
+			}
+		})
+	}
+}
+
+func TestReviewSessionOverridesFailClosed(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		kind string
+		args []string
+		want bool
+	}{
+		{name: "Claude resume alias", kind: "claude", args: []string{"-r", "author-session"}, want: true},
+		{name: "Claude continue alias", kind: "claude", args: []string{"-c"}, want: true},
+		{name: "explicit session id", kind: "claude", args: []string{"--session-id=author-session"}, want: true},
+		{name: "Codex resume command", kind: "codex", args: []string{"resume", "author-session"}, want: true},
+		{name: "Codex fork command", kind: "codex", args: []string{"fork", "author-session"}, want: true},
+		{name: "Codex session config", kind: "codex", args: []string{"-c", "session_id=author-session"}, want: true},
+		{name: "OpenCode session shorthand", kind: "opencode", args: []string{"-s", "author-session"}, want: true},
+		{name: "Pi explicit session", kind: "pi", args: []string{"--session", "author-session"}, want: true},
+		{name: "Codex model config is not session selection", kind: "codex", args: []string{"-c", `model="model-a"`}},
+		{name: "ordinary model argument", kind: "claude", args: []string{"--model", "model-a"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := reviewSessionOverrideReason(test.kind, test.args) != ""
+			if got != test.want {
+				t.Fatalf("reviewSessionOverrideReason(%q, %#v) refused=%t, want %t", test.kind, test.args, got, test.want)
+			}
+		})
+	}
+}
+
+func TestReviewResumeArgsMustUsePosseSessionPlaceholder(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "no configured resume arguments", want: true},
+		{name: "explicit session flag", args: []string{"--resume", "{session}"}, want: true},
+		{name: "Codex resume subcommand", args: []string{"resume", "{session}"}, want: true},
+		{name: "joined session flag", args: []string{"--session={session}"}, want: true},
+		{name: "continue selects unknown session", args: []string{"--continue"}},
+		{name: "literal session id", args: []string{"--resume", "author-session"}},
+		{name: "second literal selector", args: []string{"--resume", "{session}", "--session-id", "author-session"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := reviewResumeArgsUseOwnSession(test.args); got != test.want {
+				t.Fatalf("reviewResumeArgsUseOwnSession(%#v) = %t, want %t", test.args, got, test.want)
+			}
+		})
+	}
+}
+
+func TestReviewResumeArgsRefuseUnknownSessionOrModelOverrides(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		args    []string
+		session string
+		want    string
+	}{
+		{name: "fresh launch does not use resume arguments", args: []string{"--resume", "author-session"}},
+		{name: "resume own session", args: []string{"--resume", "{session}"}, session: "review-session"},
+		{name: "refuse continuation", args: []string{"--continue"}, session: "review-session", want: "do not select only Posse's own"},
+		{name: "refuse literal session", args: []string{"--resume", "author-session"}, session: "review-session", want: "do not select only Posse's own"},
+		{name: "refuse model override", args: []string{"--resume", "{session}", "--model", "model-a"}, session: "review-session", want: "can override the Review Task model"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := reviewResumeArgsRefusal(test.args, test.session)
+			if test.want == "" && got != "" || test.want != "" && !strings.Contains(got, test.want) {
+				t.Fatalf("reviewResumeArgsRefusal(%#v, %q) = %q, want containing %q", test.args, test.session, got, test.want)
 			}
 		})
 	}
@@ -93,9 +173,66 @@ func TestReviewRideRefusesSameConfiguredIdentityWithComparedEvidence(t *testing.
 	}
 }
 
+func TestReviewRelaunchRejectsProfileResumeOverrideBeforeHerdr(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRelaunchFixture(t, store.StateLost)
+	if _, err := fixture.db.NextTaskLaunchWithIdentity(ctx, fixture.task.ID, "deep", "sonnet", true); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(fixture.home, "config.toml")
+	configText, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configText = append(configText, []byte("[profiles.reviewer]\nkind = \"claude\"\nmodel = \"opus\"\nargs = [\"--resume\", \"author-session\"]\n")...)
+	if err := os.WriteFile(configPath, configText, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mountPath := filepath.Join(filepath.Dir(fixture.home), "review-mount")
+	if _, err := gitOutput(ctx, filepath.Join(filepath.Dir(fixture.home), "repo"), "worktree", "add", "-b", "posse/t2", mountPath, "main"); err != nil {
+		t.Fatal(err)
+	}
+	reviewID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "review", Title: "Independent review", Profile: "reviewer", LandingMode: "local", Branch: "posse/t2", BaseRef: "main", WorktreePath: mountPath, HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:shop:t2", AgentName: "posse-shop-t2-1", AgentSession: `{"session_id":"review-session"}`, ReviewsTaskID: fixture.task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, reviewID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, reviewID, store.StateWorking, store.StateLost, "cli", "test relaunch"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,2,?,'held',?)`, fixture.project.ID, mountPath, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, reviewID, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.NextTaskLaunchWithIdentity(ctx, reviewID, "reviewer", "opus", true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer, err := fixture.db.TaskByID(ctx, fixture.project.ID, reviewID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: reviewer.PaneID, WorkspaceID: reviewer.HerdrWorkspaceID, Label: reviewer.PaneLabel, Agent: "claude", AgentStatus: "working"})
+	_, err = fixture.service.relaunchTask(ctx, fixture.db, fixture.home, fixture.project, cfg, reviewer, "")
+	var refusal *axi.Error
+	if !errors.As(err, &refusal) || refusal.Code != "review_identity_ineligible" || !strings.Contains(refusal.Message, "session-selection option") {
+		t.Fatalf("Review relaunch with author session override was not refused: %v", err)
+	}
+	if len(fixture.fake.Calls) != 0 {
+		t.Fatalf("ineligible Review relaunch called Herdr: %#v", fixture.fake.Calls)
+	}
+}
+
 func TestReviewRideRecordsAndShowsDistinctConfiguredIdentities(t *testing.T) {
 	fixture := newRideFixture(t)
-	configureReviewIdentityFixture(t, fixture, "[profiles.reviewer]\nkind = \"pi\"\nmodel = \"model-configured\"\nargs = [\"--model\", \"model-b\"]\n")
+	configureReviewIdentityFixture(t, fixture, "[profiles.reviewer]\nkind = \"pi\"\nmodel = \"model-b\"\n")
 	seedReviewAuthor(t, fixture)
 	brief := filepath.Join(filepath.Dir(fixture.brief), "review-brief.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: review\ntitle: Review launch identity\ndone_when: the author change is independently reviewed\nreview_of: t1\n---\nReview the candidate.\n"), 0o600); err != nil {

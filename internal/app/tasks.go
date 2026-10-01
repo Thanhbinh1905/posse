@@ -198,8 +198,9 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			return axi.Failure("config_invalid", "Review Task Profile uses unknown agent kind "+resolution.Resolved.Kind, false)
 		}
 		reviewLaunchIdentity = configuredLaunchIdentity(resolution.Profile, resolution.Resolved, kindConfig)
-		if check := compareReviewIdentity(authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity); !check.Eligible {
-			return reviewIdentityFailure(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity)
+		launchRefusal := reviewSessionOverrideReason(resolution.Resolved.Kind, workerAgentArgs(resolution.Resolved, kindConfig, ""))
+		if check := compareReviewIdentity(authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity); !check.Eligible || launchRefusal != "" {
+			return reviewIdentityFailure(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity, launchRefusal)
 		}
 		reviewLaunchIdentity.LaunchNumber = 1
 		reviewIdentityDetails = reviewIdentityResult(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity)
@@ -1501,12 +1502,23 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		}
 		authorHistoryKnown := author.Launches > 0 && launchHistoryComplete(author, authorLaunches)
 		reviewerHistoryKnown := launchHistoryComplete(task, reviewerLaunches)
-		if check := compareReviewIdentity(authorLaunches, authorHistoryKnown, launchIdentity); !check.Eligible || !reviewerHistoryKnown {
-			return failure(reviewRelaunchIdentityFailure(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown, launchIdentity))
+		launchRefusal := reviewSessionOverrideReason(kind, workerAgentArgs(profile, kindConfig, ""))
+		resumeSession := ""
+		if !kindChanged {
+			resumeSession = agentSessionID(kind, task.AgentSession)
+		}
+		if resumeRefusal := reviewResumeArgsRefusal(kindConfig.ResumeArgs, resumeSession); resumeRefusal != "" {
+			if launchRefusal != "" {
+				launchRefusal += "; "
+			}
+			launchRefusal += resumeRefusal
+		}
+		if check := compareReviewIdentity(authorLaunches, authorHistoryKnown, launchIdentity); !check.Eligible || !reviewerHistoryKnown || launchRefusal != "" {
+			return failure(reviewRelaunchIdentityFailure(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown, launchIdentity, launchRefusal))
 		}
 		for _, previous := range reviewerLaunches {
 			if check := compareReviewIdentity(authorLaunches, authorHistoryKnown, previous); !check.Eligible {
-				return failure(reviewRelaunchIdentityFailure(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown, launchIdentity))
+				return failure(reviewRelaunchIdentityFailure(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown, launchIdentity, launchRefusal))
 			}
 		}
 	}
