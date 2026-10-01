@@ -38,6 +38,10 @@ _Avoid_: Id, handle, nickname
 A Task whose outcome is a change landed into the Project.
 _Avoid_: Fix task, build task
 
+**Closing Issue**:
+The one forge issue a Ship Task may name for closure when its PR Lands. A Brief uses `ticket:`; legacy `issues: [N]` is accepted only as the same singleton, and `refs:` stays non-closing.
+_Avoid_: ticket (when naming a Task)
+
 **Scout Task**:
 A Task whose outcome is a Report and never a change to the Project.
 _Avoid_: Research task, investigation

@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,39 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestHistoricalMultiIssuePublishKeepsClosingLinks(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	briefPath := filepath.Join(fixture.root, "ship.md")
+	initial := "---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change.\n"
+	if err := os.WriteFile(briefPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", briefPath, "--name", "pr-lifecycle-change")
+
+	stored := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
+	historical := strings.Replace(initial, "done_when: committed change exists\n", "done_when: committed change exists\nissues: [12, 16]\nrefs: [18]\n", 1)
+	if err := os.WriteFile(stored, []byte(historical), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "signal-gates", "t1"), []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.waitTaskState(t, "t1", store.StateDone)
+	if after, err := os.ReadFile(stored); err != nil || !bytes.Equal(after, []byte(historical)) {
+		t.Fatalf("historical Brief was rewritten: %s %v", after, err)
+	}
+	calls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Closes #12", "Closes #16", "Refs #18"} {
+		if !strings.Contains(string(calls), expected) {
+			t.Errorf("historical publish lost %q: %s", expected, calls)
+		}
+	}
+}
 
 func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)

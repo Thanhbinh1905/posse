@@ -639,7 +639,7 @@ func TestLeadInstructionsReportNoticesProactivelyByKind(t *testing.T) {
 			if code := cli.Run([]string{"lead"}); code != 0 {
 				t.Fatalf("posse lead failed: %s", output.String())
 			}
-			for _, phrase := range []string{"When Posse delivers a Notice", "Run `posse`", "handle every Notice", "tell the User the outcome in your own words without waiting to be asked", "supervise Riders", "--name <short>", "then run `posse ack", "The optional Brief fields `issues:` and `refs:` are available for forge issue links", "`issues:` closes issues when the PR Lands", "`refs:` adds non-closing references", "qualify each issue number with its member name as `member#number`", "worker#12"} {
+			for _, phrase := range []string{"When Posse delivers a Notice", "Run `posse`", "handle every Notice", "tell the User the outcome in your own words without waiting to be asked", "supervise Riders", "--name <short>", "then run `posse ack", "The optional Brief fields `ticket:` and `refs:` are available for forge issue links", "`ticket:` names the one issue a Ship Task closes", "`issues: [<one issue>]` is accepted as the same ticket", "`refs:` adds non-closing references", "qualify the ticket and each reference with its member name as `member#number`", "ticket: worker#12"} {
 				if !strings.Contains(output.String(), phrase) {
 					t.Fatalf("Lead instructions omitted %q: %s", phrase, output.String())
 				}

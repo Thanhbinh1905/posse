@@ -82,7 +82,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
 	}
-	if len(brief.Issues)+len(brief.Refs) > 0 {
+	if len(issueReferences(brief))+len(brief.Refs) > 0 {
 		warnings := s.checkBriefIssues(ctx.Context, cfg, brief, targets)
 		if len(warnings) > 0 {
 			result = append(result, axi.Field{Key: "warnings", Value: warnings})

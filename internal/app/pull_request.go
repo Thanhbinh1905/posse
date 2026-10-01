@@ -523,7 +523,7 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 	if err != nil {
 		return "", "", axi.Failure("brief_missing", "could not read the Task Brief for the pull request body", false, err.Error())
 	}
-	brief, err := dispatch.ParseBriefText(string(contents))
+	brief, err := dispatch.ParseHistoricalBriefText(string(contents))
 	if err != nil {
 		return "", "", axi.Failure("brief_invalid", "could not parse the Task Brief for the pull request body", false, err.Error())
 	}

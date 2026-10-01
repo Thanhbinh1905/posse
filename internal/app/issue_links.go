@@ -24,7 +24,7 @@ func validateBriefIssueReferences(project store.Project, brief dispatch.Brief, t
 	for _, list := range []struct {
 		field string
 		refs  []dispatch.IssueRef
-	}{{"issues", brief.Issues}, {"refs", brief.Refs}} {
+	}{{"ticket", issueReferences(brief)}, {"refs", brief.Refs}} {
 		for _, ref := range list.refs {
 			if project.IsWorkspace() {
 				if ref.Repository == "" {
@@ -52,7 +52,7 @@ func validateShipIssueTargets(brief dispatch.Brief, taskTargets []repoTarget) er
 	for _, list := range []struct {
 		field string
 		refs  []dispatch.IssueRef
-	}{{"issues", brief.Issues}, {"refs", brief.Refs}} {
+	}{{"ticket", ticketReferences(brief)}, {"refs", brief.Refs}} {
 		for _, ref := range list.refs {
 			if !members[ref.Repository] {
 				return &dispatch.BriefError{Field: list.field, Reason: ref.String() + " targets a member not listed in repos:"}
@@ -73,7 +73,7 @@ func (s *Service) checkBriefIssues(ctx context.Context, cfg config.Config, brief
 	warnings := make([]any, 0)
 	for _, list := range []struct {
 		refs []dispatch.IssueRef
-	}{{brief.Issues}, {brief.Refs}} {
+	}{{issueReferences(brief)}, {brief.Refs}} {
 		for _, ref := range list.refs {
 			key := ref.Repository
 			target, found := byName[key]
@@ -205,8 +205,12 @@ func taskIssueReferences(home string, project store.Project, task store.Task) ([
 	if err != nil {
 		return nil, nil, err
 	}
-	issues := make([]string, 0, len(brief.Issues))
-	for _, ref := range brief.Issues {
+	closingIssues := brief.Issues
+	if brief.Ticket != nil {
+		closingIssues = []dispatch.IssueRef{*brief.Ticket}
+	}
+	issues := make([]string, 0, len(closingIssues))
+	for _, ref := range closingIssues {
 		issues = append(issues, ref.String())
 	}
 	refs := make([]string, 0, len(brief.Refs))
@@ -222,16 +226,31 @@ func readTaskBrief(home string, project store.Project, task store.Task) (dispatc
 	if err != nil {
 		return dispatch.Brief{}, err
 	}
-	brief, err := dispatch.ParseBriefText(string(contents))
+	brief, err := dispatch.ParseHistoricalBriefText(string(contents))
 	if err != nil {
 		return dispatch.Brief{}, axi.Failure("brief_invalid", "could not parse the Task Brief", false, err.Error())
 	}
 	return brief, nil
 }
 
+func issueReferences(brief dispatch.Brief) []dispatch.IssueRef {
+	if brief.Ticket != nil {
+		return []dispatch.IssueRef{*brief.Ticket}
+	}
+	return brief.Issues
+}
+
+func ticketReferences(brief dispatch.Brief) []dispatch.IssueRef {
+	if brief.Ticket == nil {
+		return nil
+	}
+	return []dispatch.IssueRef{*brief.Ticket}
+}
+
 func issueLinkLines(brief dispatch.Brief, member string) []string {
-	lines := make([]string, 0, len(brief.Issues)+len(brief.Refs))
-	for _, ref := range brief.Issues {
+	closingIssues := issueReferences(brief)
+	lines := make([]string, 0, len(closingIssues)+len(brief.Refs))
+	for _, ref := range closingIssues {
 		if ref.Repository == member {
 			lines = append(lines, "Closes #"+strconv.Itoa(ref.Number))
 		}

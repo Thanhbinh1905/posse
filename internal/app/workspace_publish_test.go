@@ -19,7 +19,7 @@ func TestWorkspaceWorkerPublishesOnlyItsPRMemberAndLeadGates(t *testing.T) {
 	// simulated Worker away before the CLI can publish.
 	f.service.Herdr = nil
 	briefPath := filepath.Join(f.home, "projects", "stack", "tasks", "t1", "brief.md")
-	brief := "---\ntype: ship\ntitle: Span members\ndone_when: members changed\nrepos: [worker, e2e-tool]\nissues: [worker#12, e2e-tool#13]\nrefs: [worker#14]\n---\nChange the members.\n"
+	brief := "---\ntype: ship\ntitle: Span members\ndone_when: members changed\nrepos: [worker, e2e-tool]\nticket: worker#12\nrefs: [worker#14]\n---\nChange the members.\n"
 	if err := writeFile(briefPath, []byte(brief)); err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +100,8 @@ esac
 			t.Fatalf("worker member PR omitted %q: %s", expected, calls)
 		}
 	}
-	if strings.Contains(string(calls), "Closes #13") {
-		t.Fatalf("worker member PR contained another member's issue: %s", calls)
+	if strings.Contains(string(calls), "Closes #13") || strings.Contains(string(calls), "Closes #14") {
+		t.Fatalf("worker member PR closed a non-canonical issue: %s", calls)
 	}
 	if code := f.run("land", "t1", "--merge"); code == 0 || !strings.Contains(f.out.String(), "land_approval_required") {
 		t.Fatalf("merged without User approval: %d %s", code, f.out.String())
