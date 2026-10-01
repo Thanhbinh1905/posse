@@ -125,27 +125,26 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 				}
 				continue
 			}
-			agentServerRestarted := task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
-			if agentServerRestarted {
-				absentSince := task.AgentAbsentSince
-				if absentSince == 0 {
-					absentSince = now.UnixMilli()
-				}
-				if now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
-					if err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices); err != nil && !errors.Is(err, store.ErrStateRace) {
-						failures = append(failures, err)
-					}
-					continue
-				}
-				if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, sessionref.Sanitize("", task.AgentSession), absentSince, 0, task.AgentServerStartedAt); err != nil {
-					if !isStateRace(err) {
-						failures = append(failures, err)
-					}
+			groupedRider := !project.IsWorkspace() && project.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != project.HerdrWorkspaceID
+			restartPending := task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
+			if !groupedRider && !restartPending {
+				if err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices); err != nil && !errors.Is(err, store.ErrStateRace) {
+					failures = append(failures, err)
 				}
 				continue
 			}
-			if err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices); err != nil {
-				if !errors.Is(err, store.ErrStateRace) {
+			absentSince := task.AgentAbsentSince
+			if absentSince == 0 {
+				absentSince = now.UnixMilli()
+			}
+			if now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
+				if err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices); err != nil && !errors.Is(err, store.ErrStateRace) {
+					failures = append(failures, err)
+				}
+				continue
+			}
+			if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, sessionref.Sanitize("", task.AgentSession), absentSince, 0, task.AgentServerStartedAt); err != nil {
+				if !isStateRace(err) {
 					failures = append(failures, err)
 				}
 			}

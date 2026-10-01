@@ -105,11 +105,10 @@ func TestReconcileSkipsCompareAndSetRacesDuringBlockedMapping(t *testing.T) {
 	}
 }
 
-func TestReconcileMarksPaneMissingByIdAndLabelLost(t *testing.T) {
+func TestReconcileMarksUnrecoverableMissingPaneLost(t *testing.T) {
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
-	snapshot := herdr.Snapshot{}
-	notices, err := ReconcileSnapshot(context.Background(), db, project.ID, snapshot, time.Now())
+	notices, err := ReconcileSnapshot(context.Background(), db, project.ID, herdr.Snapshot{}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,11 +116,53 @@ func TestReconcileMarksPaneMissingByIdAndLabelLost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.State != store.StateLost || updated.WorktreePath != task.WorktreePath {
-		t.Fatalf("lost Task or preserved worktree state = %#v", updated)
+	if updated.State != store.StateLost || updated.WorktreePath != task.WorktreePath || len(notices) != 1 || notices[0].Kind != "task_lost" {
+		t.Fatalf("unrecoverable missing Rider was not marked lost: task=%#v notices=%#v", updated, notices)
 	}
-	if len(notices) != 1 || notices[0].Kind != "task_lost" {
-		t.Fatalf("Notices = %#v", notices)
+}
+
+func TestReconcileWaitsBeforeMarkingMissingGroupedRiderLost(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p2", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTaskLaunch(ctx, task.ID, task.WorktreePath, "w2", "w2:p1", task.PaneLabel, "test-agent"); err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Millisecond)
+	snapshot := herdr.Snapshot{}
+	notices, err := ReconcileSnapshot(ctx, db, project.ID, snapshot, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != store.StateWorking || updated.AgentAbsentSince != now.UnixMilli() || updated.WorktreePath != task.WorktreePath || len(notices) != 0 {
+		t.Fatalf("missing grouped Rider did not receive a recovery grace period: task=%#v notices=%#v", updated, notices)
+	}
+	notices, err = ReconcileSnapshot(ctx, db, project.ID, snapshot, now.Add(AgentAbsentGrace-time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err = db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.State != store.StateWorking || len(notices) != 0 {
+		t.Fatalf("grouped Rider was marked lost before the grace period: task=%#v notices=%#v err=%v", updated, notices, err)
+	}
+	notices, err = ReconcileSnapshot(ctx, db, project.ID, snapshot, now.Add(AgentAbsentGrace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err = db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.State != store.StateLost || updated.WorktreePath != task.WorktreePath || len(notices) != 1 || notices[0].Kind != "task_lost" {
+		t.Fatalf("persistently missing grouped Rider was not marked lost: task=%#v notices=%#v err=%v", updated, notices, err)
 	}
 }
 

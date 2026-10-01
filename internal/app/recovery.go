@@ -207,9 +207,16 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		return 0, err
 	}
 	serverRestarted := previousGeneration != "" && snapshot.ServerStartedAt != "" && previousGeneration != snapshot.ServerStartedAt
-	tasks, err := db.LiveTasks(ctx, project.ID)
+	allTasks, err := db.Tasks(ctx, project.ID, false)
 	if err != nil {
 		return 0, err
+	}
+	// LiveTasks omits lost Riders. Include Lost while keeping failed Tasks out of recovery.
+	tasks := make([]store.Task, 0, len(allTasks))
+	for _, task := range allTasks {
+		if task.State != store.StateFailed {
+			tasks = append(tasks, task)
+		}
 	}
 	for _, task := range tasks {
 		if taskNeedsRestartRecovery(task, snapshot) {
@@ -284,6 +291,10 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 			recoveryComplete = true
 			return 0, nil
 		}
+		// Use the confirmed post-close snapshot below. The initial snapshot can
+		// still contain the workspace while Herdr is finishing close_group.
+		snapshot = fresh
+		project = current
 	}
 	if _, err := os.Stat(project.Root); err != nil {
 		return 0, axi.Failure("project_missing", fmt.Sprintf("Project %s path no longer exists: %s", project.Name, project.Root), false, "Run `posse project move "+project.Name+" <new-root>`")
@@ -308,7 +319,9 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if err != nil {
 			return len(recovered), err
 		}
-		if task.State != beforeRestart.State {
+		// A failed Signal can arrive after enumeration. Lost Riders remain
+		// recoverable, but Failed Tasks still require an explicit relaunch.
+		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
 		}
 		if _, err := s.relaunchTask(ctx, db, home, project, cfg, task, ""); err != nil {

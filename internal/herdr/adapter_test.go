@@ -144,6 +144,38 @@ func TestIsolatedTestEnvironmentRedirectsAllWritableState(t *testing.T) {
 	}
 }
 
+func TestIsolatedTestEnvironmentDisablesHerdrNetworkUpdates(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", TestRootName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	configPath, err := WriteIsolatedConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := IsolatedTestEnvironment(root)
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, setting := range []string{"version_check", "manifest_check"} {
+		updated := strings.Replace(string(config), setting+" = false", setting+" = true", 1)
+		if updated == string(config) {
+			t.Fatalf("isolated Herdr config omitted %s", setting)
+		}
+		if err := os.WriteFile(configPath, []byte(updated), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ValidateIsolatedEnvironment(env); err == nil {
+			t.Errorf("accepted enabled Herdr %s network check", setting)
+		}
+		if err := os.WriteFile(configPath, config, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestSnapshotJoinsPaneAndAgentStatus(t *testing.T) {
 	fake := NewFake()
 	fake.Results["session.snapshot"] = json.RawMessage(`{
