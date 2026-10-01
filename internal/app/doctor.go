@@ -149,6 +149,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("Claude Code lowkey", "warn", versionErr.Error(), "Check the Claude Code installation")
 		}
 	}
+	checks = append(checks, playbookSizeWarnings(home, registeredProjects)...)
 	if kindConfigErr != nil {
 		addCheck("agent configuration", "warn", kindConfigErr.Error(), "Fix the agent settings in config.toml")
 	}

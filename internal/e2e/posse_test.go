@@ -144,6 +144,20 @@ esac
 	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	for _, playbook := range []struct{ path, content string }{
+		{"playbook/lead.md", "User lead marker: discuss the workflow before dispatch.\n"},
+		{"playbook/rider.md", "User rider marker: verify from the User layer.\n"},
+		{"projects/shop/playbook/lead.md", "Project lead marker: apply the Project workflow.\n"},
+		{"projects/shop/playbook/rider.md", "Project rider marker: verify from the Project layer.\n"},
+	} {
+		path := filepath.Join(root, "posse", playbook.path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(playbook.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	repo := filepath.Join(root, "repo")
 	remote := filepath.Join(root, "remote.git")
 	initRepository(t, repo, remote, env)
@@ -284,6 +298,31 @@ esac
 	if got := runPosse(t, posseBinary, repo, leadEnv, "lowkey", "off"); !strings.Contains(got, "lowkey: off") {
 		t.Fatalf("isolated Lead did not disable lowkey mode: %s", got)
 	}
+	leadInstructions := runPosse(t, posseBinary, repo, leadEnv, "lead")
+	userLeadIndex := strings.Index(leadInstructions, "User lead marker")
+	projectLeadIndex := strings.Index(leadInstructions, "Project lead marker")
+	if userLeadIndex < 0 || projectLeadIndex <= userLeadIndex {
+		t.Fatalf("posse lead omitted or misordered layered Lead Playbooks: %s", leadInstructions)
+	}
+	leadPromptFile, err := os.ReadFile(filepath.Join(home, "projects", "shop", "lead.md"))
+	if err != nil || !strings.Contains(string(leadPromptFile), "User lead marker") || !strings.Contains(string(leadPromptFile), "Project lead marker") {
+		t.Fatalf("Lead startup instructions omitted its layered Playbook: %s, %v", leadPromptFile, err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "projects", "shop", "playbook", "lead.md"), []byte("Updated Project lead marker.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updatedLeadInstructions := runPosse(t, posseBinary, repo, leadEnv, "lead")
+	if !strings.Contains(updatedLeadInstructions, "Updated Project lead marker") || strings.Contains(updatedLeadInstructions, "Project lead marker: apply") {
+		t.Fatalf("posse lead did not reload the current Playbook: %s", updatedLeadInstructions)
+	}
+	playbookOutput := runPosse(t, posseBinary, repo, leadEnv, "playbook", "show")
+	if !strings.Contains(playbookOutput, "User rider marker") || !strings.Contains(playbookOutput, "Project rider marker") || strings.Index(playbookOutput, "User rider marker") >= strings.Index(playbookOutput, "Project rider marker") {
+		t.Fatalf("playbook show omitted or misordered effective sources: %s", playbookOutput)
+	}
+	pathOutput := runPosse(t, posseBinary, repo, leadEnv, "playbook", "path", "rider")
+	if !strings.Contains(pathOutput, filepath.Join(home, "playbook", "rider.md")) || !strings.Contains(pathOutput, filepath.Join(home, "projects", "shop", "playbook", "rider.md")) {
+		t.Fatalf("playbook path omitted its User or Project source: %s", pathOutput)
+	}
 	brief := filepath.Join(root, "ship.md")
 	briefText := "---\ntype: ship\ntitle: E2E change\ndone_when: commit exists\n---\nCreate one committed file.\n"
 	if err := os.WriteFile(brief, []byte(briefText), 0o600); err != nil {
@@ -395,7 +434,7 @@ esac
 		t.Fatal(err)
 	}
 	deliveredLaunch, err := os.ReadFile(launchRead)
-	if err != nil || !bytes.Equal(generatedLaunch, deliveredLaunch) || !strings.Contains(string(deliveredLaunch), "Write in English in a neutral voice.") || !strings.Contains(string(deliveredLaunch), "posse holler done") || !strings.Contains(string(deliveredLaunch), "as background commands and never poll them") || !strings.Contains(string(deliveredLaunch), "Do not wait for PR CI") || !strings.Contains(string(deliveredLaunch), "never touch panes, tabs or workspaces you did not create") {
+	if err != nil || !bytes.Equal(generatedLaunch, deliveredLaunch) || !strings.Contains(string(deliveredLaunch), "Write in English in a neutral voice.") || !strings.Contains(string(deliveredLaunch), "posse holler done") || !strings.Contains(string(deliveredLaunch), "as background commands and never poll them") || !strings.Contains(string(deliveredLaunch), "Do not wait for PR CI") || !strings.Contains(string(deliveredLaunch), "never touch panes, tabs or workspaces you did not create") || !strings.Contains(string(deliveredLaunch), "User rider marker") || strings.Index(string(deliveredLaunch), "Project rider marker") <= strings.Index(string(deliveredLaunch), "User rider marker") || strings.Contains(string(deliveredLaunch), "User lead marker") {
 		t.Fatalf("Worker did not receive the generated launch.md contract: err=%v generated=%q delivered=%q", err, generatedLaunch, deliveredLaunch)
 	}
 	workerArgs, err := os.ReadFile(workerArgsLog)
@@ -783,6 +822,17 @@ esac
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	thirdLaunchPath := filepath.Join(home, "projects", "shop", "tasks", "t3", "launch.md")
+	thirdLaunchSnapshot, err := os.ReadFile(thirdLaunchPath)
+	if err != nil || !strings.Contains(string(thirdLaunchSnapshot), "User rider marker") || !strings.Contains(string(thirdLaunchSnapshot), "Project rider marker") {
+		t.Fatalf("recovery Rider did not receive a layered Playbook snapshot: %s, %v", thirdLaunchSnapshot, err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "playbook", "rider.md"), []byte("Updated User rider instructions.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "projects", "shop", "playbook", "rider.md"), []byte("Updated Project rider instructions.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if !waitForCondition(30*time.Second, func() bool {
 		_, statErr := os.Stat(filepath.Join(thirdTask.WorktreePath, "e2e-worker-t3.txt"))
 		return statErr == nil
@@ -931,6 +981,10 @@ esac
 	}
 	if recoveryNotices != 1 {
 		t.Fatalf("recovery digest Notice count = %d, want one: %#v; recovery=%s", recoveryNotices, notices, recoveryOutput)
+	}
+	recoveredLaunchSnapshot, err := os.ReadFile(thirdLaunchPath)
+	if err != nil || !bytes.Equal(recoveredLaunchSnapshot, thirdLaunchSnapshot) || strings.Contains(string(recoveredLaunchSnapshot), "Updated User rider instructions") || strings.Contains(string(recoveredLaunchSnapshot), "Updated Project rider instructions") {
+		t.Fatalf("Rider Playbook snapshot changed during relaunch: before=%q after=%q err=%v", thirdLaunchSnapshot, recoveredLaunchSnapshot, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

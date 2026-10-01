@@ -57,6 +57,10 @@ func (s *Service) commands() *axi.Command {
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
 		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Lookout; nothing restarts them until `posse up`.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
+		{Name: "playbook", Summary: "Inspect layered User and Project Playbooks.", Subcommands: []*axi.Command{
+			{Name: "show", Usage: "$ playbook show [--project <name>]", Summary: "Show effective Lead and Rider Playbooks with their sources.", Handler: s.playbookShow},
+			{Name: "path", Usage: "$ playbook path <lead|rider> [--project <name>]", Summary: "Show the source paths for a Playbook role.", Handler: s.playbookPath},
+		}},
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "roster", Usage: "$ roster [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
 		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, its Signals and transitions.", Handler: s.show},

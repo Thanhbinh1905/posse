@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
@@ -283,10 +284,15 @@ func TestBuiltInLeadInstructionsStayWithinBudget(t *testing.T) {
 				var injected string
 				if kind == "codex" {
 					for _, arg := range launch.Args {
-						if value, ok := strings.CutPrefix(arg, "developer_instructions="); ok {
-							injected = value
-							break
+						if !strings.HasPrefix(arg, "developer_instructions=") {
+							continue
 						}
+						var values map[string]string
+						if _, err := toml.Decode(arg, &values); err != nil {
+							t.Fatal(err)
+						}
+						injected = values["developer_instructions"]
+						break
 					}
 				} else {
 					contents, err := os.ReadFile(filepath.Join(home, "projects", project.Name, "lead.md"))
@@ -376,7 +382,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 	}
 
 	codex := launch("codex")
-	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=You are the Lead for Project shop.") || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
+	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=\"You are the Lead for Project shop.") || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
 		t.Fatalf("codex launch = %#v", codex)
 	}
 	for _, rule := range []string{"posse queues each batch of Notices", noPollRule, "End your turn and let that message wake you."} {

@@ -129,3 +129,7 @@ _Avoid_: Routing rule, policy
 **Identity**:
 The User-chosen name, persona and language the Lead uses when talking to the User; it never appears in anything another agent reads.
 _Avoid_: Alias, nickname
+
+**Playbook**:
+User-authored workflow instructions for a Lead or Rider, layered from `<POSSE_HOME>/playbook/` and `<POSSE_HOME>/projects/<project>/playbook/`. Project instructions follow User instructions; Playbooks supplement built-in rules and cannot override them.
+_Avoid_: Workflow framework, policy
