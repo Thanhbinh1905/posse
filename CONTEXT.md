@@ -131,5 +131,5 @@ The User-chosen name, persona and language the Lead uses when talking to the Use
 _Avoid_: Alias, nickname
 
 **Playbook**:
-User-authored workflow instructions for a Lead or Rider, layered from `<POSSE_HOME>/playbook/` and `<POSSE_HOME>/projects/<project>/playbook/`. Project instructions follow User instructions; Playbooks supplement built-in rules and cannot override them.
+User-authored workflow instructions for a Lead or Rider, layered from `<POSSE_HOME>/playbook/` and `<POSSE_HOME>/projects/<project>/playbook/`. Project instructions follow User instructions; Playbooks supplement built-in rules and cannot override them. The User can write them with `posse playbook set`; a Lead's write requires User consent recorded with the quote, and Riders cannot write them.
 _Avoid_: Workflow framework, policy
