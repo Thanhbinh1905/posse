@@ -89,6 +89,21 @@ func TestIssueReferenceScopeMatchesProjectAndShipMembers(t *testing.T) {
 	}
 }
 
+func TestHistoricalMultiIssueLinksAreRestoredWhenAdoptingRequest(t *testing.T) {
+	brief, err := dispatch.ParseHistoricalBriefText("---\ntype: ship\ntitle: Historical workspace issues\ndone_when: old Task compatibility\nissues: [worker#12, api#14]\nrefs: [worker#16, api#18]\n---\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerBody, changed := appendMissingIssueLinks("Existing PR description", brief, "worker")
+	if !changed || workerBody != "Existing PR description\n\n## Issue Link\n\nCloses #12\nRefs #16\n" {
+		t.Fatalf("adopted worker PR links = %q, changed=%v", workerBody, changed)
+	}
+	apiBody, changed := appendMissingIssueLinks("Existing MR description", brief, "api")
+	if !changed || apiBody != "Existing MR description\n\n## Issue Link\n\nCloses #14\nRefs #18\n" {
+		t.Fatalf("adopted api MR links = %q, changed=%v", apiBody, changed)
+	}
+}
+
 func TestWorkspacePRIssueLinksUseMemberIssueNumbers(t *testing.T) {
 	brief, err := dispatch.ParseBriefText("---\ntype: ship\ntitle: Update workspace issues\ndone_when: member links are scoped\nticket: worker#12\nrepos: [worker, api]\nrefs: [worker#16]\n---\nUpdate the workspace.\n")
 	if err != nil {

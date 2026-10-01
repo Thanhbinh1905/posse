@@ -248,8 +248,9 @@ func ticketReferences(brief dispatch.Brief) []dispatch.IssueRef {
 }
 
 func issueLinkLines(brief dispatch.Brief, member string) []string {
-	lines := make([]string, 0, 1+len(brief.Refs))
-	for _, ref := range ticketReferences(brief) {
+	closingIssues := issueReferences(brief)
+	lines := make([]string, 0, len(closingIssues)+len(brief.Refs))
+	for _, ref := range closingIssues {
 		if ref.Repository == member {
 			lines = append(lines, "Closes #"+strconv.Itoa(ref.Number))
 		}
