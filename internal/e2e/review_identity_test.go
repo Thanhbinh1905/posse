@@ -304,6 +304,64 @@ func TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch(t *testing.T) 
 	}
 }
 
+func TestReviewRejectsCodexTOMLModelLiteralAndCommentsAtSpawnAndRelaunch(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		profile   string
+		modelArgs []string
+	}{
+		{name: "triple literal string", profile: "''model-a''", modelArgs: []string{"-c", "model='{model}'"}},
+		{name: "literal string with inline comment", profile: "'model-a'#comment", modelArgs: []string{"-c", "model={model}"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := reviewIdentityFixture(t)
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.kind", "codex")
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
+			if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+				t.Fatalf("author spawn: code=%d %s", code, output)
+			}
+
+			profileModel, err := json.Marshal(test.profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", string(profileModel))
+			modelArgs, err := json.Marshal(test.modelArgs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", string(modelArgs))
+			code, output := rideReviewIdentityTask(t, fixture, "Rejected TOML Review", "reviewer", "t1")
+			requireReviewIdentityRefusal(t, code, output)
+			tasks, err := fixture.db.Tasks(context.Background(), fixture.project.ID, true)
+			if err != nil || len(tasks) != 1 {
+				t.Fatalf("refused spawn allocated a Review Task: tasks=%d err=%v", len(tasks), err)
+			}
+
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", `"model-c"`)
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
+			if code, output := rideReviewIdentityTask(t, fixture, "Independent reviewer", "reviewer", "t1"); code != 0 {
+				t.Fatalf("independent review spawn: code=%d %s", code, output)
+			}
+			reviewer := fixture.mustTask(t, "t2")
+			before, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
+			if err != nil || len(before) != 1 {
+				t.Fatalf("Review launch identities = %#v, err=%v", before, err)
+			}
+
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", string(profileModel))
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", string(modelArgs))
+			code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
+			requireReviewIdentityRefusal(t, code, output)
+			after, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
+			if err != nil || len(after) != len(before) {
+				t.Fatalf("refused relaunch recorded another launch: before=%#v after=%#v err=%v", before, after, err)
+			}
+		})
+	}
+}
+
 func TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault(t *testing.T) {
 	codex, err := exec.LookPath("codex")
 	if err != nil {

@@ -2,8 +2,9 @@ package app
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 type launchArgAnalysis struct {
@@ -317,7 +318,7 @@ func classifyCodexConfig(value string, result *launchArgAnalysis) bool {
 	raw = strings.TrimSpace(raw)
 	switch key {
 	case "model":
-		if model, err := unquoteConfigValue(raw); err == nil && model != "" {
+		if model, ok := codexModelValue(raw); ok {
 			result.models = append(result.models, model)
 		} else {
 			result.models = append(result.models, "<unknown>")
@@ -334,17 +335,22 @@ func classifyCodexConfig(value string, result *launchArgAnalysis) bool {
 	}
 }
 
-func unquoteConfigValue(value string) (string, error) {
-	if strings.HasPrefix(value, "\"") {
-		return strconv.Unquote(value)
+func codexModelValue(raw string) (string, bool) {
+	var parsed map[string]any
+	if _, err := toml.Decode("value = "+raw, &parsed); err == nil {
+		if model, ok := parsed["value"].(string); ok && model != "" {
+			return model, true
+		}
+		return "", false
 	}
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		return value[1 : len(value)-1], nil
+
+	// Codex also accepts a bare model name, which is not a TOML value. Keep
+	// that form narrow so comment markers and quoting syntax cannot be data.
+	bare := strings.TrimSpace(raw)
+	if bare == "" || strings.ContainsAny(bare, " \t\r\n#'\"[]=,{}") {
+		return "", false
 	}
-	if value == "" || strings.ContainsAny(value, " \t") {
-		return "", fmt.Errorf("ambiguous config value")
-	}
-	return value, nil
+	return bare, true
 }
 
 func configuredModelFromLaunchArgs(profileModel, kind string, args []string) (string, bool) {
