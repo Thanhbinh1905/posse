@@ -452,7 +452,7 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	}
 	launchIdentities, err := observer.TaskLaunchIdentities(ctx, taskID)
 	wantLaunchIdentities := []store.TaskLaunchIdentity{
-		{TaskID: taskID, LaunchNumber: 1, Profile: "fast", ConfiguredModel: "sonnet", ModelKnown: true},
+		{TaskID: taskID, LaunchNumber: 1, Profile: "fast", ConfiguredModel: "sonnet", ModelKnown: false},
 		{TaskID: taskID, LaunchNumber: 2, Profile: "codex-fast", ConfiguredModel: "gpt-5", ModelKnown: true},
 		{TaskID: taskID, LaunchNumber: 3, Profile: "codex-fast", ConfiguredModel: "gpt-5", ModelKnown: true},
 	}

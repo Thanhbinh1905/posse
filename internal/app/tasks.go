@@ -197,7 +197,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		if !found {
 			return axi.Failure("config_invalid", "Review Task Profile uses unknown agent kind "+resolution.Resolved.Kind, false)
 		}
-		reviewLaunchIdentity = configuredLaunchIdentity(resolution.Profile, resolution.Resolved, kindConfig)
+		reviewLaunchIdentity = configuredLaunchIdentity(resolution.Profile, resolution.Resolved, kindConfig, workerAgentArgs(resolution.Resolved, kindConfig, ""))
 		launchRefusal := reviewSessionOverrideReason(resolution.Resolved.Kind, workerAgentArgs(resolution.Resolved, kindConfig, ""))
 		if check := compareReviewIdentity(authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity); !check.Eligible || launchRefusal != "" {
 			return reviewIdentityFailure(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity, launchRefusal)
@@ -375,11 +375,12 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			return axi.Failure("prepare_failed", prepareErr.Error(), false, "Inspect the Rider worktree and config before retrying")
 		}
 	}
+	argsForAgent := workerAgentArgs(resolution.Resolved, cfg.Kinds[resolution.Resolved.Kind], "")
+	launchIdentity := configuredLaunchIdentity(resolution.Profile, resolution.Resolved, cfg.Kinds[resolution.Resolved.Kind], argsForAgent)
 	launch := 0
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.sequence", func() error {
 		var launchErr error
-		identity := configuredLaunchIdentity(resolution.Profile, resolution.Resolved, cfg.Kinds[resolution.Resolved.Kind])
-		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx.Context, taskID, resolution.Profile, identity.ConfiguredModel, identity.ModelKnown)
+		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx.Context, taskID, resolution.Profile, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown)
 		return launchErr
 	})
 	if err != nil {
@@ -404,8 +405,6 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	taskHome := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(sequence))
 	briefPath := filepath.Join(taskHome, "brief.md")
 	launchPath := filepath.Join(taskHome, "launch.md")
-	profile := resolution.Resolved
-	argsForAgent := workerAgentArgs(profile, kindConfig, "")
 	if err := s.runIntentStep(ctx.Context, db, intent, "brief.write", func() error { return writeFile(briefPath, briefData) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
@@ -1480,7 +1479,12 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		return failure(axi.Failure("config_invalid", "Task Profile uses unknown agent kind "+kind, false))
 	}
 	kindChanged := kind != taskKind(cfg, task)
-	launchIdentity := configuredLaunchIdentity(profileName, profile, kindConfig)
+	session := ""
+	if !kindChanged {
+		session = agentSessionID(kind, task.AgentSession)
+	}
+	startArgs := workerAgentArgs(profile, kindConfig, session)
+	launchIdentity := configuredLaunchIdentity(profileName, profile, kindConfig, startArgs)
 	if task.Type == "review" {
 		if task.ReviewsTaskID == 0 {
 			return failure(axi.Failure("review_identity_ineligible", "Review Task has no recorded Ship Task", false))
@@ -1503,11 +1507,7 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 		authorHistoryKnown := author.Launches > 0 && launchHistoryComplete(author, authorLaunches)
 		reviewerHistoryKnown := launchHistoryComplete(task, reviewerLaunches)
 		launchRefusal := reviewSessionOverrideReason(kind, workerAgentArgs(profile, kindConfig, ""))
-		resumeSession := ""
-		if !kindChanged {
-			resumeSession = agentSessionID(kind, task.AgentSession)
-		}
-		if resumeRefusal := reviewResumeArgsRefusal(kindConfig.ResumeArgs, resumeSession); resumeRefusal != "" {
+		if resumeRefusal := reviewResumeArgsRefusal(kind, kindConfig.ResumeArgs, session); resumeRefusal != "" {
 			if launchRefusal != "" {
 				launchRefusal += "; "
 			}
@@ -1606,11 +1606,6 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	}); err != nil {
 		return failure(err)
 	}
-	session := ""
-	if !kindChanged {
-		session = agentSessionID(kind, task.AgentSession)
-	}
-	startArgs := workerAgentArgs(profile, kindConfig, session)
 	workerName := agentName(project.Name, task.Seq, launch)
 	if err := track("agent.record", func() error {
 		return db.UpdateTaskLaunch(ctx, task.ID, task.WorktreePath, pane.WorkspaceID, pane.PaneID, task.PaneLabel, workerName)

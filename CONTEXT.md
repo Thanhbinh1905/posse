@@ -119,7 +119,7 @@ A named Worker configuration, or an implicit resolution to the Lead's agent kind
 _Avoid_: Preset, agent config
 
 **Launch Identity Record**:
-A Task's launch number, Profile name and configured model value or unknown status, persisted with its Task id; it describes only what Posse configured for that launch.
+A Task's launch number, Profile name and configured model value or unknown status, derived from that launch's arguments and persisted with its Task id.
 _Avoid_: Runtime identity, provider identity
 
 **Dispatch Rule**:

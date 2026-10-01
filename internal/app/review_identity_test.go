@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+const t144AuthorSession = "99e0a111-1ad9-4010-a1a1-1e2944973bce"
 
 func TestConfiguredModelIdentityFailsClosedOnOverrides(t *testing.T) {
 	kind := config.Kind{ModelArgs: []string{"--model", "{model}"}}
@@ -28,9 +31,9 @@ func TestConfiguredModelIdentityFailsClosedOnOverrides(t *testing.T) {
 		{name: "separate model override", profile: config.Profile{Model: "model-a", Args: []string{"--model", "model-b"}}, kind: kind, wantModel: "model-a"},
 		{name: "joined model override", profile: config.Profile{Model: "model-a", Args: []string{"--model=model-b"}}, kind: kind, wantModel: "model-a"},
 		{name: "Codex alias override", profile: config.Profile{Model: "model-a", Args: []string{"-m", "model-b"}}, kind: kind, wantModel: "model-a"},
-		{name: "quoted config override", profile: config.Profile{Model: "model-a", Args: []string{"-c", `model="model-a"`}}, kind: config.Kind{ModelArgs: []string{"-c", `model="{model}"`}}, wantModel: "model-a"},
+		{name: "quoted config override", profile: config.Profile{Kind: "codex", Model: "model-a", Args: []string{"-c", `model="model-a"`}}, kind: config.Kind{ModelArgs: []string{"-c", `model="{model}"`}}, wantModel: "model-a"},
 		{name: "malformed model alias", profile: config.Profile{Model: "model-a", Args: []string{"--model"}}, kind: kind, wantModel: "model-a"},
-		{name: "effort setting does not override model", profile: config.Profile{Model: "model-a"}, kind: config.Kind{ModelArgs: kind.ModelArgs, EffortArgs: []string{"-c", "model_reasoning_effort={effort}"}}, wantModel: "model-a", wantKnown: true},
+		{name: "effort setting does not override model", profile: config.Profile{Kind: "codex", Model: "model-a"}, kind: config.Kind{ModelArgs: []string{"-c", `model="{model}"`}, EffortArgs: []string{"-c", "model_reasoning_effort={effort}"}}, wantModel: "model-a", wantKnown: true},
 		{name: "kind auto arguments can override model", profile: config.Profile{Model: "model-a"}, kind: config.Kind{ModelArgs: kind.ModelArgs, AutoApproveArgs: []string{"--model", "model-b"}}, wantModel: "model-a"},
 		{name: "model template must set one model", profile: config.Profile{Model: "model-a"}, kind: config.Kind{ModelArgs: []string{"--model"}}, wantModel: "model-a"},
 		{name: "model template cannot replace its own value", profile: config.Profile{Model: "model-a"}, kind: config.Kind{ModelArgs: []string{"--model", "{model}", "--model", "hardcoded"}}, wantModel: "model-a"},
@@ -38,9 +41,70 @@ func TestConfiguredModelIdentityFailsClosedOnOverrides(t *testing.T) {
 		{name: "override without configured model", profile: config.Profile{Args: []string{"--model", "model-b"}}, kind: kind, wantModel: ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			model, known := configuredModelIdentity(test.profile, test.kind)
+			kindName := test.profile.Kind
+			if kindName == "" {
+				kindName = "claude"
+			}
+			model, known := configuredModelFromLaunchArgs(test.profile.Model, kindName, workerAgentArgs(test.profile, test.kind, ""))
 			if model != test.wantModel || known != test.wantKnown {
 				t.Fatalf("configured model = %q known=%t, want %q known=%t", model, known, test.wantModel, test.wantKnown)
+			}
+		})
+	}
+}
+
+func TestLaunchArgumentAnalysisClassifiesPerHarnessSpellings(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		kind         string
+		args         []string
+		wantModels   []string
+		wantSessions []string
+		wantUnknown  bool
+	}{
+		{name: "Claude attached resume", kind: "claude", args: []string{"-r" + t144AuthorSession}, wantSessions: []string{t144AuthorSession}},
+		{name: "Claude clustered print and resume", kind: "claude", args: []string{"-pr" + t144AuthorSession}, wantSessions: []string{t144AuthorSession}},
+		{name: "Claude attached long resume", kind: "claude", args: []string{"--resume=" + t144AuthorSession}, wantSessions: []string{t144AuthorSession}},
+		{name: "missing model value does not swallow next option", kind: "claude", args: []string{"--model", "-r" + t144AuthorSession}, wantModels: []string{"<unknown>"}, wantSessions: []string{t144AuthorSession}},
+		{name: "OpenCode continue and attached session cluster", kind: "opencode", args: []string{"-cs", t144AuthorSession}, wantSessions: []string{"", t144AuthorSession}},
+		{name: "Codex attached config model", kind: "codex", args: []string{`-cmodel="model-a"`}, wantModels: []string{"model-a"}},
+		{name: "Codex separated config model", kind: "codex", args: []string{"-c", `model="model-a"`}, wantModels: []string{"model-a"}},
+		{name: "Codex effort config is not a model", kind: "codex", args: []string{"-c", "model_reasoning_effort=high"}},
+		{name: "unclassified Codex config fails closed", kind: "codex", args: []string{"-c", "model_provider=local"}, wantUnknown: true},
+		{name: "unknown model alias fails closed", kind: "claude", args: []string{"--model-id", "model-a"}, wantModels: []string{"<unclassified>"}, wantUnknown: true},
+		{name: "Unclassified option fails closed", kind: "claude", args: []string{"--unknown-session-option", "value"}, wantUnknown: true},
+		{name: "Unclassified positional fails closed", kind: "pi", args: []string{"custom-session"}, wantUnknown: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analysis := analyzeLaunchArgs(test.kind, test.args)
+			if !reflect.DeepEqual(analysis.models, test.wantModels) || !reflect.DeepEqual(analysis.sessions, test.wantSessions) || (len(analysis.unknown) > 0) != test.wantUnknown {
+				t.Fatalf("analyzeLaunchArgs(%q, %#v) = %#v", test.kind, test.args, analysis)
+			}
+		})
+	}
+}
+
+func TestLaunchIdentityIncludesRenderedResumeArguments(t *testing.T) {
+	for _, test := range []struct {
+		kindName string
+		kind     config.Kind
+		resume   []string
+	}{
+		{kindName: "claude", kind: config.Kind{ModelArgs: []string{"--model", "{model}"}}, resume: []string{"--resume", "{session}", "--model", "model-b"}},
+		{kindName: "codex", kind: config.Kind{ModelArgs: []string{"-c", `model="{model}"`}}, resume: []string{"resume", "{session}", "-c", `model="model-b"`}},
+		{kindName: "pi", kind: config.Kind{ModelArgs: []string{"--model", "{model}"}}, resume: []string{"--session", "{session}", "--model", "model-b"}},
+		{kindName: "opencode", kind: config.Kind{ModelArgs: []string{"--model", "{model}"}}, resume: []string{"--session", "{session}", "--model", "model-b"}},
+	} {
+		t.Run(test.kindName, func(t *testing.T) {
+			profile := config.Profile{Kind: test.kindName, Model: "model-a"}
+			test.kind.ResumeArgs = test.resume
+			initial := configuredLaunchIdentity("author", profile, test.kind, workerAgentArgs(profile, test.kind, ""))
+			if !initial.ModelKnown || initial.ConfiguredModel != "model-a" {
+				t.Fatalf("initial launch identity = %#v, want known model-a", initial)
+			}
+			relaunch := configuredLaunchIdentity("author", profile, test.kind, workerAgentArgs(profile, test.kind, "author-session"))
+			if relaunch.ModelKnown {
+				t.Fatalf("relaunch ignored its rendered model override: %#v", relaunch)
 			}
 		})
 	}
@@ -63,6 +127,7 @@ func TestReviewSessionOverridesFailClosed(t *testing.T) {
 		{name: "Pi explicit session", kind: "pi", args: []string{"--session", "author-session"}, want: true},
 		{name: "Codex model config is not session selection", kind: "codex", args: []string{"-c", `model="model-a"`}},
 		{name: "ordinary model argument", kind: "claude", args: []string{"--model", "model-a"}},
+		{name: "unknown profile argument", kind: "claude", args: []string{"--unknown-option", "value"}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := reviewSessionOverrideReason(test.kind, test.args) != ""
@@ -76,20 +141,22 @@ func TestReviewSessionOverridesFailClosed(t *testing.T) {
 func TestReviewResumeArgsMustUsePosseSessionPlaceholder(t *testing.T) {
 	for _, test := range []struct {
 		name string
+		kind string
 		args []string
 		want bool
 	}{
-		{name: "no configured resume arguments", want: true},
-		{name: "explicit session flag", args: []string{"--resume", "{session}"}, want: true},
-		{name: "Codex resume subcommand", args: []string{"resume", "{session}"}, want: true},
-		{name: "joined session flag", args: []string{"--session={session}"}, want: true},
-		{name: "continue selects unknown session", args: []string{"--continue"}},
-		{name: "literal session id", args: []string{"--resume", "author-session"}},
-		{name: "second literal selector", args: []string{"--resume", "{session}", "--session-id", "author-session"}},
+		{name: "no configured resume arguments", kind: "claude", want: true},
+		{name: "explicit session flag", kind: "claude", args: []string{"--resume", "{session}"}, want: true},
+		{name: "Codex resume subcommand", kind: "codex", args: []string{"resume", "{session}"}, want: true},
+		{name: "joined session flag", kind: "opencode", args: []string{"--session={session}"}, want: true},
+		{name: "continue selects unknown session", kind: "claude", args: []string{"--continue"}},
+		{name: "literal session id", kind: "claude", args: []string{"--resume", "author-session"}},
+		{name: "second literal selector", kind: "claude", args: []string{"--resume", "{session}", "--session-id", "author-session"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := reviewResumeArgsUseOwnSession(test.args); got != test.want {
-				t.Fatalf("reviewResumeArgsUseOwnSession(%#v) = %t, want %t", test.args, got, test.want)
+			got := reviewResumeArgsRefusal(test.kind, test.args, "review-session") == ""
+			if got != test.want {
+				t.Fatalf("reviewResumeArgsRefusal(%q, %#v) safe=%t, want %t", test.kind, test.args, got, test.want)
 			}
 		})
 	}
@@ -109,7 +176,7 @@ func TestReviewResumeArgsRefuseUnknownSessionOrModelOverrides(t *testing.T) {
 		{name: "refuse model override", args: []string{"--resume", "{session}", "--model", "model-a"}, session: "review-session", want: "can override the Review Task model"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got := reviewResumeArgsRefusal(test.args, test.session)
+			got := reviewResumeArgsRefusal("claude", test.args, test.session)
 			if test.want == "" && got != "" || test.want != "" && !strings.Contains(got, test.want) {
 				t.Fatalf("reviewResumeArgsRefusal(%#v, %q) = %q, want containing %q", test.args, test.session, got, test.want)
 			}
@@ -222,7 +289,7 @@ func TestReviewRelaunchRejectsProfileResumeOverrideBeforeHerdr(t *testing.T) {
 	fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: reviewer.PaneID, WorkspaceID: reviewer.HerdrWorkspaceID, Label: reviewer.PaneLabel, Agent: "claude", AgentStatus: "working"})
 	_, err = fixture.service.relaunchTask(ctx, fixture.db, fixture.home, fixture.project, cfg, reviewer, "")
 	var refusal *axi.Error
-	if !errors.As(err, &refusal) || refusal.Code != "review_identity_ineligible" || !strings.Contains(refusal.Message, "session-selection option") {
+	if !errors.As(err, &refusal) || refusal.Code != "review_identity_ineligible" || !strings.Contains(refusal.Message, "session selector") {
 		t.Fatalf("Review relaunch with author session override was not refused: %v", err)
 	}
 	if len(fixture.fake.Calls) != 0 {

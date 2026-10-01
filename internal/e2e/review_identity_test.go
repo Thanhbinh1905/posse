@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,7 +35,7 @@ func reviewIdentityFixture(t *testing.T) *prLifecycleFixture {
 	} {
 		runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", setting[0], setting[1])
 	}
-	for _, kind := range []string{"claude", "codex"} {
+	for _, kind := range []string{"claude", "codex", "pi", "opencode"} {
 		script := "#!/bin/sh\n" +
 			"printf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$POSSE_TEST_ROOT/review-identity-args.log\"\n" +
 			"herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state idle >/dev/null 2>&1\n" +
@@ -102,6 +103,112 @@ func TestReviewRejectsExplicitAuthorSessionResume(t *testing.T) {
 		t.Logf("agent.start argument evidence:\n%s", args)
 	}
 	requireReviewIdentityRefusal(t, code, output)
+}
+
+func TestReviewRejectsAttachedSessionSelectors(t *testing.T) {
+	const authorSession = "99e0a111-1ad9-4010-a1a1-1e2944973bce"
+	for _, test := range []struct {
+		name string
+		kind string
+		args []string
+	}{
+		{name: "Claude attached resume", kind: "claude", args: []string{"-r" + authorSession}},
+		{name: "Claude clustered print and resume", kind: "claude", args: []string{"-pr" + authorSession}},
+		{name: "OpenCode clustered continue and session", kind: "opencode", args: []string{"-cs", authorSession}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := reviewIdentityFixture(t)
+			if test.kind != "claude" {
+				runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", test.kind)
+			}
+			if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+				t.Fatalf("author spawn: code=%d %s", code, output)
+			}
+			setReviewIdentityProfileArgs(t, fixture, "reviewer", test.args)
+			code, output := rideReviewIdentityTask(t, fixture, "Rejected attached", "reviewer", "t1")
+			requireReviewIdentityRefusal(t, code, output)
+			setReviewIdentityProfileArgs(t, fixture, "reviewer", nil)
+			if code, output := rideReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
+				t.Fatalf("initial independent review: code=%d %s", code, output)
+			}
+			setReviewIdentityProfileArgs(t, fixture, "reviewer", test.args)
+			code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
+			requireReviewIdentityRefusal(t, code, output)
+		})
+	}
+}
+
+func TestReviewResumeTemplateRejectsSecondSessionSelector(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	const authorSession = "99e0a111-1ad9-4010-a1a1-1e2944973bce"
+	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+		t.Fatalf("author spawn: code=%d %s", code, output)
+	}
+	if code, output := rideReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
+		t.Fatalf("initial independent review: code=%d %s", code, output)
+	}
+	review := fixture.mustTask(t, "t2")
+	if _, err := fixture.db.ExecContext(context.Background(), "UPDATE tasks SET agent_session=? WHERE id=?", `{"session_id":"review-session"}`, review.ID); err != nil {
+		t.Fatal(err)
+	}
+	resumeArgs, _ := json.Marshal([]string{"--resume", "{session}", "-r" + authorSession})
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.claude.resume_args", string(resumeArgs))
+	code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2")
+	requireReviewIdentityRefusal(t, code, output)
+}
+
+func TestReviewRejectsAttachedCodexModelConfig(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+		t.Fatalf("author spawn: code=%d %s", code, output)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-c","model=\"{model}\""]`)
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
+	setReviewIdentityProfileArgs(t, fixture, "reviewer", []string{`-cmodel="model-a"`})
+	code, output := rideReviewIdentityTask(t, fixture, "Attached config review", "reviewer", "t1")
+	requireReviewIdentityRefusal(t, code, output)
+	setReviewIdentityProfileArgs(t, fixture, "reviewer", nil)
+	if code, output := rideReviewIdentityTask(t, fixture, "Independent codex", "reviewer", "t1"); code != 0 {
+		t.Fatalf("initial independent review: code=%d %s", code, output)
+	}
+	setReviewIdentityProfileArgs(t, fixture, "reviewer", []string{`-cmodel="model-a"`})
+	code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
+	requireReviewIdentityRefusal(t, code, output)
+}
+
+func TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+		t.Fatalf("author spawn: code=%d %s", code, output)
+	}
+	author := fixture.mustTask(t, "t1")
+	if _, err := fixture.db.ExecContext(context.Background(), "UPDATE tasks SET agent_session=? WHERE id=?", `{"session_id":"author-session"}`, author.ID); err != nil {
+		t.Fatal(err)
+	}
+	resumeArgs, _ := json.Marshal([]string{"--resume", "{session}", "--model", "model-b"})
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.claude.resume_args", string(resumeArgs))
+	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t1"); code != 0 {
+		t.Fatalf("author relaunch: code=%d %s", code, output)
+	}
+	identities, err := fixture.db.TaskLaunchIdentities(context.Background(), author.ID)
+	if err != nil || len(identities) != 2 || identities[1].ModelKnown {
+		t.Fatalf("author relaunch identity = %#v, err=%v; want launch 2 model unknown", identities, err)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", "model-b")
+	code, output := rideReviewIdentityTask(t, fixture, "Resumed model review", "reviewer", "t1")
+	requireReviewIdentityRefusal(t, code, output)
+}
+
+func setReviewIdentityProfileArgs(t *testing.T, fixture *prLifecycleFixture, profile string, args []string) {
+	t.Helper()
+	if args == nil {
+		args = []string{}
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles."+profile+".args", string(encoded))
 }
 
 func TestReviewRejectsQuotedSameModelOverride(t *testing.T) {
