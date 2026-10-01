@@ -16,7 +16,7 @@ func TestDispatchWarnsForMissingAndClosedLinkedIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 	briefPath := filepath.Join(fixture.root, "linked-issues.md")
-	brief := "---\ntype: ship\ntitle: Fix linked issues\ndone_when: dispatch warns about issue state\nissues: [12]\nrefs: [13]\n---\nWork on the linked issues.\n"
+	brief := "---\ntype: ship\ntitle: Fix linked issues\ndone_when: dispatch warns about issue state\nticket: 12\nrefs: [13]\n---\nWork on the linked issues.\n"
 	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +28,22 @@ func TestDispatchWarnsForMissingAndClosedLinkedIssues(t *testing.T) {
 		if !strings.Contains(output, warning) {
 			t.Fatalf("dispatch omitted warning %q: %s", warning, output)
 		}
+	}
+}
+
+func TestDispatchRejectsMultipleClosingIssues(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"never\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	briefPath := filepath.Join(fixture.root, "multiple-issues.md")
+	brief := "---\ntype: ship\ntitle: Reject multiple issues\ndone_when: dispatch enforces one ticket\nissues: [12, 16]\n---\nDo the work.\n"
+	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output, _ := fixture.run("dispatch", "--brief", briefPath)
+	if code == 0 || !strings.Contains(output, "only one closing issue") {
+		t.Fatalf("dispatch accepted multiple closing issues: code=%d output=%s", code, output)
 	}
 }
 
@@ -54,7 +70,7 @@ func TestShowAndFullRosterDisplayIssueLinks(t *testing.T) {
 func TestIssueReferenceScopeMatchesProjectAndShipMembers(t *testing.T) {
 	workspace := store.Project{Kind: store.ProjectKindWorkspace}
 	targets := []repoTarget{{Name: "worker"}, {Name: "api"}}
-	brief, err := dispatch.ParseBriefText("---\ntype: ship\ntitle: Update issues\ndone_when: issue scope is valid\nrepos: [worker]\nissues: [worker#12]\n---\nUpdate the member.\n")
+	brief, err := dispatch.ParseBriefText("---\ntype: ship\ntitle: Update issues\ndone_when: issue scope is valid\nrepos: [worker]\nticket: worker#12\n---\nUpdate the member.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +90,7 @@ func TestIssueReferenceScopeMatchesProjectAndShipMembers(t *testing.T) {
 }
 
 func TestWorkspacePRIssueLinksUseMemberIssueNumbers(t *testing.T) {
-	brief, err := dispatch.ParseBriefText("---\ntype: ship\ntitle: Update workspace issues\ndone_when: member links are scoped\nissues: [worker#12, api#14]\nrefs: [worker#16]\n---\nUpdate the workspace.\n")
+	brief, err := dispatch.ParseBriefText("---\ntype: ship\ntitle: Update workspace issues\ndone_when: member links are scoped\nticket: worker#12\nrepos: [worker, api]\nrefs: [worker#16]\n---\nUpdate the workspace.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +99,7 @@ func TestWorkspacePRIssueLinksUseMemberIssueNumbers(t *testing.T) {
 		t.Fatalf("worker PR links = %q", workerBody)
 	}
 	apiBody := issueLinkBody(brief, "api")
-	if apiBody != "## Issue Link\n\nCloses #14\n" {
-		t.Fatalf("api PR links = %q", apiBody)
+	if apiBody != "" {
+		t.Fatalf("ticket was rendered outside its owning member: %q", apiBody)
 	}
 }
