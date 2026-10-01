@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,7 +171,7 @@ func TestForgeProbeCacheHasShortTTLAndInvalidatesOnConfigChange(t *testing.T) {
 		}
 	}
 	previousTTL := forgeProbeCacheTTL
-	forgeProbeCacheTTL = time.Second
+	forgeProbeCacheTTL = 10 * time.Second
 	t.Cleanup(func() { forgeProbeCacheTTL = previousTTL })
 
 	cfg := config.Config{}
@@ -196,7 +197,29 @@ func TestForgeProbeCacheHasShortTTLAndInvalidatesOnConfigChange(t *testing.T) {
 	if count := strings.Count(string(calls), "\n"); count != 4 {
 		t.Fatalf("cache did not reuse the same config result or invalidate after config change: %d calls\n%s", count, calls)
 	}
-	time.Sleep(1100 * time.Millisecond)
+	cachePath := filepath.Join(os.Getenv("POSSE_HOME"), forgeProbeCache)
+	cacheBytes, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diskCache forgeProbeDiskCache
+	if err := json.Unmarshal(cacheBytes, &diskCache); err != nil {
+		t.Fatal(err)
+	}
+	for key, entry := range diskCache.Entries {
+		entry.CheckedAt = time.Now().Add(-forgeProbeCacheTTL - time.Second)
+		diskCache.Entries[key] = entry
+	}
+	cacheBytes, err = json.Marshal(diskCache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, cacheBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forgeProbeState.Lock()
+	forgeProbeState.memory = map[string]forgeProbeCacheEntry{}
+	forgeProbeState.Unlock()
 	if _, err := cachedForgeProbe(context.Background(), root, "git.example", changed, "auto"); err != nil {
 		t.Fatal(err)
 	}
