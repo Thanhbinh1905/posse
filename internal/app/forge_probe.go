@@ -135,18 +135,34 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 		}
 
 		if entry.CheckedAt.IsZero() {
-			entry, _ = readForgeProbeCache(home, key, time.Now())
+			entry, _ = readForgeProbeCache(home, key)
+		}
+		if !forgeProbeCacheFresh(entry, time.Now()) {
+			entry = forgeProbeCacheEntry{}
 		}
 		outcome := entry.Outcome
 		var probeErr error
-		if !forgeProbeCacheFresh(entry, time.Now()) || !outcome.covers(mode) {
+		if !outcome.covers(mode) {
 			needed := missingForgeProbeMode(outcome, mode)
 			var probed forgeProbeOutcome
 			probed, probeErr = runForgeProbe(ctx, root, host, needed)
-			outcome = mergeForgeProbeOutcomes(outcome, probed)
 			if probeErr == nil {
-				entry = forgeProbeCacheEntry{CheckedAt: time.Now(), Outcome: outcome}
-				writeForgeProbeCache(home, key, entry)
+				// A still-fresh cache entry may expire while the missing CLI runs.
+				// Drop it before merging, then probe anything the request still lacks.
+				if !forgeProbeCacheFresh(entry, time.Now()) {
+					outcome = forgeProbeOutcome{}
+				}
+				outcome = mergeForgeProbeOutcomes(outcome, probed)
+				if !outcome.covers(mode) {
+					needed = missingForgeProbeMode(outcome, mode)
+					var remaining forgeProbeOutcome
+					remaining, probeErr = runForgeProbe(ctx, root, host, needed)
+					outcome = mergeForgeProbeOutcomes(outcome, remaining)
+				}
+				if probeErr == nil {
+					entry = forgeProbeCacheEntry{CheckedAt: time.Now(), Outcome: outcome}
+					writeForgeProbeCache(home, key, entry)
+				}
 			}
 		}
 
@@ -299,7 +315,7 @@ func forgeProbeCacheFresh(entry forgeProbeCacheEntry, now time.Time) bool {
 
 // readForgeProbeCache returns only fresh outcomes so a partial refresh cannot
 // merge with the unprobed portion of an expired result.
-func readForgeProbeCache(home, key string, now time.Time) (forgeProbeCacheEntry, bool) {
+func readForgeProbeCache(home, key string) (forgeProbeCacheEntry, bool) {
 	if home == "" {
 		return forgeProbeCacheEntry{}, false
 	}
@@ -312,7 +328,7 @@ func readForgeProbeCache(home, key string, now time.Time) (forgeProbeCacheEntry,
 		return forgeProbeCacheEntry{}, false
 	}
 	entry, ok := cache.Entries[key]
-	if !ok || !forgeProbeCacheFresh(entry, now) {
+	if !ok || !forgeProbeCacheFresh(entry, time.Now()) {
 		return forgeProbeCacheEntry{}, false
 	}
 	return entry, true

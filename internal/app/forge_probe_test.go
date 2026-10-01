@@ -331,6 +331,62 @@ exit "$POSSE_PROBE_EXIT"
 	}
 }
 
+func TestMemoryCacheEntryExpiringDuringPartialProbeIsDiscarded(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_HOME", filepath.Join(root, "posse"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	logPath := filepath.Join(root, "probe.log")
+	t.Setenv("POSSE_PROBE_LOG", logPath)
+	for _, cli := range []string{"glab", "gh"} {
+		script := `#!/bin/sh
+printf '%s\n' "${0##*/}" >> "$POSSE_PROBE_LOG"
+if [ "${0##*/}" = "gh" ]; then /bin/sleep 0.4; fi
+exit 1
+`
+		if err := os.WriteFile(filepath.Join(bin, cli), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousTTL := forgeProbeCacheTTL
+	forgeProbeCacheTTL = time.Second
+	t.Cleanup(func() { forgeProbeCacheTTL = previousTTL })
+	key, home, err := forgeProbeCacheKey("git.example", config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryKey := home + "\x00" + key
+	entry := forgeProbeCacheEntry{
+		CheckedAt: time.Now().Add(-700 * time.Millisecond),
+		Outcome:   forgeProbeOutcome{GitLabChecked: true, GitLabAuthenticated: true},
+	}
+	if !forgeProbeCacheFresh(entry, time.Now()) {
+		t.Fatal("fixture cache entry expired before the partial probe began")
+	}
+	forgeProbeState.Lock()
+	forgeProbeState.memory[memoryKey] = entry
+	forgeProbeState.Unlock()
+
+	outcome, err := cachedForgeProbe(context.Background(), root, "git.example", config.Config{}, "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.GitLabChecked || outcome.GitLabAuthenticated || !outcome.GitHubChecked {
+		t.Errorf("expired memory outcome was merged into the partial refresh: %+v", outcome)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(calls) != "gh\n" {
+		t.Errorf("expected only the requested current CLI probe, got %q", calls)
+	}
+}
+
 func TestForgeProbeTimeoutIsDistinctFromUnknownForge(t *testing.T) {
 	host := "git.example"
 	err := forgeProbeTimeoutError(host)
