@@ -47,7 +47,30 @@ func New(home string, adapter herdr.Adapter) *Service {
 func (s *Service) CLI() *axi.App {
 	root := s.commands()
 	s.guardWorkers(root, nil)
+	structureStoreErrors(root)
 	return &axi.App{Name: "posse", Root: root}
+}
+
+// Apply storage error classification at every command boundary, including
+// reconcile failures from preparation and failures after a Signal is recorded.
+func structureStoreErrors(command *axi.Command) {
+	if command.Handler != nil {
+		handler := command.Handler
+		command.Handler = func(ctx *axi.Context, args []string) error {
+			return normalizeCommandError(handler(ctx, args))
+		}
+	}
+	for _, subcommand := range command.Subcommands {
+		structureStoreErrors(subcommand)
+	}
+}
+
+func normalizeCommandError(err error) error {
+	var structured *axi.Error
+	if errors.As(err, &structured) || !store.IsBusy(err) {
+		return err
+	}
+	return axi.Failure("store_busy", err.Error(), true, "Retry the command after the store is available")
 }
 
 func (s *Service) commands() *axi.Command {
@@ -57,6 +80,11 @@ func (s *Service) commands() *axi.Command {
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
 		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Lookout; nothing restarts them until `posse up`.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
+		{Name: "playbook", Summary: "Inspect and update layered User and Project Playbooks.", Subcommands: []*axi.Command{
+			{Name: "show", Usage: "$ playbook show [--project <name>]", Summary: "Show effective Lead and Rider Playbooks with their sources.", Handler: s.playbookShow},
+			{Name: "path", Usage: "$ playbook path <lead|rider> [--project <name>]", Summary: "Show the source paths for a Playbook role.", Handler: s.playbookPath},
+			{Name: "set", Usage: "$ playbook set <lead|rider> --file <file> [--project <name>] [--user-approved <quote>]", Summary: "Write a Playbook atomically; a Lead needs a User quote.", Handler: s.playbookSet},
+		}},
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "roster", Usage: "$ roster [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
 		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, its Signals and transitions.", Handler: s.show},
@@ -260,6 +288,16 @@ func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Projec
 }
 
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectMode(ctx, db, project, true)
+}
+
+// Notice and inspection commands reconcile observations, but never start a
+// Rider, retry a launch Brief, or wait for a launch-capable recovery owner.
+func (s *Service) prepareProjectObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectMode(ctx, db, project, false)
+}
+
+func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project store.Project, allowRecovery bool) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
 		_ = s.regenerateProjects(ctx, db)
@@ -283,10 +321,27 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 				return cfg, herdrError(err)
 			}
 		} else {
-			result, runErr := s.reconcileProject(ctx, db, project, cfg, false)
+			var result runtime.RunResult
+			var runErr error
+			if allowRecovery {
+				result, runErr = s.reconcileProject(ctx, db, project, cfg, false)
+			} else {
+				claim, err := db.ProjectRecovery(ctx, project.ID)
+				if err != nil {
+					return cfg, err
+				}
+				if claim.OwnerPID != 0 && processAlive(claim.OwnerPID) {
+					runErr = errRecoveryDeferred
+				} else {
+					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+					if runErr == nil && result.GenerationMismatch {
+						runErr = errRecoveryDeferred
+					}
+				}
+			}
 			if runErr != nil {
 				// A held Project keeps its recorded panes for `posse up`.
-				if !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) {
+				if !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) && !errors.Is(runErr, errRecoveryDeferred) {
 					return cfg, herdrError(runErr)
 				}
 			} else {
@@ -294,7 +349,7 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 					return cfg, err
 				}
-				if err := s.reconcileIntents(ctx, db, project, cfg, result.Snapshot); err != nil {
+				if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, allowRecovery); err != nil {
 					return cfg, err
 				}
 				fresh, err := db.ProjectByID(ctx, project.ID)

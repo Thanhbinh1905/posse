@@ -32,11 +32,18 @@ type DB struct {
 
 var ErrNotFound = sql.ErrNoRows
 var ErrStateRace = errors.New("Task state changed concurrently")
-var ErrBusy = errors.New("database busy after bounded retry")
+var ErrBusy = errors.New("database contention; retry the operation")
 
-// IsBusy reports whether err is (or wraps) a SQLite busy/locked condition that
-// survived bounded retry, so a caller can tell the difference between "this
-// write is invalid" and "retry me".
+const sqliteBusyTimeoutMillis = 5000
+
+// Observation lock waits stay short enough to defer contended work within
+// the overall reconciliation budget.
+const ObservationWriteBudget = 3 * time.Second
+const ObservationWriteBusyTimeout = 250 * time.Millisecond
+const reconcileWriteBusyTimeoutMillis = int(ObservationWriteBusyTimeout / time.Millisecond)
+
+// IsBusy reports whether err represents SQLite lock contention, so callers can
+// distinguish an invalid write from one that should be retried.
 func IsBusy(err error) bool {
 	return errors.Is(err, ErrBusy) || isBusyErr(err)
 }
@@ -52,35 +59,34 @@ func isBusyErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) && (sqliteErr.Code()&0xff == 5 || sqliteErr.Code()&0xff == 6) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "database is locked")
+	return strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "sqlite_locked") || strings.Contains(msg, "database is locked") || strings.Contains(msg, "database table is locked")
 }
 
-// beginTxWithRetry begins a write transaction, retrying with backoff on SQLITE_BUSY.
-// Every write transaction in this package uses BEGIN IMMEDIATE (see the _txlock=immediate
-// DSN option in OpenAt) so two deferred readers never race to upgrade to a write lock and
-// fail without ever invoking the busy handler. Under sustained fsync pressure a connection
-// can still lose that race outright, so this adds a bounded number of retries on top of the
-// driver's own busy_timeout, so a Worker Signal is never lost to a transient lock.
-func (db *DB) beginTxWithRetry(ctx context.Context) (*sql.Tx, error) {
-	const maxAttempts = 5
-	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		tx, err := db.BeginTx(ctx, nil)
-		if err == nil {
-			return tx, nil
-		}
-		if !isBusyErr(err) {
-			return nil, err
-		}
-		lastErr = err
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
-		}
+func retryableContention(err error) error {
+	if err == nil || errors.Is(err, ErrBusy) {
+		return err
 	}
-	return nil, fmt.Errorf("%w: %v", ErrBusy, lastErr)
+	if !isBusyErr(err) && !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrBusy, err)
+}
+
+func (db *DB) withBusyTimeout(ctx context.Context, timeoutMillis int, operation func(*sql.Conn) error) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return retryableContention(err)
+	}
+	timeoutMillis = min(timeoutMillis, writeBusyTimeout(ctx))
+	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout="+strconv.Itoa(timeoutMillis)); err != nil {
+		return errors.Join(retryableContention(err), restoreBusyTimeoutAndClose(conn))
+	}
+	return errors.Join(retryableContention(operation(conn)), restoreBusyTimeoutAndClose(conn))
 }
 
 func Open(home string) (*DB, error) {
@@ -100,20 +106,25 @@ func Open(home string) (*DB, error) {
 }
 
 func OpenAt(path string) (*DB, error) {
+	return openAt(path, 5*time.Second)
+}
+
+func openAt(path string, timeout time.Duration) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
 	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
-	dsn := fileURL + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate"
+	dsn := fileURL + "?_pragma=busy_timeout(" + strconv.Itoa(sqliteBusyTimeoutMillis) + ")&_pragma=foreign_keys(1)&_txlock=immediate"
 	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	database.SetMaxOpenConns(4)
 	database.SetMaxIdleConns(2)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	result := &DB{DB: database, Path: path, queries: dbgen.New(database)}
+	result := &DB{DB: database, Path: path}
+	result.queries = dbgen.New(result)
 	if err := result.MigrateIfNeeded(ctx); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -121,7 +132,8 @@ func OpenAt(path string) (*DB, error) {
 	return result, nil
 }
 
-func (db *DB) MigrateIfNeeded(ctx context.Context) error {
+func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
+	defer func() { migrationErr = retryableContention(migrationErr) }()
 	lock, err := acquireMigrationLock(ctx, db.Path)
 	if err != nil {
 		return err
@@ -258,7 +270,7 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 		return err
 	}
 	defer tx.Rollback()
-	if err := transitionTx(ctx, db.queries.WithTx(tx), taskID, expected, next, source, note); err != nil {
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, expected, next, source, note); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -279,7 +291,7 @@ func (db *DB) TransitionWithApproval(ctx context.Context, taskID int64, expected
 		return err
 	}
 	defer tx.Rollback()
-	queries := db.queries.WithTx(tx)
+	queries := db.queries.WithTx(tx.Tx)
 	if err := queries.InsertApproval(ctx, dbgen.InsertApprovalParams{TaskID: taskID, Action: action, UserQuote: quote, At: time.Now().UnixMilli()}); err != nil {
 		return err
 	}
@@ -334,14 +346,14 @@ func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expecte
 		return err
 	}
 	defer tx.Rollback()
-	count, err := db.queries.WithTx(tx).CountApproval(ctx, dbgen.CountApprovalParams{TaskID: taskID, Action: action})
+	count, err := db.queries.WithTx(tx.Tx).CountApproval(ctx, dbgen.CountApprovalParams{TaskID: taskID, Action: action})
 	if err != nil {
 		return err
 	}
 	if count == 0 {
 		return fmt.Errorf("recorded User approval for %q is required", action)
 	}
-	if err := transitionTx(ctx, db.queries.WithTx(tx), taskID, expected, next, source, note); err != nil {
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, expected, next, source, note); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -429,7 +441,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		return 0, err
 	}
 	defer tx.Rollback()
-	queries := db.queries.WithTx(tx)
+	queries := db.queries.WithTx(tx.Tx)
 	result, err := queries.InsertTask(ctx, dbgen.InsertTaskParams{
 		ProjectID: projectID, Seq: int64(task.Seq), Type: task.Type, ReviewsTaskID: nullableID(task.ReviewsTaskID),
 		Title: task.Title, ShortName: task.ShortName, State: string(task.State), Profile: task.Profile, DispatchRule: task.DispatchRule,
@@ -1052,7 +1064,7 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 		return "", err
 	}
 	defer tx.Rollback()
-	queries := db.queries.WithTx(tx)
+	queries := db.queries.WithTx(tx.Tx)
 	var state string
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=?`, task.ID).Scan(&state); err != nil {
 		return "", err
@@ -1320,18 +1332,36 @@ func (db *DB) ClaimMessage(ctx context.Context, messageID int64, token string, a
 // succeeds, recovery must not submit the message again because Herdr may have
 // accepted it even if Posse crashes before recording delivery.
 func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token string) error {
-	result, err := db.ExecContext(ctx, `UPDATE messages SET status='submitting' WHERE id=? AND status='claimed' AND claim_token=?`, messageID, token)
+	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
 	}
-	count, err := result.RowsAffected()
-	if err != nil {
+	defer tx.Rollback()
+	var taskID int64
+	var state, taskType string
+	if err := tx.QueryRowContext(ctx, `SELECT t.id,t.state,t.type FROM tasks t JOIN messages m ON m.task_id=t.id WHERE m.id=? AND m.status='claimed' AND m.claim_token=?`, messageID, token).Scan(&taskID, &state, &taskType); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrStateRace
+		}
 		return err
 	}
-	if count != 1 {
-		return ErrStateRace
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='submitting' WHERE id=? AND claim_token=?`, messageID, token); err != nil {
+		return err
 	}
-	return nil
+	// Commit the authorized Task transition before Herdr can expose the
+	// instruction. An immediate Rider Signal must see the reopened Task.
+	current := State(state)
+	if current == StateNeedsDecision || taskType == "ship" && (current == StateDone || current == StateLanding) {
+		if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, current, StateWorking, "lead", "Lead submitted an instruction"); err != nil {
+			return err
+		}
+		if taskType == "ship" && current != StateNeedsDecision {
+			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET gated_sha='' WHERE id=?`, taskID); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (db *DB) RollbackMessageClaim(ctx context.Context, messageID int64, token string) error {
@@ -1719,14 +1749,24 @@ func taskFromDB(row dbgen.Task) Task {
 }
 
 func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {
-	if err := db.queries.UpdateTaskObservation(ctx, dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
+	defer cancel()
+	params := dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}
+	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+		return dbgen.New(conn).UpdateTaskObservation(ctx, params)
+	}); err != nil {
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) UpdateProjectObservation(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) error {
-	return db.queries.UpdateProjectObservation(ctx, dbgen.UpdateProjectObservationParams{LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID})
+	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
+	defer cancel()
+	params := dbgen.UpdateProjectObservationParams{LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID}
+	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+		return dbgen.New(conn).UpdateProjectObservation(ctx, params)
+	})
 }
 
 func (db *DB) UpdateProjectStatus(ctx context.Context, projectID int64, status string) error {

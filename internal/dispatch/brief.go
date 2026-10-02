@@ -20,6 +20,8 @@ type Brief struct {
 	AutonomyLand   string
 	// Repos names the workspace members the Task works on; empty for a repo Project.
 	Repos  []string
+	Ticket *IssueRef
+	// Issues preserves the legacy `issues:` field, including historical multi-issue Briefs.
 	Issues []IssueRef
 	Refs   []IssueRef
 	Body   string
@@ -54,6 +56,16 @@ func ParseBrief(path string) (Brief, error) {
 }
 
 func ParseBriefText(contents string) (Brief, error) {
+	return parseBriefText(contents, false)
+}
+
+// ParseHistoricalBriefText reads stored Briefs without applying the new Ship ticket
+// cardinality rule, so existing Tasks retain their original issue references.
+func ParseHistoricalBriefText(contents string) (Brief, error) {
+	return parseBriefText(contents, true)
+}
+
+func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, error) {
 	lines := strings.Split(strings.ReplaceAll(contents, "\r\n", "\n"), "\n")
 	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
 		return Brief{}, &BriefError{Field: "frontmatter", Reason: "must start with --- and include a closing ---"}
@@ -80,7 +92,7 @@ func ParseBriefText(contents string) (Brief, error) {
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review_of", "autonomy", "repos", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review_of", "autonomy", "repos", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -110,6 +122,13 @@ func ParseBriefText(contents string) (Brief, error) {
 		}
 		brief.Issues = issues
 	}
+	if raw, found := values["ticket"]; found {
+		ticket, err := parseTicket(raw)
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.Ticket = ticket
+	}
 	if raw, found := values["refs"]; found {
 		refs, err := parseIssueRefs(raw, "refs")
 		if err != nil {
@@ -117,9 +136,27 @@ func ParseBriefText(contents string) (Brief, error) {
 		}
 		brief.Refs = refs
 	}
+	if brief.Ticket != nil && brief.Type != "ship" {
+		return Brief{}, &BriefError{Field: "ticket", Reason: "is valid only for a Ship Task"}
+	}
+	if brief.Type == "ship" && len(brief.Issues) > 1 && !allowHistoricalMultiIssue {
+		return Brief{}, &BriefError{Field: "issues", Reason: "a Ship Brief may identify only one closing issue; use ticket: <issue>"}
+	}
+	if brief.Ticket != nil && len(brief.Issues) > 0 {
+		if len(brief.Issues) != 1 || brief.Issues[0] != *brief.Ticket {
+			return Brief{}, &BriefError{Field: "issues", Reason: "must contain only the same single issue as ticket:"}
+		}
+	} else if brief.Type == "ship" && brief.Ticket == nil && len(brief.Issues) == 1 {
+		ticket := brief.Issues[0]
+		brief.Ticket = &ticket
+	}
 	seenIssueRefs := make(map[IssueRef]string, len(brief.Issues)+len(brief.Refs))
-	for _, ref := range brief.Issues {
-		seenIssueRefs[ref] = "issues"
+	if brief.Ticket != nil {
+		seenIssueRefs[*brief.Ticket] = "ticket"
+	} else {
+		for _, ref := range brief.Issues {
+			seenIssueRefs[ref] = "issues"
+		}
 	}
 	for _, ref := range brief.Refs {
 		if previous := seenIssueRefs[ref]; previous != "" {
@@ -161,6 +198,18 @@ func ParseBriefText(contents string) (Brief, error) {
 
 var repoName = regexp.MustCompile(`^[a-z0-9_-]+$`)
 var issueNumber = regexp.MustCompile(`^[1-9][0-9]*$`)
+
+func parseTicket(raw string) (*IssueRef, error) {
+	text := strings.TrimSpace(raw)
+	if strings.HasPrefix(text, "[") || strings.Contains(text, ",") {
+		return nil, &BriefError{Field: "ticket", Reason: "must be one issue number or member#number, such as 121"}
+	}
+	refs, err := parseIssueRefs(text, "ticket")
+	if err != nil {
+		return nil, err
+	}
+	return &refs[0], nil
+}
 
 func parseIssueRefs(raw, field string) ([]IssueRef, error) {
 	text := strings.TrimSpace(raw)

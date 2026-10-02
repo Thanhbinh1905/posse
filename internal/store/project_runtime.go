@@ -1,6 +1,9 @@
 package store
 
-import "context"
+import (
+	"context"
+	"database/sql"
+)
 
 // LookoutRecovery stores retry state independently of the short-lived Lead
 // watcher process, so a Notice-triggered re-arm cannot reset its backoff.
@@ -50,8 +53,14 @@ func (db *DB) RememberProjectServerStartedAt(ctx context.Context, projectID int6
 	if startedAt == "" {
 		return nil
 	}
-	_, err := db.ExecContext(ctx, `INSERT INTO project_runtime(project_id,server_started_at) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET server_started_at=excluded.server_started_at WHERE project_runtime.server_started_at=''`, projectID, startedAt)
-	return err
+	known, err := db.ProjectServerStartedAt(ctx, projectID)
+	if err != nil || known != "" {
+		return err
+	}
+	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+		_, err := conn.ExecContext(ctx, `INSERT INTO project_runtime(project_id,server_started_at) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET server_started_at=excluded.server_started_at WHERE project_runtime.server_started_at=''`, projectID, startedAt)
+		return err
+	})
 }
 
 func (db *DB) SetProjectServerStartedAt(ctx context.Context, projectID int64, startedAt string) error {

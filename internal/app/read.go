@@ -442,7 +442,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+	if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
 		return err
 	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
@@ -471,6 +471,13 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			authorHistoryKnown := author.Launches > 0 && launchHistoryComplete(author, authorLaunches)
 			view["review_identity"] = reviewIdentityHistoryResult(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown)
 		}
+	}
+	recovery, err := db.TaskRecovery(ctx.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	if recovery.Status != "" {
+		view["recovery"] = recovery
 	}
 	issues, refs, err := taskIssueReferences(home, project, task)
 	if err != nil {

@@ -317,7 +317,7 @@ func TestSendReturnsTypedErrorForSQLiteStorageFailure(t *testing.T) {
 	}
 }
 
-func TestSendReopensDoneShipTaskAndClearsGatedSHA(t *testing.T) {
+func TestSendReopensDoneShipTaskBeforeImmediateSignal(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -356,6 +356,24 @@ func TestSendReopensDoneShipTaskAndClearsGatedSHA(t *testing.T) {
 	var output bytes.Buffer
 	cli := testService(home, fake).CLI()
 	cli.Out = &output
+	fake.BeforeCall = func(method string) {
+		if method != "agent.prompt" {
+			return
+		}
+		observed, err := store.Open(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer observed.Close()
+		task, err := observed.Task(ctx, project.ID, "t1")
+		if err != nil || task.State != store.StateWorking || task.GatedSHA != "" {
+			t.Errorf("instruction became visible before Task was reopened: state=%s gated=%s error=%v", task.State, task.GatedSHA, err)
+			return
+		}
+		if state, err := observed.RecordWorkerSignal(ctx, task, "done", "Immediate fix complete", nil, "task_done"); err != nil || state != store.StateDone {
+			t.Errorf("immediate Signal = %s, %v", state, err)
+		}
+	}
 	if code := cli.Run([]string{"send", "t1", "Fix the gate failure"}); code != 0 || !strings.Contains(output.String(), "delivered") {
 		t.Fatalf("send did not deliver to a done Ship Task: code=%d output=%s", code, output.String())
 	}
@@ -368,8 +386,8 @@ func TestSendReopensDoneShipTaskAndClearsGatedSHA(t *testing.T) {
 	}
 	defer db.Close()
 	task, err := db.Task(ctx, project.ID, "t1")
-	if err != nil || task.State != store.StateWorking || task.GatedSHA != "" {
-		t.Fatalf("delivered fix did not reopen Task and clear gated SHA: %#v, %v", task, err)
+	if err != nil || task.State != store.StateDone || task.GatedSHA != "" {
+		t.Fatalf("delivery overwrote the immediate Signal or retained gated SHA: %#v, %v", task, err)
 	}
 	var status, body string
 	if err := db.QueryRowContext(ctx, `SELECT status,body FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, task.ID).Scan(&status, &body); err != nil || status != "delivered" || body != "Fix the gate failure" {

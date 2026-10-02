@@ -33,16 +33,58 @@ func TestSpecBriefFixtureParsesWithTrailingComments(t *testing.T) {
 	}
 }
 
-func TestBriefParsesIssueReferences(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: ship\ntitle: Fix issue links\ndone_when: PR body includes links\nissues: [12, 16]\nrefs: [worker#9]\n---\nWork on the listed issues.\n")
+func TestBriefParsesCanonicalAndLegacyTicketFields(t *testing.T) {
+	for _, frontmatter := range []string{
+		"ticket: 12\n",
+		"issues: [12]\n",
+		"ticket: 12\nissues: [12]\n",
+	} {
+		source := "---\ntype: ship\ntitle: Fix issue links\ndone_when: PR body includes links\n" + frontmatter + "refs: [worker#9]\n---\nWork on the listed issue.\n"
+		brief, err := ParseBriefText(source)
+		if err != nil {
+			t.Fatalf("Brief with ticket %q did not validate: %v", frontmatter, err)
+		}
+		if brief.Ticket == nil || *brief.Ticket != (IssueRef{Number: 12}) {
+			t.Fatalf("parsed ticket = %#v for %q", brief.Ticket, frontmatter)
+		}
+		if len(brief.Refs) != 1 || brief.Refs[0].Repository != "worker" || brief.Refs[0].Number != 9 {
+			t.Fatalf("parsed refs = %#v", brief.Refs)
+		}
+	}
+}
+
+func TestLegacyWorkspaceIssueAliasBecomesTheCanonicalTicket(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: ship\ntitle: Workspace issue\ndone_when: member is linked\nissues: [worker#12]\n---\n")
 	if err != nil {
-		t.Fatalf("Brief with issue references did not validate: %v", err)
+		t.Fatalf("legacy Workspace alias did not parse: %v", err)
 	}
-	if len(brief.Issues) != 2 || brief.Issues[0].Number != 12 || brief.Issues[1].Number != 16 {
-		t.Fatalf("parsed issues = %#v", brief.Issues)
+	if brief.Ticket == nil || *brief.Ticket != (IssueRef{Repository: "worker", Number: 12}) {
+		t.Fatalf("legacy Workspace issue alias = %#v", brief.Ticket)
 	}
-	if len(brief.Refs) != 1 || brief.Refs[0].Repository != "worker" || brief.Refs[0].Number != 9 {
-		t.Fatalf("parsed refs = %#v", brief.Refs)
+}
+
+func TestBriefParserRejectsConflictingOrMultipleClosingIssues(t *testing.T) {
+	for _, frontmatter := range []string{
+		"ticket: 12\nissues: [13]\n",
+		"ticket: 12\nissues: [12, 13]\n",
+		"issues: [12, 13]\n",
+		"ticket: [12]\n",
+		"ticket: 12, 13\n",
+	} {
+		source := "---\ntype: ship\ntitle: Fix issue links\ndone_when: tests pass\n" + frontmatter + "---\n"
+		if _, err := ParseBriefText(source); err == nil {
+			t.Fatalf("accepted invalid canonical ticket:\n%s", source)
+		}
+	}
+}
+
+func TestHistoricalBriefParserPreservesMultipleLegacyIssues(t *testing.T) {
+	brief, err := ParseHistoricalBriefText("---\ntype: ship\ntitle: Old multi-issue Task\ndone_when: historical\nissues: [12, 16]\n---\n")
+	if err != nil {
+		t.Fatalf("historical Brief did not parse: %v", err)
+	}
+	if brief.Ticket != nil || len(brief.Issues) != 2 {
+		t.Fatalf("historical issue references changed: %#v", brief)
 	}
 }
 

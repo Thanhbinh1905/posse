@@ -109,7 +109,7 @@ func TestPublishWithoutOptionalBodyFieldsWritesDefaults(t *testing.T) {
 
 func TestPublishWritesClosingAndReferenceKeywordsToPullRequestBody(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
-	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12, 16]\nrefs: [18]\n---\nE2E intent\n"
+	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nticket: 12\nrefs: [18]\n---\nE2E intent\n"
 	briefPath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
 	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
@@ -121,10 +121,13 @@ func TestPublishWritesClosingAndReferenceKeywordsToPullRequestBody(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, keyword := range []string{"Closes #12", "Closes #16", "Refs #18"} {
+	for _, keyword := range []string{"Closes #12", "Refs #18"} {
 		if !strings.Contains(string(log), keyword) {
 			t.Fatalf("PR body omitted %q: %s", keyword, log)
 		}
+	}
+	if strings.Contains(string(log), "Closes #18") {
+		t.Fatalf("non-closing reference became a closing link: %s", log)
 	}
 }
 

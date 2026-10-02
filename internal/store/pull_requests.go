@@ -187,7 +187,7 @@ func (db *DB) RecordRootBehind(ctx context.Context, projectID int64, repo string
 	return created, nil
 }
 
-func setRootBehindHeadTx(ctx context.Context, tx *sql.Tx, projectID int64, repo, head string) error {
+func setRootBehindHeadTx(ctx context.Context, tx *writeTx, projectID int64, repo, head string) error {
 	if repo == "" {
 		_, err := tx.ExecContext(ctx, `UPDATE project_watch_state SET root_behind_head=? WHERE project_id=?`, head, projectID)
 		return err
@@ -259,7 +259,7 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 					return false, err
 				}
 			}
-			if err := transitionTx(ctx, db.queries.WithTx(tx), observation.TaskID, state, effect.TransitionTo, "cli", effect.TransitionNote); err != nil {
+			if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), observation.TaskID, state, effect.TransitionTo, "cli", effect.TransitionNote); err != nil {
 				return false, err
 			}
 			transitioned = true
@@ -276,7 +276,7 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	return !unchanged || transitioned, nil
 }
 
-func latestPRObservationTx(ctx context.Context, tx *sql.Tx, taskID int64) (PRObservation, error) {
+func latestPRObservationTx(ctx context.Context, tx *writeTx, taskID int64) (PRObservation, error) {
 	var observation PRObservation
 	err := tx.QueryRowContext(ctx, `SELECT id, project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at FROM pr_observations WHERE task_id=? ORDER BY id DESC LIMIT 1`, taskID).
 		Scan(&observation.ID, &observation.ProjectID, &observation.TaskID, &observation.PRURL, &observation.HeadSHA, &observation.State, &observation.Checks, &observation.Review, &observation.Mergeable, &observation.MergeCommit, &observation.ObservedAt)
@@ -287,7 +287,7 @@ func samePRObservation(left, right PRObservation) bool {
 	return left.ProjectID == right.ProjectID && left.TaskID == right.TaskID && left.PRURL == right.PRURL && left.HeadSHA == right.HeadSHA && left.State == right.State && left.Checks == right.Checks && left.Review == right.Review && left.Mergeable == right.Mergeable && left.MergeCommit == right.MergeCommit
 }
 
-func insertNoticeTx(ctx context.Context, tx *sql.Tx, notice Notice) error {
+func insertNoticeTx(ctx context.Context, tx *writeTx, notice Notice) error {
 	if notice.DataJSON == "" {
 		notice.DataJSON = "{}"
 	}

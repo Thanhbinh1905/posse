@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t *testing.T) {
@@ -38,6 +39,37 @@ func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t
 	generation, err = db.ProjectServerStartedAt(ctx, project.ID)
 	if err != nil || generation != "server-1" {
 		t.Fatalf("remembering a later Project generation = %q, want the original server-1: %v", generation, err)
+	}
+}
+
+func TestRememberKnownGenerationDoesNotContendWithWriters(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "server-1"); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+
+	readCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := db.RememberProjectServerStartedAt(readCtx, project.ID, "server-2"); err != nil {
+		t.Fatalf("remembering a known generation unnecessarily waited for a write lock: %v", err)
+	}
+	generation, err := db.ProjectServerStartedAt(ctx, project.ID)
+	if err != nil || generation != "server-1" {
+		t.Fatalf("known generation changed: %q, %v", generation, err)
 	}
 }
 

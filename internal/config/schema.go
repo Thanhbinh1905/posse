@@ -42,6 +42,8 @@ var keySpecs = []KeySpec{
 	{Key: "defaults.idle_after", Type: TypeDuration, Default: "3m", Meaning: "Time a Rider may be idle without a Signal before a Notice is created."},
 	{Key: "defaults.auto_unsaddle", Type: TypeString, Allowed: []string{"finished", "landed", "never"}, Default: "finished", Meaning: "Whether completed Tasks are automatically Teardown after landing or Notice acknowledgement."},
 	{Key: "defaults.auto_recover", Type: TypeBoolean, Default: true, Meaning: "Whether plugin events and the Herdr startup hook restart the Lead and Riders after a Herdr restart or a closed Lead workspace; when false, `posse up` recovers them."},
+	{Key: "defaults.recovery_attempts", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic relaunch attempts per Rider recovery episode; exhaustion requires explicit relaunch."},
+	{Key: "defaults.recovery_backoff", Type: TypeDuration, Default: "5s", Meaning: "Initial delay between failed automatic Rider relaunches; doubles up to one minute."},
 	{Key: "defaults.landing_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Default: "pr", Meaning: "How Ship Task changes are Landed."},
 	{Key: "defaults.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Forge for this Project; auto detects from each repository remote."},
 	{Key: "repositories.<repository>.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override the forge for a member repository."},
@@ -59,7 +61,7 @@ var keySpecs = []KeySpec{
 	{Key: "kinds.<kind>.model_args", Type: TypeStringArray, Default: []string{}, Meaning: "Argument template for a Profile model; supports {model}."},
 	{Key: "kinds.<kind>.effort_args", Type: TypeStringArray, Default: []string{}, Meaning: "Argument template for a Profile effort; supports {effort}."},
 	{Key: "kinds.<kind>.resume_args", Type: TypeStringArray, Default: []string{}, Meaning: "Argument template for resuming a recorded agent session; supports {session}."},
-	{Key: "kinds.<kind>.system_prompt_args", Type: TypeStringArray, Default: map[string][]string{"claude": {"--append-system-prompt-file", "{file}"}, "codex": {"-c", "developer_instructions={text}"}, "pi": {"--append-system-prompt", "{file}"}}, Meaning: "Argument template that gives the Lead its instructions as a system prompt; supports {file} (the instructions file) and {text} (the instructions on one line)."},
+	{Key: "kinds.<kind>.system_prompt_args", Type: TypeStringArray, Default: map[string][]string{"claude": {"--append-system-prompt-file", "{file}"}, "codex": {"-c", "developer_instructions={text}"}, "pi": {"--append-system-prompt", "{file}"}}, Meaning: "Argument template that gives the Lead its instructions as a system prompt; supports {file} (the instructions file) and {text} (the complete instructions with whitespace preserved; Codex receives a TOML-quoted string)."},
 	{Key: "kinds.<kind>.lead_args", Type: TypeStringArray, Default: map[string][]string{"codex": {"--sandbox", "danger-full-access"}}, Meaning: "Arguments every Lead of this kind gets so it can run posse commands; codex's default sandbox cannot write the posse home. Approvals are unchanged."},
 	{Key: "kinds.<kind>.background_commands", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": false, "pi": false}, Meaning: "Whether this agent kind can run a background command and be re-invoked when it exits; Riders of such kinds are told to background long commands."},
 	{Key: "kinds.<kind>.notice_delivery", Type: TypeString, Allowed: NoticeDeliveries, Default: map[string]string{"claude": NoticeDeliveryLookout, "codex": NoticeDeliveryCodexQueue, "pi": NoticeDeliveryPiExtension, "opencode": NoticeDeliveryOpenCodePlugin, "<other>": NoticeDeliveryPrompt}, Meaning: "How Notices reach a Lead: prompt (typed only when idle and unfocused), lookout (background command), codex-queue (codex session queue), pi-extension (Pi lookout extension), opencode-plugin (Lead-only OpenCode lookout and session API)."},
@@ -139,7 +141,7 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 			}
 		}
 	}
-	if key == "defaults.max_workers" || key == "remuda.keep_idle" {
+	if key == "defaults.max_workers" || key == "remuda.keep_idle" || key == "defaults.recovery_attempts" {
 		if number, ok := integerValue(value); ok && number < 1 {
 			return fmt.Errorf("%s must be positive", key)
 		}

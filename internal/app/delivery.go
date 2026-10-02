@@ -186,5 +186,8 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 	if err := db.MarkMessageDelivered(ctx, message.ID, token, currentTime()); err != nil {
 		return false, "", err
 	}
+	if err := db.PersistTask(ctx, task.ID); err != nil {
+		return true, "", err
+	}
 	return true, "", nil
 }

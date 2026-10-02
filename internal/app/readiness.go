@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -95,12 +97,69 @@ func (s *Service) projectDoctorChecks(ctx context.Context, db *store.DB, project
 
 // These checks use the same effective Member policies as Landing, never a
 // guessed test command or a repository script. Auth/status probes are read-only.
+type forgeReadinessResult struct {
+	Forge repositoryForge
+	Err   error
+}
+
+type forgeAuthenticationError struct {
+	CLI  string
+	Host string
+}
+
+func (e *forgeAuthenticationError) Error() string {
+	return e.CLI + " authentication for " + e.Host + " is missing or could not be verified"
+}
+
+func repositoryForgeReadiness(ctx context.Context, root string, cfg config.Config, member string) (repositoryForge, error) {
+	forge, probe, err := resolveForgeForRepository(ctx, root, cfg, member)
+	if err != nil {
+		return forge, err
+	}
+	if probe == nil {
+		result, err := cachedForgeProbe(ctx, root, forge.Host, cfg, forge.Kind)
+		if err != nil {
+			return forge, err
+		}
+		probe = &result
+	}
+	if probe.timedOut(forge.Kind) {
+		return forge, forgeProbeTimeoutError(forge.Host)
+	}
+	if !probe.authenticated(forge.Kind) {
+		cli := "gh"
+		if forge.Kind == "gitlab" {
+			cli = "glab"
+		}
+		return forge, &forgeAuthenticationError{CLI: cli, Host: forge.Host}
+	}
+	return forge, nil
+}
+
 func repositoryDoctorChecks(ctx context.Context, cfg config.Config, targets []repoTarget) []doctorCheck {
 	checks := []doctorCheck{}
-	for _, target := range targets {
-		mode, gate, gateKey := cfg.Defaults.LandingMode, cfg.Defaults.Gate, "defaults.gate"
+	modes := make([]string, len(targets))
+	forgeChecks := make([]forgeReadinessResult, len(targets))
+	var probes sync.WaitGroup
+	for index, target := range targets {
+		modes[index] = cfg.Defaults.LandingMode
 		if target.Name != "" {
-			mode = memberLandingMode(cfg, target.Name, originHost(ctx, target.Root))
+			modes[index] = memberLandingMode(cfg, target.Name, originHost(ctx, target.Root))
+		}
+		if modes[index] != "pr" {
+			continue
+		}
+		probes.Add(1)
+		go func(index int, target repoTarget) {
+			defer probes.Done()
+			forgeChecks[index].Forge, forgeChecks[index].Err = repositoryForgeReadiness(ctx, target.Root, cfg, target.Name)
+		}(index, target)
+	}
+	probes.Wait()
+
+	for index, target := range targets {
+		mode, gate, gateKey := modes[index], cfg.Defaults.Gate, "defaults.gate"
+		if target.Name != "" {
 			if override, ok := cfg.Repositories[target.Name]; ok && override.Gate != nil {
 				gate = override.Gate
 			}
@@ -118,25 +177,25 @@ func repositoryDoctorChecks(ctx context.Context, cfg config.Config, targets []re
 		}
 		checks = append(checks, gateCheck)
 		if mode == "pr" {
-			forge, err := forgeForRepository(ctx, target.Root, cfg, target.Name)
+			forgeCheck := forgeChecks[index]
 			auth := doctorCheck{Name: "forge auth" + suffix, Status: "ok", Detail: "authenticated", GapCode: "forge_auth", Key: "defaults.forge", Member: target.Name}
 			if target.Name != "" {
 				auth.Key = "repositories." + target.Name + ".forge"
 			}
-			if err != nil {
+			if forgeCheck.Forge.Host != "" {
+				auth.Name += " " + forgeCheck.Forge.Host
+			}
+			if forgeCheck.Err != nil {
 				auth.Status = "warn"
-				auth.Detail = "Pull requests cannot be verified or opened" + suffix + ": " + err.Error()
+				auth.Detail = "Pull requests cannot be verified or opened" + suffix + ": " + forgeCheck.Err.Error()
 				auth.Action = "Configure an origin remote and its forge, then authenticate gh or glab for that host."
-			} else {
-				cli := "gh"
-				if forge.Kind == "gitlab" {
-					cli = "glab"
+				var authErr *forgeAuthenticationError
+				if errors.As(forgeCheck.Err, &authErr) {
+					auth.Action = "Run `" + authErr.CLI + " auth login --hostname " + authErr.Host + "`."
 				}
-				auth.Name += " " + forge.Host
-				if _, err := commandOutputArgs(ctx, target.Root, cli, "auth", "status", "--hostname", forge.Host); err != nil {
-					auth.Status = "warn"
-					auth.Detail = "Pull requests cannot be opened" + suffix + " because " + cli + " authentication for " + forge.Host + " is missing or could not be verified."
-					auth.Action = "Run `" + cli + " auth login --hostname " + forge.Host + "`."
+				var probeErr *axi.Error
+				if errors.As(forgeCheck.Err, &probeErr) && probeErr.Code == "pr_forge_probe_timeout" {
+					auth.Action = "Check forge CLI connectivity and authentication for this host."
 				}
 			}
 			checks = append(checks, auth)

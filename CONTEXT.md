@@ -38,6 +38,10 @@ _Avoid_: Id, handle, nickname
 A Task whose outcome is a change landed into the Project.
 _Avoid_: Fix task, build task
 
+**Closing Issue**:
+The one forge issue a Ship Task may name for closure when its PR Lands. A Brief uses `ticket:`; legacy `issues: [N]` is accepted only as the same singleton, and `refs:` stays non-closing.
+_Avoid_: ticket (when naming a Task)
+
 **Scout Task**:
 A Task whose outcome is a Report and never a change to the Project.
 _Avoid_: Research task, investigation
@@ -129,3 +133,7 @@ _Avoid_: Routing rule, policy
 **Identity**:
 The User-chosen name, persona and language the Lead uses when talking to the User; it never appears in anything another agent reads.
 _Avoid_: Alias, nickname
+
+**Playbook**:
+User-authored workflow instructions for a Lead or Rider, layered from `<POSSE_HOME>/playbook/` and `<POSSE_HOME>/projects/<project>/playbook/`. Project instructions follow User instructions; Playbooks supplement built-in rules and cannot override them. The User can write them with `posse playbook set`; a Lead's write requires User consent recorded with the quote, and Riders cannot write them.
+_Avoid_: Workflow framework, policy

@@ -236,6 +236,32 @@ func (f rideFixture) onlyTask(t *testing.T) (store.Task, []store.Notice) {
 	return tasks[0], notices
 }
 
+func TestRideRejectsMultipleClosingIssuesBeforeAcquiringMount(t *testing.T) {
+	fixture := newRideFixture(t)
+	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nissues: [12, 13]\n---\nCreate a committed file.\n"
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := fixture.ride(t)
+	if code == 0 || !strings.Contains(output, "issues") || !strings.Contains(output, "only one closing issue") {
+		t.Fatalf("ride accepted multiple closing issues: code=%d output=%s", code, output)
+	}
+	if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
+		t.Fatalf("invalid Brief acquired Rider resources: calls=%#v", fixture.fake.Calls)
+	}
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if tasks, err := db.Tasks(context.Background(), fixture.project.ID, true); err != nil || len(tasks) != 0 {
+		t.Fatalf("invalid Brief created Tasks: %#v, %v", tasks, err)
+	}
+	if mounts, err := db.Mounts(context.Background(), fixture.project.ID); err != nil || len(mounts) != 0 {
+		t.Fatalf("invalid Brief acquired Mounts: %#v, %v", mounts, err)
+	}
+}
+
 func TestCodexLaunchCarriesBriefWithoutTypingIntoFocusedComposer(t *testing.T) {
 	fixture := newRideFixture(t)
 	cfg := "[defaults]\nlanding_mode = \"local\"\n\n[profiles.codex]\nkind = \"codex\"\n\n[dispatch.default]\nuse = \"codex\"\n"

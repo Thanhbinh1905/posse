@@ -234,7 +234,7 @@ func TestFirstOutcomeDispatchPrecedence(t *testing.T) {
 	}
 }
 
-func TestFirstOutcomeDispatchRoutesPhasesByTypeAndProfile(t *testing.T) {
+func TestFirstOutcomeExplicitProfilesFollowTypedDispatchRules(t *testing.T) {
 	configText := `[profiles.pi-luna]
 kind='pi'
 [profiles.pi-sol]
@@ -298,26 +298,26 @@ use='pi-luna'
 	for _, tc := range []struct {
 		name, taskType, profile, expected string
 	}{
-		{name: "scout default", taskType: "scout", expected: "pi-luna"},
-		{name: "science escalation", taskType: "scout", profile: "pi-sol", expected: "pi-sol"},
-		{name: "exceptional science escalation", taskType: "scout", profile: "claude-opus", expected: "claude-opus"},
-		{name: "plan default", taskType: "scout", profile: "pi-sol", expected: "pi-sol"},
-		{name: "plan opus escalation", taskType: "scout", profile: "claude-opus", expected: "claude-opus"},
-		{name: "implement with luna", taskType: "ship", profile: "pi-luna", expected: "pi-luna"},
-		{name: "implement with sonnet", taskType: "ship", profile: "claude-sonnet", expected: "claude-sonnet"},
-		{name: "validate with luna", taskType: "review", profile: "pi-luna", expected: "pi-luna"},
-		{name: "validate with sonnet", taskType: "review", profile: "claude-sonnet", expected: "claude-sonnet"},
+		{name: "type default", taskType: "scout", expected: "pi-luna"},
+		{name: "conditional selection", taskType: "scout", profile: "pi-sol", expected: "pi-sol"},
+		{name: "alternate explicit selection", taskType: "scout", profile: "claude-opus", expected: "claude-opus"},
+		{name: "ship conditional selection", taskType: "ship", profile: "pi-sol", expected: "pi-sol"},
+		{name: "ship alternate selection", taskType: "ship", profile: "claude-opus", expected: "claude-opus"},
+		{name: "ship Profile choice one", taskType: "ship", profile: "pi-luna", expected: "pi-luna"},
+		{name: "ship Profile choice two", taskType: "ship", profile: "claude-sonnet", expected: "claude-sonnet"},
+		{name: "review Profile choice one", taskType: "review", profile: "pi-luna", expected: "pi-luna"},
+		{name: "review Profile choice two", taskType: "review", profile: "claude-sonnet", expected: "claude-sonnet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFirstOutcomeFixture(t)
 			if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			brief := "---\ntype: " + tc.taskType + "\ntitle: Phase dispatch test\ndone_when: the selected phase profile is returned\n"
+			brief := "---\ntype: " + tc.taskType + "\ntitle: Typed dispatch test\ndone_when: the selected Profile is returned\n"
 			if tc.taskType == "review" {
 				brief += "review_of: t1\n"
 			}
-			brief += "---\nRun this phase.\n"
+			brief += "---\nRun this Task.\n"
 			if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -516,6 +516,9 @@ func TestFirstOutcomeImplicitRideRelaunchAndRecovery(t *testing.T) {
 }
 
 func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
+	previousTTL := forgeProbeCacheTTL
+	forgeProbeCacheTTL = 0 // This test changes fake CLI state between checks.
+	t.Cleanup(func() { forgeProbeCacheTTL = previousTTL })
 	f := newFirstOutcomeFixture(t)
 	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
 	for _, cli := range []string{"gh", "glab", "no-mistakes"} {
@@ -616,9 +619,14 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	output := outcomeCLI(t, f.service, 0, "lead")
-	for _, rule := range []string{"First outcome", "explicit yes", "--user-approved", "one-off", "deliverable", "verification", "permitted effects", "return conditions", "at most once", "language they write in", "lowkey", "separate Brief and Rider for each needed phase", "choose either pi-luna or claude-sonnet based on load and fit", "Heavy work: technical design, product design, architecture (prefer pi-sol; claude-opus only when the work is exceptionally technical or pi-sol already failed at it)"} {
+	for _, rule := range []string{"First outcome", "substantive intent", "scope", "trade-offs", "acceptance", "following their Playbook", "consequential gaps", "resolve mechanics silently", "explicit yes", "--user-approved", "one-off", "deliverable", "verification", "permitted effects", "return conditions", "never make personalization a prerequisite", "at most once", "language they write in", "lowkey", "posse playbook set <lead|rider> --file <file>", "Riders cannot write Playbooks"} {
 		if !strings.Contains(output, rule) {
 			t.Fatalf("Lead missing %q: %s", rule, output)
+		}
+	}
+	for _, personalProfile := range []string{"pi-luna", "pi-sol", "claude-sonnet", "claude-opus", "codex-sol"} {
+		if strings.Contains(output, personalProfile) {
+			t.Fatalf("Lead instructions hard-coded personal Profile %q: %s", personalProfile, output)
 		}
 	}
 	cfg, err := config.Load(f.home, "shop")
@@ -626,7 +634,12 @@ func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := leadText(f.project, cfg, "pi")
-	for _, rule := range []string{phasedRidersRule, firstOutcomeRule, userOnlyRule, leadLanguageRule(cfg)} {
+	for _, personalProfile := range []string{"pi-luna", "pi-sol", "claude-sonnet", "claude-opus", "codex-sol"} {
+		if strings.Contains(text, personalProfile) {
+			t.Fatalf("Lead system prompt hard-coded personal Profile %q: %s", personalProfile, text)
+		}
+	}
+	for _, rule := range []string{firstOutcomeRule, userOnlyRule, leadLanguageRule(cfg)} {
 		if !strings.Contains(text, rule) {
 			t.Fatalf("system prompt omitted rule: %s", rule)
 		}

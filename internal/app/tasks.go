@@ -82,7 +82,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
 	}
-	if len(brief.Issues)+len(brief.Refs) > 0 {
+	if len(issueReferences(brief))+len(brief.Refs) > 0 {
 		warnings := s.checkBriefIssues(ctx.Context, cfg, brief, targets)
 		if len(warnings) > 0 {
 			result = append(result, axi.Field{Key: "warnings", Value: warnings})
@@ -410,6 +410,12 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return err
 	}
 	launchContents := workerProtocol(project, task, brief, launchPath) + workspaceProtocol(project, members) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	playbook, err := playbookSources(home, project, "rider")
+	if err != nil {
+		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+		return err
+	}
+	launchContents = appendPlaybookInstructions(launchContents, "rider", playbook)
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
@@ -915,17 +921,12 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	defer db.Close()
 	task, err := s.workerTask(ctx.Context, db)
 	if err != nil {
+		if store.IsBusy(err) {
+			return err
+		}
 		return axi.Failure("worker_task_unknown", "cannot find the Rider's Task from this pane or worktree", false, "Run `posse holler` from the Rider's Herdr pane")
 	}
 	project, err := db.ProjectByID(ctx.Context, task.ProjectID)
-	if err != nil {
-		return err
-	}
-	_, err = s.prepareProject(ctx.Context, db, project)
-	if err != nil {
-		return err
-	}
-	task, err = db.TaskByID(ctx.Context, project.ID, task.ID)
 	if err != nil {
 		return err
 	}
@@ -1044,13 +1045,20 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		return err
 	}
+	// The Signal and its Notice are committed before unrelated Project work.
+	// A retry after a post-commit failure would incorrectly imply it was lost.
+	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
+	defer cancelMaintenance()
+	if _, err := s.prepareProject(maintenanceCtx, db, project); err != nil {
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project maintenance deferred: %v\n", normalizeCommandError(err))
+	}
 	if noticeKind != "" {
-		if err := s.deliverNotices(ctx.Context, db, project); err != nil && !isHerdrUnavailable(err) {
-			return err
+		if err := s.deliverNotices(maintenanceCtx, db, project); err != nil && !isHerdrUnavailable(err) {
+			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Notice delivery deferred: %v\n", normalizeCommandError(err))
 		}
 	}
-	if err := s.regenerateProjects(ctx.Context, db); err != nil {
-		return err
+	if err := s.regenerateProjects(maintenanceCtx, db); err != nil {
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project snapshot deferred: %v\n", normalizeCommandError(err))
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "signal", Value: verb}, {Key: "state", Value: string(state)}, {Key: "help", Value: []any{"Run `posse brief` to reread the Rider protocol"}}})
 }
@@ -1217,25 +1225,6 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 						return err
 					}
 					if wasDelivered {
-						if task.State == store.StateNeedsDecision {
-							if err := db.Transition(ctx.Context, task.ID, store.StateNeedsDecision, store.StateWorking, "lead", "Lead delivered a response"); err != nil {
-								return err
-							}
-						} else if task.State == store.StateDone && task.Type == "ship" {
-							if err := db.Transition(ctx.Context, task.ID, store.StateDone, store.StateWorking, "lead", "Lead delivered a fix instruction"); err != nil {
-								return err
-							}
-							if err := db.ClearTaskGatedSHA(ctx.Context, task.ID); err != nil {
-								return err
-							}
-						} else if task.State == store.StateLanding && task.Type == "ship" {
-							if err := db.Transition(ctx.Context, task.ID, store.StateLanding, store.StateWorking, "lead", "Lead delivered a pull request fix instruction"); err != nil {
-								return err
-							}
-							if err := db.ClearTaskGatedSHA(ctx.Context, task.ID); err != nil {
-								return err
-							}
-						}
 						if queued.ID != messageID {
 							reason = "earlier_message_delivered_first"
 						}
@@ -1454,6 +1443,14 @@ type relaunchResult struct {
 }
 
 func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string) (relaunchResult, error) {
+	result, err := s.relaunchTaskAttempt(ctx, db, home, project, cfg, task, requestedProfile, false)
+	if err == nil {
+		err = db.ResetTaskRecovery(ctx, task.ID)
+	}
+	return result, err
+}
+
+func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string, automatic bool) (relaunchResult, error) {
 	failure := func(err error) (relaunchResult, error) { return relaunchResult{}, err }
 	if !recoverableTaskState(task.State) {
 		return failure(axi.Failure("relaunch_refused", "Task in state "+string(task.State)+" cannot be relaunched", false))
@@ -1532,7 +1529,11 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	if task.WorktreePath == "" || task.Branch == "" {
 		return failure(axi.Failure("relaunch_mount_missing", "Task has no recorded Mount or branch", false))
 	}
-	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "relaunch")
+	payload := `{}`
+	if automatic {
+		payload = `{"automatic_recovery":true}`
+	}
+	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "relaunch", payload)
 	if err != nil {
 		return failure(axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error()))
 	}
@@ -1644,7 +1645,7 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	if err := track("agent.prompt", func() error { return s.deliverLaunchPrompt(ctx, pane.PaneID, "Read "+relaunchPath+" and follow it.") }); err != nil {
 		return failure(err)
 	}
-	if err := s.markRelaunchedWorking(ctx, db, project.ID, task.ID, track); err != nil {
+	if err := s.markRelaunchedWorking(ctx, db, project.ID, task.ID, automatic, snapshot.ServerStartedAt, track); err != nil {
 		return failure(err)
 	}
 	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {
@@ -1664,16 +1665,24 @@ const (
 // markRelaunchedWorking records the relaunched Worker as working. It reads the
 // Task again because reconcile can mark it lost while the relaunch waits for the
 // new agent, and a transition from the stale state would leave it lost.
-func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, projectID, taskID int64, track func(string, func() error) error) error {
+func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, projectID, taskID int64, automatic bool, generation string, track func(string, func() error) error) error {
 	for attempt := 0; ; attempt++ {
 		current, err := db.TaskByID(ctx, projectID, taskID)
 		if err != nil {
 			return err
 		}
-		if current.State == store.StateWorking {
-			return track("task.progress", func() error { return db.ResetTaskProgress(ctx, taskID) })
+		progress := func() error {
+			if err := db.ResetTaskProgress(ctx, taskID); err != nil {
+				return err
+			}
+			// Record the successful launch's generation before another event
+			// can mistake this Rider for an unrecovered process.
+			return db.UpdateTaskObservation(ctx, taskID, current.PaneID, current.HerdrWorkspaceID, current.AgentSession, 0, 0, generation)
 		}
-		if !recoverableTaskState(current.State) {
+		if current.State == store.StateWorking {
+			return track("task.progress", progress)
+		}
+		if automatic && current.State == store.StateFailed || !recoverableTaskState(current.State) {
 			return nil
 		}
 		source := "cli"
@@ -1691,7 +1700,7 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 			}
 			continue
 		}
-		return track("task.progress", func() error { return db.ResetTaskProgress(ctx, taskID) })
+		return track("task.progress", progress)
 	}
 }
 
