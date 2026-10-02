@@ -151,6 +151,33 @@ jobs:
             find "$root" -type d -exec chmod u+rwx {} +
             rm -rf -- "$root"
           done
+      - name: Run stopped Rider relaunch stress regression
+        env:
+          POSSE_E2E_RELAUNCH_STRESS: "1"
+          POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-relaunch-stress-
+        run: go test -tags=e2e -count=1 -timeout=9m ./internal/e2e -run '^TestStoppedRiderPaneCanBeRelaunched$'
+      - name: Clean stopped Rider stress test fixtures
+        if: ${{ always() }}
+        run: |
+          prefix="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-relaunch-stress-"
+          for process in /proc/[0-9]*; do
+            [ -r "$process/environ" ] || continue
+            if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Fxq 'POSSE_TEST_HERDR=1'; then
+              continue
+            fi
+            if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Eq "^XDG_CONFIG_HOME=/tmp/${prefix}[^/]*/xdg$"; then
+              continue
+            fi
+            command_line=$(tr '\0' ' ' < "$process/cmdline" 2>/dev/null || true)
+            case "$command_line" in
+              *herdr*server*) kill "${process##*/}" 2>/dev/null || true ;;
+            esac
+          done
+          for root in /tmp/"$prefix"* /var/tmp/"$prefix"installed-*; do
+            [ -d "$root" ] || continue
+            find "$root" -type d -exec chmod u+rwx {} +
+            rm -rf -- "$root"
+          done
       - name: Run second isolated Herdr end-to-end suite
         run: |
           export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass2-"

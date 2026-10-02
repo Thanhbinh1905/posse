@@ -7,11 +7,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestStoppedRiderPaneCanBeRelaunchedRepeatedly(t *testing.T) {
+func TestStoppedRiderPaneCanBeRelaunched(t *testing.T) {
+	attempts := 1
+	if os.Getenv("POSSE_E2E_RELAUNCH_STRESS") == "1" {
+		attempts = 30
+	}
 	for _, kind := range []string{"codex", "opencode"} {
 		t.Run(kind, func(t *testing.T) {
 			fixture := newPRLifecycleFixture(t)
@@ -26,15 +31,15 @@ func TestStoppedRiderPaneCanBeRelaunchedRepeatedly(t *testing.T) {
 			}
 
 			brief := filepath.Join(fixture.root, "relaunch.md")
-			content := "---\ntype: ship\ntitle: Repeated stopped Rider relaunch\ndone_when: relaunch succeeds 30 times\n---\nKeep the Rider alive for the relaunch regression.\n"
+			content := "---\ntype: ship\ntitle: Repeated stopped Rider relaunch\ndone_when: relaunch succeeds repeatedly\n---\nKeep the Rider alive for the relaunch regression.\n"
 			if err := os.WriteFile(brief, []byte(content), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "repeated-stopped-rider")
 			initial := fixture.mustTask(t, "t1")
 
-			const attempts = 30
 			for attempt := 1; attempt <= attempts; attempt++ {
+				started := time.Now()
 				command := exec.Command(fixture.binary, "relaunch", "t1")
 				command.Dir, command.Env = fixture.repo, fixture.leadEnv
 				output, err := command.CombinedOutput()
@@ -45,6 +50,7 @@ func TestStoppedRiderPaneCanBeRelaunchedRepeatedly(t *testing.T) {
 				if current.Launches != initial.Launches+attempt || current.State != store.StateWorking || current.PaneID != initial.PaneID || current.WorktreePath != initial.WorktreePath {
 					t.Fatalf("relaunch %d/%d changed Rider identity or Mount: initial=%#v current=%#v output=%s", attempt, attempts, initial, current, output)
 				}
+				t.Logf("relaunch %d/%d completed in %s", attempt, attempts, time.Since(started))
 			}
 		})
 	}
