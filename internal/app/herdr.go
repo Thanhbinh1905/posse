@@ -105,14 +105,18 @@ var (
 // startAgent starts an agent in a pane that may have just opened. Herdr queues
 // a launch before the pane's shell starts, but rejects it with agent_pane_busy
 // while the shell is still running its startup commands, so the start is
-// retried until the shell reaches its prompt.
+// retried until the shell reaches its prompt. Exhausting that bound reports a
+// retryable busy error so a later relaunch can try again after Herdr catches up.
 func (s *Service) startAgent(ctx context.Context, params map[string]any) (json.RawMessage, error) {
 	deadline := time.Now().Add(agentStartBusyWait)
 	for {
 		started, err := s.herdrCall(ctx, "agent.start", params)
 		var failure *axi.Error
-		if err == nil || !errors.As(err, &failure) || failure.Code != "agent_pane_busy" || time.Now().After(deadline) {
+		if err == nil || !errors.As(err, &failure) || failure.Code != "agent_pane_busy" {
 			return started, err
+		}
+		if time.Now().After(deadline) {
+			return nil, axi.Failure("agent_pane_busy", failure.Message, true, "Wait for the Rider pane's shell to become available, then retry")
 		}
 		select {
 		case <-ctx.Done():
@@ -243,11 +247,16 @@ var (
 
 // stopPaneAgent ends the agent in the pane and waits until the pane's shell is
 // back in the foreground. Herdr has no call that stops an agent, so posse
-// signals the pane's foreground process group: SIGTERM, then SIGKILL.
+// signals the pane's foreground process group: SIGTERM, then SIGKILL. Herdr may
+// retain lifecycle authority after the process exits, so clear it once the shell
+// is available for a new launch.
 func (s *Service) stopPaneAgent(ctx context.Context, paneID string) error {
 	group, err := s.paneAgentGroup(ctx, paneID)
-	if err != nil || group == 0 {
+	if err != nil {
 		return err
+	}
+	if group == 0 {
+		return s.clearPaneAgentAuthority(ctx, paneID)
 	}
 	for _, step := range []struct {
 		signal syscall.Signal
@@ -262,8 +271,8 @@ func (s *Service) stopPaneAgent(ctx context.Context, paneID string) error {
 			if err != nil {
 				return err
 			}
-			if current != group {
-				return nil
+			if current == 0 {
+				return s.clearPaneAgentAuthority(ctx, paneID)
 			}
 			select {
 			case <-ctx.Done():
@@ -273,6 +282,11 @@ func (s *Service) stopPaneAgent(ctx context.Context, paneID string) error {
 		}
 	}
 	return axi.Failure("agent_stop_failed", fmt.Sprintf("the agent in pane %s did not exit", paneID), true, "Close the pane, then retry")
+}
+
+func (s *Service) clearPaneAgentAuthority(ctx context.Context, paneID string) error {
+	_, err := s.herdrCall(ctx, "pane.clear_agent_authority", map[string]any{"pane_id": paneID})
+	return err
 }
 
 // paneAgentGroup returns the pane's foreground process group when it is not
