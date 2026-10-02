@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,13 +39,15 @@ func reportAttachmentGitArgs(baseRef string) [][]string {
 
 // preserveReportAttachments saves the Rider's non-ignored, unlanded files at
 // their worktree-relative paths next to report.md before the Mount is reset.
-// Workspace Mounts are enumerated repository by repository. A retry may
-// encounter the same saved files but never removes or replaces them.
+// Workspace Members are enumerated repository by repository, and changed
+// shared root files are compared with the Project. A retry may encounter the
+// same saved files but never removes or replaces them.
 func preserveReportAttachments(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
 	if task.WorktreePath == "" {
 		return nil
 	}
 	repositories := []reportAttachmentRepository{{path: task.WorktreePath, baseRef: task.BaseRef}}
+	workspaceMembers := map[string]bool{}
 	if project.IsWorkspace() {
 		targets, err := workspaceMountTargets(ctx, db, project)
 		if err != nil {
@@ -62,6 +66,7 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 			if target.Path == "" || filepath.IsAbs(target.Path) || filepath.Clean(target.Path) != target.Path || target.Path == ".." || strings.HasPrefix(target.Path, ".."+string(os.PathSeparator)) {
 				return fmt.Errorf("unsafe workspace Member path %q", target.Path)
 			}
+			workspaceMembers[target.Path] = true
 			path := filepath.Join(task.WorktreePath, target.Path)
 			if _, err := os.Stat(filepath.Join(path, ".git")); os.IsNotExist(err) {
 				continue
@@ -95,6 +100,15 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 			}
 		}
 	}
+	if project.IsWorkspace() {
+		rootAttachments, err := workspaceRootReportAttachments(project.Root, task.WorktreePath, workspaceMembers)
+		if err != nil {
+			return err
+		}
+		for name, source := range rootAttachments {
+			paths[name] = source
+		}
+	}
 
 	names := make([]string, 0, len(paths))
 	for path := range paths {
@@ -118,7 +132,7 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 		}
 		relative, err := filepath.Rel(root, resolved)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("report attachment %q escapes Member repository", name)
+			return fmt.Errorf("report attachment %q escapes its source tree", name)
 		}
 		info, err := os.Stat(source)
 		if err != nil {
@@ -152,6 +166,98 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 		}
 	}
 	return nil
+}
+
+// workspaceRootReportAttachments finds changed shared files in a workspace
+// Mount. Unchanged copies of Project context are not Report attachments.
+func workspaceRootReportAttachments(projectRoot, mountRoot string, members map[string]bool) (map[string]reportAttachmentSource, error) {
+	projectRoot, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	mountRoot, err = filepath.EvalSymlinks(mountRoot)
+	if err != nil {
+		return nil, err
+	}
+	attachments := map[string]reportAttachmentSource{}
+	err = filepath.WalkDir(mountRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(mountRoot, path)
+		if err != nil || relative == "." {
+			return err
+		}
+		if entry.IsDir() {
+			if members[relative] || entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+				return filepath.SkipDir
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		if relative == ".git" || strings.HasPrefix(relative, ".git"+string(os.PathSeparator)) || oneOfString(relative, "report.md", "brief.md", "launch.md", "relaunch.md", "findings.toon") {
+			return nil
+		}
+		if relative == "" || filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("unsafe workspace-root Report attachment path %q", relative)
+		}
+		changed, err := workspaceRootFileChanged(filepath.Join(projectRoot, relative), path)
+		if err != nil {
+			return err
+		}
+		if changed {
+			attachments[relative] = reportAttachmentSource{root: mountRoot, name: relative}
+		}
+		return nil
+	})
+	return attachments, err
+}
+
+func workspaceRootFileChanged(original, mounted string) (bool, error) {
+	originalInfo, err := os.Lstat(original)
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	mountedInfo, err := os.Lstat(mounted)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if originalInfo.Mode().Type() != mountedInfo.Mode().Type() {
+		return true, nil
+	}
+	if originalInfo.Mode()&os.ModeSymlink != 0 {
+		originalTarget, err := os.Readlink(original)
+		if err != nil {
+			return false, err
+		}
+		mountedTarget, err := os.Readlink(mounted)
+		if err != nil {
+			return false, err
+		}
+		return originalTarget != mountedTarget, nil
+	}
+	if !originalInfo.Mode().IsRegular() {
+		return true, nil
+	}
+	originalContents, err := os.ReadFile(original)
+	if err != nil {
+		return false, err
+	}
+	mountedContents, err := os.ReadFile(mounted)
+	if err != nil {
+		return false, err
+	}
+	return !bytes.Equal(originalContents, mountedContents), nil
 }
 
 func safeAttachmentDestination(root, path string) error {

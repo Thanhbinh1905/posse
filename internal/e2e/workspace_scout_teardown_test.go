@@ -16,9 +16,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// TestWorkspaceScoutTeardownPreservesMemberAttachments exercises Report, ack,
-// and Teardown against isolated Herdr for Scouts checking one and two Members.
-func TestWorkspaceScoutTeardownPreservesMemberAttachments(t *testing.T) {
+// TestWorkspaceScoutTeardownPreservesMemberAndRootAttachments exercises Report,
+// ack, and Teardown for one- and two-Member Scouts on a reused workspace Mount.
+func TestWorkspaceScoutTeardownPreservesMemberAndRootAttachments(t *testing.T) {
 	root := newFixtureRoot(t, fixturePrefix("workspace-scout-"))
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
@@ -40,6 +40,9 @@ case "$PWD/" in
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     printf 'Report for %s\n' "$PWD" > report.md
+    printf 'root evidence\n' > root-evidence.txt
+    printf 'updated workspace context\n' > workspace-note.txt
+    printf 'See root-evidence.txt and workspace-note.txt\n' >> report.md
     for member in */; do
       [ -e "$member/.git" ] || continue
       printf 'committed evidence from %s\n' "$member" > "${member}evidence.txt"
@@ -85,6 +88,17 @@ esac
 	}
 
 	workspace := filepath.Join(root, "stack")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, contents := range map[string]string{
+		"workspace-note.txt":    "initial workspace context\n",
+		"unchanged-context.txt": "unchanged shared context\n",
+	} {
+		if err := os.WriteFile(filepath.Join(workspace, path), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, member := range []string{"backend", "worker"} {
 		repo := filepath.Join(workspace, member)
 		if err := os.MkdirAll(repo, 0o700); err != nil {
@@ -131,6 +145,7 @@ esac
 		t.Fatalf("workspace Project = %#v, %v", project, err)
 	}
 
+	var firstMountID int64
 	for _, test := range []struct {
 		taskID, title, name string
 		members             []string
@@ -154,6 +169,11 @@ esac
 			task, err := db.Task(context.Background(), project.ID, test.taskID)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if test.taskID == "t1" {
+				firstMountID = task.MountID
+			} else if task.MountID != firstMountID {
+				t.Fatalf("Scout did not reuse Mount %d: got Mount %d", firstMountID, task.MountID)
 			}
 			notices, err := db.Notices(context.Background(), project.ID, false)
 			if err != nil {
@@ -185,14 +205,27 @@ esac
 			if len(mounts) == 0 || mounts[0].State != "idle" {
 				t.Fatalf("Mount was not released: %#v", mounts)
 			}
-			artifacts := []string{"report.md"}
+			artifacts := []string{"report.md", "root-evidence.txt", "workspace-note.txt"}
 			for _, member := range test.members {
 				artifacts = append(artifacts, filepath.Join(member, "evidence.txt"), filepath.Join(member, "untracked.txt"))
 			}
+			savedDir := filepath.Join(root, "posse", "projects", "stack", "tasks", test.taskID)
 			for _, artifact := range artifacts {
-				if contents, err := os.ReadFile(filepath.Join(root, "posse", "projects", "stack", "tasks", test.taskID, artifact)); err != nil || len(contents) == 0 {
+				if contents, err := os.ReadFile(filepath.Join(savedDir, artifact)); err != nil || len(contents) == 0 {
 					t.Errorf("saved artifact %s = %q, %v", artifact, contents, err)
 				}
+			}
+			for artifact, want := range map[string]string{
+				"report.md":          "Report for " + task.WorktreePath + "\nSee root-evidence.txt and workspace-note.txt\n",
+				"root-evidence.txt":  "root evidence\n",
+				"workspace-note.txt": "updated workspace context\n",
+			} {
+				if contents, err := os.ReadFile(filepath.Join(savedDir, artifact)); err != nil || string(contents) != want {
+					t.Errorf("saved root artifact %s = %q, want %q: %v", artifact, contents, want, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(savedDir, "unchanged-context.txt")); !os.IsNotExist(err) {
+				t.Errorf("unchanged shared context was saved as an attachment: %v", err)
 			}
 			show := runPosse(t, binary, workspace, leadEnv, "show", test.taskID)
 			for _, artifact := range artifacts[1:] {
