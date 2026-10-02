@@ -234,6 +234,14 @@ type Task struct {
 	ShortName            string
 }
 
+type TaskLaunchIdentity struct {
+	TaskID          int64
+	LaunchNumber    int64
+	ProfileName     string
+	ConfiguredModel string
+	ModelKnown      int64
+}
+
 type TaskRecovery struct {
 	TaskID        int64
 	Generation    string

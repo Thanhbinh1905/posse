@@ -451,6 +451,27 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile}
+	if task.Type == "review" {
+		reviewerLaunches, err := db.TaskLaunchIdentities(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		reviewerHistoryKnown := launchHistoryComplete(task, reviewerLaunches)
+		if task.ReviewsTaskID == 0 {
+			view["review_identity"] = map[string]any{"review_task": id, "eligible": false, "reason": "Review Task has no recorded Ship Task", "review_history_known": reviewerHistoryKnown, "review_launches": identityViews(reviewerLaunches)}
+		} else {
+			author, err := db.TaskByID(ctx.Context, project.ID, task.ReviewsTaskID)
+			if err != nil {
+				return err
+			}
+			authorLaunches, err := db.TaskLaunchIdentities(ctx.Context, author.ID)
+			if err != nil {
+				return err
+			}
+			authorHistoryKnown := author.Launches > 0 && launchHistoryComplete(author, authorLaunches)
+			view["review_identity"] = reviewIdentityHistoryResult(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown)
+		}
+	}
 	recovery, err := db.TaskRecovery(ctx.Context, task.ID)
 	if err != nil {
 		return err
@@ -540,6 +561,13 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["signals"] = taskSignalRows(task, signals)
 		view["transitions"] = taskTransitionRows(task, transitions)
 		view["profile"] = task.Profile
+		view["launches"] = task.Launches
+		launchIdentities, err := db.TaskLaunchIdentities(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		view["launch_identities"] = identityViews(launchIdentities)
+		view["launch_identity_history_known"] = launchHistoryComplete(task, launchIdentities)
 		view["dispatch_rule"] = task.DispatchRule
 		view["landing_mode"] = task.LandingMode
 		if task.Branch != "posse/"+taskIDString(task.Seq) {

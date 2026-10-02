@@ -122,6 +122,10 @@ _Avoid_: Subproject, submodule, child repo
 A named Worker configuration, or an implicit resolution to the Lead's agent kind; a named Profile can also provide model, effort and arguments.
 _Avoid_: Preset, agent config
 
+**Launch Identity Record**:
+A Task's launch number, Profile name and configured model value or unknown status, derived from that launch's arguments and persisted with its Task id.
+_Avoid_: Runtime identity, provider identity
+
 **Dispatch Rule**:
 A User-written rule that says which Profile a kind of Task should use.
 _Avoid_: Routing rule, policy

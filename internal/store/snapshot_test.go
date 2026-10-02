@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
@@ -64,6 +67,104 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTaskLaunchIdentitiesPersistAndRebuildWithoutLosingProfileChanges(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Author", ShortName: "author", Profile: "author", Branch: "posse/author", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunchWithIdentity(ctx, taskID, "author", "model-a", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunchWithIdentity(ctx, taskID, "reviewer", "model-b", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ChangeTaskProfile(ctx, taskID, "author", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	identities, err := db.TaskLaunchIdentities(ctx, taskID)
+	want := []TaskLaunchIdentity{
+		{TaskID: taskID, LaunchNumber: 1, Profile: "author", ConfiguredModel: "model-a", ModelKnown: true},
+		{TaskID: taskID, LaunchNumber: 2, Profile: "reviewer", ConfiguredModel: "model-b", ModelKnown: true},
+	}
+	if err != nil || !reflect.DeepEqual(identities, want) {
+		t.Fatalf("launch identities after Profile change = %#v, %v; want %#v", identities, err, want)
+	}
+	snapshotData, err := os.ReadFile(db.TaskSnapshotPath(project.Name, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot TaskSnapshot
+	if _, err := toml.Decode(string(snapshotData), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.LaunchIdentities, want) {
+		t.Fatalf("snapshot launch identities = %#v, want %#v", snapshot.LaunchIdentities, want)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET profile='damaged',launches=0 WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM task_launch_identities`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	rebuilt, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil || rebuilt.Profile != "reviewer" || rebuilt.Launches != 2 {
+		t.Fatalf("rebuilt Task lost its latest Profile or launch count: %#v, %v", rebuilt, err)
+	}
+	rebuiltIdentities, err := db.TaskLaunchIdentities(ctx, taskID)
+	if err != nil || !reflect.DeepEqual(rebuiltIdentities, want) {
+		t.Fatalf("rebuilt launch identities = %#v, %v; want %#v", rebuiltIdentities, err, want)
+	}
+}
+
+func TestRebuildKeepsMissingLaunchIdentityHistoryUnknown(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Legacy", ShortName: "legacy", Profile: "legacy", Branch: "posse/legacy", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunchWithIdentity(ctx, taskID, "legacy", "model-a", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM task_launch_identities WHERE task_id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	rebuilt, err := db.TaskByID(ctx, project.ID, taskID)
+	identities, identityErr := db.TaskLaunchIdentities(ctx, taskID)
+	if err != nil || identityErr != nil || rebuilt.Launches != 1 || len(identities) != 0 {
+		t.Fatalf("incomplete identity history was inferred during rebuild: task=%#v identities=%#v errors=%v/%v", rebuilt, identities, err, identityErr)
 	}
 }
 
