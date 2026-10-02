@@ -24,6 +24,10 @@ type TaskSnapshot struct {
 	Version int     `toml:"version"`
 	Project Project `toml:"project"`
 	Task    Task    `toml:"task"`
+	// LaunchIdentities retain the configured author and reviewer identity for
+	// every recorded Task launch. Missing numbers are left missing so rebuilds
+	// can report legacy or interrupted history as unknown rather than infer it.
+	LaunchIdentities []TaskLaunchIdentity `toml:"launch_identities,omitempty"`
 	// Members and TaskRepos are set for a workspace Project only.
 	Members   []ProjectRepo `toml:"members,omitempty"`
 	TaskRepos []TaskRepo    `toml:"task_repos,omitempty"`
@@ -101,7 +105,11 @@ func (db *DB) PersistTask(ctx context.Context, taskID int64) error {
 	if err != nil {
 		return err
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task}
+	identities, err := db.TaskLaunchIdentities(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities}
 	if project.IsWorkspace() {
 		if snapshot.Members, err = db.ProjectRepos(ctx, projectID); err != nil {
 			return err
@@ -301,7 +309,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notices", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notices", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -336,9 +344,21 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if task.ReviewsTaskID != 0 {
 			reviewed = task.ReviewsTaskID
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.ShortName, task.State, task.Profile, task.DispatchRule, task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.PRURL, task.LandedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.CreatedAt, task.UpdatedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,launches,gated_sha,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.ShortName, task.State, task.Profile, task.DispatchRule, task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.PRURL, task.LandedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt); err != nil {
 			return err
+		}
+		for _, identity := range snapshot.LaunchIdentities {
+			if identity.TaskID != 0 && identity.TaskID != task.ID {
+				return fmt.Errorf("Task launch identity in snapshot for t%d belongs to Task %d", task.Seq, identity.TaskID)
+			}
+			if identity.LaunchNumber < 1 || identity.LaunchNumber > task.Launches {
+				return fmt.Errorf("invalid launch number %d in snapshot for t%d", identity.LaunchNumber, task.Seq)
+			}
+			modelKnown := identity.ModelKnown && strings.TrimSpace(identity.ConfiguredModel) != ""
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known) VALUES(?,?,?,?,?)`, task.ID, identity.LaunchNumber, identity.Profile, identity.ConfiguredModel, modelKnown); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, "", task.State, "cli", "Rebuilt from atomic Task snapshot", task.UpdatedAt); err != nil {
 			return err

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -448,6 +449,15 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	updated, err = observer.Task(ctx, project.ID, "t1")
 	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != mount || updated.Launches != 3 {
 		t.Fatalf("recovered relaunch changed Task Mount/state incorrectly: %#v, %v", updated, err)
+	}
+	launchIdentities, err := observer.TaskLaunchIdentities(ctx, taskID)
+	wantLaunchIdentities := []store.TaskLaunchIdentity{
+		{TaskID: taskID, LaunchNumber: 1, Profile: "fast", ConfiguredModel: "sonnet", ModelKnown: false},
+		{TaskID: taskID, LaunchNumber: 2, Profile: "codex-fast", ConfiguredModel: "gpt-5", ModelKnown: true},
+		{TaskID: taskID, LaunchNumber: 3, Profile: "codex-fast", ConfiguredModel: "gpt-5", ModelKnown: true},
+	}
+	if err != nil || !reflect.DeepEqual(launchIdentities, wantLaunchIdentities) {
+		t.Fatalf("relaunch identity history = %#v, %v; want %#v", launchIdentities, err, wantLaunchIdentities)
 	}
 	if _, err := observer.IntentByTask(ctx, taskID); !store.IsNotFound(err) {
 		t.Fatalf("relaunch intent remains after recovery: %v", err)
