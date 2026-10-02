@@ -129,6 +129,7 @@ jobs:
       - name: Run first isolated Herdr end-to-end suite
         run: |
           export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass1-"
+          scripts/run-e2e-shard.sh --self-test
           for shard in 1 2 3 4; do
             scripts/run-e2e-shard.sh "$shard"
           done
