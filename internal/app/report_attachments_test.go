@@ -33,18 +33,10 @@ func TestReportAttachmentGitArgsOmitEmptyBaseRef(t *testing.T) {
 }
 
 func TestWorkspaceRootReportAttachmentsIncludeOnlyChangedSharedFiles(t *testing.T) {
-	projectRoot, mountRoot := filepath.Join(t.TempDir(), "project"), filepath.Join(t.TempDir(), "mount")
-	for _, root := range []string{projectRoot, mountRoot} {
-		if err := os.MkdirAll(root, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	mountRoot := filepath.Join(t.TempDir(), "mount")
 	for path, contents := range map[string]string{
-		filepath.Join(projectRoot, "unchanged.txt"):         "same\n",
-		filepath.Join(projectRoot, "changed.txt"):           "original\n",
 		filepath.Join(mountRoot, "unchanged.txt"):           "same\n",
-		filepath.Join(mountRoot, "changed.txt"):             "edited\n",
-		filepath.Join(mountRoot, "new.txt"):                 "new evidence\n",
+		filepath.Join(mountRoot, "changed.txt"):             "original\n",
 		filepath.Join(mountRoot, "report.md"):               "canonical report\n",
 		filepath.Join(mountRoot, ".git", "hidden"):          "metadata\n",
 		filepath.Join(mountRoot, "backend", "evidence.txt"): "member evidence\n",
@@ -56,7 +48,20 @@ func TestWorkspaceRootReportAttachmentsIncludeOnlyChangedSharedFiles(t *testing.
 			t.Fatal(err)
 		}
 	}
-	attachments, err := workspaceRootReportAttachments(projectRoot, mountRoot, map[string]bool{"backend": true})
+	members := map[string]bool{"backend": true}
+	baselineFiles, err := workspaceRootFileStates(mountRoot, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(mountRoot, "changed.txt"): "edited\n",
+		filepath.Join(mountRoot, "new.txt"):     "new evidence\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attachments, err := workspaceRootReportAttachments(context.Background(), mountRoot, members, workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: baselineFiles})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,14 +74,103 @@ func TestWorkspaceRootReportAttachmentsIncludeOnlyChangedSharedFiles(t *testing.
 	}
 }
 
+func TestWorkspaceRootReportAttachmentsIncludeNonIgnoredNestedGitFiles(t *testing.T) {
+	mountRoot := t.TempDir()
+	repository := filepath.Join(mountRoot, "git-evidence")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repository, "init", "-q", "-b", "main")
+	gitTest(t, repository, "config", "user.name", "Posse Test")
+	gitTest(t, repository, "config", "user.email", "posse@example.test")
+	if err := os.WriteFile(filepath.Join(repository, ".git", "info", "exclude"), []byte("ignored.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{"proof.txt": "committed proof\n", "notes.txt": "untracked evidence\n", "ignored.txt": "ignored data\n"} {
+		if err := os.WriteFile(filepath.Join(repository, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitTest(t, repository, "add", "proof.txt")
+	gitTest(t, repository, "commit", "-m", "evidence")
+	attachments, err := workspaceRootReportAttachments(context.Background(), mountRoot, map[string]bool{}, workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: map[string]workspaceRootFingerprint{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]reportAttachmentSource{
+		"git-evidence/proof.txt": {root: repository, name: "proof.txt"},
+		"git-evidence/notes.txt": {root: repository, name: "notes.txt"},
+	}
+	if !reflect.DeepEqual(attachments, want) {
+		t.Fatalf("nested Git attachments = %#v, want %#v", attachments, want)
+	}
+}
+
+func TestWorkspaceRootBaselineUsesMountContentsAtAcquireAndRemainsHidden(t *testing.T) {
+	home := t.TempDir()
+	project := store.Project{Name: "stack", Kind: store.ProjectKindWorkspace, Root: filepath.Join(t.TempDir(), "project")}
+	task := store.Task{Seq: 1, WorktreePath: filepath.Join(t.TempDir(), "mount")}
+	for _, root := range []string{project.Root, task.WorktreePath, filepath.Join(task.WorktreePath, "backend")} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, root := range []string{project.Root, task.WorktreePath} {
+		if err := os.WriteFile(filepath.Join(root, "workspace-note.txt"), []byte("acquired copy\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "backend", "member.txt"), []byte("member\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWorkspaceRootBaseline(home, project, task, task.WorktreePath, []taskMember{{Path: "backend"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{project.Root, task.WorktreePath} {
+		if err := os.WriteFile(filepath.Join(root, "workspace-note.txt"), []byte("same later update\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(project.Root, "root-evidence.txt"), []byte("same new evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "root-evidence.txt"), []byte("same new evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, ".workspace-root-baseline.json"), []byte("evidence with an internal-looking name\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := readWorkspaceRootBaseline(home, project, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments, err := workspaceRootReportAttachments(context.Background(), task.WorktreePath, map[string]bool{"backend": true}, baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]reportAttachmentSource{
+		".workspace-root-baseline.json": {root: task.WorktreePath, name: ".workspace-root-baseline.json"},
+		"root-evidence.txt":             {root: task.WorktreePath, name: "root-evidence.txt"},
+		"workspace-note.txt":            {root: task.WorktreePath, name: "workspace-note.txt"},
+	}
+	if !reflect.DeepEqual(attachments, want) {
+		t.Fatalf("attachments after live Project update = %#v, want %#v", attachments, want)
+	}
+	listed, err := reportAttachments(home, project, task)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("internal baseline appeared as a Report attachment: %#v, %v", listed, err)
+	}
+}
+
 func TestWorkspaceScoutProtocolDescribesRootAttachments(t *testing.T) {
 	project := store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}
 	task := store.Task{Seq: 1, Type: "scout"}
 	protocol := workerProtocol(project, task, dispatch.Brief{}, "/tmp/launch.md") + workspaceProtocol(project, nil)
 	for _, phrase := range []string{
 		"new or edited shared-root files",
-		"but not unchanged Project copies",
-		"are saved as Report attachments at Teardown",
+		"snapshot of the Mount before the Rider starts",
+		"Later edits to the live Project do not change that baseline",
+		"Teardown keeps the Mount",
 	} {
 		if !strings.Contains(protocol, phrase) {
 			t.Errorf("workspace Scout protocol omits %q:\n%s", phrase, protocol)

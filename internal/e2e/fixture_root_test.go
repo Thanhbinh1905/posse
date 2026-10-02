@@ -124,8 +124,9 @@ func reclaimAbandonedFixtures(parent string) error {
 	if err != nil {
 		return err
 	}
+	prefix := fixturePrefix("")
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "posse-e2e-") {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
 			continue
 		}
 		root := filepath.Join(parent, entry.Name())

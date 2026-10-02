@@ -1,9 +1,12 @@
 package app
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -24,6 +27,70 @@ type reportAttachmentSource struct {
 	name string
 }
 
+type workspaceRootBaseline struct {
+	Version int                                 `json:"version"`
+	Files   map[string]workspaceRootFingerprint `json:"files"`
+}
+
+type workspaceRootFingerprint struct {
+	Mode          uint32 `json:"mode"`
+	SHA256        string `json:"sha256,omitempty"`
+	SymlinkTarget string `json:"symlink_target,omitempty"`
+}
+
+const workspaceRootBaselineVersion = 1
+
+func workspaceRootBaselinePath(home string, project store.Project, task store.Task) string {
+	return filepath.Join(home, "projects", project.Name, ".workspace-root-baselines", taskIDString(task.Seq)+".json")
+}
+
+func writeWorkspaceRootBaseline(home string, project store.Project, task store.Task, mountRoot string, targets []taskMember) error {
+	members, err := workspaceMemberPaths(targets)
+	if err != nil {
+		return err
+	}
+	files, err := workspaceRootFileStates(mountRoot, members)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: files})
+	if err != nil {
+		return err
+	}
+	return writeFile(workspaceRootBaselinePath(home, project, task), data)
+}
+
+func readWorkspaceRootBaseline(home string, project store.Project, task store.Task) (workspaceRootBaseline, error) {
+	data, err := os.ReadFile(workspaceRootBaselinePath(home, project, task))
+	if err != nil {
+		return workspaceRootBaseline{}, fmt.Errorf("read workspace root acquisition baseline: %w", err)
+	}
+	var baseline workspaceRootBaseline
+	if err := json.Unmarshal(data, &baseline); err != nil {
+		return workspaceRootBaseline{}, fmt.Errorf("decode workspace root acquisition baseline: %w", err)
+	}
+	if baseline.Version != workspaceRootBaselineVersion || baseline.Files == nil {
+		return workspaceRootBaseline{}, fmt.Errorf("unsupported or incomplete workspace root acquisition baseline")
+	}
+	for path := range baseline.Files {
+		if !safeWorkspaceRootPath(path) || isGitMetadataPath(path) || isWorkspaceControlPath(path) {
+			return workspaceRootBaseline{}, fmt.Errorf("unsafe path %q in workspace root acquisition baseline", path)
+		}
+	}
+	return baseline, nil
+}
+
+func workspaceMemberPaths(targets []taskMember) (map[string]bool, error) {
+	members := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		if !safeWorkspaceRootPath(target.Path) {
+			return nil, fmt.Errorf("unsafe workspace Member path %q", target.Path)
+		}
+		members[target.Path] = true
+	}
+	return members, nil
+}
+
 // reportAttachmentGitArgs lists changes without treating an absent base ref as
 // an empty pathspec. The HEAD diff includes staged and unstaged changes.
 func reportAttachmentGitArgs(baseRef string) [][]string {
@@ -39,9 +106,9 @@ func reportAttachmentGitArgs(baseRef string) [][]string {
 
 // preserveReportAttachments saves the Rider's non-ignored, unlanded files at
 // their worktree-relative paths next to report.md before the Mount is reset.
-// Workspace Members are enumerated repository by repository, and changed
-// shared root files are compared with the Project. A retry may encounter the
-// same saved files but never removes or replaces them.
+// Workspace Members are enumerated repository by repository, and shared-root
+// files are compared with the prelaunch Mount snapshot. A retry may encounter
+// the same saved files but never removes or replaces them.
 func preserveReportAttachments(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
 	if task.WorktreePath == "" {
 		return nil
@@ -50,6 +117,10 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 	workspaceMembers := map[string]bool{}
 	if project.IsWorkspace() {
 		targets, err := workspaceMountTargets(ctx, db, project)
+		if err != nil {
+			return err
+		}
+		workspaceMembers, err = workspaceMemberPaths(targets)
 		if err != nil {
 			return err
 		}
@@ -63,10 +134,6 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 		}
 		repositories = repositories[:0]
 		for _, target := range targets {
-			if target.Path == "" || filepath.IsAbs(target.Path) || filepath.Clean(target.Path) != target.Path || target.Path == ".." || strings.HasPrefix(target.Path, ".."+string(os.PathSeparator)) {
-				return fmt.Errorf("unsafe workspace Member path %q", target.Path)
-			}
-			workspaceMembers[target.Path] = true
 			path := filepath.Join(task.WorktreePath, target.Path)
 			if _, err := os.Stat(filepath.Join(path, ".git")); os.IsNotExist(err) {
 				continue
@@ -101,7 +168,11 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 		}
 	}
 	if project.IsWorkspace() {
-		rootAttachments, err := workspaceRootReportAttachments(project.Root, task.WorktreePath, workspaceMembers)
+		baseline, err := readWorkspaceRootBaseline(home, project, task)
+		if err != nil {
+			return err
+		}
+		rootAttachments, err := workspaceRootReportAttachments(ctx, task.WorktreePath, workspaceMembers, baseline)
 		if err != nil {
 			return err
 		}
@@ -168,18 +239,16 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 	return nil
 }
 
-// workspaceRootReportAttachments finds changed shared files in a workspace
-// Mount. Unchanged copies of Project context are not Report attachments.
-func workspaceRootReportAttachments(projectRoot, mountRoot string, members map[string]bool) (map[string]reportAttachmentSource, error) {
-	projectRoot, err := filepath.EvalSymlinks(projectRoot)
+// workspaceRootReportAttachments finds new or changed files in a workspace
+// Mount relative to the copy captured before the Rider started. Files inside
+// nested repositories come from Git's tracked and non-ignored file listing.
+func workspaceRootReportAttachments(ctx context.Context, mountRoot string, members map[string]bool, baseline workspaceRootBaseline) (map[string]reportAttachmentSource, error) {
+	mountRoot, err := filepath.EvalSymlinks(mountRoot)
 	if err != nil {
 		return nil, err
 	}
-	mountRoot, err = filepath.EvalSymlinks(mountRoot)
-	if err != nil {
-		return nil, err
-	}
-	attachments := map[string]reportAttachmentSource{}
+	var rootFiles []string
+	var repositories []reportAttachmentRepository
 	err = filepath.WalkDir(mountRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -193,71 +262,170 @@ func workspaceRootReportAttachments(projectRoot, mountRoot string, members map[s
 				return filepath.SkipDir
 			}
 			if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
-				return filepath.SkipDir
+				repositories = append(repositories, reportAttachmentRepository{path: path, relative: relative})
 			} else if !os.IsNotExist(err) {
 				return err
 			}
 			return nil
 		}
-		if relative == ".git" || strings.HasPrefix(relative, ".git"+string(os.PathSeparator)) || oneOfString(relative, "report.md", "brief.md", "launch.md", "relaunch.md", "findings.toon") {
+		if isGitMetadataPath(relative) || isWorkspaceControlPath(relative) {
 			return nil
 		}
-		if relative == "" || filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		if !safeWorkspaceRootPath(relative) {
 			return fmt.Errorf("unsafe workspace-root Report attachment path %q", relative)
 		}
-		changed, err := workspaceRootFileChanged(filepath.Join(projectRoot, relative), path)
+		rootFiles = append(rootFiles, relative)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	attachments := map[string]reportAttachmentSource{}
+	addIfChanged := func(relative, root, name string) error {
+		if !safeWorkspaceRootPath(relative) || isGitMetadataPath(relative) || isWorkspaceControlPath(relative) {
+			return fmt.Errorf("unsafe workspace-root Report attachment path %q", relative)
+		}
+		current, err := fingerprintWorkspaceRootFile(filepath.Join(root, name))
 		if err != nil {
 			return err
 		}
-		if changed {
-			attachments[relative] = reportAttachmentSource{root: mountRoot, name: relative}
+		previous, found := baseline.Files[relative]
+		if !found || current != previous {
+			attachments[relative] = reportAttachmentSource{root: root, name: name}
 		}
 		return nil
-	})
-	return attachments, err
+	}
+	for _, relative := range rootFiles {
+		insideRepository := false
+		for _, repository := range repositories {
+			if workspaceRelativePathWithin(repository.relative, relative) {
+				insideRepository = true
+				break
+			}
+		}
+		if insideRepository {
+			continue
+		}
+		if err := addIfChanged(relative, mountRoot, relative); err != nil {
+			return nil, err
+		}
+	}
+	for _, repository := range repositories {
+		output, err := gitOutputRaw(ctx, repository.path, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+		if err != nil {
+			return nil, fmt.Errorf("list workspace-root Report attachments in %s: %w", repository.path, err)
+		}
+		for _, name := range nulPaths(output) {
+			if !safeWorkspaceRootPath(name) || isGitMetadataPath(name) {
+				return nil, fmt.Errorf("unsafe nested Git Report attachment path %q", name)
+			}
+			source := filepath.Join(repository.path, name)
+			info, err := os.Lstat(source)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if info.IsDir() {
+				continue
+			}
+			relative := filepath.Join(repository.relative, name)
+			if err := addIfChanged(relative, repository.path, name); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return attachments, nil
 }
 
-func workspaceRootFileChanged(original, mounted string) (bool, error) {
-	originalInfo, err := os.Lstat(original)
-	if os.IsNotExist(err) {
-		return true, nil
-	}
+func workspaceRootFileStates(root string, members map[string]bool) (map[string]workspaceRootFingerprint, error) {
+	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	mountedInfo, err := os.Lstat(mounted)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if originalInfo.Mode().Type() != mountedInfo.Mode().Type() {
-		return true, nil
-	}
-	if originalInfo.Mode()&os.ModeSymlink != 0 {
-		originalTarget, err := os.Readlink(original)
-		if err != nil {
-			return false, err
+	files := map[string]workspaceRootFingerprint{}
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		mountedTarget, err := os.Readlink(mounted)
-		if err != nil {
-			return false, err
+		relative, err := filepath.Rel(root, path)
+		if err != nil || relative == "." {
+			return err
 		}
-		return originalTarget != mountedTarget, nil
-	}
-	if !originalInfo.Mode().IsRegular() {
-		return true, nil
-	}
-	originalContents, err := os.ReadFile(original)
+		if entry.IsDir() {
+			if members[relative] || entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if isGitMetadataPath(relative) || isWorkspaceControlPath(relative) {
+			return nil
+		}
+		if !safeWorkspaceRootPath(relative) {
+			return fmt.Errorf("unsafe workspace-root baseline path %q", relative)
+		}
+		fingerprint, err := fingerprintWorkspaceRootFile(path)
+		if err != nil {
+			return err
+		}
+		files[relative] = fingerprint
+		return nil
+	})
+	return files, err
+}
+
+func fingerprintWorkspaceRootFile(path string) (workspaceRootFingerprint, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
-		return false, err
+		return workspaceRootFingerprint{}, err
 	}
-	mountedContents, err := os.ReadFile(mounted)
-	if err != nil {
-		return false, err
+	fingerprint := workspaceRootFingerprint{Mode: uint32(info.Mode() & (fs.ModeType | 0o777))}
+	if info.Mode().IsRegular() {
+		file, err := os.Open(path)
+		if err != nil {
+			return workspaceRootFingerprint{}, err
+		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return workspaceRootFingerprint{}, copyErr
+		}
+		if closeErr != nil {
+			return workspaceRootFingerprint{}, closeErr
+		}
+		fingerprint.SHA256 = hex.EncodeToString(hash.Sum(nil))
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		fingerprint.SymlinkTarget, err = os.Readlink(path)
+		if err != nil {
+			return workspaceRootFingerprint{}, err
+		}
 	}
-	return !bytes.Equal(originalContents, mountedContents), nil
+	return fingerprint, nil
+}
+
+func safeWorkspaceRootPath(path string) bool {
+	return path != "" && path != "." && path != ".." && !filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.HasPrefix(path, ".."+string(os.PathSeparator))
+}
+
+func isGitMetadataPath(path string) bool {
+	for _, component := range strings.Split(path, string(os.PathSeparator)) {
+		if component == ".git" {
+			return true
+		}
+	}
+	return false
+}
+
+func isWorkspaceControlPath(path string) bool {
+	return oneOfString(path, "report.md", "brief.md", "launch.md", "relaunch.md", "findings.toon")
+}
+
+func workspaceRelativePathWithin(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !filepath.IsAbs(relative) && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
 }
 
 func safeAttachmentDestination(root, path string) error {

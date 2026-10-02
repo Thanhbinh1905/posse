@@ -43,6 +43,18 @@ case "$PWD/" in
     printf 'root evidence\n' > root-evidence.txt
     printf 'updated workspace context\n' > workspace-note.txt
     printf 'See root-evidence.txt and workspace-note.txt\n' >> report.md
+    mode=$(cat "$POSSE_TEST_ROOT/scout-mode" 2>/dev/null || true)
+    rm -f "$POSSE_TEST_ROOT/scout-mode"
+    if [ "$mode" = nested-git ]; then
+      mkdir -p git-evidence
+      git -C git-evidence init -q -b main
+      printf 'ignored.txt\n' > git-evidence/.git/info/exclude
+      printf 'nested Git proof\n' > git-evidence/proof.txt
+      printf 'untracked nested evidence\n' > git-evidence/notes.txt
+      printf 'ignored nested file\n' > git-evidence/ignored.txt
+      git -C git-evidence add proof.txt && git -C git-evidence commit -qm 'nested evidence' || exit 0
+      printf 'See git-evidence/proof.txt\n' >> report.md
+    fi
     for member in */; do
       [ -e "$member/.git" ] || continue
       printf 'committed evidence from %s\n' "$member" > "${member}evidence.txt"
@@ -149,11 +161,21 @@ esac
 	for _, test := range []struct {
 		taskID, title, name string
 		members             []string
+		scenario            string
+		nestedGit           bool
+		updateProject       bool
 	}{
 		{taskID: "t1", title: "Inspect backend member", name: "inspect-backend-member", members: []string{"backend"}},
 		{taskID: "t2", title: "Inspect both members", name: "inspect-both-members", members: []string{"backend", "worker"}},
+		{taskID: "t3", title: "Inspect nested root", name: "inspect-nested-root", members: []string{"backend"}, scenario: "nested-git", nestedGit: true},
+		{taskID: "t4", title: "Preserve root evidence", name: "preserve-root-evidence", members: []string{"backend"}, updateProject: true},
 	} {
 		t.Run(test.taskID, func(t *testing.T) {
+			if test.scenario != "" {
+				if err := os.WriteFile(filepath.Join(root, "scout-mode"), []byte(test.scenario), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			brief := filepath.Join(root, test.taskID+".md")
 			if err := os.WriteFile(brief, []byte("---\ntype: scout\ntitle: "+test.title+"\ndone_when: report and member evidence are preserved\nrepos: ["+strings.Join(test.members, ", ")+"]\n---\nInspect the listed member repositories and attach their evidence.\n"), 0o600); err != nil {
 				t.Fatal(err)
@@ -174,6 +196,13 @@ esac
 				firstMountID = task.MountID
 			} else if task.MountID != firstMountID {
 				t.Fatalf("Scout did not reuse Mount %d: got Mount %d", firstMountID, task.MountID)
+			}
+			if test.updateProject {
+				for path, contents := range map[string]string{"root-evidence.txt": "root evidence\n", "workspace-note.txt": "updated workspace context\n"} {
+					if err := os.WriteFile(filepath.Join(workspace, path), []byte(contents), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			notices, err := db.Notices(context.Background(), project.ID, false)
 			if err != nil {
@@ -206,6 +235,9 @@ esac
 				t.Fatalf("Mount was not released: %#v", mounts)
 			}
 			artifacts := []string{"report.md", "root-evidence.txt", "workspace-note.txt"}
+			if test.nestedGit {
+				artifacts = append(artifacts, "git-evidence/proof.txt", "git-evidence/notes.txt")
+			}
 			for _, member := range test.members {
 				artifacts = append(artifacts, filepath.Join(member, "evidence.txt"), filepath.Join(member, "untracked.txt"))
 			}
@@ -215,17 +247,38 @@ esac
 					t.Errorf("saved artifact %s = %q, %v", artifact, contents, err)
 				}
 			}
-			for artifact, want := range map[string]string{
-				"report.md":          "Report for " + task.WorktreePath + "\nSee root-evidence.txt and workspace-note.txt\n",
+			wantReport := "Report for " + task.WorktreePath + "\nSee root-evidence.txt and workspace-note.txt\n"
+			if test.nestedGit {
+				wantReport += "See git-evidence/proof.txt\n"
+			}
+			wantFiles := map[string]string{
+				"report.md":          wantReport,
 				"root-evidence.txt":  "root evidence\n",
 				"workspace-note.txt": "updated workspace context\n",
-			} {
+			}
+			if test.nestedGit {
+				wantFiles["git-evidence/proof.txt"] = "nested Git proof\n"
+				wantFiles["git-evidence/notes.txt"] = "untracked nested evidence\n"
+			}
+			for artifact, want := range wantFiles {
 				if contents, err := os.ReadFile(filepath.Join(savedDir, artifact)); err != nil || string(contents) != want {
 					t.Errorf("saved root artifact %s = %q, want %q: %v", artifact, contents, want, err)
 				}
 			}
 			if _, err := os.Stat(filepath.Join(savedDir, "unchanged-context.txt")); !os.IsNotExist(err) {
 				t.Errorf("unchanged shared context was saved as an attachment: %v", err)
+			}
+			if test.nestedGit {
+				if _, err := os.Stat(filepath.Join(savedDir, "git-evidence/ignored.txt")); !os.IsNotExist(err) {
+					t.Errorf("Git-ignored nested file was saved as an attachment: %v", err)
+				}
+			}
+			if test.updateProject {
+				for path, want := range map[string]string{"root-evidence.txt": "root evidence\n", "workspace-note.txt": "updated workspace context\n"} {
+					if got, err := os.ReadFile(filepath.Join(workspace, path)); err != nil || string(got) != want {
+						t.Errorf("live Project update for %s = %q, want %q: %v", path, got, want, err)
+					}
+				}
 			}
 			show := runPosse(t, binary, workspace, leadEnv, "show", test.taskID)
 			for _, artifact := range artifacts[1:] {
