@@ -129,7 +129,9 @@ jobs:
       - name: Run first isolated Herdr end-to-end suite
         run: |
           export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass1-"
-          go test -tags=e2e -count=1 ./internal/e2e
+          for shard in 1 2 3 4; do
+            scripts/run-e2e-shard.sh "$shard"
+          done
       - name: Clean first-pass Herdr processes and fixtures
         run: |
           prefix="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass1-"
@@ -181,7 +183,9 @@ jobs:
       - name: Run second isolated Herdr end-to-end suite
         run: |
           export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass2-"
-          go test -tags=e2e -count=1 ./internal/e2e
+          for shard in 1 2 3 4; do
+            scripts/run-e2e-shard.sh "$shard"
+          done
       - name: Check command CPU budgets without the race detector
         run: go test -tags='e2e perf' -count=1 ./internal/e2e -run '^TestCommandPerformanceBudgets$'
       - name: Clean isolated E2E processes and state
