@@ -218,8 +218,26 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 			tasks = append(tasks, task)
 		}
 	}
+	projectRecovery, err := db.ProjectRecovery(ctx, project.ID)
+	if err != nil {
+		return 0, err
+	}
 	for _, task := range tasks {
-		if taskNeedsRestartRecovery(task, snapshot) {
+		state, err := db.TaskRecovery(ctx, task.ID)
+		if err != nil {
+			return 0, err
+		}
+		if state.Status == "exhausted" {
+			continue
+		}
+		pane, found := findTaskPane(snapshot.Panes, task)
+		missing := !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped"
+		// A group can close again while its first Lead is still starting.
+		// Another hook may recover only that Lead from a pre-close snapshot.
+		// Missing Riders from the older group episode still need recovery,
+		// even though the server generation and the new Lead are now current.
+		unfinishedGroup := state.Status == "recovered" && strings.Contains(state.Generation, "/group/") && strings.Contains(projectRecovery.Generation, "/group/") && state.Generation != projectRecovery.Generation && missing
+		if taskNeedsRestartRecovery(task, snapshot) || unfinishedGroup {
 			serverRestarted = true
 			break
 		}
@@ -311,6 +329,8 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		return 0, err
 	}
 	recovered := []string{}
+	pendingRecovery := false
+	failedRecovery := false
 	for _, beforeRestart := range tasks {
 		if !recoverableTaskState(beforeRestart.State) {
 			continue
@@ -324,34 +344,18 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
 		}
-		if _, err := s.relaunchTask(ctx, db, home, project, cfg, task, ""); err != nil {
-			var cliErr *axi.Error
-			if errors.As(err, &cliErr) && cliErr.Code == "intent_active" {
-				active, intentErr := db.IntentByTask(ctx, task.ID)
-				if intentErr != nil {
-					return len(recovered), fmt.Errorf("recover Task %s: %w (read active intent: %v)", taskIDString(task.Seq), err, intentErr)
-				}
-				if active.Command == "relaunch" && active.ProcessID != os.Getpid() && intentProcessAlive(active) {
-					completed, waitErr := waitForRecoveryGeneration(ctx, db, project.ID, snapshot.ServerStartedAt, active.ProcessID)
-					if waitErr != nil {
-						return len(recovered), waitErr
-					}
-					if completed {
-						return 0, nil
-					}
-					current, taskErr := db.TaskByID(ctx, project.ID, task.ID)
-					if taskErr != nil {
-						return len(recovered), taskErr
-					}
-					if current.State == store.StateWorking && (current.Launches > task.Launches || current.AgentName != task.AgentName) {
-						recovered = append(recovered, taskDisplayName(task))
-						continue
-					}
-				}
-			}
+		settled, success, err := s.recoverTask(ctx, db, home, project, cfg, task, claimGeneration, snapshot)
+		if err != nil {
 			return len(recovered), fmt.Errorf("recover Task %s: %w", taskIDString(task.Seq), err)
 		}
-		recovered = append(recovered, taskDisplayName(task))
+		pendingRecovery = pendingRecovery || !settled
+		failedRecovery = failedRecovery || settled && !success
+		if success {
+			recovered = append(recovered, taskDisplayName(task))
+		}
+	}
+	if pendingRecovery {
+		return len(recovered), errRecoveryDeferred
 	}
 	data := marshalJSON(map[string]any{"server_started_at": snapshot.ServerStartedAt, "tasks": recovered})
 	summary := "Recovered after a Herdr restart"
@@ -365,7 +369,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE project_id=? AND kind='recovery' AND data_json=?`, project.ID, data).Scan(&existing); err != nil {
 		return len(recovered), err
 	}
-	if existing == 0 {
+	if existing == 0 && (!failedRecovery || len(recovered) > 0) {
 		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "recovery", Summary: summary, DataJSON: data}); err != nil {
 			return len(recovered), err
 		}
@@ -483,32 +487,6 @@ func recoverableTaskState(state store.State) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func waitForRecoveryGeneration(ctx context.Context, db *store.DB, projectID int64, generation string, ownerPID int) (bool, error) {
-	deadline := time.NewTimer(60 * time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		startedAt, err := db.ProjectServerStartedAt(ctx, projectID)
-		if err != nil {
-			return false, err
-		}
-		if startedAt == generation {
-			return true, nil
-		}
-		if !processAlive(ownerPID) {
-			return false, nil
-		}
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-deadline.C:
-			return false, axi.Failure("intent_active", "another recovery is still running", true, "Retry `posse recover --all` after it completes")
-		case <-ticker.C:
-		}
 	}
 }
 

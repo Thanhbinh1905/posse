@@ -161,6 +161,17 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 		_, leadReady := findLeadInSnapshot(f.snapshot(t))
 		return leadReady && a.Launches > firstBeforeLeadClose.Launches && b.Launches > secondBeforeLeadClose.Launches
 	}) {
+		db, err := store.OpenReadOnly(f.home)
+		if err == nil {
+			project, _ := db.ProjectByID(context.Background(), f.projectID)
+			recovery, _ := db.ProjectRecovery(context.Background(), f.projectID)
+			firstRecovery, _ := db.TaskRecovery(context.Background(), first.ID)
+			secondRecovery, _ := db.TaskRecovery(context.Background(), second.ID)
+			t.Logf("Project=%#v recovery=%#v first=%#v second=%#v", project, recovery, firstRecovery, secondRecovery)
+			_ = db.Close()
+		}
+		logs, logErr := f.client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.group-e2e"})
+		t.Logf("hook logs=%s error=%v", logs, logErr)
 		t.Fatalf("Lead group close did not restore both Riders: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
 	}
 	snap = f.snapshot(t)

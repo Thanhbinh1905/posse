@@ -99,7 +99,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		}
 		if len(notices) == 0 {
 			if lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute {
-				if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+				if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
 					if !store.IsBusy(err) {
 						return err
 					}
@@ -335,7 +335,7 @@ func (s *Service) ack(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) ackNotices(ctx *axi.Context, db *store.DB, project store.Project, args []string) (int, []string, error) {
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	cfg, err := s.prepareProjectObservation(ctx.Context, db, project)
 	if err != nil {
 		return 0, nil, err
 	}

@@ -234,6 +234,16 @@ type Task struct {
 	ShortName            string
 }
 
+type TaskRecovery struct {
+	TaskID        int64
+	Generation    string
+	Attempts      int64
+	NextAttemptAt int64
+	OwnerPid      int64
+	Status        string
+	LastError     string
+}
+
 type TaskRepo struct {
 	ID           int64
 	TaskID       int64
