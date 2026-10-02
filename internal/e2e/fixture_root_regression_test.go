@@ -36,6 +36,7 @@ func TestFixtureRootRemovesReadOnlyGoModuleDirectories(t *testing.T) {
 }
 
 func TestFixtureRootPreservesLiveIsolatedProcesses(t *testing.T) {
+	t.Setenv("POSSE_E2E_TMP_PREFIX", "posse-e2e-")
 	if runtime.GOOS != "linux" {
 		t.Skip("process environment scanning requires Linux procfs")
 	}
@@ -91,6 +92,7 @@ func TestFixtureRootPreservesLiveIsolatedProcesses(t *testing.T) {
 }
 
 func TestFixtureRootReclaimsOnlyAbandonedOwnedRoots(t *testing.T) {
+	t.Setenv("POSSE_E2E_TMP_PREFIX", "posse-e2e-")
 	parent := t.TempDir()
 	active := filepath.Join(parent, "posse-e2e-active")
 	abandoned := filepath.Join(parent, "posse-e2e-abandoned")
@@ -132,5 +134,29 @@ func TestFixtureRootReclaimsOnlyAbandonedOwnedRoots(t *testing.T) {
 	}
 	if _, err := os.Stat(active); !os.IsNotExist(err) {
 		t.Fatalf("unlocked fixture remains: %v", err)
+	}
+}
+
+func TestFixtureRootReclaimsOnlyConfiguredPrefix(t *testing.T) {
+	t.Setenv("POSSE_E2E_TMP_PREFIX", "posse-e2e-owned-")
+	parent := t.TempDir()
+	owned := filepath.Join(parent, "posse-e2e-owned-abandoned")
+	unrelated := filepath.Join(parent, "posse-e2e-other-abandoned")
+	for _, root := range []string{owned, unrelated} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, fixtureLockName), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := reclaimAbandonedFixtures(parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(owned); !os.IsNotExist(err) {
+		t.Fatalf("configured abandoned fixture remains: %v", err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Fatalf("removed fixture outside configured prefix: %v", err)
 	}
 }

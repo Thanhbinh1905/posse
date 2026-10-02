@@ -489,11 +489,11 @@ func missingPaneError(err error) bool {
 	return herdrErr.Code == "pane_not_found" || herdrErr.Code == "tab_not_found" || herdrErr.Code == "workspace_not_found" || herdrErr.Code == "not_found"
 }
 
-func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
+func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, step string, cause error) error {
 	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
 		return errors.Join(cause, err)
 	}
-	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Resolve the remaining pane or Mount process, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
+	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
 }
 
 func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {

@@ -347,7 +347,13 @@ func stopLookoutProcesses(ctx context.Context, home string, processes []lookoutP
 		return processes, nil
 	}
 	for _, process := range processes {
+		if !lookoutPIDRunning(process.PID) {
+			continue
+		}
 		if !lookoutExecutableIdentityMatches(process) {
+			if !lookoutPIDRunning(process.PID) {
+				continue
+			}
 			return nil, fmt.Errorf("refusing to signal Lookout PID %d with unverified executable identity", process.PID)
 		}
 	}
@@ -367,7 +373,13 @@ func stopLookoutProcesses(ctx context.Context, home string, processes []lookoutP
 	defer removeLookoutUpdateMarkers(markers)
 
 	for _, process := range processes {
+		if !lookoutPIDRunning(process.PID) {
+			continue
+		}
 		if !lookoutExecutableIdentityMatches(process) {
+			if !lookoutPIDRunning(process.PID) {
+				continue
+			}
 			return nil, fmt.Errorf("refusing to signal Lookout PID %d after executable identity changed", process.PID)
 		}
 		if err := syscall.Kill(process.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {

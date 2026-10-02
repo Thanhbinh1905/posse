@@ -479,7 +479,8 @@ requires_openai_auth = false
 			models = nil
 			mu.Unlock()
 			args := append([]string{}, test.args...)
-			args = append(args, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--json", "-")
+			// This probe needs only the model request, not plugin downloads outside the fixture.
+			args = append(args, "--disable", "plugins", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--json", "-")
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			command := exec.CommandContext(ctx, codex, args...)
