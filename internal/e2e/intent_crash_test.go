@@ -1120,6 +1120,13 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 			s.panes[paneID] = pane
 		}
 		return map[string]any{"process_info": map[string]any{"pane_id": paneID, "foreground_process_group_id": fakeShellPID, "shell_pid": fakeShellPID}}, nil
+	case "pane.clear_agent_authority":
+		paneID := stringParam("pane_id")
+		delete(s.agents, paneID)
+		pane := s.panes[paneID]
+		pane.Agent, pane.AgentStatus = "", ""
+		s.panes[paneID] = pane
+		return map[string]any{}, nil
 	case "pane.close":
 		paneID := stringParam("pane_id")
 		delete(s.panes, paneID)

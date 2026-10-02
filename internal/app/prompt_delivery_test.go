@@ -472,13 +472,13 @@ func TestStartAgentWaitsForShellStartupInNewPane(t *testing.T) {
 	}
 }
 
-func TestStartAgentGivesUpOnPersistentlyBusyPane(t *testing.T) {
+func TestStartAgentReturnsRetryableErrorWhenPaneStaysBusy(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	fake.Errors["agent.start"] = paneBusy()
 	_, err := service.startAgent(context.Background(), map[string]any{"name": "w", "kind": "codex", "pane_id": "w1:p1"})
 	var failure *axi.Error
-	if !errors.As(err, &failure) || failure.Code != "agent_pane_busy" {
-		t.Fatalf("busy pane error = %v", err)
+	if !errors.As(err, &failure) || failure.Code != "agent_pane_busy" || !failure.Retryable {
+		t.Fatalf("busy pane error = %v, want retryable agent_pane_busy", err)
 	}
 }
 
