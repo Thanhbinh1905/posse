@@ -73,6 +73,11 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		return result, nil
 	}
 	if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
+		// Local contention says nothing about whether origin is ahead. Let
+		// the caller retry instead of creating a misleading root_behind Notice.
+		if store.IsBusy(err) || ctx.Err() != nil {
+			return result, err
+		}
 		result.Status = "root_behind"
 		result.Err = err
 		result.UpstreamHead, _ = gitOutput(ctx, target.Root, "rev-parse", "refs/remotes/origin/"+target.DefaultBranch)
@@ -84,6 +89,9 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	upstreamHead, err := gitOutput(ctx, target.Root, "rev-parse", upstreamRef)
 	if err != nil {
 		if _, fetchErr := gitFetch(ctx, target.Root, "origin", target.DefaultBranch+":"+upstreamRef); fetchErr != nil {
+			if store.IsBusy(fetchErr) || ctx.Err() != nil {
+				return result, fetchErr
+			}
 			result.Status = "fetch_failed"
 			result.Err = fetchErr
 			return result, nil

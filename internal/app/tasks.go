@@ -897,17 +897,12 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	defer db.Close()
 	task, err := s.workerTask(ctx.Context, db)
 	if err != nil {
+		if store.IsBusy(err) {
+			return err
+		}
 		return axi.Failure("worker_task_unknown", "cannot find the Rider's Task from this pane or worktree", false, "Run `posse holler` from the Rider's Herdr pane")
 	}
 	project, err := db.ProjectByID(ctx.Context, task.ProjectID)
-	if err != nil {
-		return err
-	}
-	_, err = s.prepareProject(ctx.Context, db, project)
-	if err != nil {
-		return err
-	}
-	task, err = db.TaskByID(ctx.Context, project.ID, task.ID)
 	if err != nil {
 		return err
 	}
@@ -1026,13 +1021,20 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		return err
 	}
+	// The Signal and its Notice are committed before unrelated Project work.
+	// A retry after a post-commit failure would incorrectly imply it was lost.
+	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
+	defer cancelMaintenance()
+	if _, err := s.prepareProject(maintenanceCtx, db, project); err != nil {
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project maintenance deferred: %v\n", normalizeCommandError(err))
+	}
 	if noticeKind != "" {
-		if err := s.deliverNotices(ctx.Context, db, project); err != nil && !isHerdrUnavailable(err) {
-			return err
+		if err := s.deliverNotices(maintenanceCtx, db, project); err != nil && !isHerdrUnavailable(err) {
+			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Notice delivery deferred: %v\n", normalizeCommandError(err))
 		}
 	}
-	if err := s.regenerateProjects(ctx.Context, db); err != nil {
-		return err
+	if err := s.regenerateProjects(maintenanceCtx, db); err != nil {
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project snapshot deferred: %v\n", normalizeCommandError(err))
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "signal", Value: verb}, {Key: "state", Value: string(state)}, {Key: "help", Value: []any{"Run `posse brief` to reread the Rider protocol"}}})
 }
@@ -1199,25 +1201,6 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 						return err
 					}
 					if wasDelivered {
-						if task.State == store.StateNeedsDecision {
-							if err := db.Transition(ctx.Context, task.ID, store.StateNeedsDecision, store.StateWorking, "lead", "Lead delivered a response"); err != nil {
-								return err
-							}
-						} else if task.State == store.StateDone && task.Type == "ship" {
-							if err := db.Transition(ctx.Context, task.ID, store.StateDone, store.StateWorking, "lead", "Lead delivered a fix instruction"); err != nil {
-								return err
-							}
-							if err := db.ClearTaskGatedSHA(ctx.Context, task.ID); err != nil {
-								return err
-							}
-						} else if task.State == store.StateLanding && task.Type == "ship" {
-							if err := db.Transition(ctx.Context, task.ID, store.StateLanding, store.StateWorking, "lead", "Lead delivered a pull request fix instruction"); err != nil {
-								return err
-							}
-							if err := db.ClearTaskGatedSHA(ctx.Context, task.ID); err != nil {
-								return err
-							}
-						}
 						if queued.ID != messageID {
 							reason = "earlier_message_delivered_first"
 						}

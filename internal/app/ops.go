@@ -100,14 +100,20 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		if len(notices) == 0 {
 			if lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute {
 				if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
-					return err
-				}
-				lastHerdrReconcile = time.Now()
-				if snapshot, err := s.snapshot(ctx.Context); err == nil {
-					for _, pane := range snapshot.Panes {
-						if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
-							lookoutPaneID = pane.PaneID
-							break
+					if !store.IsBusy(err) {
+						return err
+					}
+					// Contention is transient. Keep this Lookout armed, and retry
+					// rather than requiring the Lead to restart it after release.
+					fmt.Fprintf(ctx.ErrOut, "Lookout maintenance deferred: %v\n", normalizeCommandError(err))
+				} else {
+					lastHerdrReconcile = time.Now()
+					if snapshot, err := s.snapshot(ctx.Context); err == nil {
+						for _, pane := range snapshot.Panes {
+							if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
+								lookoutPaneID = pane.PaneID
+								break
+							}
 						}
 					}
 				}

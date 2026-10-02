@@ -47,7 +47,30 @@ func New(home string, adapter herdr.Adapter) *Service {
 func (s *Service) CLI() *axi.App {
 	root := s.commands()
 	s.guardWorkers(root, nil)
+	structureStoreErrors(root)
 	return &axi.App{Name: "posse", Root: root}
+}
+
+// Apply storage error classification at every command boundary, including
+// reconcile failures from preparation and failures after a Signal is recorded.
+func structureStoreErrors(command *axi.Command) {
+	if command.Handler != nil {
+		handler := command.Handler
+		command.Handler = func(ctx *axi.Context, args []string) error {
+			return normalizeCommandError(handler(ctx, args))
+		}
+	}
+	for _, subcommand := range command.Subcommands {
+		structureStoreErrors(subcommand)
+	}
+}
+
+func normalizeCommandError(err error) error {
+	var structured *axi.Error
+	if errors.As(err, &structured) || !store.IsBusy(err) {
+		return err
+	}
+	return axi.Failure("store_busy", err.Error(), true, "Retry the command after the store is available")
 }
 
 func (s *Service) commands() *axi.Command {

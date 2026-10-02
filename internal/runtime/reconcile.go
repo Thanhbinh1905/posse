@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-const ReconcileBudget = 3 * time.Second
+const ReconcileBudget = store.ObservationWriteBudget
 const AgentAbsentGrace = 2 * time.Minute
 
 type RunResult struct {
@@ -31,25 +32,11 @@ type SystemProgress struct{}
 func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int64, stallAfter, idleAfter time.Duration, now time.Time, progress ProgressSource) (result RunResult, returnedErr error) {
 	budgetCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
 	defer cancel()
+	defer func() { returnedErr = reconcileError(returnedErr) }()
 	snapshot, err := adapter.Snapshot(budgetCtx)
 	if err != nil {
 		return RunResult{}, err
 	}
-	defer func() {
-		if snapshot.ServerStartedAt == "" {
-			return
-		}
-		// Leave a changed generation pending until recover --all handles it.
-		// A Herdr event can run before the startup hook and must not consume the
-		// restart signal that the hook uses to relaunch Workers and the Lead.
-		if err := db.RememberProjectServerStartedAt(ctx, projectID, snapshot.ServerStartedAt); err != nil {
-			if returnedErr == nil {
-				returnedErr = err
-			} else {
-				returnedErr = errors.Join(returnedErr, err)
-			}
-		}
-	}()
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -62,10 +49,21 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 		result.GenerationMismatch = err == nil && !matches
 		return result, err
 	}
+	if err := reconcileWorkDeferred(budgetCtx); err != nil {
+		return result, err
+	}
+	if snapshot.ServerStartedAt != "" {
+		writeCtx, cancelWrite := context.WithTimeout(budgetCtx, ReconcileBudget)
+		err := db.RememberProjectServerStartedAt(writeCtx, projectID, snapshot.ServerStartedAt)
+		cancelWrite()
+		if err != nil {
+			returnedErr = fmt.Errorf("remember Project server observation: %w", err)
+		}
+	}
 	notices, err := ReconcileSnapshot(budgetCtx, db, projectID, snapshot, now, idleAfter)
 	result.Notices = append(result.Notices, notices...)
 	if err != nil {
-		return result, err
+		return result, errors.Join(returnedErr, err)
 	}
 	if stallAfter > 0 {
 		if progress == nil {
@@ -74,10 +72,10 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 		stalled, err := evaluateStallsSnapshot(budgetCtx, db, adapter, projectID, snapshot, stallAfter, now, progress)
 		result.Notices = append(result.Notices, stalled...)
 		if err != nil {
-			return result, err
+			return result, errors.Join(returnedErr, err)
 		}
 	}
-	return result, nil
+	return result, returnedErr
 }
 
 func snapshotMatchesProjectGeneration(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot) (bool, error) {
@@ -85,7 +83,10 @@ func snapshotMatchesProjectGeneration(ctx context.Context, db *store.DB, project
 	return generation == "" || snapshot.ServerStartedAt == "" || generation == snapshot.ServerStartedAt, err
 }
 
-func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot, now time.Time, idleAfterValues ...time.Duration) ([]store.Notice, error) {
+func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot, now time.Time, idleAfterValues ...time.Duration) (notices []store.Notice, returnedErr error) {
+	defer func() { returnedErr = reconcileError(returnedErr) }()
+	ctx, cancelBudget := context.WithTimeout(ctx, ReconcileBudget)
+	defer cancelBudget()
 	idleAfter := time.Duration(0)
 	if len(idleAfterValues) > 0 {
 		idleAfter = idleAfterValues[0]
@@ -111,156 +112,168 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 	if err != nil {
 		return nil, err
 	}
-	var notices []store.Notice
 	var failures []error
-	for _, task := range tasks {
-		if task.State == store.StateSpawning && task.PaneID == "" {
-			continue
+	if project.LeadPaneID != "" || project.LeadLabel != "" {
+		if err := reconcileWorkDeferred(ctx); err != nil {
+			return notices, err
 		}
-		pane, found := findPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-		if !found {
-			if task.State == store.StateDone || task.State == store.StateLanding {
-				if err := db.CreateWorkerExitedNotice(ctx, task, now); err != nil && !errors.Is(err, store.ErrStateRace) {
-					failures = append(failures, err)
-				}
-				continue
-			}
-			groupedRider := !project.IsWorkspace() && project.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != project.HerdrWorkspaceID
-			restartPending := task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
-			if !groupedRider && !restartPending {
-				if err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices); err != nil && !errors.Is(err, store.ErrStateRace) {
-					failures = append(failures, err)
-				}
-				continue
-			}
-			absentSince := task.AgentAbsentSince
-			if absentSince == 0 {
-				absentSince = now.UnixMilli()
-			}
-			if now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
-				if err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices); err != nil && !errors.Is(err, store.ErrStateRace) {
-					failures = append(failures, err)
-				}
-				continue
-			}
-			if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, sessionref.Sanitize("", task.AgentSession), absentSince, 0, task.AgentServerStartedAt); err != nil {
-				if !isStateRace(err) {
-					failures = append(failures, err)
-				}
-			}
-			continue
-		}
-		absentSince := task.AgentAbsentSince
-		agentPresent := pane.Agent != ""
-		session := sessionref.Sanitize(pane.Agent, task.AgentSession)
-		if len(pane.AgentSession) > 0 && string(pane.AgentSession) != "null" {
-			if reported := sessionref.Sanitize(pane.Agent, string(pane.AgentSession)); reported != "" {
-				session = reported
-			}
-		}
-		if !agentPresent {
-			if absentSince == 0 {
-				absentSince = now.UnixMilli()
-			}
-			resumePending := hasRecordedSession(task.AgentSession) && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
-			if !resumePending && now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
-				if task.State == store.StateDone || task.State == store.StateLanding {
-					if err := db.CreateWorkerExitedNotice(ctx, task, now); err != nil && !errors.Is(err, store.ErrStateRace) {
-						failures = append(failures, err)
-					}
-					continue
-				}
-				if err := markLost(ctx, db, task, "Rider has been absent for two minutes", now, &notices); err != nil {
-					if !errors.Is(err, store.ErrStateRace) {
-						failures = append(failures, err)
-					}
-				}
-				continue
-			}
-		} else {
-			absentSince = 0
-		}
-		serverStartedAt := task.AgentServerStartedAt
-		if agentPresent && snapshot.ServerStartedAt != "" {
-			serverStartedAt = snapshot.ServerStartedAt
-		}
-		idleSince := task.IdleSince
-		if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
-			if idleSince == 0 {
-				idleSince = now.UnixMilli()
-			}
-		} else {
-			idleSince = 0
-		}
-		if err := db.UpdateTaskObservation(ctx, task.ID, pane.PaneID, pane.WorkspaceID, session, absentSince, idleSince, serverStartedAt); err != nil {
-			if !isStateRace(err) {
-				failures = append(failures, fmt.Errorf("update Task %s observation: %w", taskID(task.Seq), err))
-			}
-			continue
-		}
-		if task.State == store.StateWorking && idleAfter > 0 && idleSince > 0 && now.Sub(time.UnixMilli(idleSince)) >= idleAfter {
-			exists, err := db.HasNotice(ctx, task.ProjectID, task.ID, "worker_idle", task.Launches)
-			if err != nil {
-				failures = append(failures, err)
-				continue
-			}
-			if !exists {
-				notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d}`, task.Launches), now)
-				if err != nil {
-					failures = append(failures, err)
-				} else {
-					notices = append(notices, notice)
-				}
-			}
-		}
-		if task.State == store.StateWorking && pane.AgentStatus == "blocked" {
-			if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateBlocked, "herdr", "Herdr reports Rider blocked"); err != nil {
-				if errors.Is(err, store.ErrStateRace) {
-					continue
-				}
-				failures = append(failures, err)
-				continue
-			}
-			notice, err := createNotice(ctx, db, project.ID, task.ID, "worker_blocked", task.Title+" is blocked", now)
-			if err != nil {
-				failures = append(failures, err)
-			} else {
-				notices = append(notices, notice)
-			}
-		} else if task.State == store.StateBlocked && pane.AgentStatus != "blocked" && agentPresent {
-			if err := db.Transition(ctx, task.ID, store.StateBlocked, store.StateWorking, "herdr", "Herdr reports Rider unblocked"); err != nil {
-				if errors.Is(err, store.ErrStateRace) {
-					continue
-				}
-				failures = append(failures, err)
-			}
+		projectCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
+		err := reconcileLeadObservation(projectCtx, db, project, snapshot, now)
+		cancel()
+		if err != nil {
+			failures = append(failures, fmt.Errorf("update Project observation: %w", err))
 		}
 	}
-	if project.LeadPaneID != "" || project.LeadLabel != "" {
-		pane, found := findPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
-		if !found {
-			absentSince := project.LeadAbsentSince
-			if absentSince == 0 {
-				absentSince = now.UnixMilli()
-			}
-			if err := db.UpdateProjectObservation(ctx, project.ID, project.LeadPaneID, project.HerdrWorkspaceID, absentSince); err != nil {
-				failures = append(failures, err)
-			}
-		} else {
-			absentSince := project.LeadAbsentSince
-			if pane.Agent == "" {
-				if absentSince == 0 {
-					absentSince = now.UnixMilli()
-				}
-			} else {
-				absentSince = 0
-			}
-			if err := db.UpdateProjectObservation(ctx, project.ID, pane.PaneID, pane.WorkspaceID, absentSince); err != nil {
-				failures = append(failures, err)
-			}
+	// Prefer observations left stale by the previous bounded pass.
+	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].UpdatedAt < tasks[j].UpdatedAt })
+	for _, task := range tasks {
+		if err := reconcileWorkDeferred(ctx); err != nil {
+			return notices, errors.Join(append(failures, err)...)
+		}
+		// Each admitted Task gets a fresh short context. Never start work with
+		// an expired pass context, or give it a budget beyond the pass deadline.
+		taskCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
+		taskNotices, err := reconcileTask(taskCtx, db, project, task, snapshot, now, idleAfter)
+		cancel()
+		notices = append(notices, taskNotices...)
+		if err != nil && !isStateRace(err) {
+			failures = append(failures, err)
 		}
 	}
 	return notices, errors.Join(failures...)
+}
+
+func reconcileError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: reconciliation work deferred: %v", store.ErrBusy, err)
+	}
+	return err
+}
+
+// Leave enough time for one SQLite lock wait and its cleanup. Work that does
+// not fit is retried on the next pass rather than consuming an expired context.
+func reconcileWorkDeferred(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		return fmt.Errorf("%w: reconciliation budget spent; remaining work deferred", store.ErrBusy)
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < store.ObservationWriteBusyTimeout+25*time.Millisecond {
+		return fmt.Errorf("%w: reconciliation budget spent; remaining work deferred", store.ErrBusy)
+	}
+	return nil
+}
+
+func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration) ([]store.Notice, error) {
+	var notices []store.Notice
+	if task.State == store.StateSpawning && task.PaneID == "" {
+		return nil, nil
+	}
+	observationFailure := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		return fmt.Errorf("update Task %s observation: %w", taskID(task.Seq), err)
+	}
+	pane, found := findPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+	if !found {
+		if task.State == store.StateDone || task.State == store.StateLanding {
+			return nil, db.CreateWorkerExitedNotice(ctx, task, now)
+		}
+		groupedRider := !project.IsWorkspace() && project.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != project.HerdrWorkspaceID
+		restartPending := task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
+		absentSince := task.AgentAbsentSince
+		if absentSince == 0 {
+			absentSince = now.UnixMilli()
+		}
+		if (!groupedRider && !restartPending) || now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
+			err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices)
+			return notices, err
+		}
+		return nil, observationFailure(db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, sessionref.Sanitize("", task.AgentSession), absentSince, 0, task.AgentServerStartedAt))
+	}
+	absentSince := task.AgentAbsentSince
+	agentPresent := pane.Agent != ""
+	session := sessionref.Sanitize(pane.Agent, task.AgentSession)
+	if len(pane.AgentSession) > 0 && string(pane.AgentSession) != "null" {
+		if reported := sessionref.Sanitize(pane.Agent, string(pane.AgentSession)); reported != "" {
+			session = reported
+		}
+	}
+	if !agentPresent {
+		if absentSince == 0 {
+			absentSince = now.UnixMilli()
+		}
+		resumePending := hasRecordedSession(task.AgentSession) && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
+		if !resumePending && now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
+			if task.State == store.StateDone || task.State == store.StateLanding {
+				return nil, db.CreateWorkerExitedNotice(ctx, task, now)
+			}
+			err := markLost(ctx, db, task, "Rider has been absent for two minutes", now, &notices)
+			return notices, err
+		}
+	} else {
+		absentSince = 0
+	}
+	serverStartedAt := task.AgentServerStartedAt
+	if agentPresent && snapshot.ServerStartedAt != "" {
+		serverStartedAt = snapshot.ServerStartedAt
+	}
+	idleSince := task.IdleSince
+	if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
+		if idleSince == 0 {
+			idleSince = now.UnixMilli()
+		}
+	} else {
+		idleSince = 0
+	}
+	if err := db.UpdateTaskObservation(ctx, task.ID, pane.PaneID, pane.WorkspaceID, session, absentSince, idleSince, serverStartedAt); err != nil {
+		return nil, observationFailure(err)
+	}
+	if task.State == store.StateWorking && idleAfter > 0 && idleSince > 0 && now.Sub(time.UnixMilli(idleSince)) >= idleAfter {
+		exists, err := db.HasNotice(ctx, task.ProjectID, task.ID, "worker_idle", task.Launches)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d}`, task.Launches), now)
+			if err != nil {
+				return nil, err
+			}
+			notices = append(notices, notice)
+		}
+	}
+	if task.State == store.StateWorking && pane.AgentStatus == "blocked" {
+		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateBlocked, "herdr", "Herdr reports Rider blocked"); err != nil {
+			return notices, err
+		}
+		notice, err := createNotice(ctx, db, project.ID, task.ID, "worker_blocked", task.Title+" is blocked", now)
+		if err != nil {
+			return notices, err
+		}
+		notices = append(notices, notice)
+	} else if task.State == store.StateBlocked && pane.AgentStatus != "blocked" && agentPresent {
+		if err := db.Transition(ctx, task.ID, store.StateBlocked, store.StateWorking, "herdr", "Herdr reports Rider unblocked"); err != nil {
+			return notices, err
+		}
+	}
+	return notices, nil
+}
+
+func reconcileLeadObservation(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot, now time.Time) error {
+	paneID, workspaceID := project.LeadPaneID, project.HerdrWorkspaceID
+	absentSince := project.LeadAbsentSince
+	pane, found := findPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
+	if found {
+		paneID, workspaceID = pane.PaneID, pane.WorkspaceID
+	}
+	if found && pane.Agent != "" {
+		absentSince = 0
+	} else if absentSince == 0 {
+		absentSince = now.UnixMilli()
+	}
+	return db.UpdateProjectObservation(ctx, project.ID, paneID, workspaceID, absentSince)
 }
 
 func hasRecordedSession(session string) bool {

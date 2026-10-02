@@ -58,8 +58,11 @@ func (s *Service) MigrationGate(path string, pending []int64, forced bool) error
 	return nil
 }
 
-// schemaFailure turns a store.SchemaError into a structured CLI error.
+// schemaFailure turns store migration and contention errors into structured CLI errors.
 func schemaFailure(err error) error {
+	if store.IsBusy(err) {
+		return axi.Failure("store_busy", "the store was busy while opening or migrating the database", true, "Retry the command")
+	}
 	var schema *store.SchemaError
 	if errors.As(err, &schema) {
 		return axi.Failure(schema.Code, schema.Message, false, schema.Help)
