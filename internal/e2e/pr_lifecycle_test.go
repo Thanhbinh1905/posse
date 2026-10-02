@@ -327,7 +327,8 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	gitTest(t, fixture.env, extra, "add", "other-main-work.txt")
 	gitTest(t, fixture.env, extra, "commit", "-m", "other Task on main")
 	gitTest(t, fixture.env, extra, "push", "origin", "HEAD:refs/heads/main")
-	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "--no-write-fetch-head", "origin", "main:refs/remotes/posse-test/main")
+	// Keep this test ref isolated from origin/main, which Project sync may fetch concurrently.
+	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "--no-write-fetch-head", "--refmap=", "origin", "main:refs/remotes/posse-test/main")
 	gitTest(t, fixture.env, landing.WorktreePath, "merge", "--no-edit", "refs/remotes/posse-test/main")
 	movedTip := strings.TrimSpace(gitTest(t, fixture.env, landing.WorktreePath, "rev-parse", "HEAD"))
 	if movedTip == landing.GatedSHA {
