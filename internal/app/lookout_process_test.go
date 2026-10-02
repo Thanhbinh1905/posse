@@ -111,6 +111,31 @@ func TestStopLookoutsRefusesUnverifiedExecutableIdentity(t *testing.T) {
 	}
 }
 
+func TestStopLookoutsIgnoresProcessThatExitedBeforeStop(t *testing.T) {
+	command := exec.Command("/bin/sh", "-c", "sleep 30")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := command.Process.Pid
+	if !lookoutPIDRunning(pid) {
+		t.Fatal("test process did not start")
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = command.Wait() // The killed process exits with a signal status.
+
+	_, err := stopLookoutProcesses(context.Background(), t.TempDir(), []lookoutProcess{{
+		PID:        pid,
+		Executable: lookoutExecutableIdentity{Path: "/proc/exited/exe", Inode: 1},
+		Project:    "shop",
+		Kind:       "lead",
+	}})
+	if err != nil {
+		t.Fatalf("stopping an already exited Lookout: %v", err)
+	}
+}
+
 func TestStopLookoutsEscalatesToSIGKILL(t *testing.T) {
 	previousVerifier := lookoutExecutableVerifier
 	lookoutExecutableVerifier = func(string) bool { return true }
