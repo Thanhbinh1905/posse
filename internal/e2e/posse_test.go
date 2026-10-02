@@ -75,10 +75,18 @@ func TestPosseSpawnNoticeLandTeardownAndRecovery(t *testing.T) {
 	    git diff --cached --quiet || git commit -m "worker change $task_id" >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'git commit failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
 	    while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id" ]; do sleep 0.05; done
 	    posse holler done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'posse holler failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
+	    if [ "$task_id" = t1 ]; then
+	      while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id-idle" ]; do sleep 0.05; done
+	    fi
 	    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1 &
 	    while IFS= read -r line; do
 	      printf '%s\n' "$line" >> "$POSSE_E2E_WORKER_LOG"
-	      case "$line" in *'Queue after the current turn'*) posse holler done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1 ;; esac
+	      case "$line" in
+	        *'Queue after the current turn'*)
+	          while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id-queued" ]; do sleep 0.05; done
+	          posse holler done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1
+	          ;;
+	      esac
 	    done
 	    ;;
 	  *)
@@ -458,7 +466,12 @@ esac
 		return noticeErr == nil && len(notices) == 1
 	}) {
 		snapshot, snapshotErr := client.Snapshot(context.Background())
-		notices, noticesErr := db.Notices(context.Background(), project.ID, false)
+		debugDB, noticesErr := store.OpenReadOnly(home)
+		var notices []store.Notice
+		if noticesErr == nil {
+			notices, noticesErr = debugDB.Notices(context.Background(), project.ID, false)
+			_ = debugDB.Close()
+		}
 		leadPrompt, _ := os.ReadFile(leadLog)
 		pluginLogs, _ := client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.herdr", "limit": 20})
 		t.Fatalf("busy Lead did not leave the Worker Notice pending: notices=%#v noticesErr=%v snapshot=%#v snapshotErr=%v leadLog=%q pluginLogs=%s", notices, noticesErr, snapshot, snapshotErr, leadPrompt, pluginLogs)
@@ -489,6 +502,11 @@ esac
 	if leadSnapshot.FocusedPaneID == project.LeadPaneID {
 		t.Fatalf("could not move focus away from the Lead before testing pane-prompt delivery: %#v", leadSnapshot.Panes)
 	}
+	// Only now let the focused Rider become idle. The queued instruction
+	// cannot reopen the Task before the first completion has been inspected.
+	if err := os.WriteFile(filepath.Join(signalGateDir, "t1-idle"), []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if !waitForCondition(30*time.Second, func() bool {
 		contents, readErr := os.ReadFile(leadLog)
 		return readErr == nil && strings.Contains(string(contents), "[posse | Posse -> Lead project | notice")
@@ -515,6 +533,11 @@ esac
 	}) {
 		contents, err := os.ReadFile(workerLog)
 		t.Fatalf("Worker steer/queued instruction envelopes missing: %q %v", contents, err)
+	}
+	// The two completions produce two Notices. Keep the queued completion
+	// behind this barrier until the first Notice's busy-Lead check is done.
+	if err := os.WriteFile(filepath.Join(signalGateDir, "t1-queued"), []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if !waitForCondition(15*time.Second, func() bool {
 		pending, err := store.Open(home)

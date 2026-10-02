@@ -88,7 +88,7 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	cfg, err := s.prepareProjectObservation(ctx.Context, db, project)
 	if err != nil {
 		return err
 	}

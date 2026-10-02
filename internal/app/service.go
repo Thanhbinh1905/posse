@@ -288,6 +288,16 @@ func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Projec
 }
 
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectMode(ctx, db, project, true)
+}
+
+// Notice and inspection commands reconcile observations, but never start a
+// Rider, retry a launch Brief, or wait for a launch-capable recovery owner.
+func (s *Service) prepareProjectObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectMode(ctx, db, project, false)
+}
+
+func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project store.Project, allowRecovery bool) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
 		_ = s.regenerateProjects(ctx, db)
@@ -311,10 +321,27 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 				return cfg, herdrError(err)
 			}
 		} else {
-			result, runErr := s.reconcileProject(ctx, db, project, cfg, false)
+			var result runtime.RunResult
+			var runErr error
+			if allowRecovery {
+				result, runErr = s.reconcileProject(ctx, db, project, cfg, false)
+			} else {
+				claim, err := db.ProjectRecovery(ctx, project.ID)
+				if err != nil {
+					return cfg, err
+				}
+				if claim.OwnerPID != 0 && processAlive(claim.OwnerPID) {
+					runErr = errRecoveryDeferred
+				} else {
+					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+					if runErr == nil && result.GenerationMismatch {
+						runErr = errRecoveryDeferred
+					}
+				}
+			}
 			if runErr != nil {
 				// A held Project keeps its recorded panes for `posse up`.
-				if !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) {
+				if !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) && !errors.Is(runErr, errRecoveryDeferred) {
 					return cfg, herdrError(runErr)
 				}
 			} else {
@@ -322,7 +349,7 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 					return cfg, err
 				}
-				if err := s.reconcileIntents(ctx, db, project, cfg, result.Snapshot); err != nil {
+				if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, allowRecovery); err != nil {
 					return cfg, err
 				}
 				fresh, err := db.ProjectByID(ctx, project.ID)
