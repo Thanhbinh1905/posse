@@ -897,6 +897,8 @@ type fakeHerdrSession struct {
 	promptTargets   []string
 	agentStartGate  chan struct{}
 	agentStartNames []string
+	promptError     *herdr.APIError
+	promptGate      chan struct{}
 	// workspaceCreates counts top-level workspace.create requests, not linked worktree opens.
 	workspaceCreates int
 	workspaces       map[string]herdr.Workspace
@@ -1136,6 +1138,23 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 	case "pane.read":
 		return map[string]any{"text": ""}, nil
 	case "agent.prompt":
+		if stringParam("text") == "/exit" || stringParam("text") == "/quit" {
+			paneID := stringParam("target")
+			s.forgetAgent(paneID)
+			pane := s.panes[paneID]
+			pane.Agent, pane.AgentStatus = "", ""
+			s.panes[paneID] = pane
+			return map[string]any{}, nil
+		}
+		if s.promptGate != nil && strings.HasPrefix(stringParam("text"), "Read ") {
+			gate := s.promptGate
+			s.mu.Unlock()
+			<-gate
+			s.mu.Lock()
+		}
+		if s.promptError != nil && strings.HasPrefix(stringParam("text"), "Read ") {
+			return nil, s.promptError
+		}
 		s.prompts = append(s.prompts, stringParam("text"))
 		s.promptTargets = append(s.promptTargets, stringParam("target"))
 		return map[string]any{}, nil

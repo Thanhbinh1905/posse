@@ -16,6 +16,10 @@ import (
 )
 
 func (s *Service) reconcileIntents(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot) error {
+	return s.reconcileIntentsMode(ctx, db, project, cfg, snapshot, true)
+}
+
+func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot, allowLaunch bool) error {
 	intents, err := db.Intents(ctx, project.ID)
 	if err != nil {
 		return err
@@ -25,8 +29,21 @@ func (s *Service) reconcileIntents(ctx context.Context, db *store.DB, project st
 		return err
 	}
 	for _, intent := range intents {
-		if intentProcessAlive(intent) {
+		if intentProcessAlive(intent) || !allowLaunch && (intent.Command == "relaunch" || intent.Command == "ride") {
 			continue
+		}
+		if intent.Command == "relaunch" {
+			var payload struct {
+				AutomaticRecovery bool `json:"automatic_recovery"`
+			}
+			if err := json.Unmarshal([]byte(intent.PayloadJSON), &payload); err != nil {
+				return err
+			}
+			// Automatic recovery owns its crashed intent and retry budget;
+			// an unrelated explicit relaunch still uses normal intent recovery.
+			if payload.AutomaticRecovery {
+				continue
+			}
 		}
 		task, err := db.TaskByID(ctx, project.ID, intent.TaskID)
 		if err != nil {

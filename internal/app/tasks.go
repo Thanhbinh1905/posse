@@ -1419,6 +1419,14 @@ type relaunchResult struct {
 }
 
 func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string) (relaunchResult, error) {
+	result, err := s.relaunchTaskAttempt(ctx, db, home, project, cfg, task, requestedProfile, false)
+	if err == nil {
+		err = db.ResetTaskRecovery(ctx, task.ID)
+	}
+	return result, err
+}
+
+func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string, automatic bool) (relaunchResult, error) {
 	failure := func(err error) (relaunchResult, error) { return relaunchResult{}, err }
 	if !recoverableTaskState(task.State) {
 		return failure(axi.Failure("relaunch_refused", "Task in state "+string(task.State)+" cannot be relaunched", false))
@@ -1454,7 +1462,11 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	if task.WorktreePath == "" || task.Branch == "" {
 		return failure(axi.Failure("relaunch_mount_missing", "Task has no recorded Mount or branch", false))
 	}
-	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "relaunch")
+	payload := `{}`
+	if automatic {
+		payload = `{"automatic_recovery":true}`
+	}
+	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "relaunch", payload)
 	if err != nil {
 		return failure(axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error()))
 	}
@@ -1571,7 +1583,7 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	if err := track("agent.prompt", func() error { return s.deliverLaunchPrompt(ctx, pane.PaneID, "Read "+relaunchPath+" and follow it.") }); err != nil {
 		return failure(err)
 	}
-	if err := s.markRelaunchedWorking(ctx, db, project.ID, task.ID, track); err != nil {
+	if err := s.markRelaunchedWorking(ctx, db, project.ID, task.ID, automatic, snapshot.ServerStartedAt, track); err != nil {
 		return failure(err)
 	}
 	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {
@@ -1591,16 +1603,24 @@ const (
 // markRelaunchedWorking records the relaunched Worker as working. It reads the
 // Task again because reconcile can mark it lost while the relaunch waits for the
 // new agent, and a transition from the stale state would leave it lost.
-func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, projectID, taskID int64, track func(string, func() error) error) error {
+func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, projectID, taskID int64, automatic bool, generation string, track func(string, func() error) error) error {
 	for attempt := 0; ; attempt++ {
 		current, err := db.TaskByID(ctx, projectID, taskID)
 		if err != nil {
 			return err
 		}
-		if current.State == store.StateWorking {
-			return track("task.progress", func() error { return db.ResetTaskProgress(ctx, taskID) })
+		progress := func() error {
+			if err := db.ResetTaskProgress(ctx, taskID); err != nil {
+				return err
+			}
+			// Record the successful launch's generation before another event
+			// can mistake this Rider for an unrecovered process.
+			return db.UpdateTaskObservation(ctx, taskID, current.PaneID, current.HerdrWorkspaceID, current.AgentSession, 0, 0, generation)
 		}
-		if !recoverableTaskState(current.State) {
+		if current.State == store.StateWorking {
+			return track("task.progress", progress)
+		}
+		if automatic && current.State == store.StateFailed || !recoverableTaskState(current.State) {
 			return nil
 		}
 		source := "cli"
@@ -1618,7 +1638,7 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 			}
 			continue
 		}
-		return track("task.progress", func() error { return db.ResetTaskProgress(ctx, taskID) })
+		return track("task.progress", progress)
 	}
 }
 

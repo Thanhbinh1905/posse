@@ -36,17 +36,19 @@ type Lead struct {
 }
 
 type Defaults struct {
-	MaxWorkers   int      `toml:"max_workers" json:"max_workers"`
-	StallAfter   string   `toml:"stall_after" json:"stall_after"`
-	IdleAfter    string   `toml:"idle_after" json:"idle_after"`
-	AutoUnsaddle string   `toml:"auto_unsaddle" json:"auto_unsaddle"`
-	AutoRecover  bool     `toml:"auto_recover" json:"auto_recover"`
-	LandingMode  string   `toml:"landing_mode" json:"landing_mode"`
-	MergeMethod  string   `toml:"merge_method" json:"merge_method"`
-	Forge        string   `toml:"forge" json:"forge"`
-	PRPoll       string   `toml:"pr_poll" json:"pr_poll"`
-	Review       string   `toml:"review" json:"review"`
-	Gate         []string `toml:"gate" json:"gate"`
+	MaxWorkers       int      `toml:"max_workers" json:"max_workers"`
+	StallAfter       string   `toml:"stall_after" json:"stall_after"`
+	IdleAfter        string   `toml:"idle_after" json:"idle_after"`
+	AutoUnsaddle     string   `toml:"auto_unsaddle" json:"auto_unsaddle"`
+	AutoRecover      bool     `toml:"auto_recover" json:"auto_recover"`
+	RecoveryAttempts int      `toml:"recovery_attempts" json:"recovery_attempts"`
+	RecoveryBackoff  string   `toml:"recovery_backoff" json:"recovery_backoff"`
+	LandingMode      string   `toml:"landing_mode" json:"landing_mode"`
+	MergeMethod      string   `toml:"merge_method" json:"merge_method"`
+	Forge            string   `toml:"forge" json:"forge"`
+	PRPoll           string   `toml:"pr_poll" json:"pr_poll"`
+	Review           string   `toml:"review" json:"review"`
+	Gate             []string `toml:"gate" json:"gate"`
 }
 
 type Remuda struct {
@@ -360,7 +362,7 @@ func defaultMap() map[string]any {
 		"lead":   map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey": map[string]any{"lead": false},
 		"defaults": map[string]any{
-			"max_workers": 4, "stall_after": "20m", "idle_after": "3m", "auto_unsaddle": "finished", "auto_recover": true, "landing_mode": "pr",
+			"max_workers": 4, "stall_after": "20m", "idle_after": "3m", "auto_unsaddle": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "landing_mode": "pr",
 			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "on_risk", "gate": []string{},
 		},
 		"kinds": map[string]any{
@@ -411,6 +413,12 @@ func (c Config) Validate(projectFile bool) error {
 	}
 	if c.Defaults.MaxWorkers < 1 {
 		return &InvalidError{File: file, Key: "defaults.max_workers", Reason: "must be positive"}
+	}
+	if c.Defaults.RecoveryAttempts < 1 {
+		return &InvalidError{File: file, Key: "defaults.recovery_attempts", Reason: "must be positive"}
+	}
+	if backoff, err := time.ParseDuration(c.Defaults.RecoveryBackoff); err != nil || backoff <= 0 {
+		return &InvalidError{File: file, Key: "defaults.recovery_backoff", Reason: "must be a positive duration"}
 	}
 	stall, err := time.ParseDuration(c.Defaults.StallAfter)
 	if err != nil || stall <= 0 {
