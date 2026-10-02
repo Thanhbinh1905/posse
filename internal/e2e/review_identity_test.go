@@ -304,6 +304,54 @@ func TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch(t *testing.T) 
 	}
 }
 
+func TestReviewRejectsCodexProfileSelectorAtSpawnAndRelaunch(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.kind", "codex")
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
+	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+		t.Fatalf("author spawn: code=%d %s", code, output)
+	}
+	if code, output := rideReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
+		t.Fatalf("independent review spawn: code=%d %s", code, output)
+	}
+
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.model", `"model-b"`)
+	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t1"); code != 0 {
+		t.Fatalf("author relaunch: code=%d %s", code, output)
+	}
+	author := fixture.mustTask(t, "t1")
+	authorLaunches, err := fixture.db.TaskLaunchIdentities(context.Background(), author.ID)
+	if err != nil || len(authorLaunches) != 2 || authorLaunches[0].ConfiguredModel != "model-a" || authorLaunches[1].ConfiguredModel != "model-b" {
+		t.Fatalf("author launch history = %#v, err=%v", authorLaunches, err)
+	}
+
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", `"<profile>"`)
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-palt"]`)
+	code, output := rideReviewIdentityTask(t, fixture, "Profile-marker spawn", "reviewer", "t1")
+	if code != 1 || !strings.Contains(output, "review_identity_ineligible") {
+		t.Errorf("Review spawn with unresolved Codex profile selector was admitted: code=%d\n%s", code, output)
+	}
+	tasks, err := fixture.db.Tasks(context.Background(), fixture.project.ID, true)
+	if err != nil || len(tasks) != 2 {
+		t.Errorf("refused spawn allocated a Task: tasks=%d err=%v", len(tasks), err)
+	}
+
+	reviewer := fixture.mustTask(t, "t2")
+	before, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("reviewer launch identities before relaunch = %#v, err=%v", before, err)
+	}
+	code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
+	if code != 1 || !strings.Contains(output, "review_identity_ineligible") {
+		t.Errorf("Review relaunch with unresolved Codex profile selector was admitted: code=%d\n%s", code, output)
+	}
+	after, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
+	if err != nil || len(after) != len(before) {
+		t.Errorf("refused relaunch recorded another identity: before=%#v after=%#v err=%v", before, after, err)
+	}
+}
+
 func TestReviewRejectsCodexTOMLModelLiteralAndCommentsAtSpawnAndRelaunch(t *testing.T) {
 	for _, test := range []struct {
 		name      string

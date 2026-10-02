@@ -142,11 +142,9 @@ func analyzeShortLaunchArg(kind, arg string, args []string, index *int, result *
 				*index += consumed
 				return
 			case 'p':
-				_, consumed, ok := shortOptionValue(args, *index, rest)
+				_, consumed, _ := shortOptionValue(args, *index, rest)
 				result.models = append(result.models, "<profile>")
-				if !ok {
-					result.unknown = append(result.unknown, "-p")
-				}
+				result.unknown = append(result.unknown, "-p")
 				*index += consumed
 				return
 			case 's', 'a', 'i', 'C':
