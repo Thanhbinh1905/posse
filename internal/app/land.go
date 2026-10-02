@@ -475,7 +475,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return closeErr
 	})
 	if err != nil {
-		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane closure", err)
 	}
 	var stopped []string
 	if task.State == store.StateLanded && !discardable && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
@@ -486,7 +486,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			stopped, stopErr = stopMountProcesses(task.WorktreePath)
 			return stopErr
 		}); err != nil {
-			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process shutdown", err)
 		}
 		if err := s.runIntentStep(ctx, db, intent, "leftover.snapshot", func() error {
 			if !project.IsWorkspace() {
@@ -540,7 +540,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			if decisionErr != nil {
 				return result, errors.Join(err, decisionErr)
 			}
-			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Leftover snapshot", err)
 		}
 	}
 	if task.State == store.StateReported && !discardable {
@@ -554,13 +554,13 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			if err != nil {
 				return err
 			}
-			return preserveReportAttachments(ctx, home, project, task)
+			return preserveReportAttachments(ctx, db, home, project, task)
 		}); err != nil {
 			_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: "leftover:unrecoverable:" + strconv.FormatInt(task.ID, 10), Question: "Report attachments could not be preserved. Repair the Mount and retry Teardown, or approve discarding the unsaved attachments?", Options: []string{"repair", "discard"}})
 			if decisionErr != nil {
 				return result, errors.Join(err, decisionErr)
 			}
-			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Report attachment preservation", err)
 		}
 	}
 	var killed []string
@@ -570,7 +570,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return releaseErr
 	})
 	if err != nil {
-		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount release", err)
 	}
 	result.Panes = paneResult
 	result.StoppedProcesses = append(stopped, killed...)
@@ -591,7 +591,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return removeErr
 		})
 		if err != nil {
-			return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Task branch removal", err)
 		}
 	} else if discardable {
 		if task.Branch != "" {
@@ -610,7 +610,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				return nil
 			})
 			if err != nil {
-				return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+				return result, s.unsaddleIncomplete(ctx, db, project, task, "Task branch removal", err)
 			}
 		}
 	} else {
@@ -642,7 +642,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				return nil
 			})
 			if err != nil {
-				return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+				return result, s.unsaddleIncomplete(ctx, db, project, task, "Task branch removal", err)
 			}
 		}
 	}
@@ -656,7 +656,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", "Task Mount released after completion")
 	})
 	if err != nil {
-		return result, s.unsaddleIncomplete(ctx, db, project, task, err)
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task state update", err)
 	}
 	if err := s.regenerateProjects(ctx, db); err != nil {
 		return result, err

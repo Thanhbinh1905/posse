@@ -455,13 +455,29 @@ esac
 			return false
 		}
 		notices, noticeErr := pending.UndeliveredNotices(context.Background(), project.ID)
-		return noticeErr == nil && len(notices) == 1
+		if noticeErr != nil || len(notices) != 2 {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.TaskID != task.ID || notice.Kind != "task_done" {
+				return false
+			}
+		}
+		return true
 	}) {
 		snapshot, snapshotErr := client.Snapshot(context.Background())
-		notices, noticesErr := db.Notices(context.Background(), project.ID, false)
+		diagnosticDB, diagnosticErr := store.Open(home)
+		var notices, undelivered []store.Notice
+		var noticesErr, undeliveredErr error
+		if diagnosticErr == nil {
+			notices, noticesErr = diagnosticDB.Notices(context.Background(), project.ID, false)
+			undelivered, undeliveredErr = diagnosticDB.UndeliveredNotices(context.Background(), project.ID)
+			_ = diagnosticDB.Close()
+		}
 		leadPrompt, _ := os.ReadFile(leadLog)
 		pluginLogs, _ := client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.herdr", "limit": 20})
-		t.Fatalf("busy Lead did not leave the Worker Notice pending: notices=%#v noticesErr=%v snapshot=%#v snapshotErr=%v leadLog=%q pluginLogs=%s", notices, noticesErr, snapshot, snapshotErr, leadPrompt, pluginLogs)
+		workerLogContents, _ := os.ReadFile(workerLog)
+		t.Fatalf("busy Lead did not leave both Worker Notices pending: notices=%#v noticesErr=%v undelivered=%#v undeliveredErr=%v diagnosticErr=%v snapshot=%#v snapshotErr=%v leadLog=%q workerLog=%q pluginLogs=%s", notices, noticesErr, undelivered, undeliveredErr, diagnosticErr, snapshot, snapshotErr, leadPrompt, workerLogContents, pluginLogs)
 	}
 	leadSnapshot, err := client.Snapshot(context.Background())
 	if err != nil {
@@ -531,6 +547,9 @@ esac
 	}
 	if output := runPosse(t, posseBinary, repo, leadEnv, "land", "t1", "--merge", "--user-approved", "User approved the local merge"); !strings.Contains(output, "landed") {
 		t.Fatalf("local land failed: %s", output)
+	}
+	if output := runPosse(t, posseBinary, repo, leadEnv, "ack", "all"); !strings.Contains(output, "acknowledged") {
+		t.Fatalf("could not acknowledge the first Task's Notices before the next Lookout check: %s", output)
 	}
 	if got, err := gitCommand(env, repo, "show", "main:e2e-worker-t1.txt"); err != nil || strings.TrimSpace(got) != "worker change t1" {
 		t.Fatalf("Worker change was not merged: %q %v", got, err)

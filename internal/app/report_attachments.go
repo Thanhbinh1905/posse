@@ -11,42 +11,104 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+type reportAttachmentRepository struct {
+	path     string
+	relative string
+	baseRef  string
+}
+
+type reportAttachmentSource struct {
+	root string
+	name string
+}
+
+// reportAttachmentGitArgs lists changes without treating an absent base ref as
+// an empty pathspec. The HEAD diff includes staged and unstaged changes.
+func reportAttachmentGitArgs(baseRef string) [][]string {
+	args := make([][]string, 0, 3)
+	if baseRef != "" {
+		args = append(args, []string{"diff", "--name-only", "-z", baseRef, "HEAD"})
+	}
+	return append(args,
+		[]string{"diff", "--name-only", "-z", "HEAD"},
+		[]string{"ls-files", "--others", "--exclude-standard", "-z"},
+	)
+}
+
 // preserveReportAttachments saves the Rider's non-ignored, unlanded files at
 // their worktree-relative paths next to report.md before the Mount is reset.
-// A retry may overwrite the same attachment, but never removes saved files.
-func preserveReportAttachments(ctx context.Context, home string, project store.Project, task store.Task) error {
+// Workspace Mounts are enumerated repository by repository. A retry may
+// encounter the same saved files but never removes or replaces them.
+func preserveReportAttachments(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
 	if task.WorktreePath == "" {
 		return nil
 	}
-	paths := map[string]bool{}
-	for _, args := range [][]string{
-		{"diff", "--name-only", "-z", task.BaseRef, "HEAD"},
-		{"diff", "--name-only", "-z", "HEAD"},
-		{"ls-files", "--others", "--exclude-standard", "-z"},
-	} {
-		output, err := gitOutputRaw(ctx, task.WorktreePath, args...)
+	repositories := []reportAttachmentRepository{{path: task.WorktreePath, baseRef: task.BaseRef}}
+	if project.IsWorkspace() {
+		targets, err := workspaceMountTargets(ctx, db, project)
 		if err != nil {
-			return fmt.Errorf("list Report attachments: %w", err)
+			return err
 		}
-		for _, path := range nulPaths(output) {
-			paths[path] = true
+		taskRepos, err := db.TaskRepos(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		baseRefs := make(map[string]string, len(taskRepos))
+		for _, repo := range taskRepos {
+			baseRefs[repo.Repo] = repo.BaseRef
+		}
+		repositories = repositories[:0]
+		for _, target := range targets {
+			if target.Path == "" || filepath.IsAbs(target.Path) || filepath.Clean(target.Path) != target.Path || target.Path == ".." || strings.HasPrefix(target.Path, ".."+string(os.PathSeparator)) {
+				return fmt.Errorf("unsafe workspace Member path %q", target.Path)
+			}
+			path := filepath.Join(task.WorktreePath, target.Path)
+			if _, err := os.Stat(filepath.Join(path, ".git")); os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			baseRef, selected := baseRefs[target.Name]
+			if !selected {
+				baseRef = "HEAD"
+			}
+			repositories = append(repositories, reportAttachmentRepository{path: path, relative: target.Path, baseRef: baseRef})
 		}
 	}
+
+	paths := map[string]reportAttachmentSource{}
+	for _, repository := range repositories {
+		for _, args := range reportAttachmentGitArgs(repository.baseRef) {
+			output, err := gitOutputRaw(ctx, repository.path, args...)
+			if err != nil {
+				return fmt.Errorf("list Report attachments in %s: %w", repository.path, err)
+			}
+			for _, name := range nulPaths(output) {
+				if name == "" || filepath.IsAbs(name) || name == ".git" || strings.HasPrefix(name, ".git"+string(os.PathSeparator)) || filepath.Clean(name) != name || name == ".." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) {
+					return fmt.Errorf("unsafe Report attachment path %q", name)
+				}
+				relative := name
+				if repository.relative != "" {
+					relative = filepath.Join(repository.relative, name)
+				}
+				paths[relative] = reportAttachmentSource{root: repository.path, name: name}
+			}
+		}
+	}
+
 	names := make([]string, 0, len(paths))
 	for path := range paths {
 		names = append(names, path)
 	}
 	sort.Strings(names)
 	destination := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq))
-	root, err := filepath.EvalSymlinks(task.WorktreePath)
-	if err != nil {
-		return err
-	}
 	for _, name := range names {
-		if name == "" || filepath.IsAbs(name) || name == ".git" || strings.HasPrefix(name, ".git"+string(os.PathSeparator)) || filepath.Clean(name) != name || name == ".." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("unsafe Report attachment path %q", name)
+		sourcePath := paths[name]
+		root, err := filepath.EvalSymlinks(sourcePath.root)
+		if err != nil {
+			return err
 		}
-		source := filepath.Join(root, name)
+		source := filepath.Join(root, sourcePath.name)
 		resolved, err := filepath.EvalSymlinks(source)
 		if os.IsNotExist(err) {
 			continue
@@ -56,7 +118,7 @@ func preserveReportAttachments(ctx context.Context, home string, project store.P
 		}
 		relative, err := filepath.Rel(root, resolved)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("report attachment %q escapes Mount", name)
+			return fmt.Errorf("report attachment %q escapes Member repository", name)
 		}
 		info, err := os.Stat(source)
 		if err != nil {
