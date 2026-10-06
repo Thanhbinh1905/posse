@@ -44,9 +44,13 @@ func TestRefreshPublishBodyRequiresExplicitLegacyAdoption(t *testing.T) {
 }
 
 func TestRefreshPublishBodyRefusesAmbiguousLegacyAndMarkers(t *testing.T) {
+	legacyWithHumanSection := strings.Replace(legacyPublishTemplate("old summary"), "## Verification", "## Maintainer Review\n\nKeep this note.\n\n## Verification", 1)
+	legacyWithSetextHumanSection := strings.Replace(legacyPublishTemplate("old summary"), "## Verification", "Maintainer Review\n---\n\nKeep this note.\n\n## Verification", 1)
 	for _, body := range []string{
 		"## Summary\n\nold, edited legacy description",
 		publishBodyStart + "\npartial\n",
+		legacyWithHumanSection,
+		legacyWithSetextHumanSection,
 	} {
 		if _, err := refreshPublishBody(body, "new", true); !isPublishBodyConflict(err) {
 			t.Errorf("ambiguous description was not rejected: %q, %v", body, err)

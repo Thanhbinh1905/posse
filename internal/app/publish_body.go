@@ -73,8 +73,49 @@ func legacyPublishBodyRange(body string) (int, int, bool) {
 	if documentationEnd < 0 {
 		return 0, 0, false
 	}
+	start := positions[0]
 	end := positions[len(positions)-1] + documentationEnd + len(documentationChecklist)
-	return positions[0], end, true
+	lines := strings.Split(body[start:end], "\n")
+	for i, line := range lines {
+		if isMarkdownSectionHeading(line) {
+			known := false
+			for _, heading := range publishBodySections {
+				if strings.TrimSpace(line) == heading {
+					known = true
+					break
+				}
+			}
+			if !known {
+				return 0, 0, false
+			}
+		}
+		if i > 0 && strings.TrimSpace(lines[i-1]) != "" && isSetextHeadingUnderline(line) {
+			return 0, 0, false
+		}
+	}
+	return start, end, true
+}
+
+func isMarkdownSectionHeading(line string) bool {
+	line = strings.TrimSpace(line)
+	level := 0
+	for level < len(line) && line[level] == '#' {
+		level++
+	}
+	return level > 0 && level <= 6 && (level == len(line) || line[level] == ' ' || line[level] == '\t')
+}
+
+func isSetextHeadingUnderline(line string) bool {
+	line = strings.TrimSpace(line)
+	if len(line) < 3 || (line[0] != '-' && line[0] != '=') {
+		return false
+	}
+	for i := 1; i < len(line); i++ {
+		if line[i] != line[0] {
+			return false
+		}
+	}
+	return true
 }
 
 func markerIsWholeLine(value string, start int, marker string) bool {

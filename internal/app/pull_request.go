@@ -398,7 +398,7 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 	if forge.Kind == "gitlab" {
 		number, _ := forgeReference(prURL, forge)
 		endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests/" + strconv.Itoa(number)
-		_, err = runOutputStep(ctx, db, intent, "pr.refresh.write", forge.Root, "glab", "api", "--hostname", forge.Host, "--method", "PUT", "--field", "title="+title, "--field", "description="+nextBody, endpoint)
+		_, err = runOutputStep(ctx, db, intent, "pr.refresh.write", forge.Root, "glab", "api", "--hostname", forge.Host, "--method", "PUT", "--raw-field", "title="+title, "--raw-field", "description="+nextBody, endpoint)
 	} else {
 		_, err = runOutputStep(ctx, db, intent, "pr.refresh.write", forge.Root, "gh", "pr", "edit", prURL, "--title", title, "--body", nextBody)
 	}

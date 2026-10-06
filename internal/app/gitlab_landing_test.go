@@ -31,10 +31,21 @@ set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 case "$*" in
  *"--method PUT"*)
+   field_mode=
    for argument in "$@"; do
      case "$argument" in
-       description=*) printf '%s' "${argument#description=}" > "$POSSE_TEST_GLAB_DESCRIPTION" ;;
-       title=*) printf '%s' "${argument#title=}" > "$POSSE_TEST_GLAB_TITLE" ;;
+       --field) field_mode=typed ;;
+       --raw-field) field_mode=raw ;;
+       description=\[*|title=\[*)
+         if [ "$field_mode" = typed ]; then
+           printf 'Error parsing typed field value: %s\n' "$argument" >&2
+           exit 1
+         fi
+         if [ "${argument#description=}" != "$argument" ]; then printf '%s' "${argument#description=}" > "$POSSE_TEST_GLAB_DESCRIPTION"; fi
+         if [ "${argument#title=}" != "$argument" ]; then printf '%s' "${argument#title=}" > "$POSSE_TEST_GLAB_TITLE"; fi
+         field_mode= ;;
+       description=*) printf '%s' "${argument#description=}" > "$POSSE_TEST_GLAB_DESCRIPTION"; field_mode= ;;
+       title=*) printf '%s' "${argument#title=}" > "$POSSE_TEST_GLAB_TITLE"; field_mode= ;;
      esac
    done
    printf 'updated\n' ;;
@@ -191,7 +202,8 @@ func TestGitLabRepublishRefreshesCurrentMetadata(t *testing.T) {
 	if err := json.Unmarshal(state, &current); err != nil {
 		t.Fatal(err)
 	}
-	current["title"], current["description"] = "E2E Brief title", string(firstBody)
+	humanPrefixedBody := "[Maintainer notes]\n\n" + string(firstBody)
+	current["title"], current["description"] = "E2E Brief title", humanPrefixedBody
 	state, err = json.Marshal(current)
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +211,7 @@ func TestGitLabRepublishRefreshesCurrentMetadata(t *testing.T) {
 	if err := os.WriteFile(f.ghState, state, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	updatedBrief := strings.Replace(brief, "title: E2E Brief title", "title: Updated MR title", 1)
+	updatedBrief := strings.Replace(brief, "title: E2E Brief title", "title: \"[Release] Updated MR title\"", 1)
 	if err := os.WriteFile(briefPath, []byte(updatedBrief), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +223,7 @@ func TestGitLabRepublishRefreshesCurrentMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"Second summary", "go test ./... -> second pass", "second proof", "Risk: second", "Closes #12", "Refs #14"} {
+	for _, expected := range []string{"[Maintainer notes]", "Second summary", "go test ./... -> second pass", "second proof", "Risk: second", "Closes #12", "Refs #14"} {
 		if !strings.Contains(string(body), expected) {
 			t.Errorf("refreshed GitLab description omitted %q: %s", expected, body)
 		}
@@ -221,8 +233,8 @@ func TestGitLabRepublishRefreshesCurrentMetadata(t *testing.T) {
 			t.Errorf("refreshed GitLab description retained stale %q: %s", stale, body)
 		}
 	}
-	if title, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_TITLE")); err != nil || string(title) != "Updated MR title" {
-		t.Errorf("refreshed GitLab title=%q want %q: %v", title, "Updated MR title", err)
+	if title, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_TITLE")); err != nil || string(title) != "[Release] Updated MR title" {
+		t.Errorf("refreshed GitLab title=%q want %q: %v", title, "[Release] Updated MR title", err)
 	}
 }
 
