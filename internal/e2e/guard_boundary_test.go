@@ -83,6 +83,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "adapter_test.go"), []byte("herdrCall = 'fixture'\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "probe"), []byte("print('herdr')\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name, command string
 		blocked       bool
@@ -106,6 +109,11 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"rg search with Herdr data", "rg -n herdrCall internal/herdr/adapter_test.go", false},
 		{"python socket access", `python3 -c 'import socket, os; socket.socket(socket.AF_UNIX).connect(os.environ["HERDR_SOCKET_PATH"])'`, true},
 		{"python Herdr subprocess", fmt.Sprintf(`python3 -c 'import subprocess; subprocess.run(["herdr", "workspace", "rename", "%s", "forbidden"])'`, id), true},
+		{"python interactive stdin", fmt.Sprintf("python3 -i -c \"print('herdr')\" <<'PY'\nimport subprocess\nsubprocess.run(['herdr', 'workspace', 'rename', '%s', 'changed'], check=True)\nPY", id), true},
+		{"python option operand before command", fmt.Sprintf(`python3 -X probe -c "import subprocess; subprocess.run(['herdr', 'workspace', 'rename', '%s', 'changed'], check=True)"`, id), true},
+		{"python inspect environment with stdin", fmt.Sprintf("PYTHONINSPECT=1 python3 -c \"print('herdr')\" <<'PY'\nimport subprocess\nsubprocess.run(['herdr', 'workspace', 'rename', '%s', 'changed'], check=True)\nPY", id), true},
+		{"python inspect environment", "PYTHONINSPECT=1 python3 -c \"print('herdr')\"", true},
+		{"python redirected stdin", "python3 -c \"print('herdr')\" <<'PY'\nprint('post-command input')\nPY", true},
 		{"direct Rider push", "git push origin HEAD", true},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
