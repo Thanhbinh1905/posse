@@ -43,14 +43,41 @@ func TestRefreshPublishBodyRequiresExplicitLegacyAdoption(t *testing.T) {
 	}
 }
 
+func TestRefreshPublishBodyRecognizesGeneratedLegacyTemplateWithIssueLinksAndCRLF(t *testing.T) {
+	legacy := strings.Replace(legacyPublishTemplate("old summary"), "## Issue Link\n\n## Changes", "## Issue Link\n\nCloses #12\nRefs #14\n\n## Changes", 1)
+	legacy = "Human preface\n\n" + legacy + "\n\nHuman footer\n"
+	legacy = strings.ReplaceAll(legacy, "\n", "\r\n")
+
+	updated, err := refreshPublishBody(legacy, "## Summary\n\nnew summary", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Human preface", "new summary", "Human footer"} {
+		if !strings.Contains(updated, expected) {
+			t.Errorf("adopted CRLF legacy description omitted %q: %s", expected, updated)
+		}
+	}
+	if strings.Contains(updated, "Closes #12") || strings.Contains(updated, "Refs #14") {
+		t.Errorf("adopted CRLF body retained stale issue links: %s", updated)
+	}
+}
+
 func TestRefreshPublishBodyRefusesAmbiguousLegacyAndMarkers(t *testing.T) {
-	legacyWithHumanSection := strings.Replace(legacyPublishTemplate("old summary"), "## Verification", "## Maintainer Review\n\nKeep this note.\n\n## Verification", 1)
-	legacyWithSetextHumanSection := strings.Replace(legacyPublishTemplate("old summary"), "## Verification", "Maintainer Review\n---\n\nKeep this note.\n\n## Verification", 1)
+	legacy := legacyPublishTemplate("old summary")
+	for _, insertion := range []string{
+		"## Maintainer Review\n\nKeep this note.\n\n",
+		"Maintainer Review\n=\n\nKeep this note.\n\n",
+		"<h2>Maintainer Review</h2>\n\nKeep this note.\n\n",
+		"Maintainer review requires deployment approval.\n\n",
+	} {
+		body := strings.Replace(legacy, "## Verification", insertion+"## Verification", 1)
+		if _, err := refreshPublishBody(body, "new", true); !isPublishBodyConflict(err) {
+			t.Errorf("legacy description with inserted text was not rejected: %q, %v", insertion, err)
+		}
+	}
 	for _, body := range []string{
 		"## Summary\n\nold, edited legacy description",
 		publishBodyStart + "\npartial\n",
-		legacyWithHumanSection,
-		legacyWithSetextHumanSection,
 	} {
 		if _, err := refreshPublishBody(body, "new", true); !isPublishBodyConflict(err) {
 			t.Errorf("ambiguous description was not rejected: %q, %v", body, err)
@@ -71,7 +98,7 @@ func isPublishBodyConflict(err error) bool {
 
 func legacyPublishTemplate(summary string) string {
 	return "## Summary\n\n" + summary + "\n\n" +
-		"## Issue Link\n\n\n" +
+		"## Issue Link\n\n" +
 		"## Changes\n\n- change\n\n" +
 		"## Verification\n\n- [x] old verification\n\n" +
 		"## Proof\n\nold proof\n\n" +

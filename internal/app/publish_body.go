@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -56,62 +57,143 @@ func refreshPublishBody(existing, next string, refreshLegacy bool) (string, erro
 }
 
 func legacyPublishBodyRange(body string) (int, int, bool) {
+	normalized := strings.ReplaceAll(body, "\r\n", "\n")
 	positions := make([]int, len(publishBodySections))
 	previous := -1
 	for i, heading := range publishBodySections {
-		if strings.Count(body, heading) != 1 {
+		if strings.Count(normalized, heading) != 1 {
 			return 0, 0, false
 		}
-		position := strings.Index(body, heading)
-		if position <= previous || (position > 0 && body[position-1] != '\n') {
+		position := strings.Index(normalized, heading)
+		if position <= previous || (position > 0 && normalized[position-1] != '\n') {
 			return 0, 0, false
 		}
 		positions[i] = position
 		previous = position
 	}
-	documentationEnd := strings.Index(body[positions[len(positions)-1]:], documentationChecklist)
+	documentationEnd := strings.Index(normalized[positions[len(positions)-1]:], documentationChecklist)
 	if documentationEnd < 0 {
 		return 0, 0, false
 	}
 	start := positions[0]
 	end := positions[len(positions)-1] + documentationEnd + len(documentationChecklist)
-	lines := strings.Split(body[start:end], "\n")
-	for i, line := range lines {
-		if isMarkdownSectionHeading(line) {
-			known := false
-			for _, heading := range publishBodySections {
-				if strings.TrimSpace(line) == heading {
-					known = true
-					break
-				}
-			}
-			if !known {
-				return 0, 0, false
-			}
-		}
-		if i > 0 && strings.TrimSpace(lines[i-1]) != "" && isSetextHeadingUnderline(line) {
-			return 0, 0, false
-		}
+	if !isLegacyPublishTemplate(normalized[start:end]) {
+		return 0, 0, false
 	}
-	return start, end, true
+	return originalOffsetForNormalizedBody(body, start), originalOffsetForNormalizedBody(body, end), true
 }
 
-func isMarkdownSectionHeading(line string) bool {
-	line = strings.TrimSpace(line)
-	level := 0
-	for level < len(line) && line[level] == '#' {
-		level++
+func originalOffsetForNormalizedBody(body string, offset int) int {
+	original := 0
+	for normalized := 0; normalized < offset; normalized++ {
+		if body[original] == '\r' && original+1 < len(body) && body[original+1] == '\n' {
+			original++
+		}
+		original++
 	}
-	return level > 0 && level <= 6 && (level == len(line) || line[level] == ' ' || line[level] == '\t')
+	return original
 }
 
-func isSetextHeadingUnderline(line string) bool {
-	line = strings.TrimSpace(line)
-	if len(line) < 3 || (line[0] != '-' && line[0] != '=') {
+func isLegacyPublishTemplate(body string) bool {
+	sections := make([]string, len(publishBodySections))
+	positions := make([]int, len(publishBodySections))
+	for i, heading := range publishBodySections {
+		positions[i] = strings.Index(body, heading)
+		if positions[i] < 0 || (i > 0 && positions[i] <= positions[i-1]) {
+			return false
+		}
+	}
+	for i := range publishBodySections {
+		end := len(body)
+		if i+1 < len(positions) {
+			end = positions[i+1] - 2
+		}
+		if end < positions[i] {
+			return false
+		}
+		sections[i] = body[positions[i]:end]
+	}
+
+	summary, ok := legacySectionValue(sections[0], publishBodySections[0])
+	if !ok || summary == "" {
 		return false
 	}
-	for i := 1; i < len(line); i++ {
-		if line[i] != line[0] {
+	if !validLegacyIssueLinks(sections[1]) || !validLegacyChanges(sections[2]) || !validLegacyChecklist(sections[3]) {
+		return false
+	}
+	proof, ok := legacySectionValue(sections[4], publishBodySections[4])
+	if !ok || proof == "" {
+		return false
+	}
+	risk, ok := legacySectionValue(sections[5], publishBodySections[5])
+	if !ok || risk == "" {
+		return false
+	}
+	return sections[6] == publishBodySections[6]+"\n\n"+documentationChecklist
+}
+
+func legacySectionValue(section, heading string) (string, bool) {
+	if !strings.HasPrefix(section, heading) {
+		return "", false
+	}
+	value := strings.TrimPrefix(section, heading)
+	if value == "" {
+		return "", true
+	}
+	if !strings.HasPrefix(value, "\n\n") {
+		return "", false
+	}
+	value = strings.TrimPrefix(value, "\n\n")
+	return value, value == strings.TrimSpace(value)
+}
+
+func validLegacyIssueLinks(section string) bool {
+	value, ok := legacySectionValue(section, publishBodySections[1])
+	if !ok {
+		return false
+	}
+	if value == "" {
+		return true
+	}
+	for _, line := range strings.Split(value, "\n") {
+		if !strings.HasPrefix(line, "Closes #") && !strings.HasPrefix(line, "Refs #") {
+			return false
+		}
+		if !positiveIssueNumber(strings.TrimPrefix(strings.TrimPrefix(line, "Closes #"), "Refs #")) {
+			return false
+		}
+	}
+	return true
+}
+
+func positiveIssueNumber(value string) bool {
+	number, err := strconv.Atoi(value)
+	return err == nil && number > 0 && strconv.Itoa(number) == value
+}
+
+func validLegacyChanges(section string) bool {
+	value, ok := legacySectionValue(section, publishBodySections[2])
+	if !ok || value == "" {
+		return false
+	}
+	for _, line := range strings.Split(value, "\n") {
+		if !strings.HasPrefix(line, "- ") || strings.TrimSpace(strings.TrimPrefix(line, "- ")) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func validLegacyChecklist(section string) bool {
+	value, ok := legacySectionValue(section, publishBodySections[3])
+	if !ok || value == "" {
+		return false
+	}
+	for _, line := range strings.Split(value, "\n") {
+		if !strings.HasPrefix(line, "- [ ] ") && !strings.HasPrefix(line, "- [x] ") && !strings.HasPrefix(line, "- [X] ") {
+			return false
+		}
+		if strings.TrimSpace(line[6:]) == "" {
 			return false
 		}
 	}
