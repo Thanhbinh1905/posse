@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -80,6 +81,9 @@ func TestUpOffersUpdateBeforeRegistrationThenReexecsExactArguments(t *testing.T)
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = url
+	if _, ok := service.cachedRelease(context.Background()); !ok {
+		t.Fatal("failed to seed the fresh update cache")
+	}
 	userShellUpdatePane(t, service)
 	prompted := 0
 	service.updateConfirm = func(_ io.Writer, question string) (bool, bool, error) {
@@ -119,6 +123,23 @@ func TestUpOffersUpdateBeforeRegistrationThenReexecsExactArguments(t *testing.T)
 	}
 }
 
+func TestUpColdUpdateCacheDoesNotMakeReleaseRequest(t *testing.T) {
+	home, _, url, closeServer, requests := upReleaseFixture(t, "#!/bin/sh\nexit 0\n")
+	defer closeServer()
+	service := testService(home, nil)
+	service.Version = "0.1.0"
+	service.updateURL = url
+	userShellUpdatePane(t, service)
+	ctx := &axi.Context{Context: context.Background(), Out: io.Discard, ErrOut: io.Discard}
+	known, err := service.offerUpUpdate(ctx, []string{"--yes"})
+	if err != nil || known || *requests != 0 {
+		t.Fatalf("cold-cache up update offer: known=%t requests=%d err=%v", known, *requests, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "update-check.json")); !os.IsNotExist(err) {
+		t.Fatalf("cold-cache up wrote a release result: %v", err)
+	}
+}
+
 func TestUpDeclineAndNonInteractiveDoNotInstallEvenWithYes(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -130,6 +151,9 @@ func TestUpDeclineAndNonInteractiveDoNotInstallEvenWithYes(t *testing.T) {
 			service := testService(home, nil)
 			service.Version = "0.1.0"
 			service.updateURL = url
+			if _, ok := service.cachedRelease(context.Background()); !ok {
+				t.Fatal("failed to seed the fresh update cache")
+			}
 			userShellUpdatePane(t, service)
 			service.updateConfirm = func(io.Writer, string) (bool, bool, error) { return false, tc.interactive, nil }
 			code, output := runCLI(t, service, "up", "--yes")
@@ -186,6 +210,9 @@ func TestUpUpdateMigrationRefusalDoesNotRegisterOrReplaceBinary(t *testing.T) {
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = url
+	if _, ok := service.cachedRelease(context.Background()); !ok {
+		t.Fatal("failed to seed the fresh update cache")
+	}
 	userShellUpdatePane(t, service)
 	service.updateConfirm = func(io.Writer, string) (bool, bool, error) { return true, true, nil }
 	code, output := runCLI(t, service, "up")

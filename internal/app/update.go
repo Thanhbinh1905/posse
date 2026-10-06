@@ -90,19 +90,30 @@ func (s *Service) currentVersion() string {
 	}
 	return "dev"
 }
+func (s *Service) readCachedRelease() (githubRelease, bool) {
+	home, err := s.homePath()
+	if err != nil {
+		return githubRelease{}, false
+	}
+	data, _ := os.ReadFile(filepath.Join(home, "update-check.json"))
+	var cache updateCache
+	if json.Unmarshal(data, &cache) == nil && time.Since(cache.Checked) >= 0 && time.Since(cache.Checked) < 24*time.Hour {
+		return cache.Release, cache.Release.Tag != ""
+	}
+	return githubRelease{}, false
+}
+
 func (s *Service) cachedRelease(ctx context.Context) (githubRelease, bool) {
+	if release, ok := s.readCachedRelease(); ok {
+		return release, true
+	}
 	home, err := s.homePath()
 	if err != nil {
 		return githubRelease{}, false
 	}
 	cachePath := filepath.Join(home, "update-check.json")
-	data, _ := os.ReadFile(cachePath)
-	var cache updateCache
-	if json.Unmarshal(data, &cache) == nil && time.Since(cache.Checked) >= 0 && time.Since(cache.Checked) < 24*time.Hour {
-		return cache.Release, cache.Release.Tag != ""
-	}
 	// Record the attempt, including failures, to avoid polling while offline.
-	cache = updateCache{Checked: time.Now()}
+	cache := updateCache{Checked: time.Now()}
 	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	release, err := s.fetchRelease(probe, "")

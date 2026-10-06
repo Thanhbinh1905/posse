@@ -209,9 +209,6 @@ func TestStartupUnsaddleRecoveryDoesNotFetchWhileReleasingMount(t *testing.T) {
 	initRepo(t, repo)
 	remote := filepath.Join(root, "remote.git")
 	gitTest(t, root, "clone", "--bare", repo, remote)
-	gitTest(t, repo, "remote", "add", "origin", remote)
-	gitTest(t, repo, "fetch", "origin")
-	gitTest(t, repo, "remote", "set-url", "origin", "https://blackhole.invalid/acme/repo.git")
 	mountPath := filepath.Join(root, "mount")
 	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
 	home := filepath.Join(root, "posse")
@@ -250,6 +247,7 @@ func TestStartupUnsaddleRecoveryDoesNotFetchWhileReleasingMount(t *testing.T) {
 	if err := db.StartIntent(ctx, project.ID, taskID, "unsaddle", "done:panes.close", `{}`, deadIntentProcessID); err != nil {
 		t.Fatal(err)
 	}
+	gitTest(t, repo, "remote", "add", "origin", "https://blackhole.invalid/acme/repo.git")
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)

@@ -164,8 +164,8 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 	}
 	viewPath := filepath.Join(root, "good-pr-view.json")
 	view, err := json.Marshal(map[string]any{
-		"url": goodURL, "state": "MERGED", "headRefOid": goodHead, "mergeable": "MERGEABLE",
-		"reviewDecision": "APPROVED", "mergeCommit": map[string]string{"oid": goodHead}, "statusCheckRollup": []any{},
+		"url": goodURL, "state": "OPEN", "headRefOid": goodHead, "mergeable": "MERGEABLE",
+		"reviewDecision": "APPROVED", "statusCheckRollup": []any{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -252,6 +252,26 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 
 	if !waitForCondition(7*time.Second, func() bool {
 		observation, observationErr := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
+		return observationErr == nil && observation.State == "OPEN"
+	}) {
+		observation, observationErr := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
+		t.Fatalf("healthy Member's initial OPEN observation was not recorded during offline stalls: %#v, %v", observation, observationErr)
+	}
+	if task, err := db.TaskByID(context.Background(), project.ID, good.ID); err != nil || task.State != store.StateLanding {
+		t.Fatalf("healthy Task changed state before its PR merged: %#v, %v", task, err)
+	}
+	view, err = json.Marshal(map[string]any{
+		"url": goodURL, "state": "MERGED", "headRefOid": goodHead, "mergeable": "MERGEABLE",
+		"reviewDecision": "APPROVED", "mergeCommit": map[string]string{"oid": goodHead}, "statusCheckRollup": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(viewPath, view, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(7*time.Second, func() bool {
+		observation, observationErr := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
 		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
 		landed, landedErr := db.TaskByID(context.Background(), project.ID, preLanded.ID)
 		healthy, healthyErr := db.TaskByID(context.Background(), project.ID, good.ID)
@@ -282,8 +302,8 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		t.Fatalf("blackholed Member checkout unexpectedly completed during Teardown: %#v, %v", offlineWatch, err)
 	}
 	ghCalls, err := os.ReadFile(ghLog)
-	if err != nil || !strings.Contains(string(ghCalls), "pr view https://github.com/acme/good/pull/2") {
-		t.Fatalf("healthy Member forge was not queried after offline discovery failed: %s %v", ghCalls, err)
+	if err != nil || strings.Count(string(ghCalls), "pr view https://github.com/acme/good/pull/2") < 2 {
+		t.Fatalf("healthy Member was not queried again while offline work remained stalled: %s %v", ghCalls, err)
 	}
 	if err := os.WriteFile(releaseStall, []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)

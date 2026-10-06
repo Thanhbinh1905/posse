@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -32,6 +33,8 @@ type Service struct {
 	confirm       confirmFunc
 	updateConfirm confirmFunc
 	reexecUpdate  func(string, []string, []string) error
+	maintenanceMu sync.Mutex
+	maintenance   map[string]bool
 }
 
 func New(home string, adapter herdr.Adapter) *Service {
@@ -136,6 +139,25 @@ func (s *Service) commands() *axi.Command {
 		{Name: "doctor", Summary: "Check Herdr, plugin, config, database and landing tools.", Handler: s.doctor},
 	}
 	return root
+}
+
+func (s *Service) beginMaintenance(key string) bool {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	if s.maintenance == nil {
+		s.maintenance = make(map[string]bool)
+	}
+	if s.maintenance[key] {
+		return false
+	}
+	s.maintenance[key] = true
+	return true
+}
+
+func (s *Service) endMaintenance(key string) {
+	s.maintenanceMu.Lock()
+	delete(s.maintenance, key)
+	s.maintenanceMu.Unlock()
 }
 
 func (s *Service) homePath() (string, error) {

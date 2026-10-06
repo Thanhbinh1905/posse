@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -138,6 +139,27 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 
 	if err := f.service.maintainProjectWatch(ctx, f.db, f.project); err != nil {
 		t.Fatalf("workspace maintenance aborted: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		observation, observationErr := f.db.LatestMemberPRObservation(ctx, goodID, "worker")
+		goodTask, taskErr := f.db.TaskByID(ctx, f.project.ID, goodID)
+		backend, backendErr := f.db.ProjectRepoWatchState(ctx, f.project.ID, "backend")
+		worker, workerErr := f.db.ProjectRepoWatchState(ctx, f.project.ID, "worker")
+		notices, noticeErr := f.db.Notices(ctx, f.project.ID, false)
+		foundOfflineFailure := false
+		for _, notice := range notices {
+			if notice.TaskID == f.task.ID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "backend") && strings.Contains(notice.Summary, "vpn-t181.invalid") {
+				foundOfflineFailure = true
+			}
+		}
+		f.service.maintenanceMu.Lock()
+		maintenancePending := len(f.service.maintenance) != 0
+		f.service.maintenanceMu.Unlock()
+		if observationErr == nil && observation.State == "MERGED" && taskErr == nil && goodTask.State == store.StateTornDown && backendErr == nil && backend.CheckoutCheckedAt > 0 && workerErr == nil && worker.CheckoutCheckedAt > 0 && noticeErr == nil && foundOfflineFailure && !maintenancePending {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	observation, err := f.db.LatestMemberPRObservation(ctx, goodID, "worker")
 	if err != nil || observation.State != "MERGED" {

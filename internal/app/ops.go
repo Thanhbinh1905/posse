@@ -34,6 +34,131 @@ func (s *Service) recordLookoutMaintenanceFailure(ctx context.Context, db *store
 	return s.regenerateProjects(ctx, db)
 }
 
+func (s *Service) startWorkspacePRPolls(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
+	now := time.Now()
+	projectClaim, err := db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), false)
+	if err != nil || projectClaim == "" {
+		return err
+	}
+	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, projectClaim) }()
+	targets, err := s.projectTargets(ctx, db, project)
+	if err != nil {
+		return err
+	}
+	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
+	for _, target := range targets {
+		repo := target.Name
+		key := fmt.Sprintf("pr:%d:%s", project.ID, repo)
+		if !s.beginMaintenance(key) {
+			continue
+		}
+		token, err := db.ClaimMemberPRPoll(ctx, project.ID, repo, now, interval, false)
+		if err != nil {
+			s.endMaintenance(key)
+			return err
+		}
+		if token == "" {
+			s.endMaintenance(key)
+			continue
+		}
+		go func(repo, key, token string) {
+			defer s.endMaintenance(key)
+			onLanded := func() {
+				s.startLandedTaskTeardown(ctx, db, project, cfg)
+				s.startLandedMemberSync(ctx, db, project, repo)
+			}
+			pollErr := s.pollWorkspacePullRequestsForRepo(ctx, db, project, cfg, false, onLanded, repo, false, false, token)
+			if pollErr != nil && !store.IsBusy(pollErr) {
+				_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s PR polling: %w", repo, pollErr))
+			}
+		}(repo, key, token)
+	}
+	return nil
+}
+
+func (s *Service) startWorkspaceCheckoutSync(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
+	targets, err := s.projectTargets(ctx, db, project)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
+	for _, target := range targets {
+		state, err := db.ProjectRepoWatchState(ctx, project.ID, target.Name)
+		if err != nil {
+			return err
+		}
+		if !store.ProjectWatchInterval(state.CheckoutCheckedAt, interval, now) {
+			continue
+		}
+		target := target
+		key := fmt.Sprintf("checkout:%d:%s", project.ID, target.Name)
+		if !s.beginMaintenance(key) {
+			continue
+		}
+		go func() {
+			defer s.endMaintenance(key)
+			result, syncErr := s.syncRepository(ctx, db, project, target, now)
+			if syncErr == nil {
+				reason := result.Reason
+				if reason == "" && result.Err != nil {
+					reason = truncate(strings.TrimSpace(result.Err.Error()), 240)
+				}
+				syncErr = db.RecordRepoCheckout(ctx, project.ID, target.Name, now.UnixMilli(), result.Status, reason)
+			}
+			if syncErr == nil {
+				syncErr = db.RecordCheckoutAttempt(ctx, project.ID, now.UnixMilli())
+			}
+			if syncErr != nil && !store.IsBusy(syncErr) {
+				_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s checkout sync: %w", target.Name, syncErr))
+			}
+		}()
+	}
+	return nil
+}
+
+func (s *Service) startLandedMemberSync(ctx context.Context, db *store.DB, project store.Project, repo string) {
+	key := fmt.Sprintf("land-sync:%d:%s", project.ID, repo)
+	if !s.beginMaintenance(key) {
+		return
+	}
+	go func() {
+		defer s.endMaintenance(key)
+		target, err := s.projectTarget(ctx, db, project, repo)
+		if err == nil {
+			now := time.Now()
+			var result projectSyncResult
+			result, err = s.syncRepository(ctx, db, project, target, now)
+			if err == nil {
+				reason := result.Reason
+				if reason == "" && result.Err != nil {
+					reason = truncate(strings.TrimSpace(result.Err.Error()), 240)
+				}
+				err = db.RecordRepoCheckout(ctx, project.ID, repo, now.UnixMilli(), result.Status, reason)
+			}
+		}
+		if err == nil {
+			err = db.RecordCheckoutAttempt(ctx, project.ID, time.Now().UnixMilli())
+		}
+		if err != nil && !store.IsBusy(err) {
+			_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s landed checkout sync: %w", repo, err))
+		}
+	}()
+}
+
+func (s *Service) startLandedTaskTeardown(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) {
+	key := fmt.Sprintf("teardown:%d", project.ID)
+	if !s.beginMaintenance(key) {
+		return
+	}
+	go func() {
+		defer s.endMaintenance(key)
+		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil && !store.IsBusy(err) {
+			_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("landed Task Teardown: %w", err))
+		}
+	}()
+}
+
 func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, project store.Project) error {
 	home, err := s.homePath()
 	if err != nil {
@@ -42,6 +167,19 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
 		return configError(err)
+	}
+	if project.IsWorkspace() {
+		if err := s.startWorkspacePRPolls(ctx, db, project, cfg); err != nil {
+			return err
+		}
+		if err := s.startWorkspaceCheckoutSync(ctx, db, project, cfg); err != nil {
+			return err
+		}
+		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+			return err
+		}
+		_, _ = s.availableUpdate(ctx, db, &project)
+		return nil
 	}
 	var failures []error
 	landedTasks := make(chan struct{}, 1)

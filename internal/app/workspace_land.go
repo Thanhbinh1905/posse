@@ -450,15 +450,28 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 }
 
 func (s *Service) pollWorkspacePullRequestsAndNotify(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onLanded func()) error {
+	return s.pollWorkspacePullRequestsForRepo(ctx, db, project, cfg, force, onLanded, "", true, true, "")
+}
+
+func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onLanded func(), repoFilter string, claimProject, syncRoot bool, memberClaim string) error {
 	now := time.Now()
-	claim, err := db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
-	if err != nil {
-		return err
+	claim := ""
+	var err error
+	if claimProject {
+		claim, err = db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
+		if err != nil {
+			return err
+		}
+		if claim == "" {
+			return nil
+		}
+		defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
 	}
-	if claim == "" {
-		return nil
+	if memberClaim != "" {
+		defer func() {
+			_ = db.FinishMemberPRPoll(context.Background(), project.ID, repoFilter, memberClaim, time.Now().UnixMilli())
+		}()
 	}
-	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
 	tasks, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {
 		return err
@@ -492,6 +505,9 @@ func (s *Service) pollWorkspacePullRequestsAndNotify(ctx context.Context, db *st
 			return err
 		}
 		for _, member := range members {
+			if repoFilter != "" && member.repo.Repo != repoFilter {
+				continue
+			}
 			if member.repo.PRURL == "" || member.repo.State == store.TaskRepoLanded {
 				continue
 			}
@@ -525,6 +541,29 @@ func (s *Service) pollWorkspacePullRequestsAndNotify(ctx context.Context, db *st
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
+			claimToken := memberClaim
+			if claimProject {
+				var claimErr error
+				claimToken, claimErr = db.ClaimMemberPRPoll(ctx, project.ID, group.repo, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
+				if claimErr != nil {
+					for _, target := range group.targets {
+						results <- pollResult{target: target, err: claimErr}
+					}
+					return
+				}
+				if claimToken == "" {
+					return
+				}
+			}
+			if claimToken != "" && claimProject {
+				defer func() {
+					if err := db.FinishMemberPRPoll(context.Background(), project.ID, group.repo, claimToken, time.Now().UnixMilli()); err != nil {
+						for _, target := range group.targets {
+							results <- pollResult{target: target, err: err}
+						}
+					}
+				}()
+			}
 			for _, target := range group.targets {
 				member := target.member
 				forge, err := forgeForRepository(pollCtx, member.target.Root, cfg, group.repo)
@@ -624,7 +663,7 @@ func (s *Service) pollWorkspacePullRequestsAndNotify(ctx context.Context, db *st
 	if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), truncate(strings.Join(failures, "; "), 1000)); err != nil {
 		return err
 	}
-	if landedAny {
+	if landedAny && syncRoot {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
 			return err
 		}
