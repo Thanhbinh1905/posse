@@ -32,7 +32,10 @@ printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 case "$*" in
  *"--method PUT"*)
    for argument in "$@"; do
-     case "$argument" in description=*) printf '%s' "${argument#description=}" > "$POSSE_TEST_GLAB_DESCRIPTION" ;; esac
+     case "$argument" in
+       description=*) printf '%s' "${argument#description=}" > "$POSSE_TEST_GLAB_DESCRIPTION" ;;
+       title=*) printf '%s' "${argument#title=}" > "$POSSE_TEST_GLAB_TITLE" ;;
+     esac
    done
    printf 'updated\n' ;;
  *"merge_requests?state=opened"*) if [ -n "${POSSE_TEST_GLAB_LIST:-}" ]; then cat "$POSSE_TEST_GLAB_LIST"; else printf '[]\n'; fi ;;
@@ -53,6 +56,7 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("POSSE_TEST_GLAB_DESCRIPTION", filepath.Join(f.root, "mr-description"))
+	t.Setenv("POSSE_TEST_GLAB_TITLE", filepath.Join(f.root, "mr-title"))
 	f.setGitLabApprovals(t, true, 0)
 	f.setGitLabState(t, "opened", "mergeable", "running", f.headSHA)
 	return f
@@ -147,6 +151,81 @@ func TestGitLabPublishAddsIssueLinksToAnExistingMergeRequest(t *testing.T) {
 	}
 }
 
+func TestGitLabRepublishRefreshesCurrentMetadata(t *testing.T) {
+	f := gitlabFixture(t, store.StateWorking)
+	briefPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "brief.md")
+	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nticket: 12\nrefs: [14]\n---\nE2E intent\n"
+	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := map[string]any{
+		"web_url": "https://git.example.com/group/sub/shop/-/merge_requests/17",
+		"state":   "opened", "sha": f.headSHA, "source_branch": "posse/t1", "target_branch": "main",
+		"source_project_id": 7, "target_project_id": 7,
+	}
+	encoded, err := json.Marshal([]any{request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listPath := filepath.Join(f.root, "existing-mrs.json")
+	if err := os.WriteFile(listPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GLAB_LIST", listPath)
+	first := []string{"First summary", "--verify", "go test ./... -> pass", "--proof", "first proof", "--risk", "Risk: first"}
+	if code, output, stderr := f.run(append([]string{"publish"}, first...)...); code != 0 {
+		t.Fatalf("first publish: %d %s %s", code, output, stderr)
+	}
+	firstBody, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_DESCRIPTION"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(firstBody), "<!-- posse:publish:start -->") {
+		t.Fatalf("first GitLab publish did not write the ownership markers: %s", firstBody)
+	}
+	state, err := os.ReadFile(f.ghState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current map[string]any
+	if err := json.Unmarshal(state, &current); err != nil {
+		t.Fatal(err)
+	}
+	current["title"], current["description"] = "E2E Brief title", string(firstBody)
+	state, err = json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.ghState, state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updatedBrief := strings.Replace(brief, "title: E2E Brief title", "title: Updated MR title", 1)
+	if err := os.WriteFile(briefPath, []byte(updatedBrief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := []string{"Second summary", "--verify", "go test ./... -> second pass", "--proof", "second proof", "--risk", "Risk: second"}
+	if code, output, stderr := f.run(append([]string{"publish"}, second...)...); code != 0 {
+		t.Fatalf("second publish: %d %s %s", code, output, stderr)
+	}
+	body, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_DESCRIPTION"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Second summary", "go test ./... -> second pass", "second proof", "Risk: second", "Closes #12", "Refs #14"} {
+		if !strings.Contains(string(body), expected) {
+			t.Errorf("refreshed GitLab description omitted %q: %s", expected, body)
+		}
+	}
+	for _, stale := range []string{"First summary", "go test ./... -> pass", "first proof", "Risk: first"} {
+		if strings.Contains(string(body), stale) {
+			t.Errorf("refreshed GitLab description retained stale %q: %s", stale, body)
+		}
+	}
+	if title, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_TITLE")); err != nil || string(title) != "Updated MR title" {
+		t.Errorf("refreshed GitLab title=%q want %q: %v", title, "Updated MR title", err)
+	}
+}
+
 func TestGitLabWorkerRejectsForkAndRebaseBeforePublishing(t *testing.T) {
 	f := gitlabFixture(t, store.StateWorking)
 	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("[defaults]\nforge = \"gitlab\"\nmerge_method = \"rebase\"\n"), 0o600); err != nil {
@@ -217,8 +296,8 @@ func TestGitLabMRDescriptionMatchesGitHubPRBody(t *testing.T) {
 		t.Fatalf("publish: %d %s %s", code, output, stderr)
 	}
 	written, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_DESCRIPTION"))
-	if err != nil || string(written) != body {
-		t.Fatalf("MR body differs from GitHub PR body: %q want %q: %v", written, body, err)
+	if err != nil || string(written) != managedPublishBody(body) {
+		t.Fatalf("MR body differs from GitHub PR body: %q want %q: %v", written, managedPublishBody(body), err)
 	}
 	log, err := os.ReadFile(f.ghLog)
 	if err != nil || !strings.Contains(string(log), "--title "+title) {

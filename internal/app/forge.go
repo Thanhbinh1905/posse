@@ -164,6 +164,7 @@ func gitlabMR(ctx context.Context, forge repositoryForge, number int) (gitlabMer
 // Keeps GitLab REST shape at the forge boundary.
 type gitlabMergeRequest struct {
 	WebURL            string `json:"web_url"`
+	Title             string `json:"title"`
 	Description       string `json:"description"`
 	State             string `json:"state"`
 	SHA               string `json:"sha"`
@@ -182,7 +183,7 @@ type gitlabMergeRequest struct {
 	} `json:"head_pipeline"`
 }
 
-func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string) (string, bool, error) {
+func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool) (string, bool, error) {
 	output, err := runOutputStep(ctx, db, intent, "pr.lookup", forge.Root, "glab", "api", "--hostname", forge.Host, "projects/"+url.PathEscape(forge.Path)+"/merge_requests?state=opened&source_branch="+url.QueryEscape(task.Branch)+"&target_branch="+url.QueryEscape(project.DefaultBranch))
 	if err != nil {
 		return "", false, axi.Failure("pr_list_failed", "could not list GitLab merge requests", true, err.Error())
@@ -201,13 +202,21 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 		if _, err := forgeReference(mr.WebURL, forge); err != nil {
 			return "", false, err
 		}
+		if err := validateWorkerPullRequest(ctx, project, task, forge, mr.WebURL, task.GatedSHA); err != nil {
+			return "", false, err
+		}
+		if summary != "" {
+			if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, mr.WebURL, member, summary, verification, proof, risk, refreshLegacy); err != nil {
+				return "", false, err
+			}
+		}
 		return mr.WebURL, false, nil
 	}
 	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
 	if err != nil {
 		return "", false, err
 	}
-	created, err := runOutputStep(ctx, db, intent, "pr.create", forge.Root, "glab", "mr", "create", "--repo", "https://"+forge.Host+"/"+forge.Path, "--source-branch", task.Branch, "--target-branch", project.DefaultBranch, "--title", title, "--description", body, "--yes")
+	created, err := runOutputStep(ctx, db, intent, "pr.create", forge.Root, "glab", "mr", "create", "--repo", "https://"+forge.Host+"/"+forge.Path, "--source-branch", task.Branch, "--target-branch", project.DefaultBranch, "--title", title, "--description", managedPublishBody(body), "--yes")
 	if err != nil {
 		return "", false, axi.Failure("pr_create_failed", "could not create GitLab merge request", true, err.Error())
 	}
