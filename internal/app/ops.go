@@ -19,6 +19,21 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func (s *Service) recordLookoutMaintenanceFailure(ctx context.Context, db *store.DB, project store.Project, cause error) error {
+	summary := "Lookout maintenance failed (retryable): " + truncate(normalizeCommandError(cause).Error(), 200)
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND kind='pr_watch_failing' AND summary=? AND acked_at IS NULL)`, project.ID, summary).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: summary, DataJSON: `{}`}); err != nil {
+		return err
+	}
+	return s.regenerateProjects(ctx, db)
+}
+
 func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, project store.Project) error {
 	home, err := s.homePath()
 	if err != nil {
@@ -28,17 +43,23 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return configError(err)
 	}
+	var failures []error
 	if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
-		return err
+		failures = append(failures, fmt.Errorf("PR polling: %w", err))
 	}
 	if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
-		return err
+		failures = append(failures, fmt.Errorf("checkout sync: %w", err))
 	}
 	if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
-		return err
+		failures = append(failures, fmt.Errorf("landed Task Teardown: %w", err))
+	}
+	if s.Herdr != nil {
+		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
+			failures = append(failures, fmt.Errorf("active Task Teardown: %w", err))
+		}
 	}
 	_, _ = s.availableUpdate(ctx, db, &project)
-	return nil
+	return errors.Join(failures...)
 }
 
 func (s *Service) wait(ctx *axi.Context, args []string) error {
@@ -122,12 +143,13 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		if len(notices) == 0 {
 			if lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute {
 				if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
-					if !store.IsBusy(err) {
-						return err
+					if store.IsBusy(err) {
+						// Contention is transient. Keep this Lookout armed, and retry
+						// rather than requiring the Lead to restart it after release.
+						fmt.Fprintf(ctx.ErrOut, "Lookout maintenance deferred: %v\n", normalizeCommandError(err))
+					} else if noticeErr := s.recordLookoutMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
+						fmt.Fprintf(ctx.ErrOut, "Lookout maintenance failure could not be recorded: %v\n", noticeErr)
 					}
-					// Contention is transient. Keep this Lookout armed, and retry
-					// rather than requiring the Lead to restart it after release.
-					fmt.Fprintf(ctx.ErrOut, "Lookout maintenance deferred: %v\n", normalizeCommandError(err))
 				} else {
 					lastHerdrReconcile = time.Now()
 					if snapshot, err := s.snapshot(ctx.Context); err == nil {
@@ -220,7 +242,11 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				}
 			}
 			if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
-				return err
+				if store.IsBusy(err) {
+					fmt.Fprintf(ctx.ErrOut, "Lookout maintenance deferred: %v\n", normalizeCommandError(err))
+				} else if noticeErr := s.recordLookoutMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
+					return noticeErr
+				}
 			}
 			notices, err = db.UndeliveredNotices(ctx.Context, project.ID)
 			if err != nil {
@@ -347,9 +373,13 @@ func (s *Service) ack(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) ackNotices(ctx *axi.Context, db *store.DB, project store.Project, args []string) (int, []string, error) {
-	cfg, err := s.prepareProjectObservation(ctx.Context, db, project)
+	home, err := s.homePath()
 	if err != nil {
 		return 0, nil, err
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return 0, nil, configError(err)
 	}
 	identifiers := []string{}
 	for _, arg := range args {

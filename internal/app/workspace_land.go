@@ -483,7 +483,11 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			}
 			forge, err := forgeForRepository(ctx, member.target.Root, cfg, member.repo.Repo)
 			if err != nil {
-				return prefixFailure(member.repo.Repo, err)
+				failure = member.repo.Repo + ": " + truncate(err.Error(), 240)
+				if noticeErr := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, err, now); noticeErr != nil {
+					return noticeErr
+				}
+				continue
 			}
 			var observation store.PRObservation
 			var failures []failedCheck

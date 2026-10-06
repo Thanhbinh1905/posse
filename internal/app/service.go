@@ -87,7 +87,7 @@ func (s *Service) commands() *axi.Command {
 		}},
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "roster", Usage: "$ roster [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
-		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, its Signals and transitions.", Handler: s.show},
+		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, undelivered messages, Signals and transitions.", Handler: s.show},
 		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Rider's question to the User as a Decision.", Handler: s.ask},
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
@@ -105,7 +105,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "land", Summary: "Land a completed Ship Task.", Handler: s.land},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "unsaddle", Summary: "Teardown a finished Task and release its Mount.", Handler: s.teardown},
-		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--poll-only]", Summary: "Acknowledge Notices and wait for the next undelivered Notice.", Handler: s.wait},
+		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--poll-only]", Summary: "Acknowledge requested Notices and wait; unrelated maintenance failures arrive as Notices.", Handler: s.wait},
 		{Name: "remuda", Summary: "List a Project's Remuda or prune idle Mounts.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
@@ -306,6 +306,18 @@ func (s *Service) prepareProjectObservation(ctx context.Context, db *store.DB, p
 	return s.prepareProjectMode(ctx, db, project, false, false)
 }
 
+func leadAgentStarted(project store.Project, snapshot herdr.Snapshot) bool {
+	if project.LeadPaneID == "" {
+		return false
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Agent != "" && pane.AgentStatus != "unknown" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories bool) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
@@ -324,6 +336,7 @@ func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project 
 		return cfg, err
 	}
 	herdrReady := false
+	allowNetworkRecovery := allowRecovery
 	if s.Herdr != nil {
 		if err := s.Herdr.CheckProtocol(ctx); err != nil {
 			if !isHerdrUnavailable(err) {
@@ -355,10 +368,11 @@ func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project 
 				}
 			} else {
 				herdrReady = true
+				allowNetworkRecovery = allowNetworkRecovery || leadAgentStarted(project, result.Snapshot)
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 					return cfg, err
 				}
-				if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, allowRecovery); err != nil {
+				if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, allowRecovery, allowNetworkRecovery); err != nil {
 					return cfg, err
 				}
 				fresh, err := db.ProjectByID(ctx, project.ID)

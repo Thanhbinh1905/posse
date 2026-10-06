@@ -980,6 +980,20 @@ func (response *ghQueryResponse) pullRequest(target prWatchTarget) (*ghPullReque
 	return pull, nil
 }
 
+func recordWorkspacePRTaskWatchFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task, repo, prURL string, cause error, now time.Time) error {
+	summary := taskDisplayName(task) + " pull request watch failed for " + repo + ": " + truncate(cause.Error(), 240)
+	data := marshalJSON(map[string]any{"repo": repo, "pr_url": prURL, "error": cause.Error()})
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND data_json=?)`, project.ID, task.ID, data).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_watch_failing", Summary: summary, DataJSON: data, CreatedAt: now.UnixMilli()})
+	return err
+}
+
 func recordPRTaskWatchFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error, now time.Time) error {
 	summary := taskDisplayName(task) + " pull request watch failed: " + truncate(cause.Error(), 240)
 	data := marshalJSON(map[string]any{"pr_url": task.PRURL, "error": cause.Error()})

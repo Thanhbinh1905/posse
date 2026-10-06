@@ -251,8 +251,12 @@ func registeredProjectFor(ctx context.Context, db *store.DB, dir string) (store.
 // taskForPath finds the live-or-finished Task whose Mount contains dir.
 func taskForPath(ctx context.Context, db *store.DB, dir string) (store.Task, error) {
 	if top, err := gitTop(ctx, dir); err == nil {
-		if task, err := db.TaskByWorktree(ctx, top); err == nil {
+		task, taskErr := db.TaskByWorktree(ctx, top)
+		if taskErr == nil {
 			return task, nil
+		}
+		if !store.IsNotFound(taskErr) {
+			return store.Task{}, taskErr
 		}
 	}
 	projects, err := db.Projects(ctx)
