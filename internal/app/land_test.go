@@ -558,6 +558,14 @@ func (adapter *changingSnapshotAdapter) Call(ctx context.Context, method string,
 		return raw, err
 	}
 	if method == "pane.process_info" {
+		var response struct {
+			ProcessInfo struct {
+				PaneID string `json:"pane_id"`
+			} `json:"process_info"`
+		}
+		if json.Unmarshal(raw, &response) == nil && response.ProcessInfo.PaneID != "" {
+			return raw, nil
+		}
 		paneID, _ := params["pane_id"].(string)
 		adapter.mu.Lock()
 		var pane herdr.Pane
@@ -572,9 +580,13 @@ func (adapter *changingSnapshotAdapter) Call(ctx context.Context, method string,
 		if !found {
 			return raw, nil
 		}
-		foreground, foregroundProcesses := 100, []map[string]any(nil)
+		shellPID := os.Getppid()
+		if shellPID <= 1 {
+			shellPID = os.Getpid() + 1
+		}
+		foreground, foregroundProcesses := shellPID, []map[string]any(nil)
 		if pane.Agent != "" {
-			foreground = 200
+			foreground = os.Getpid()
 			cwd := pane.CWD
 			if cwd == "" {
 				cwd = "/"
@@ -582,7 +594,7 @@ func (adapter *changingSnapshotAdapter) Call(ctx context.Context, method string,
 			foregroundProcesses = []map[string]any{{"pid": foreground, "name": pane.Agent, "cwd": cwd}}
 		}
 		return json.Marshal(map[string]any{"process_info": map[string]any{
-			"pane_id": paneID, "shell_pid": 100, "foreground_process_group_id": foreground,
+			"pane_id": paneID, "shell_pid": shellPID, "foreground_process_group_id": foreground,
 			"foreground_processes": foregroundProcesses,
 		}})
 	}

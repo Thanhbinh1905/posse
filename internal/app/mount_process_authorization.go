@@ -58,7 +58,7 @@ func (authorization *mountProcessAuthorization) verify(pid int) error {
 		return fmt.Errorf("cannot verify Mount process %d identity: %w", pid, err)
 	}
 	if handle.Identity() != bootID+"/"+startTime {
-		return fmt.Errorf("Mount PID %d changed process instance; preserving its work", pid)
+		return fmt.Errorf("mount PID %d changed process instance; preserving its work", pid)
 	}
 	return nil
 }

@@ -146,18 +146,10 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 // the Task's own panes close, and the other panes of its tabs are reported as
 // foreign. posse never closes a workspace: the Lead and sibling Riders share
 // the Lead's, and a legacy Rider workspace disappears with its last tab.
-// verifyMountForegroundOwnership retains exact process handles for Task panes
-// and shell-only panes in the held Mount. A foreign pane contributes only its
-// exact shell and remains open; CWD alone cannot authorize a process.
-func (s *Service) verifyMountForegroundOwnership(ctx context.Context, db *store.DB, project store.Project, task store.Task) (*mountProcessAuthorization, error) {
-	authorization := newMountProcessAuthorization()
-	if err := s.verifyMountForegroundOwnershipWithAuthorization(ctx, db, project, task, authorization); err != nil {
-		authorization.Close()
-		return nil, err
-	}
-	return authorization, nil
-}
-
+// verifyMountForegroundOwnershipWithAuthorization retains exact process handles
+// for Task panes and shell-only panes in the held Mount. A foreign pane
+// contributes only its exact shell and remains open; CWD alone cannot authorize
+// a process.
 func (s *Service) verifyMountForegroundOwnershipWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, authorization *mountProcessAuthorization) error {
 	mounts, err := db.Mounts(ctx, project.ID)
 	if err != nil {

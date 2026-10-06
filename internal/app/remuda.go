@@ -672,10 +672,6 @@ func breakMount(ctx context.Context, db *store.DB, project store.Project, task s
 	return err
 }
 
-func stopMountProcesses(path string) ([]string, error) {
-	return stopMountProcessesAuthorized(path, nil)
-}
-
 func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthorization) ([]string, error) {
 	if message := processIdentityCapabilityError(); message != "" {
 		return nil, fmt.Errorf("%s; refusing to signal processes or reset the Mount", message)
