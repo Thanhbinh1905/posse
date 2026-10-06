@@ -78,7 +78,7 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 		}
 		items = append(items, pruneItem{kind: "mount", label: fmt.Sprintf("mount-%d", mount.Number), path: mount.Path, state: mount.State, reason: reason, bytes: size, mount: mount})
 	}
-	scratch, err := taskScratchPruneItems(ctx.Context, db, home, project, tasks)
+	scratch, err := taskScratchPruneItems(ctx.Context, db, home, project)
 	if err != nil {
 		return err
 	}
@@ -114,6 +114,44 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 		}
 	}
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "prune", Value: rows}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{"Run `posse remuda prune --yes` to remove these safe, Posse-owned items"}}})
+}
+
+func (s *Service) applyScratchPruneItem(ctx context.Context, db *store.DB, home string, project store.Project, item pruneItem) error {
+	err := withMountStateLock(ctx, db, func() error {
+		_, reason, taskID, eligible, err := taskScratchPruneOwnership(ctx, db, project, item.seq)
+		if err != nil {
+			return err
+		}
+		if !eligible || taskID != item.taskID {
+			return axi.Failure("prune_incomplete", fmt.Sprintf("Task scratch ownership changed for %s (%s)", item.label, reason), true, "Retry `posse remuda prune` after the Task operation finishes")
+		}
+		expected, err := taskScratchPath(home, project, store.Task{Seq: item.seq})
+		if err != nil {
+			return err
+		}
+		if filepath.Clean(item.path) != filepath.Clean(expected) {
+			return axi.Failure("prune_incomplete", fmt.Sprintf("refuse to prune scratch outside the validated Task path for %s", item.label), true, "Inspect POSSE_HOME, then retry `posse remuda prune`")
+		}
+		root, err := validatedTaskScratchRoot(home, project, store.Task{Seq: item.seq})
+		if err != nil {
+			return axi.Failure("prune_incomplete", err.Error(), true, "Repair the Task scratch path, then retry `posse remuda prune`")
+		}
+		if _, err := stopOwnedProcesses([]ownedProcessRoot{{path: root, includeOpenFiles: true}}); err != nil {
+			return axi.Failure("prune_incomplete", err.Error(), true, "Resolve Task scratch processes, then retry `posse remuda prune`")
+		}
+		if err := removeTaskScratch(home, project, store.Task{Seq: item.seq}); err != nil {
+			return axi.Failure("prune_incomplete", err.Error(), true, "Repair Task scratch permissions, then retry `posse remuda prune`")
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+	var commandError *axi.Error
+	if errors.As(err, &commandError) && commandError.Code == "prune_incomplete" && commandError.Retryable {
+		return err
+	}
+	return axi.Failure("prune_incomplete", err.Error(), true, "Resolve Task scratch ownership, then retry `posse remuda prune`")
 }
 
 func (s *Service) applyBranchPruneItem(ctx context.Context, db *store.DB, project store.Project, item pruneItem) error {
@@ -186,7 +224,7 @@ func (s *Service) applyPruneItem(ctx context.Context, db *store.DB, home string,
 		}
 		return db.DeletePrunedMount(ctx, project.ID, item.mount.ID)
 	case "scratch":
-		return removeTaskScratch(home, project, store.Task{Seq: item.seq})
+		return s.applyScratchPruneItem(ctx, db, home, project, item)
 	case "artifacts":
 		return removeTaskArtifacts(home, project, item.seq, item.files)
 	case "branch":
@@ -924,7 +962,10 @@ func ownedProcessesInRoots(roots []ownedProcessRoot) ([]ownedProcess, error) {
 	processes := []ownedProcess{}
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 || !processReferencesRoots(pid, roots) {
+		if err != nil || pid <= 1 {
+			continue
+		}
+		if !processReferencesRoots(pid, roots) {
 			continue
 		}
 		bootID, startTime, err := store.ProcessIdentityForPID(pid)

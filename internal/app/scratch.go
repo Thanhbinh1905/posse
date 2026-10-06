@@ -30,6 +30,16 @@ func taskScratchPath(home string, project store.Project, task store.Task) (strin
 	return filepath.Join(root, "scratch", project.Name, taskIDString(task.Seq)), nil
 }
 
+func ensureTaskScratchForTask(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) (string, error) {
+	var path string
+	err := withMountStateLock(ctx, db, func() error {
+		var err error
+		path, err = ensureTaskScratch(home, project, task)
+		return err
+	})
+	return path, err
+}
+
 func ensureTaskScratch(home string, project store.Project, task store.Task) (string, error) {
 	path, err := taskScratchPath(home, project, task)
 	if err != nil {

@@ -318,7 +318,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	var scratchPath string
 	if err := s.runIntentStep(ctx.Context, db, intent, "scratch.create", func() error {
 		var createErr error
-		scratchPath, createErr = ensureTaskScratch(home, project, task)
+		scratchPath, createErr = ensureTaskScratchForTask(ctx.Context, db, home, project, task)
 		return createErr
 	}); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -636,11 +636,18 @@ func createTaskWithSequence(ctx context.Context, db *store.DB, project store.Pro
 }
 
 func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task) (int64, int, store.Intent, error) {
-	taskID, sequence, err := db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "ride", os.Getpid(), taskSequenceOccupied(ctx, db, project, home))
-	if err != nil {
-		return 0, 0, store.Intent{}, err
-	}
-	intent, err := db.IntentByTask(ctx, taskID)
+	var taskID int64
+	var sequence int
+	var intent store.Intent
+	err := withMountStateLock(ctx, db, func() error {
+		var err error
+		taskID, sequence, err = db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "ride", os.Getpid(), taskSequenceOccupied(ctx, db, project, home))
+		if err != nil {
+			return err
+		}
+		intent, err = db.IntentByTask(ctx, taskID)
+		return err
+	})
 	return taskID, sequence, intent, err
 }
 
@@ -1571,7 +1578,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	pane, found := findTaskPane(snapshot.Panes, task)
-	scratchPath, err := ensureTaskScratch(home, project, task)
+	scratchPath, err := ensureTaskScratchForTask(ctx, db, home, project, task)
 	if err != nil {
 		return failure(err)
 	}

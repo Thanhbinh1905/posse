@@ -31,7 +31,7 @@ type pruneItem struct {
 	mountPath string
 }
 
-func taskScratchPruneItems(ctx context.Context, db *store.DB, home string, project store.Project, tasks []store.Task) ([]pruneItem, error) {
+func taskScratchPruneItems(ctx context.Context, db *store.DB, home string, project store.Project) ([]pruneItem, error) {
 	path, err := taskScratchPath(home, project, store.Task{Seq: 1})
 	if err != nil {
 		return nil, err
@@ -50,10 +50,6 @@ func taskScratchPruneItems(ctx context.Context, db *store.DB, home string, proje
 			return nil, fmt.Errorf("refuse to inspect unsafe Task scratch root %s", directory)
 		}
 	}
-	known := make(map[int]store.Task, len(tasks))
-	for _, task := range tasks {
-		known[task.Seq] = task
-	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -68,33 +64,46 @@ func taskScratchPruneItems(ctx context.Context, db *store.DB, home string, proje
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
-		state, reason := "orphan", "Task no longer exists"
-		if task, found := known[seq]; found {
-			state = string(task.State)
-			if !terminalScratchState(task.State) {
-				continue
-			}
-			if _, intentErr := db.IntentByTask(ctx, task.ID); intentErr == nil {
-				continue
-			} else if !store.IsNotFound(intentErr) {
-				return nil, intentErr
-			}
-			mount, mountErr := db.MountByTask(ctx, task.ID)
-			if mountErr == nil && mount.State != "idle" && mount.State != "broken" {
-				continue
-			}
-			if mountErr != nil && !store.IsNotFound(mountErr) {
-				return nil, mountErr
-			}
-			reason = "terminal Task scratch"
+		state, reason, taskID, eligible, err := taskScratchPruneOwnership(ctx, db, project, seq)
+		if err != nil {
+			return nil, err
+		}
+		if !eligible {
+			continue
 		}
 		bytes, err := pathBytes(path)
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, pruneItem{kind: "scratch", label: entry.Name(), path: path, state: state, reason: reason, bytes: bytes, seq: seq})
+		items = append(items, pruneItem{kind: "scratch", label: entry.Name(), path: path, state: state, reason: reason, bytes: bytes, seq: seq, taskID: taskID})
 	}
 	return items, nil
+}
+
+func taskScratchPruneOwnership(ctx context.Context, db *store.DB, project store.Project, seq int) (string, string, int64, bool, error) {
+	task, err := db.Task(ctx, project.ID, taskIDString(seq))
+	if store.IsNotFound(err) {
+		return "orphan", "Task no longer exists", 0, true, nil
+	}
+	if err != nil {
+		return "", "", 0, false, err
+	}
+	if !terminalScratchState(task.State) {
+		return string(task.State), "Task is active", task.ID, false, nil
+	}
+	if _, err := db.IntentByTask(ctx, task.ID); err == nil {
+		return string(task.State), "Task has an active operation", task.ID, false, nil
+	} else if !store.IsNotFound(err) {
+		return "", "", 0, false, err
+	}
+	mount, err := db.MountByTask(ctx, task.ID)
+	if err == nil && mount.State != "idle" && mount.State != "broken" {
+		return string(task.State), "Task still owns a Mount", task.ID, false, nil
+	}
+	if err != nil && !store.IsNotFound(err) {
+		return "", "", 0, false, err
+	}
+	return string(task.State), "terminal Task scratch", task.ID, true, nil
 }
 
 func terminalScratchState(state store.State) bool {

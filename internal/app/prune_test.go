@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -43,10 +45,10 @@ func TestTaskScratchPruneReclaimsUnheldTerminalTasksOnly(t *testing.T) {
 		}
 		return task
 	}
-	terminal := makeTask(1, store.StateTornDown)
-	failed := makeTask(2, store.StateFailed)
+	makeTask(1, store.StateTornDown)
+	makeTask(2, store.StateFailed)
 	held := makeTask(3, store.StateLanded)
-	lost := makeTask(6, store.StateLost)
+	makeTask(6, store.StateLost)
 	heldFailed := makeTask(7, store.StateFailed)
 	activeTeardown := makeTask(5, store.StateTornDown)
 	if err := db.StartIntent(ctx, project.ID, activeTeardown.ID, "unsaddle", "in_progress:scratch.remove", "{}", os.Getpid()); err != nil {
@@ -66,7 +68,7 @@ func TestTaskScratchPruneReclaimsUnheldTerminalTasksOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	items, err := taskScratchPruneItems(ctx, db, home, project, []store.Task{terminal, failed, held, lost, heldFailed, activeTeardown})
+	items, err := taskScratchPruneItems(ctx, db, home, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,8 +90,153 @@ func TestTaskScratchPruneReclaimsUnheldTerminalTasksOnly(t *testing.T) {
 	if err := os.Symlink(outsideScratch, filepath.Join(unsafeHome, "scratch")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := taskScratchPruneItems(ctx, db, unsafeHome, project, []store.Task{terminal}); err == nil {
+	if _, err := taskScratchPruneItems(ctx, db, unsafeHome, project); err == nil {
 		t.Fatal("scratch pruning followed a symlink outside POSSE_HOME")
+	}
+}
+
+func TestTaskCreationAndScratchAcquisitionSharePruneLock(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireFileLock(ctx, db.Path+".mount-lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	createResult := make(chan error, 1)
+	go func() {
+		_, _, _, err := createTaskWithSequenceAndIntent(ctx, db, project, home, store.Task{Type: "ship", Title: "Concurrent Rider", ShortName: "concurrent-rider", Branch: "posse/concurrent-rider", BaseRef: "main"})
+		createResult <- err
+	}()
+	select {
+	case err := <-createResult:
+		t.Fatalf("Task creation bypassed the prune lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if tasks, err := db.Tasks(ctx, project.ID, true); err != nil || len(tasks) != 0 {
+		t.Fatalf("Task appeared before serialized creation: %#v %v", tasks, err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-createResult; err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lock, err = acquireFileLock(ctx, db.Path+".mount-lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	scratchPath := filepath.Join(home, "scratch", project.Name, "t1")
+	scratchResult := make(chan error, 1)
+	go func() {
+		_, err := ensureTaskScratchForTask(ctx, db, home, project, task)
+		scratchResult <- err
+	}()
+	select {
+	case err := <-scratchResult:
+		t.Fatalf("Task scratch acquisition bypassed the prune lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := os.Stat(scratchPath); !os.IsNotExist(err) {
+		t.Fatalf("Task scratch appeared before serialized acquisition: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-scratchResult; err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(scratchPath); err != nil || !info.IsDir() {
+		t.Fatalf("serialized Task scratch was not created: %v", err)
+	}
+}
+
+func TestScratchPruneRevalidatesTaskOwnershipAtApply(t *testing.T) {
+	for _, scenario := range []string{"active-state", "active-intent", "held-mount"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			repo := filepath.Join(root, "repo")
+			initRepo(t, repo)
+			home := filepath.Join(root, "posse")
+			db, err := store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			project, err := db.CreateProject(ctx, "shop", repo, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			scratch := filepath.Join(home, "scratch", project.Name, "t1")
+			if err := os.MkdirAll(scratch, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cache := filepath.Join(scratch, "cache")
+			if err := os.WriteFile(cache, []byte("active rider cache"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			items, err := taskScratchPruneItems(ctx, db, home, project)
+			if err != nil || len(items) != 1 || items[0].taskID != 0 {
+				t.Fatalf("orphan scratch plan = %#v, %v", items, err)
+			}
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Concurrent Rider", Branch: "posse/concurrent-rider", BaseRef: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, err := db.TaskByID(ctx, project.ID, taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "active-state":
+				if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Rider started"); err != nil {
+					t.Fatal(err)
+				}
+			case "active-intent":
+				if _, err := db.ExecContext(ctx, `UPDATE tasks SET state=? WHERE id=?`, string(store.StateTornDown), taskID); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.StartIntent(ctx, project.ID, taskID, "relaunch", "scratch.environment", "{}", os.Getpid()); err != nil {
+					t.Fatal(err)
+				}
+			case "held-mount":
+				if _, err := db.ExecContext(ctx, `UPDATE tasks SET state=? WHERE id=?`, string(store.StateTornDown), taskID); err != nil {
+					t.Fatal(err)
+				}
+				mount, err := acquireMount(ctx, db, project, task, home, "warm", nil)
+				if err != nil || mount.State != "held" {
+					t.Fatalf("acquire concurrent Rider Mount = %#v, %v", mount, err)
+				}
+			}
+			service := testService(home, nil)
+			err = service.applyPruneItem(ctx, db, home, project, items[0])
+			var structured *axi.Error
+			if !errors.As(err, &structured) || !structured.Retryable {
+				t.Fatalf("stale scratch prune error = %v, want retryable ownership failure", err)
+			}
+			if contents, err := os.ReadFile(cache); err != nil || string(contents) != "active rider cache" {
+				t.Fatalf("stale scratch plan removed current Task data: %q %v", contents, err)
+			}
+		})
 	}
 }
 
