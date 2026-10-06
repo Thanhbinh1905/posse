@@ -122,14 +122,21 @@ func TestPublishRefreshesReusedPRMetadata(t *testing.T) {
 	}
 	publish(workerEnv, second...)
 	body := readTestFile(t, fixture.ghBody)
+	if !strings.HasPrefix(body, beforeConflict) {
+		t.Fatalf("legacy PR description changed before the appended managed section: %s", body)
+	}
+	managed := managedPublishedSection(body)
+	if managed == "" {
+		t.Fatalf("re-published PR has no managed section: %s", body)
+	}
 	for _, expected := range []string{"Second summary", "go test ./... -> second pass", "second proof", "Risk: second", "Rollback: second rollback", "Maintainer note before.", "Keep this paragraph."} {
 		if !strings.Contains(body, expected) {
 			t.Errorf("re-published PR body omitted %q: %s", expected, body)
 		}
 	}
 	for _, stale := range []string{"First summary", "go test ./... -> pass", "first proof", "Risk: first", "first rollback"} {
-		if strings.Contains(body, stale) {
-			t.Errorf("re-published PR retained stale %q: %s", stale, body)
+		if strings.Contains(managed, stale) {
+			t.Errorf("re-published managed section retained stale %q: %s", stale, managed)
 		}
 	}
 	if title := readTestFile(t, fixture.ghTitle); title != "Updated PR title" {
@@ -155,6 +162,17 @@ func readTestFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(contents)
+}
+
+func managedPublishedSection(body string) string {
+	const startMarker = "<!-- posse:publish:start -->"
+	const endMarker = "<!-- posse:publish:end -->"
+	start := strings.Index(body, startMarker)
+	end := strings.Index(body, endMarker)
+	if start < 0 || end < start {
+		return ""
+	}
+	return body[start : end+len(endMarker)]
 }
 
 func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {

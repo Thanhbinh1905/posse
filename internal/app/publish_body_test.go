@@ -24,26 +24,28 @@ func TestRefreshPublishBodyReplacesManagedSectionAndPreservesHumanText(t *testin
 	}
 }
 
-func TestRefreshPublishBodyRequiresExplicitLegacyAdoption(t *testing.T) {
+func TestRefreshPublishBodyAppendsManagedSectionAfterLegacyBody(t *testing.T) {
 	legacy := "Human intro\n\n" + legacyPublishTemplate("Old summary") + "\n\nHuman footer\n"
 	if _, err := refreshPublishBody(legacy, "## Summary\n\nNew summary", false); !isPublishBodyConflict(err) {
-		t.Fatalf("legacy publish body did not require explicit adoption: %v", err)
+		t.Fatalf("legacy publish body did not require explicit refresh: %v", err)
 	}
 	updated, err := refreshPublishBody(legacy, "## Summary\n\nNew summary", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"Human intro", "New summary", "Human footer"} {
-		if !strings.Contains(updated, expected) {
-			t.Errorf("adopted body omitted %q: %s", expected, updated)
-		}
+	assertLegacyBodyAppended(t, legacy, updated, "## Summary\n\nNew summary")
+
+	republished, err := refreshPublishBody(updated, "## Summary\n\nLatest summary", false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(updated, "Old summary") {
-		t.Errorf("adopted body retained stale Posse content: %s", updated)
+	assertLegacyBodyAppended(t, legacy, republished, "## Summary\n\nLatest summary")
+	if strings.Contains(republished, managedPublishBody("## Summary\n\nNew summary")) {
+		t.Errorf("refresh left the stale managed block: %s", republished)
 	}
 }
 
-func TestRefreshPublishBodyRecognizesGeneratedLegacyTemplateWithIssueLinksAndCRLF(t *testing.T) {
+func TestRefreshPublishBodyPreservesIssueLinkedCRLFLegacyBody(t *testing.T) {
 	legacy := strings.Replace(legacyPublishTemplate("old summary"), "## Issue Link\n\n## Changes", "## Issue Link\n\nCloses #12\nRefs #14\n\n## Changes", 1)
 	legacy = "Human preface\n\n" + legacy + "\n\nHuman footer\n"
 	legacy = strings.ReplaceAll(legacy, "\n", "\r\n")
@@ -52,17 +54,18 @@ func TestRefreshPublishBodyRecognizesGeneratedLegacyTemplateWithIssueLinksAndCRL
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"Human preface", "new summary", "Human footer"} {
-		if !strings.Contains(updated, expected) {
-			t.Errorf("adopted CRLF legacy description omitted %q: %s", expected, updated)
-		}
-	}
-	if strings.Contains(updated, "Closes #12") || strings.Contains(updated, "Refs #14") {
-		t.Errorf("adopted CRLF body retained stale issue links: %s", updated)
+	assertLegacyBodyAppended(t, legacy, updated, "## Summary\n\nnew summary")
+}
+
+func assertLegacyBodyAppended(t *testing.T, legacy, updated, next string) {
+	t.Helper()
+	wantSuffix := "\n\n" + managedPublishBody(next)
+	if !strings.HasPrefix(updated, legacy) || !strings.HasSuffix(updated, wantSuffix) {
+		t.Fatalf("legacy refresh was not append-only: got %q, want original prefix %q and suffix %q", updated, legacy, wantSuffix)
 	}
 }
 
-func TestRefreshPublishBodyRefusesAmbiguousLegacyAndMarkers(t *testing.T) {
+func TestRefreshPublishBodyAppendsEditsWithoutParsingLegacyBody(t *testing.T) {
 	legacy := legacyPublishTemplate("old summary")
 	for _, insertion := range []string{
 		"## Maintainer Review\n\nKeep this note.\n\n",
@@ -71,17 +74,16 @@ func TestRefreshPublishBodyRefusesAmbiguousLegacyAndMarkers(t *testing.T) {
 		"Maintainer review requires deployment approval.\n\n",
 	} {
 		body := strings.Replace(legacy, "## Verification", insertion+"## Verification", 1)
-		if _, err := refreshPublishBody(body, "new", true); !isPublishBodyConflict(err) {
-			t.Errorf("legacy description with inserted text was not rejected: %q, %v", insertion, err)
+		updated, err := refreshPublishBody(body, "new", true)
+		if err != nil {
+			t.Errorf("legacy content with inserted text was not appended: insertion=%q, err=%v", insertion, err)
+			continue
 		}
+		assertLegacyBodyAppended(t, body, updated, "new")
 	}
-	for _, body := range []string{
-		"## Summary\n\nold, edited legacy description",
-		publishBodyStart + "\npartial\n",
-	} {
-		if _, err := refreshPublishBody(body, "new", true); !isPublishBodyConflict(err) {
-			t.Errorf("ambiguous description was not rejected: %q, %v", body, err)
-		}
+	partial := publishBodyStart + "\npartial\n"
+	if _, err := refreshPublishBody(partial, "new", true); !isPublishBodyConflict(err) {
+		t.Errorf("incomplete ownership markers were not rejected: %q, %v", partial, err)
 	}
 }
 

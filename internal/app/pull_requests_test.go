@@ -959,7 +959,9 @@ case "$1 $2" in
   "pr edit")
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        --title) shift 2 ;;
+        --title)
+          if [ -n "${POSSE_TEST_GH_EDIT_TITLE:-}" ]; then printf '%s' "$2" > "$POSSE_TEST_GH_EDIT_TITLE"; fi
+          shift 2 ;;
         --body) printf '%s' "$2" > "$POSSE_TEST_GH_EDIT_BODY"; shift 2 ;;
         *) shift ;;
       esac
