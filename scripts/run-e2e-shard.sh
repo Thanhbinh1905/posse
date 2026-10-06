@@ -86,6 +86,7 @@ assignments='
 4 TestDownDoesNotSignalUnrelatedExecutableNamedLookout
 4 TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault
 4 TestRideCrashImmediatelyAfterTaskCreationIsRecovered
+4 TestTeardownStopsTaskProcessesAndPruneProtectsHeldBranches
 '
 
 validate_assignments() {

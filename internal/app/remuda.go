@@ -116,6 +116,42 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "prune", Value: rows}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{"Run `posse remuda prune --yes` to remove these safe, Posse-owned items"}}})
 }
 
+func (s *Service) applyBranchPruneItem(ctx context.Context, db *store.DB, project store.Project, item pruneItem) error {
+	return withMountStateLock(ctx, db, func() error {
+		task, err := db.Task(ctx, project.ID, taskIDString(item.seq))
+		if err != nil {
+			return err
+		}
+		if task.ID != item.taskID || task.Branch != item.label || task.State != store.StateLanded && task.State != store.StateTornDown {
+			return fmt.Errorf("refuse to prune branch %s after its Task changed", item.label)
+		}
+		blocked, err := taskBranchPruneBlocked(ctx, db, task)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			return fmt.Errorf("refuse to prune branch %s while Task t%d has an active operation or held Mount", item.label, task.Seq)
+		}
+		checkedOut, err := branchCheckedOutInLiveWorktree(ctx, item.path, item.label)
+		if err != nil {
+			return err
+		}
+		if checkedOut {
+			return fmt.Errorf("refuse to prune branch %s while it is checked out in a live worktree", item.label)
+		}
+		ref := "refs/heads/" + item.label
+		sha, err := gitOutput(ctx, item.path, "rev-parse", "--verify", ref)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(sha) != item.sha {
+			return fmt.Errorf("refuse to prune branch %s after its tip changed", item.label)
+		}
+		_, err = gitOutput(ctx, item.path, "branch", "-D", "--", item.label)
+		return err
+	})
+}
+
 func (s *Service) applyPruneItem(ctx context.Context, db *store.DB, home string, project store.Project, item pruneItem) error {
 	switch item.kind {
 	case "mount":
@@ -154,8 +190,7 @@ func (s *Service) applyPruneItem(ctx context.Context, db *store.DB, home string,
 	case "artifacts":
 		return removeTaskArtifacts(home, project, item.seq, item.files)
 	case "branch":
-		_, err := gitOutput(ctx, item.path, "update-ref", "-d", "refs/heads/"+item.label, item.sha)
-		return err
+		return s.applyBranchPruneItem(ctx, db, project, item)
 	case "worktree-registration":
 		if item.mount.ID != 0 {
 			claimed, err := db.ClaimMountPrune(ctx, project.ID, item.mount.ID)
@@ -760,63 +795,209 @@ func breakMount(ctx context.Context, db *store.DB, project store.Project, task s
 	return err
 }
 
+type ownedProcessRoot struct {
+	path             string
+	includeOpenFiles bool
+}
+
+type ownedProcess struct {
+	pid       int
+	bootID    string
+	startTime string
+}
+
 func stopMountProcesses(path string) ([]string, error) {
-	root, err := filepath.Abs(path)
+	root, err := normalizeOwnedProcessRoot(path)
 	if err != nil {
 		return nil, err
 	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return nil, err
-	}
-	pids, err := mountProcessIDs(root)
-	if err != nil {
-		return nil, err
-	}
-	allPIDs := append([]int(nil), pids...)
-	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for len(pids) > 0 && time.Now().Before(deadline) {
-		remaining := pids[:0]
-		for _, pid := range pids {
-			if processInMount(pid, root) {
-				remaining = append(remaining, pid)
-			}
+	return stopOwnedProcesses([]ownedProcessRoot{{path: root}})
+}
+
+func stopTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) ([]string, error) {
+	roots := []ownedProcessRoot{}
+	mount, err := db.MountByTask(ctx, task.ID)
+	if err == nil && mount.TaskID == task.ID && (mount.State == "held" || mount.State == "releasing") {
+		if mount.ID != task.MountID || task.WorktreePath == "" || !pathInside(task.WorktreePath, mount.Path) {
+			return nil, fmt.Errorf("refuse to stop processes for Task %s without a verified held or releasing Mount", taskIDString(task.Seq))
 		}
-		pids = remaining
-		if len(pids) > 0 {
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-	deadline = time.Now().Add(time.Second)
-	var survivors []int
-	for time.Now().Before(deadline) {
-		survivors, err = mountProcessIDs(root)
+		root, err := normalizeOwnedProcessRoot(mount.Path)
 		if err != nil {
 			return nil, err
 		}
-		if len(survivors) == 0 {
+		roots = append(roots, ownedProcessRoot{path: root})
+	} else if err != nil && !store.IsNotFound(err) {
+		return nil, err
+	}
+	scratch, err := validatedTaskScratchRoot(home, project, task)
+	if err != nil {
+		return nil, err
+	}
+	roots = append(roots, ownedProcessRoot{path: scratch, includeOpenFiles: true})
+	return stopOwnedProcesses(roots)
+}
+
+func normalizeOwnedProcessRoot(path string) (string, error) {
+	root, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("owned process root is not a directory: %s", root)
+	}
+	return root, nil
+}
+
+func stopOwnedProcesses(roots []ownedProcessRoot) ([]string, error) {
+	if len(roots) == 0 {
+		return nil, nil
+	}
+	processes, err := ownedProcessesInRoots(roots)
+	if err != nil {
+		return nil, err
+	}
+	labels := make([]string, 0, len(processes))
+	for _, process := range processes {
+		labels = append(labels, strconv.Itoa(process.pid))
+		if err := signalOwnedProcess(process, roots, syscall.SIGTERM); err != nil {
+			return labels, err
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		remaining := make([]ownedProcess, 0, len(processes))
+		for _, process := range processes {
+			alive, err := ownedProcessStillInRoots(process, roots)
+			if err != nil {
+				return labels, err
+			}
+			if alive {
+				remaining = append(remaining, process)
+			}
+		}
+		processes = remaining
+		if len(processes) == 0 {
 			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for _, process := range processes {
+		if err := signalOwnedProcess(process, roots, syscall.SIGKILL); err != nil {
+			return labels, err
+		}
+	}
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		survivors, err := ownedProcessesInRoots(roots)
+		if err != nil {
+			return labels, err
+		}
+		if len(survivors) == 0 {
+			return labels, nil
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	labels := make([]string, 0, len(allPIDs))
-	for _, pid := range allPIDs {
-		labels = append(labels, strconv.Itoa(pid))
+	survivors, err := ownedProcessesInRoots(roots)
+	if err != nil {
+		return labels, err
 	}
-	if len(survivors) > 0 {
-		remaining := make([]string, len(survivors))
-		for index, pid := range survivors {
-			remaining[index] = strconv.Itoa(pid)
+	remaining := make([]string, len(survivors))
+	for index, process := range survivors {
+		remaining[index] = strconv.Itoa(process.pid)
+	}
+	return labels, fmt.Errorf("task-owned processes survived teardown: %s", strings.Join(remaining, ", "))
+}
+
+func ownedProcessesInRoots(roots []ownedProcessRoot) ([]ownedProcess, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	processes := []ownedProcess{}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 || !processReferencesRoots(pid, roots) {
+			continue
 		}
-		return labels, fmt.Errorf("mount processes survived teardown: %s", strings.Join(remaining, ", "))
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("verify identity for Task-owned process %d: %w", pid, err)
+		}
+		processes = append(processes, ownedProcess{pid: pid, bootID: bootID, startTime: startTime})
 	}
-	return labels, nil
+	return processes, nil
+}
+
+func ownedProcessStillInRoots(process ownedProcess, roots []ownedProcessRoot) (bool, error) {
+	bootID, startTime, err := store.ProcessIdentityForPID(process.pid)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("verify identity for Task-owned process %d: %w", process.pid, err)
+	}
+	if bootID != process.bootID || startTime != process.startTime {
+		return false, nil
+	}
+	return processReferencesRoots(process.pid, roots), nil
+}
+
+func signalOwnedProcess(process ownedProcess, roots []ownedProcessRoot, signal syscall.Signal) error {
+	stillOwned, err := ownedProcessStillInRoots(process, roots)
+	if err != nil || !stillOwned {
+		return err
+	}
+	if err := syscall.Kill(process.pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("signal Task-owned process %d: %w", process.pid, err)
+	}
+	return nil
+}
+
+func processReferencesRoots(pid int, roots []ownedProcessRoot) bool {
+	procRoot := filepath.Join("/proc", strconv.Itoa(pid))
+	if cwd, err := os.Readlink(filepath.Join(procRoot, "cwd")); err == nil {
+		for _, root := range roots {
+			if processPathInsideRoot(cwd, root.path) {
+				return true
+			}
+		}
+	}
+	for _, root := range roots {
+		if !root.includeOpenFiles {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(procRoot, "fd"))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			path, err := os.Readlink(filepath.Join(procRoot, "fd", entry.Name()))
+			if err == nil && processPathInsideRoot(path, root.path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func processPathInsideRoot(path, root string) bool {
+	path = strings.TrimSuffix(path, " (deleted)")
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func mountProcessIDs(path string) ([]int, error) {

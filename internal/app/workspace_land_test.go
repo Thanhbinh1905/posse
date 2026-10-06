@@ -184,6 +184,13 @@ func TestWorkspaceDiscardCaptureBundlesEveryApprovedMemberTip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := releaseMount(ctx, f.db, f.project, task, "", false); err != nil {
+		t.Fatalf("release workspace Mount before pruning its landed branches: %v", err)
+	}
+	task, err = f.db.TaskByID(ctx, f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	items, err := landedOrDiscardedBranchItems(ctx, f.db, f.home, f.project, []store.Task{task})
 	if err != nil || len(items) != 2 {
 		t.Fatalf("captured workspace branch prune candidates = %#v, %v; want both approved member tips", items, err)

@@ -54,6 +54,30 @@ func ensureTaskScratch(home string, project store.Project, task store.Task) (str
 	return path, nil
 }
 
+func validatedTaskScratchRoot(home string, project store.Project, task store.Task) (string, error) {
+	path, err := taskScratchPath(home, project, task)
+	if err != nil {
+		return "", err
+	}
+	for _, directory := range []string{filepath.Dir(filepath.Dir(path)), filepath.Dir(path), path} {
+		info, err := os.Lstat(directory)
+		if os.IsNotExist(err) {
+			return path, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("refuse to inspect non-directory Task scratch component %s", directory)
+		}
+	}
+	root, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
 func removeTaskScratch(home string, project store.Project, task store.Task) error {
 	path, err := taskScratchPath(home, project, task)
 	if err != nil {

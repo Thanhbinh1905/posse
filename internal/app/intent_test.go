@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -41,6 +42,52 @@ func TestIntentCrashHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestTaskIntentClaimWaitsForMountStateLock(t *testing.T) {
+	ctx := context.Background()
+	home := filepath.Join(t.TempDir(), "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(t.TempDir(), "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Lock test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireFileLock(ctx, db.Path+".mount-lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	service := testService(home, nil)
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := service.startTaskIntent(ctx, db, project.ID, taskID, "unsaddle")
+		result <- err
+	}()
+	<-started
+	select {
+	case err := <-result:
+		t.Fatalf("Task intent claim bypassed the Mount-state lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.IntentByTask(ctx, taskID); err != nil {
+		t.Fatalf("serialized Task intent was not recorded: %v", err)
+	}
+}
+
 func TestIntentProcessAliveChecksBootAndStartTime(t *testing.T) {
 	bootID, startTime, err := store.ProcessIdentityForPID(os.Getpid())
 	if err != nil {
@@ -66,7 +113,7 @@ func TestIntentCrashHookExitsAfterPersistingCompletedStep(t *testing.T) {
 	checkpoints := map[string][]string{
 		"ride":         {"scratch.create", "mount.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"},
 		"land --merge": {"gate.record", "gate.run", "task.landing", "notice.create", "approval.record", "merge", "landed_ref.record", "task.landed"},
-		"unsaddle":     {"approval.record", "discard.capture", "panes.close", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"},
+		"unsaddle":     {"approval.record", "discard.capture", "panes.close", "mount.stop", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"},
 		"relaunch":     {"git.inspect", "pane.open", "agent.stop", "pane.label", "scratch.environment", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"},
 	}
 	dbPath := filepath.Join(t.TempDir(), "posse.db")

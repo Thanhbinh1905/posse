@@ -505,16 +505,14 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane closure", err)
 	}
 	var stopped []string
+	if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
+		var stopErr error
+		stopped, stopErr = stopTaskOwnedProcesses(ctx, db, home, project, task)
+		return stopErr
+	}); err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task process shutdown", err)
+	}
 	if mountHeld && task.State == store.StateLanded && !discardable && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
-		// Background processes may write after the Rider pane closes. Stop
-		// them before taking the snapshot, never after it.
-		if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
-			var stopErr error
-			stopped, stopErr = stopMountProcesses(task.WorktreePath)
-			return stopErr
-		}); err != nil {
-			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process shutdown", err)
-		}
 		if err := s.runIntentStep(ctx, db, intent, "leftover.snapshot", func() error {
 			if !project.IsWorkspace() {
 				return snapshotPRLeftover(ctx, db, project, task)
@@ -572,11 +570,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	if mountHeld && task.State == store.StateReported && !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "report.attachments", func() error {
-			if task.WorktreePath != "" {
-				if _, err := stopMountProcesses(task.WorktreePath); err != nil {
-					return err
-				}
-			}
 			home, err := s.homePath()
 			if err != nil {
 				return err
@@ -591,6 +584,11 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		}
 	}
 	if err := s.runIntentStep(ctx, db, intent, "scratch.remove", func() error {
+		newlyStopped, err := stopTaskOwnedProcesses(ctx, db, home, project, task)
+		if err != nil {
+			return err
+		}
+		stopped = append(stopped, newlyStopped...)
 		return removeTaskScratch(home, project, task)
 	}); err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task scratch removal", err)

@@ -26,6 +26,7 @@ type pruneItem struct {
 	sha       string
 	mount     store.Mount
 	files     []string
+	taskID    int64
 	repoRoot  string
 	mountPath string
 }
@@ -285,6 +286,13 @@ func landedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 		if task.Branch == "" || !strings.HasPrefix(task.Branch, "posse/") || task.State != store.StateLanded && task.State != store.StateTornDown {
 			continue
 		}
+		blocked, err := taskBranchPruneBlocked(ctx, db, task)
+		if err != nil {
+			return nil, err
+		}
+		if blocked {
+			continue
+		}
 		approved, err := db.LatestApprovalBranchSHA(ctx, task.ID, "discard")
 		if store.IsNotFound(err) {
 			approved = ""
@@ -297,6 +305,13 @@ func landedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 				return nil, err
 			}
 			items = append(items, workspaceItems...)
+			continue
+		}
+		checkedOut, err := branchCheckedOutInLiveWorktree(ctx, project.Root, task.Branch)
+		if err != nil {
+			return nil, err
+		}
+		if checkedOut {
 			continue
 		}
 		branchRef := "refs/heads/" + task.Branch
@@ -338,9 +353,53 @@ func landedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, pruneItem{kind: "branch", label: task.Branch, path: project.Root, state: string(task.State), reason: reason, bytes: bytes, seq: task.Seq, sha: sha})
+		items = append(items, pruneItem{kind: "branch", label: task.Branch, path: project.Root, state: string(task.State), reason: reason, bytes: bytes, seq: task.Seq, sha: sha, taskID: task.ID})
 	}
 	return items, nil
+}
+
+func taskBranchPruneBlocked(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	if _, err := db.IntentByTask(ctx, task.ID); err == nil {
+		return true, nil
+	} else if !store.IsNotFound(err) {
+		return false, err
+	}
+	mount, err := db.MountByTask(ctx, task.ID)
+	if err == nil {
+		return mount.TaskID == task.ID && (mount.State == "held" || mount.State == "releasing" || mount.State == "pruning"), nil
+	}
+	if store.IsNotFound(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func branchCheckedOutInLiveWorktree(ctx context.Context, root, branch string) (bool, error) {
+	listing, err := gitOutput(ctx, root, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	want := "refs/heads/" + branch
+	for _, block := range strings.Split(listing, "\n\n") {
+		var path, checkedOutBranch string
+		for _, line := range strings.Split(block, "\n") {
+			switch {
+			case strings.HasPrefix(line, "worktree "):
+				path = strings.TrimPrefix(line, "worktree ")
+			case strings.HasPrefix(line, "branch "):
+				checkedOutBranch = strings.TrimPrefix(line, "branch ")
+			}
+		}
+		if checkedOutBranch != want || path == "" {
+			continue
+		}
+		if _, err := os.Lstat(path); err == nil {
+			return true, nil
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, approved string) ([]pruneItem, error) {
@@ -372,6 +431,13 @@ func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, p
 			}
 		}
 		if !found {
+			continue
+		}
+		checkedOut, err := branchCheckedOutInLiveWorktree(ctx, root, task.Branch)
+		if err != nil {
+			return nil, err
+		}
+		if checkedOut {
 			continue
 		}
 		branchRef := "refs/heads/" + task.Branch
@@ -408,7 +474,7 @@ func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, p
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, pruneItem{kind: "branch", label: task.Branch, path: root, state: string(task.State), reason: reason, bytes: bytes, seq: task.Seq, sha: sha})
+		items = append(items, pruneItem{kind: "branch", label: task.Branch, path: root, state: string(task.State), reason: reason, bytes: bytes, seq: task.Seq, sha: sha, taskID: task.ID})
 	}
 	return items, nil
 }

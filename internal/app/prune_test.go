@@ -260,6 +260,98 @@ func TestPruneRemovesOnlyStaleOwnedWorktreeRegistrations(t *testing.T) {
 	}
 }
 
+func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeLandedTask := func(seq int) (store.Task, string) {
+		t.Helper()
+		branch := "posse/t" + strconv.Itoa(seq)
+		gitTest(t, repo, "switch", "-c", branch)
+		file := "landed-" + strconv.Itoa(seq) + ".txt"
+		if err := os.WriteFile(filepath.Join(repo, file), []byte("landed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, repo, "add", file)
+		gitTest(t, repo, "commit", "-m", branch)
+		sha := strings.TrimSpace(gitTest(t, repo, "rev-parse", "HEAD"))
+		gitTest(t, repo, "switch", "main")
+		gitTest(t, repo, "merge", "--ff-only", branch)
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "ship", Title: "Landed Task", Branch: branch, BaseRef: "main", LandingMode: "local"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='landed' WHERE id=?`, id); err != nil {
+			t.Fatal(err)
+		}
+		task, err := db.TaskByID(ctx, project.ID, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task, sha
+	}
+	service := testService(home, nil)
+	assertProtectedAtApply := func(task store.Task, expectedSHA string, afterPlan func()) {
+		t.Helper()
+		items, err := landedOrDiscardedBranchItems(ctx, db, home, project, []store.Task{task})
+		if err != nil || len(items) != 1 {
+			t.Fatalf("branch plan for %s = %#v, %v; want one initially eligible branch", task.Branch, items, err)
+		}
+		afterPlan()
+		if err := service.applyPruneItem(ctx, db, home, project, items[0]); err == nil {
+			t.Errorf("prune applied stale branch plan for %s after its ownership changed", task.Branch)
+		}
+		if got := strings.TrimSpace(gitTest(t, repo, "rev-parse", "refs/heads/"+task.Branch)); got != expectedSHA {
+			t.Errorf("stale prune plan changed %s from %s to %s", task.Branch, expectedSHA, got)
+		}
+	}
+
+	intentTask, intentSHA := makeLandedTask(1)
+	assertProtectedAtApply(intentTask, intentSHA, func() {
+		if err := db.StartIntent(ctx, project.ID, intentTask.ID, "unsaddle", "in_progress:branch.remove", "{}", os.Getpid()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := db.FinishIntent(ctx, mustTaskIntent(t, db, intentTask.ID), os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+
+	heldTask, heldSHA := makeLandedTask(2)
+	assertProtectedAtApply(heldTask, heldSHA, func() {
+		mount, err := db.AcquireMount(ctx, project.ID, heldTask.ID, filepath.Join(home, "remuda", project.Name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, repo, "worktree", "add", mount.Path, heldTask.Branch)
+	})
+
+	checkedOutTask, checkedOutSHA := makeLandedTask(3)
+	assertProtectedAtApply(checkedOutTask, checkedOutSHA, func() {
+		path := filepath.Join(root, "external-worktree")
+		gitTest(t, repo, "worktree", "add", path, checkedOutTask.Branch)
+	})
+}
+
+func mustTaskIntent(t *testing.T, db *store.DB, taskID int64) int64 {
+	t.Helper()
+	intent, err := db.IntentByTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return intent.ID
+}
+
 func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

@@ -16,6 +16,16 @@ func (s *Service) startTaskIntent(ctx context.Context, db *store.DB, projectID, 
 }
 
 func (s *Service) startTaskIntentWithPayload(ctx context.Context, db *store.DB, projectID, taskID int64, command, payload string) (store.Intent, error) {
+	var intent store.Intent
+	err := withMountStateLock(ctx, db, func() error {
+		var err error
+		intent, err = s.startTaskIntentWithPayloadLocked(ctx, db, projectID, taskID, command, payload)
+		return err
+	})
+	return intent, err
+}
+
+func (s *Service) startTaskIntentWithPayloadLocked(ctx context.Context, db *store.DB, projectID, taskID int64, command, payload string) (store.Intent, error) {
 	processID := os.Getpid()
 	intent, err := db.IntentByTask(ctx, taskID)
 	if err == nil {
