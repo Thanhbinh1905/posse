@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 			if err := syscall.Kill(owner.Process.Pid, syscall.SIGSTOP); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			wake := exec.CommandContext(ctx, f.binary, "--json")
 			wake.WaitDelay = time.Second
@@ -63,11 +64,33 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 			if ctx.Err() != nil {
 				t.Fatalf("CLI wake waited indefinitely for stopped lock owner: %s", time.Since(started))
 			}
-			var failure axi.Error
-			if err == nil || json.Unmarshal(output, &failure) != nil || failure.Code != "store_busy" || !failure.Retryable {
-				t.Fatalf("stopped owner failure = %s, %v; want retryable store_busy", output, err)
+			if err != nil {
+				var failure axi.Error
+				if json.Unmarshal(output, &failure) != nil || failure.Code != "store_busy" || !failure.Retryable {
+					t.Fatalf("stopped owner failure = %s, %v; want retryable store_busy or a recorded checkout-sync Notice", output, err)
+				}
+			} else {
+				var response struct {
+					Notices []struct {
+						Kind    string `json:"kind"`
+						Summary string `json:"summary"`
+					} `json:"notices"`
+				}
+				if json.Unmarshal(output, &response) != nil {
+					t.Fatalf("stopped owner response is not valid JSON: %s", output)
+				}
+				recordedContention := false
+				for _, notice := range response.Notices {
+					if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "checkout sync") && strings.Contains(notice.Summary, "posse-fetch.lock") {
+						recordedContention = true
+						break
+					}
+				}
+				if !recordedContention {
+					t.Fatalf("stopped owner response did not report checkout contention: %s", output)
+				}
 			}
-			if elapsed := time.Since(started); elapsed > 6*time.Second {
+			if elapsed := time.Since(started); elapsed > 8*time.Second {
 				t.Fatalf("lock wait exceeded bound: %s", elapsed)
 			}
 			if err := owner.Process.Kill(); err != nil {

@@ -28,6 +28,7 @@ type TaskSnapshot struct {
 	// every recorded Task launch. Missing numbers are left missing so rebuilds
 	// can report legacy or interrupted history as unknown rather than infer it.
 	LaunchIdentities []TaskLaunchIdentity `toml:"launch_identities,omitempty"`
+	PRBodyMarkers    []PRBodyMarker       `toml:"pr_body_markers,omitempty"`
 	// Members and TaskRepos are set for a workspace Project only.
 	Members   []ProjectRepo `toml:"members,omitempty"`
 	TaskRepos []TaskRepo    `toml:"task_repos,omitempty"`
@@ -113,7 +114,33 @@ func (db *DB) PersistTask(ctx context.Context, taskID int64) error {
 	if err != nil {
 		return err
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities}
+	markers, err := db.PRBodyMarkersForTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	snapshotPath := db.TaskSnapshotPath(project.Name, task.Seq)
+	if data, readErr := os.ReadFile(snapshotPath); readErr == nil {
+		var previous TaskSnapshot
+		if _, err := toml.Decode(string(data), &previous); err != nil {
+			return fmt.Errorf("decode existing Task snapshot %s: %w", snapshotPath, err)
+		}
+		known := make(map[string]struct{}, len(markers))
+		for _, marker := range markers {
+			known[marker.Repo] = struct{}{}
+		}
+		for _, marker := range previous.PRBodyMarkers {
+			if marker.TaskID == taskID {
+				if _, exists := known[marker.Repo]; !exists {
+					markers = append(markers, marker)
+					known[marker.Repo] = struct{}{}
+				}
+			}
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	sort.Slice(markers, func(i, j int) bool { return markers[i].Repo < markers[j].Repo })
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities, PRBodyMarkers: markers}
 	if project.IsWorkspace() {
 		if snapshot.Members, err = db.ProjectRepos(ctx, projectID); err != nil {
 			return err
@@ -341,7 +368,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "pr_body_markers", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -379,6 +406,17 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,launches,gated_sha,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.ShortName, task.State, task.Profile, task.DispatchRule, task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.PRURL, task.LandedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt); err != nil {
 			return err
+		}
+		for _, marker := range snapshot.PRBodyMarkers {
+			if marker.TaskID != 0 && marker.TaskID != task.ID {
+				return fmt.Errorf("PR body marker in snapshot for t%d belongs to Task %d", task.Seq, marker.TaskID)
+			}
+			if marker.Token == "" {
+				return fmt.Errorf("empty PR body marker token in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO pr_body_markers(task_id,repo,pr_url,marker_token,updated_at) VALUES(?,?,?,?,?)`, task.ID, marker.Repo, marker.PRURL, marker.Token, marker.UpdatedAt); err != nil {
+				return err
+			}
 		}
 		for _, identity := range snapshot.LaunchIdentities {
 			if identity.TaskID != 0 && identity.TaskID != task.ID {
