@@ -144,7 +144,12 @@ func TestPublishAddsIssueLinksWhenReusingAnExistingPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("POSSE_TEST_GH_BODY", "Maintainer intro\n\n"+managedPublishBody(currentBody, testPublishToken)+"\n\nMaintainer footer")
+	prURL := "https://github.com/acme/shop/pull/17"
+	token, err := fixture.db.EnsurePRBodyMarker(context.Background(), fixture.task.ID, "", prURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_BODY", "Maintainer intro\n\n"+managedPublishBody(currentBody, token)+"\n\nMaintainer footer")
 	openPR := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, fixture.headSHA)
 	if err := os.WriteFile(fixture.ghOpenPRs, []byte(openPR), 0o600); err != nil {
 		t.Fatal(err)

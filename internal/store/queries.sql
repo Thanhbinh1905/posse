@@ -5,6 +5,10 @@ VALUES (?, ?, ?, ?);
 -- name: PRBodyMarkerByTaskRepo :one
 SELECT pr_url, marker_token FROM pr_body_markers WHERE task_id = ? AND repo = ?;
 
+-- name: PRBodyMarkersByTask :many
+SELECT task_id, repo, pr_url, marker_token, updated_at FROM pr_body_markers
+WHERE task_id = ? ORDER BY repo;
+
 -- name: UpsertPRBodyMarker :exec
 INSERT INTO pr_body_markers(task_id, repo, pr_url, marker_token, updated_at)
 VALUES (?, ?, ?, ?, ?)

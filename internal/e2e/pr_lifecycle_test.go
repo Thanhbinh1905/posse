@@ -154,6 +154,7 @@ func TestPublishRefreshesReusedPRMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	t205PRBodyMarkerCases(t)
+	t208SnapshotRebuildCases(t)
 }
 
 func readTestFile(t *testing.T, path string) string {

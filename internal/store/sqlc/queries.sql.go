@@ -918,6 +918,40 @@ func (q *Queries) PRBodyMarkerByTaskRepo(ctx context.Context, arg PRBodyMarkerBy
 	return i, err
 }
 
+const pRBodyMarkersByTask = `-- name: PRBodyMarkersByTask :many
+SELECT task_id, repo, pr_url, marker_token, updated_at FROM pr_body_markers
+WHERE task_id = ? ORDER BY repo
+`
+
+func (q *Queries) PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PrBodyMarker, error) {
+	rows, err := q.db.QueryContext(ctx, pRBodyMarkersByTask, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PrBodyMarker{}
+	for rows.Next() {
+		var i PrBodyMarker
+		if err := rows.Scan(
+			&i.TaskID,
+			&i.Repo,
+			&i.PrUrl,
+			&i.MarkerToken,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const projectByID = `-- name: ProjectByID :one
 SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE id = ?
 `

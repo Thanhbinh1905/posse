@@ -51,6 +51,7 @@ type Querier interface {
 	OldestQueuedMessage(ctx context.Context, taskID int64) (OldestQueuedMessageRow, error)
 	OpenNotices(ctx context.Context, projectID int64) ([]OpenNoticesRow, error)
 	PRBodyMarkerByTaskRepo(ctx context.Context, arg PRBodyMarkerByTaskRepoParams) (PRBodyMarkerByTaskRepoRow, error)
+	PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PrBodyMarker, error)
 	ProjectByID(ctx context.Context, id int64) (Project, error)
 	ProjectByLeadPane(ctx context.Context, leadPaneID string) (Project, error)
 	ProjectByName(ctx context.Context, name string) (Project, error)

@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
-	"regexp"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestEnsurePRBodyMarkerPersistsAndBindsTokenPerTaskMember(t *testing.T) {
@@ -26,8 +29,8 @@ func TestEnsurePRBodyMarkerPersistsAndBindsTokenPerTaskMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(pending) {
-		t.Fatalf("marker token is not 256-bit lowercase hex: %q", pending)
+	if len(pending) != 64 {
+		t.Fatalf("marker token length = %d, want 64 hexadecimal characters", len(pending))
 	}
 	if retry, err := db.EnsurePRBodyMarker(ctx, taskID, "", ""); err != nil || retry != pending {
 		t.Fatalf("pending retry token=%q err=%v, want %q", retry, err, pending)
@@ -62,5 +65,111 @@ func TestEnsurePRBodyMarkerPersistsAndBindsTokenPerTaskMember(t *testing.T) {
 	marker, err = db.GetPRBodyMarker(ctx, taskID, "")
 	if err != nil || marker.PRURL != newURL || marker.Token != nextDelivery {
 		t.Fatalf("new delivery marker=%+v err=%v", marker, err)
+	}
+}
+
+func TestPersistTaskPreservesMarkersMissingFromStore(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Published"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/acme/shop/pull/17"
+	token, err := db.EnsurePRBodyMarker(ctx, taskID, "", prURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM pr_body_markers WHERE task_id = ?", taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(db.TaskSnapshotPath(project.Name, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot TaskSnapshot
+	if _, err := toml.Decode(string(data), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PRBodyMarkers) != 1 || snapshot.PRBodyMarkers[0].Token != token || snapshot.PRBodyMarkers[0].PRURL != prURL {
+		t.Fatalf("Task update dropped the authoritative marker: %#v", snapshot.PRBodyMarkers)
+	}
+	if count, err := db.RebuildFromSnapshots(ctx, home); err != nil || count != 1 {
+		t.Fatalf("rebuild count=%d err=%v", count, err)
+	}
+	marker, err := db.GetPRBodyMarker(ctx, taskID, "")
+	if err != nil || marker.Token != token || marker.PRURL != prURL {
+		t.Fatalf("restored marker=%+v err=%v", marker, err)
+	}
+}
+
+func TestPRBodyMarkersSurviveSnapshotRebuild(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingTask, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Pending", Branch: "posse/pending"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingToken, err := db.EnsurePRBodyMarker(ctx, pendingTask, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestTask, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "ship", Title: "Published", Branch: "posse/published"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestURL := "https://github.com/acme/shop/pull/22"
+	requestToken, err := db.EnsurePRBodyMarker(ctx, requestTask, "", requestURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(db.TaskSnapshotPath(project.Name, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot TaskSnapshot
+	if _, err := toml.Decode(string(data), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PRBodyMarkers) != 1 || snapshot.PRBodyMarkers[0].Token != pendingToken || snapshot.PRBodyMarkers[0].PRURL != "" {
+		t.Fatalf("pending marker snapshot = %#v", snapshot.PRBodyMarkers)
+	}
+
+	if count, err := db.RebuildFromSnapshots(ctx, home); err != nil || count != 2 {
+		t.Fatalf("rebuild count=%d err=%v", count, err)
+	}
+	pending, err := db.GetPRBodyMarker(ctx, pendingTask, "")
+	if err != nil || pending.Token != pendingToken || pending.PRURL != "" {
+		t.Fatalf("pending reservation after rebuild = %+v, %v", pending, err)
+	}
+	request, err := db.GetPRBodyMarker(ctx, requestTask, "")
+	if err != nil || request.Token != requestToken || request.PRURL != requestURL {
+		t.Fatalf("published PR marker after rebuild = %+v, %v", request, err)
+	}
+	markers, err := db.PRBodyMarkersForTask(ctx, requestTask)
+	if err != nil || len(markers) != 1 || markers[0].TaskID != requestTask || markers[0].PRURL != requestURL || markers[0].Token != requestToken {
+		t.Fatalf("restored marker rows = %#v, %v", markers, err)
 	}
 }

@@ -121,6 +121,16 @@ func hasLegacyPublishSections(body string) bool {
 	return false
 }
 
+func missingPRBodyMarkerError() error {
+	return axi.Failure(
+		"pr_body_marker_missing",
+		"the existing PR/MR has a tokenized Posse section, but its ownership token is missing from the store",
+		true,
+		"Run `posse recover --rebuild` to restore the marker from the Task snapshot, then retry `posse publish`",
+		"If the Task snapshot does not contain the token, restore a POSSE_HOME backup before retrying; do not edit the PR/MR markers",
+	)
+}
+
 func legacyPublishConflict(reason string) error {
 	help := "Inspect the pull request description, resolve the ownership conflict, then re-run `posse publish`"
 	if reason == "description uses the unmarked Posse template" {

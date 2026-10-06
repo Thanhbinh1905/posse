@@ -361,10 +361,6 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 }
 
 func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, intent store.Intent, project store.Project, task store.Task, forge repositoryForge, prURL, member, summary, verification, proof, risk string, refreshLegacy bool) error {
-	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, prURL)
-	if err != nil {
-		return err
-	}
 	title, nextBody, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
 	if err != nil {
 		return err
@@ -398,6 +394,17 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 			return axi.Failure("pr_refresh_failed", "gh returned invalid pull request metadata", true, err.Error())
 		}
 		existingTitle, existingBody = pull.Title, pull.Body
+	}
+	_, markerErr := db.GetPRBodyMarker(ctx, task.ID, member)
+	if store.IsNotFound(markerErr) && hasUnownedTokenizedPublishMarkerPair(existingBody) {
+		return missingPRBodyMarkerError()
+	}
+	if markerErr != nil && !store.IsNotFound(markerErr) {
+		return markerErr
+	}
+	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, prURL)
+	if err != nil {
+		return err
 	}
 	nextBody, err = refreshPublishBody(existingBody, nextBody, token, refreshLegacy)
 	if err != nil {

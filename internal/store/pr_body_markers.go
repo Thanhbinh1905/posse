@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,10 +14,11 @@ import (
 
 // PRBodyMarker records the token Posse may use to replace one PR/MR body span.
 type PRBodyMarker struct {
-	TaskID int64
-	Repo   string
-	PRURL  string
-	Token  string
+	TaskID    int64  `toml:"task_id"`
+	Repo      string `toml:"repo"`
+	PRURL     string `toml:"pr_url"`
+	Token     string `toml:"token"`
+	UpdatedAt int64  `toml:"updated_at"`
 }
 
 // EnsurePRBodyMarker returns the token for this Task member's PR. An empty URL
@@ -30,43 +32,39 @@ func (db *DB) EnsurePRBodyMarker(ctx context.Context, taskID int64, repo, prURL 
 	defer tx.Rollback()
 	queries := db.queries.WithTx(tx.Tx)
 	current, err := queries.PRBodyMarkerByTaskRepo(ctx, dbgen.PRBodyMarkerByTaskRepoParams{TaskID: taskID, Repo: repo})
-	if err == nil {
-		if current.PrUrl == prURL {
-			if err := tx.Commit(); err != nil {
-				return "", err
-			}
-			return current.MarkerToken, nil
+	var token string
+	switch {
+	case err == nil && current.PrUrl == prURL:
+		token = current.MarkerToken
+	case err == nil && prURL != "" && current.PrUrl == "":
+		result, bindErr := queries.BindPRBodyMarker(ctx, dbgen.BindPRBodyMarkerParams{
+			PrUrl: prURL, UpdatedAt: time.Now().UnixMilli(), TaskID: taskID,
+			Repo: repo, MarkerToken: current.MarkerToken, PrUrl_2: prURL,
+		})
+		if bindErr != nil {
+			return "", bindErr
 		}
-		if prURL != "" && current.PrUrl == "" {
-			result, err := queries.BindPRBodyMarker(ctx, dbgen.BindPRBodyMarkerParams{
-				PrUrl: prURL, UpdatedAt: time.Now().UnixMilli(), TaskID: taskID,
-				Repo: repo, MarkerToken: current.MarkerToken, PrUrl_2: prURL,
-			})
-			if err != nil {
-				return "", err
-			}
-			if changed, _ := result.RowsAffected(); changed != 1 {
-				return "", sql.ErrNoRows
-			}
-			if err := tx.Commit(); err != nil {
-				return "", err
-			}
-			return current.MarkerToken, nil
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			return "", sql.ErrNoRows
 		}
-	} else if err != sql.ErrNoRows {
+		token = current.MarkerToken
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return "", err
-	}
-
-	token, err := newPRBodyMarkerToken()
-	if err != nil {
-		return "", err
-	}
-	if err := queries.UpsertPRBodyMarker(ctx, dbgen.UpsertPRBodyMarkerParams{
-		TaskID: taskID, Repo: repo, PrUrl: prURL, MarkerToken: token, UpdatedAt: time.Now().UnixMilli(),
-	}); err != nil {
-		return "", err
+	default:
+		token, err = newPRBodyMarkerToken()
+		if err != nil {
+			return "", err
+		}
+		if err := queries.UpsertPRBodyMarker(ctx, dbgen.UpsertPRBodyMarkerParams{
+			TaskID: taskID, Repo: repo, PrUrl: prURL, MarkerToken: token, UpdatedAt: time.Now().UnixMilli(),
+		}); err != nil {
+			return "", err
+		}
 	}
 	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
 		return "", err
 	}
 	return token, nil
@@ -83,11 +81,11 @@ func (db *DB) BindPRBodyMarker(ctx context.Context, taskID int64, repo, prURL, t
 		return err
 	}
 	if changed, _ := result.RowsAffected(); changed == 1 {
-		return nil
+		return db.PersistTask(ctx, taskID)
 	}
 	current, err := db.GetPRBodyMarker(ctx, taskID, repo)
 	if err == nil && current.PRURL == prURL && current.Token == token {
-		return nil
+		return db.PersistTask(ctx, taskID)
 	}
 	if err != nil {
 		return err
@@ -102,6 +100,19 @@ func (db *DB) GetPRBodyMarker(ctx context.Context, taskID int64, repo string) (P
 		return PRBodyMarker{}, err
 	}
 	return PRBodyMarker{TaskID: taskID, Repo: repo, PRURL: row.PrUrl, Token: row.MarkerToken}, nil
+}
+
+// PRBodyMarkersForTask returns every forge body marker for a Task and its members.
+func (db *DB) PRBodyMarkersForTask(ctx context.Context, taskID int64) ([]PRBodyMarker, error) {
+	rows, err := db.queries.PRBodyMarkersByTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	markers := make([]PRBodyMarker, 0, len(rows))
+	for _, row := range rows {
+		markers = append(markers, PRBodyMarker{TaskID: row.TaskID, Repo: row.Repo, PRURL: row.PrUrl, Token: row.MarkerToken, UpdatedAt: row.UpdatedAt})
+	}
+	return markers, nil
 }
 
 func newPRBodyMarkerToken() (string, error) {

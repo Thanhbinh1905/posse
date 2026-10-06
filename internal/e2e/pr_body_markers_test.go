@@ -101,22 +101,8 @@ func t205PRBodyMarkerCases(t *testing.T) {
 				t.Fatal("marker conflict changed Task state")
 			}
 
-			// Simulate a pre-migration PR whose body is marked but has no token
-			// record. It must be preserved and adopted by appending a fresh span.
+			// Restore the unique-marker body after the ambiguity test.
 			f.setBody(t, updated)
-			if _, err := f.db.ExecContext(context.Background(), "DELETE FROM pr_body_markers WHERE task_id = ? AND repo = ''", f.task.ID); err != nil {
-				t.Fatal(err)
-			}
-			f.publishOK(t, t205PublishArgs("third")...)
-			afterAdoption := f.body(t)
-			adoptedMarker, err := f.db.GetPRBodyMarker(context.Background(), f.task.ID, "")
-			if err != nil || adoptedMarker.Token == initialMarker.Token || !strings.HasPrefix(afterAdoption, updated+"\n\n") {
-				t.Fatalf("missing stored token did not append a fresh marker: marker=%+v err=%v body=%s", adoptedMarker, err, afterAdoption)
-			}
-			adoptedBlock := t205ManagedBlock(t, afterAdoption, adoptedMarker.Token)
-			if !strings.Contains(adoptedBlock, "third summary") || strings.Count(afterAdoption, t205Marker("start", adoptedMarker.Token)) != 1 {
-				t.Fatalf("new tokenized metadata block is missing or duplicated: %s", afterAdoption)
-			}
 
 			// A forge can apply the write and lose its acknowledgement. The stored
 			// token lets a retry recognize the applied span without a second write.
@@ -127,8 +113,9 @@ func t205PRBodyMarkerCases(t *testing.T) {
 				t.Fatalf("applied write did not report its lost acknowledgement: %v %s", publishErr, output)
 			}
 			afterLostAck := f.body(t)
-			if !strings.HasPrefix(afterLostAck, updated+"\n\n") || !strings.Contains(t205ManagedBlock(t, afterLostAck, adoptedMarker.Token), "fourth summary") {
-				t.Fatalf("applied write did not preserve unowned text and refresh its owned block: %s", afterLostAck)
+			if !strings.HasPrefix(afterLostAck, prefix) || !strings.HasSuffix(afterLostAck, suffix) || strings.Count(afterLostAck, t205Marker("start", initialMarker.Token)) != 1 || !strings.Contains(t205ManagedBlock(t, afterLostAck, initialMarker.Token), "fourth summary") {
+				calls := strings.TrimPrefix(readTestFile(t, f.callsPath()), beforeCalls)
+				t.Fatalf("applied write did not preserve unowned text and refresh its owned block: calls=%s body=%s", calls, afterLostAck)
 			}
 			beforeRetryCalls := readTestFile(t, f.callsPath())
 			f.publishOK(t, args...)
@@ -138,6 +125,112 @@ func t205PRBodyMarkerCases(t *testing.T) {
 			}
 			if strings.Count(readTestFile(t, f.callsPath()), `"create"`) != 1 {
 				t.Fatal("marker retries created a duplicate PR/MR")
+			}
+		})
+	}
+}
+
+func t208SnapshotRebuildCases(t *testing.T) {
+	t.Helper()
+	for _, forge := range []string{"github", "gitlab"} {
+		t.Run("t208-snapshot-rebuild/"+forge, func(t *testing.T) {
+			f := t205NewPRFixture(t, forge)
+			f.publishOK(t, t205PublishArgs("first")...)
+			marker, err := f.db.GetPRBodyMarker(context.Background(), f.task.ID, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix, suffix := "Maintainer intro\r\n\n", "\n\nMaintainer footer\r\n"
+			f.setBody(t, prefix+f.body(t)+suffix)
+			f.publishOK(t, t205PublishArgs("second")...)
+			beforeRebuild := f.body(t)
+			if !strings.HasPrefix(beforeRebuild, prefix) || !strings.HasSuffix(beforeRebuild, suffix) {
+				t.Fatal("initial refresh changed human-authored text")
+			}
+
+			// Existing rebuild blockers are unrelated to marker persistence. Keep
+			// this workaround local to the disposable User-facing fixture.
+			for _, statement := range []string{"UPDATE tasks SET mount_id=NULL", "DELETE FROM decision_notice_cursors"} {
+				if _, err := f.db.ExecContext(context.Background(), statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := exec.Command(f.binary, "recover", "--rebuild")
+			command.Dir, command.Env = f.repo, f.env
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("recover --rebuild: %v\n%s", err, output)
+			}
+			restored, err := f.db.GetPRBodyMarker(context.Background(), f.task.ID, "")
+			if err != nil || restored != marker {
+				t.Fatalf("rebuilt marker=%+v err=%v, want %+v", restored, err, marker)
+			}
+			beforeCalls := readTestFile(t, f.callsPath())
+			f.publishOK(t, t205PublishArgs("second")...)
+			if f.body(t) != beforeRebuild {
+				t.Fatal("identical publish after rebuild changed body")
+			}
+			t205AssertNoForgeMutation(t, strings.TrimPrefix(readTestFile(t, f.callsPath()), beforeCalls))
+
+			f.publishOK(t, t205PublishArgs("third")...)
+			body := f.body(t)
+			managed := t205ManagedBlock(t, body, marker.Token)
+			if !strings.HasPrefix(body, prefix) || !strings.HasSuffix(body, suffix) || strings.Count(body, t205Marker("start", marker.Token)) != 1 || !strings.Contains(managed, "third proof") || strings.Contains(managed, "second proof") {
+				t.Fatalf("post-rebuild refresh lost human text or stale/duplicate evidence: %s", body)
+			}
+
+			// A missing token beside a tokenized block must not silently create a
+			// second block. The retryable refusal leaves forge and Task unchanged.
+			snapshotBeforeLoss, err := os.ReadFile(f.db.TaskSnapshotPath(f.project.Name, f.task.Seq))
+			if err != nil || !strings.Contains(string(snapshotBeforeLoss), marker.Token) {
+				t.Fatalf("published token was not in the Task snapshot before loss: err=%v snapshot=%s", err, snapshotBeforeLoss)
+			}
+			if _, err := f.db.ExecContext(context.Background(), "DELETE FROM pr_body_markers WHERE task_id=? AND repo=''", f.task.ID); err != nil {
+				t.Fatal(err)
+			}
+			beforeState := readTestFile(t, f.statePath())
+			beforeCalls = readTestFile(t, f.callsPath())
+			publishOutput, publishErr := f.publish(t, f.workerEnv, t205PublishArgs("fourth")...)
+			calls := strings.TrimPrefix(readTestFile(t, f.callsPath()), beforeCalls)
+			if publishErr == nil || !strings.Contains(publishOutput, "pr_body_marker_missing") || !strings.Contains(publishOutput, ",true,") || readTestFile(t, f.statePath()) != beforeState {
+				t.Fatalf("missing stored token was not a retryable effect-free error: %v %s", publishErr, publishOutput)
+			}
+			t205AssertNoForgeMutation(t, calls)
+			if f.mustTask(t, "t1").State != store.StateWorking {
+				t.Fatal("missing-marker refusal changed Task state")
+			}
+			intents, err := f.db.Intents(context.Background(), f.project.ID)
+			if err != nil || len(intents) != 0 {
+				t.Fatalf("missing-marker refusal retained intent: %v %v", intents, err)
+			}
+
+			// The Task snapshot remains authoritative and can restore the token,
+			// after which the same publish is safe to retry.
+			for _, statement := range []string{"UPDATE tasks SET mount_id=NULL", "DELETE FROM decision_notice_cursors"} {
+				if _, err := f.db.ExecContext(context.Background(), statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshotBeforeRebuild, err := os.ReadFile(f.db.TaskSnapshotPath(f.project.Name, f.task.Seq))
+			if err != nil || !strings.Contains(string(snapshotBeforeRebuild), marker.Token) {
+				t.Fatalf("Task snapshot lost token before recovery: %v\n%s", err, snapshotBeforeRebuild)
+			}
+			command = exec.Command(f.binary, "recover", "--rebuild")
+			command.Dir, command.Env = f.repo, f.env
+			output, err = command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("rebuild marker from Task snapshot: %v\n%s", err, output)
+			}
+			restoredAgain, rebuildErr := f.db.GetPRBodyMarker(context.Background(), f.task.ID, "")
+			if rebuildErr != nil || restoredAgain != marker {
+				snapshot, _ := os.ReadFile(f.db.TaskSnapshotPath(f.project.Name, f.task.Seq))
+				t.Fatalf("second rebuild marker=%+v err=%v, want %+v; snapshot=%s", restoredAgain, rebuildErr, marker, snapshot)
+			}
+			f.publishOK(t, t205PublishArgs("fourth")...)
+			body = f.body(t)
+			managed = t205ManagedBlock(t, body, marker.Token)
+			if !strings.HasPrefix(body, prefix) || !strings.HasSuffix(body, suffix) || strings.Count(body, t205Marker("start", marker.Token)) != 1 || !strings.Contains(managed, "fourth proof") {
+				t.Fatalf("recovered marker did not permit safe retry: %s", body)
 			}
 		})
 	}
