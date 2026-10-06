@@ -30,7 +30,7 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("remuda prune does not take positional arguments")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -50,57 +50,142 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	tasks, err := db.Tasks(ctx.Context, project.ID, true)
+	if err != nil {
+		return err
+	}
 	clean := mountWorktreeClean
 	if project.IsWorkspace() {
 		clean = workspaceMountClean
 	}
-	remove := pruneCandidates(ctx.Context, mounts, cfg.Remuda.KeepIdle, clean)
-	rows := make([]any, 0, len(remove))
-	for _, mount := range remove {
-		rows = append(rows, map[string]any{"mount": fmt.Sprintf("mount-%d", mount.Number), "path": mount.Path, "state": mount.State})
-		if parsed.Bool("yes") {
-			claimed, err := db.ClaimMountPrune(ctx.Context, project.ID, mount.ID)
-			if err != nil {
-				return err
-			}
-			if !claimed {
-				continue
-			}
-			var removeErr error
-			if project.IsWorkspace() {
-				removeErr = s.removeWorkspaceMount(ctx.Context, db, project, mount.Path)
-			} else {
-				if err := makeMountUntrackedWritable(ctx.Context, mount.Path, "pristine"); err != nil {
-					return errors.Join(err, db.RestoreMountAfterPrune(ctx.Context, mount.ID, mount.State))
-				}
-				if mount.State == "broken" && !mountWorktreeClean(ctx.Context, mount.Path) {
-					if !mountTrackedWorktreeClean(ctx.Context, mount.Path) {
-						return errors.Join(fmt.Errorf("broken mount has tracked changes and cannot be pruned safely"), db.RestoreMountAfterPrune(ctx.Context, mount.ID, mount.State))
-					}
-					if _, err := gitOutput(ctx.Context, mount.Path, "clean", "-fdx"); err != nil {
-						return errors.Join(err, db.RestoreMountAfterPrune(ctx.Context, mount.ID, mount.State))
-					}
-				}
-				if err := unlockMount(ctx.Context, project.Root, mount.Path); err != nil {
-					return errors.Join(err, db.RestoreMountAfterPrune(ctx.Context, mount.ID, mount.State))
-				}
-				removeErr = s.removeMount(ctx.Context, project.Root, mount.Path)
-			}
-			if err := removeErr; err != nil {
-				return errors.Join(err, db.RestoreMountAfterPrune(ctx.Context, mount.ID, mount.State))
-			}
-			if err := db.DeletePrunedMount(ctx.Context, project.ID, mount.ID); err != nil {
+	items := []pruneItem{}
+	prunableMountPaths := map[string]bool{}
+	managedMounts := make([]store.Mount, 0, len(mounts))
+	for _, mount := range mounts {
+		if safeManagedMountPath(home, project.Name, mount.Path) {
+			managedMounts = append(managedMounts, mount)
+		}
+	}
+	for _, mount := range pruneCandidates(ctx.Context, managedMounts, cfg.Remuda.KeepIdle, clean) {
+		prunableMountPaths[filepath.Clean(mount.Path)] = true
+		size, err := pathBytes(mount.Path)
+		if err != nil {
+			return err
+		}
+		reason := "idle Mount beyond keep_idle"
+		if mount.State == "broken" {
+			reason = "quarantined Mount is safe to remove"
+		}
+		items = append(items, pruneItem{kind: "mount", label: fmt.Sprintf("mount-%d", mount.Number), path: mount.Path, state: mount.State, reason: reason, bytes: size, mount: mount})
+	}
+	scratch, err := taskScratchPruneItems(ctx.Context, db, home, project, tasks)
+	if err != nil {
+		return err
+	}
+	items = append(items, scratch...)
+	artifacts, err := expiredTaskArtifactItems(home, project, tasks, duration(cfg.Retention.TaskArtifacts), time.Now())
+	if err != nil {
+		return err
+	}
+	items = append(items, artifacts...)
+	branches, err := landedOrDiscardedBranchItems(ctx.Context, db, home, project, tasks)
+	if err != nil {
+		return err
+	}
+	items = append(items, branches...)
+	registrations, err := staleOwnedWorktreeItems(ctx.Context, project, home, mounts)
+	if err != nil {
+		return err
+	}
+	for _, registration := range registrations {
+		if !prunableMountPaths[filepath.Clean(registration.path)] {
+			items = append(items, registration)
+		}
+	}
+	rows := make([]any, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, map[string]any{"kind": item.kind, "item": item.label, "path": item.path, "state": item.state, "size_bytes": item.bytes, "reason": item.reason})
+	}
+	if parsed.Bool("yes") {
+		for _, item := range items {
+			if err := s.applyPruneItem(ctx.Context, db, home, project, item); err != nil {
 				return err
 			}
 		}
 	}
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "prune", Value: rows}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{"Run `posse remuda prune --yes` to remove these Mounts"}}})
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "prune", Value: rows}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{"Run `posse remuda prune --yes` to remove these safe, Posse-owned items"}}})
+}
+
+func (s *Service) applyPruneItem(ctx context.Context, db *store.DB, home string, project store.Project, item pruneItem) error {
+	switch item.kind {
+	case "mount":
+		claimed, err := db.ClaimMountPrune(ctx, project.ID, item.mount.ID)
+		if err != nil || !claimed {
+			return err
+		}
+		var removeErr error
+		if project.IsWorkspace() {
+			removeErr = s.removeWorkspaceMount(ctx, db, project, item.mount.Path)
+		} else if _, statErr := os.Stat(item.mount.Path); os.IsNotExist(statErr) {
+			removeErr = removeStaleWorktreeRegistration(ctx, project.Root, item.mount.Path)
+		} else {
+			if err := makeMountUntrackedWritable(ctx, item.mount.Path, "pristine"); err != nil {
+				return errors.Join(err, db.RestoreMountAfterPrune(ctx, item.mount.ID, item.mount.State))
+			}
+			if item.mount.State == "broken" && !mountWorktreeClean(ctx, item.mount.Path) {
+				if !mountTrackedWorktreeClean(ctx, item.mount.Path) {
+					return errors.Join(fmt.Errorf("broken Mount has tracked changes and cannot be pruned safely"), db.RestoreMountAfterPrune(ctx, item.mount.ID, item.mount.State))
+				}
+				if _, err := gitOutput(ctx, item.mount.Path, "clean", "-fdx"); err != nil {
+					return errors.Join(err, db.RestoreMountAfterPrune(ctx, item.mount.ID, item.mount.State))
+				}
+			}
+			if err := unlockMount(ctx, project.Root, item.mount.Path); err != nil {
+				return errors.Join(err, db.RestoreMountAfterPrune(ctx, item.mount.ID, item.mount.State))
+			}
+			removeErr = s.removeMount(ctx, project.Root, item.mount.Path)
+		}
+		if removeErr != nil {
+			return errors.Join(removeErr, db.RestoreMountAfterPrune(ctx, item.mount.ID, item.mount.State))
+		}
+		return db.DeletePrunedMount(ctx, project.ID, item.mount.ID)
+	case "scratch":
+		return removeTaskScratch(home, project, store.Task{Seq: item.seq})
+	case "artifacts":
+		return removeTaskArtifacts(home, project, item.seq, item.files)
+	case "branch":
+		_, err := gitOutput(ctx, item.path, "update-ref", "-d", "refs/heads/"+item.label, item.sha)
+		return err
+	case "worktree-registration":
+		if item.mount.ID != 0 {
+			claimed, err := db.ClaimMountPrune(ctx, project.ID, item.mount.ID)
+			if err != nil || !claimed {
+				return err
+			}
+		}
+		if err := removeStaleWorktreeRegistration(ctx, project.Root, item.path); err != nil {
+			if item.mount.ID != 0 {
+				return errors.Join(err, db.RestoreMountAfterPrune(ctx, item.mount.ID, item.mount.State))
+			}
+			return err
+		}
+		if item.mount.ID != 0 {
+			return db.DeletePrunedMount(ctx, project.ID, item.mount.ID)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown prune item kind %q", item.kind)
+	}
 }
 
 func pruneCandidates(ctx context.Context, mounts []store.Mount, keepIdle int, clean func(context.Context, string) bool) []store.Mount {
 	idle := []store.Mount{}
 	remove := []store.Mount{}
 	for _, mount := range mounts {
+		info, err := os.Lstat(mount.Path)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 		switch mount.State {
 		case "idle":
 			idle = append(idle, mount)

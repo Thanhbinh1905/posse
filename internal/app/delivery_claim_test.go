@@ -24,10 +24,11 @@ type promptGateAdapter struct {
 }
 
 func exitMessageCrashHelper(code int) {
-	for name, prefix := range map[string]string{"POSSE_HOME": "posse-app-test-home-", "CODEX_HOME": "posse-app-test-codex-"} {
+	for _, name := range []string{"POSSE_HOME", "CODEX_HOME"} {
 		path := os.Getenv(name)
-		if filepath.Dir(path) == os.TempDir() && strings.HasPrefix(filepath.Base(path), prefix) {
-			_ = os.RemoveAll(path)
+		root := filepath.Dir(path)
+		if filepath.Dir(root) == os.TempDir() && strings.HasPrefix(filepath.Base(root), "posse-app-test-run-") {
+			_ = removeAppTestRun(root)
 		}
 	}
 	os.Exit(code)

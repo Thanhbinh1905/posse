@@ -165,7 +165,7 @@ func TestWorkspaceRootBaselineUsesMountContentsAtAcquireAndRemainsHidden(t *test
 func TestWorkspaceScoutProtocolDescribesRootAttachments(t *testing.T) {
 	project := store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}
 	task := store.Task{Seq: 1, Type: "scout"}
-	protocol := workerProtocol(project, task, dispatch.Brief{}, "/tmp/launch.md") + workspaceProtocol(project, nil)
+	protocol := workerProtocol(project, task, dispatch.Brief{}, "/tmp/launch.md", "/tmp/posse/scratch/stack/t1") + workspaceProtocol(project, nil)
 	for _, phrase := range []string{
 		"new or edited shared-root files",
 		"snapshot of the Mount before the Rider starts",

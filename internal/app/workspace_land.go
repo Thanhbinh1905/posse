@@ -696,7 +696,11 @@ func (s *Service) removeWorkspaceBranches(ctx context.Context, db *store.DB, pro
 				continue
 			}
 		} else if _, mergeErr := gitOutput(ctx, target.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+target.DefaultBranch); mergeErr != nil {
-			continue
+			// Squash and rebase merges need not contain the branch ref. Delete
+			// only the exact gated head that the recorded PR delivered.
+			if repo.State != store.TaskRepoLanded || repo.LandingMode != "pr" || repo.LandedRef == "" || repo.GatedSHA != sha {
+				continue
+			}
 		}
 		if _, err := gitOutput(ctx, target.Root, "update-ref", "-d", ref, sha); err != nil {
 			return removed, memberFailure(repo.Repo, err)

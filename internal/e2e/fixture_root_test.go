@@ -29,13 +29,24 @@ func fixturePrefix(suffix string) string {
 // can reclaim only roots bearing our marker whose owning test has exited.
 func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
-	return newFixtureRootAt(t, "/tmp", prefix)
+	return newFixtureRootAt(t, os.TempDir(), prefix)
 }
 
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
-	if (parent != "/tmp" && parent != "/var/tmp") || !strings.HasPrefix(prefix, "posse-e2e-") {
-		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
+	if !strings.HasPrefix(prefix, "posse-e2e-") {
+		t.Fatalf("unsafe E2E fixture prefix: %q", prefix)
+	}
+	if configured := os.Getenv("TMPDIR"); configured != "" && parent == "/tmp" {
+		parent = os.TempDir()
+	}
+	if parent != "/tmp" && parent != "/var/tmp" && parent != os.TempDir() {
+		t.Fatalf("unsafe E2E fixture parent: %q", parent)
+	}
+	if parent == os.TempDir() && parent != "/tmp" && parent != "/var/tmp" {
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			t.Fatalf("create isolated E2E fixture parent %s: %v", parent, err)
+		}
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {
 		t.Fatalf("reclaim abandoned E2E fixtures: %v", err)

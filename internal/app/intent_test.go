@@ -64,10 +64,10 @@ func TestIntentProcessAliveChecksBootAndStartTime(t *testing.T) {
 func TestIntentCrashHookExitsAfterPersistingCompletedStep(t *testing.T) {
 	ctx := context.Background()
 	checkpoints := map[string][]string{
-		"ride":         {"mount.acquire", "pane.open", "pane.record", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"},
+		"ride":         {"scratch.create", "mount.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"},
 		"land --merge": {"gate.record", "gate.run", "task.landing", "notice.create", "approval.record", "merge", "landed_ref.record", "task.landed"},
-		"unsaddle":     {"approval.record", "panes.close", "mount.release", "branch.remove", "task.torn_down"},
-		"relaunch":     {"git.inspect", "pane.open", "agent.stop", "pane.label", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"},
+		"unsaddle":     {"approval.record", "discard.capture", "panes.close", "mount.release", "branch.remove", "scratch.remove", "task.torn_down"},
+		"relaunch":     {"git.inspect", "pane.open", "agent.stop", "pane.label", "scratch.environment", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"},
 	}
 	dbPath := filepath.Join(t.TempDir(), "posse.db")
 	var taskID int64

@@ -478,6 +478,17 @@ func (s *Service) unsaddleTaskWithMountOwnershipCheck(ctx context.Context, db *s
 			return result, err
 		}
 	}
+	home, err := s.homePath()
+	if err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task artifact access", err)
+	}
+	if discardable {
+		if err := s.runIntentStep(ctx, db, intent, "discard.capture", func() error {
+			return s.captureDiscardTips(ctx, db, home, project, task)
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "discard tip capture", err)
+		}
+	}
 	var paneResult teardownPanes
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
 		var closeErr error
@@ -650,7 +661,23 @@ func (s *Service) unsaddleTaskWithMountOwnershipCheck(ctx context.Context, db *s
 				}
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
+					merged := false
 					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+project.DefaultBranch); mergeErr == nil {
+						merged = true
+					}
+					if task.State == store.StateLanded && task.LandingMode == "pr" {
+						observation, observationErr := db.LatestPRObservation(ctx, task.ID)
+						if observationErr != nil && !store.IsNotFound(observationErr) {
+							return observationErr
+						}
+						if observationErr == nil && observation.State == "MERGED" {
+							if sha != observation.HeadSHA {
+								return nil // Preserve work added after the merged PR head.
+							}
+							merged = true // Squash and rebase merges need not contain the branch ref.
+						}
+					}
+					if merged {
 						if _, err := gitOutput(ctx, project.Root, "update-ref", "-d", ref, sha); err != nil {
 							return err
 						}
@@ -663,6 +690,11 @@ func (s *Service) unsaddleTaskWithMountOwnershipCheck(ctx context.Context, db *s
 				return result, s.unsaddleIncomplete(ctx, db, project, task, "Task branch removal", err)
 			}
 		}
+	}
+	if err := s.runIntentStep(ctx, db, intent, "scratch.remove", func() error {
+		return removeTaskScratch(home, project, task)
+	}); err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task scratch removal", err)
 	}
 	err = s.runIntentStep(ctx, db, intent, "task.torn_down", func() error {
 		if discardable {

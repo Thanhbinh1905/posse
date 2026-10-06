@@ -241,6 +241,9 @@ esac
 			for _, member := range test.members {
 				artifacts = append(artifacts, filepath.Join(member, "evidence.txt"), filepath.Join(member, "untracked.txt"))
 			}
+			if _, err := os.Stat(filepath.Join(root, "posse", "scratch", "stack", test.taskID)); !os.IsNotExist(err) {
+				t.Fatalf("Scout Teardown kept Task scratch: %v", err)
+			}
 			savedDir := filepath.Join(root, "posse", "projects", "stack", "tasks", test.taskID)
 			for _, artifact := range artifacts {
 				if contents, err := os.ReadFile(filepath.Join(savedDir, artifact)); err != nil || len(contents) == 0 {

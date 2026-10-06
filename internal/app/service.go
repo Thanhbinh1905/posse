@@ -106,7 +106,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "unsaddle", Summary: "Teardown a finished Task and release its Mount.", Handler: s.teardown},
 		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--poll-only]", Summary: "Acknowledge Notices and wait for the next undelivered Notice.", Handler: s.wait},
-		{Name: "remuda", Summary: "List a Project's Remuda or prune idle Mounts.", Handler: s.remuda},
+		{Name: "remuda", Summary: "List a Project's Remuda or prune safe, Posse-owned leftovers.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
 		{Name: "project", Summary: "Inspect or change a Project's settings.", Subcommands: []*axi.Command{
