@@ -478,6 +478,18 @@ func (s *Service) unsaddleTaskWithMountOwnershipCheck(ctx context.Context, db *s
 			return result, err
 		}
 	}
+	var processAuthorization *mountProcessAuthorization
+	defer func() {
+		if processAuthorization != nil {
+			processAuthorization.Close()
+		}
+	}()
+	if !verifyMountOwnership && s.Herdr != nil && task.AgentName != "" {
+		processAuthorization, err = s.verifyMountForegroundOwnership(ctx, db, project, task)
+		if err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process ownership", err)
+		}
+	}
 	var paneResult teardownPanes
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
 		var closeErr error
@@ -496,7 +508,7 @@ func (s *Service) unsaddleTaskWithMountOwnershipCheck(ctx context.Context, db *s
 		// them before taking the snapshot, never after it.
 		if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
 			var stopErr error
-			stopped, stopErr = stopMountProcesses(task.WorktreePath)
+			stopped, stopErr = stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
 			return stopErr
 		}); err != nil {
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process shutdown", err)
@@ -559,7 +571,7 @@ func (s *Service) unsaddleTaskWithMountOwnershipCheck(ctx context.Context, db *s
 	if task.State == store.StateReported && !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "report.attachments", func() error {
 			if task.WorktreePath != "" {
-				if _, err := stopMountProcesses(task.WorktreePath); err != nil {
+				if _, err := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization); err != nil {
 					return err
 				}
 			}
@@ -579,12 +591,14 @@ func (s *Service) unsaddleTaskWithMountOwnershipCheck(ctx context.Context, db *s
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
 		if verifyMountOwnership {
-			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
-				return err
+			var verifyErr error
+			processAuthorization, verifyErr = s.verifyMountForegroundOwnership(ctx, db, project, task)
+			if verifyErr != nil {
+				return verifyErr
 			}
 		}
 		var releaseErr error
-		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean, discardable)
+		killed, releaseErr = releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, discardable, processAuthorization)
 		return releaseErr
 	})
 	if err != nil {

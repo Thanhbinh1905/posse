@@ -355,7 +355,12 @@ func TestStopMountProcessesResolvesMountRootBeforeMatchingCWD(t *testing.T) {
 		_ = command.Process.Kill()
 		_ = command.Wait()
 	}()
-	killed, err := stopMountProcesses(mountAlias)
+	authorization := newMountProcessAuthorization()
+	if _, err := authorization.bind(command.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	defer authorization.Close()
+	killed, err := stopMountProcessesAuthorized(mountAlias, authorization)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,13 +24,18 @@ type t175Adapter struct {
 	failures       int
 	beforeInfo     func()
 	beforeSnapshot func()
+	afterSnapshot  func(herdr.Snapshot)
 }
 
 func (a *t175Adapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
 	if a.beforeSnapshot != nil {
 		a.beforeSnapshot()
 	}
-	return a.Client.Snapshot(ctx)
+	snapshot, err := a.Client.Snapshot(ctx)
+	if err == nil && a.afterSnapshot != nil {
+		a.afterSnapshot(snapshot)
+	}
+	return snapshot, err
 }
 
 func (a *t175Adapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
@@ -103,9 +108,9 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 		return 0
 	}
 
-	// Start a foreign Claude agent before Teardown. At the actual Mount-release
-	// snapshot boundary, replace it with a Task-named Claude agent, then replace
-	// that process with another foreign Claude agent before process_info reads.
+	// Start a foreign Claude agent before Teardown. At the first ownership
+	// snapshot boundary, replace it with a Task-named agent, then replace that
+	// process with another foreign agent before process_info reads.
 	stop()
 	start("foreign-agent", "foreign-agent")
 	work := filepath.Join(task.WorktreePath, "foreign-work.txt")
@@ -121,7 +126,7 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 		}
 		intent, err := ro.IntentByTask(ctx, task.ID)
 		_ = ro.Close()
-		if err != nil || intent.Step != "in_progress:mount.release" || ownedPID != 0 {
+		if err != nil || intent.Step != "started" || ownedPID != 0 {
 			return
 		}
 		stop()
@@ -179,6 +184,146 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 	mounts, err := ro.Mounts(ctx, f.projectID)
 	if err != nil || len(mounts) != 1 || mounts[0].State != "held" {
 		t.Fatalf("Mount after refused teardown = %#v, %v", mounts, err)
+	}
+}
+
+// Replays the handoff race after the final Herdr ownership snapshot: a Task-named
+// process passes the first ownership gate, then is replaced before Mount cleanup.
+func TestT175ForeignRestartAfterFinalOwnershipSnapshotIsPreserved(t *testing.T) {
+	f := newRiderTabsFixture(t)
+	ctx := context.Background()
+	task := f.ride(t, "t1", "Late foreign restart", "late-foreign-restart")
+	f.fail(t, "t1")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: f.projectID, TaskID: task.ID, Kind: "worker_failed", Summary: "Rider failed", DataJSON: `{}`})
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(f.home, "config.toml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config = append(config, []byte("\n[kinds.claude]\nnotice_delivery = \"prompt\"\n")...)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := func() {
+		t.Helper()
+		if _, err := f.client.Run(ctx, "agent", "send-keys", task.PaneID, "ctrl+c"); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForCondition(10*time.Second, func() bool {
+			for _, pane := range f.snapshot(t).Panes {
+				if pane.PaneID == task.PaneID {
+					return pane.Agent == ""
+				}
+			}
+			return false
+		}) {
+			t.Fatal("agent did not return to its shell")
+		}
+	}
+	start := func(label, name string) int {
+		t.Helper()
+		if _, err := f.client.Call(ctx, "pane.rename", map[string]any{"pane_id": task.PaneID, "label": label}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.client.Run(ctx, "agent", "start", name, "--kind", "claude", "--pane", task.PaneID); err != nil {
+			t.Fatal(err)
+		}
+		for _, agent := range f.snapshot(t).Agents {
+			if agent.PaneID == task.PaneID && agent.Name == name {
+				return foregroundPID(t, f, task.PaneID)
+			}
+		}
+		t.Fatalf("agent %q did not appear", name)
+		return 0
+	}
+	stop()
+	start("foreign-agent", "foreign-agent")
+	work := filepath.Join(task.WorktreePath, "foreign-work.txt")
+	if err := os.WriteFile(work, []byte("foreign work must survive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &t175Adapter{Client: f.client, lead: f.leadPaneID, target: task.PaneID}
+	ownedPID, foreignPID, guardSnapshots := 0, 0, 0
+	adapter.beforeSnapshot = func() {
+		ro, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		intent, err := ro.IntentByTask(ctx, task.ID)
+		_ = ro.Close()
+		if err != nil || intent.Step != "started" || ownedPID != 0 {
+			return
+		}
+		stop()
+		ownedPID = start(task.PaneLabel, task.AgentName)
+	}
+	adapter.afterSnapshot = func(snapshot herdr.Snapshot) {
+		if ownedPID == 0 || foreignPID != 0 {
+			return
+		}
+		guardSnapshots++
+		if guardSnapshots != 3 {
+			return
+		}
+		owned := false
+		for _, agent := range snapshot.Agents {
+			if agent.PaneID == task.PaneID && agent.Name == task.AgentName {
+				owned = true
+			}
+		}
+		if !owned {
+			t.Fatal("final real snapshot was not Task-owned")
+		}
+		stop()
+		foreignPID = start("foreign-late", "foreign-late")
+	}
+	if _, err := f.client.Run(ctx, "pane", "report-agent", f.leadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Call(ctx, "pane.focus", map[string]any{"pane_id": f.userBefore.RootPane.PaneID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range f.leadEnv {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			t.Setenv(key, value)
+		}
+	}
+	t.Chdir(f.repo)
+	cli := app.New(f.home, adapter).CLI()
+	var output bytes.Buffer
+	cli.Out, cli.ErrOut = &output, &output
+	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
+	if adapter.failures != 1 || guardSnapshots != 3 || ownedPID == 0 || foreignPID == 0 || ownedPID == foreignPID {
+		t.Fatalf("replacement missed final guard boundary: failures=%d snapshots=%d owned=%d foreign=%d", adapter.failures, guardSnapshots, ownedPID, foreignPID)
+	}
+	contents, fileErr := os.ReadFile(work)
+	foreignAlive := false
+	for _, agent := range f.snapshot(t).Agents {
+		if agent.PaneID == task.PaneID && agent.Name == "foreign-late" {
+			foreignAlive = true
+		}
+	}
+	taskAfter := f.task(t, "t1")
+	branchOutput, branchErr := exec.CommandContext(ctx, "git", "-C", f.repo, "show-ref", "--verify", "refs/heads/"+task.Branch).CombinedOutput()
+	ro, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, mountErr := ro.Mounts(ctx, f.projectID)
+	_ = ro.Close()
+	t.Logf("owned PID=%d, foreign PID=%d, exit=%d, foreign alive=%v, file=%q, file error=%v, Task=%s, branch error=%v, Mounts=%#v, output=%s", ownedPID, foreignPID, code, foreignAlive, contents, fileErr, taskAfter.State, branchErr, mounts, output.String())
+	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" || taskAfter.State != store.StateFailed || branchErr != nil || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
+		t.Fatalf("late foreign replacement was not preserved: branch=%s mount error=%v", branchOutput, mountErr)
 	}
 }
 

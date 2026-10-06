@@ -480,6 +480,10 @@ func mountHasReadOnlyUntracked(ctx context.Context, path string) bool {
 }
 
 func releaseMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, clean string, approvedDiscard bool) ([]string, error) {
+	return releaseMountWithAuthorization(ctx, db, project, task, clean, approvedDiscard, nil)
+}
+
+func releaseMountWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, clean string, approvedDiscard bool, authorization *mountProcessAuthorization) ([]string, error) {
 	mounts, err := db.Mounts(ctx, project.ID)
 	if err != nil {
 		return nil, err
@@ -497,7 +501,7 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 	if mount.State == "releasing" {
 		return nil, finishReleasingMount(ctx, db, project, mount, task)
 	}
-	killed, err := stopMountProcesses(mount.Path)
+	killed, err := stopMountProcessesAuthorized(mount.Path, authorization)
 	if err != nil {
 		return killed, err
 	}
@@ -669,6 +673,10 @@ func breakMount(ctx context.Context, db *store.DB, project store.Project, task s
 }
 
 func stopMountProcesses(path string) ([]string, error) {
+	return stopMountProcessesAuthorized(path, nil)
+}
+
+func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthorization) ([]string, error) {
 	if message := processIdentityCapabilityError(); message != "" {
 		return nil, fmt.Errorf("%s; refusing to signal processes or reset the Mount", message)
 	}
@@ -684,24 +692,15 @@ func stopMountProcesses(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var allPIDs []int
+	allPIDs := make([]int, 0, len(pids))
 	handles := make(map[int]*mountProcessHandle, len(pids))
-	defer func() {
-		for _, handle := range handles {
-			_ = handle.Close()
-		}
-	}()
 	for _, pid := range pids {
-		handle, err := openMountProcessHandle(pid)
-		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrNotExist) {
-			continue
+		handle := authorization.handle(pid)
+		if handle == nil {
+			return nil, fmt.Errorf("unverified process %d appeared in the Mount; preserving its work", pid)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("cannot bind Mount process to its exact instance: %w", err)
-		}
-		if !processInMount(pid, root) {
-			_ = handle.Close()
-			continue
+		if err := authorization.verify(pid); err != nil {
+			return nil, err
 		}
 		handles[pid] = handle
 		allPIDs = append(allPIDs, pid)
