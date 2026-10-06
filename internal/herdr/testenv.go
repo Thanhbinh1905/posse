@@ -75,8 +75,16 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 		}
 		root = filepath.Dir(configHome)
 	}
-	if env["POSSE_TEST_HERDR"] != "1" || !strings.HasPrefix(filepath.Base(root), "posse-e2e-") || filepath.Dir(root) != "/tmp" || !filepath.IsAbs(root) {
-		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* test root"}
+	insideTemp := false
+	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
+		relative, err := filepath.Rel(tempRoot, root)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			insideTemp = true
+			break
+		}
+	}
+	if env["POSSE_TEST_HERDR"] != "1" || !strings.HasPrefix(filepath.Base(root), "posse-e2e-") || !insideTemp || !filepath.IsAbs(root) {
+		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* or /var/tmp/posse-e2e-* test root"}
 	}
 	for key := range env {
 		if strings.HasPrefix(key, "HERDR_") {

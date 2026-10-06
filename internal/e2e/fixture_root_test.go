@@ -29,12 +29,33 @@ func fixturePrefix(suffix string) string {
 // can reclaim only roots bearing our marker whose owning test has exited.
 func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
-	return newFixtureRootAt(t, "/tmp", prefix)
+	parent := os.Getenv("POSSE_E2E_TMP_DIR")
+	if parent == "" {
+		parent = "/tmp"
+	}
+	return newFixtureRootAt(t, parent, prefix)
 }
 
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
-	if (parent != "/tmp" && parent != "/var/tmp") || !strings.HasPrefix(prefix, "posse-e2e-") {
+	parent, err := filepath.Abs(parent)
+	if err != nil {
+		t.Fatalf("resolve E2E fixture parent: %v", err)
+	}
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatalf("resolve E2E fixture parent %s: %v", parent, err)
+	}
+	parent = resolvedParent
+	insideTemp := false
+	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
+		relative, err := filepath.Rel(tempRoot, parent)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			insideTemp = true
+			break
+		}
+	}
+	if !insideTemp || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {

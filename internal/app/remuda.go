@@ -669,6 +669,9 @@ func breakMount(ctx context.Context, db *store.DB, project store.Project, task s
 }
 
 func stopMountProcesses(path string) ([]string, error) {
+	if message := processIdentityCapabilityError(); message != "" {
+		return nil, fmt.Errorf("%s; refusing to signal processes or reset the Mount", message)
+	}
 	root, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -681,50 +684,128 @@ func stopMountProcesses(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	allPIDs := append([]int(nil), pids...)
+	var allPIDs []int
+	handles := make(map[int]*mountProcessHandle, len(pids))
+	defer func() {
+		for _, handle := range handles {
+			_ = handle.Close()
+		}
+	}()
 	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		handle, err := openMountProcessHandle(pid)
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("cannot bind Mount process to its exact instance: %w", err)
+		}
+		if !processInMount(pid, root) {
+			_ = handle.Close()
+			continue
+		}
+		handles[pid] = handle
+		allPIDs = append(allPIDs, pid)
+	}
+	if err := verifyMountProcessSet(root, handles); err != nil {
+		return nil, err
+	}
+	for _, handle := range handles {
+		if err := handle.Signal(syscall.SIGTERM); err != nil {
+			return nil, err
+		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for len(pids) > 0 && time.Now().Before(deadline) {
-		remaining := pids[:0]
-		for _, pid := range pids {
-			if processInMount(pid, root) {
-				remaining = append(remaining, pid)
-			}
+	for time.Now().Before(deadline) {
+		if err := verifyMountProcessSet(root, handles); err != nil {
+			return nil, err
 		}
-		pids = remaining
-		if len(pids) > 0 {
-			time.Sleep(50 * time.Millisecond)
+		alive, err := mountHandlesInMount(handles, root)
+		if err != nil {
+			return nil, err
 		}
+		if len(alive) == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+	alive, err := mountHandlesInMount(handles, root)
+	if err != nil {
+		return nil, err
+	}
+	for _, handle := range alive {
+		if err := handle.Signal(syscall.SIGKILL); err != nil {
+			return nil, err
+		}
 	}
 	deadline = time.Now().Add(time.Second)
-	var survivors []int
 	for time.Now().Before(deadline) {
-		survivors, err = mountProcessIDs(root)
+		if err := verifyMountProcessSet(root, handles); err != nil {
+			return nil, err
+		}
+		survivors, err := mountProcessIDs(root)
 		if err != nil {
 			return nil, err
 		}
 		if len(survivors) == 0 {
-			break
+			return processLabels(allPIDs), nil
+		}
+		stillAlive, err := mountHandlesInMount(handles, root)
+		if err != nil {
+			return nil, err
+		}
+		if len(stillAlive) == 0 {
+			return nil, fmt.Errorf("unverified Mount processes appeared during teardown: %v", survivors)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	labels := make([]string, 0, len(allPIDs))
-	for _, pid := range allPIDs {
+	survivors, err := mountProcessIDs(root)
+	if err != nil {
+		return nil, err
+	}
+	return processLabels(allPIDs), fmt.Errorf("mount processes survived teardown: %v", survivors)
+}
+
+func verifyMountProcessSet(root string, handles map[int]*mountProcessHandle) error {
+	pids, err := mountProcessIDs(root)
+	if err != nil {
+		return err
+	}
+	for _, pid := range pids {
+		handle, found := handles[pid]
+		if !found {
+			return fmt.Errorf("unverified process %d appeared in the Mount during teardown; preserving its work", pid)
+		}
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if err != nil || handle.Identity() != bootID+"/"+startTime {
+			if err != nil {
+				return fmt.Errorf("cannot verify Mount process %d identity: %w", pid, err)
+			}
+			return fmt.Errorf("mount PID %d changed process instance during teardown; preserving its work", pid)
+		}
+	}
+	return nil
+}
+
+func mountHandlesInMount(handles map[int]*mountProcessHandle, root string) ([]*mountProcessHandle, error) {
+	var alive []*mountProcessHandle
+	for _, handle := range handles {
+		stillAlive, err := handle.Alive()
+		if err != nil {
+			return nil, fmt.Errorf("check Mount process %d: %w", handle.PID(), err)
+		}
+		if stillAlive && processInMount(handle.PID(), root) {
+			alive = append(alive, handle)
+		}
+	}
+	return alive, nil
+}
+
+func processLabels(pids []int) []string {
+	labels := make([]string, 0, len(pids))
+	for _, pid := range pids {
 		labels = append(labels, strconv.Itoa(pid))
 	}
-	if len(survivors) > 0 {
-		remaining := make([]string, len(survivors))
-		for index, pid := range survivors {
-			remaining[index] = strconv.Itoa(pid)
-		}
-		return labels, fmt.Errorf("mount processes survived teardown: %s", strings.Join(remaining, ", "))
-	}
-	return labels, nil
+	return labels
 }
 
 func mountProcessIDs(path string) ([]int, error) {
