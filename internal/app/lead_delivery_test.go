@@ -262,6 +262,29 @@ func TestAgentSessionIDReadsHerdrSessionValue(t *testing.T) {
 	}
 }
 
+func TestLeadComposerRetainsWorkspaceAndAnsweredDecisionGuidance(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := config.Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	composed, err := composeLeadInstructions(home, store.Project{Name: "workspace", Kind: store.ProjectKindWorkspace}, cfg, "codex", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{
+		"Read shared workspace-root files such as CLAUDE.md and docs/",
+		"posse project scan` after the User adds or removes a repository",
+		"posse apply <decision>` to relaunch or discard",
+		"posse ride --from-leftover <decision>",
+		"Never perform these actions before the User answers",
+	} {
+		if !strings.Contains(composed.Text, rule) {
+			t.Errorf("composed Lead instructions omitted %q", rule)
+		}
+	}
+}
+
 func TestBuiltInLeadInstructionsStayWithinBudget(t *testing.T) {
 	home := t.TempDir()
 	service := testService(home, nil)
@@ -324,7 +347,11 @@ func TestPrepareLeadLaunchRejectsOversizedIdentity(t *testing.T) {
 	}
 	cfg.Identity.Lead.Persona = strings.Repeat("x", leadInstructionMaxBytes)
 	project := store.Project{Name: "shop"}
-	actualSize := len(leadText(project, cfg, "codex"))
+	composed, err := composeLeadInstructions(home, project, cfg, "codex", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualSize := len(composed.Text)
 
 	launch, err := service.prepareLeadLaunch(home, project, cfg, "codex")
 	if err == nil {
@@ -382,7 +409,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 	}
 
 	codex := launch("codex")
-	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=\"You are the Lead for Project shop.") || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
+	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=\"# Posse Lead instructions\\n\\nYou are the Lead for Project shop.") || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
 		t.Fatalf("codex launch = %#v", codex)
 	}
 	for _, rule := range []string{"posse queues each batch of Notices", noPollRule, "End your turn and let that message wake you."} {

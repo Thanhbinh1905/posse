@@ -410,12 +410,12 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return err
 	}
 	launchContents := workerProtocol(project, task, brief, launchPath) + workspaceProtocol(project, members) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
-	playbook, err := playbookSources(home, project, "rider")
+	preferences, err := preferenceSources(home, project, "rider")
 	if err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	launchContents = appendPlaybookInstructions(launchContents, "rider", playbook)
+	launchContents = appendPreferenceInstructions(launchContents, "rider", preferences)
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
