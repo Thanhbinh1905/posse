@@ -29,12 +29,16 @@ func fixturePrefix(suffix string) string {
 // can reclaim only roots bearing our marker whose owning test has exited.
 func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
-	return newFixtureRootAt(t, "/tmp", prefix)
+	parent := os.Getenv("POSSE_E2E_TMP_PARENT")
+	if parent == "" {
+		parent = "/tmp"
+	}
+	return newFixtureRootAt(t, parent, prefix)
 }
 
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
-	if (parent != "/tmp" && parent != "/var/tmp") || !strings.HasPrefix(prefix, "posse-e2e-") {
+	if (parent != "/tmp" && parent != "/var/tmp" && !isTaskScratchParent(parent)) || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {
@@ -88,6 +92,19 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 
 // Go's module cache makes directories read-only. WalkDir never follows links,
 // so only directories within this fixture have their owner write bit restored.
+func isTaskScratchParent(parent string) bool {
+	name := filepath.Base(parent)
+	if filepath.Clean(parent) != parent || filepath.Dir(parent) != "/tmp" || !strings.HasPrefix(name, "posse-") || !strings.HasSuffix(name, "-scratch") {
+		return false
+	}
+	info, err := os.Lstat(parent)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(parent)
+	return err == nil && resolved == parent
+}
+
 func removeFixtureRoot(root string) error {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
