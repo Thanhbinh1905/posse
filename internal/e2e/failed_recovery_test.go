@@ -318,6 +318,82 @@ func TestRecoveryRepairsRidersFromAnInterruptedGroupEpisode(t *testing.T) {
 	}
 }
 
+func TestRecoveryRetriesMissingRiderMarkedRecoveredInSameGroupEpisode(t *testing.T) {
+	h := newIntentCLIHarness(t)
+	f := h.newProject(t, "recovered-group-rider-missing")
+	if _, err := f.addShipTask(t, store.StateWorking); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.attachTaskPane(t, "t1", true); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := f.run(t, "", "roster"); code != 0 {
+		t.Fatalf("initial reconcile: %d %s", code, out)
+	}
+	readTask := func() store.Task {
+		t.Helper()
+		var task store.Task
+		if err := f.openDB(t, func(db *store.DB) error {
+			var err error
+			task, err = db.Task(context.Background(), f.project.ID, "t1")
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	before := readTask()
+	generation := h.session.serverAt + "/group/" + f.project.HerdrWorkspaceID + "/" + f.project.LeadPaneID
+	if err := f.openDB(t, func(db *store.DB) error {
+		claimed, err := db.ClaimTaskRecovery(context.Background(), before.ID, generation, 0, 101, 3, 1000, 2000)
+		if err != nil || !claimed {
+			return fmt.Errorf("seed completed group recovery claim: claimed=%v err=%v", claimed, err)
+		}
+		return db.FinishTaskRecovery(context.Background(), before, 101, 3, true, "", 2000)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a second group close before another hook has reconciled the
+	// completed recovery. The server generation and group recovery key remain
+	// unchanged, but the Rider pane is gone.
+	h.session.mu.Lock()
+	for paneID, pane := range h.session.panes {
+		if pane.WorkspaceID == f.project.HerdrWorkspaceID || pane.Label == before.PaneLabel {
+			delete(h.session.panes, paneID)
+			h.session.forgetAgent(paneID)
+		}
+	}
+	for workspaceID, workspace := range h.session.workspaces {
+		if workspaceID == f.project.HerdrWorkspaceID || workspace.Worktree.CheckoutPath == before.WorktreePath {
+			delete(h.session.workspaces, workspaceID)
+		}
+	}
+	h.session.mu.Unlock()
+	if code, out := f.run(t, "", "recover", "--all"); code != 0 {
+		t.Fatalf("same-generation group recovery: %d %s", code, out)
+	}
+	after := readTask()
+	var state store.TaskRecovery
+	if err := f.openDB(t, func(db *store.DB) error {
+		var err error
+		state, err = db.TaskRecovery(context.Background(), after.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after.Launches != before.Launches+1 || after.State != store.StateWorking || state.Status != "recovered" || state.Attempts != 2 {
+		t.Fatalf("missing Rider was treated as already recovered: launches %d -> %d, task=%s, recovery=%#v", before.Launches, after.Launches, after.State, state)
+	}
+	snapshot, err := h.client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane, found := herdr.FindPane(snapshot.Panes, after.PaneID, after.PaneLabel)
+	if !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped" {
+		t.Fatalf("recovery record says recovered but Rider pane is not live: state=%#v pane=%#v found=%v", state, pane, found)
+	}
+}
+
 func TestRecoveryCrashConsumesFinalAttempt(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "recovery-crash-budget")

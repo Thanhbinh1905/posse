@@ -95,6 +95,7 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 		t.Fatalf("group close did not automatically restore Lead and Riders: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
 	}
 	snap = f.snapshot(t)
+	assertRecoveredRiderRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
 	if !waitForCondition(30*time.Second, func() bool {
 		db, err := store.OpenReadOnly(f.home)
 		if err != nil {
@@ -175,6 +176,7 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 		t.Fatalf("Lead group close did not restore both Riders: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
 	}
 	snap = f.snapshot(t)
+	assertRecoveredRiderRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPanes(t, f.client)) > 0 && len(lookoutPIDs(f.root)) > 0 }) {
 		t.Fatal("Lead-primary recovery did not restart Lookout")
 	}
@@ -235,6 +237,28 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	for _, block := range strings.Split(string(output), "\n\n") {
 		if strings.HasPrefix(block, "worktree "+second.WorktreePath+"\n") && strings.Contains(block, "locked ") {
 			t.Fatalf("released Mount still locked: %s", block)
+		}
+	}
+}
+
+func assertRecoveredRiderRecordsMatchSnapshot(t *testing.T, home string, tasks []store.Task, snapshot herdr.Snapshot) {
+	t.Helper()
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, task := range tasks {
+		state, err := db.TaskRecovery(context.Background(), task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Status != "recovered" {
+			continue
+		}
+		pane, found := herdr.FindPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+		if !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped" {
+			t.Fatalf("Task %s recovery says recovered without a live Rider pane: state=%#v pane=%#v found=%v", task.ShortName, state, pane, found)
 		}
 	}
 }

@@ -67,7 +67,7 @@ func (db *DB) FinishTaskRecovery(ctx context.Context, task Task, ownerPID, limit
 	if err := tx.QueryRowContext(ctx, `SELECT attempts,status FROM task_recovery WHERE task_id=? AND owner_pid=?`, task.ID, ownerPID).Scan(&attempts, &status); err != nil {
 		return err
 	}
-	if status == "exhausted" || status == "recovered" {
+	if status == "exhausted" || status == "recovered" && succeeded {
 		return nil
 	}
 	nextStatus := "pending"
@@ -75,6 +75,9 @@ func (db *DB) FinishTaskRecovery(ctx context.Context, task Task, ownerPID, limit
 		nextStatus = "recovered"
 	} else if attempts >= limit {
 		nextStatus = "exhausted"
+	}
+	if succeeded {
+		nextAttemptAt = 0
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE task_recovery SET owner_pid=0,status=?,last_error=?,next_attempt_at=? WHERE task_id=? AND owner_pid=?`, nextStatus, cause, nextAttemptAt, task.ID, ownerPID); err != nil {
 		return err
@@ -87,6 +90,17 @@ func (db *DB) FinishTaskRecovery(ctx context.Context, task Task, ownerPID, limit
 		}
 	}
 	return tx.Commit()
+}
+
+// RetryRecoveredTask reopens a completed episode only after its caller verifies
+// that the recovered Rider pane is no longer live in the same generation.
+func (db *DB) RetryRecoveredTask(ctx context.Context, taskID int64, generation string) (bool, error) {
+	result, err := db.ExecContext(ctx, `UPDATE task_recovery SET status='pending',next_attempt_at=0 WHERE task_id=? AND generation=? AND owner_pid=0 AND status='recovered'`, taskID, generation)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
 }
 
 func (db *DB) ResetTaskRecovery(ctx context.Context, taskID int64) error {
