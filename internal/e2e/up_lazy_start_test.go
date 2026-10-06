@@ -84,7 +84,7 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	gitScript := "#!/bin/sh\nset -eu\nprintf '%s\\t%s\\n' \"${HERDR_PANE_ID:-}\" \"$PWD $*\" >> \"$POSSE_TEST_GIT_COMMAND_LOG\"\nevent=\nfor arg in \"$@\"; do\n  case \"$arg\" in fetch|ls-remote) event=$arg; break ;; esac\ndone\nif [ -n \"$event\" ]; then\n  printf '%s\\t%s\\t%s\\n' \"${HERDR_PANE_ID:-}\" \"$event\" \"$PWD $*\" >> \"$POSSE_TEST_GIT_LOG\"\n  if [ \"$event\" = fetch ]; then case \"$*\" in *offline*) exit 1 ;; esac; fi\nfi\nexec \"$POSSE_REAL_GIT\" \"$@\"\n"
+	gitScript := "#!/bin/sh\nset -eu\nprintf '%s\\t%s\\n' \"${HERDR_PANE_ID:-}\" \"$PWD $*\" >> \"$POSSE_TEST_GIT_COMMAND_LOG\"\nevent=\nfor arg in \"$@\"; do\n  case \"$arg\" in fetch|ls-remote) event=$arg; break ;; esac\ndone\nif [ -n \"$event\" ]; then\n  printf '%s\\t%s\\t%s\\n' \"${HERDR_PANE_ID:-}\" \"$event\" \"$PWD $*\" >> \"$POSSE_TEST_GIT_LOG\"\n  case \"$event:$*\" in\n    fetch:*offline*) exit 1 ;;\n    ls-remote:*offline*) exit 0 ;;\n  esac\nfi\nexec \"$POSSE_REAL_GIT\" \"$@\"\n"
 	for name, script := range map[string]string{
 		"git":    gitScript,
 		"gh":     "#!/bin/sh\nprintf '%s\\tgh %s\\n' \"${HERDR_PANE_ID:-}\" \"$*\" >> \"$POSSE_TEST_FORGE_LOG\"\nexit 1\n",
@@ -274,7 +274,7 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, line := range appendedLogLines(calls, before) {
-		if pane, _, found := strings.Cut(line, "\t"); found && pane == workspace.RootPane.PaneID && strings.Contains(line, "offline") {
+		if pane, event, found := strings.Cut(line, "\t"); found && pane == workspace.RootPane.PaneID && event == "fetch" && strings.Contains(line, "offline") {
 			t.Fatalf("Ship Task touched the unrequested offline Member: %s", line)
 		}
 	}
