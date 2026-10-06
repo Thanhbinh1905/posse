@@ -289,14 +289,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 	}
 	name := parsed.Flags["name"]
-	branchTargets := []repoTarget{{Name: project.Name, Root: project.Root}}
-	if project.IsWorkspace() {
-		branchTargets = make([]repoTarget, 0, len(members))
-		for _, member := range members {
-			branchTargets = append(branchTargets, member.repoTarget)
-		}
-	}
-	if err := taskBranchAvailableForTargets(ctx.Context, db, project, name, branchTargets); err != nil {
+	if err := taskBranchAvailable(ctx.Context, db, project, name); err != nil {
 		return err
 	}
 	if project.HerdrWorkspaceID == "" {

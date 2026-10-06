@@ -339,7 +339,7 @@ func leadAgentStarted(project store.Project, snapshot herdr.Snapshot) bool {
 		return false
 	}
 	for _, pane := range snapshot.Panes {
-		if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Agent != "" && pane.AgentStatus != "unknown" {
+		if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Agent != "" && pane.AgentStatus != "" && pane.AgentStatus != "unknown" && pane.AgentStatus != "exited" && pane.AgentStatus != "stopped" {
 			return true
 		}
 	}

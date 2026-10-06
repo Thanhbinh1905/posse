@@ -798,6 +798,35 @@ func TestTaskBranchAvailabilityAllowsWorkspaceMemberWithoutOrigin(t *testing.T) 
 	}
 }
 
+func TestWorkspaceRideChecksEveryMemberBeforeCreatingTask(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		brief string
+	}{
+		{name: "requested member", brief: "---\ntype: ship\ntitle: Existing branch\ndone_when: branch is checked\nrepos: [worker]\n---\nUse the existing branch check.\n"},
+		{name: "empty scout", brief: "---\ntype: scout\ntitle: Existing branch\ndone_when: branch is checked\n---\nUse the existing branch check.\n"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			f := newWorkspaceLandFixture(t, localWorkspaceConfig+"\n[profiles.pi]\nkind = \"pi\"\n\n[dispatch.default]\nuse = \"pi\"\n", []string{"worker"}, []string{"worker"})
+			gitTest(t, filepath.Join(f.workspace, "backend"), "branch", "posse/existing-branch")
+			brief := filepath.Join(f.root, "brief.md")
+			if err := os.WriteFile(brief, []byte(testCase.brief), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HERDR_ENV", "1")
+			t.Setenv("HERDR_PANE_ID", "w1:p1")
+			t.Setenv("HERDR_WORKSPACE_ID", "w1")
+			if code := f.run("ride", "--brief", brief, "--name", "existing-branch"); code != 1 || !strings.Contains(f.out.String(), "branch_exists") || !strings.Contains(f.out.String(), "backend") {
+				t.Fatalf("ride accepted a branch used by an unrequested member: code=%d output=%s", code, f.out.String())
+			}
+			tasks, err := f.db.Tasks(context.Background(), f.project.ID, true)
+			if err != nil || len(tasks) != 1 {
+				t.Fatalf("branch collision created a Task: tasks=%#v err=%v", tasks, err)
+			}
+		})
+	}
+}
+
 func TestRetryNameSuggestionAccepts24CharacterSlug(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

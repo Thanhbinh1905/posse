@@ -356,6 +356,9 @@ func TestUpdateNoticeOncePerReleaseAndDailyCache(t *testing.T) {
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = server.URL
+	if _, ok := service.cachedRelease(context.Background()); !ok {
+		t.Fatal("failed to seed the fresh update cache")
+	}
 	for range 3 {
 		if _, ok := service.availableUpdate(context.Background(), db, &project); !ok {
 			t.Fatal("missing update")
@@ -364,6 +367,34 @@ func TestUpdateNoticeOncePerReleaseAndDailyCache(t *testing.T) {
 	notices, err := db.Notices(context.Background(), project.ID, false)
 	if err != nil || len(notices) != 1 || notices[0].Kind != "update_available" || calls != 1 {
 		t.Fatalf("notices=%v calls=%d err=%v", notices, calls, err)
+	}
+}
+
+func TestAvailableUpdateDoesNotFetchWithColdCache(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.2.0"})
+	}))
+	defer server.Close()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(context.Background(), "demo", home, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	service.Version = "0.1.0"
+	service.updateURL = server.URL
+	if _, ok := service.availableUpdate(context.Background(), db, &project); ok {
+		t.Fatal("cold cache advertised an update")
+	}
+	if calls != 0 {
+		t.Fatalf("cold cache fetched a release: %d request(s)", calls)
 	}
 }
 
