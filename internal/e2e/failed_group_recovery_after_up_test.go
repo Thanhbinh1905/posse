@@ -16,6 +16,13 @@ import (
 )
 
 func TestFailedGroupAttemptRetriesAfterLeadStarts(t *testing.T) {
+	for _, trigger := range []string{"plugin-event", "recover-all"} {
+		t.Run(trigger, func(t *testing.T) { runFailedGroupAttemptRetriesAfterLeadStarts(t, trigger) })
+	}
+}
+
+func runFailedGroupAttemptRetriesAfterLeadStarts(t *testing.T, trigger string) {
+	t.Helper()
 	f := newRiderTabsFixture(t)
 	t.Cleanup(func() { stopIsolatedFinalizers(t, f.root) })
 	startsLog := filepath.Join(f.root, "failed-group-starts.log")
@@ -89,6 +96,7 @@ esac
 	if state.Status != "pending" || state.Attempts != 1 || state.NextAttemptAt <= time.Now().UnixMilli() {
 		t.Fatalf("did not produce a real pending backoff: %#v output=%s", state, output)
 	}
+	retryAt := state.NextAttemptAt
 	if !waitForCondition(2*time.Second, func() bool { return workerStarts() == 2 }) {
 		t.Fatalf("failed attempt process did not start: starts=%d", workerStarts())
 	}
@@ -121,26 +129,55 @@ esac
 		t.Fatalf("replacement Lead starts=%d, want exactly one", leadStarts())
 	}
 	lead := herdr.Pane{PaneID: caller.RootPane.PaneID, TabID: caller.RootPane.TabID, WorkspaceID: caller.Workspace.WorkspaceID}
+	f.leadEnv = setEnv(f.env, "HERDR_ENV", "1")
+	f.leadEnv = setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
+	f.leadEnv = setEnv(f.leadEnv, "HERDR_TAB_ID", lead.TabID)
+	f.leadEnv = setEnv(f.leadEnv, "HERDR_WORKSPACE_ID", lead.WorkspaceID)
+	healthy := f.ride(t, "t2", "Healthy new Rider", "healthy-new-rider")
+	if healthy.Launches != 1 || healthy.State != store.StateWorking || healthy.AgentServerStartedAt != f.snapshot(t).ServerStartedAt || time.Now().UnixMilli() >= retryAt {
+		t.Fatalf("new Rider did not start healthy in the current generation during backoff: %#v", healthy)
+	}
 	state = readRecovery()
-	if state.Status != "pending" || state.Attempts != 1 || state.NextAttemptAt <= time.Now().UnixMilli() {
-		t.Fatalf("early up changed the pending retry episode: %#v", state)
+	if state.Status != "pending" || state.Attempts != 1 || state.NextAttemptAt != retryAt {
+		t.Fatalf("early up changed the pending retry episode: %#v, expected retry_at=%d", state, retryAt)
 	}
 
 	if delay := time.Until(time.UnixMilli(state.NextAttemptAt)); delay > 0 {
 		time.Sleep(delay + 250*time.Millisecond)
 	}
 	pluginEnv := setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"working"}}`, lead.PaneID))
-	for range 4 {
-		runPosse(t, f.binary, f.repo, pluginEnv, "_ingest")
+	if trigger == "plugin-event" {
+		for range 4 {
+			runPosse(t, f.binary, f.repo, pluginEnv, "_ingest")
+		}
+	} else {
+		output = runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
 	}
 	current := f.task(t, "t1")
 	state = readRecovery()
-	if current.State != store.StateWorking || current.Launches != before.Launches+2 || state.Status != "recovered" || state.Attempts != 2 || workerStarts() != 3 || leadStarts() != 1 {
-		t.Fatalf("late plugin events did not retry the Rider once after backoff: before=%#v current=%#v recovery=%#v worker_starts=%d lead_starts=%d", before, current, state, workerStarts(), leadStarts())
+	if current.State != store.StateWorking || current.Launches != before.Launches+2 || state.Status != "recovered" || state.Attempts != 2 || workerStarts() < 4 || leadStarts() != 1 {
+		t.Fatalf("%s did not recover the pending Rider once after backoff: before=%#v current=%#v recovery=%#v worker_starts=%d lead_starts=%d", trigger, before, current, state, workerStarts(), leadStarts())
 	}
-	output = runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
-	if after := f.task(t, "t1"); after.Launches != current.Launches || workerStarts() != 3 {
-		t.Fatalf("recover --all duplicated the completed plugin-event retry: current=%#v after=%#v starts=%d output=%s", current, after, workerStarts(), output)
+	if currentHealthy := f.task(t, "t2"); currentHealthy.Launches != healthy.Launches || currentHealthy.AgentName != healthy.AgentName || workerStarts() != 4 {
+		t.Fatalf("deferred group recovery restarted healthy new Rider: before=%#v after=%#v worker_starts=%d", healthy, currentHealthy, workerStarts())
+	}
+	healthySnapshot := f.snapshot(t)
+	healthyPane, found := herdr.FindPane(healthySnapshot.Panes, healthy.PaneID, healthy.PaneLabel)
+	if !found || healthyPane.Agent == "" || healthyPane.AgentStatus == "exited" || healthyPane.AgentStatus == "stopped" {
+		t.Fatalf("deferred group recovery stopped healthy Rider agent: pane=%#v found=%v", healthyPane, found)
+	}
+	if trigger == "plugin-event" {
+		output = runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
+	} else {
+		for range 4 {
+			runPosse(t, f.binary, f.repo, pluginEnv, "_ingest")
+		}
+	}
+	if after := f.task(t, "t1"); after.Launches != current.Launches || workerStarts() != 4 {
+		t.Fatalf("second recovery trigger duplicated the completed retry: trigger=%s current=%#v after=%#v starts=%d output=%s", trigger, current, after, workerStarts(), output)
+	}
+	if afterHealthy := f.task(t, "t2"); afterHealthy.Launches != healthy.Launches || afterHealthy.AgentName != healthy.AgentName {
+		t.Fatalf("second recovery trigger restarted healthy new Rider: before=%#v after=%#v", healthy, afterHealthy)
 	}
 	if current.MountID != before.MountID || current.Branch != before.Branch {
 		t.Fatalf("retry changed held work identity: before=%#v current=%#v", before, current)

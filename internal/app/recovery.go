@@ -341,6 +341,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, err
 	}
+	deferredGroupRetry := groupRecoveryPending && !groupClosed && !serverRestarted
 	recovered := []string{}
 	pendingRecovery := false
 	failedRecovery := false
@@ -356,6 +357,31 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		// recoverable, but Failed Tasks still require an explicit relaunch.
 		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
+		}
+		if deferredGroupRetry {
+			// The prior group-close snapshot predates the Lead and Riders started
+			// during backoff. Recheck each pane under this recovery claim.
+			currentSnapshot, err := s.snapshot(ctx)
+			if err != nil {
+				return len(recovered), err
+			}
+			snapshot = currentSnapshot
+			task, err = db.TaskByID(ctx, project.ID, beforeRestart.ID)
+			if err != nil {
+				return len(recovered), err
+			}
+			state, err := db.TaskRecovery(ctx, task.ID)
+			if err != nil {
+				return len(recovered), err
+			}
+			if healthyCurrentGenerationRider(task, snapshot, state) {
+				if (state.Status == "pending" || state.Status == "running") && (state.OwnerPID == 0 || !processAlive(state.OwnerPID)) {
+					if _, err := db.SettleTaskRecovery(ctx, task.ID, state); err != nil {
+						return len(recovered), err
+					}
+				}
+				continue
+			}
 		}
 		settled, success, err := s.recoverTask(ctx, db, home, project, cfg, task, claimGeneration, snapshot)
 		if err != nil {
@@ -519,6 +545,19 @@ func pendingGroupRecoveryDue(ctx context.Context, db *store.DB, projectID int64)
 		}
 	}
 	return false, nil
+}
+
+func healthyCurrentGenerationRider(task store.Task, snapshot herdr.Snapshot, state store.TaskRecovery) bool {
+	if snapshot.ServerStartedAt == "" || task.AgentServerStartedAt != snapshot.ServerStartedAt {
+		return false
+	}
+	pane, found := findTaskPane(snapshot.Panes, task)
+	if !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped" {
+		return false
+	}
+	// A detected agent with no recovery episode was not part of the failed
+	// group attempt. Preserve it even while its harness is still initializing.
+	return state.Status == "" || pane.AgentStatus == "working" || pane.AgentStatus == "blocked"
 }
 
 func taskNeedsRestartRecovery(task store.Task, snapshot herdr.Snapshot) bool {
