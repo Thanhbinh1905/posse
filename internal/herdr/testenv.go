@@ -75,10 +75,10 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 		}
 		root = filepath.Dir(configHome)
 	}
-	rootParent := filepath.Dir(root)
-	scratchParent := filepath.Dir(rootParent) == "/tmp" && strings.HasPrefix(filepath.Base(rootParent), "posse-") && strings.HasSuffix(filepath.Base(rootParent), "-scratch")
-	if env["POSSE_TEST_HERDR"] != "1" || !strings.HasPrefix(filepath.Base(root), "posse-e2e-") || (rootParent != "/tmp" && !scratchParent) || !filepath.IsAbs(root) {
-		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* test root"}
+	scratchRoot := filepath.Clean(env["POSSE_E2E_TMP_ROOT"])
+	insideScratch := strings.HasPrefix(scratchRoot, "/tmp/posse-") && strings.HasSuffix(scratchRoot, "-scratch") && inside(scratchRoot, root)
+	if env["POSSE_TEST_HERDR"] != "1" || !strings.HasPrefix(filepath.Base(root), "posse-e2e-") || (filepath.Dir(root) != "/tmp" && !insideScratch) || !filepath.IsAbs(root) {
+		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* root or a fixture under the configured /tmp/posse-*-scratch root"}
 	}
 	for key := range env {
 		if strings.HasPrefix(key, "HERDR_") {

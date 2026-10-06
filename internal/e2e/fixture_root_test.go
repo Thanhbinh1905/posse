@@ -29,7 +29,7 @@ func fixturePrefix(suffix string) string {
 // can reclaim only roots bearing our marker whose owning test has exited.
 func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
-	parent := os.Getenv("POSSE_E2E_TMP_DIR")
+	parent := os.Getenv("POSSE_E2E_TMP_ROOT")
 	if parent == "" {
 		parent = "/tmp"
 	}
@@ -38,9 +38,15 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
-	scratchParent := filepath.Dir(parent) == "/tmp" && strings.HasPrefix(filepath.Base(parent), "posse-") && strings.HasSuffix(filepath.Base(parent), "-scratch")
-	if (parent != "/tmp" && parent != "/var/tmp" && !scratchParent) || !strings.HasPrefix(prefix, "posse-e2e-") {
+	configuredRoot := filepath.Clean(os.Getenv("POSSE_E2E_TMP_ROOT"))
+	customRoot := configuredRoot != "." && filepath.Clean(parent) == configuredRoot && strings.HasPrefix(configuredRoot, "/tmp/posse-") && strings.HasSuffix(configuredRoot, "-scratch")
+	if (parent != "/tmp" && parent != "/var/tmp" && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
+	}
+	if customRoot {
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			t.Fatalf("create isolated E2E scratch root %s: %v", parent, err)
+		}
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {
 		t.Fatalf("reclaim abandoned E2E fixtures: %v", err)
