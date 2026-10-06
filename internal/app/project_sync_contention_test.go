@@ -7,6 +7,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 func TestLocalFetchContentionDoesNotInventRootBehindNotice(t *testing.T) {
@@ -44,5 +45,22 @@ func TestRepositorySyncSkipsAnOverlappingSameTarget(t *testing.T) {
 	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now())
 	if err != nil || result.Status != "skipped" {
 		t.Fatalf("overlapping repository sync = %+v, %v; want skipped", result, err)
+	}
+}
+
+func TestRepositorySyncSkipsAnInterprocessOverlap(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	owner, err := acquireRepositorySyncLock(context.Background(), fixture.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	defer unix.Flock(int(owner.Fd()), unix.LOCK_UN)
+	target := repoTarget{Root: fixture.repo, DefaultBranch: fixture.project.DefaultBranch}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	result, err := fixture.service.syncRepository(ctx, fixture.db, fixture.project, target, time.Now())
+	if err != nil || result.Status != "skipped" {
+		t.Fatalf("interprocess repository overlap = %+v, %v; want skipped", result, err)
 	}
 }

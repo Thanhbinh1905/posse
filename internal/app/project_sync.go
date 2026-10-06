@@ -11,6 +11,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 type projectSyncResult struct {
@@ -131,6 +132,15 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		result.Reason = "origin remote unavailable: " + truncate(strings.TrimSpace(err.Error()), 240)
 		return result, nil
 	}
+	lock, err := acquireRepositorySyncLock(ctx, target.Root)
+	if err != nil {
+		if store.IsBusy(err) {
+			return projectSyncResult{Status: "skipped", Reason: "repository sync already running"}, nil
+		}
+		return result, err
+	}
+	defer lock.Close()
+	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
 	if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
 		// Local contention says nothing about whether origin is ahead. Let
 		// the caller retry instead of creating a misleading root_behind Notice.

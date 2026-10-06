@@ -126,6 +126,11 @@ func (db *DB) FinishMemberPRPoll(ctx context.Context, projectID int64, repo, tok
 	return nil
 }
 
+func (db *DB) ReleaseMemberPRPoll(ctx context.Context, projectID int64, repo, token string) error {
+	_, err := db.ExecContext(ctx, `UPDATE member_pr_poll_state SET claim_until=0,claim_token='' WHERE project_id=? AND repo=? AND claim_token=?`, projectID, repo, token)
+	return err
+}
+
 func (db *DB) ReleasePRPoll(ctx context.Context, projectID int64, token string) error {
 	_, err := db.ExecContext(ctx, `UPDATE project_watch_state SET pr_poll_claim_until=0,pr_poll_claim_token='' WHERE project_id=? AND pr_poll_claim_token=?`, projectID, token)
 	return err

@@ -39,21 +39,37 @@ func gitFetch(ctx context.Context, root string, args ...string) (string, error) 
 }
 
 func acquireRepositoryFetchLock(ctx context.Context, root string) (*os.File, error) {
-	commonDir, err := gitOutput(ctx, root, "rev-parse", "--git-common-dir")
+	commonDir, err := repositoryCommonDir(ctx, root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Git common directory for fetch lock: %w", err)
+	}
+	return acquireFileLock(ctx, filepath.Join(commonDir, "posse-fetch.lock"))
+}
+
+func acquireRepositorySyncLock(ctx context.Context, root string) (*os.File, error) {
+	commonDir, err := repositoryCommonDir(ctx, root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Git common directory for sync lock: %w", err)
+	}
+	return acquireFileLock(ctx, filepath.Join(commonDir, "posse-sync.lock"))
+}
+
+func repositoryCommonDir(ctx context.Context, root string) (string, error) {
+	commonDir, err := gitOutput(ctx, root, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
 	}
 	if !filepath.IsAbs(commonDir) {
 		commonDir = filepath.Join(root, commonDir)
 	}
 	commonDir, err = filepath.Abs(commonDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve Git common directory for fetch lock: %w", err)
+		return "", err
 	}
 	if commonDir, err = filepath.EvalSymlinks(commonDir); err != nil {
-		return nil, fmt.Errorf("resolve Git common directory for fetch lock: %w", err)
+		return "", err
 	}
-	return acquireFileLock(ctx, filepath.Join(commonDir, "posse-fetch.lock"))
+	return commonDir, nil
 }
 
 func isTransientGitFetchLock(err error) bool {

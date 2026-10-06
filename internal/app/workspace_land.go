@@ -453,6 +453,13 @@ func (s *Service) pollWorkspacePullRequestsAndNotify(ctx context.Context, db *st
 	return s.pollWorkspacePullRequestsForRepo(ctx, db, project, cfg, force, onLanded, "", true, true, "")
 }
 
+func finishMemberPRPollOrRelease(ctx context.Context, db *store.DB, projectID int64, repo, token string, polledAt int64) error {
+	if err := db.FinishMemberPRPoll(ctx, projectID, repo, token, polledAt); err != nil {
+		return errors.Join(err, db.ReleaseMemberPRPoll(ctx, projectID, repo, token))
+	}
+	return nil
+}
+
 func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onLanded func(), repoFilter string, claimProject, syncRoot bool, memberClaim string) error {
 	now := time.Now()
 	claim := ""
@@ -469,7 +476,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 	}
 	if memberClaim != "" {
 		defer func() {
-			_ = db.FinishMemberPRPoll(context.Background(), project.ID, repoFilter, memberClaim, time.Now().UnixMilli())
+			_ = finishMemberPRPollOrRelease(context.Background(), db, project.ID, repoFilter, memberClaim, time.Now().UnixMilli())
 		}()
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
@@ -557,7 +564,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			}
 			if claimToken != "" && claimProject {
 				defer func() {
-					if err := db.FinishMemberPRPoll(context.Background(), project.ID, group.repo, claimToken, time.Now().UnixMilli()); err != nil {
+					if err := finishMemberPRPollOrRelease(context.Background(), db, project.ID, group.repo, claimToken, time.Now().UnixMilli()); err != nil {
 						for _, target := range group.targets {
 							results <- pollResult{target: target, err: err}
 						}

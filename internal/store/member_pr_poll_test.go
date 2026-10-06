@@ -59,3 +59,37 @@ func TestMemberPRPollClaimsAreIndependentAndDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMemberPRPollReleaseClearsOnlyTheMatchingClaim(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	first, err := db.ClaimMemberPRPoll(ctx, project.ID, "api", now, time.Minute, false)
+	if err != nil || first == "" {
+		t.Fatalf("claim api: token=%q err=%v", first, err)
+	}
+	if err := db.ReleaseMemberPRPoll(ctx, project.ID, "api", first); err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.ClaimMemberPRPoll(ctx, project.ID, "api", now, time.Minute, false)
+	if err != nil || second == "" {
+		t.Fatalf("reclaim api after release: token=%q err=%v", second, err)
+	}
+	if err := db.ReleaseMemberPRPoll(ctx, project.ID, "api", first); err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, err := db.ClaimMemberPRPoll(ctx, project.ID, "api", now, time.Minute, false); err != nil || duplicate != "" {
+		t.Fatalf("stale release cleared successor claim: token=%q err=%v", duplicate, err)
+	}
+	if err := db.ReleaseMemberPRPoll(ctx, project.ID, "api", second); err != nil {
+		t.Fatal(err)
+	}
+}
