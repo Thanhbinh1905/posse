@@ -17,9 +17,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// All operations except the single preflight readiness failure use the real
-// isolated Herdr server. Replace the original Rider with a separately named
-// agent through public Herdr commands, retaining the reused pane's cwd.
+// Drive the real isolated Herdr server with a foreign Rider-pane occupant and
+// a working Lead, so the test deterministically skips notice prompt delivery.
 type t146ReadinessAdapter struct {
 	*herdr.Client
 	lead     string
@@ -94,21 +93,21 @@ func TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.client.Run(ctx, "pane", "report-agent", f.leadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+	if _, err := f.client.Run(ctx, "pane", "report-agent", f.leadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.client.Call(ctx, "pane.focus", map[string]any{"pane_id": f.userBefore.RootPane.PaneID}); err != nil {
 		t.Fatal(err)
 	}
 	preflight := f.snapshot(t)
-	leadReady := false
+	leadBusy := false
 	for _, pane := range preflight.Panes {
 		if pane.PaneID == f.leadPaneID {
-			leadReady = (pane.AgentStatus == "idle" || pane.AgentStatus == "done") && !pane.Focused && preflight.FocusedPaneID != f.leadPaneID
+			leadBusy = pane.AgentStatus == "working" && !pane.Focused && preflight.FocusedPaneID != f.leadPaneID
 		}
 	}
-	if !leadReady {
-		t.Fatalf("preflight setup did not leave an idle Lead unfocused: snapshot=%#v", preflight)
+	if !leadBusy {
+		t.Fatalf("preflight setup did not leave a working Lead unfocused: snapshot=%#v", preflight)
 	}
 	for _, entry := range f.leadEnv {
 		key, value, ok := strings.Cut(entry, "=")
@@ -123,8 +122,8 @@ func TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard(t *testing.T) {
 	var output bytes.Buffer
 	cli.Out, cli.ErrOut = &output, &output
 	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
-	if adapter.failures != 1 {
-		t.Fatalf("readiness race boundary not exercised: failures=%d exit=%d output=%s", adapter.failures, code, output.String())
+	if adapter.failures != 0 {
+		t.Fatalf("working Lead unexpectedly received a notice prompt: failures=%d exit=%d output=%s", adapter.failures, code, output.String())
 	}
 	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") {
 		t.Fatalf("unproven foreign foreground process was not refused with a typed Teardown error: exit=%d output=%s", code, output.String())

@@ -8,9 +8,11 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -19,6 +21,8 @@ func TestLookoutAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 	defer f.db.Close()
 
 	ctx := context.Background()
+	stopBackgroundLookout(t, f)
+
 	maintenanceTaskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
 		Seq: 90, Type: "ship", Title: "Unrelated landed Task", LandingMode: "local",
 	})
@@ -155,6 +159,38 @@ func TestLookoutAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 	maintenanceTask, err := f.db.TaskByID(ctx, f.project.ID, maintenanceTaskID)
 	if err != nil || maintenanceTask.State != store.StateTornDown {
 		t.Fatalf("unrelated automatic Teardown was not retried after its owner finished: task=%#v err=%v", maintenanceTask, err)
+	}
+}
+
+// The fixture starts a real poll-only Lookout. Its independent reconcile would
+// also time out on the synthetic active Teardown and race this test's Notice
+// delivery. Keep this test focused on the Lead's explicit acknowledgement path.
+func stopBackgroundLookout(t *testing.T, f *prLifecycleFixture) {
+	t.Helper()
+	client := herdr.NewWithEnv("herdr", f.env)
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Fatalf("initial Lookout did not start: %v", lookoutPIDs(f.root))
+	}
+	panes := lookoutPanes(t, client)
+	if len(panes) != 1 {
+		t.Fatalf("initial Lookout tabs = %d, want 1", len(panes))
+	}
+	for _, pid := range lookoutPIDs(f.root) {
+		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
+			t.Fatalf("stop background Lookout: %v", err)
+		}
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 0 }) {
+		t.Fatalf("background Lookout did not stop: %v", lookoutPIDs(f.root))
+	}
+	state, err := f.db.LookoutRecovery(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The foreground Lookout would otherwise restart the poll-only process.
+	state.RetryAt = time.Now().Add(time.Hour).UnixMilli()
+	if err := f.db.SetLookoutRecovery(context.Background(), f.project.ID, state); err != nil {
+		t.Fatal(err)
 	}
 }
 
