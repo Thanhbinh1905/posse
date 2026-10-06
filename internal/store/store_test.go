@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -282,8 +283,86 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 26 {
-		t.Fatalf("applied Goose migration version = %d, want 26", version)
+	if version != 27 {
+		t.Fatalf("applied Goose migration version = %d, want 27", version)
+	}
+}
+
+func TestConfigApprovalMoveMigrationPreservesExistingApprovals(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordConfigApproval(ctx, project.ID, "autonomy.land", "set", "auto", "Use automatic Landing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordConfigApproval(ctx, project.ID, "autonomy.review", "unset", "", "Clear review Autonomy"); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE config_approvals_v26 (
+			id INTEGER PRIMARY KEY,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			key TEXT NOT NULL,
+			action TEXT NOT NULL CHECK (action IN ('set', 'unset')),
+			value TEXT,
+			user_quote TEXT NOT NULL CHECK (length(trim(user_quote)) > 0),
+			at INTEGER NOT NULL,
+			CHECK ((action = 'set' AND value IS NOT NULL) OR (action = 'unset' AND value IS NULL))
+		)`,
+		`INSERT INTO config_approvals_v26 SELECT * FROM config_approvals`,
+		`DROP TABLE config_approvals`,
+		`ALTER TABLE config_approvals_v26 RENAME TO config_approvals`,
+		`DELETE FROM goose_db_version WHERE version_id = 27`,
+		`DELETE FROM posse_migration_checksums WHERE version = 27`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatalf("apply move-approval migration: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `SELECT project_id,key,action,value,user_quote FROM config_approvals ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type approval struct {
+		projectID int64
+		key       string
+		action    string
+		value     sql.NullString
+		quote     string
+	}
+	var approvals []approval
+	for rows.Next() {
+		var item approval
+		if err := rows.Scan(&item.projectID, &item.key, &item.action, &item.value, &item.quote); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		approvals = append(approvals, item)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(approvals) != 2 || approvals[0].projectID != project.ID || approvals[0].key != "autonomy.land" || approvals[0].action != "set" || approvals[0].value.String != "auto" || !approvals[0].value.Valid || approvals[0].quote != "Use automatic Landing" || approvals[1].projectID != project.ID || approvals[1].key != "autonomy.review" || approvals[1].action != "unset" || approvals[1].value.Valid || approvals[1].quote != "Clear review Autonomy" {
+		t.Fatalf("historical approvals after migration = %#v", approvals)
+	}
+	if err := db.RecordConfigApproval(ctx, project.ID, "preferences.lead", "move", filepath.Join("/home", "preferences", "lead.md"), "Move my Lead preferences"); err != nil {
+		t.Fatalf("record move approval after migration: %v", err)
 	}
 }
 
@@ -414,9 +493,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 26 {
+	if version != 27 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 26", version)
+		t.Fatalf("initial Goose migration version = %d, want 27", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -441,7 +520,7 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 
 	db, err = Open(home)
 	if err != nil {
-		t.Fatalf("opening a database at version 25 without migration 12: %v", err)
+		t.Fatalf("opening a database missing migration 12: %v", err)
 	}
 	defer db.Close()
 	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE version_id = 12 AND is_applied = 1`).Scan(&missing); err != nil {
@@ -453,8 +532,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 26 {
-		t.Fatalf("reopened Goose migration version = %d, want 26", version)
+	if version != 27 {
+		t.Fatalf("reopened Goose migration version = %d, want 27", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {

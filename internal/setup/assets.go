@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-//go:embed assets/herdr-plugin.toml assets/pi-worker-guard.ts skills/posse/SKILL.md skills/posse-setup/SKILL.md
+//go:embed assets/herdr-plugin.toml assets/pi-worker-guard.ts assets/lead-guidance.md skills/posse/SKILL.md skills/posse-setup/SKILL.md
 var files embed.FS
 
 func PluginManifest(binary, version string) ([]byte, error) {
@@ -35,6 +35,10 @@ func PiWorkerGuard(binary string) ([]byte, error) {
 		return nil, fmt.Errorf("pi guard template has unresolved placeholders")
 	}
 	return []byte(contents), nil
+}
+
+func LeadGuidance() ([]byte, error) {
+	return files.ReadFile("assets/lead-guidance.md")
 }
 
 func Skill(name string) ([]byte, error) {
