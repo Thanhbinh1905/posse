@@ -241,7 +241,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 				}
 				openIntentActive = true
-				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", "", "", "", "")
+				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", "", "", "", "", false)
 				if openErr != nil {
 					return openErr
 				}
@@ -283,9 +283,9 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 	return s.mergePullRequest(out, db, project, cfg, task, userQuote)
 }
 
-func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string) (string, bool, error) {
+func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool) (string, bool, error) {
 	if forge.Kind == "gitlab" {
-		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk)
+		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy)
 	}
 	args := []string{"pr", "list", "--state", "open", "--base", project.DefaultBranch, "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
 	var urlValue, lastHead string
@@ -310,6 +310,15 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 				if err := validatePullRequestOrigin(ctx, project.Root, urlValue); err != nil {
 					return "", false, err
 				}
+				if err := validateWorkerPullRequest(ctx, project, task, forge, urlValue, task.GatedSHA); err != nil {
+					return "", false, err
+				}
+				// Land may adopt an existing PR but has no new Rider metadata to publish.
+				if summary != "" {
+					if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, urlValue, member, summary, verification, proof, risk, refreshLegacy); err != nil {
+						return "", false, err
+					}
+				}
 				return urlValue, false, nil
 			}
 		}
@@ -326,11 +335,15 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if foundOpenPR {
 		return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
 	}
+	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, "")
+	if err != nil {
+		return "", false, err
+	}
 	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
 	if err != nil {
 		return "", false, err
 	}
-	created, err := runOutputStep(ctx, db, intent, "pr.create", project.Root, "gh", "pr", "create", "--base", project.DefaultBranch, "--head", task.Branch, "--title", title, "--body", body)
+	created, err := runOutputStep(ctx, db, intent, "pr.create", project.Root, "gh", "pr", "create", "--base", project.DefaultBranch, "--head", task.Branch, "--title", title, "--body", managedPublishBody(body, token))
 	if err != nil {
 		return "", false, axi.Failure("pr_create_failed", "could not open the pull request", true, truncate(err.Error(), 1200))
 	}
@@ -341,7 +354,76 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if err := validatePullRequestOrigin(ctx, project.Root, urlValue); err != nil {
 		return "", false, err
 	}
+	if err := db.BindPRBodyMarker(ctx, task.ID, member, urlValue, token); err != nil {
+		return "", false, err
+	}
 	return urlValue, true, nil
+}
+
+func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, intent store.Intent, project store.Project, task store.Task, forge repositoryForge, prURL, member, summary, verification, proof, risk string, refreshLegacy bool) error {
+	title, nextBody, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
+	if err != nil {
+		return err
+	}
+	var existingTitle, existingBody string
+	if forge.Kind == "gitlab" {
+		number, err := forgeReference(prURL, forge)
+		if err != nil {
+			return err
+		}
+		endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests/" + strconv.Itoa(number)
+		output, err := runOutputStep(ctx, db, intent, "pr.refresh.read", forge.Root, "glab", "api", "--hostname", forge.Host, endpoint)
+		if err != nil {
+			return axi.Failure("pr_refresh_failed", "could not read the existing merge request metadata", true, err.Error())
+		}
+		var mr gitlabMergeRequest
+		if err := json.Unmarshal([]byte(output), &mr); err != nil || mr.WebURL != prURL {
+			return axi.Failure("pr_refresh_failed", "GitLab returned invalid merge request metadata", true, output)
+		}
+		existingTitle, existingBody = mr.Title, mr.Description
+	} else {
+		output, err := runOutputStep(ctx, db, intent, "pr.refresh.read", forge.Root, "gh", "pr", "view", prURL, "--json", "title,body")
+		if err != nil {
+			return axi.Failure("pr_refresh_failed", "could not read the existing pull request metadata", true, err.Error())
+		}
+		var pull struct {
+			Title string `json:"title"`
+			Body  string `json:"body"`
+		}
+		if err := json.Unmarshal([]byte(output), &pull); err != nil {
+			return axi.Failure("pr_refresh_failed", "gh returned invalid pull request metadata", true, err.Error())
+		}
+		existingTitle, existingBody = pull.Title, pull.Body
+	}
+	_, markerErr := db.GetPRBodyMarker(ctx, task.ID, member)
+	if store.IsNotFound(markerErr) && hasUnownedTokenizedPublishMarkerPair(existingBody) {
+		return missingPRBodyMarkerError()
+	}
+	if markerErr != nil && !store.IsNotFound(markerErr) {
+		return markerErr
+	}
+	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, prURL)
+	if err != nil {
+		return err
+	}
+	nextBody, err = refreshPublishBody(existingBody, nextBody, token, refreshLegacy)
+	if err != nil {
+		return err
+	}
+	if existingTitle == title && existingBody == nextBody {
+		return nil
+	}
+	if forge.Kind == "gitlab" {
+		number, _ := forgeReference(prURL, forge)
+		endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests/" + strconv.Itoa(number)
+		_, err = runOutputStep(ctx, db, intent, "pr.refresh.write", forge.Root, "glab", "api", "--hostname", forge.Host, "--method", "PUT", "--raw-field", "title="+title, "--raw-field", "description="+nextBody, endpoint)
+	} else {
+		_, err = runOutputStep(ctx, db, intent, "pr.refresh.write", forge.Root, "gh", "pr", "edit", prURL, "--title", title, "--body", nextBody)
+	}
+	if err != nil {
+		return axi.Failure("pr_refresh_failed", "could not refresh Posse-owned pull request metadata", true, err.Error())
+	}
+	return nil
 }
 
 func openPullRequestForBranch(output, branch string) (string, string, bool, error) {

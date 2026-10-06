@@ -104,7 +104,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--profile <name>]", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
 		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p] [--from-leftover <decision>]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
 		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note>", Summary: "Record a Rider's Signal.", Handler: s.signal},
-		{Name: "publish", Usage: "$ publish [--repo <member>] <summary> [--verify <command -> result>] [--proof <markdown>] [--risk <markdown>]", Summary: "Push this PR-mode Ship Task's branch and open or reuse its pull request.", Handler: s.publish},
+		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>] [--proof <markdown>] [--risk <markdown>]", Summary: "Push this PR-mode Ship Task's branch and open or refresh its pull request.", Handler: s.publish},
 		{Name: "brief", Summary: "Reprint this Rider's launch Brief.", Handler: s.brief},
 		{Name: "send", Usage: "$ send <task> <message> [--queue]", Summary: "Deliver to an unfocused ready Rider, steering supported kinds mid-turn; --queue waits for idle.", Handler: s.send},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},
