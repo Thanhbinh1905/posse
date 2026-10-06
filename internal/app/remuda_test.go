@@ -103,6 +103,16 @@ func TestUnsaddleFailedTaskDoesNotResetMountReusedByAnotherTask(t *testing.T) {
 	}
 }
 
+func TestProcMapPathPreservesSpacesAndRejectsAnonymousMappings(t *testing.T) {
+	line := "7f100000-7f101000 r--s 00000000 00:33 12345                   /tmp/cache  with spaces/file (deleted)"
+	if got, want := procMapPath(line), "/tmp/cache  with spaces/file (deleted)"; got != want {
+		t.Fatalf("mapped path = %q, want %q", got, want)
+	}
+	if got := procMapPath("7f100000-7f101000 r--p 00000000 00:00 0"); got != "" {
+		t.Fatalf("anonymous mapping path = %q, want empty", got)
+	}
+}
+
 func TestPruneCandidatesRemoveOnlyExcessIdleAndCleanBrokenMounts(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")

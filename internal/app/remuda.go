@@ -107,8 +107,16 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 		rows = append(rows, map[string]any{"kind": item.kind, "item": item.label, "path": item.path, "state": item.state, "size_bytes": item.bytes, "reason": item.reason})
 	}
 	if parsed.Bool("yes") {
-		for _, item := range items {
+		for index, item := range items {
 			if err := s.applyPruneItem(ctx.Context, db, home, project, item); err != nil {
+				var commandError *axi.Error
+				if errors.As(err, &commandError) && commandError.Code == "prune_skipped" {
+					if row, ok := rows[index].(map[string]any); ok {
+						row["state"] = "skipped"
+						row["reason"] = commandError.Message
+					}
+					continue
+				}
 				return err
 			}
 		}
@@ -136,7 +144,7 @@ func (s *Service) applyScratchPruneItem(ctx context.Context, db *store.DB, home 
 		if err != nil {
 			return axi.Failure("prune_incomplete", err.Error(), true, "Repair the Task scratch path, then retry `posse remuda prune`")
 		}
-		if _, err := stopOwnedProcesses([]ownedProcessRoot{{path: root, includeOpenFiles: true}}); err != nil {
+		if _, err := stopOwnedProcesses([]ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true}}); err != nil {
 			return axi.Failure("prune_incomplete", err.Error(), true, "Resolve Task scratch processes, then retry `posse remuda prune`")
 		}
 		if err := removeTaskScratch(home, project, store.Task{Seq: item.seq}); err != nil {
@@ -183,9 +191,19 @@ func (s *Service) applyBranchPruneItem(ctx context.Context, db *store.DB, projec
 			return err
 		}
 		if strings.TrimSpace(sha) != item.sha {
-			return fmt.Errorf("refuse to prune branch %s after its tip changed", item.label)
+			return skippedPruneBranch(item, "branch tip changed since prune was planned")
 		}
-		_, err = gitOutput(ctx, item.path, "branch", "-D", "--", item.label)
+		_, err = gitOutput(ctx, item.path, "update-ref", "-d", ref, item.sha)
+		if err == nil {
+			return nil
+		}
+		currentSHA, readErr := gitOutput(ctx, item.path, "rev-parse", "--verify", ref)
+		if readErr != nil && isMissingGitRef(readErr) || readErr == nil && strings.TrimSpace(currentSHA) != item.sha {
+			return skippedPruneBranch(item, "branch ref changed before it could be deleted")
+		}
+		if readErr != nil {
+			return errors.Join(err, readErr)
+		}
 		return err
 	})
 }
@@ -833,9 +851,14 @@ func breakMount(ctx context.Context, db *store.DB, project store.Project, task s
 	return err
 }
 
+func skippedPruneBranch(item pruneItem, reason string) error {
+	return axi.Failure("prune_skipped", fmt.Sprintf("branch %s was skipped: %s", item.label, reason), false)
+}
+
 type ownedProcessRoot struct {
-	path             string
-	includeOpenFiles bool
+	path               string
+	includeOpenFiles   bool
+	includeMappedFiles bool
 }
 
 type ownedProcess struct {
@@ -871,7 +894,7 @@ func stopTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, proj
 	if err != nil {
 		return nil, err
 	}
-	roots = append(roots, ownedProcessRoot{path: scratch, includeOpenFiles: true})
+	roots = append(roots, ownedProcessRoot{path: scratch, includeOpenFiles: true, includeMappedFiles: true})
 	return stopOwnedProcesses(roots)
 }
 
@@ -1029,7 +1052,35 @@ func processReferencesRoots(pid int, roots []ownedProcessRoot) bool {
 			}
 		}
 	}
+	for _, root := range roots {
+		if !root.includeMappedFiles {
+			continue
+		}
+		maps, err := os.ReadFile(filepath.Join(procRoot, "maps"))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(maps), "\n") {
+			mappedPath := procMapPath(line)
+			if mappedPath != "" && processPathInsideRoot(mappedPath, root.path) {
+				return true
+			}
+		}
+	}
 	return false
+}
+
+func procMapPath(line string) string {
+	remaining := line
+	for field := 0; field < 5; field++ {
+		remaining = strings.TrimLeft(remaining, " ")
+		separator := strings.IndexByte(remaining, ' ')
+		if separator < 0 {
+			return ""
+		}
+		remaining = remaining[separator+1:]
+	}
+	return strings.TrimLeft(remaining, " ")
 }
 
 func processPathInsideRoot(path, root string) bool {

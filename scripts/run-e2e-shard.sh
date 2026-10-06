@@ -89,6 +89,9 @@ assignments='
 4 TestPruneRechecksScratchAfterConcurrentRide
 4 TestPruneReclaimsOrphanOpenCacheStorage
 4 TestTeardownStopsTaskProcessesAndPruneProtectsHeldBranches
+4 TestPrunePreservesBranchAdvancedAfterFinalCheck
+4 TestPruneReclaimsMappedCacheStorage
+4 TestRiderMappingIsStoppedBeforeRelease
 '
 
 validate_assignments() {
