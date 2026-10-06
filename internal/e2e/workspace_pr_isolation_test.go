@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,7 +19,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls(t *testing.T) {
+func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) {
 	root := newFixtureRoot(t, herdr.TestRootName())
 	binDir := filepath.Join(root, "bin")
 	workspace := filepath.Join(root, "stack")
@@ -182,8 +184,42 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	blackhole, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetchStarted := make(chan struct{}, 1)
+	releaseFetch := make(chan struct{})
+	var releaseFetchOnce sync.Once
+	releaseBlackhole := func() {
+		releaseFetchOnce.Do(func() {
+			close(releaseFetch)
+			_ = blackhole.Close()
+		})
+	}
+	go func() {
+		for {
+			connection, acceptErr := blackhole.Accept()
+			if acceptErr != nil {
+				return
+			}
+			select {
+			case fetchStarted <- struct{}{}:
+			default:
+			}
+			go func(connection net.Conn) {
+				<-releaseFetch
+				_ = connection.Close()
+			}(connection)
+		}
+	}()
+	offlineRoot := filepath.Join(workspace, "offline")
+	gitTest(t, env, offlineRoot, "config", "--unset-all", "url.file://"+filepath.Join(root, "offline.git")+".insteadOf")
+	gitTest(t, env, offlineRoot, "config", "url.http://"+blackhole.Addr().String()+"/.insteadOf", "https://vpn-t181.invalid/")
+
 	lookoutPaneID := ""
 	t.Cleanup(func() {
+		releaseBlackhole()
 		_ = os.WriteFile(releaseStall, []byte("release\n"), 0o600)
 		if lookoutPaneID != "" {
 			_, _ = client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c")
@@ -204,7 +240,14 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls(t *testing.T) {
 		_, err := os.Stat(stallStarted)
 		return err == nil
 	}) {
-		t.Fatal("offline Member forge query did not enter its deliberate stall")
+		calls, _ := os.ReadFile(ghLog)
+		screen, _ := client.Run(context.Background(), "pane", "read", lookoutPaneID, "--lines", "30")
+		t.Fatalf("offline Member forge query did not enter its deliberate stall: gh calls=%s lookout=%s", calls, screen)
+	}
+	select {
+	case <-fetchStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("offline Member git fetch did not connect to the deliberate blackhole")
 	}
 
 	if !waitForCondition(7*time.Second, func() bool {
@@ -212,7 +255,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls(t *testing.T) {
 		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
 		landed, landedErr := db.TaskByID(context.Background(), project.ID, preLanded.ID)
 		healthy, healthyErr := db.TaskByID(context.Background(), project.ID, good.ID)
-		return observationErr == nil && observation.State == "MERGED" && watchErr == nil && watch.CheckoutCheckedAt > 0 && landedErr == nil && landed.State == store.StateTornDown && healthyErr == nil && healthy.State == store.StateTornDown
+		return observationErr == nil && observation.State == "MERGED" && watchErr == nil && watch.CheckoutCheckedAt == 0 && landedErr == nil && landed.State == store.StateTornDown && healthyErr == nil && healthy.State == store.StateTornDown
 	}) {
 		observation, observationErr := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
 		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
@@ -231,11 +274,12 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls(t *testing.T) {
 	if err != nil || currentGood.State != store.StateTornDown {
 		t.Fatalf("healthy merged Member Task was not auto-torn down during the offline forge stall: %#v, %v", currentGood, err)
 	}
-	for _, name := range []string{"offline", "good"} {
-		watch, err := db.ProjectRepoWatchState(context.Background(), project.ID, name)
-		if err != nil || watch.CheckoutCheckedAt == 0 || watch.CheckoutStatus == "unknown" {
-			t.Fatalf("Member %s checkout status = %#v, %v", name, watch, err)
-		}
+	goodWatch, err := db.ProjectRepoWatchState(context.Background(), project.ID, "good")
+	if err != nil || goodWatch.CheckoutCheckedAt == 0 || goodWatch.CheckoutStatus == "unknown" {
+		t.Fatalf("healthy Member checkout status = %#v, %v", goodWatch, err)
+	}
+	if offlineWatch, err := db.ProjectRepoWatchState(context.Background(), project.ID, "offline"); err != nil || offlineWatch.CheckoutCheckedAt != 0 {
+		t.Fatalf("blackholed Member checkout unexpectedly completed during Teardown: %#v, %v", offlineWatch, err)
 	}
 	ghCalls, err := os.ReadFile(ghLog)
 	if err != nil || !strings.Contains(string(ghCalls), "pr view https://github.com/acme/good/pull/2") {
@@ -244,22 +288,25 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls(t *testing.T) {
 	if err := os.WriteFile(releaseStall, []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	releaseBlackhole()
 	if !waitForCondition(5*time.Second, func() bool {
 		notices, err := db.Notices(context.Background(), project.ID, false)
 		if err != nil {
 			return false
 		}
+		foundFailure := false
 		for _, notice := range notices {
 			if notice.TaskID == offline.ID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "offline") {
-				return true
+				foundFailure = true
 			}
 		}
-		return false
+		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
+		return foundFailure && watchErr == nil && watch.CheckoutCheckedAt > 0 && watch.CheckoutStatus == "root_behind"
 	}) {
-		t.Fatal("released offline forge failure was not recorded against its Member Task")
+		t.Fatal("released forge failure and blackholed checkout failure were not recorded against the offline Member")
 	}
 	if _, err := client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c"); err != nil {
 		t.Errorf("stop isolated Lookout: %v", err)
 	}
-	t.Logf("while offline PR query remained stalled, healthy Member observation, checkout polling, and landed Task Teardown all completed")
+	t.Logf("while offline PR query and git fetch remained stalled, the healthy Member observation and landed-Task Teardown completed; failures became visible after release")
 }

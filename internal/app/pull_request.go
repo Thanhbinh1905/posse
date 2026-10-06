@@ -648,8 +648,12 @@ func validatePullRequestOrigin(ctx context.Context, root, value string) error {
 }
 
 func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) error {
+	return s.pollProjectPullRequestsWithLandedCallback(ctx, db, project, cfg, force, nil)
+}
+
+func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onWorkspaceTaskLanded func()) error {
 	if project.IsWorkspace() {
-		return s.pollWorkspacePullRequests(ctx, db, project, cfg, force)
+		return s.pollWorkspacePullRequestsAndNotify(ctx, db, project, cfg, force, onWorkspaceTaskLanded)
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {

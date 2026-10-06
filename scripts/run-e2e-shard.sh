@@ -86,7 +86,7 @@ assignments='
 4 TestDownDoesNotSignalUnrelatedExecutableNamedLookout
 4 TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault
 4 TestRideCrashImmediatelyAfterTaskCreationIsRecovered
-4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls
+4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall
 '
 
 validate_assignments() {

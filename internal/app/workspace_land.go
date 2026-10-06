@@ -446,6 +446,10 @@ func prefixFailure(repo string, err error) error {
 // pollWorkspacePullRequests watches every open member pull request of the
 // Project's landing Tasks and records what changed.
 func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) error {
+	return s.pollWorkspacePullRequestsAndNotify(ctx, db, project, cfg, force, nil)
+}
+
+func (s *Service) pollWorkspacePullRequestsAndNotify(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onLanded func()) error {
 	now := time.Now()
 	claim, err := db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
 	if err != nil {
@@ -608,7 +612,11 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 				continue
 			}
 		}
-		landedAny = landedAny || (recorded && memberEffect.RepoState == store.TaskRepoLanded)
+		newlyLanded := recorded && memberEffect.RepoState == store.TaskRepoLanded
+		landedAny = landedAny || newlyLanded
+		if newlyLanded && onLanded != nil {
+			onLanded()
+		}
 	}
 	if processingErr != nil {
 		return processingErr

@@ -325,6 +325,16 @@ func leadAgentStarted(project store.Project, snapshot herdr.Snapshot) bool {
 }
 
 func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories bool) (config.Config, error) {
+	return s.prepareProjectModeWithRecoveryPolicy(ctx, db, project, allowRecovery, pollRepositories, true)
+}
+
+// prepareProjectLocalRecovery reconciles durable local state without invoking
+// forge CLIs or refreshing repositories before the Lead is running.
+func (s *Service) prepareProjectLocalRecovery(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectModeWithRecoveryPolicy(ctx, db, project, false, false, false)
+}
+
+func (s *Service) prepareProjectModeWithRecoveryPolicy(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery bool) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
 		_ = s.regenerateProjects(ctx, db)
@@ -374,7 +384,7 @@ func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project 
 				}
 			} else {
 				herdrReady = true
-				allowNetworkRecovery = allowNetworkRecovery || leadAgentStarted(project, result.Snapshot)
+				allowNetworkRecovery = allowNetworkRecovery || allowRunningLeadNetworkRecovery && leadAgentStarted(project, result.Snapshot)
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 					return cfg, err
 				}

@@ -267,9 +267,9 @@ func resetMount(ctx context.Context, path string, project store.Project, clean s
 	return resetWorktree(ctx, path, projectRepoTarget(project), clean, true)
 }
 
-// resetWorktree detaches a Mount worktree at the repository's fresh default
-// branch and cleans it. fetch is false for workspace members a Task does not
-// request, which are reset to what the last fetch saw.
+// resetWorktree detaches a Mount worktree at the repository's default branch
+// and cleans it. Teardown and unrequested workspace Members use the last fetched
+// ref; acquisition fetches before new work starts.
 func resetWorktree(ctx context.Context, path string, target repoTarget, clean string, fetch bool) error {
 	ref, remote := mountDefaultRef(ctx, target)
 	if remote && fetch {
@@ -505,7 +505,9 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 	if project.IsWorkspace() {
 		resetErr = releaseWorkspaceMount(ctx, db, project, mount, clean)
 	} else {
-		resetErr = resetMount(ctx, mount.Path, project, clean)
+		// Teardown is local and must not wait on origin. The next Mount
+		// acquisition fetches before starting new work.
+		resetErr = resetWorktree(ctx, mount.Path, projectRepoTarget(project), clean, false)
 	}
 	if err := resetErr; err != nil {
 		if breakErr := breakMount(ctx, db, project, task, mount, "Mount could not be reset during release"); breakErr != nil {
