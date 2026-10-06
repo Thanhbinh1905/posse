@@ -83,8 +83,10 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 			break
 		}
 	}
-	if env["POSSE_TEST_HERDR"] != "1" || !strings.HasPrefix(filepath.Base(root), "posse-e2e-") || !insideTemp || !filepath.IsAbs(root) {
-		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* or /var/tmp/posse-e2e-* test root"}
+	scratchRoot := filepath.Clean(env["POSSE_E2E_TMP_ROOT"])
+	insideScratch := safeTaskScratchRoot(scratchRoot) && inside(scratchRoot, root)
+	if env["POSSE_TEST_HERDR"] != "1" || !strings.HasPrefix(filepath.Base(root), "posse-e2e-") || !insideTemp && !insideScratch || !filepath.IsAbs(root) {
+		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* or /var/tmp/posse-e2e-* root, or a fixture under POSSE_E2E_TMP_ROOT"}
 	}
 	for key := range env {
 		if strings.HasPrefix(key, "HERDR_") {
@@ -113,6 +115,18 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr config must disable background update network checks"}
 	}
 	return root, nil
+}
+
+func safeTaskScratchRoot(root string) bool {
+	if filepath.Clean(root) != root || filepath.Dir(root) != "/tmp" || !strings.HasPrefix(filepath.Base(root), "posse-") || !strings.HasSuffix(filepath.Base(root), "-scratch") {
+		return false
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	return err == nil && resolved == root
 }
 
 func isolatedDefaultShell(config string) string {
