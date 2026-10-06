@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -356,8 +357,8 @@ func TestUpdateNoticeOncePerReleaseAndDailyCache(t *testing.T) {
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = server.URL
-	if _, ok := service.cachedRelease(context.Background()); !ok {
-		t.Fatal("failed to seed the fresh update cache")
+	if err := writeUpdateCache(home, updateCache{Checked: time.Now(), Release: githubRelease{Tag: "v0.2.0"}}); err != nil {
+		t.Fatal(err)
 	}
 	for range 3 {
 		if _, ok := service.availableUpdate(context.Background(), db, &project); !ok {
@@ -365,7 +366,7 @@ func TestUpdateNoticeOncePerReleaseAndDailyCache(t *testing.T) {
 		}
 	}
 	notices, err := db.Notices(context.Background(), project.ID, false)
-	if err != nil || len(notices) != 1 || notices[0].Kind != "update_available" || calls != 1 {
+	if err != nil || len(notices) != 1 || notices[0].Kind != "update_available" || calls != 0 {
 		t.Fatalf("notices=%v calls=%d err=%v", notices, calls, err)
 	}
 }
@@ -395,6 +396,29 @@ func TestAvailableUpdateDoesNotFetchWithColdCache(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("cold cache fetched a release: %d request(s)", calls)
+	}
+}
+
+func TestUpdateCheckPersistsLatestReleaseForFutureUp(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.2.0"})
+	}))
+	defer server.Close()
+	service := testService(t.TempDir(), nil)
+	service.Version = "0.1.0"
+	service.updateURL = server.URL
+	if code, output := runCLI(t, service, "update", "--check"); code != 0 {
+		t.Fatalf("update --check: %d %s", code, output)
+	}
+	if release, ok := service.readCachedRelease(); !ok || release.Tag != "v0.2.0" {
+		t.Fatalf("latest release was not cached: %#v %t", release, ok)
+	}
+	ctx := &axi.Context{Context: context.Background(), Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}, JSON: true}
+	known, err := service.offerUpUpdate(ctx, nil)
+	if err != nil || !known || calls != 1 {
+		t.Fatalf("future up cache lookup: known=%t calls=%d err=%v", known, calls, err)
 	}
 }
 

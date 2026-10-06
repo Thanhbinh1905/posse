@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -29,5 +30,19 @@ func TestLocalFetchContentionDoesNotInventRootBehindNotice(t *testing.T) {
 	}
 	if countNoticeKind(notices, "root_behind") != 0 {
 		t.Fatalf("local contention invented a root-behind warning: %#v", notices)
+	}
+}
+
+func TestRepositorySyncSkipsAnOverlappingSameTarget(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	target := repoTarget{Root: fixture.repo, DefaultBranch: fixture.project.DefaultBranch}
+	key := repositorySyncKey(fixture.project, target)
+	if !fixture.service.beginMaintenance(key) {
+		t.Fatal("could not reserve repository sync target")
+	}
+	defer fixture.service.endMaintenance(key)
+	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now())
+	if err != nil || result.Status != "skipped" {
+		t.Fatalf("overlapping repository sync = %+v, %v; want skipped", result, err)
 	}
 }

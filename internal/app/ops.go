@@ -92,21 +92,16 @@ func (s *Service) startWorkspaceCheckoutSync(ctx context.Context, db *store.DB, 
 			continue
 		}
 		target := target
-		key := fmt.Sprintf("checkout:%d:%s", project.ID, target.Name)
-		if !s.beginMaintenance(key) {
-			continue
-		}
 		go func() {
-			defer s.endMaintenance(key)
 			result, syncErr := s.syncRepository(ctx, db, project, target, now)
-			if syncErr == nil {
+			if syncErr == nil && result.Status != "skipped" {
 				reason := result.Reason
 				if reason == "" && result.Err != nil {
 					reason = truncate(strings.TrimSpace(result.Err.Error()), 240)
 				}
 				syncErr = db.RecordRepoCheckout(ctx, project.ID, target.Name, now.UnixMilli(), result.Status, reason)
 			}
-			if syncErr == nil {
+			if syncErr == nil && result.Status != "skipped" {
 				syncErr = db.RecordCheckoutAttempt(ctx, project.ID, now.UnixMilli())
 			}
 			if syncErr != nil && !store.IsBusy(syncErr) {
@@ -118,18 +113,13 @@ func (s *Service) startWorkspaceCheckoutSync(ctx context.Context, db *store.DB, 
 }
 
 func (s *Service) startLandedMemberSync(ctx context.Context, db *store.DB, project store.Project, repo string) {
-	key := fmt.Sprintf("land-sync:%d:%s", project.ID, repo)
-	if !s.beginMaintenance(key) {
-		return
-	}
 	go func() {
-		defer s.endMaintenance(key)
+		var result projectSyncResult
 		target, err := s.projectTarget(ctx, db, project, repo)
 		if err == nil {
 			now := time.Now()
-			var result projectSyncResult
 			result, err = s.syncRepository(ctx, db, project, target, now)
-			if err == nil {
+			if err == nil && result.Status != "skipped" {
 				reason := result.Reason
 				if reason == "" && result.Err != nil {
 					reason = truncate(strings.TrimSpace(result.Err.Error()), 240)
@@ -137,7 +127,7 @@ func (s *Service) startLandedMemberSync(ctx context.Context, db *store.DB, proje
 				err = db.RecordRepoCheckout(ctx, project.ID, repo, now.UnixMilli(), result.Status, reason)
 			}
 		}
-		if err == nil {
+		if err == nil && result.Status != "skipped" {
 			err = db.RecordCheckoutAttempt(ctx, project.ID, time.Now().UnixMilli())
 		}
 		if err != nil && !store.IsBusy(err) {

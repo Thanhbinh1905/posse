@@ -106,7 +106,7 @@ func Open(home string) (*DB, error) {
 }
 
 func OpenAt(path string) (*DB, error) {
-	return openAt(path, 15*time.Second)
+	return openAt(path, 5*time.Second)
 }
 
 func openAt(path string, timeout time.Duration) (*DB, error) {

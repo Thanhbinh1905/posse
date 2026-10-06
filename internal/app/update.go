@@ -103,29 +103,15 @@ func (s *Service) readCachedRelease() (githubRelease, bool) {
 	return githubRelease{}, false
 }
 
-func (s *Service) cachedRelease(ctx context.Context) (githubRelease, bool) {
-	if release, ok := s.readCachedRelease(); ok {
-		return release, true
-	}
-	home, err := s.homePath()
+func writeUpdateCache(home string, cache updateCache) error {
+	data, err := json.Marshal(cache)
 	if err != nil {
-		return githubRelease{}, false
+		return err
 	}
-	cachePath := filepath.Join(home, "update-check.json")
-	// Record the attempt, including failures, to avoid polling while offline.
-	cache := updateCache{Checked: time.Now()}
-	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	release, err := s.fetchRelease(probe, "")
-	if err == nil {
-		cache.Release = release
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
 	}
-	if data, err := json.Marshal(cache); err == nil {
-		if os.MkdirAll(home, 0o700) == nil {
-			_ = atomicfile.Write(cachePath, data, 0o600)
-		}
-	}
-	return cache.Release, err == nil
+	return atomicfile.Write(filepath.Join(home, "update-check.json"), data, 0o600)
 }
 func newerVersion(current, latest string) bool {
 	if current == "dev" || !releaseVersion.MatchString(latest) {
@@ -185,6 +171,11 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 		return axi.Failure("release_unavailable", message, true, "Retry when GitHub is reachable")
 	}
 	if parsed.Bool("check") {
+		if tag == "" {
+			if err := writeUpdateCache(home, updateCache{Checked: time.Now(), Release: release}); err != nil {
+				return axi.Failure("update_cache_failed", "could not save the release check: "+err.Error(), true, "Retry `posse update --check`")
+			}
+		}
 		help := []any{updateInstallHelp}
 		if len(lookouts) > 0 {
 			help = append(help, "Stop running lookouts with `posse update --stop-lookouts` before installing")

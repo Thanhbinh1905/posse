@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -72,6 +73,21 @@ func upReleaseFixture(t *testing.T, script string) (home, binary, url string, cl
 	return home, binary, server.URL, server.Close, &n
 }
 
+func seedCachedRelease(t *testing.T, service *Service) {
+	t.Helper()
+	release, err := service.fetchRelease(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := service.homePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeUpdateCache(home, updateCache{Checked: time.Now(), Release: release}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUpOffersUpdateBeforeRegistrationThenReexecsExactArguments(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("uses a shell fixture")
@@ -81,9 +97,7 @@ func TestUpOffersUpdateBeforeRegistrationThenReexecsExactArguments(t *testing.T)
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = url
-	if _, ok := service.cachedRelease(context.Background()); !ok {
-		t.Fatal("failed to seed the fresh update cache")
-	}
+	seedCachedRelease(t, service)
 	userShellUpdatePane(t, service)
 	prompted := 0
 	service.updateConfirm = func(_ io.Writer, question string) (bool, bool, error) {
@@ -151,9 +165,7 @@ func TestUpDeclineAndNonInteractiveDoNotInstallEvenWithYes(t *testing.T) {
 			service := testService(home, nil)
 			service.Version = "0.1.0"
 			service.updateURL = url
-			if _, ok := service.cachedRelease(context.Background()); !ok {
-				t.Fatal("failed to seed the fresh update cache")
-			}
+			seedCachedRelease(t, service)
 			userShellUpdatePane(t, service)
 			service.updateConfirm = func(io.Writer, string) (bool, bool, error) { return false, tc.interactive, nil }
 			code, output := runCLI(t, service, "up", "--yes")
@@ -210,9 +222,7 @@ func TestUpUpdateMigrationRefusalDoesNotRegisterOrReplaceBinary(t *testing.T) {
 	service := testService(home, nil)
 	service.Version = "0.1.0"
 	service.updateURL = url
-	if _, ok := service.cachedRelease(context.Background()); !ok {
-		t.Fatal("failed to seed the fresh update cache")
-	}
+	seedCachedRelease(t, service)
 	userShellUpdatePane(t, service)
 	service.updateConfirm = func(io.Writer, string) (bool, bool, error) { return true, true, nil }
 	code, output := runCLI(t, service, "up")

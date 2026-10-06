@@ -39,6 +39,10 @@ type repoSyncResult struct {
 	projectSyncResult
 }
 
+func repositorySyncKey(project store.Project, target repoTarget) string {
+	return fmt.Sprintf("sync:%d:%s", project.ID, target.Name)
+}
+
 // syncProjectRepos fast-forwards the default branch of every repository of the
 // Project (the Project itself, or each member of a workspace) when that is safe.
 func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) ([]repoSyncResult, error) {
@@ -73,6 +77,7 @@ func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project st
 	var workers sync.WaitGroup
 	var errorMu sync.Mutex
 	var firstErr error
+	attempted := false
 	for index, target := range targets {
 		if !due[index] {
 			continue
@@ -81,7 +86,12 @@ func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project st
 		go func(index int, target repoTarget) {
 			defer workers.Done()
 			result, syncErr := s.syncRepository(ctx, db, project, target, now)
-			if syncErr == nil && project.IsWorkspace() {
+			if syncErr == nil && result.Status != "skipped" {
+				errorMu.Lock()
+				attempted = true
+				errorMu.Unlock()
+			}
+			if syncErr == nil && project.IsWorkspace() && result.Status != "skipped" {
 				reason := result.Reason
 				if reason == "" && result.Err != nil {
 					reason = truncate(strings.TrimSpace(result.Err.Error()), 240)
@@ -102,10 +112,18 @@ func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project st
 	if firstErr != nil {
 		return results, firstErr
 	}
+	if !attempted {
+		return results, nil
+	}
 	return results, db.RecordCheckoutAttempt(ctx, project.ID, now.UnixMilli())
 }
 
 func (s *Service) syncRepository(ctx context.Context, db *store.DB, project store.Project, target repoTarget, now time.Time) (projectSyncResult, error) {
+	key := repositorySyncKey(project, target)
+	if !s.beginMaintenance(key) {
+		return projectSyncResult{Status: "skipped", Reason: "repository sync already running"}, nil
+	}
+	defer s.endMaintenance(key)
 	result := projectSyncResult{Status: "current"}
 	if _, err := gitOutput(ctx, target.Root, "remote", "get-url", "origin"); err != nil {
 		result.Status = "no_origin"
