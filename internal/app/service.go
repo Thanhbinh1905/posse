@@ -80,10 +80,16 @@ func (s *Service) commands() *axi.Command {
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
 		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Lookout; nothing restarts them until `posse up`.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
-		{Name: "playbook", Summary: "Inspect and update layered User and Project Playbooks.", Subcommands: []*axi.Command{
-			{Name: "show", Usage: "$ playbook show [--project <name>]", Summary: "Show effective Lead and Rider Playbooks with their sources.", Handler: s.playbookShow},
-			{Name: "path", Usage: "$ playbook path <lead|rider> [--project <name>]", Summary: "Show the source paths for a Playbook role.", Handler: s.playbookPath},
-			{Name: "set", Usage: "$ playbook set <lead|rider> --file <file> [--project <name>] [--user-approved <quote>]", Summary: "Write a Playbook atomically; a Lead needs a User quote.", Handler: s.playbookSet},
+		{Name: "preferences", Summary: "Inspect and update layered User and Project preferences.", Subcommands: []*axi.Command{
+			{Name: "show", Usage: "$ preferences show [--project <name>]", Summary: "Show effective Lead and Rider preferences with their sources.", Handler: s.preferencesShow},
+			{Name: "path", Usage: "$ preferences path <lead|rider> [--project <name>]", Summary: "Show canonical and legacy source paths for a role.", Handler: s.preferencesPath},
+			{Name: "set", Usage: "$ preferences set <lead|rider> --file <file> [--project <name>] [--user-approved <quote>]", Summary: "Write preferences atomically; a Lead needs a User quote.", Handler: s.preferencesSet},
+			{Name: "move", Usage: "$ preferences move <lead|rider> [--project <name>] [--user-approved <quote>]", Summary: "Move one legacy Playbook file without overwriting existing preferences.", Handler: s.preferencesMove},
+		}},
+		{Name: "playbook", Summary: "Deprecated alias for `posse preferences`; legacy files remain readable.", Subcommands: []*axi.Command{
+			{Name: "show", Usage: "$ playbook show [--project <name>]", Summary: "Deprecated alias for `posse preferences show`.", Handler: s.playbookShow},
+			{Name: "path", Usage: "$ playbook path <lead|rider> [--project <name>]", Summary: "Deprecated alias for `posse preferences path`.", Handler: s.playbookPath},
+			{Name: "set", Usage: "$ playbook set <lead|rider> --file <file> [--project <name>] [--user-approved <quote>]", Summary: "Deprecated alias for `posse preferences set`.", Handler: s.playbookSet},
 		}},
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "roster", Usage: "$ roster [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},

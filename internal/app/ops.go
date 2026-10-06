@@ -44,14 +44,18 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		return configError(err)
 	}
 	var failures []error
-	if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
-		failures = append(failures, fmt.Errorf("PR polling: %w", err))
-	}
+	pollResult := make(chan error, 1)
+	go func() {
+		pollResult <- s.pollProjectPullRequests(ctx, db, project, cfg, false)
+	}()
 	if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
 		failures = append(failures, fmt.Errorf("checkout sync: %w", err))
 	}
 	if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
 		failures = append(failures, fmt.Errorf("landed Task Teardown: %w", err))
+	}
+	if err := <-pollResult; err != nil {
+		failures = append(failures, fmt.Errorf("PR polling: %w", err))
 	}
 	if s.Herdr != nil {
 		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {

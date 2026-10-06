@@ -72,6 +72,8 @@ assignments='
 4 TestPRLandingLifecycleAndExternalMerge
 4 TestFailedRecoveryIsBoundedUnderPluginEvents
 4 TestWorkerPublishRetriesLaggingOpenPRHead
+4 TestApprovedLeadPreferencesMove
+4 TestRideRetriesRetryableStoreBusyBeforeTaskCreation
 4 TestExternalMergeDuringFollowUpWithMovedTaskBranch
 4 TestLookoutRestartsAfterHerdrRestart
 4 TestReviewRejectsAttachedCodexModelConfig
@@ -84,7 +86,7 @@ assignments='
 4 TestDownDoesNotSignalUnrelatedExecutableNamedLookout
 4 TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault
 4 TestRideCrashImmediatelyAfterTaskCreationIsRecovered
-4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails
+4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls
 '
 
 validate_assignments() {

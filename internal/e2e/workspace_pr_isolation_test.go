@@ -17,7 +17,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails(t *testing.T) {
+func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeQueryStalls(t *testing.T) {
 	root := newFixtureRoot(t, herdr.TestRootName())
 	binDir := filepath.Join(root, "bin")
 	workspace := filepath.Join(root, "stack")
@@ -37,7 +37,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails(t *testing.T)
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"landed\"\npr_poll = \"1ms\"\nforge = \"auto\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"landed\"\npr_poll = \"1ms\"\nforge = \"github\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,14 +94,14 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails(t *testing.T)
 
 	createLandingTask := func(seq int, member store.ProjectRepo, prURL string, merge bool) (store.Task, string) {
 		t.Helper()
-		branch := fmt.Sprintf("posse/watch-%s", member.Name)
+		branch := fmt.Sprintf("posse/watch-%s-%d", member.Name, seq)
 		mountRoot := filepath.Join(root, "mounts", fmt.Sprintf("t%d", seq))
 		memberWorktree := filepath.Join(mountRoot, member.Name)
 		if err := os.MkdirAll(mountRoot, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		gitTest(t, env, filepath.Join(workspace, member.Path), "worktree", "add", "-q", "-b", branch, memberWorktree, "main")
-		if err := os.WriteFile(filepath.Join(memberWorktree, "change.txt"), []byte(member.Name+" change\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(memberWorktree, "change.txt"), []byte(fmt.Sprintf("%s change %d\n", member.Name, seq)), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		gitTest(t, env, memberWorktree, "add", "change.txt")
@@ -153,7 +153,13 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails(t *testing.T)
 	offline, _ := createLandingTask(1, members[0], "https://vpn-t181.invalid/acme/offline/pull/1", false)
 	goodURL := "https://github.com/acme/good/pull/2"
 	good, goodHead := createLandingTask(2, members[1], goodURL, true)
-	_ = offline
+	preLanded, preLandedHead := createLandingTask(3, members[1], "", true)
+	if err := db.Transition(context.Background(), preLanded.ID, store.StateLanding, store.StateLanded, "cli", "fixture already landed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET landed_ref=? WHERE id=?`, preLandedHead, preLanded.ID); err != nil {
+		t.Fatal(err)
+	}
 	viewPath := filepath.Join(root, "good-pr-view.json")
 	view, err := json.Marshal(map[string]any{
 		"url": goodURL, "state": "MERGED", "headRefOid": goodHead, "mergeable": "MERGEABLE",
@@ -166,7 +172,9 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails(t *testing.T)
 		t.Fatal(err)
 	}
 	ghLog := filepath.Join(root, "gh.log")
-	gh := "#!/bin/sh\nprintf '%s %s\\n' \"${HERDR_PANE_ID:-none}\" \"$*\" >> \"" + ghLog + "\"\ncase \"$1 $2\" in\n  \"auth status\") case \" $* \" in *vpn-t181.invalid*) exit 1 ;; *) exit 0 ;; esac ;;\n  \"pr view\") cat \"" + viewPath + "\" ;;\n  *) echo \"unexpected gh command: $*\" >&2; exit 90 ;;\nesac\n"
+	stallStarted := filepath.Join(root, "offline-pr-stalled")
+	releaseStall := filepath.Join(root, "release-pr-stall")
+	gh := "#!/bin/sh\nprintf '%s %s\\n' \"${HERDR_PANE_ID:-none}\" \"$*\" >> \"" + ghLog + "\"\ncase \"$1 $2\" in\n  \"auth status\") exit 0 ;;\n  \"pr view\")\n    case \"$3\" in\n      *vpn-t181.invalid*) : > \"" + stallStarted + "\"; while [ ! -e \"" + releaseStall + "\" ]; do sleep 0.05; done; echo \"stalled forge released by test\" >&2; exit 1 ;;\n      *github.com*) cat \"" + viewPath + "\" ;;\n    esac ;;\n  *) echo \"unexpected gh command: $*\" >&2; exit 90 ;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(gh), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -174,6 +182,13 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails(t *testing.T)
 		t.Fatal(err)
 	}
 
+	lookoutPaneID := ""
+	t.Cleanup(func() {
+		_ = os.WriteFile(releaseStall, []byte("release\n"), 0o600)
+		if lookoutPaneID != "" {
+			_, _ = client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c")
+		}
+	})
 	lookout, err := createTab(client, project.HerdrWorkspaceID, workspace, "posse:stack:lookout")
 	if err != nil {
 		t.Fatal(err)
@@ -181,21 +196,40 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails(t *testing.T)
 	if _, err := client.Call(context.Background(), "pane.rename", map[string]any{"pane_id": lookout.RootPane.PaneID, "label": "posse:stack:lookout"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Run(context.Background(), "pane", "run", lookout.RootPane.PaneID, binary+" lookout --poll-only"); err != nil {
+	lookoutPaneID = lookout.RootPane.PaneID
+	if _, err := client.Run(context.Background(), "pane", "run", lookoutPaneID, binary+" lookout --poll-only"); err != nil {
 		t.Fatalf("start isolated Lookout: %v", err)
 	}
-
-	if !waitForCondition(20*time.Second, func() bool {
-		current, err := db.TaskByID(context.Background(), project.ID, good.ID)
-		return err == nil && current.State == store.StateTornDown
+	if !waitForCondition(5*time.Second, func() bool {
+		_, err := os.Stat(stallStarted)
+		return err == nil
 	}) {
-		current, _ := db.TaskByID(context.Background(), project.ID, good.ID)
-		statuses, _ := db.ProjectRepos(context.Background(), project.ID)
-		t.Fatalf("healthy merged Member Task was not torn down: task=%#v repos=%#v", current, statuses)
+		t.Fatal("offline Member forge query did not enter its deliberate stall")
+	}
+
+	if !waitForCondition(7*time.Second, func() bool {
+		observation, observationErr := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
+		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
+		landed, landedErr := db.TaskByID(context.Background(), project.ID, preLanded.ID)
+		healthy, healthyErr := db.TaskByID(context.Background(), project.ID, good.ID)
+		return observationErr == nil && observation.State == "MERGED" && watchErr == nil && watch.CheckoutCheckedAt > 0 && landedErr == nil && landed.State == store.StateTornDown && healthyErr == nil && healthy.State == store.StateTornDown
+	}) {
+		observation, observationErr := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
+		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
+		landed, landedErr := db.TaskByID(context.Background(), project.ID, preLanded.ID)
+		healthy, healthyErr := db.TaskByID(context.Background(), project.ID, good.ID)
+		t.Fatalf("stalled offline forge blocked independent maintenance: healthy observation=%#v (%v), offline checkout=%#v (%v), already-landed Task=%#v (%v), healthy merged Task=%#v (%v)", observation, observationErr, watch, watchErr, landed, landedErr, healthy, healthyErr)
+	}
+	if _, err := os.Stat(releaseStall); err == nil {
+		t.Fatal("offline forge stall ended before healthy Member and independent maintenance completed")
 	}
 	observation, err := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
 	if err != nil || observation.State != "MERGED" {
 		t.Fatalf("healthy Member PR observation = %#v, %v", observation, err)
+	}
+	currentGood, err := db.TaskByID(context.Background(), project.ID, good.ID)
+	if err != nil || currentGood.State != store.StateTornDown {
+		t.Fatalf("healthy merged Member Task was not auto-torn down during the offline forge stall: %#v, %v", currentGood, err)
 	}
 	for _, name := range []string{"offline", "good"} {
 		watch, err := db.ProjectRepoWatchState(context.Background(), project.ID, name)
@@ -203,25 +237,29 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeDiscoveryFails(t *testing.T)
 			t.Fatalf("Member %s checkout status = %#v, %v", name, watch, err)
 		}
 	}
-	notices, err := db.Notices(context.Background(), project.ID, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foundOfflineFailure := false
-	for _, notice := range notices {
-		if notice.TaskID == offline.ID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "offline") && strings.Contains(notice.Summary, "vpn-t181.invalid") {
-			foundOfflineFailure = true
-		}
-	}
-	if !foundOfflineFailure {
-		t.Fatalf("offline Member-specific PR discovery Notice missing: %#v", notices)
-	}
 	ghCalls, err := os.ReadFile(ghLog)
 	if err != nil || !strings.Contains(string(ghCalls), "pr view https://github.com/acme/good/pull/2") {
 		t.Fatalf("healthy Member forge was not queried after offline discovery failed: %s %v", ghCalls, err)
 	}
-	t.Logf("offline Member failure stayed scoped; healthy Member PR landed, checkout polling updated both Members, and auto-Teardown completed")
-	if _, err := client.Run(context.Background(), "pane", "send-keys", lookout.RootPane.PaneID, "ctrl+c"); err != nil {
+	if err := os.WriteFile(releaseStall, []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(5*time.Second, func() bool {
+		notices, err := db.Notices(context.Background(), project.ID, false)
+		if err != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.TaskID == offline.ID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "offline") {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("released offline forge failure was not recorded against its Member Task")
+	}
+	if _, err := client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c"); err != nil {
 		t.Errorf("stop isolated Lookout: %v", err)
 	}
+	t.Logf("while offline PR query remained stalled, healthy Member observation, checkout polling, and landed Task Teardown all completed")
 }

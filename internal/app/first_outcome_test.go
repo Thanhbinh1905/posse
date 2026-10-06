@@ -633,7 +633,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	output := outcomeCLI(t, f.service, 0, "lead")
-	for _, rule := range []string{"First outcome", "substantive intent", "scope", "trade-offs", "acceptance", "following their Playbook", "consequential gaps", "resolve mechanics silently", "explicit yes", "--user-approved", "one-off", "deliverable", "verification", "permitted effects", "return conditions", "never make personalization a prerequisite", "at most once", "language they write in", "lowkey", "posse playbook set <lead|rider> --file <file>", "Riders cannot write Playbooks"} {
+	for _, rule := range []string{"Default workflow guidance", "lightest workflow", "one Ship Brief and dispatch it directly", "Scouts, specifications, tickets and separate review Tasks are optional", "consequential questions", "Investigate repository facts before asking the User", "runtime obligations", "explicit yes", "--user-approved", "one-off permission never becomes standing Autonomy", "deliverable", "verification", "permitted effects", "return conditions", "setup and personalization optional", "at most once", "language they write in", "lowkey", "posse preferences set <lead|rider> --file <file>", "Riders cannot write preferences"} {
 		if !strings.Contains(output, rule) {
 			t.Fatalf("Lead missing %q: %s", rule, output)
 		}
@@ -647,13 +647,17 @@ func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := leadText(f.project, cfg, "pi")
+	composed, err := composeLeadInstructions(f.home, f.project, cfg, "pi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := composed.Text
 	for _, personalProfile := range []string{"pi-luna", "pi-sol", "claude-sonnet", "claude-opus", "codex-sol"} {
 		if strings.Contains(text, personalProfile) {
 			t.Fatalf("Lead system prompt hard-coded personal Profile %q: %s", personalProfile, text)
 		}
 	}
-	for _, rule := range []string{firstOutcomeRule, userOnlyRule, leadLanguageRule(cfg)} {
+	for _, rule := range []string{"Runtime obligations", leadLanguageRule(cfg)} {
 		if !strings.Contains(text, rule) {
 			t.Fatalf("system prompt omitted rule: %s", rule)
 		}
