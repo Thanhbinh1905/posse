@@ -163,6 +163,7 @@ func (s *Service) applyScratchPruneItem(ctx context.Context, db *store.DB, home 
 }
 
 func (s *Service) applyBranchPruneItem(ctx context.Context, db *store.DB, project store.Project, item pruneItem) error {
+	// Serialize the final worktree check and ref deletion with Posse Mount claims.
 	return withMountStateLock(ctx, db, func() error {
 		task, err := db.Task(ctx, project.ID, taskIDString(item.seq))
 		if err != nil {
@@ -178,13 +179,6 @@ func (s *Service) applyBranchPruneItem(ctx context.Context, db *store.DB, projec
 		if blocked {
 			return fmt.Errorf("refuse to prune branch %s while Task t%d has an active operation or held Mount", item.label, task.Seq)
 		}
-		checkedOut, err := branchCheckedOutInLiveWorktree(ctx, item.path, item.label)
-		if err != nil {
-			return err
-		}
-		if checkedOut {
-			return fmt.Errorf("refuse to prune branch %s while it is checked out in a live worktree", item.label)
-		}
 		ref := "refs/heads/" + item.label
 		sha, err := gitOutput(ctx, item.path, "rev-parse", "--verify", ref)
 		if err != nil {
@@ -193,18 +187,36 @@ func (s *Service) applyBranchPruneItem(ctx context.Context, db *store.DB, projec
 		if strings.TrimSpace(sha) != item.sha {
 			return skippedPruneBranch(item, "branch tip changed since prune was planned")
 		}
+		checkedOut, err := branchCheckedOutInAnyWorktree(ctx, item.path, item.label)
+		if err != nil {
+			return err
+		}
+		if checkedOut {
+			return skippedPruneBranch(item, "branch is checked out in a worktree")
+		}
 		_, err = gitOutput(ctx, item.path, "update-ref", "-d", ref, item.sha)
-		if err == nil {
-			return nil
+		if err != nil {
+			currentSHA, readErr := gitOutput(ctx, item.path, "rev-parse", "--verify", ref)
+			if readErr != nil && isMissingGitRef(readErr) || readErr == nil && strings.TrimSpace(currentSHA) != item.sha {
+				return skippedPruneBranch(item, "branch ref changed before it could be deleted")
+			}
+			if readErr != nil {
+				return errors.Join(err, readErr)
+			}
+			return err
 		}
-		currentSHA, readErr := gitOutput(ctx, item.path, "rev-parse", "--verify", ref)
-		if readErr != nil && isMissingGitRef(readErr) || readErr == nil && strings.TrimSpace(currentSHA) != item.sha {
-			return skippedPruneBranch(item, "branch ref changed before it could be deleted")
+		checkedOut, err = branchCheckedOutInAnyWorktree(ctx, item.path, item.label)
+		if err != nil {
+			restoreErr := restorePrunedBranchRef(ctx, item.path, ref, item.sha)
+			return errors.Join(fmt.Errorf("cannot verify worktree state after pruning branch %s", item.label), err, restoreErr)
 		}
-		if readErr != nil {
-			return errors.Join(err, readErr)
+		if checkedOut {
+			if err := restorePrunedBranchRef(ctx, item.path, ref, item.sha); err != nil {
+				return fmt.Errorf("branch %s became checked out during prune and its ref could not be restored: %w", item.label, err)
+			}
+			return skippedPruneBranch(item, "branch became checked out in a worktree during prune; its ref was restored")
 		}
-		return err
+		return nil
 	})
 }
 
@@ -853,6 +865,18 @@ func breakMount(ctx context.Context, db *store.DB, project store.Project, task s
 
 func skippedPruneBranch(item pruneItem, reason string) error {
 	return axi.Failure("prune_skipped", fmt.Sprintf("branch %s was skipped: %s", item.label, reason), false)
+}
+
+func restorePrunedBranchRef(ctx context.Context, root, ref, sha string) error {
+	_, err := gitOutput(ctx, root, "update-ref", ref, sha, "")
+	if err == nil {
+		return nil
+	}
+	currentSHA, readErr := gitOutput(ctx, root, "rev-parse", "--verify", ref)
+	if readErr == nil && strings.TrimSpace(currentSHA) == sha {
+		return nil
+	}
+	return errors.Join(fmt.Errorf("restore branch ref %s at %s", ref, sha), err, readErr)
 }
 
 type ownedProcessRoot struct {

@@ -92,6 +92,7 @@ assignments='
 4 TestPrunePreservesBranchAdvancedAfterFinalCheck
 4 TestPruneReclaimsMappedCacheStorage
 4 TestRiderMappingIsStoppedBeforeRelease
+4 TestPrunePreservesBranchCheckedOutAfterFinalCheck
 '
 
 validate_assignments() {

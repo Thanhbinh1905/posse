@@ -383,6 +383,20 @@ func taskBranchPruneBlocked(ctx context.Context, db *store.DB, task store.Task) 
 	return false, err
 }
 
+func branchCheckedOutInAnyWorktree(ctx context.Context, root, branch string) (bool, error) {
+	listing, err := gitOutput(ctx, root, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	want := "refs/heads/" + branch
+	for _, line := range strings.Split(listing, "\n") {
+		if strings.TrimSpace(strings.TrimPrefix(line, "branch ")) == want && strings.HasPrefix(line, "branch ") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func branchCheckedOutInLiveWorktree(ctx context.Context, root, branch string) (bool, error) {
 	listing, err := gitOutput(ctx, root, "worktree", "list", "--porcelain")
 	if err != nil {
