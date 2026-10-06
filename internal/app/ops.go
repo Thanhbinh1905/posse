@@ -100,12 +100,20 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		if len(notices) == 0 {
 			if lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute {
 				if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
-					if !store.IsBusy(err) {
-						return err
+					if store.IsBusy(err) {
+						// Contention is transient. Keep this Lookout armed, and retry
+						// rather than requiring the Lead to restart it after release.
+						fmt.Fprintf(ctx.ErrOut, "Lookout maintenance deferred: %v\n", normalizeCommandError(err))
+					} else {
+						if _, noticeErr := db.CreateNotice(ctx.Context, store.Notice{
+							ProjectID: project.ID, Kind: "pr_watch_failing",
+							Summary: "Lookout maintenance failed (retryable): " + truncate(normalizeCommandError(err).Error(), 200), DataJSON: `{}`,
+						}); noticeErr != nil {
+							fmt.Fprintf(ctx.ErrOut, "Lookout maintenance failure could not be recorded: %v\n", noticeErr)
+						} else {
+							_ = s.regenerateProjects(ctx.Context, db)
+						}
 					}
-					// Contention is transient. Keep this Lookout armed, and retry
-					// rather than requiring the Lead to restart it after release.
-					fmt.Fprintf(ctx.ErrOut, "Lookout maintenance deferred: %v\n", normalizeCommandError(err))
 				} else {
 					lastHerdrReconcile = time.Now()
 					if snapshot, err := s.snapshot(ctx.Context); err == nil {
@@ -335,9 +343,13 @@ func (s *Service) ack(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) ackNotices(ctx *axi.Context, db *store.DB, project store.Project, args []string) (int, []string, error) {
-	cfg, err := s.prepareProjectObservation(ctx.Context, db, project)
+	home, err := s.homePath()
 	if err != nil {
 		return 0, nil, err
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return 0, nil, configError(err)
 	}
 	identifiers := []string{}
 	for _, arg := range args {
