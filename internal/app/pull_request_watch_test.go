@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -159,6 +162,7 @@ func TestPRWatchLandsDoneTaskWhenItsPRIsMerged(t *testing.T) {
 	}
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	fixture.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	removeFixtureTaskPane(fixture)
 
 	if _, err := fixture.service.prepareProject(ctx, fixture.db, fixture.project); err != nil {
 		t.Fatalf("reconcile merged PR: %v", err)
@@ -251,6 +255,7 @@ auto_unsaddle = "finished"
 			fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 			adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 			fixture.service.Herdr = adapter
+			removeFixtureTaskPane(fixture)
 
 			if _, err := fixture.service.prepareProject(ctx, fixture.db, fixture.project); err != nil {
 				t.Fatalf("reconcile merged PR: %v", err)
@@ -311,7 +316,7 @@ func TestPlainUnsaddleRefusesLandedPRWithLateWork(t *testing.T) {
 	}
 }
 
-func TestPRMergePreservesWorkWrittenDuringPaneClosure(t *testing.T) {
+func TestPRMergePreservesWorkWrittenDuringPaneShutdown(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateDone)
 	mount := attachPRFixtureMount(t, f)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"finished\"\n"), 0o600); err != nil {
@@ -323,13 +328,38 @@ func TestPRMergePreservesWorkWrittenDuringPaneClosure(t *testing.T) {
 	}
 	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
 	fake := f.service.Herdr.(*herdr.Fake)
-	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
-	work := filepath.Join(f.worktree, "late-rider-work.txt")
-	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue, afterClose: func() {
-		if err := os.WriteFile(work, []byte("preserve me\n"), 0o600); err != nil {
+	worker := exec.Command("bash", "-c", "trap 'printf \"%s\\n\" \"preserve me\" > late-rider-work.txt; exit 0' TERM; while true; do read -t 0.1 || :; done")
+	worker.Dir = f.worktree
+	worker.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := worker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = worker.Process.Kill()
+		_ = worker.Wait()
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		pids, err := mountProcessIDs(f.worktree)
+		if err != nil {
 			t.Fatal(err)
 		}
-	}}
+		if len(pids) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not start in Mount")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := f.db.UpdateTaskLaunch(ctx, f.task.ID, f.task.WorktreePath, f.task.HerdrWorkspaceID, f.task.PaneID, f.task.PaneLabel, "posse-shop-t1-1"); err != nil {
+		t.Fatal(err)
+	}
+	fake.SnapshotValue.Panes[0].Agent = ""
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":2147483647,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"claude","cwd":%q}]}}`, worker.Process.Pid, worker.Process.Pid, f.worktree))
+	work := filepath.Join(f.worktree, "late-rider-work.txt")
+	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue, autoCloseWhenFile: work, autoClosePaneID: f.task.PaneID}
 	f.service.Herdr = adapter
 	if _, err := f.service.prepareProject(ctx, f.db, f.project); err != nil {
 		t.Fatal(err)
@@ -647,6 +677,7 @@ func TestPRMergeAutoTeardownRetriesAfterHerdrReturns(t *testing.T) {
 	snapshot.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	adapter := &changingSnapshotAdapter{Fake: availableHerdr, snapshot: snapshot}
 	fixture.service.Herdr = adapter
+	removeFixtureTaskPane(fixture)
 	if _, err := fixture.service.prepareProject(context.Background(), fixture.db, fixture.project); err != nil {
 		t.Fatalf("reconcile after Herdr returned: %v; calls=%#v panes=%#v", err, adapter.Calls, adapter.snapshot.Panes)
 	}

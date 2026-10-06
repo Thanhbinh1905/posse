@@ -5,6 +5,9 @@ package app
 import (
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -20,6 +23,48 @@ type mountProcessHandle struct {
 }
 
 func processIdentityCapabilityError() string { return "" }
+
+func mountProcessGroupID(pid int) (int, error) {
+	fields, err := mountProcessStatFields(pid)
+	if err != nil {
+		return 0, err
+	}
+	if len(fields) < 3 {
+		return 0, fmt.Errorf("process stat for PID %d has no process group", pid)
+	}
+	group, err := strconv.Atoi(fields[2])
+	if err != nil || group <= 0 {
+		return 0, fmt.Errorf("invalid process group for PID %d", pid)
+	}
+	return group, nil
+}
+
+func mountProcessParentID(pid int) (int, error) {
+	fields, err := mountProcessStatFields(pid)
+	if err != nil {
+		return 0, err
+	}
+	if len(fields) < 2 {
+		return 0, fmt.Errorf("process stat for PID %d has no parent process", pid)
+	}
+	parent, err := strconv.Atoi(fields[1])
+	if err != nil || parent < 0 {
+		return 0, fmt.Errorf("invalid parent process for PID %d", pid)
+	}
+	return parent, nil
+}
+
+func mountProcessStatFields(pid int) ([]string, error) {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return nil, err
+	}
+	commandEnd := strings.LastIndexByte(string(stat), ')')
+	if commandEnd < 0 {
+		return nil, fmt.Errorf("malformed process stat for PID %d", pid)
+	}
+	return strings.Fields(string(stat)[commandEnd+1:]), nil
+}
 
 func openMountProcessHandle(pid int) (*mountProcessHandle, error) {
 	bootID, startTime, err := store.ProcessIdentityForPID(pid)

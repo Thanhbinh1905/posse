@@ -540,7 +540,8 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 			f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
 			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
 			if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
-				t.Fatalf("merged Task did not release its Rider: %#v", task)
+				notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+				t.Fatalf("merged Task did not release its Rider: %#v notices=%#v", task, notices)
 			}
 			assertMountUnlocked(t, f.env, f.repo, landing.WorktreePath)
 			f.requireNotice(t, "t1", "pr_merged")

@@ -620,6 +620,7 @@ auto_unsaddle = "finished"
 	}
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	fixture.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	removeFixtureTaskPane(fixture)
 	fixture.test.Chdir(fixture.repo)
 	if _, err := fixture.service.prepareProject(context.Background(), fixture.db, fixture.project); err != nil {
 		t.Fatalf("reconcile merged PR after done Signal: %v", err)
@@ -930,6 +931,34 @@ func newPRLandingFixture(t *testing.T, mode string, state store.State) *prLandin
 	}
 	fixture.installFakeGH(t)
 	return fixture
+}
+
+func removeFixtureTaskPane(fixture *prLandingFixture) {
+	remove := func(snapshot herdr.Snapshot) herdr.Snapshot {
+		panes := snapshot.Panes[:0]
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID != fixture.task.PaneID && pane.Label != fixture.task.PaneLabel {
+				panes = append(panes, pane)
+			}
+		}
+		snapshot.Panes = panes
+		agents := snapshot.Agents[:0]
+		for _, agent := range snapshot.Agents {
+			if agent.PaneID != fixture.task.PaneID {
+				agents = append(agents, agent)
+			}
+		}
+		snapshot.Agents = agents
+		return snapshot
+	}
+	switch adapter := fixture.service.Herdr.(type) {
+	case *herdr.Fake:
+		adapter.SnapshotValue = remove(adapter.SnapshotValue)
+	case *changingSnapshotAdapter:
+		adapter.mu.Lock()
+		adapter.snapshot = remove(adapter.snapshot)
+		adapter.mu.Unlock()
+	}
 }
 
 func (fixture *prLandingFixture) installFakeGH(t *testing.T) {

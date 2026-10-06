@@ -11,6 +11,14 @@ type mountProcessHandle struct {
 	pid int
 }
 
+func mountProcessGroupID(pid int) (int, error) {
+	return 0, fmt.Errorf("process group is unsupported on this platform for PID %d", pid)
+}
+
+func mountProcessParentID(pid int) (int, error) {
+	return 0, fmt.Errorf("process ancestry is unsupported on this platform for PID %d", pid)
+}
+
 func processIdentityCapabilityError() string {
 	return "exact process-instance signaling with pidfds is unavailable on this platform"
 }

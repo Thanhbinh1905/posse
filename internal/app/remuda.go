@@ -680,9 +680,10 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 	if err != nil {
 		return nil, err
 	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return nil, err
+	if resolved, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
+		root = resolved
+	} else if !errors.Is(resolveErr, os.ErrNotExist) {
+		return nil, resolveErr
 	}
 	pids, err := mountProcessIDs(root)
 	if err != nil {
@@ -690,18 +691,43 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 	}
 	allPIDs := make([]int, 0, len(pids))
 	handles := make(map[int]*mountProcessHandle, len(pids))
+	transients := make(map[int]*mountProcessHandle)
+	defer func() {
+		for _, handle := range transients {
+			_ = handle.Close()
+		}
+	}()
 	for _, pid := range pids {
 		handle := authorization.handle(pid)
 		if handle == nil {
-			return nil, fmt.Errorf("unverified process %d appeared in the Mount; preserving its work", pid)
+			child, found, childErr := trackShortLivedMountProcess(pid, root, authorization)
+			if childErr != nil {
+				return nil, fmt.Errorf("could not verify Mount child process %d: %w", pid, childErr)
+			}
+			if found {
+				transients[pid] = child
+				continue
+			}
+			alive, aliveErr := unretainedMountProcessAlive(pid)
+			if aliveErr != nil {
+				return nil, fmt.Errorf("could not verify unretained Mount process %d: %w", pid, aliveErr)
+			}
+			if alive {
+				return nil, fmt.Errorf("unverified process %d appeared in the Mount; preserving its work", pid)
+			}
+			continue
 		}
-		if err := authorization.verify(pid); err != nil {
-			return nil, err
+		alive, verifyErr := authorization.verifyIfAlive(pid)
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
+		if !alive {
+			continue
 		}
 		handles[pid] = handle
 		allPIDs = append(allPIDs, pid)
 	}
-	if err := verifyMountProcessSet(root, handles); err != nil {
+	if err := verifyMountProcessSet(root, handles, transients, authorization, false); err != nil {
 		return nil, err
 	}
 	for _, handle := range handles {
@@ -711,7 +737,7 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := verifyMountProcessSet(root, handles); err != nil {
+		if err := verifyMountProcessSet(root, handles, transients, authorization, true); err != nil {
 			return nil, err
 		}
 		alive, err := mountHandlesInMount(handles, root)
@@ -734,7 +760,7 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if err := verifyMountProcessSet(root, handles); err != nil {
+		if err := verifyMountProcessSet(root, handles, transients, authorization, true); err != nil {
 			return nil, err
 		}
 		survivors, err := mountProcessIDs(root)
@@ -760,7 +786,7 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 	return processLabels(allPIDs), fmt.Errorf("mount processes survived teardown: %v", survivors)
 }
 
-func verifyMountProcessSet(root string, handles map[int]*mountProcessHandle) error {
+func verifyMountProcessSet(root string, handles, transients map[int]*mountProcessHandle, authorization *mountProcessAuthorization, waitForTransients bool) error {
 	pids, err := mountProcessIDs(root)
 	if err != nil {
 		return err
@@ -768,17 +794,61 @@ func verifyMountProcessSet(root string, handles map[int]*mountProcessHandle) err
 	for _, pid := range pids {
 		handle, found := handles[pid]
 		if !found {
-			return fmt.Errorf("unverified process %d appeared in the Mount during teardown; preserving its work", pid)
-		}
-		bootID, startTime, err := store.ProcessIdentityForPID(pid)
-		if err != nil || handle.Identity() != bootID+"/"+startTime {
-			if err != nil {
-				return fmt.Errorf("cannot verify Mount process %d identity: %w", pid, err)
+			child := transients[pid]
+			if child == nil {
+				var isChild bool
+				var childErr error
+				child, isChild, childErr = trackShortLivedMountProcess(pid, root, authorization)
+				if childErr != nil {
+					return fmt.Errorf("cannot verify Mount child process %d during teardown: %w", pid, childErr)
+				}
+				if isChild {
+					transients[pid] = child
+				}
 			}
-			return fmt.Errorf("mount PID %d changed process instance during teardown; preserving its work", pid)
+			if child != nil {
+				alive, childErr := verifyMountProcessHandleIfAlive(pid, child)
+				if childErr != nil {
+					return childErr
+				}
+				if alive && waitForTransients {
+					if err := waitForMountProcessExit(pid, root, child); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			alive, aliveErr := unretainedMountProcessAlive(pid)
+			if aliveErr != nil {
+				return fmt.Errorf("cannot verify Mount process %d during teardown: %w", pid, aliveErr)
+			}
+			if alive {
+				return fmt.Errorf("unverified process %d appeared in the Mount during teardown; preserving its work", pid)
+			}
+			continue
+		}
+		if _, err := verifyMountProcessHandleIfAlive(pid, handle); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func waitForMountProcessExit(pid int, root string, handle *mountProcessHandle) error {
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for {
+		alive, err := verifyMountProcessHandleIfAlive(pid, handle)
+		if err != nil {
+			return err
+		}
+		if !alive || !processInMount(pid, root) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("short-lived process %d remained in the Mount after retained pane processes stopped; preserving its work", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func mountHandlesInMount(handles map[int]*mountProcessHandle, root string) ([]*mountProcessHandle, error) {

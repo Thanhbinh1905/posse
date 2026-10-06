@@ -103,17 +103,16 @@ func TestLocalLandingRequiresApprovalAndTeardownAudits(t *testing.T) {
 
 	output.Reset()
 	gitTest(t, repo, "worktree", "remove", worktree)
+	fake.autoClosePaneID = "w2:p1"
+	fake.autoCloseAfterSnapshot = fake.snapshotsSeen + 2 // The plan sees the pane; Herdr removes it with its exited shell.
 	if code := cli.Run([]string{"unsaddle", "t1"}); code != 0 {
 		t.Fatalf("landed teardown exit = %d; output=%s error=%s", code, output.String(), errorsOut.String())
 	}
 	if fake.CallCount("worktree.remove") != 0 {
 		t.Fatal("teardown must keep the Mount instead of asking Herdr to remove it")
 	}
-	if fake.CallCount("workspace.close") != 0 || fake.CallCount("pane.close") != 1 {
-		t.Fatalf("teardown did not close only the Task pane: %#v", fake.Calls)
-	}
-	if !strings.Contains(output.String(), "w2:p2") {
-		t.Fatalf("Teardown did not list the foreign pane: %s", output.String())
+	if fake.CallCount("workspace.close") != 0 || fake.CallCount("pane.close") != 0 || fake.CallCount("tab.close") != 0 {
+		t.Fatalf("teardown must not issue unconditional close RPCs: %#v", fake.Calls)
 	}
 	foreignPaneRemains := false
 	for _, pane := range fake.currentSnapshot().Panes {
@@ -277,10 +276,14 @@ func TestLandAcceptsTeardownCompletedBeforeClaim(t *testing.T) {
 	snapshot.Panes[1].Agent = ""
 	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: snapshot}
 	fixture.service.Herdr = adapter
+	adapter.snapshot.Panes = adapter.snapshot.Panes[:1] // Model Herdr removing the Rider with its shell.
 	ctx := context.Background()
 	first, err := fixture.service.unsaddleTask(ctx, fixture.db, fixture.project, cfg, task, false, "")
 	if err != nil || first.AlreadyTornDown {
 		t.Fatalf("competing Teardown result=%#v err=%v", first, err)
+	}
+	if fake.CallCount("pane.close") != 0 || fake.CallCount("tab.close") != 0 || fake.CallCount("workspace.close") != 0 {
+		t.Fatalf("Teardown issued an unconditional close RPC: %#v", fake.Calls)
 	}
 	_, completedElsewhere, landErr := fixture.service.teardownLandedTask(ctx, fixture.db, fixture.project, cfg, task)
 	paneCloses := fake.CallCount("pane.close")
@@ -479,12 +482,12 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 	var output bytes.Buffer
 	cli := service.CLI()
 	cli.Out = &output
+	fake.snapshot.Panes = fake.snapshot.Panes[:1] // Herdr already removed the Rider pane with its shell.
 	if code := cli.Run([]string{"unsaddle", "t1"}); code != 0 || !strings.Contains(output.String(), "torn-down") {
-		t.Fatalf("unsaddle did not close the re-adopted pane by its Task label: code=%d output=%s", code, output.String())
+		t.Fatalf("unsaddle did not release the Mount after Herdr removed the Rider pane: code=%d output=%s", code, output.String())
 	}
-	// A legacy Rider workspace disappears with its last tab; posse never closes a workspace.
-	if fake.CallCount("tab.close") != 1 || fake.CallCount("workspace.close") != 0 {
-		t.Fatalf("Task-only tab in the moved workspace was not closed by tab: %#v", fake.Calls)
+	if fake.CallCount("tab.close") != 0 || fake.CallCount("workspace.close") != 0 || fake.CallCount("pane.close") != 0 {
+		t.Fatalf("teardown issued an unconditional close RPC: %#v", fake.Calls)
 	}
 	updated, err := db.Task(ctx, project.ID, "t1")
 	if err != nil || updated.State != store.StateTornDown || updated.HerdrWorkspaceID != "w3" {
@@ -498,6 +501,7 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 
 func TestApprovedDiscardTeardownSurvivesAgentNotReadyDuringPreflightNoticeDelivery(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	attachPRFixtureMount(t, fixture)
 	ctx := context.Background()
 	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateFailed, "worker", "Rider failed"); err != nil {
 		t.Fatal(err)
@@ -521,7 +525,19 @@ func TestApprovedDiscardTeardownSurvivesAgentNotReadyDuringPreflightNoticeDelive
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = &output, &errorsOut
 	if code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"}); code != 0 {
-		t.Fatalf("approved discard exit = %d; output=%s error=%s", code, output.String(), errorsOut.String())
+		if !strings.Contains(output.String(), "unsaddle_incomplete") || adapter.CallCount("pane.close") != 0 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("workspace.close") != 0 {
+			t.Fatalf("approved discard did not fail closed without close RPCs: code=%d output=%s calls=%#v", code, output.String(), adapter.Calls)
+		}
+		current, readErr := fixture.db.Task(ctx, fixture.project.ID, "t1")
+		mount, mountErr := fixture.db.MountByTask(ctx, fixture.task.ID)
+		if readErr != nil || current.State != store.StateFailed || mountErr != nil || mount.State != "held" {
+			t.Fatalf("fail-closed approved discard changed the Task or Mount: task=%#v mount=%#v errors=%v/%v", current, mount, readErr, mountErr)
+		}
+		notices, noticeErr := fixture.db.UndeliveredNotices(ctx, fixture.project.ID)
+		if noticeErr != nil || len(notices) != 2 || notices[0].Kind != "worker_failed" || notices[1].Kind != "unsaddle_incomplete" {
+			t.Fatalf("preflight or teardown Notice was not preserved: %#v %v", notices, noticeErr)
+		}
+		return
 	}
 	updated, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
 	if err != nil || updated.State != store.StateTornDown {
@@ -541,14 +557,34 @@ func TestApprovedDiscardTeardownSurvivesAgentNotReadyDuringPreflightNoticeDelive
 
 type changingSnapshotAdapter struct {
 	*herdr.Fake
-	mu         sync.Mutex
-	snapshot   herdr.Snapshot
-	afterClose func()
+	mu                     sync.Mutex
+	snapshot               herdr.Snapshot
+	afterClose             func()
+	autoCloseWhenFile      string
+	autoClosePaneID        string
+	autoCloseAfterSnapshot int
+	snapshotsSeen          int
 }
 
 func (adapter *changingSnapshotAdapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
 	adapter.mu.Lock()
 	defer adapter.mu.Unlock()
+	adapter.snapshotsSeen++
+	shouldClose := adapter.autoCloseAfterSnapshot > 0 && adapter.snapshotsSeen >= adapter.autoCloseAfterSnapshot
+	if adapter.autoCloseWhenFile != "" && adapter.autoClosePaneID != "" {
+		if _, err := os.Stat(adapter.autoCloseWhenFile); err == nil {
+			shouldClose = true
+		}
+	}
+	if shouldClose && adapter.autoClosePaneID != "" {
+		panes := adapter.snapshot.Panes[:0]
+		for _, pane := range adapter.snapshot.Panes {
+			if pane.PaneID != adapter.autoClosePaneID {
+				panes = append(panes, pane)
+			}
+		}
+		adapter.snapshot.Panes = panes
+	}
 	return adapter.snapshot, nil
 }
 
@@ -623,9 +659,6 @@ func (adapter *changingSnapshotAdapter) Call(ctx context.Context, method string,
 		}
 		adapter.snapshot.Panes = kept
 	case "workspace.close":
-		if adapter.afterClose != nil {
-			adapter.afterClose()
-		}
 		workspaceID, _ := params["workspace_id"].(string)
 		kept := adapter.snapshot.Panes[:0]
 		for _, pane := range adapter.snapshot.Panes {

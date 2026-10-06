@@ -166,8 +166,8 @@ func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 
 	// A foreign split in the first Rider's tab survives its teardown.
 	foreign := fixture.split(t, first.PaneID, fixture.root)
-	// An unlabeled pane inside the second Mount but in a User workspace is not the Rider's pane;
-	// Mount release still stops its shell with every other Mount process.
+	// An unlabeled pane inside the second Mount but in a User workspace is not the Rider's pane.
+	// Mount release signals its exact shell; Herdr may remove the pane when that shell exits.
 	stray := fixture.split(t, fixture.userAfter.RootPane.PaneID, second.WorktreePath)
 	fixture.fail(t, "t1")
 	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t1", "--discard", "--user-approved", "User approved the tab teardown test")
@@ -194,7 +194,7 @@ func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 	snapshot = fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
 	fixture.assertRiderLabels(t, snapshot)
-	fixture.assertGone(t, snapshot, second.PaneID, ownSplit)
+	fixture.assertGone(t, snapshot, second.PaneID, ownSplit, stray)
 	fixture.assertAlive(t, snapshot, foreign)
 	for _, tab := range snapshot.Tabs {
 		if tab.TabID == secondTab {

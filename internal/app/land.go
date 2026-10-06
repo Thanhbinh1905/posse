@@ -467,6 +467,10 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			processAuthorization.Close()
 		}
 	}()
+	panePlan, err := s.planTaskPaneTeardown(ctx, project, task)
+	if err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane inspection", err)
+	}
 	if discardable {
 		branchSHA := ""
 		if project.IsWorkspace() {
@@ -485,10 +489,20 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, err
 		}
 	}
+	var stopped []string
+	if task.WorktreePath != "" {
+		if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
+			var stopErr error
+			stopped, stopErr = stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
+			return stopErr
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process shutdown", err)
+		}
+	}
 	var paneResult teardownPanes
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
 		var closeErr error
-		paneResult, closeErr = s.closeTaskPanes(ctx, project, task)
+		paneResult, closeErr = s.verifyTaskPanesClosed(ctx, project, task, panePlan)
 		if closeErr == nil {
 			s.relabelProjectTabs(ctx, db, project)
 		}
@@ -497,17 +511,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane closure", err)
 	}
-	var stopped []string
 	if task.State == store.StateLanded && !discardable && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
-		// Background processes may write after the Rider pane closes. Stop
-		// them before taking the snapshot, never after it.
-		if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
-			var stopErr error
-			stopped, stopErr = stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
-			return stopErr
-		}); err != nil {
-			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process shutdown", err)
-		}
 		if err := s.runIntentStep(ctx, db, intent, "leftover.snapshot", func() error {
 			if !project.IsWorkspace() {
 				return snapshotPRLeftover(ctx, db, project, task)
@@ -565,11 +569,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	if task.State == store.StateReported && !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "report.attachments", func() error {
-			if task.WorktreePath != "" {
-				if _, err := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization); err != nil {
-					return err
-				}
-			}
 			home, err := s.homePath()
 			if err != nil {
 				return err
