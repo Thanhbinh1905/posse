@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// RecordConfigApproval keeps the User's words with the Project and config change they authorized.
+// RecordConfigApproval keeps the User's words with the Project and change they authorized.
 // For a global change, projectID identifies the Lead that made it.
 func (db *DB) RecordConfigApproval(ctx context.Context, projectID int64, key, action, value, quote string) error {
 	if strings.TrimSpace(quote) == "" {
@@ -15,7 +15,7 @@ func (db *DB) RecordConfigApproval(ctx context.Context, projectID int64, key, ac
 	}
 	var storedValue any
 	switch action {
-	case "set":
+	case "set", "move":
 		storedValue = value
 	case "unset":
 		storedValue = nil
