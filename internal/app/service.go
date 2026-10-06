@@ -225,7 +225,11 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 					return runtime.RunResult{}, err
 				}
 				if _, err := s.recoverProject(ctx, db, home, project); err != nil {
-					return runtime.RunResult{}, fmt.Errorf("recover Project %s after Herdr group close: %w", project.Name, err)
+					if !userStart || !errors.Is(err, errRecoveryDeferred) {
+						return runtime.RunResult{}, fmt.Errorf("recover Project %s after Herdr group close: %w", project.Name, err)
+					}
+					// Keep the Lead startup moving; userStart settles interrupted
+					// relaunch intents after reconciling the current snapshot.
 				}
 				// Concurrent workspace.closed hooks wait for the recovery owner;
 				// a partial snapshot would mark still-restoring Riders lost.
