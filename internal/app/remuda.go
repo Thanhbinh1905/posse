@@ -93,12 +93,12 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 		return err
 	}
 	items = append(items, branches...)
-	registrations, err := staleOwnedWorktreeItems(ctx.Context, project, home, mounts)
+	registrations, err := staleOwnedWorktreeItems(ctx.Context, db, project, home, mounts)
 	if err != nil {
 		return err
 	}
 	for _, registration := range registrations {
-		if !prunableMountPaths[filepath.Clean(registration.path)] {
+		if !prunableMountPaths[filepath.Clean(registration.path)] && !prunableMountPaths[filepath.Clean(registration.mountPath)] {
 			items = append(items, registration)
 		}
 	}
@@ -163,13 +163,20 @@ func (s *Service) applyPruneItem(ctx context.Context, db *store.DB, home string,
 				return err
 			}
 		}
-		if err := removeStaleWorktreeRegistration(ctx, project.Root, item.path); err != nil {
+		repoRoot := item.repoRoot
+		if repoRoot == "" {
+			repoRoot = project.Root
+		}
+		if err := removeStaleWorktreeRegistration(ctx, repoRoot, item.path); err != nil {
 			if item.mount.ID != 0 {
 				return errors.Join(err, db.RestoreMountAfterPrune(ctx, item.mount.ID, item.mount.State))
 			}
 			return err
 		}
 		if item.mount.ID != 0 {
+			if project.IsWorkspace() && item.mountPath != "" {
+				return db.RestoreMountAfterPrune(ctx, item.mount.ID, item.mount.State)
+			}
 			return db.DeletePrunedMount(ctx, project.ID, item.mount.ID)
 		}
 		return nil

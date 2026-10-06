@@ -94,7 +94,7 @@ esac
 			t.Fatal(err)
 		}
 	}
-	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"finished\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"finished\"\n\n[remuda]\nkeep_idle = 10\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -290,5 +290,136 @@ esac
 				}
 			}
 		})
+	}
+
+	if !t.Run("scratch cleanup retry cannot reach another Rider's Mount", func(t *testing.T) {
+		brief := filepath.Join(root, "t5.md")
+		contents := "---\ntype: scout\ntitle: scratch-failure\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
+		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "scratch-failure")
+		if !waitForCondition(60*time.Second, func() bool {
+			current, err := db.Task(context.Background(), project.ID, "t5")
+			return err == nil && current.State == store.StateReported
+		}) {
+			current, _ := db.Task(context.Background(), project.ID, "t5")
+			t.Fatalf("Scout t5 did not report: %#v", current)
+		}
+
+		first, err := db.Task(context.Background(), project.ID, "t5")
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstScratch := filepath.Join(root, "posse", "scratch", "stack", "t5")
+		if err := os.RemoveAll(firstScratch); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(firstScratch, []byte("force scratch cleanup failure"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(binary, "unsaddle", "t5")
+		command.Dir, command.Env = workspace, leadEnv
+		failure, commandErr := command.CombinedOutput()
+		if commandErr == nil || !strings.Contains(string(failure), "unsaddle_incomplete") {
+			t.Fatalf("unsaddle did not expose the injected scratch cleanup failure: err=%v output=%s", commandErr, failure)
+		}
+		mount, err := db.MountByTask(context.Background(), first.ID)
+		if err != nil || mount.ID != first.MountID || mount.TaskID != first.ID || mount.State != "held" {
+			t.Fatalf("Mount became reusable before scratch cleanup completed: mount=%#v err=%v", mount, err)
+		}
+
+		brief = filepath.Join(root, "t6.md")
+		contents = "---\ntype: scout\ntitle: scratch-successor\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
+		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "scratch-successor")
+		if !waitForCondition(60*time.Second, func() bool {
+			current, err := db.Task(context.Background(), project.ID, "t6")
+			return err == nil && current.State == store.StateReported
+		}) {
+			current, _ := db.Task(context.Background(), project.ID, "t6")
+			t.Fatalf("successor Scout t6 did not report: %#v", current)
+		}
+		second, err := db.Task(context.Background(), project.ID, "t6")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if second.MountID == first.MountID {
+			t.Fatalf("successor Rider reused t5's Mount before its cleanup completed: t5=%#v t6=%#v", first, second)
+		}
+		foreignFile := filepath.Join(second.WorktreePath, "t6-only.txt")
+		if err := os.WriteFile(foreignFile, []byte("belongs only to t6\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		process := exec.Command("sleep", "300")
+		process.Dir = second.WorktreePath
+		if err := process.Start(); err != nil {
+			t.Fatal(err)
+		}
+		processExited := make(chan error, 1)
+		go func() { processExited <- process.Wait() }()
+		processWaited := false
+		t.Cleanup(func() {
+			if processWaited {
+				return
+			}
+			_ = process.Process.Kill()
+			select {
+			case <-processExited:
+			case <-time.After(5 * time.Second):
+				t.Error("successor Rider process did not exit during cleanup")
+			}
+		})
+
+		if err := os.Remove(firstScratch); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(firstScratch, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t5")
+		select {
+		case err := <-processExited:
+			processWaited = true
+			t.Fatalf("retrying t5 stopped the process owned by t6: %v", err)
+		case <-time.After(150 * time.Millisecond):
+		}
+		if _, err := os.Stat(foreignFile); err != nil {
+			t.Fatalf("retrying t5 changed the successor Rider's file: %v", err)
+		}
+		firstSaved := filepath.Join(root, "posse", "projects", "stack", "tasks", "t5")
+		if _, err := os.Stat(filepath.Join(firstSaved, "t6-only.txt")); !os.IsNotExist(err) {
+			t.Fatalf("retrying t5 captured t6's unlanded file: %v", err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t6")
+	}) {
+		return
+	}
+
+	mounts, err := db.Mounts(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) == 0 {
+		t.Fatal("workspace Project has no idle Mount for stale registration coverage")
+	}
+	staleMount := mounts[0]
+	staleMemberWorktree := filepath.Join(staleMount.Path, "backend")
+	if err := os.RemoveAll(staleMemberWorktree); err != nil {
+		t.Fatal(err)
+	}
+	dryRun := runPosse(t, binary, workspace, leadEnv, "remuda", "prune")
+	if !strings.Contains(dryRun, "worktree-registration") || !strings.Contains(dryRun, "dry_run: true") {
+		t.Fatalf("workspace prune dry run omitted its member registration: %s", dryRun)
+	}
+	applied := runPosse(t, binary, workspace, leadEnv, "remuda", "prune", "--yes")
+	if !strings.Contains(applied, "dry_run: false") {
+		t.Fatalf("workspace prune --yes did not apply its dry-run plan: %s", applied)
+	}
+	listing := gitTest(t, env, filepath.Join(workspace, "backend"), "worktree", "list", "--porcelain")
+	if strings.Contains(listing, staleMemberWorktree) {
+		t.Fatalf("workspace prune left the stale Member worktree registration: %s", listing)
 	}
 }

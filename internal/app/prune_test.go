@@ -236,7 +236,7 @@ func TestPruneRemovesOnlyStaleOwnedWorktreeRegistrations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := staleOwnedWorktreeItems(ctx, project, home, mounts)
+	items, err := staleOwnedWorktreeItems(ctx, db, project, home, mounts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,6 +292,16 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 	discardSHA := makeBranch("posse/t3", "discard.txt")
 	unlandedSHA := makeBranch("posse/t2", "unlanded.txt")
 	prMergedSHA := makeBranch("posse/t4", "pr-merged.txt")
+	noMistakesMergedSHA := makeBranch("posse/t6", "no-mistakes-merged.txt")
+	noMistakesHeadSHA := makeBranch("posse/t7", "no-mistakes-head.txt")
+	gitTest(t, repo, "switch", "posse/t7")
+	if err := os.WriteFile(filepath.Join(repo, "no-mistakes-follow-up.txt"), []byte("unmerged follow-up\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "add", "no-mistakes-follow-up.txt")
+	gitTest(t, repo, "commit", "-m", "follow-up after merged no-mistakes PR")
+	noMistakesFollowUpSHA := strings.TrimSpace(gitTest(t, repo, "rev-parse", "HEAD"))
+	gitTest(t, repo, "switch", "main")
 	gitTest(t, repo, "switch", "-c", "posse/t5")
 	if err := os.WriteFile(filepath.Join(repo, "pr-head.txt"), []byte("merged head\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -326,12 +336,16 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 	discarded := makeTask(3, "posse/t3", store.StateTornDown, "local")
 	mergedPR := makeTask(4, "posse/t4", store.StateLanded, "pr")
 	advancedPR := makeTask(5, "posse/t5", store.StateLanded, "pr")
+	mergedNoMistakes := makeTask(6, "posse/t6", store.StateLanded, "no-mistakes")
+	advancedNoMistakes := makeTask(7, "posse/t7", store.StateLanded, "no-mistakes")
 	for _, entry := range []struct {
 		task    store.Task
 		headSHA string
 	}{
 		{task: mergedPR, headSHA: prMergedSHA},
 		{task: advancedPR, headSHA: prHeadSHA},
+		{task: mergedNoMistakes, headSHA: noMistakesMergedSHA},
+		{task: advancedNoMistakes, headSHA: noMistakesHeadSHA},
 	} {
 		if _, err := db.ExecContext(ctx, `INSERT INTO pr_observations(project_id,task_id,pr_url,head_sha,state,observed_at) VALUES(?,?,?,?,?,?)`, project.ID, entry.task.ID, "https://example.test/pull/1", entry.headSHA, "MERGED", time.Now().UnixMilli()); err != nil {
 			t.Fatal(err)
@@ -343,14 +357,14 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 	if err := testService(home, nil).captureDiscardTips(ctx, db, home, project, discarded); err != nil {
 		t.Fatalf("capture approved discard for prune: %v", err)
 	}
-	items, err := landedOrDiscardedBranchItems(ctx, db, home, project, []store.Task{landed, unlanded, discarded, mergedPR, advancedPR})
+	items, err := landedOrDiscardedBranchItems(ctx, db, home, project, []store.Task{landed, unlanded, discarded, mergedPR, advancedPR, mergedNoMistakes, advancedNoMistakes})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 || items[0].label != "posse/t1" || items[1].label != "posse/t3" || items[2].label != "posse/t4" {
-		t.Fatalf("prunable branch items = %#v, want landed, captured discard, and merged-PR branches", items)
+	if len(items) != 4 || items[0].label != "posse/t1" || items[1].label != "posse/t3" || items[2].label != "posse/t4" || items[3].label != "posse/t6" {
+		t.Fatalf("prunable branch items = %#v, want landed, captured discard, merged PR, and merged no-mistakes branches", items)
 	}
-	if items[0].sha != landedSHA || items[1].sha != discardSHA || items[1].bytes <= 0 || items[2].sha != prMergedSHA || prFollowUpSHA == prHeadSHA {
+	if items[0].sha != landedSHA || items[1].sha != discardSHA || items[1].bytes <= 0 || items[2].sha != prMergedSHA || items[3].sha != noMistakesMergedSHA || prFollowUpSHA == prHeadSHA {
 		t.Fatalf("branch candidates lost their captured tips or sizes: %#v", items)
 	}
 	service := testService(home, nil)
@@ -359,7 +373,7 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 			t.Fatalf("remove safe branch %s: %v", item.label, err)
 		}
 	}
-	for _, branch := range []string{"posse/t1", "posse/t3", "posse/t4"} {
+	for _, branch := range []string{"posse/t1", "posse/t3", "posse/t4", "posse/t6"} {
 		command := exec.Command("git", "-C", repo, "show-ref", "--verify", "refs/heads/"+branch)
 		if output, err := command.CombinedOutput(); err == nil {
 			t.Errorf("pruned branch %s still exists: %s", branch, output)
@@ -370,6 +384,9 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitTest(t, repo, "rev-parse", "refs/heads/posse/t5")); got != prFollowUpSHA {
 		t.Fatalf("prune changed follow-up PR branch tip to %s, want %s", got, prFollowUpSHA)
+	}
+	if got := strings.TrimSpace(gitTest(t, repo, "rev-parse", "refs/heads/posse/t7")); got != noMistakesFollowUpSHA {
+		t.Fatalf("prune changed follow-up no-mistakes branch tip to %s, want %s", got, noMistakesFollowUpSHA)
 	}
 }
 

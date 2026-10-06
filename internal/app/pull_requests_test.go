@@ -447,6 +447,96 @@ func TestNoMistakesDoneSignalRecordsPRForLand(t *testing.T) {
 	}
 }
 
+func TestUnsaddleRemovesExactMergedNoMistakesBranch(t *testing.T) {
+	fixture := newPRLandingFixture(t, "no-mistakes", store.StateWorking)
+	ctx := context.Background()
+
+	mountBase := filepath.Join(fixture.home, "remuda", fixture.project.Name)
+	if err := os.MkdirAll(mountBase, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mount, err := fixture.db.AcquireMount(ctx, fixture.project.ID, fixture.task.ID, mountBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "worktree", "move", fixture.worktree, mount.Path)
+	if err := lockMount(ctx, fixture.repo, mount.Path, fixture.task.Seq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, fixture.repo, "merge", "--squash", fixture.task.Branch); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "commit", "-m", "squash merge no-mistakes PR")
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='landed' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO pr_observations(project_id,task_id,pr_url,head_sha,state,observed_at) VALUES(?,?,?,?,?,?)`, fixture.project.ID, fixture.task.ID, "", fixture.headSHA, "MERGED", 1); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.Herdr.(*herdr.Fake).SnapshotValue = herdr.Snapshot{}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.service.unsaddleTask(ctx, fixture.db, fixture.project, cfg, task, false, "")
+	if err != nil || !result.BranchRemoved {
+		t.Fatalf("Teardown did not remove the exact merged no-mistakes branch: result=%#v err=%v", result, err)
+	}
+	if _, err := gitOutput(ctx, fixture.repo, "rev-parse", "--verify", "refs/heads/"+task.Branch); !isMissingGitRef(err) {
+		t.Fatalf("merged no-mistakes branch remains: %v", err)
+	}
+}
+
+func TestUnsaddlePreservesAdvancedMergedNoMistakesBranch(t *testing.T) {
+	fixture := newPRLandingFixture(t, "no-mistakes", store.StateWorking)
+	ctx := context.Background()
+
+	mountBase := filepath.Join(fixture.home, "remuda", fixture.project.Name)
+	if err := os.MkdirAll(mountBase, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mount, err := fixture.db.AcquireMount(ctx, fixture.project.ID, fixture.task.ID, mountBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "worktree", "move", fixture.worktree, mount.Path)
+	if err := lockMount(ctx, fixture.repo, mount.Path, fixture.task.Seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mount.Path, "follow-up.txt"), []byte("follow-up after merged head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, mount.Path, "add", "follow-up.txt")
+	gitTest(t, mount.Path, "commit", "-m", "follow-up after merged no-mistakes PR")
+	advancedSHA := strings.TrimSpace(gitTest(t, mount.Path, "rev-parse", "HEAD"))
+	gitTest(t, fixture.repo, "cherry-pick", fixture.headSHA)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='landed' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO pr_observations(project_id,task_id,pr_url,head_sha,state,observed_at) VALUES(?,?,?,?,?,?)`, fixture.project.ID, fixture.task.ID, "", fixture.headSHA, "MERGED", 1); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.Herdr.(*herdr.Fake).SnapshotValue = herdr.Snapshot{}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.unsaddleTask(ctx, fixture.db, fixture.project, cfg, task, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/"+task.Branch)); got != advancedSHA {
+		t.Fatalf("Teardown changed the advanced no-mistakes branch tip to %s, want %s", got, advancedSHA)
+	}
+}
+
 func TestNoMistakesDoneRejectsPullRequestFromAnotherRepository(t *testing.T) {
 	fixture := newPRLandingFixture(t, "no-mistakes", store.StateWorking)
 	fixture.installFakeNoMistakes(t, "status: initialized\n", 0)

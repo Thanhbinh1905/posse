@@ -408,7 +408,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			phase   string
 		}{"land --merge", step, "after"})
 	}
-	for _, step := range []string{"approval.record", "discard.capture", "panes.close", "mount.release", "branch.remove", "scratch.remove", "task.torn_down"} {
+	for _, step := range []string{"approval.record", "discard.capture", "panes.close", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"} {
 		steps = append(steps, struct {
 			command string
 			step    string
@@ -656,7 +656,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 						t.Fatalf("discard recovery kept Task scratch after %s/%s: %v", item.phase, item.step, err)
 					}
 				}
-				branchRemoved := item.step == "task.torn_down" || item.step == "scratch.remove" || item.step == "branch.remove" && item.phase == "after"
+				branchRemoved := item.step == "task.torn_down" || item.step == "branch.remove" && item.phase == "after" || item.step == "scratch.remove" && item.phase == "before"
 				branchTip, branchErr := gitCommand(fixture.harness.baseEnv, fixture.repo, "rev-parse", "--verify", "refs/heads/posse/t1")
 				if branchRemoved && branchErr == nil {
 					t.Fatalf("discard crash at %s/%s left branch at %s", item.phase, item.step, strings.TrimSpace(branchTip))
@@ -689,7 +689,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					if err := db.QueryRowContext(context.Background(), `SELECT state FROM mounts WHERE path=?`, filepath.Join(fixture.home, "remuda", fixture.project.Name, "mount-1")).Scan(&mountState); err != nil {
 						return err
 					}
-					mountReleased := item.step == "mount.release" && item.phase == "after" || item.step == "branch.remove" || item.step == "scratch.remove" || item.step == "task.torn_down"
+					mountReleased := item.step == "mount.release" && item.phase == "after" || item.step == "branch.remove" || item.step == "task.torn_down" || item.step == "scratch.remove" && item.phase == "before"
 					wantMountState := "held"
 					if mountReleased {
 						wantMountState = "idle"

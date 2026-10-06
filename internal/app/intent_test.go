@@ -66,7 +66,7 @@ func TestIntentCrashHookExitsAfterPersistingCompletedStep(t *testing.T) {
 	checkpoints := map[string][]string{
 		"ride":         {"scratch.create", "mount.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"},
 		"land --merge": {"gate.record", "gate.run", "task.landing", "notice.create", "approval.record", "merge", "landed_ref.record", "task.landed"},
-		"unsaddle":     {"approval.record", "discard.capture", "panes.close", "mount.release", "branch.remove", "scratch.remove", "task.torn_down"},
+		"unsaddle":     {"approval.record", "discard.capture", "panes.close", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"},
 		"relaunch":     {"git.inspect", "pane.open", "agent.stop", "pane.label", "scratch.environment", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"},
 	}
 	dbPath := filepath.Join(t.TempDir(), "posse.db")

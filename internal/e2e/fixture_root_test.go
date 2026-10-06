@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
 const fixtureLockName = ".posse-e2e-fixture.lock"
@@ -105,6 +107,42 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		_ = lock.Close()
 	})
 	return root
+}
+
+func TestIsolatedHerdrAcceptsDefaultTaskScratchTMPDIR(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux procfs to keep the non-/tmp fixture physically inside Task scratch")
+	}
+	taskScratch := newFixtureRoot(t, "posse-e2e-task-scratch-")
+	tmpDir := filepath.Join(taskScratch, "posse", "scratch", "shop", "t1")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmpHandle, err := os.Open(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tmpHandle.Close() })
+	configuredTMPDIR := fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), tmpHandle.Fd())
+	if _, err := os.Stat(configuredTMPDIR); err != nil {
+		t.Fatalf("Task TMPDIR alias is unavailable: %v", err)
+	}
+	t.Setenv("TMPDIR", configuredTMPDIR)
+	t.Setenv("POSSE_E2E_TMP_ROOT", "")
+
+	root := newFixtureRoot(t, herdr.TestRootName())
+	if filepath.Dir(root) != configuredTMPDIR || strings.HasPrefix(root, "/tmp/") {
+		t.Fatalf("isolated E2E fixture is not directly under the non-/tmp Task TMPDIR: %q", root)
+	}
+	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
+		t.Fatal(err)
+	}
+	client := herdr.NewWithEnv("herdr", isolatedE2EEnv(t, root))
+	startServer(t, client)
+	status, err := client.Status(t.Context())
+	if err != nil || !status.Running {
+		t.Fatalf("private Herdr server did not start under Task TMPDIR: status=%#v err=%v", status, err)
+	}
 }
 
 // Go's module cache makes directories read-only. WalkDir never follows links,
