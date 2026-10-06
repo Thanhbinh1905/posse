@@ -431,7 +431,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	quoted, _ := json.Marshal(executable)
-	if !strings.Contains(string(contents), "const posse = "+string(quoted)+";") || !strings.Contains(string(contents), `["lookout", "--json", "--quiet-routine"]`) || !strings.Contains(string(contents), "wake = result.wake") || !strings.Contains(string(contents), `customType: "posse-notices"`) || !strings.Contains(string(contents), `origin: "posse"`) || !strings.Contains(string(contents), `triggerTurn: true`) || !strings.Contains(string(contents), `pendingRequeue = ids.join(",")`) || !strings.Contains(string(contents), `pi.registerCommand("lowkey"`) || !strings.Contains(string(contents), `AssistantMessageComponent.prototype.updateContent`) || !strings.Contains(string(contents), `ui?.setHiddenThinkingLabel(active ? "" : undefined)`) {
+	if !strings.Contains(string(contents), "const posse = "+string(quoted)+";") || !strings.Contains(string(contents), `["lookout", "--json", "--quiet-routine", "--handoff"`) || !strings.Contains(string(contents), "wake = result.wake") || !strings.Contains(string(contents), `customType: "posse-notices"`) || !strings.Contains(string(contents), `origin: "posse"`) || !strings.Contains(string(contents), `triggerTurn: true`) || !strings.Contains(string(contents), `sessionHasReceipt(delivery)`) || !strings.Contains(string(contents), `pi.registerCommand("lowkey"`) || !strings.Contains(string(contents), `AssistantMessageComponent.prototype.updateContent`) || !strings.Contains(string(contents), `ui?.setHiddenThinkingLabel(active ? "" : undefined)`) {
 		t.Fatalf("pi extension does not run this posse binary's lookout:\n%s", contents)
 	}
 	for _, frame := range []string{"░░▒▓", "░▒▓█", "▒▓█▓", "▓█▓▒", "█▓▒░", "▓▒░░"} {
@@ -614,7 +614,7 @@ func TestOpenCodeLeadLaunchAndPluginConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	quoted, _ := json.Marshal(executable)
-	for _, part := range []string{"const posse = " + string(quoted), "experimental.chat.system.transform", "output.system.push(instructions)", `"lookout", "--json", "--quiet-routine"`, "client.session.prompt(", "event.type === \"session.idle\"", "requeue = batch.ids.join(\",\")"} {
+	for _, part := range []string{"const posse = " + string(quoted), "experimental.chat.system.transform", "output.system.push(instructions)", `"lookout", "--json", "--quiet-routine", "--handoff"`, "client.session.prompt(", "client.session.messages(", "--receipt-outcome", "event.type === \"session.idle\""} {
 		if !strings.Contains(string(contents), part) {
 			t.Fatalf("OpenCode plugin missing %q", part)
 		}

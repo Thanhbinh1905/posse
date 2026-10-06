@@ -607,7 +607,7 @@ func TestLeadInstructionsReportNoticesProactivelyByKind(t *testing.T) {
 	for kind, rule := range map[string]string{
 		"claude": "Keep exactly one `posse lookout` running as a background command",
 		"codex":  "posse queues each batch of Notices into this conversation",
-		"pi":     "The Pi extension queues actionable Notices into model context as hidden Posse Notice messages",
+		"pi":     "The Pi extension delivers Notices through Pi's persisted session queue",
 		"gemini": "Notices arrive as a Posse Notice prompt only while your pane is idle and unfocused",
 	} {
 		t.Run(kind, func(t *testing.T) {

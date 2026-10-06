@@ -337,6 +337,8 @@ func seedValue(column seedColumn) any {
 	switch column.name {
 	case "action":
 		return "set"
+	case "state":
+		return "claimed"
 	case "user_quote":
 		return "test quote"
 	case "value":

@@ -92,6 +92,10 @@ func (db *DB) TaskSnapshotPath(project string, sequence int) string {
 	return filepath.Join(filepath.Dir(db.Path), "projects", project, "tasks", fmt.Sprintf("t%d", sequence), "task.toml")
 }
 
+func (db *DB) NoticeDeliverySnapshotPath(project string) string {
+	return filepath.Join(filepath.Dir(db.Path), "projects", project, "notice-delivery.toml")
+}
+
 func (db *DB) PersistTask(ctx context.Context, taskID int64) error {
 	var projectID int64
 	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID); err != nil {
@@ -205,6 +209,7 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 	snapshots := make([]TaskSnapshot, 0, len(paths))
 	projects := map[int64]Project{}
 	members := map[int64][]ProjectRepo{}
+	deliverySnapshots := map[int64]NoticeDeliverySnapshot{}
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -226,6 +231,33 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		}
 		snapshots = append(snapshots, snapshot)
 	}
+	deliveryPaths, err := filepath.Glob(filepath.Join(home, "projects", "*", "notice-delivery.toml"))
+	if err != nil {
+		return 0, err
+	}
+	for _, path := range deliveryPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return 0, err
+		}
+		var snapshot NoticeDeliverySnapshot
+		if _, err := toml.Decode(string(data), &snapshot); err != nil {
+			return 0, fmt.Errorf("decode %s: %w", path, err)
+		}
+		if snapshot.Version != 1 || snapshot.Project.ID == 0 || snapshot.Project.Name == "" || filepath.Clean(path) != filepath.Clean(db.NoticeDeliverySnapshotPath(snapshot.Project.Name)) {
+			return 0, fmt.Errorf("invalid Notice delivery snapshot %s", path)
+		}
+		if existing, ok := projects[snapshot.Project.ID]; ok && (existing.Name != snapshot.Project.Name || existing.Root != snapshot.Project.Root) {
+			return 0, fmt.Errorf("Notice delivery snapshot Project identity conflicts: %s", path)
+		}
+		if _, ok := projects[snapshot.Project.ID]; !ok {
+			projects[snapshot.Project.ID] = snapshot.Project
+		}
+		if _, duplicate := deliverySnapshots[snapshot.Project.ID]; duplicate {
+			return 0, fmt.Errorf("duplicate Notice delivery snapshot for Project %d", snapshot.Project.ID)
+		}
+		deliverySnapshots[snapshot.Project.ID] = snapshot
+	}
 	maxID := int64(0)
 	known := make(map[string]bool, len(snapshots))
 	for _, snapshot := range snapshots {
@@ -246,7 +278,7 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		}
 	}
 	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].Task.ID < snapshots[j].Task.ID })
-	if err := db.rebuild(ctx, snapshots, projects, members); err != nil {
+	if err := db.rebuild(ctx, snapshots, projects, members, deliverySnapshots); err != nil {
 		return 0, err
 	}
 	for _, snapshot := range snapshots {
@@ -303,13 +335,13 @@ func latestUpdate(snapshots []TaskSnapshot, projectID int64) int64 {
 	return latest
 }
 
-func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects map[int64]Project, members map[int64][]ProjectRepo) error {
+func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects map[int64]Project, members map[int64][]ProjectRepo, deliverySnapshots map[int64]NoticeDeliverySnapshot) error {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notices", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -367,6 +399,11 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id,repo,worktree_path,base_ref,landing_mode,state,gated_sha,pr_url,landed_ref,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, task.ID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.LandingMode, repo.State, repo.GatedSHA, repo.PRURL, repo.LandedRef, task.UpdatedAt); err != nil {
 				return err
 			}
+		}
+	}
+	for _, snapshot := range deliverySnapshots {
+		if err := db.RestoreNoticeDeliverySnapshot(ctx, tx, snapshot); err != nil {
+			return fmt.Errorf("restore Notice delivery snapshot for Project %d: %w", snapshot.Project.ID, err)
 		}
 	}
 	return tx.Commit()

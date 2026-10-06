@@ -182,10 +182,10 @@ INSERT INTO notice_notifications(project_id, notified_at) VALUES (?, ?)
 ON CONFLICT(project_id) DO UPDATE SET notified_at = excluded.notified_at;
 
 -- name: AckAllNotices :execresult
-UPDATE notices SET acked_at = ? WHERE project_id = ? AND acked_at IS NULL;
+UPDATE notices SET acked_at = ? WHERE project_id = ? AND acked_at IS NULL AND claim_token = '';
 
 -- name: AckNotice :execresult
-UPDATE notices SET acked_at = ? WHERE id = ? AND project_id = ? AND acked_at IS NULL;
+UPDATE notices SET acked_at = ? WHERE id = ? AND project_id = ? AND acked_at IS NULL AND claim_token = '';
 
 -- name: ProjectByRoot :one
 SELECT * FROM projects WHERE root = ?;

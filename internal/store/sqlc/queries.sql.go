@@ -11,7 +11,7 @@ import (
 )
 
 const ackAllNotices = `-- name: AckAllNotices :execresult
-UPDATE notices SET acked_at = ? WHERE project_id = ? AND acked_at IS NULL
+UPDATE notices SET acked_at = ? WHERE project_id = ? AND acked_at IS NULL AND claim_token = ''
 `
 
 type AckAllNoticesParams struct {
@@ -24,7 +24,7 @@ func (q *Queries) AckAllNotices(ctx context.Context, arg AckAllNoticesParams) (s
 }
 
 const ackNotice = `-- name: AckNotice :execresult
-UPDATE notices SET acked_at = ? WHERE id = ? AND project_id = ? AND acked_at IS NULL
+UPDATE notices SET acked_at = ? WHERE id = ? AND project_id = ? AND acked_at IS NULL AND claim_token = ''
 `
 
 type AckNoticeParams struct {
