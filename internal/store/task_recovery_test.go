@@ -80,6 +80,61 @@ func TestTaskRecoveryBudgetBackoffAndExhaustionSurviveReopen(t *testing.T) {
 	}
 }
 
+func TestCompletedTaskRecoveryCanRetryWhenPaneDisappearsWithinGeneration(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Rider"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := db.ClaimTaskRecovery(ctx, id, "server/group/lead/pane", 0, 101, 3, 1000, 2000); err != nil || !claimed {
+		t.Fatalf("initial claim=%v err=%v", claimed, err)
+	}
+	if err := db.FinishTaskRecovery(ctx, task, 101, 3, true, "", 2000); err != nil {
+		t.Fatal(err)
+	}
+	state, err := db.TaskRecovery(ctx, id)
+	if err != nil || state.NextAttemptAt != 0 {
+		t.Fatalf("successful recovery retained retry delay: %#v err=%v", state, err)
+	}
+	if reopened, err := db.RetryRecoveredTask(ctx, id, state.Generation); err != nil || !reopened {
+		t.Fatalf("reopen missing recovered pane=%v err=%v", reopened, err)
+	}
+	if claimed, err := db.ClaimTaskRecovery(ctx, id, state.Generation, 0, 102, 3, 2001, 3001); err != nil || !claimed {
+		t.Fatalf("same-generation retry claim=%v err=%v", claimed, err)
+	}
+	state, err = db.TaskRecovery(ctx, id)
+	if err != nil || state.Attempts != 2 || state.Status != "running" {
+		t.Fatalf("same-generation retry state=%#v err=%v", state, err)
+	}
+	if err := db.FinishTaskRecovery(ctx, task, 102, 3, true, "", 4000); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishTaskRecovery(ctx, task, 0, 2, false, "recovered Rider pane is no longer live", 0); err != nil {
+		t.Fatal(err)
+	}
+	state, err = db.TaskRecovery(ctx, id)
+	if err != nil || state.Status != "exhausted" {
+		t.Fatalf("missing Rider at exhausted budget state=%#v err=%v", state, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "recovery_failed" {
+		t.Fatalf("exhaustion Notices=%#v err=%v", notices, err)
+	}
+}
+
 func TestConcurrentTaskRecoveryClaimsChargeOneAttempt(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
