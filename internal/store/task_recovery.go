@@ -89,7 +89,13 @@ func (db *DB) FinishTaskRecovery(ctx context.Context, task Task, ownerPID, limit
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if nextStatus == "exhausted" {
+		return db.PersistProject(ctx, task.ProjectID)
+	}
+	return nil
 }
 
 // RetryRecoveredTask reopens a completed episode only after its caller verifies

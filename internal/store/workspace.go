@@ -87,7 +87,11 @@ func (db *DB) CreateWorkspaceProject(ctx context.Context, name, root string, rep
 	if err := tx.Commit(); err != nil {
 		return Project{}, err
 	}
-	return Project{ID: id, Name: name, Root: root, Kind: ProjectKindWorkspace, Status: "active", CreatedAt: now, LastActivityAt: now}, nil
+	project := Project{ID: id, Name: name, Root: root, Kind: ProjectKindWorkspace, Status: "active", CreatedAt: now, LastActivityAt: now}
+	if err := db.PersistProject(ctx, id); err != nil {
+		return Project{}, err
+	}
+	return project, nil
 }
 
 // ProjectRepos lists a Project's members by name, including missing ones.
@@ -146,7 +150,10 @@ ON CONFLICT(project_id, name) DO UPDATE SET path=excluded.path, default_branch=e
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 // CreateTaskRepos records the members a workspace Task touches.
@@ -163,7 +170,10 @@ ON CONFLICT(task_id, repo) DO UPDATE SET worktree_path=excluded.worktree_path, b
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) TaskRepos(ctx context.Context, taskID int64) ([]TaskRepo, error) {
@@ -192,7 +202,7 @@ func (db *DB) UpdateTaskRepo(ctx context.Context, repo TaskRepo) error {
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return db.PersistTask(ctx, repo.TaskID)
 }
 
 func (db *DB) ProjectRepoWatchState(ctx context.Context, projectID int64, repo string) (RepoWatchState, error) {
@@ -267,7 +277,6 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 			}
 		}
 	}
-	transitioned := false
 	if effect.RepoState != "" {
 		now := time.Now().UnixMilli()
 		switch effect.RepoState {
@@ -279,7 +288,7 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		if err != nil {
 			return false, err
 		}
-		transitioned, err = settleWorkspaceTaskTx(ctx, db, tx, observation.TaskID, effect.RepoState == TaskRepoOpen, "Pull request for "+repo+" closed without merging")
+		_, err = settleWorkspaceTaskTx(ctx, db, tx, observation.TaskID, effect.RepoState == TaskRepoOpen, "Pull request for "+repo+" closed without merging")
 		if err != nil {
 			return false, err
 		}
@@ -287,12 +296,7 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
-	if transitioned {
-		if err := db.PersistTask(ctx, observation.TaskID); err != nil {
-			return false, err
-		}
-	}
-	return true, nil
+	return true, db.PersistTask(ctx, observation.TaskID)
 }
 
 // SettleWorkspaceTask moves a landing workspace Task to landed once every changed

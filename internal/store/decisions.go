@@ -101,19 +101,47 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	if count == 0 && (decision.TaskID != request.TaskID || decision.Kind != request.Kind || decision.Question != request.Question || !slices.Equal(request.Options, decision.Options)) {
 		return Decision{}, fmt.Errorf("decision origin %q already belongs to another question", request.Origin)
 	}
-	return decision, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return Decision{}, err
+	}
+	if err := db.PersistProject(ctx, request.ProjectID); err != nil {
+		return Decision{}, err
+	}
+	return decision, nil
 }
 
 // ObsoletePendingPRDecision retires a stale observation without changing a
 // User's answer or affecting a different Member's PR.
 func (db *DB) ObsoletePendingPRDecision(ctx context.Context, taskID int64, origin, reason string) error {
-	_, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?, obsolete_reason=? WHERE task_id=? AND kind='pr_closed' AND origin=? AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), reason, taskID, origin)
-	return err
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?, obsolete_reason=? WHERE task_id=? AND kind='pr_closed' AND origin=? AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), reason, taskID, origin)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) ObsoletePendingLeftoverDecision(ctx context.Context, id int64) error {
-	_, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Leftover has no content diff' WHERE id=? AND kind='leftover' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), id)
-	return err
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Leftover has no content diff' WHERE id=? AND kind='leftover' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM decisions WHERE id=?`, id).Scan(&projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 // QueueDecisionMessage makes applying a Review answer retry-safe.
@@ -138,7 +166,10 @@ func (db *DB) QueueDecisionMessage(ctx context.Context, decision Decision, targe
 	if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at) VALUES(?,?,'decision_applied',?,?,?, ?, ?)`, decision.ProjectID, decision.TaskID, "Review answer applied", key, now, now, now); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, decision.ProjectID)
 }
 
 // AnswerDecision records one answer and one Notice atomically. A second answer
@@ -171,6 +202,9 @@ func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, u
 		if err := tx.Commit(); err != nil {
 			return Decision{}, err
 		}
+		if err := db.PersistProject(ctx, projectID); err != nil {
+			return Decision{}, err
+		}
 		return Decision{}, fmt.Errorf("decision %d is obsolete: %s", id, reason)
 	}
 	valid := false
@@ -195,6 +229,9 @@ func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, u
 		return Decision{}, err
 	}
 	decision.Answer, decision.UserQuote, decision.AnsweredAt = option, userQuote, at
+	if err := db.PersistProject(ctx, projectID); err != nil {
+		return Decision{}, err
+	}
 	return decision, nil
 }
 
@@ -225,15 +262,17 @@ func (db *DB) DecisionSourceNotices(ctx context.Context, projectID int64) ([]Not
 // AdvanceDecisionNoticeCursor marks all Notices up to id evaluated, including
 // unrelated kinds and those that did not require a Decision. It is monotonic.
 func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int64) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO decision_notice_cursors(project_id,last_notice_id) VALUES(?,?)
-		ON CONFLICT(project_id) DO UPDATE SET last_notice_id=MAX(last_notice_id,excluded.last_notice_id)`, projectID, id)
-	return err
+	if _, err := db.ExecContext(ctx, `INSERT INTO decision_notice_cursors(project_id,last_notice_id) VALUES(?,?)
+		ON CONFLICT(project_id) DO UPDATE SET last_notice_id=MAX(last_notice_id,excluded.last_notice_id)`, projectID, id); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 // ObsoleteResolvedDecisions removes resolved questions from the pending list
 // without pretending the User answered them. Answered and manual Decisions stay.
 func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) error {
-	_, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=CASE kind
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=CASE kind
 		WHEN 'land_ready' THEN 'Task left landing'
 		WHEN 'pr_closed' THEN 'Closed PR was reopened, replaced or Task discarded'
 		WHEN 'leftover' THEN 'Unrecoverable Leftover resolved during Teardown'
@@ -244,7 +283,14 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))
 		OR (kind='pr_closed' AND ((decisions.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR decisions.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url)) OR (decisions.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
 		OR (kind='leftover' AND decisions.origin LIKE 'leftover:unrecoverable:%' AND t.state='torn-down')))`, time.Now().UnixMilli(), projectID)
-	return err
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
