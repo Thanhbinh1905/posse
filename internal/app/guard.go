@@ -555,6 +555,9 @@ func (g *guard) interpreter(e *shellEnv, args []string, literal []bool, raw, std
 	if strings.TrimSpace(code) == "" {
 		code = stdin
 	}
+	if len(args) > 0 && pythonInterpreter(filepath.Base(args[0])) && provenPythonInspection(code) {
+		return false, guardReason{}
+	}
 	return g.opaque(e, raw, raw+"\n"+code)
 }
 
@@ -805,6 +808,34 @@ var (
 	validName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	simpleVar = regexp.MustCompile(`^\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$`)
 )
+
+var provenPythonInspections = func() []*regexp.Regexp {
+	literal := `(?:'[^'\\\r\n]*(?:\\.[^'\\\r\n]*)*'|"[^"\\\r\n]*(?:\\.[^"\\\r\n]*)*")`
+	return []*regexp.Regexp{
+		regexp.MustCompile(`(?s)^\s*print\s*\(\s*` + literal + `\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*from\s+pathlib\s+import\s+Path\s*[;\n]\s*print\s*\(\s*Path\s*\(\s*` + literal + `\s*\)\s*\.\s*read_text\s*\(\s*\)\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*import\s+importlib\.metadata\s*;\s*print\s*\(\s*importlib\.metadata\.version\s*\(\s*` + literal + `\s*\)\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*from\s+importlib\.metadata\s+import\s+version\s*;\s*print\s*\(\s*version\s*\(\s*` + literal + `\s*\)\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*import\s+sys\s*;\s*print\s*\(\s*sys\.version(?:_info)?\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*import\s+sys\s*;\s*print\s*\(\s*` + literal + `\s*,\s*sys\.version(?:_info)?\s*\)\s*;?\s*$`),
+	}
+}()
+
+func pythonInterpreter(name string) bool {
+	return strings.HasPrefix(name, "python") || strings.HasPrefix(name, "pypy")
+}
+
+// provenPythonInspection recognizes a few single-purpose read-only probes.
+// Other interpreter programs remain opaque and are checked conservatively.
+func provenPythonInspection(code string) bool {
+	code = strings.TrimSpace(code)
+	for _, pattern := range provenPythonInspections {
+		if pattern.MatchString(code) {
+			return true
+		}
+	}
+	return false
+}
 
 // shellEnv tracks the environment and working directory a command will see,
 // as far as the script shows them. A variable set from an expansion posse

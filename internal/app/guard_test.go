@@ -100,6 +100,41 @@ func TestGuardAllowsReadsAndIsolatedHerdrServers(t *testing.T) {
 	}
 }
 
+func TestGuardAllowsProvenPythonInspections(t *testing.T) {
+	scope, _ := guardFixture(t)
+	for _, command := range []string{
+		`python3 -c "from pathlib import Path; print(Path('internal/herdr/adapter_test.go').read_text())"`,
+		`python3 -c "print('herdr')"`,
+		`python3 -c "import sys; print('herdr runtime:', sys.version)"`,
+		`python3 -c "import importlib.metadata; print(importlib.metadata.version('herdr'))"`,
+	} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard refused proven read-only Python inspection %q: %#v", command, reason)
+		}
+	}
+}
+
+func TestGuardKeepsOpaquePythonHerdrAccessBlocked(t *testing.T) {
+	scope, _ := guardFixture(t)
+	for _, command := range []string{
+		`python3 -c "from pathlib import Path; print(Path('internal/herdr/adapter_test.go').read_text()); import subprocess; subprocess.run(['herdr'])"`,
+		`python3 -c "import socket, os; socket.socket(socket.AF_UNIX).connect(os.environ['HERDR_SOCKET_PATH'])"`,
+		`python3 -c "print('herdr'); __import__('os').system('herdr workspace close w1')"`,
+	} {
+		if refused, reason := guardCommand(command, scope); !refused || reason.why == "" {
+			t.Errorf("guard did not conservatively refuse opaque Python command %q: %#v", command, reason)
+		}
+	}
+}
+
+func TestGuardExplainsUnknownDynamicHerdrTarget(t *testing.T) {
+	scope, _ := guardFixture(t)
+	command := `R=$(printf %s /tmp/isolated); HERDR_SOCKET_PATH=$R/herdr.sock herdr workspace close w1`
+	if refused, reason := guardCommand(command, scope); !refused || !strings.Contains(reason.why, "cannot tell which Herdr server it reaches") {
+		t.Fatalf("guard did not explain the unverified dynamic Herdr target: refused=%v reason=%#v", refused, reason)
+	}
+}
+
 func TestGuardAllowsReadOnlyHerdrProbesAndPlainMentions(t *testing.T) {
 	for _, command := range []string{
 		"command -v herdr",
@@ -131,7 +166,7 @@ func TestGuardAllowsDownloadingAndRunningAnIsolatedHerdrBinary(t *testing.T) {
 		}
 	}
 
-	root, err := os.MkdirTemp("/tmp", "posse-e2e-t91-")
+	root, err := os.MkdirTemp(os.TempDir(), "posse-e2e-t91-")
 	if err != nil {
 		t.Fatal(err)
 	}

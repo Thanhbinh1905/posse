@@ -76,6 +76,13 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	source := filepath.Join(root, "internal", "herdr")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "adapter_test.go"), []byte("herdrCall = 'fixture'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name, command string
 		blocked       bool
@@ -93,6 +100,13 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"isolated experiment", fmt.Sprintf("env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s POSSE_HOME=%s herdr workspace rename %s harmless", filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), otherWorkspace.Workspace.WorkspaceID), false},
 		{"isolated dynamic posse home", fmt.Sprintf("R=$(printf %%s %s); env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s POSSE_HOME=$R/posse herdr workspace rename %s harmless", otherRoot, filepath.Join(otherRoot, "xdg"), otherWorkspace.Workspace.WorkspaceID), false},
 		{"isolated clean environment", fmt.Sprintf("env -i HOME=%s XDG_CONFIG_HOME=%s POSSE_HOME=%s PATH=%s herdr workspace rename %s harmless", filepath.Join(otherRoot, "home"), filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), os.Getenv("PATH"), otherWorkspace.Workspace.WorkspaceID), false},
+		{"unverifiable dynamic environment", fmt.Sprintf("R=$(printf %%s %s); HERDR_SOCKET_PATH=$R/herdr.sock herdr workspace rename %s forbidden", otherRoot, id), true},
+		{"python path read", `python3 -c "from pathlib import Path; print(Path('internal/herdr/adapter_test.go').read_text())"`, false},
+		{"python version query with Herdr data", `python3 -c "import sys; print('herdr runtime:', sys.version)"`, false},
+		{"rg search with Herdr data", "rg -n herdrCall internal/herdr/adapter_test.go", false},
+		{"python socket access", `python3 -c 'import socket, os; socket.socket(socket.AF_UNIX).connect(os.environ["HERDR_SOCKET_PATH"])'`, true},
+		{"python Herdr subprocess", fmt.Sprintf(`python3 -c 'import subprocess; subprocess.run(["herdr", "workspace", "rename", "%s", "forbidden"])'`, id), true},
+		{"direct Rider push", "git push origin HEAD", true},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
 		{"type probe", "type herdr", false},
@@ -111,6 +125,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			blocked := err != nil && guard.ProcessState.ExitCode() == 2
 			if blocked != tc.blocked {
 				t.Errorf("guard blocked=%v, want %v: %v %s", blocked, tc.blocked, err, output)
+			}
+			if tc.name == "unverifiable dynamic environment" && !strings.Contains(string(output), "cannot tell which Herdr server it reaches") {
+				t.Errorf("dynamic environment refusal did not explain the unknown target: %s", output)
 			}
 			if tc.blocked && strings.HasPrefix(tc.name, "default socket") && (!strings.Contains(string(output), "default socket reaches the User's Herdr server") || !strings.Contains(string(output), "env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse")) {
 				t.Errorf("refusal omitted the default-socket reason or accepted isolation command: %s", output)
