@@ -132,7 +132,14 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			if tc.blocked && strings.HasPrefix(tc.name, "default socket") && (!strings.Contains(string(output), "default socket reaches the User's Herdr server") || !strings.Contains(string(output), "env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse")) {
 				t.Errorf("refusal omitted the default-socket reason or accepted isolation command: %s", output)
 			}
-			if !blocked {
+			runShell := true
+			if tc.name == "rg search with Herdr data" {
+				if _, err := exec.LookPath("rg"); err != nil {
+					runShell = false
+					t.Log("rg is not installed; guard acceptance was checked without executing the search")
+				}
+			}
+			if !blocked && runShell {
 				shell := exec.Command("bash", "-c", tc.command)
 				shell.Dir = root
 				shell.Env = workerEnv
