@@ -178,6 +178,100 @@ func TestStateTransitionsAreCompareAndSetAndAudited(t *testing.T) {
 	}
 }
 
+func TestTerminalTaskTransitionsMakeQueuedMessagesUndeliverable(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		taskType string
+		followUp string
+		finish   func(int64) error
+	}{
+		{name: "reported", taskType: "scout", followUp: "Create a new Ship Task", finish: func(id int64) error {
+			if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
+				return err
+			}
+			return db.Transition(ctx, id, StateDone, StateReported, "cli", "report copied")
+		}},
+		{name: "failed", taskType: "ship", followUp: "posse relaunch t2", finish: func(id int64) error {
+			return db.Transition(ctx, id, StateWorking, StateFailed, "worker", "failed")
+		}},
+		{name: "lost", taskType: "ship", followUp: "posse relaunch t3", finish: func(id int64) error {
+			return db.Transition(ctx, id, StateWorking, StateLost, "cli", "Rider disappeared")
+		}},
+		{name: "landed", taskType: "ship", followUp: "Create a new Ship Task", finish: func(id int64) error {
+			if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
+				return err
+			}
+			if err := db.Transition(ctx, id, StateDone, StateLanding, "cli", "Gate passed"); err != nil {
+				return err
+			}
+			return db.Transition(ctx, id, StateLanding, StateLanded, "cli", "merged")
+		}},
+		{name: "torn-down", taskType: "ship", followUp: "Create a new Ship Task", finish: func(id int64) error {
+			if err := db.Transition(ctx, id, StateWorking, StateStalled, "cli", "Rider stalled"); err != nil {
+				return err
+			}
+			return db.TransitionWithApproval(ctx, id, StateStalled, StateTornDown, "user", "discard", "discard", "User approved discard")
+		}},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			id, err := db.CreateTask(ctx, project.ID, Task{Seq: index + 1, Type: test.taskType, Title: test.name, LandingMode: "local"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "Rider ready"); err != nil {
+				t.Fatal(err)
+			}
+			messageID, err := db.QueueMessage(ctx, id, "queued before "+test.name, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.finish(id); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.QueueMessage(ctx, id, "too late", true); !errors.Is(err, ErrStateRace) {
+				t.Fatalf("terminal Task accepted another queued message: %v", err)
+			}
+			message, err := db.MessageByID(ctx, messageID)
+			if err != nil || message.Status != "undeliverable" {
+				t.Fatalf("message after %s transition = %#v, %v", test.name, message, err)
+			}
+			messages, err := db.UndeliveredTaskMessages(ctx, id)
+			if err != nil || len(messages) != 1 || messages[0].ID != messageID {
+				t.Fatalf("showable undelivered messages = %#v, %v", messages, err)
+			}
+			notices, err := db.Notices(ctx, project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := 0
+			for _, notice := range notices {
+				if notice.TaskID == id && notice.Kind == "queued_message_undeliverable" {
+					found++
+					if !strings.Contains(notice.Summary, "#"+fmt.Sprint(messageID)) || !strings.Contains(notice.Summary, test.followUp) {
+						t.Fatalf("queued-message Notice lacks its ID or supported follow-up: %#v", notice)
+					}
+				}
+			}
+			if found != 1 {
+				t.Fatalf("queued-message Notices = %d, want one naming message #%d: %#v", found, messageID, notices)
+			}
+		})
+	}
+}
+
 func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
 	if err != nil {
@@ -188,8 +282,58 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 25 {
-		t.Fatalf("applied Goose migration version = %d, want 25", version)
+	if version != 26 {
+		t.Fatalf("applied Goose migration version = %d, want 26", version)
+	}
+}
+
+func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Legacy report", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "Rider ready"); err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := db.QueueMessage(ctx, taskID, "legacy queued instruction", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER terminalize_queued_messages`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='reported' WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id=26`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	message, err := db.MessageByID(ctx, messageID)
+	if err != nil || message.Status != "undeliverable" {
+		t.Fatalf("legacy orphan after migration = %#v, %v", message, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "queued_message_undeliverable" || !strings.Contains(notices[0].Summary, "#"+fmt.Sprint(messageID)) {
+		t.Fatalf("migration did not create its repair Notice: %#v, %v", notices, err)
 	}
 }
 
@@ -270,9 +414,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 25 {
+	if version != 26 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 25", version)
+		t.Fatalf("initial Goose migration version = %d, want 26", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -309,8 +453,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 25 {
-		t.Fatalf("reopened Goose migration version = %d, want 25", version)
+	if version != 26 {
+		t.Fatalf("reopened Goose migration version = %d, want 26", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {

@@ -1182,6 +1182,9 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	body := strings.Join(parsed.Positionals[1:], " ")
 	messageID, err := db.QueueMessage(ctx.Context, task.ID, body, parsed.Bool("queue"))
+	if errors.Is(err, store.ErrStateRace) {
+		return axi.Failure("message_refused", "Task stopped accepting Rider instructions before the message could be queued", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect the Task")
+	}
 	if err != nil {
 		return err
 	}

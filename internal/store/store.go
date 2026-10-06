@@ -238,6 +238,13 @@ const (
 	StateTornDown      State = "torn-down"
 )
 
+func taskAcceptsInstruction(state State, taskType string) bool {
+	if oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled) {
+		return true
+	}
+	return taskType == "ship" && oneOfState(state, StateDone, StateLanding)
+}
+
 var transitions = map[State]map[State]bool{
 	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
 	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateLanded: true},
@@ -1201,9 +1208,23 @@ type TransitionRecord struct {
 }
 
 func (db *DB) QueueMessage(ctx context.Context, taskID int64, body string, waitForIdle bool) (int64, error) {
-	result, err := db.ExecContext(ctx, `INSERT INTO messages(task_id, body, created_at, status, wait_for_idle) VALUES (?, ?, ?, 'queued', ?)`, taskID, body, time.Now().UnixMilli(), waitForIdle)
+	result, err := db.ExecContext(ctx, `INSERT INTO messages(task_id, body, created_at, status, wait_for_idle)
+SELECT ?, ?, ?, 'queued', ?
+WHERE EXISTS (
+    SELECT 1 FROM tasks WHERE id=? AND (
+        state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled')
+        OR type='ship' AND state IN ('done', 'landing')
+    )
+)`, taskID, body, time.Now().UnixMilli(), waitForIdle, taskID)
 	if err != nil {
 		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if count != 1 {
+		return 0, ErrStateRace
 	}
 	return result.LastInsertId()
 }
@@ -1242,6 +1263,24 @@ func (db *DB) MessageByID(ctx context.Context, messageID int64) (Message, error)
 		return Message{}, ErrNotFound
 	}
 	return message, err
+}
+
+func (db *DB) UndeliveredTaskMessages(ctx context.Context, taskID int64) ([]Message, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
+FROM messages WHERE task_id=? AND status IN ('queued', 'claimed', 'undeliverable') ORDER BY created_at, id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := []Message{}
+	for rows.Next() {
+		var message Message
+		if err := rows.Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
 }
 
 type ExpiredMessageSubmission struct {
@@ -1344,6 +1383,9 @@ func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token 
 			return ErrStateRace
 		}
 		return err
+	}
+	if !taskAcceptsInstruction(State(state), taskType) {
+		return ErrStateRace
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='submitting' WHERE id=? AND claim_token=?`, messageID, token); err != nil {
 		return err

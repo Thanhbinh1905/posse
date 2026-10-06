@@ -528,6 +528,25 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	commandName := taskCLIName(task)
 	help := []any{"Run `posse peek " + commandName + "` to read recent Rider output"}
+	undeliveredMessages, err := db.UndeliveredTaskMessages(ctx.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	if len(undeliveredMessages) > 0 {
+		rows := make([]any, 0, len(undeliveredMessages))
+		for _, message := range undeliveredMessages {
+			rows = append(rows, map[string]any{"id": message.ID, "status": message.Status, "instruction": message.Body})
+		}
+		view["undelivered_messages"] = rows
+		switch task.State {
+		case store.StateFailed, store.StateLost:
+			help = append(help, "Relaunch with `posse relaunch "+commandName+"`, then resend each undeliverable instruction with `posse send "+commandName+" <message>`")
+		case store.StateReported, store.StateLanded, store.StateTornDown:
+			help = append(help, "Create a new Ship Task, then resend each undeliverable instruction with `posse send <task> <message>`")
+		default:
+			help = append(help, "Queued instructions will be delivered when the Rider is ready and unfocused")
+		}
+	}
 	if task.Type == "ship" && task.State == store.StateDone {
 		help = append(help, "Run `posse land "+commandName+"` to run the Gate")
 	}
