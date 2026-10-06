@@ -1143,7 +1143,11 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 	case "pane.process_info":
 		paneID := stringParam("pane_id")
 		if process := s.processes[paneID]; process != nil && process.alive() {
-			return map[string]any{"process_info": map[string]any{"pane_id": paneID, "foreground_process_group_id": process.pid, "shell_pid": fakeShellPID}}, nil
+			pane := s.panes[paneID]
+			return map[string]any{"process_info": map[string]any{
+				"pane_id": paneID, "foreground_process_group_id": process.pid, "shell_pid": fakeShellPID,
+				"foreground_processes": []map[string]any{{"pid": process.pid, "name": pane.Agent, "cwd": pane.CWD}},
+			}}, nil
 		}
 		if process := s.processes[paneID]; process != nil {
 			s.forgetAgent(paneID)

@@ -557,6 +557,35 @@ func (adapter *changingSnapshotAdapter) Call(ctx context.Context, method string,
 	if err != nil {
 		return raw, err
 	}
+	if method == "pane.process_info" {
+		paneID, _ := params["pane_id"].(string)
+		adapter.mu.Lock()
+		var pane herdr.Pane
+		found := false
+		for _, candidate := range adapter.snapshot.Panes {
+			if candidate.PaneID == paneID {
+				pane, found = candidate, true
+				break
+			}
+		}
+		adapter.mu.Unlock()
+		if !found {
+			return raw, nil
+		}
+		foreground, foregroundProcesses := 100, []map[string]any(nil)
+		if pane.Agent != "" {
+			foreground = 200
+			cwd := pane.CWD
+			if cwd == "" {
+				cwd = "/"
+			}
+			foregroundProcesses = []map[string]any{{"pid": foreground, "name": pane.Agent, "cwd": cwd}}
+		}
+		return json.Marshal(map[string]any{"process_info": map[string]any{
+			"pane_id": paneID, "shell_pid": 100, "foreground_process_group_id": foreground,
+			"foreground_processes": foregroundProcesses,
+		}})
+	}
 	adapter.mu.Lock()
 	defer adapter.mu.Unlock()
 	switch method {

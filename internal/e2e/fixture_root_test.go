@@ -17,6 +17,11 @@ import (
 
 const fixtureLockName = ".posse-e2e-fixture.lock"
 
+func isTaskScratchRoot(path string) bool {
+	path = filepath.Clean(path)
+	return filepath.IsAbs(path) && strings.HasPrefix(path, "/tmp/posse-") && strings.HasSuffix(path, "-scratch")
+}
+
 func fixturePrefix(suffix string) string {
 	prefix := os.Getenv("POSSE_E2E_TMP_PREFIX")
 	if prefix == "" {
@@ -29,23 +34,26 @@ func fixturePrefix(suffix string) string {
 // can reclaim only roots bearing our marker whose owning test has exited.
 func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
-	return newFixtureRootAt(t, os.TempDir(), prefix)
+	parent := os.Getenv("POSSE_E2E_TMP_ROOT")
+	if parent == "" {
+		parent = os.TempDir()
+		if isTaskScratchRoot(parent) {
+			t.Setenv("POSSE_E2E_TMP_ROOT", parent)
+		}
+	}
+	return newFixtureRootAt(t, parent, prefix)
 }
 
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
-	if !strings.HasPrefix(prefix, "posse-e2e-") {
-		t.Fatalf("unsafe E2E fixture prefix: %q", prefix)
+	configuredRoot := filepath.Clean(os.Getenv("POSSE_E2E_TMP_ROOT"))
+	customRoot := configuredRoot != "." && filepath.Clean(parent) == configuredRoot && isTaskScratchRoot(configuredRoot)
+	if (parent != "/tmp" && parent != "/var/tmp" && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
+		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
-	if configured := os.Getenv("TMPDIR"); configured != "" && parent == "/tmp" {
-		parent = os.TempDir()
-	}
-	if parent != "/tmp" && parent != "/var/tmp" && parent != os.TempDir() {
-		t.Fatalf("unsafe E2E fixture parent: %q", parent)
-	}
-	if parent == os.TempDir() && parent != "/tmp" && parent != "/var/tmp" {
+	if customRoot {
 		if err := os.MkdirAll(parent, 0o700); err != nil {
-			t.Fatalf("create isolated E2E fixture parent %s: %v", parent, err)
+			t.Fatalf("create isolated E2E scratch root %s: %v", parent, err)
 		}
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {
