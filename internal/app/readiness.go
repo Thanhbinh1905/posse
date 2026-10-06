@@ -50,7 +50,7 @@ func projectReadiness(cfg config.Config, checks []doctorCheck) []readinessGap {
 		}
 		for _, check := range checks {
 			if check.GapCode == code && check.Status != "ok" {
-				gaps = append(gaps, readinessGap{Code: code, Consequence: check.Detail, Key: check.Key, UserOnly: check.UserOnly, Fix: check.Action, Member: check.Member})
+				gaps = append(gaps, readinessGap{Code: code, Consequence: check.Detail, Key: check.Key, UserOnly: check.UserOnly, Fix: check.Action, Informational: code == "forge_auth" && check.Status == "info", Member: check.Member})
 			}
 		}
 	}
@@ -79,7 +79,7 @@ func withReadinessHelp(err error, gaps []readinessGap) error {
 }
 
 func (s *Service) readiness(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]readinessGap, error) {
-	checks, err := s.projectDoctorChecks(ctx, db, project, cfg)
+	checks, err := s.projectReadinessChecks(ctx, db, project, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -87,12 +87,12 @@ func (s *Service) readiness(ctx context.Context, db *store.DB, project store.Pro
 	return projectReadiness(cfg, checks), nil
 }
 
-func (s *Service) projectDoctorChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]doctorCheck, error) {
+func (s *Service) projectReadinessChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]doctorCheck, error) {
 	targets, err := s.projectTargets(ctx, db, project)
 	if err != nil {
 		return nil, err
 	}
-	return repositoryDoctorChecks(ctx, cfg, targets), nil
+	return repositoryReadinessChecks(ctx, cfg, targets), nil
 }
 
 // These checks use the same effective Member policies as Landing, never a
@@ -136,15 +136,102 @@ func repositoryForgeReadiness(ctx context.Context, root string, cfg config.Confi
 	return forge, nil
 }
 
+type forgeAuthenticationUnknownError struct {
+	Host string
+}
+
+func (e *forgeAuthenticationUnknownError) Error() string {
+	if e.Host == "" {
+		return "no cached forge authentication check is available"
+	}
+	return "no cached forge authentication check is available for " + e.Host
+}
+
+func cachedRepositoryForgeReadiness(ctx context.Context, target repoTarget, cfg config.Config) (repositoryForge, error) {
+	host := target.OriginHost
+	if host == "" && target.Name == "" {
+		host = originHost(ctx, target.Root)
+	}
+	if host == "" || host == noOriginHost {
+		return repositoryForge{Root: target.Root}, &forgeAuthenticationUnknownError{}
+	}
+	kind := cfg.Defaults.Forge
+	if target.Name != "" {
+		if override, ok := cfg.Repositories[target.Name]; ok && override.Forge != "" {
+			kind = override.Forge
+		}
+	}
+	probeMode := kind
+	if kind == "" || kind == "auto" {
+		switch host {
+		case "github.com":
+			kind, probeMode = "github", "github"
+		case "gitlab.com":
+			kind, probeMode = "gitlab", "gitlab"
+		default:
+			probeMode = "auto"
+		}
+	}
+	if probeMode != "github" && probeMode != "gitlab" && probeMode != "auto" {
+		return repositoryForge{Host: host, Root: target.Root}, axi.Failure("pr_forge_unknown", "origin host has no configured forge: "+host, false, "Set defaults.forge to github or gitlab for this Project")
+	}
+	outcome, found, err := cachedForgeProbeOnly(host, cfg, probeMode)
+	forge := repositoryForge{Kind: kind, Host: host, Root: target.Root}
+	if err != nil {
+		return forge, err
+	}
+	if !found {
+		return forge, &forgeAuthenticationUnknownError{Host: host}
+	}
+	if probeMode == "auto" {
+		switch {
+		case outcome.GitLabAuthenticated && outcome.GitHubAuthenticated:
+			return forge, axi.Failure("pr_forge_ambiguous", "origin host is authenticated with both gh and glab: "+host, false, "Set defaults.forge or repositories.<repository>.forge")
+		case outcome.GitLabAuthenticated:
+			forge.Kind = "gitlab"
+		case outcome.GitHubAuthenticated:
+			forge.Kind = "github"
+		case outcome.anyTimedOut():
+			return forge, forgeProbeTimeoutError(host)
+		default:
+			return forge, axi.Failure("pr_forge_unknown", "origin host has no configured forge: "+host, false, "Set defaults.forge to github or gitlab for this Project")
+		}
+	}
+	if outcome.timedOut(forge.Kind) {
+		return forge, forgeProbeTimeoutError(host)
+	}
+	if !outcome.authenticated(forge.Kind) {
+		cli := "gh"
+		if forge.Kind == "gitlab" {
+			cli = "glab"
+		}
+		return forge, &forgeAuthenticationError{CLI: cli, Host: host}
+	}
+	return forge, nil
+}
+
 func repositoryDoctorChecks(ctx context.Context, cfg config.Config, targets []repoTarget) []doctorCheck {
+	return repositoryChecks(ctx, cfg, targets, true)
+}
+
+func repositoryReadinessChecks(ctx context.Context, cfg config.Config, targets []repoTarget) []doctorCheck {
+	return repositoryChecks(ctx, cfg, targets, false)
+}
+
+func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarget, probeForge bool) []doctorCheck {
 	checks := []doctorCheck{}
 	modes := make([]string, len(targets))
 	forgeChecks := make([]forgeReadinessResult, len(targets))
 	var probes sync.WaitGroup
 	for index, target := range targets {
+		remote := target.OriginHost
+		if probeForge || target.Name == "" {
+			remote = originHost(ctx, target.Root)
+		}
+		target.OriginHost = remote
 		modes[index] = cfg.Defaults.LandingMode
 		if target.Name != "" {
-			modes[index] = memberLandingMode(cfg, target.Name, originHost(ctx, target.Root))
+			modes[index] = savedMemberLandingMode(cfg, target.Name, remote)
 		}
 		if modes[index] != "pr" {
 			continue
@@ -152,7 +239,11 @@ func repositoryDoctorChecks(ctx context.Context, cfg config.Config, targets []re
 		probes.Add(1)
 		go func(index int, target repoTarget) {
 			defer probes.Done()
-			forgeChecks[index].Forge, forgeChecks[index].Err = repositoryForgeReadiness(ctx, target.Root, cfg, target.Name)
+			if probeForge {
+				forgeChecks[index].Forge, forgeChecks[index].Err = repositoryForgeReadiness(ctx, target.Root, cfg, target.Name)
+			} else {
+				forgeChecks[index].Forge, forgeChecks[index].Err = cachedRepositoryForgeReadiness(ctx, target, cfg)
+			}
 		}(index, target)
 	}
 	probes.Wait()
@@ -186,9 +277,16 @@ func repositoryDoctorChecks(ctx context.Context, cfg config.Config, targets []re
 				auth.Name += " " + forgeCheck.Forge.Host
 			}
 			if forgeCheck.Err != nil {
-				auth.Status = "warn"
-				auth.Detail = "Pull requests cannot be verified or opened" + suffix + ": " + forgeCheck.Err.Error()
-				auth.Action = "Configure an origin remote and its forge, then authenticate gh or glab for that host."
+				var unknown *forgeAuthenticationUnknownError
+				if errors.As(forgeCheck.Err, &unknown) {
+					auth.Status = "info"
+					auth.Detail = "Forge kind or authentication is unknown" + suffix + ": " + forgeCheck.Err.Error()
+					auth.Action = "Posse will resolve forge access when a Task needs this repository."
+				} else {
+					auth.Status = "warn"
+					auth.Detail = "Pull requests cannot be verified or opened" + suffix + ": " + forgeCheck.Err.Error()
+					auth.Action = "Configure an origin remote and its forge, then authenticate gh or glab for that host."
+				}
 				var authErr *forgeAuthenticationError
 				if errors.As(forgeCheck.Err, &authErr) {
 					auth.Action = "Run `" + authErr.CLI + " auth login --hostname " + authErr.Host + "`."

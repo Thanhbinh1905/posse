@@ -678,8 +678,8 @@ func TestPRMergeAutoTeardownRetriesAfterHerdrReturns(t *testing.T) {
 	adapter := &changingSnapshotAdapter{Fake: availableHerdr, snapshot: snapshot}
 	fixture.service.Herdr = adapter
 	removeFixtureTaskPane(fixture)
-	if _, err := fixture.service.prepareProject(context.Background(), fixture.db, fixture.project); err != nil {
-		t.Fatalf("reconcile after Herdr returned: %v; calls=%#v panes=%#v", err, adapter.Calls, adapter.snapshot.Panes)
+	if err := fixture.service.maintainProjectWatch(context.Background(), fixture.db, fixture.project); err != nil {
+		t.Fatalf("background watch after Herdr returned: %v; calls=%#v panes=%#v", err, adapter.Calls, adapter.snapshot.Panes)
 	}
 	task, err = fixture.db.Task(context.Background(), fixture.project.ID, "t1")
 	if err != nil || task.State != store.StateTornDown {
@@ -851,8 +851,8 @@ func TestPRWatchReconcilesOnlyAfterConfiguredInterval(t *testing.T) {
 	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE project_watch_state SET pr_polled_at=? WHERE project_id=?`, time.Now().Add(-2*time.Hour).UnixMilli(), fixture.project.ID); err != nil {
 		t.Fatal(err)
 	}
-	if code, output, errOutput := fixture.run("show", "t1"); code != 0 {
-		t.Fatalf("show after the poll interval exit=%d output=%s error=%s", code, output, errOutput)
+	if err := fixture.service.maintainProjectWatch(context.Background(), fixture.db, fixture.project); err != nil {
+		t.Fatalf("Lookout poll after the configured interval: %v", err)
 	}
 	log, err = os.ReadFile(fixture.ghLog)
 	observation, observationErr := fixture.db.LatestPRObservation(context.Background(), fixture.task.ID)

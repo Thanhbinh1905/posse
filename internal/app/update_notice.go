@@ -11,7 +11,7 @@ func (s *Service) availableUpdate(ctx context.Context, db *store.DB, project *st
 	if s.currentVersion() == "dev" {
 		return nil, false
 	}
-	release, ok := s.cachedRelease(ctx)
+	release, ok := s.readCachedRelease()
 	if !ok || !newerVersion(s.currentVersion(), release.Tag) {
 		return nil, false
 	}

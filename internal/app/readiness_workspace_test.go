@@ -16,8 +16,8 @@ func TestFirstOutcomeWorkspaceReadinessUsesEffectiveMemberPolicies(t *testing.T)
 		initRepo(t, filepath.Join(workspace, member))
 	}
 	project, err := f.db.CreateWorkspaceProject(context.Background(), "stack", workspace, []store.ProjectRepo{
-		{Name: "backend", Path: "backend", DefaultBranch: "main", Status: store.RepoActive},
-		{Name: "worker", Path: "worker", DefaultBranch: "main", Status: store.RepoActive},
+		{Name: "backend", Path: "backend", DefaultBranch: "main", Status: store.RepoActive, OriginHost: noOriginHost},
+		{Name: "worker", Path: "worker", DefaultBranch: "main", Status: store.RepoActive, OriginHost: noOriginHost},
 	})
 	if err != nil {
 		t.Fatal(err)

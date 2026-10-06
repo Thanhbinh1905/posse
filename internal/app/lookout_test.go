@@ -36,10 +36,10 @@ func TestLeadLookoutReportsRestartAfterUpdateSignal(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	requestStarted := make(chan struct{}, 1)
+	requests := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requestStarted <- struct{}{}
-		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.1.0"})
+		requests <- struct{}{}
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.2.0"})
 	}))
 	defer server.Close()
 	t.Chdir(repo)
@@ -52,10 +52,35 @@ func TestLeadLookoutReportsRestartAfterUpdateSignal(t *testing.T) {
 	cli.Out, cli.ErrOut = &output, &output
 	done := make(chan int, 1)
 	go func() { done <- cli.Run([]string{"lookout", "--json"}) }()
+	observer, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	var state store.ProjectWatchState
+	for time.Now().Before(deadline) {
+		state, err = observer.ProjectWatchState(context.Background(), project.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.PRPolledAt > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if state.PRPolledAt == 0 {
+		t.Fatal("Lead lookout did not complete its initial maintenance pass")
+	}
 	select {
-	case <-requestStarted:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Lead lookout did not enter its wait loop")
+	case <-requests:
+		t.Fatal("Lead lookout fetched a release instead of using the local cache")
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case code := <-done:
+		t.Fatalf("Lead lookout exited before update signal: code=%d output=%s", code, output.String())
+	default:
 	}
 	marker := lookoutUpdateStopMarker(home, os.Getpid())
 	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {

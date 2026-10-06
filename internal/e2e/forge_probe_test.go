@@ -16,7 +16,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestForgeProbeTimeoutInMultiMemberWorkspace(t *testing.T) {
+func TestForgeReadinessUsesCacheInMultiMemberWorkspace(t *testing.T) {
 	root := newFixtureRoot(t, herdr.TestRootName())
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
@@ -33,7 +33,7 @@ func TestForgeProbeTimeoutInMultiMemberWorkspace(t *testing.T) {
 
 	logPath := filepath.Join(root, "forge-probes.log")
 	for _, cli := range []string{"glab", "gh"} {
-		script := "#!/bin/sh\nprintf '%s %s\\n' '" + cli + "' \"$*\" >> \"" + logPath + "\"\n/bin/sleep 0.8\nexit 1\n"
+		script := "#!/bin/sh\nprintf '%s %s\\n' '" + cli + "' \"$*\" >> \"" + logPath + "\"\nexit 1\n"
 		if err := os.WriteFile(filepath.Join(binDir, cli), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +56,7 @@ func TestForgeProbeTimeoutInMultiMemberWorkspace(t *testing.T) {
 		gitTest(t, env, repo, "add", "README.md")
 		gitTest(t, env, repo, "commit", "-qm", "fixture")
 		gitTest(t, env, repo, "remote", "add", "origin", "https://git.paas.vn/acme/"+member+".git")
-		repos = append(repos, store.ProjectRepo{Name: member, Path: member, DefaultBranch: "main", Status: store.RepoActive})
+		repos = append(repos, store.ProjectRepo{Name: member, Path: member, DefaultBranch: "main", Status: store.RepoActive, OriginHost: "git.paas.vn"})
 	}
 
 	home := filepath.Join(root, "posse")
@@ -74,8 +74,14 @@ func TestForgeProbeTimeoutInMultiMemberWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RecordCheckoutAttempt(context.Background(), project.ID, time.Now().UnixMilli()); err != nil {
+	now := time.Now().UnixMilli()
+	if err := db.RecordCheckoutAttempt(context.Background(), project.ID, now); err != nil {
 		t.Fatal(err)
+	}
+	for _, member := range members {
+		if err := db.RecordRepoCheckout(context.Background(), project.ID, member, now, "current", ""); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -94,15 +100,16 @@ func TestForgeProbeTimeoutInMultiMemberWorkspace(t *testing.T) {
 	started := time.Now()
 	output, err := command.CombinedOutput()
 	elapsed := time.Since(started)
-	t.Logf("posse --json with shared-host CLI timeouts completed in %s", elapsed)
+	t.Logf("posse --json with uncached shared-host auth completed in %s", elapsed)
 	if err != nil {
 		t.Fatalf("posse status failed after %s: %v\n%s", elapsed, err, output)
 	}
 	var result struct {
 		Readiness []struct {
-			Code        string `json:"code"`
-			Consequence string `json:"consequence"`
-			Fix         string `json:"fix"`
+			Code          string `json:"code"`
+			Consequence   string `json:"consequence"`
+			Fix           string `json:"fix"`
+			Informational bool   `json:"informational"`
 		} `json:"readiness"`
 	}
 	if err := json.Unmarshal(output, &result); err != nil {
@@ -111,20 +118,20 @@ func TestForgeProbeTimeoutInMultiMemberWorkspace(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Errorf("posse status took %s with slow forge CLIs, want at most 2s", elapsed)
 	}
-	foundTimeout := false
+	foundUnknown := false
 	for _, gap := range result.Readiness {
-		if gap.Code == "forge_auth" && strings.Contains(gap.Consequence, "forge CLI timed out for host git.paas.vn") && strings.Contains(gap.Fix, "Check forge CLI connectivity") {
-			foundTimeout = true
+		if gap.Code == "forge_auth" && strings.Contains(gap.Consequence, "unknown") && strings.Contains(gap.Consequence, "git.paas.vn") && strings.Contains(gap.Fix, "resolve forge access when a Task needs") && gap.Informational {
+			foundUnknown = true
 		}
 	}
-	if !foundTimeout {
-		t.Errorf("readiness did not identify the forge probe timeout: %s", output)
+	if !foundUnknown {
+		t.Errorf("readiness did not report the uncached forge state as informational: %s", output)
 	}
 	calls, err := os.ReadFile(logPath)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("read forge probe log: %v", err)
 	}
-	if count := strings.Count(string(calls), "auth status --hostname git.paas.vn"); count != 2 {
-		t.Errorf("probed the shared host %d times, want one call per forge CLI:\n%s", count, calls)
+	if len(calls) != 0 {
+		t.Errorf("readiness invoked a forge CLI despite having no cached auth result:\n%s", calls)
 	}
 }

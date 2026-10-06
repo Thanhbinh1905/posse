@@ -16,10 +16,10 @@ import (
 )
 
 func (s *Service) reconcileIntents(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot) error {
-	return s.reconcileIntentsMode(ctx, db, project, cfg, snapshot, true)
+	return s.reconcileIntentsMode(ctx, db, project, cfg, snapshot, true, true)
 }
 
-func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot, allowLaunch bool) error {
+func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot, allowLaunch, allowNetwork bool) error {
 	intents, err := db.Intents(ctx, project.ID)
 	if err != nil {
 		return err
@@ -29,6 +29,9 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 		return err
 	}
 	for _, intent := range intents {
+		if !allowNetwork && intent.Command == "land --open-pr" {
+			continue
+		}
 		if intentProcessAlive(intent) || !allowLaunch && (intent.Command == "relaunch" || intent.Command == "ride") {
 			continue
 		}

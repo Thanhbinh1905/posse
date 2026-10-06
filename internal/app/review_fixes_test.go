@@ -315,6 +315,33 @@ func TestReviewInterruptedPRCreateIsAdoptedOnReconcile(t *testing.T) {
 	}
 }
 
+func TestInspectionDefersOpenPRRecoveryUntilLeadIsLive(t *testing.T) {
+	for _, status := range []string{"stopped", "exited"} {
+		t.Run(status, func(t *testing.T) {
+			fixture := newPRLandingFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "land --open-pr", "done:pr.create", `{}`, 2147483647); err != nil {
+				t.Fatal(err)
+			}
+			fixture.service.Herdr.(*herdr.Fake).SnapshotValue.Panes[0].AgentStatus = status
+			if _, err := fixture.service.prepareProjectModeWithRecoveryPolicy(ctx, fixture.db, fixture.project, false, false, true); err != nil {
+				t.Fatal(err)
+			}
+			intents, err := fixture.db.Intents(ctx, fixture.project.ID)
+			if err != nil || len(intents) != 1 {
+				t.Fatalf("open PR recovery intent = %#v, err=%v", intents, err)
+			}
+			if _, err := os.Stat(fixture.ghLog); !os.IsNotExist(err) {
+				contents, _ := os.ReadFile(fixture.ghLog)
+				t.Fatalf("inspection invoked forge recovery: %q (%v)", contents, err)
+			}
+		})
+	}
+}
+
 func TestReviewReconcileFailuresDoNotBlockCommandSurface(t *testing.T) {
 	t.Run("checkout sync", func(t *testing.T) {
 		fixture := newPRLandingFixture(t, "pr", store.StateWorking)
