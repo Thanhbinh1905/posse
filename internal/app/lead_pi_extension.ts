@@ -165,6 +165,7 @@ export default function (pi) {
 	let timer;
 	let backoffMs = 1_000;
 	let pendingNotification = false;
+	const pendingAcceptance = new Map();
 	let sessionManager;
 	let destination;
 
@@ -187,7 +188,7 @@ export default function (pi) {
 		try {
 			return sessionManager.getEntries().some((entry) =>
 				entry.type === "custom_message" && entry.customType === "posse-notices" &&
-				entry.details?.delivery_id === delivery.delivery_id);
+				(entry.details?.delivery_id === delivery.delivery_id || entry.details?.batch_id === delivery.batch_id));
 		} catch {
 			return undefined;
 		}
@@ -195,7 +196,8 @@ export default function (pi) {
 
 	const settleReceipt = (delivery, outcome) => new Promise((resolve) => {
 		const args = ["lookout", "--json", "--receipt", delivery.delivery_id,
-			"--receipt-outcome", outcome, "--receipt-token", delivery.owner_token];
+			"--receipt-outcome", outcome];
+		if (delivery.owner_token) args.push("--receipt-token", delivery.owner_token);
 		const current = spawn(posse, args, { stdio: ["ignore", "ignore", "ignore"] });
 		child = current;
 		current.on("error", () => {});
@@ -204,6 +206,39 @@ export default function (pi) {
 			resolve(code === 0);
 		});
 	});
+
+	const reconcilePendingAcceptance = async () => {
+		if (!running || agentRunActive || child || pendingAcceptance.size === 0) return;
+		for (const [deliveryID, delivery] of pendingAcceptance) {
+			const persisted = sessionHasReceipt(delivery);
+			if (persisted === true) {
+				if (!await settleReceipt(delivery, "accepted")) {
+					retry();
+					return;
+				}
+				pendingAcceptance.delete(deliveryID);
+				backoffMs = 1_000;
+				continue;
+			}
+			if (persisted === undefined) {
+				if (!await settleReceipt(delivery, "uncertain")) {
+					retry();
+					return;
+				}
+				pendingAcceptance.delete(deliveryID);
+				notifyUncertainty(`Pi could not inspect its session receipt for Notice batch ${delivery.batch_id}. Inspect the Lead session before retrying.`);
+				return;
+			}
+			if (!await settleReceipt(delivery, "uncertain")) {
+				retry();
+				return;
+			}
+			pendingAcceptance.delete(deliveryID);
+			notifyUncertainty(`Pi did not persist queued Notice batch ${delivery.batch_id} before its run settled. Inspect the Lead session before retrying.`);
+			return;
+		}
+		if (pendingAcceptance.size === 0) schedule(0);
+	};
 
 	const notifyUncertainty = (warning) => {
 		blocked = true;
@@ -266,6 +301,18 @@ export default function (pi) {
 				applyLowkey(lowkey);
 			}
 			if (result.state === "uncertain") {
+				const delivery = result.delivery;
+				if (delivery?.delivery_id && sessionHasReceipt(delivery) === true) {
+					if (await settleReceipt(delivery, "accepted")) {
+						pendingAcceptance.delete(delivery.delivery_id);
+						backoffMs = 1_000;
+						schedule(0);
+					} else {
+						retry();
+					}
+					return;
+				}
+				if (delivery?.delivery_id) pendingAcceptance.delete(delivery.delivery_id);
 				notifyUncertainty(result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect the Lead session before retrying.");
 				return;
 			}
@@ -289,6 +336,7 @@ export default function (pi) {
 			}
 			if (previouslyAccepted) {
 				if (await settleReceipt(delivery, "accepted")) {
+					pendingAcceptance.delete(delivery.delivery_id);
 					backoffMs = 1_000;
 					schedule(0);
 				} else {
@@ -298,9 +346,14 @@ export default function (pi) {
 			}
 			const wake = result.wake;
 			const ids = notices.map((notice) => notice.id);
+			if (typeof wake !== "string" || !wake.startsWith("[posse | Posse -> Lead ")) {
+				await settleReceipt(delivery, "rejected");
+				retry();
+				return;
+			}
+			const tasks = [...new Set(notices.map((notice) => /^t[1-9][0-9]*$/.test(notice.task) ? notice.task : "project"))];
+			pendingAcceptance.set(delivery.delivery_id, delivery);
 			try {
-				if (typeof wake !== "string" || !wake.startsWith("[posse | Posse -> Lead ")) throw new Error("invalid Notice envelope");
-				const tasks = [...new Set(notices.map((notice) => /^t[1-9][0-9]*$/.test(notice.task) ? notice.task : "project"))];
 				pi.sendMessage({
 					customType: "posse-notices",
 					content: wake,
@@ -308,36 +361,25 @@ export default function (pi) {
 					details: { origin: "posse", from: "Posse", to: "Lead", tasks, type: "notice", ids, notices, delivery_id: delivery.delivery_id, batch_id: delivery.batch_id },
 				}, { triggerTurn: true, deliverAs: "followUp" });
 			} catch {
+				pendingAcceptance.delete(delivery.delivery_id);
 				const foundAfterFailure = sessionHasReceipt(delivery);
 				if (foundAfterFailure === true) {
 					if (await settleReceipt(delivery, "accepted")) schedule(0);
 					else retry();
 				} else if (foundAfterFailure === false) {
-					if (await settleReceipt(delivery, "rejected")) retry();
-					else retry();
+					await settleReceipt(delivery, "rejected");
+					retry();
+				} else if (await settleReceipt(delivery, "uncertain")) {
+					notifyUncertainty(`Pi could not verify whether Notice batch ${delivery.batch_id} reached the session.`);
 				} else {
-					if (await settleReceipt(delivery, "uncertain")) {
-						notifyUncertainty(`Pi could not verify whether Notice batch ${delivery.batch_id} reached the session.`);
-					} else {
-						retry();
-					}
+					retry();
 				}
 				return;
 			}
-			if (sessionHasReceipt(delivery) === true) {
-				if (await settleReceipt(delivery, "accepted")) {
-					backoffMs = 1_000;
-					schedule(0);
-				} else {
-					retry();
-				}
-			} else {
-				if (await settleReceipt(delivery, "uncertain")) {
-					notifyUncertainty(`Pi did not record a session receipt for Notice batch ${delivery.batch_id}.`);
-				} else {
-					retry();
-				}
-			}
+			// sendMessage resolves when a busy-session follow-up is queued, not
+			// when Pi persists it. Keep the durable receipt printed until the
+			// agent_settled boundary can confirm the session entry.
+			if (sessionHasReceipt(delivery) === true) void reconcilePendingAcceptance();
 		});
 	};
 
@@ -352,6 +394,12 @@ export default function (pi) {
 		agentRunActive = false;
 		ui = ctx.ui;
 		applySlabPresentation(true);
+		if (pendingAcceptance.size > 0) {
+			setTimeout(() => {
+				if (!running || agentRunActive || typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+				void reconcilePendingAcceptance();
+			}, 0);
+		}
 	});
 
 	pi.on("session_start", async (_event, ctx) => {

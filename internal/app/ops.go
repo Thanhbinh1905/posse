@@ -272,9 +272,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		}
 		var err error
 		if parsed.Flags["receipt-token"] == "" {
-			err = db.ResolveUncertainNoticeDelivery(ctx.Context, parsed.Flags["receipt"], parsed.Flags["receipt-outcome"], currentTime())
+			err = db.ResolveUncertainNoticeDelivery(ctx.Context, project.ID, parsed.Flags["receipt"], parsed.Flags["receipt-outcome"], currentTime())
 		} else {
-			err = db.ResolveNoticeDelivery(ctx.Context, parsed.Flags["receipt"], parsed.Flags["receipt-token"], parsed.Flags["receipt-outcome"], currentTime())
+			err = db.ResolveNoticeDelivery(ctx.Context, project.ID, parsed.Flags["receipt"], parsed.Flags["receipt-token"], parsed.Flags["receipt-outcome"], currentTime())
 		}
 		if err != nil {
 			return err
@@ -338,12 +338,37 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				return err
 			}
 			if found && existing.State == "uncertain" {
-				return ctx.Print(axi.Object{
-					{Key: "state", Value: "uncertain"},
-					{Key: "delivery", Value: noticeDeliveryRow(existing, false)},
-					{Key: "warning", Value: fmt.Sprintf("Receipt %s for Notice batch %s may already have reached %s. Inspect that Lead session before retrying Notice IDs %s. Then resolve it with `posse lookout --receipt %s --receipt-outcome accepted|rejected`.", existing.DeliveryID, existing.BatchID, existing.Destination, strings.Join(int64Strings(existing.NoticeIDs), ","), existing.DeliveryID)},
-					{Key: "help", Value: []any{"Inspect the adapter session; do not retry the Notice blindly", fmt.Sprintf("Resolve the confirmed outcome with `posse lookout --receipt %s --receipt-outcome accepted|rejected`", existing.DeliveryID)}},
-				})
+				return ctx.Print(noticeDeliveryUncertaintyResult(existing, "Inspect that Lead session before retrying"))
+			}
+			prior, priorFound, err := db.NoticeDeliveryForOtherSession(ctx.Context, project.ID, parsed.Flags["destination"])
+			if err != nil {
+				return err
+			}
+			if priorFound {
+				switch prior.State {
+				case "uncertain":
+					return ctx.Print(noticeDeliveryUncertaintyResult(prior, "The previous session outcome is unresolved; inspect its history or effect before retrying"))
+				case "printed":
+					if err := db.MarkNoticeDeliveryUncertain(ctx.Context, prior.DeliveryID, currentTime()); err != nil {
+						return err
+					}
+					prior, err = db.NoticeDelivery(ctx.Context, prior.DeliveryID)
+					if err != nil {
+						return err
+					}
+					return ctx.Print(noticeDeliveryUncertaintyResult(prior, "The previous session may have received this batch; inspect its history or effect before retrying"))
+				case "claimed":
+					if prior.LeaseUntil > currentTime() {
+						if err := waitNoticeDeliveryRetry(ctx.Context); err != nil {
+							return err
+						}
+						continue
+					}
+					if err := db.RejectExpiredNoticeDeliveryClaim(ctx.Context, prior.DeliveryID, currentTime()); err != nil && !errors.Is(err, store.ErrStateRace) {
+						return err
+					}
+					continue
+				}
 			}
 			if found {
 				retryDelivery = &existing
@@ -558,7 +583,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse show <task>` for Task details", "Run `posse lookout --ack <ids>` to acknowledge and keep waiting (or `posse ack all`)"}})
 			if err := ctx.Print(result); err != nil {
 				if handoff != nil {
-					return errors.Join(err, db.ResolveNoticeDelivery(ctx.Context, handoff.DeliveryID, token, "uncertain", currentTime()))
+					return errors.Join(err, db.ResolveNoticeDelivery(ctx.Context, project.ID, handoff.DeliveryID, token, "uncertain", currentTime()))
 				}
 				return errors.Join(err, db.RollbackNoticeClaim(ctx.Context, project.ID, ids, token))
 			}

@@ -614,7 +614,7 @@ func TestOpenCodeLeadLaunchAndPluginConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	quoted, _ := json.Marshal(executable)
-	for _, part := range []string{"const posse = " + string(quoted), "experimental.chat.system.transform", "output.system.push(instructions)", `"lookout", "--json", "--quiet-routine", "--handoff"`, "client.session.prompt(", "client.session.messages(", "--receipt-outcome", "event.type === \"session.idle\""} {
+	for _, part := range []string{"const posse = " + string(quoted), "experimental.chat.system.transform", "output.system.push(instructions)", `"lookout", "--json", "--quiet-routine", "--handoff"`, "client.session.prompt(", "client.session.messages(", "Posse batch receipt:", "priorSession", "--receipt-outcome", "event.type === \"session.idle\""} {
 		if !strings.Contains(string(contents), part) {
 			t.Fatalf("OpenCode plugin missing %q", part)
 		}

@@ -25,16 +25,16 @@ export const PosseLead = async ({ client, directory }) => {
     timer.unref?.();
   };
 
-  const sessionHasReceipt = async (delivery) => {
-    if (typeof client.session?.messages !== "function" || !session) return undefined;
+  const sessionHasReceipt = async (delivery, sessionID = session) => {
+    if (typeof client.session?.messages !== "function" || !sessionID) return undefined;
     try {
-      const response = await client.session.messages({ path: { id: session }, query: { directory } });
+      const response = await client.session.messages({ path: { id: sessionID }, query: { directory } });
       if (response?.error) return undefined;
       const messages = response?.data ?? response;
       if (!Array.isArray(messages)) return undefined;
-      const marker = `Posse delivery receipt: ${delivery.delivery_id}`;
+      const markers = [`Posse delivery receipt: ${delivery.delivery_id}`, `Posse batch receipt: ${delivery.batch_id}`];
       return messages.some((message) => (message.parts ?? []).some((part) =>
-        part.type === "text" && typeof part.text === "string" && part.text.includes(marker)));
+        part.type === "text" && typeof part.text === "string" && markers.some((marker) => part.text.includes(marker))));
     } catch {
       return undefined;
     }
@@ -42,7 +42,8 @@ export const PosseLead = async ({ client, directory }) => {
 
   const settleReceipt = (delivery, outcome) => new Promise((resolve) => {
     const args = ["lookout", "--json", "--receipt", delivery.delivery_id,
-      "--receipt-outcome", outcome, "--receipt-token", delivery.owner_token];
+      "--receipt-outcome", outcome];
+    if (delivery.owner_token) args.push("--receipt-token", delivery.owner_token);
     const current = spawn(posse, args, { stdio: ["ignore", "ignore", "ignore"] });
     child = current;
     current.on("error", () => {});
@@ -71,7 +72,7 @@ export const PosseLead = async ({ client, directory }) => {
     let output = "";
     current.stdout.on("data", (chunk) => { output += chunk; });
     current.on("error", () => {});
-    current.on("close", (code) => {
+    current.on("close", async (code) => {
       if (child !== current) return;
       child = undefined;
       if (stopped) return;
@@ -89,6 +90,21 @@ export const PosseLead = async ({ client, directory }) => {
         return;
       }
       if (result.state === "uncertain") {
+        const delivery = result.delivery;
+        const destination = delivery?.destination ?? "";
+        const separator = destination.indexOf(":");
+        const priorSession = separator < 0 ? "" : destination.slice(separator + 1);
+        if (destination.startsWith("opencode:") && priorSession && priorSession !== session) {
+          const priorReceipt = await sessionHasReceipt(delivery, priorSession);
+          if (priorReceipt !== undefined) {
+            const outcome = priorReceipt ? "accepted" : "rejected";
+            if (await settleReceipt(delivery, outcome)) {
+              backoff = 1_000;
+              schedule(0);
+              return;
+            }
+          }
+        }
         surfaceUncertainty(result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect this session before retrying.");
         return;
       }
@@ -146,7 +162,7 @@ export const PosseLead = async ({ client, directory }) => {
           return;
         }
 
-        const marker = `Posse delivery receipt: ${batch.delivery.delivery_id}`;
+        const marker = `Posse delivery receipt: ${batch.delivery.delivery_id}\nPosse batch receipt: ${batch.delivery.batch_id}`;
         let promptError;
         try {
           const response = await client.session.prompt({

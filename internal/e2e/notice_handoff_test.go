@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -185,6 +186,105 @@ esac
 	}
 	if delivered, err := db.NoticesByIDs(ctx, project.ID, []int64{noticeID}); err != nil || delivered[0].DeliveredAt == 0 || delivered[0].AckedAt != 0 {
 		t.Fatalf("accepted Notice delivery before acknowledgment = %#v, %v", delivered, err)
+	}
+
+	busyNoticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "busy-session follow-up"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	piEnv := setEnv(harnessEnv, "POSSE_E2E_PI_EXTENSION", filepath.Join(moduleRoot(t), "internal/app/lead_pi_extension.ts"))
+	busyAdapter := exec.Command("node", filepath.Join(moduleRoot(t), "internal/e2e/testdata/pi_notice_busy_followup.mjs"))
+	busyAdapter.Dir = repo
+	busyAdapter.Env = piEnv
+	busyOutput, err := busyAdapter.CombinedOutput()
+	if err != nil {
+		t.Fatalf("busy Pi follow-up adapter: %v output=%s", err, busyOutput)
+	}
+	if !strings.Contains(string(busyOutput), `"outcomes":["accepted"]`) || !strings.Contains(string(busyOutput), `"queued":1`) || strings.Contains(string(busyOutput), "delivery-uncertain") {
+		t.Fatalf("busy Pi follow-up did not settle after persistence: %s", busyOutput)
+	}
+	var busyDeliveryState string
+	if err := db.QueryRowContext(ctx, `SELECT state FROM notice_delivery_receipts WHERE project_id=? AND destination=?`, project.ID, "pi:busy-session").Scan(&busyDeliveryState); err != nil || busyDeliveryState != "accepted" {
+		t.Fatalf("busy Pi follow-up receipt state = %q err=%v", busyDeliveryState, err)
+	}
+	busyNotices, err := db.NoticesByIDs(ctx, project.ID, []int64{busyNoticeID})
+	if err != nil || busyNotices[0].DeliveredAt == 0 {
+		t.Fatalf("persisted busy Pi follow-up was not delivered: %#v, %v", busyNotices, err)
+	}
+
+	piReplacementNoticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "Pi replacement session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	piNow := time.Now().UnixMilli()
+	piPriorDelivery, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{piReplacementNoticeID}, "pi:old-session", "generation-1", "old-pi-owner", piNow, 100)
+	if err != nil || !claimed {
+		t.Fatalf("old Pi session claim = %#v, %v, %v", piPriorDelivery, claimed, err)
+	}
+	if err := db.MarkNoticeDeliveryPrinted(ctx, piPriorDelivery.DeliveryID, piPriorDelivery.OwnerToken, piNow+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE notice_delivery_receipts SET lease_until=0 WHERE delivery_id=?`, piPriorDelivery.DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	piReplacementEnv := setEnv(harnessEnv, "POSSE_E2E_PI_EXTENSION", filepath.Join(moduleRoot(t), "internal/app/lead_pi_extension.ts"))
+	piReplacementEnv = setEnv(piReplacementEnv, "POSSE_E2E_OLD_DELIVERY_ID", piPriorDelivery.DeliveryID)
+	piReplacementEnv = setEnv(piReplacementEnv, "POSSE_E2E_OLD_BATCH_ID", piPriorDelivery.BatchID)
+	piReplacement := exec.Command("node", filepath.Join(moduleRoot(t), "internal/e2e/testdata/pi_notice_replacement.mjs"))
+	piReplacement.Dir = repo
+	piReplacement.Env = piReplacementEnv
+	piReplacementOutput, err := piReplacement.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Pi replacement-session adapter: %v output=%s", err, piReplacementOutput)
+	}
+	if !strings.Contains(string(piReplacementOutput), `"outcomes":["accepted"]`) {
+		t.Fatalf("Pi did not reconcile the matching current-session record: %s", piReplacementOutput)
+	}
+	piPriorAfterReplacement, err := db.NoticeDelivery(ctx, piPriorDelivery.DeliveryID)
+	if err != nil || piPriorAfterReplacement.State != "accepted" {
+		t.Fatalf("prior Pi receipt after replacement = %#v, %v", piPriorAfterReplacement, err)
+	}
+
+	replacementNoticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "OpenCode replacement session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	priorDelivery, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{replacementNoticeID}, "opencode:old-session", "generation-1", "old-opencode-owner", now, 100)
+	if err != nil || !claimed {
+		t.Fatalf("old OpenCode session claim = %#v, %v, %v", priorDelivery, claimed, err)
+	}
+	if err := db.MarkNoticeDeliveryPrinted(ctx, priorDelivery.DeliveryID, priorDelivery.OwnerToken, now+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE notice_delivery_receipts SET lease_until=0 WHERE delivery_id=?`, priorDelivery.DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	leadFile := filepath.Join(root, "lead.md")
+	if err := os.WriteFile(leadFile, []byte("test lead instructions"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opencodeEnv := setEnv(harnessEnv, "POSSE_E2E_OPENCODE_PLUGIN", filepath.Join(moduleRoot(t), "internal/app/lead_opencode_plugin.js"))
+	opencodeEnv = setEnv(opencodeEnv, "POSSE_E2E_LEAD_FILE", leadFile)
+	opencodeEnv = setEnv(opencodeEnv, "POSSE_E2E_OLD_DELIVERY_ID", priorDelivery.DeliveryID)
+	opencodeEnv = setEnv(opencodeEnv, "POSSE_E2E_OLD_BATCH_ID", priorDelivery.BatchID)
+	opencodeAdapter := exec.Command("node", filepath.Join(moduleRoot(t), "internal/e2e/testdata/opencode_notice_replacement.mjs"))
+	opencodeAdapter.Dir = repo
+	opencodeAdapter.Env = opencodeEnv
+	opencodeOutput, err := opencodeAdapter.CombinedOutput()
+	if err != nil {
+		t.Fatalf("OpenCode replacement-session adapter: %v output=%s", err, opencodeOutput)
+	}
+	if !strings.Contains(string(opencodeOutput), `"queriedSessions":["old-session"]`) || !strings.Contains(string(opencodeOutput), `"outcomes":["accepted"]`) {
+		t.Fatalf("OpenCode did not reconcile prior-session evidence: %s", opencodeOutput)
+	}
+	priorAfterReplacement, err := db.NoticeDelivery(ctx, priorDelivery.DeliveryID)
+	if err != nil || priorAfterReplacement.State != "accepted" {
+		t.Fatalf("prior OpenCode receipt after replacement = %#v, %v", priorAfterReplacement, err)
+	}
+	replacementNotices, err := db.NoticesByIDs(ctx, project.ID, []int64{replacementNoticeID})
+	if err != nil || replacementNotices[0].DeliveredAt == 0 {
+		t.Fatalf("prior-session receipt did not preserve the recorded effect: %#v, %v", replacementNotices, err)
 	}
 }
 

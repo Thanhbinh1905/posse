@@ -257,6 +257,115 @@ func (db *DB) NoticeDeliveryForDestination(ctx context.Context, projectID int64,
 	return delivery, true, err
 }
 
+func (db *DB) NoticeDeliveryForOtherSession(ctx context.Context, projectID int64, destination string) (NoticeDelivery, bool, error) {
+	adapter, _, ok := strings.Cut(destination, ":")
+	if !ok || strings.TrimSpace(adapter) == "" {
+		return NoticeDelivery{}, false, errors.New("Notice delivery destination must name an adapter session")
+	}
+	var deliveryID string
+	adapterPrefix := adapter + ":"
+	err := db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts
+		WHERE project_id=? AND destination<>? AND substr(destination,1,?)=? AND state IN ('claimed','printed','uncertain')
+		ORDER BY CASE state WHEN 'uncertain' THEN 0 WHEN 'printed' THEN 1 ELSE 2 END,updated_at,delivery_id LIMIT 1`, projectID, destination, len([]rune(adapterPrefix)), adapterPrefix).Scan(&deliveryID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NoticeDelivery{}, false, nil
+	}
+	if err != nil {
+		return NoticeDelivery{}, false, err
+	}
+	delivery, err := db.NoticeDelivery(ctx, deliveryID)
+	return delivery, true, err
+}
+
+func (db *DB) MarkNoticeDeliveryUncertain(ctx context.Context, deliveryID string, at int64) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var delivery NoticeDelivery
+	var rawIDs string
+	if err := tx.QueryRowContext(ctx, `SELECT delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at
+		FROM notice_delivery_receipts WHERE delivery_id=?`, deliveryID).Scan(&delivery.DeliveryID, &delivery.BatchID, &delivery.ProjectID, &rawIDs, &delivery.Destination, &delivery.Generation, &delivery.State, &delivery.OwnerToken, &delivery.ClaimedAt, &delivery.LeaseUntil, &delivery.AcceptedAt, &delivery.CreatedAt, &delivery.UpdatedAt); err != nil {
+		return err
+	}
+	if delivery.State == "uncertain" {
+		return nil
+	}
+	if delivery.State != "printed" {
+		return ErrStateRace
+	}
+	if err := json.Unmarshal([]byte(rawIDs), &delivery.NoticeIDs); err != nil {
+		return fmt.Errorf("decode Notice delivery IDs: %w", err)
+	}
+	if err := markNoticeDeliveryUncertainTx(ctx, tx, delivery, at); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE notice_delivery_receipts SET state='uncertain',owner_token='',lease_until=0,updated_at=? WHERE delivery_id=? AND state='printed'`, at, deliveryID)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		if err != nil {
+			return err
+		}
+		return ErrStateRace
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistNoticeDeliverySnapshot(ctx, delivery.ProjectID)
+}
+
+func (db *DB) RejectExpiredNoticeDeliveryClaim(ctx context.Context, deliveryID string, at int64) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var delivery NoticeDelivery
+	var rawIDs string
+	if err := tx.QueryRowContext(ctx, `SELECT delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at
+		FROM notice_delivery_receipts WHERE delivery_id=?`, deliveryID).Scan(&delivery.DeliveryID, &delivery.BatchID, &delivery.ProjectID, &rawIDs, &delivery.Destination, &delivery.Generation, &delivery.State, &delivery.OwnerToken, &delivery.ClaimedAt, &delivery.LeaseUntil, &delivery.AcceptedAt, &delivery.CreatedAt, &delivery.UpdatedAt); err != nil {
+		return err
+	}
+	if delivery.State != "claimed" || delivery.LeaseUntil > at {
+		return ErrStateRace
+	}
+	if err := json.Unmarshal([]byte(rawIDs), &delivery.NoticeIDs); err != nil {
+		return fmt.Errorf("decode Notice delivery IDs: %w", err)
+	}
+	query := `UPDATE notices SET claim_token='',claimed_at=0 WHERE project_id=? AND claim_token=? AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
+	args := []any{delivery.ProjectID, delivery.OwnerToken}
+	for _, id := range delivery.NoticeIDs {
+		args = append(args, id)
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil || count != int64(len(delivery.NoticeIDs)) {
+		if err != nil {
+			return err
+		}
+		return ErrStateRace
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE notice_delivery_receipts SET state='rejected',owner_token='',lease_until=0,updated_at=? WHERE delivery_id=? AND state='claimed' AND lease_until<=?`, at, deliveryID, at)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		if err != nil {
+			return err
+		}
+		return ErrStateRace
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistNoticeDeliverySnapshot(ctx, delivery.ProjectID)
+}
+
 func (db *DB) MarkNoticeDeliveryPrinted(ctx context.Context, deliveryID, token string, at int64) error {
 	result, err := db.ExecContext(ctx, `UPDATE notice_delivery_receipts SET state='printed',updated_at=?
 		WHERE delivery_id=? AND owner_token=? AND state IN ('claimed','printed') AND lease_until>?`, at, deliveryID, token, at)
@@ -280,7 +389,7 @@ func (db *DB) MarkNoticeDeliveryPrinted(ctx context.Context, deliveryID, token s
 // ResolveNoticeDelivery records the adapter's known outcome. An uncertain
 // receipt remains held and creates a separate actionable Notice; it is never
 // released for blind retry.
-func (db *DB) ResolveNoticeDelivery(ctx context.Context, deliveryID, token, outcome string, at int64) error {
+func (db *DB) ResolveNoticeDelivery(ctx context.Context, projectID int64, deliveryID, token, outcome string, at int64) error {
 	if outcome != "accepted" && outcome != "rejected" && outcome != "uncertain" {
 		return fmt.Errorf("invalid Notice delivery outcome %q", outcome)
 	}
@@ -292,7 +401,7 @@ func (db *DB) ResolveNoticeDelivery(ctx context.Context, deliveryID, token, outc
 	var delivery NoticeDelivery
 	var rawIDs string
 	if err := tx.QueryRowContext(ctx, `SELECT delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at
-		FROM notice_delivery_receipts WHERE delivery_id=?`, deliveryID).Scan(&delivery.DeliveryID, &delivery.BatchID, &delivery.ProjectID, &rawIDs, &delivery.Destination, &delivery.Generation, &delivery.State, &delivery.OwnerToken, &delivery.ClaimedAt, &delivery.LeaseUntil, &delivery.AcceptedAt, &delivery.CreatedAt, &delivery.UpdatedAt); err != nil {
+		FROM notice_delivery_receipts WHERE delivery_id=? AND project_id=?`, deliveryID, projectID).Scan(&delivery.DeliveryID, &delivery.BatchID, &delivery.ProjectID, &rawIDs, &delivery.Destination, &delivery.Generation, &delivery.State, &delivery.OwnerToken, &delivery.ClaimedAt, &delivery.LeaseUntil, &delivery.AcceptedAt, &delivery.CreatedAt, &delivery.UpdatedAt); err != nil {
 		return err
 	}
 	if delivery.OwnerToken != token || delivery.LeaseUntil <= at || delivery.State != "printed" && delivery.State != "claimed" {
@@ -305,7 +414,7 @@ func (db *DB) ResolveNoticeDelivery(ctx context.Context, deliveryID, token, outc
 	switch outcome {
 	case "accepted":
 		nextState = "accepted"
-		query := `UPDATE notices SET delivered_at=?,claim_token='',claimed_at=0 WHERE project_id=? AND delivered_at IS NULL AND acked_at IS NULL AND claim_token=? AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
+		query := `UPDATE notices SET delivered_at=?,claim_token='',claimed_at=0 WHERE project_id=? AND delivered_at IS NULL AND claim_token=? AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
 		args := []any{at, delivery.ProjectID, token}
 		for _, id := range delivery.NoticeIDs {
 			args = append(args, id)
@@ -323,7 +432,7 @@ func (db *DB) ResolveNoticeDelivery(ctx context.Context, deliveryID, token, outc
 		}
 	case "rejected":
 		nextState = "rejected"
-		query := `UPDATE notices SET claim_token='',claimed_at=0 WHERE project_id=? AND claim_token=? AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
+		query := `UPDATE notices SET acked_at=NULL,claim_token='',claimed_at=0 WHERE project_id=? AND claim_token=? AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
 		args := []any{delivery.ProjectID, token}
 		for _, id := range delivery.NoticeIDs {
 			args = append(args, id)
@@ -333,32 +442,8 @@ func (db *DB) ResolveNoticeDelivery(ctx context.Context, deliveryID, token, outc
 		}
 	case "uncertain":
 		nextState = "uncertain"
-		uncertainToken := "uncertain:" + deliveryID
-		query := `UPDATE notices SET claim_token=?,claimed_at=? WHERE project_id=? AND claim_token=? AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
-		args := []any{uncertainToken, at, delivery.ProjectID, token}
-		for _, id := range delivery.NoticeIDs {
-			args = append(args, id)
-		}
-		result, err := tx.ExecContext(ctx, query, args...)
-		if err != nil {
+		if err := markNoticeDeliveryUncertainTx(ctx, tx, delivery, at); err != nil {
 			return err
-		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if count != int64(len(delivery.NoticeIDs)) {
-			return ErrStateRace
-		}
-		data, _ := json.Marshal(map[string]any{"delivery_id": deliveryID, "batch_id": delivery.BatchID, "notice_ids": delivery.NoticeIDs})
-		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND kind='notice_delivery_uncertain' AND json_extract(data_json,'$.delivery_id')=?)`, delivery.ProjectID, deliveryID).Scan(&exists); err != nil {
-			return err
-		}
-		if exists == 0 {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'notice_delivery_uncertain',?,?,?)`, delivery.ProjectID, fmt.Sprintf("Notice receipt %s for batch %s may have reached %s; inspect the Lead session before retrying IDs %s, then explicitly resolve the receipt as accepted or rejected", deliveryID, delivery.BatchID, delivery.Destination, formatNoticeIDs(delivery.NoticeIDs)), string(data), at); err != nil {
-				return err
-			}
 		}
 	}
 	query := `UPDATE notice_delivery_receipts SET state=?,owner_token='',lease_until=0,accepted_at=CASE WHEN ?='accepted' THEN ? ELSE accepted_at END,updated_at=? WHERE delivery_id=? AND owner_token=?`
@@ -378,7 +463,7 @@ func (db *DB) ResolveNoticeDelivery(ctx context.Context, deliveryID, token, outc
 	return db.PersistNoticeDeliverySnapshot(ctx, delivery.ProjectID)
 }
 
-func (db *DB) ResolveUncertainNoticeDelivery(ctx context.Context, deliveryID, outcome string, at int64) error {
+func (db *DB) ResolveUncertainNoticeDelivery(ctx context.Context, projectID int64, deliveryID, outcome string, at int64) error {
 	if outcome != "accepted" && outcome != "rejected" {
 		return fmt.Errorf("uncertain Notice delivery must be resolved as accepted or rejected, got %q", outcome)
 	}
@@ -390,7 +475,7 @@ func (db *DB) ResolveUncertainNoticeDelivery(ctx context.Context, deliveryID, ou
 	var delivery NoticeDelivery
 	var rawIDs string
 	if err := tx.QueryRowContext(ctx, `SELECT delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at
-		FROM notice_delivery_receipts WHERE delivery_id=?`, deliveryID).Scan(&delivery.DeliveryID, &delivery.BatchID, &delivery.ProjectID, &rawIDs, &delivery.Destination, &delivery.Generation, &delivery.State, &delivery.OwnerToken, &delivery.ClaimedAt, &delivery.LeaseUntil, &delivery.AcceptedAt, &delivery.CreatedAt, &delivery.UpdatedAt); err != nil {
+		FROM notice_delivery_receipts WHERE delivery_id=? AND project_id=?`, deliveryID, projectID).Scan(&delivery.DeliveryID, &delivery.BatchID, &delivery.ProjectID, &rawIDs, &delivery.Destination, &delivery.Generation, &delivery.State, &delivery.OwnerToken, &delivery.ClaimedAt, &delivery.LeaseUntil, &delivery.AcceptedAt, &delivery.CreatedAt, &delivery.UpdatedAt); err != nil {
 		return err
 	}
 	if delivery.State != "uncertain" {
@@ -399,9 +484,9 @@ func (db *DB) ResolveUncertainNoticeDelivery(ctx context.Context, deliveryID, ou
 	if err := json.Unmarshal([]byte(rawIDs), &delivery.NoticeIDs); err != nil {
 		return fmt.Errorf("decode Notice delivery IDs: %w", err)
 	}
-	query := `UPDATE notices SET delivered_at=CASE WHEN ?='accepted' THEN ? ELSE delivered_at END,claim_token='',claimed_at=0
-		WHERE project_id=? AND delivered_at IS NULL AND acked_at IS NULL AND claim_token=? AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
-	args := []any{outcome, at, delivery.ProjectID, "uncertain:" + deliveryID}
+	query := `UPDATE notices SET delivered_at=CASE WHEN ?='accepted' THEN ? ELSE delivered_at END,acked_at=CASE WHEN ?='rejected' THEN NULL ELSE acked_at END,claim_token='',claimed_at=0
+		WHERE project_id=? AND delivered_at IS NULL AND claim_token=? AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
+	args := []any{outcome, at, outcome, delivery.ProjectID, "uncertain:" + deliveryID}
 	for _, id := range delivery.NoticeIDs {
 		args = append(args, id)
 	}
@@ -433,6 +518,38 @@ func (db *DB) ResolveUncertainNoticeDelivery(ctx context.Context, deliveryID, ou
 		return err
 	}
 	return db.PersistNoticeDeliverySnapshot(ctx, delivery.ProjectID)
+}
+
+func markNoticeDeliveryUncertainTx(ctx context.Context, tx interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, delivery NoticeDelivery, at int64) error {
+	query := `UPDATE notices SET claim_token=?,claimed_at=? WHERE project_id=? AND claim_token=? AND delivered_at IS NULL AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
+	args := []any{"uncertain:" + delivery.DeliveryID, at, delivery.ProjectID, delivery.OwnerToken}
+	for _, id := range delivery.NoticeIDs {
+		args = append(args, id)
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != int64(len(delivery.NoticeIDs)) {
+		return ErrStateRace
+	}
+	data, _ := json.Marshal(map[string]any{"delivery_id": delivery.DeliveryID, "batch_id": delivery.BatchID, "notice_ids": delivery.NoticeIDs})
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND kind='notice_delivery_uncertain' AND json_extract(data_json,'$.delivery_id')=?)`, delivery.ProjectID, delivery.DeliveryID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		_, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'notice_delivery_uncertain',?,?,?)`, delivery.ProjectID, fmt.Sprintf("Notice receipt %s for batch %s may have reached %s; inspect the Lead session before retrying IDs %s, then explicitly resolve the receipt as accepted or rejected", delivery.DeliveryID, delivery.BatchID, delivery.Destination, formatNoticeIDs(delivery.NoticeIDs)), string(data), at)
+		return err
+	}
+	return nil
 }
 
 func formatNoticeIDs(ids []int64) string {
