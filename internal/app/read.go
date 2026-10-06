@@ -534,8 +534,16 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	if len(undeliveredMessages) > 0 {
 		rows := make([]any, 0, len(undeliveredMessages))
+		hasQueuedMessages := false
+		hasUndeliverableMessages := false
 		for _, message := range undeliveredMessages {
 			rows = append(rows, map[string]any{"id": message.ID, "status": message.Status, "instruction": message.Body})
+			switch message.Status {
+			case "queued":
+				hasQueuedMessages = true
+			case "undeliverable":
+				hasUndeliverableMessages = true
+			}
 		}
 		view["undelivered_messages"] = rows
 		switch task.State {
@@ -544,7 +552,12 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		case store.StateReported, store.StateLanded, store.StateTornDown:
 			help = append(help, "Create a new Ship Task, then resend each undeliverable instruction with `posse send <task> <message>`")
 		default:
-			help = append(help, "Queued instructions will be delivered when the Rider is ready and unfocused")
+			if hasUndeliverableMessages {
+				help = append(help, "Undeliverable instructions are not retried automatically; resend each with `posse send "+commandName+" <message>`")
+			}
+			if hasQueuedMessages {
+				help = append(help, "Queued instructions will be delivered when the Rider is ready and unfocused")
+			}
 		}
 	}
 	if task.Type == "ship" && task.State == store.StateDone {
