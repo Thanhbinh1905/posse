@@ -1805,10 +1805,29 @@ func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, w
 func (db *DB) UpdateProjectObservation(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) error {
 	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
 	defer cancel()
+	// Concurrent CLI commands often observe the same Lead pane. Skip the write
+	// lock when another reconciliation already recorded this state.
+	unchanged, err := db.projectObservationMatches(ctx, projectID, paneID, workspaceID, absentSince)
+	if err != nil || unchanged {
+		return err
+	}
 	params := dbgen.UpdateProjectObservationParams{LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID}
 	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateProjectObservation(ctx, params)
 	})
+}
+
+func (db *DB) projectObservationMatches(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) (bool, error) {
+	var currentPaneID, currentWorkspaceID string
+	var currentAbsentSince int64
+	err := db.QueryRowContext(ctx, `SELECT lead_pane_id, herdr_workspace_id, lead_absent_since FROM projects WHERE id=?`, projectID).Scan(&currentPaneID, &currentWorkspaceID, &currentAbsentSince)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, retryableContention(err)
+	}
+	return currentPaneID == paneID && currentWorkspaceID == workspaceID && currentAbsentSince == absentSince, nil
 }
 
 func (db *DB) UpdateProjectStatus(ctx context.Context, projectID int64, status string) error {
