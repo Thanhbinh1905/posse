@@ -43,7 +43,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	cfg, err := s.prepareProjectForTask(ctx.Context, db, project)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	cfg, err := s.prepareProjectForTask(ctx.Context, db, project)
 	if err != nil {
 		return err
 	}
@@ -289,7 +289,14 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 	}
 	name := parsed.Flags["name"]
-	if err := taskBranchAvailable(ctx.Context, db, project, name); err != nil {
+	branchTargets := []repoTarget{{Name: project.Name, Root: project.Root}}
+	if project.IsWorkspace() {
+		branchTargets = make([]repoTarget, 0, len(members))
+		for _, member := range members {
+			branchTargets = append(branchTargets, member.repoTarget)
+		}
+	}
+	if err := taskBranchAvailableForTargets(ctx.Context, db, project, name, branchTargets); err != nil {
 		return err
 	}
 	if project.HerdrWorkspaceID == "" {
@@ -669,14 +676,6 @@ func branchRefTaken(name, repository, ref string) error {
 // Check every repository before inserting the Task, including members a
 // workspace Brief did not request. A later checkout -b still guards races.
 func taskBranchAvailable(ctx context.Context, db *store.DB, project store.Project, name string) error {
-	branch := "posse/" + name
-	used, err := db.TaskBranchExists(ctx, project.ID, branch)
-	if err != nil {
-		return err
-	}
-	if used {
-		return branchNameTaken(name, "in Project "+project.Name+" Task history for ref refs/heads/posse/"+name)
-	}
 	targets := []repoTarget{{Name: project.Name, Root: project.Root}}
 	if project.IsWorkspace() {
 		targets = nil
@@ -687,6 +686,18 @@ func taskBranchAvailable(ctx context.Context, db *store.DB, project store.Projec
 		for _, member := range members {
 			targets = append(targets, member.repoTarget)
 		}
+	}
+	return taskBranchAvailableForTargets(ctx, db, project, name, targets)
+}
+
+func taskBranchAvailableForTargets(ctx context.Context, db *store.DB, project store.Project, name string, targets []repoTarget) error {
+	branch := "posse/" + name
+	used, err := db.TaskBranchExists(ctx, project.ID, branch)
+	if err != nil {
+		return err
+	}
+	if used {
+		return branchNameTaken(name, "in Project "+project.Name+" Task history for ref refs/heads/posse/"+name)
 	}
 	for _, target := range targets {
 		repository := target.Name

@@ -158,6 +158,7 @@ type ProjectRepo struct {
 	Status        string
 	CreatedAt     int64
 	UpdatedAt     int64
+	OriginHost    string
 }
 
 type ProjectRuntime struct {
@@ -183,9 +184,12 @@ type ProjectWatchState struct {
 }
 
 type RepoWatchState struct {
-	ProjectID      int64
-	Repo           string
-	RootBehindHead string
+	ProjectID         int64
+	Repo              string
+	RootBehindHead    string
+	CheckoutCheckedAt int64
+	CheckoutStatus    string
+	CheckoutReason    string
 }
 
 type Signal struct {

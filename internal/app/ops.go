@@ -19,6 +19,28 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, project store.Project) error {
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return configError(err)
+	}
+	if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
+		return err
+	}
+	if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
+		return err
+	}
+	if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+		return err
+	}
+	_, _ = s.availableUpdate(ctx, db, &project)
+	return nil
+}
+
 func (s *Service) wait(ctx *axi.Context, args []string) error {
 	stopSignals := make(chan os.Signal, 1)
 	signal.Notify(stopSignals, syscall.SIGTERM)
@@ -196,19 +218,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 						}
 					}
 				}
-				cfg, err := config.Load(home, project.Name)
-				if err != nil {
-					return configError(err)
-				}
-				if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, false); err != nil {
-					return err
-				}
-				if _, err := s.syncProjectRoot(ctx.Context, db, project, cfg, false); err != nil {
-					return err
-				}
-				if err := s.autoTeardownLandedTasks(ctx.Context, db, project, cfg); err != nil {
-					return err
-				}
+			}
+			if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
+				return err
 			}
 			notices, err = db.UndeliveredNotices(ctx.Context, project.ID)
 			if err != nil {
@@ -408,7 +420,12 @@ func (s *Service) projectShow(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	var cfg config.Config
+	if project.IsWorkspace() {
+		cfg, err = s.prepareProjectObservation(ctx.Context, db, project)
+	} else {
+		cfg, err = s.prepareProjectInspection(ctx.Context, db, project)
+	}
 	if err != nil {
 		return err
 	}

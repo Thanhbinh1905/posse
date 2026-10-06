@@ -424,15 +424,6 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 			return herdrError(err)
 		}
 	}
-	if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, false); err != nil {
-		return err
-	}
-	if _, err := s.syncProjectRoot(ctx.Context, db, project, cfg, false); err != nil {
-		return err
-	}
-	if err := s.autoTeardownLandedTasks(ctx.Context, db, project, cfg); err != nil {
-		return err
-	}
 	callerPaneID := os.Getenv("HERDR_PANE_ID")
 	callerWorkspaceID := os.Getenv("HERDR_WORKSPACE_ID")
 	if callerPaneID == "" || callerWorkspaceID == "" {

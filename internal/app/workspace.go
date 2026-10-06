@@ -38,10 +38,13 @@ type detectedRepo struct {
 
 // repoTarget is one repository posse works on: the Project itself for a repo
 // Project (Name ""), or one member of a workspace Project.
+const noOriginHost = "<no-origin>"
+
 type repoTarget struct {
 	Name          string
 	Root          string
 	DefaultBranch string
+	OriginHost    string
 }
 
 // currentDir returns the working directory with symlinks resolved, so it compares
@@ -164,10 +167,20 @@ func memberLandingMode(cfg config.Config, name, remote string) string {
 	if repository, ok := cfg.Repositories[name]; ok && repository.LandingMode != "" {
 		return repository.LandingMode
 	}
-	if remote == "" {
+	if remote == "" || remote == noOriginHost {
 		return "local"
 	}
 	return cfg.Defaults.LandingMode
+}
+
+func savedMemberLandingMode(cfg config.Config, name, remote string) string {
+	if remote == "" {
+		if repository, ok := cfg.Repositories[name]; ok && repository.LandingMode != "" {
+			return repository.LandingMode
+		}
+		return cfg.Defaults.LandingMode
+	}
+	return memberLandingMode(cfg, name, remote)
 }
 
 // projectTargets lists the repositories of a Project: the Project itself, or its active members.
@@ -184,7 +197,7 @@ func (s *Service) projectTargets(ctx context.Context, db *store.DB, project stor
 		if repo.Status != store.RepoActive {
 			continue
 		}
-		targets = append(targets, repoTarget{Name: repo.Name, Root: filepath.Join(project.Root, repo.Path), DefaultBranch: repo.DefaultBranch})
+		targets = append(targets, repoTarget{Name: repo.Name, Root: filepath.Join(project.Root, repo.Path), DefaultBranch: repo.DefaultBranch, OriginHost: repo.OriginHost})
 	}
 	return targets, nil
 }
@@ -293,6 +306,13 @@ func detectionObject(detected detectedProject, cfg config.Config) axi.Object {
 	return object
 }
 
+func savedOriginHost(host string) string {
+	if host == "" {
+		return noOriginHost
+	}
+	return host
+}
+
 // registerDetected saves a detected Project.
 func registerDetected(ctx context.Context, db *store.DB, detected detectedProject) (store.Project, error) {
 	var (
@@ -302,7 +322,7 @@ func registerDetected(ctx context.Context, db *store.DB, detected detectedProjec
 	if detected.Kind == store.ProjectKindWorkspace {
 		repos := make([]store.ProjectRepo, 0, len(detected.Repos))
 		for _, repo := range detected.Repos {
-			repos = append(repos, store.ProjectRepo{Name: repo.Name, Path: repo.Path, DefaultBranch: repo.DefaultBranch})
+			repos = append(repos, store.ProjectRepo{Name: repo.Name, Path: repo.Path, DefaultBranch: repo.DefaultBranch, OriginHost: savedOriginHost(repo.Remote)})
 		}
 		project, err = db.CreateWorkspaceProject(ctx, detected.Name, detected.Root, repos)
 	} else {

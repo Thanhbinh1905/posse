@@ -39,6 +39,13 @@ type ProjectRepo struct {
 	Path          string `toml:"path"` // relative to the Project root
 	DefaultBranch string `toml:"default_branch"`
 	Status        string `toml:"status"`
+	OriginHost    string `toml:"origin_host"`
+}
+
+type RepoWatchState struct {
+	CheckoutCheckedAt int64
+	CheckoutStatus    string
+	CheckoutReason    string
 }
 
 type TaskRepo struct {
@@ -73,7 +80,7 @@ func (db *DB) CreateWorkspaceProject(ctx context.Context, name, root string, rep
 		return Project{}, err
 	}
 	for _, repo := range repos {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO project_repos(project_id, name, path, default_branch, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)`, id, repo.Name, repo.Path, repo.DefaultBranch, now, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_repos(project_id, name, path, default_branch, status, created_at, updated_at, origin_host) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`, id, repo.Name, repo.Path, repo.DefaultBranch, now, now, repo.OriginHost); err != nil {
 			return Project{}, err
 		}
 	}
@@ -85,7 +92,7 @@ func (db *DB) CreateWorkspaceProject(ctx context.Context, name, root string, rep
 
 // ProjectRepos lists a Project's members by name, including missing ones.
 func (db *DB) ProjectRepos(ctx context.Context, projectID int64) ([]ProjectRepo, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, project_id, name, path, default_branch, status FROM project_repos WHERE project_id=? ORDER BY name`, projectID)
+	rows, err := db.QueryContext(ctx, `SELECT id, project_id, name, path, default_branch, status, origin_host FROM project_repos WHERE project_id=? ORDER BY name`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +100,7 @@ func (db *DB) ProjectRepos(ctx context.Context, projectID int64) ([]ProjectRepo,
 	repos := []ProjectRepo{}
 	for rows.Next() {
 		var repo ProjectRepo
-		if err := rows.Scan(&repo.ID, &repo.ProjectID, &repo.Name, &repo.Path, &repo.DefaultBranch, &repo.Status); err != nil {
+		if err := rows.Scan(&repo.ID, &repo.ProjectID, &repo.Name, &repo.Path, &repo.DefaultBranch, &repo.Status, &repo.OriginHost); err != nil {
 			return nil, err
 		}
 		repos = append(repos, repo)
@@ -113,8 +120,8 @@ func (db *DB) SyncProjectRepos(ctx context.Context, projectID int64, scanned []P
 	seen := map[string]bool{}
 	for _, repo := range scanned {
 		seen[repo.Name] = true
-		if _, err := tx.ExecContext(ctx, `INSERT INTO project_repos(project_id, name, path, default_branch, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)
-ON CONFLICT(project_id, name) DO UPDATE SET path=excluded.path, default_branch=excluded.default_branch, status='active', updated_at=excluded.updated_at`, projectID, repo.Name, repo.Path, repo.DefaultBranch, now, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_repos(project_id, name, path, default_branch, status, created_at, updated_at, origin_host) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+ON CONFLICT(project_id, name) DO UPDATE SET path=excluded.path, default_branch=excluded.default_branch, origin_host=excluded.origin_host, status='active', updated_at=excluded.updated_at`, projectID, repo.Name, repo.Path, repo.DefaultBranch, now, now, repo.OriginHost); err != nil {
 			return err
 		}
 	}
@@ -186,6 +193,22 @@ func (db *DB) UpdateTaskRepo(ctx context.Context, repo TaskRepo) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (db *DB) ProjectRepoWatchState(ctx context.Context, projectID int64, repo string) (RepoWatchState, error) {
+	var state RepoWatchState
+	err := db.QueryRowContext(ctx, `SELECT checkout_checked_at, checkout_status, checkout_reason FROM repo_watch_state WHERE project_id=? AND repo=?`, projectID, repo).
+		Scan(&state.CheckoutCheckedAt, &state.CheckoutStatus, &state.CheckoutReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RepoWatchState{}, nil
+	}
+	return state, err
+}
+
+func (db *DB) RecordRepoCheckout(ctx context.Context, projectID int64, repo string, at int64, status, reason string) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO repo_watch_state(project_id, repo, checkout_checked_at, checkout_status, checkout_reason) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(project_id, repo) DO UPDATE SET checkout_checked_at=excluded.checkout_checked_at, checkout_status=excluded.checkout_status, checkout_reason=excluded.checkout_reason`, projectID, repo, at, status, reason)
+	return err
 }
 
 func (db *DB) SetRepoRootBehindHead(ctx context.Context, projectID int64, repo, head string) error {

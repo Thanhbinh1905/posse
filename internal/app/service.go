@@ -288,16 +288,25 @@ func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Projec
 }
 
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
-	return s.prepareProjectMode(ctx, db, project, true)
+	return s.prepareProjectMode(ctx, db, project, true, true)
+}
+
+func (s *Service) prepareProjectForTask(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectMode(ctx, db, project, true, false)
+}
+
+// PR inspections keep their refresh behavior without attempting launch recovery.
+func (s *Service) prepareProjectInspection(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectMode(ctx, db, project, false, true)
 }
 
 // Notice and inspection commands reconcile observations, but never start a
 // Rider, retry a launch Brief, or wait for a launch-capable recovery owner.
 func (s *Service) prepareProjectObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
-	return s.prepareProjectMode(ctx, db, project, false)
+	return s.prepareProjectMode(ctx, db, project, false, false)
 }
 
-func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project store.Project, allowRecovery bool) (config.Config, error) {
+func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories bool) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
 		_ = s.regenerateProjects(ctx, db)
@@ -366,22 +375,28 @@ func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project 
 			}
 		}
 	}
-	if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
-		return cfg, err
+	if pollRepositories {
+		if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
+			return cfg, err
+		}
 	}
 	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
 		return cfg, err
 	}
-	if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
-		return cfg, err
-	}
-	_, _ = s.availableUpdate(ctx, db, &project)
-	if herdrReady {
-		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+	if pollRepositories {
+		if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
 			return cfg, err
 		}
-		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
-			return cfg, err
+		_, _ = s.availableUpdate(ctx, db, &project)
+	}
+	if herdrReady {
+		if pollRepositories {
+			if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+				return cfg, err
+			}
+			if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
+				return cfg, err
+			}
 		}
 		fresh, err := db.ProjectByID(ctx, project.ID)
 		if err != nil {

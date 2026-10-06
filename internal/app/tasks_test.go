@@ -782,7 +782,7 @@ func TestTaskBranchAvailabilityAllowsWorkspaceMemberWithoutOrigin(t *testing.T) 
 	}
 	members := make([]store.ProjectRepo, 0, len(detected.Repos))
 	for _, member := range detected.Repos {
-		members = append(members, store.ProjectRepo{Name: member.Name, Path: member.Path, DefaultBranch: member.DefaultBranch, Status: store.RepoActive})
+		members = append(members, store.ProjectRepo{Name: member.Name, Path: member.Path, DefaultBranch: member.DefaultBranch, Status: store.RepoActive, OriginHost: savedOriginHost(member.Remote)})
 	}
 	db, err := store.Open(filepath.Join(root, "posse"))
 	if err != nil {
