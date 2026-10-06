@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 type projectSyncResult struct {
@@ -38,6 +40,10 @@ type repoSyncResult struct {
 	projectSyncResult
 }
 
+func repositorySyncKey(project store.Project, target repoTarget) string {
+	return fmt.Sprintf("sync:%d:%s", project.ID, target.Name)
+}
+
 // syncProjectRepos fast-forwards the default branch of every repository of the
 // Project (the Project itself, or each member of a workspace) when that is safe.
 func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) ([]repoSyncResult, error) {
@@ -47,31 +53,94 @@ func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project st
 		return nil, err
 	}
 	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
-	if !force && !store.ProjectWatchInterval(state.CheckoutCheckedAt, interval, now) {
-		return []repoSyncResult{{projectSyncResult: projectSyncResult{Status: "skipped"}}}, nil
-	}
 	targets, err := s.projectTargets(ctx, db, project)
 	if err != nil {
 		return nil, err
 	}
-	results := make([]repoSyncResult, 0, len(targets))
-	for _, target := range targets {
-		result, err := s.syncRepository(ctx, db, project, target, now)
-		if err != nil {
-			return results, err
+	if !project.IsWorkspace() && !force && !store.ProjectWatchInterval(state.CheckoutCheckedAt, interval, now) {
+		return []repoSyncResult{{projectSyncResult: projectSyncResult{Status: "skipped"}}}, nil
+	}
+	results := make([]repoSyncResult, len(targets))
+	due := make([]bool, len(targets))
+	for index, target := range targets {
+		due[index] = true
+		if project.IsWorkspace() && !force {
+			repoState, stateErr := db.ProjectRepoWatchState(ctx, project.ID, target.Name)
+			if stateErr != nil {
+				return nil, stateErr
+			}
+			due[index] = store.ProjectWatchInterval(repoState.CheckoutCheckedAt, interval, now)
+			if !due[index] {
+				results[index] = repoSyncResult{Repo: target.Name, projectSyncResult: projectSyncResult{Status: "skipped", Reason: repoState.CheckoutReason}}
+			}
 		}
-		results = append(results, repoSyncResult{Repo: target.Name, projectSyncResult: result})
+	}
+	var workers sync.WaitGroup
+	var errorMu sync.Mutex
+	var firstErr error
+	attempted := false
+	for index, target := range targets {
+		if !due[index] {
+			continue
+		}
+		workers.Add(1)
+		go func(index int, target repoTarget) {
+			defer workers.Done()
+			result, syncErr := s.syncRepository(ctx, db, project, target, now)
+			if syncErr == nil && result.Status != "skipped" {
+				errorMu.Lock()
+				attempted = true
+				errorMu.Unlock()
+			}
+			if syncErr == nil && project.IsWorkspace() && result.Status != "skipped" {
+				reason := result.Reason
+				if reason == "" && result.Err != nil {
+					reason = truncate(strings.TrimSpace(result.Err.Error()), 240)
+				}
+				syncErr = db.RecordRepoCheckout(ctx, project.ID, target.Name, now.UnixMilli(), result.Status, reason)
+			}
+			results[index] = repoSyncResult{Repo: target.Name, projectSyncResult: result}
+			if syncErr != nil {
+				errorMu.Lock()
+				if firstErr == nil {
+					firstErr = syncErr
+				}
+				errorMu.Unlock()
+			}
+		}(index, target)
+	}
+	workers.Wait()
+	if firstErr != nil {
+		return results, firstErr
+	}
+	if !attempted {
+		return results, nil
 	}
 	return results, db.RecordCheckoutAttempt(ctx, project.ID, now.UnixMilli())
 }
 
 func (s *Service) syncRepository(ctx context.Context, db *store.DB, project store.Project, target repoTarget, now time.Time) (projectSyncResult, error) {
+	key := repositorySyncKey(project, target)
+	if !s.beginMaintenance(key) {
+		return projectSyncResult{Status: "skipped", Reason: "repository sync already running"}, nil
+	}
+	defer s.endMaintenance(key)
 	result := projectSyncResult{Status: "current"}
 	if _, err := gitOutput(ctx, target.Root, "remote", "get-url", "origin"); err != nil {
 		result.Status = "no_origin"
 		result.Err = err
+		result.Reason = "origin remote unavailable: " + truncate(strings.TrimSpace(err.Error()), 240)
 		return result, nil
 	}
+	lock, err := acquireRepositorySyncLock(ctx, target.Root)
+	if err != nil {
+		if store.IsBusy(err) {
+			return projectSyncResult{Status: "skipped", Reason: "repository sync already running"}, nil
+		}
+		return result, err
+	}
+	defer lock.Close()
+	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
 	if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
 		// Local contention says nothing about whether origin is ahead. Let
 		// the caller retry instead of creating a misleading root_behind Notice.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -445,21 +446,63 @@ func prefixFailure(repo string, err error) error {
 // pollWorkspacePullRequests watches every open member pull request of the
 // Project's landing Tasks and records what changed.
 func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) error {
+	return s.pollWorkspacePullRequestsAndNotify(ctx, db, project, cfg, force, nil)
+}
+
+func (s *Service) pollWorkspacePullRequestsAndNotify(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onLanded func()) error {
+	return s.pollWorkspacePullRequestsForRepo(ctx, db, project, cfg, force, onLanded, "", true, true, "")
+}
+
+func finishMemberPRPollOrRelease(ctx context.Context, db *store.DB, projectID int64, repo, token string, polledAt int64) error {
+	if err := db.FinishMemberPRPoll(ctx, projectID, repo, token, polledAt); err != nil {
+		return errors.Join(err, db.ReleaseMemberPRPoll(ctx, projectID, repo, token))
+	}
+	return nil
+}
+
+func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onLanded func(), repoFilter string, claimProject, syncRoot bool, memberClaim string) error {
 	now := time.Now()
-	claim, err := db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
-	if err != nil {
-		return err
+	claim := ""
+	var err error
+	if claimProject {
+		claim, err = db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
+		if err != nil {
+			return err
+		}
+		if claim == "" {
+			return nil
+		}
+		defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
 	}
-	if claim == "" {
-		return nil
+	if memberClaim != "" {
+		defer func() {
+			_ = finishMemberPRPollOrRelease(context.Background(), db, project.ID, repoFilter, memberClaim, time.Now().UnixMilli())
+		}()
 	}
-	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
 	tasks, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {
 		return err
 	}
-	landedAny := false
-	failure := ""
+	type pollTarget struct {
+		task     store.Task
+		member   memberLanding
+		members  []memberLanding
+		previous store.PRObservation
+		hasPrev  bool
+	}
+	type pollResult struct {
+		target      pollTarget
+		observation store.PRObservation
+		checks      []failedCheck
+		err         error
+	}
+	type memberGroup struct {
+		repo    string
+		targets []pollTarget
+	}
+	groups := []memberGroup{}
+	groupIndexes := map[string]int{}
+	targetCount := 0
 	for _, task := range tasks {
 		if task.State == store.StateLanded || task.State == store.StateTornDown || task.State == store.StateReported {
 			continue
@@ -469,6 +512,9 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 			return err
 		}
 		for _, member := range members {
+			if repoFilter != "" && member.repo.Repo != repoFilter {
+				continue
+			}
 			if member.repo.PRURL == "" || member.repo.State == store.TaskRepoLanded {
 				continue
 			}
@@ -481,72 +527,150 @@ func (s *Service) pollWorkspacePullRequests(ctx context.Context, db *store.DB, p
 					return err
 				}
 			}
-			forge, err := forgeForRepository(ctx, member.target.Root, cfg, member.repo.Repo)
-			if err != nil {
-				return prefixFailure(member.repo.Repo, err)
+			target := pollTarget{task: task, member: member, members: append([]memberLanding(nil), members...), previous: previous, hasPrev: previousErr == nil && previous.PRURL == member.repo.PRURL}
+			index, ok := groupIndexes[member.repo.Repo]
+			if !ok {
+				index = len(groups)
+				groupIndexes[member.repo.Repo] = index
+				groups = append(groups, memberGroup{repo: member.repo.Repo})
 			}
-			var observation store.PRObservation
-			var failures []failedCheck
-			if forge.Kind == "gitlab" {
-				observation, failures, err = gitlabObservation(ctx, forge, member.task, now.UnixMilli())
-			} else {
-				var pull *ghPullRequest
-				pull, err = viewMemberPullRequest(ctx, member)
-				if err == nil {
-					observation, failures, err = makePRObservation(project.ID, member.task, pull, now)
+			groups[index].targets = append(groups[index].targets, target)
+			targetCount++
+		}
+	}
+
+	pollCtx, cancelPoll := context.WithCancel(ctx)
+	defer cancelPoll()
+	results := make(chan pollResult, targetCount)
+	var workers sync.WaitGroup
+	for _, group := range groups {
+		group := group
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			claimToken := memberClaim
+			if claimProject {
+				var claimErr error
+				claimToken, claimErr = db.ClaimMemberPRPoll(ctx, project.ID, group.repo, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), force)
+				if claimErr != nil {
+					for _, target := range group.targets {
+						results <- pollResult{target: target, err: claimErr}
+					}
+					return
+				}
+				if claimToken == "" {
+					return
 				}
 			}
-			if err != nil {
-				failure = member.repo.Repo + ": " + truncate(err.Error(), 240)
-				if noticeErr := recordPRTaskWatchFailure(ctx, db, project, member.task, err, now); noticeErr != nil {
-					return noticeErr
+			if claimToken != "" && claimProject {
+				defer func() {
+					if err := finishMemberPRPollOrRelease(context.Background(), db, project.ID, group.repo, claimToken, time.Now().UnixMilli()); err != nil {
+						for _, target := range group.targets {
+							results <- pollResult{target: target, err: err}
+						}
+					}
+				}()
+			}
+			for _, target := range group.targets {
+				member := target.member
+				forge, err := forgeForRepository(pollCtx, member.target.Root, cfg, group.repo)
+				var observation store.PRObservation
+				var checks []failedCheck
+				if err == nil {
+					if forge.Kind == "gitlab" {
+						observation, checks, err = gitlabObservation(pollCtx, forge, member.task, now.UnixMilli())
+					} else {
+						var pull *ghPullRequest
+						pull, err = viewMemberPullRequest(pollCtx, member)
+						if err == nil {
+							observation, checks, err = makePRObservation(project.ID, member.task, pull, now)
+						}
+					}
+				}
+				results <- pollResult{target: target, observation: observation, checks: checks, err: err}
+			}
+		}()
+	}
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	landedAny := false
+	failures := []string{}
+	var processingErr error
+	for result := range results {
+		if processingErr != nil {
+			continue
+		}
+		task, member := result.target.task, result.target.member
+		if result.err != nil {
+			failures = append(failures, member.repo.Repo+": "+truncate(result.err.Error(), 240))
+			if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, result.err, now); err != nil {
+				processingErr = err
+				cancelPoll()
+			}
+			continue
+		}
+		observation := result.observation
+		previous, hasPrevious := result.target.previous, result.target.hasPrev
+		if strings.EqualFold(observation.Mergeable, "UNKNOWN") && hasPrevious {
+			observation.Mergeable = previous.Mergeable
+		}
+		effect := prObservationEffect(project, member.task, observation, result.checks, previous, hasPrevious)
+		memberEffect := store.MemberPREffect{Notices: effect.Notices, LandedRef: effect.LandedRef}
+		for index := range memberEffect.Notices {
+			memberEffect.Notices[index].DataJSON = withRepo(memberEffect.Notices[index].DataJSON, member.repo.Repo)
+		}
+		if observation.State == "MERGED" {
+			if err := settleUnchangedWorkspaceMembers(ctx, db, result.target.members); err != nil {
+				processingErr = err
+				cancelPoll()
+				continue
+			}
+			branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+			if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
+				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+					processingErr = err
+					cancelPoll()
 				}
 				continue
 			}
-			hasPrevious := previousErr == nil && previous.PRURL == member.repo.PRURL
-			if strings.EqualFold(observation.Mergeable, "UNKNOWN") && hasPrevious {
-				observation.Mergeable = previous.Mergeable
-			}
-			effect := prObservationEffect(project, member.task, observation, failures, previous, hasPrevious)
-			memberEffect := store.MemberPREffect{Notices: effect.Notices, LandedRef: effect.LandedRef}
-			for index := range memberEffect.Notices {
-				memberEffect.Notices[index].DataJSON = withRepo(memberEffect.Notices[index].DataJSON, member.repo.Repo)
-			}
-			if observation.State == "MERGED" {
-				if err := settleUnchangedWorkspaceMembers(ctx, db, members); err != nil {
-					return err
+			if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
+				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+					processingErr = err
+					cancelPoll()
 				}
-				branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
-				if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
-					if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
-						return err
-					}
-					continue
-				}
-				if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
-					if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
-						return err
-					}
-					continue
-				}
-				memberEffect.RepoState = store.TaskRepoLanded
+				continue
 			}
-			recorded, err := db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, memberEffect)
-			if err != nil {
-				return err
+			memberEffect.RepoState = store.TaskRepoLanded
+		}
+		recorded, err := db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, memberEffect)
+		if err != nil {
+			processingErr = err
+			cancelPoll()
+			continue
+		}
+		if recorded && observation.State == "CLOSED" {
+			if err := raiseClosedPRDecision(ctx, db, project, task, member.repo.PRURL); err != nil {
+				processingErr = err
+				cancelPoll()
+				continue
 			}
-			if recorded && observation.State == "CLOSED" {
-				if err := raiseClosedPRDecision(ctx, db, project, task, member.repo.PRURL); err != nil {
-					return err
-				}
-			}
-			landedAny = landedAny || (recorded && memberEffect.RepoState == store.TaskRepoLanded)
+		}
+		newlyLanded := recorded && memberEffect.RepoState == store.TaskRepoLanded
+		landedAny = landedAny || newlyLanded
+		if newlyLanded && onLanded != nil {
+			onLanded()
 		}
 	}
-	if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure); err != nil {
+	if processingErr != nil {
+		return processingErr
+	}
+	if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), truncate(strings.Join(failures, "; "), 1000)); err != nil {
 		return err
 	}
-	if landedAny {
+	if landedAny && syncRoot {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
 			return err
 		}

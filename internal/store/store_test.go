@@ -283,8 +283,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 28 {
-		t.Fatalf("applied Goose migration version = %d, want 28", version)
+	if version != 31 {
+		t.Fatalf("applied Goose migration version = %d, want 31", version)
 	}
 }
 
@@ -394,8 +394,18 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='reported' WHERE id=?`, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id=26`); err != nil {
-		t.Fatal(err)
+	for _, statement := range []string{
+		`ALTER TABLE repo_watch_state DROP COLUMN checkout_reason`,
+		`ALTER TABLE repo_watch_state DROP COLUMN checkout_status`,
+		`ALTER TABLE repo_watch_state DROP COLUMN checkout_checked_at`,
+		`ALTER TABLE project_repos DROP COLUMN origin_host`,
+		`DROP TABLE member_pr_poll_state`,
+		`DROP TABLE pr_body_markers`,
+		`DELETE FROM goose_db_version WHERE version_id >= 26`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("prepare pre-migration database: %v", err)
+		}
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -493,9 +503,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 28 {
+	if version != 31 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 28", version)
+		t.Fatalf("initial Goose migration version = %d, want 31", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -532,8 +542,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 28 {
-		t.Fatalf("reopened Goose migration version = %d, want 28", version)
+	if version != 31 {
+		t.Fatalf("reopened Goose migration version = %d, want 31", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {

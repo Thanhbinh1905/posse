@@ -51,7 +51,7 @@ func (s *Service) offerUpUpdate(ctx *axi.Context, args []string) (bool, error) {
 	if s.currentVersion() == "dev" {
 		return false, nil
 	}
-	release, known := s.cachedRelease(ctx.Context)
+	release, known := s.readCachedRelease()
 	if !known || !newerVersion(s.currentVersion(), release.Tag) {
 		return false, nil
 	}

@@ -517,7 +517,7 @@ func TestFirstOutcomeImplicitRideRelaunchAndRecovery(t *testing.T) {
 
 func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	previousTTL := forgeProbeCacheTTL
-	forgeProbeCacheTTL = 0 // This test changes fake CLI state between checks.
+	forgeProbeCacheTTL = 10 * time.Second // Readiness consumes only fresh, already-resolved auth state.
 	t.Cleanup(func() { forgeProbeCacheTTL = previousTTL })
 	f := newFirstOutcomeFixture(t)
 	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
@@ -570,11 +570,18 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	}
 	outcomeCLI(t, f.service, 0, "config", "set", "defaults.gate", "['true']", "--project", "shop", "--user-approved", "Use true as the fixture Gate")
 	outcomeCLI(t, f.service, 0, "config", "set", "autonomy.yolo", "true", "--project", "shop", "--user-approved", "Grant standing fixture Autonomy")
+	cfg, err := config.Load(f.home, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cachedForgeProbe(context.Background(), f.repo, "github.com", cfg, "github"); err != nil {
+		t.Fatal(err)
+	}
 	check([]string{"machine_setup"}, []string{"forge_auth", "gate_empty", "autonomy_ask"})
 	outcomeCLI(t, f.service, 0, "config", "set", "defaults.forge", "gitlab", "--project", "shop")
 	gitTest(t, f.repo, "remote", "set-url", "origin", "https://gitlab.example.com/group/project.git")
 	output := outcomeCLI(t, f.service, 0, "--json")
-	if !strings.Contains(output, "gitlab.example.com") || !strings.Contains(output, "glab auth login --hostname gitlab.example.com") {
+	if !strings.Contains(output, "gitlab.example.com") || !strings.Contains(output, "unknown") {
 		t.Fatal(output)
 	}
 	output = outcomeCLI(t, f.service, 0, "doctor", "--json")
@@ -586,6 +593,13 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 		t.Fatalf("doctor added readiness: %s", output)
 	}
 	if err := os.WriteFile(filepath.Join(f.root, "glab-ready"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(f.home, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cachedForgeProbe(context.Background(), f.repo, "gitlab.example.com", cfg, "gitlab"); err != nil {
 		t.Fatal(err)
 	}
 	check([]string{"machine_setup"}, []string{"forge_auth"})

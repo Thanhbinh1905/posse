@@ -442,7 +442,11 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
+	if project.IsWorkspace() {
+		if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
+			return err
+		}
+	} else if _, err := s.prepareProjectInspection(ctx.Context, db, project); err != nil {
 		return err
 	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
