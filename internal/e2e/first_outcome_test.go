@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,10 @@ func TestFirstOutcomeFreshHome(t *testing.T) {
 	if err := os.MkdirAll(bin, 0700); err != nil {
 		t.Fatal(err)
 	}
-	installed := newFixtureRootAt(t, "/var/tmp", fixturePrefix("installed-"))
+	installed := filepath.Join(root, "installed")
+	if err := os.MkdirAll(installed, 0700); err != nil {
+		t.Fatal(err)
+	}
 	binary := filepath.Join(installed, "posse")
 	build := exec.Command("go", "build", "-o", binary, "./cmd/posse")
 	build.Dir = moduleRoot(t)
@@ -61,7 +65,6 @@ done
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, binary, root, env, "setup", "--binary", binary)
 	repo := filepath.Join(root, "repo")
 	if err := os.MkdirAll(repo, 0700); err != nil {
 		t.Fatal(err)
@@ -130,6 +133,44 @@ done
 			}
 		}
 	}
+	var leadResult struct {
+		Instructions string `json:"instructions"`
+	}
+	leadOutput := runPosse(t, binary, repo, leadEnv, "lead", "--json")
+	if err := json.Unmarshal([]byte(leadOutput), &leadResult); err != nil {
+		t.Fatalf("decode posse lead instructions: %v\n%s", err, leadOutput)
+	}
+	startupInstructions, err := os.ReadFile(filepath.Join(root, "posse", "projects", "shop", "lead.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leadResult.Instructions != string(startupInstructions) {
+		t.Fatalf("startup and posse lead instructions differ:\nstartup:\n%s\nlead:\n%s", startupInstructions, leadResult.Instructions)
+	}
+	for _, want := range []string{"one Ship Brief and dispatch it directly", "Scouts, specifications, tickets and separate review Tasks are optional", "## Runtime obligations", "Never edit the Project repository", "Posse does not support those paths yet", "This is a status update, not another approval step"} {
+		if !strings.Contains(leadResult.Instructions, want) {
+			t.Fatalf("composed instructions omit %q: %s", want, leadResult.Instructions)
+		}
+	}
+	preferenceFile := filepath.Join(root, "project-preferences.md")
+	const preferenceText = "For this Project, choose concise implementation Briefs and skip unnecessary exploration.\n"
+	if err := os.WriteFile(preferenceFile, []byte(preferenceText), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, binary, repo, env, "preferences", "set", "lead", "--file", preferenceFile, "--project", "shop")
+	leadOutput = runPosse(t, binary, repo, leadEnv, "lead", "--json")
+	if err := json.Unmarshal([]byte(leadOutput), &leadResult); err != nil {
+		t.Fatalf("decode updated posse lead instructions: %v\n%s", err, leadOutput)
+	}
+	if !strings.Contains(leadResult.Instructions, preferenceText) || !strings.Contains(leadResult.Instructions, "## Runtime obligations") || !strings.Contains(leadResult.Instructions, "Never edit the Project repository") {
+		t.Fatalf("Project preferences did not affect guidance while retaining runtime obligations: %s", leadResult.Instructions)
+	}
+	riderPreferences := filepath.Join(root, "rider-preferences.md")
+	const originalRiderPreferences = "Original Rider preferences.\n"
+	if err := os.WriteFile(riderPreferences, []byte(originalRiderPreferences), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, binary, repo, env, "preferences", "set", "rider", "--file", riderPreferences, "--project", "shop")
 	brief := filepath.Join(root, "ship.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: First change\ndone_when: change verified\n---\nMake a change.\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -145,6 +186,21 @@ done
 	task, err := db.Task(context.Background(), project.ID, "t1")
 	if err != nil || task.State != store.StateWorking || !strings.Contains(task.Profile, "claude") {
 		t.Fatalf("implicit Task: %#v %v", task, err)
+	}
+	launchPath := filepath.Join(root, "posse", "projects", "shop", "tasks", "t1", "launch.md")
+	launchSnapshot, err := os.ReadFile(launchPath)
+	if err != nil || !strings.Contains(string(launchSnapshot), originalRiderPreferences) {
+		t.Fatalf("Rider launch omitted its admitted preferences: %s, %v", launchSnapshot, err)
+	}
+	const updatedRiderPreferences = "Updated Rider preferences for future Tasks.\n"
+	if err := os.WriteFile(riderPreferences, []byte(updatedRiderPreferences), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, binary, repo, env, "preferences", "set", "rider", "--file", riderPreferences, "--project", "shop")
+	runPosse(t, binary, repo, leadEnv, "relaunch", "t1")
+	afterUpdate, err := os.ReadFile(launchPath)
+	if err != nil || string(afterUpdate) != string(launchSnapshot) || strings.Contains(string(afterUpdate), updatedRiderPreferences) {
+		t.Fatalf("editing preferences changed an existing Rider snapshot during relaunch: before=%q after=%q err=%v", launchSnapshot, afterUpdate, err)
 	}
 	for _, path := range []string{filepath.Join(root, "posse", "config.toml"), filepath.Join(root, "posse", "projects", "shop", "config.toml")} {
 		content, err := os.ReadFile(path)

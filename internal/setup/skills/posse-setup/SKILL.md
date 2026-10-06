@@ -46,6 +46,8 @@ Ask which repositories the User wants posse in. A folder that holds several repo
 
 Done when every Project the User named is registered and each of its keys has a written value or an explicit "keep the default".
 
+If the User wants standing workflow guidance, write concise Lead or Rider preferences with `posse preferences set <lead|rider> --file <file> --project <name>`; a Lead must include the User's explicit quote with `--user-approved`. Preferences change workflow advice, not runtime obligations or authority. Legacy `playbook/` paths and `posse playbook` commands remain readable with deprecation warnings; move old content explicitly with `posse preferences move`.
+
 ## 4. Verify
 
 Run `posse doctor`. For GitLab Projects, confirm `glab auth status --hostname <host>` succeeds on each host. Fix each failing check you can fix through the CLI; explain the rest to the User.

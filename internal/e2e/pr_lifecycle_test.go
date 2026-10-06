@@ -1233,7 +1233,7 @@ func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID s
 	} else if strings.Contains(brief, "follow-up") {
 		name = "pr-follow-up"
 	}
-	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", name)
+	output := fixture.runRideWithStoreBusyRetry(t, brief, name)
 	if !strings.Contains(output, taskID) {
 		t.Fatalf("ride did not return %s: %s", taskID, output)
 	}
@@ -1242,6 +1242,35 @@ func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID s
 	}
 	fixture.waitTaskState(t, taskID, store.StateDone)
 	return fixture.mustTask(t, taskID)
+}
+
+// A retryable observation lock can fail before ride creates a Task. Retry that
+// documented store_busy result, but never retry if the failed command created a Task.
+func (fixture *prLifecycleFixture) runRideWithStoreBusyRetry(t *testing.T, brief, name string) string {
+	t.Helper()
+	const maxAttempts = 4
+	var output []byte
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		command := exec.Command(fixture.binary, "ride", "--brief", brief, "--name", name)
+		command.Dir, command.Env = fixture.repo, fixture.leadEnv
+		output, err = command.CombinedOutput()
+		if err == nil {
+			return string(output)
+		}
+		if !strings.Contains(string(output), `error{code,message,retryable,help}: "store_busy"`) {
+			t.Fatalf("posse ride: %v\n%s", err, output)
+		}
+		var count int
+		if queryErr := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM tasks WHERE project_id=? AND short_name=?`, fixture.project.ID, name).Scan(&count); queryErr != nil || count != 0 {
+			t.Fatalf("refusing to retry ride after a partial Task creation: tasks=%d query_err=%v output=%s", count, queryErr, output)
+		}
+		if attempt+1 < maxAttempts {
+			time.Sleep(time.Duration(25*(1<<attempt)) * time.Millisecond)
+		}
+	}
+	t.Fatalf("posse ride stayed retryable store_busy after %d attempts: %v\n%s", maxAttempts, err, output)
+	return ""
 }
 
 func (fixture *prLifecycleFixture) rideAndCommitLegacy(t *testing.T, brief, taskID string) {

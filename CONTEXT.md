@@ -134,6 +134,6 @@ _Avoid_: Routing rule, policy
 The User-chosen name, persona and language the Lead uses when talking to the User; it never appears in anything another agent reads.
 _Avoid_: Alias, nickname
 
-**Playbook**:
-User-authored workflow instructions for a Lead or Rider, layered from `<POSSE_HOME>/playbook/` and `<POSSE_HOME>/projects/<project>/playbook/`. Project instructions follow User instructions; Playbooks supplement built-in rules and cannot override them. The User can write them with `posse playbook set`; a Lead's write requires User consent recorded with the quote, and Riders cannot write them.
-_Avoid_: Workflow framework, policy
+**Preferences**:
+User-authored how-to-work guidance for a Lead or Rider, layered from `<POSSE_HOME>/preferences/` and `<POSSE_HOME>/projects/<project>/preferences/`. Project guidance follows User guidance and can change default workflow advice, but cannot grant authority or override runtime obligations. The User writes it with `posse preferences set`; a Lead's write requires User consent recorded with the quote, and Riders cannot write it. Deprecated `playbook/` paths remain readable until explicitly moved.
+_Avoid_: Playbook, workflow framework, policy
