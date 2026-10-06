@@ -333,7 +333,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			return err
 		}
 		for _, member := range members[project.ID] {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO project_repos(project_id,name,path,default_branch,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, project.ID, member.Name, member.Path, member.DefaultBranch, member.Status, project.CreatedAt, project.LastActivityAt); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO project_repos(project_id,name,path,default_branch,status,created_at,updated_at,origin_host) VALUES(?,?,?,?,?,?,?,?)`, project.ID, member.Name, member.Path, member.DefaultBranch, member.Status, project.CreatedAt, project.LastActivityAt, member.OriginHost); err != nil {
 				return err
 			}
 		}
