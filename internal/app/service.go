@@ -266,6 +266,28 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return result, err
 	}
 	if !result.GenerationMismatch {
+		if userStart || !recoveryHeld(project, cfg) {
+			pendingGroupRecovery, err := pendingGroupRecoveryDue(ctx, db, project.ID)
+			if err != nil {
+				return result, err
+			}
+			if pendingGroupRecovery {
+				home, err := s.homePath()
+				if err != nil {
+					return result, err
+				}
+				if _, err := s.recoverProject(ctx, db, home, project); err != nil {
+					return result, fmt.Errorf("recover Project %s after group recovery backoff: %w", project.Name, err)
+				}
+				result, err = run()
+				if err != nil {
+					return result, err
+				}
+				if result.GenerationMismatch {
+					return result, fmt.Errorf("project %s Herdr generation changed during recovery; retry reconcile", project.Name)
+				}
+			}
+		}
 		return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 	}
 	current, err := s.snapshot(ctx)

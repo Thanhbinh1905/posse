@@ -92,6 +92,17 @@ func (db *DB) FinishTaskRecovery(ctx context.Context, task Task, ownerPID, limit
 	return tx.Commit()
 }
 
+// AssociateTaskRecoveryGeneration ties an unfinished retry episode to a group
+// recovery without changing its budget, retry time, status, or owner.
+func (db *DB) AssociateTaskRecoveryGeneration(ctx context.Context, taskID int64, previousGeneration, generation string) (bool, error) {
+	result, err := db.ExecContext(ctx, `UPDATE task_recovery SET generation=? WHERE task_id=? AND generation=? AND status IN ('pending','running')`, generation, taskID, previousGeneration)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
+}
+
 // RetryRecoveredTask reopens a completed episode only after its caller verifies
 // that the recovered Rider pane is no longer live in the same generation.
 func (db *DB) RetryRecoveredTask(ctx context.Context, taskID int64, generation string) (bool, error) {
