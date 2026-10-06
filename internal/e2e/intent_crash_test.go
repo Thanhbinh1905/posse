@@ -73,7 +73,7 @@ func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := fixture.attachTaskPane(t, taskID, false); err != nil {
+			if err := fixture.attachTaskPane(t, taskID, true); err != nil {
 				t.Fatal(err)
 			}
 			configPath := filepath.Join(fixture.home, "config.toml")
@@ -529,9 +529,31 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					} else if err != nil {
 						return err
 					}
-					// A failed ride leaves no Rider pane in the Lead or a linked child.
+					// An interrupted spawn may leave a shell that was never bound
+					// during ownership proof. In that case, retain its pane and Mount
+					// rather than signal it based on CWD discovery alone.
 					if task.State == store.StateFailed && len(leftovers) != 0 {
-						return fmt.Errorf("failed ride left Rider panes: %#v", leftovers)
+						if len(leftovers) != 1 || leftovers[0].Label != task.PaneLabel {
+							return fmt.Errorf("failed ride left unexpected Rider panes: %#v", leftovers)
+						}
+						mounts, mountErr := db.Mounts(context.Background(), fixture.project.ID)
+						if mountErr != nil {
+							return mountErr
+						}
+						held := false
+						for _, mount := range mounts {
+							held = held || mount.ID == task.MountID && mount.TaskID == task.ID && mount.State == "held"
+						}
+						if !held {
+							return fmt.Errorf("failed ride left pane without retaining its Mount: %#v", mounts)
+						}
+						fixture.harness.session.mu.Lock()
+						shell := fixture.harness.session.shells[leftovers[0].PaneID]
+						shellAlive := shell != nil && shell.alive()
+						fixture.harness.session.mu.Unlock()
+						if !shellAlive {
+							return fmt.Errorf("failed ride retained pane %s without its shell process", leftovers[0].PaneID)
+						}
 					}
 					if task.State == store.StateWorking && (len(leftovers) != 1 || leftovers[0].Label != task.PaneLabel) {
 						return fmt.Errorf("working ride has panes %#v, want its one labeled Rider pane", leftovers)
@@ -904,9 +926,10 @@ type fakeHerdrSession struct {
 	workspaces       map[string]herdr.Workspace
 	panes            map[string]herdr.Pane
 	agents           map[string]herdr.Agent
-	// processes holds one real process group per started agent, so posse's
-	// stop path signals something real.
+	// processes and shells are real processes in their pane CWDs, so teardown
+	// exercises process identity and Herdr's natural pane removal.
 	processes map[string]*fakeAgentProcess
+	shells    map[string]*fakeAgentProcess
 }
 
 type fakeAgentProcess struct {
@@ -914,10 +937,9 @@ type fakeAgentProcess struct {
 	exited chan struct{}
 }
 
-const fakeShellPID = 999999999
-
-func startFakeAgentProcess() (*fakeAgentProcess, error) {
+func startFakeAgentProcess(cwd string) (*fakeAgentProcess, error) {
 	command := exec.Command("sleep", "600")
+	command.Dir = cwd
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := command.Start(); err != nil {
 		return nil, err
@@ -950,6 +972,22 @@ func (s *fakeHerdrSession) forgetAgent(paneID string) {
 	}
 }
 
+func (s *fakeHerdrSession) forgetShell(paneID string) {
+	if shell := s.shells[paneID]; shell != nil {
+		shell.kill()
+		delete(s.shells, paneID)
+	}
+}
+
+func (s *fakeHerdrSession) spawnShell(paneID, cwd string) error {
+	shell, err := startFakeAgentProcess(cwd)
+	if err != nil {
+		return err
+	}
+	s.shells[paneID] = shell
+	return nil
+}
+
 func newFakeHerdrSession(t *testing.T, socketPath string) *fakeHerdrSession {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
@@ -959,13 +997,16 @@ func newFakeHerdrSession(t *testing.T, socketPath string) *fakeHerdrSession {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := &fakeHerdrSession{listener: listener, serverAt: "e2e-server-generation", requests: make(chan string, 512), workspaces: map[string]herdr.Workspace{}, panes: map[string]herdr.Pane{}, agents: map[string]herdr.Agent{}, processes: map[string]*fakeAgentProcess{}}
+	session := &fakeHerdrSession{listener: listener, serverAt: "e2e-server-generation", requests: make(chan string, 512), workspaces: map[string]herdr.Workspace{}, panes: map[string]herdr.Pane{}, agents: map[string]herdr.Agent{}, processes: map[string]*fakeAgentProcess{}, shells: map[string]*fakeAgentProcess{}}
 	t.Cleanup(func() {
 		_ = listener.Close()
 		session.mu.Lock()
 		defer session.mu.Unlock()
 		for paneID := range session.processes {
 			session.forgetAgent(paneID)
+		}
+		for paneID := range session.shells {
+			session.forgetShell(paneID)
 		}
 	})
 	go session.serve()
@@ -1032,6 +1073,25 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 	}
 	switch method {
 	case "session.snapshot":
+		for paneID, shell := range s.shells {
+			if shell.alive() {
+				continue
+			}
+			workspaceID := s.panes[paneID].WorkspaceID
+			delete(s.panes, paneID)
+			s.forgetAgent(paneID)
+			delete(s.shells, paneID)
+			workspaceHasPanes := false
+			for _, pane := range s.panes {
+				if pane.WorkspaceID == workspaceID {
+					workspaceHasPanes = true
+					break
+				}
+			}
+			if !workspaceHasPanes {
+				delete(s.workspaces, workspaceID)
+			}
+		}
 		panes := make([]herdr.Pane, 0, len(s.panes))
 		for _, pane := range s.panes {
 			panes = append(panes, pane)
@@ -1042,14 +1102,22 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		workspaceID, paneID, tabID := newID("workspace"), newID("pane"), newID("tab")
 		workspace := herdr.Workspace{WorkspaceID: workspaceID, Label: stringParam("label"), Root: stringParam("cwd")}
 		s.workspaces[workspaceID] = workspace
-		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, Label: stringParam("label"), CWD: stringParam("cwd")}
+		cwd := stringParam("cwd")
+		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, Label: stringParam("label"), CWD: cwd}
+		if err := s.spawnShell(paneID, cwd); err != nil {
+			return nil, &herdr.APIError{Code: "shell_start_failed", Message: err.Error()}
+		}
 		return map[string]any{"workspace": map[string]any{"workspace_id": workspaceID}, "root_pane": map[string]any{"pane_id": paneID, "tab_id": tabID}}, nil
 	case "worktree.open":
 		workspaceID, paneID, tabID := newID("workspace"), newID("pane"), newID("tab")
 		workspace := herdr.Workspace{WorkspaceID: workspaceID, Label: stringParam("label"), Root: stringParam("path")}
 		workspace.Worktree.CheckoutPath = stringParam("path")
 		s.workspaces[workspaceID] = workspace
-		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, Label: stringParam("label"), CWD: stringParam("path")}
+		cwd := stringParam("path")
+		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, Label: stringParam("label"), CWD: cwd}
+		if err := s.spawnShell(paneID, cwd); err != nil {
+			return nil, &herdr.APIError{Code: "shell_start_failed", Message: err.Error()}
+		}
 		return map[string]any{"workspace": map[string]any{"workspace_id": workspaceID}, "root_pane": map[string]any{"pane_id": paneID, "tab_id": tabID}}, nil
 	case "tab.create":
 		// Like Herdr, the label names the tab; the root pane starts unlabeled.
@@ -1057,7 +1125,11 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		if _, ok := s.workspaces[workspaceID]; !ok {
 			return nil, &herdr.APIError{Code: "workspace_not_found", Message: "workspace " + workspaceID + " not found"}
 		}
-		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, CWD: stringParam("cwd")}
+		cwd := stringParam("cwd")
+		s.panes[paneID] = herdr.Pane{PaneID: paneID, WorkspaceID: workspaceID, TabID: tabID, CWD: cwd}
+		if err := s.spawnShell(paneID, cwd); err != nil {
+			return nil, &herdr.APIError{Code: "shell_start_failed", Message: err.Error()}
+		}
 		return map[string]any{"tab": map[string]any{"tab_id": tabID, "workspace_id": workspaceID}, "root_pane": map[string]any{"pane_id": paneID, "tab_id": tabID, "workspace_id": workspaceID}}, nil
 	case "tab.close":
 		tabID, closed := stringParam("tab_id"), false
@@ -1065,6 +1137,7 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 			if pane.TabID == tabID {
 				delete(s.panes, paneID)
 				s.forgetAgent(paneID)
+				s.forgetShell(paneID)
 				closed = true
 			}
 		}
@@ -1096,7 +1169,7 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		pane.Agent, pane.AgentStatus = stringParam("kind"), "idle"
 		s.panes[paneID] = pane
 		s.agents[paneID] = herdr.Agent{Name: stringParam("name"), PaneID: paneID, Kind: stringParam("kind"), Agent: stringParam("kind"), Status: "idle", AgentStatus: "idle"}
-		process, err := startFakeAgentProcess()
+		process, err := startFakeAgentProcess(pane.CWD)
 		if err != nil {
 			return nil, &herdr.APIError{Code: "agent_start_failed", Message: err.Error()}
 		}
@@ -1110,20 +1183,28 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		return map[string]any{"agent": map[string]any{"agent_status": agent.AgentStatus, "interactive_ready": true, "launch_pending": false}}, nil
 	case "pane.process_info":
 		paneID := stringParam("pane_id")
-		if process := s.processes[paneID]; process != nil && process.alive() {
-			pane := s.panes[paneID]
-			return map[string]any{"process_info": map[string]any{
-				"pane_id": paneID, "foreground_process_group_id": process.pid, "shell_pid": fakeShellPID,
-				"foreground_processes": []map[string]any{{"pid": process.pid, "name": pane.Agent, "cwd": pane.CWD}},
-			}}, nil
+		pane, found := s.panes[paneID]
+		if !found {
+			return nil, &herdr.APIError{Code: "pane_not_found", Message: "pane " + paneID + " not found"}
 		}
-		if process := s.processes[paneID]; process != nil {
+		shell := s.shells[paneID]
+		if shell == nil || !shell.alive() {
+			return nil, &herdr.APIError{Code: "pane_process_unavailable", Message: "pane shell is no longer running"}
+		}
+		if process := s.processes[paneID]; process != nil && !process.alive() {
 			s.forgetAgent(paneID)
-			pane := s.panes[paneID]
 			pane.Agent, pane.AgentStatus = "", ""
 			s.panes[paneID] = pane
 		}
-		return map[string]any{"process_info": map[string]any{"pane_id": paneID, "foreground_process_group_id": fakeShellPID, "shell_pid": fakeShellPID}}, nil
+		foreground := shell.pid
+		foregroundName := "shell"
+		if process := s.processes[paneID]; process != nil && process.alive() {
+			foreground, foregroundName = process.pid, pane.Agent
+		}
+		return map[string]any{"process_info": map[string]any{
+			"pane_id": paneID, "foreground_process_group_id": foreground, "shell_pid": shell.pid,
+			"foreground_processes": []map[string]any{{"pid": foreground, "name": foregroundName, "cwd": pane.CWD}},
+		}}, nil
 	case "pane.clear_agent_authority":
 		paneID := stringParam("pane_id")
 		delete(s.agents, paneID)
@@ -1135,6 +1216,7 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 		paneID := stringParam("pane_id")
 		delete(s.panes, paneID)
 		s.forgetAgent(paneID)
+		s.forgetShell(paneID)
 		return map[string]any{}, nil
 	case "workspace.close":
 		workspaceID := stringParam("workspace_id")
@@ -1143,6 +1225,7 @@ func (s *fakeHerdrSession) call(method string, params map[string]any) (any, *her
 			if pane.WorkspaceID == workspaceID {
 				delete(s.panes, paneID)
 				s.forgetAgent(paneID)
+				s.forgetShell(paneID)
 			}
 		}
 		return map[string]any{}, nil

@@ -41,6 +41,50 @@ func (adapter *teardownCloseGuardAdapter) Call(ctx context.Context, method strin
 	return adapter.Client.Call(ctx, method, params)
 }
 
+type teardownShellSignalRaceAdapter struct {
+	*herdr.Client
+	home      string
+	taskID    int64
+	paneID    string
+	onReplace func()
+	replaced  bool
+}
+
+func (adapter *teardownShellSignalRaceAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	if method == "pane.process_info" && params["pane_id"] == adapter.paneID && !adapter.replaced && adapter.mountStopInShell(adapter.Client, ctx) {
+		adapter.replaced = true
+		adapter.onReplace()
+	}
+	return adapter.Client.Call(ctx, method, params)
+}
+
+func (adapter *teardownShellSignalRaceAdapter) mountStopInShell(client *herdr.Client, ctx context.Context) bool {
+	db, err := store.OpenReadOnly(adapter.home)
+	if err != nil {
+		return false
+	}
+	intent, err := db.IntentByTask(ctx, adapter.taskID)
+	_ = db.Close()
+	if err != nil || intent.Step != "in_progress:mount.stop" {
+		return false
+	}
+	snapshot, err := client.Snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	pane, found := snapshotPaneByID(snapshot, adapter.paneID)
+	return found && pane.Agent == ""
+}
+
+func snapshotPaneByID(snapshot herdr.Snapshot, paneID string) (herdr.Pane, bool) {
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == paneID {
+			return pane, true
+		}
+	}
+	return herdr.Pane{}, false
+}
+
 // TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary makes a real
 // same-kind replacement if teardown attempts any unconditional close RPC.
 func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
@@ -118,6 +162,65 @@ func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 	}
 	if ownedPID <= 1 {
 		t.Fatalf("invalid owned process PID %d", ownedPID)
+	}
+}
+
+func TestTeardownRefusesRetainedShellKillAfterForeignReplacement(t *testing.T) {
+	f := newRiderTabsFixture(t)
+	ctx := context.Background()
+	task := f.ride(t, "t1", "Shell signal race", "shell-signal-race")
+	f.fail(t, "t1")
+	work := filepath.Join(task.WorktreePath, "foreign-work.txt")
+	if err := os.WriteFile(work, []byte("preserve\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownedPID := foregroundPID(t, f, task.PaneID)
+	foreignPID := 0
+	adapter := &teardownShellSignalRaceAdapter{
+		Client: f.client, home: f.home, taskID: task.ID, paneID: task.PaneID,
+		onReplace: func() {
+			if _, err := f.client.Call(ctx, "pane.rename", map[string]any{"pane_id": task.PaneID, "label": "foreign-at-shell-kill"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.client.Run(ctx, "agent", "start", "foreign-at-shell-kill", "--kind", "claude", "--pane", task.PaneID); err != nil {
+				t.Fatal(err)
+			}
+			foreignPID = foregroundPID(t, f, task.PaneID)
+		},
+	}
+	for _, entry := range f.leadEnv {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			t.Setenv(key, value)
+		}
+	}
+	t.Chdir(f.repo)
+	cli := app.New(f.home, adapter).CLI()
+	var output bytes.Buffer
+	cli.Out, cli.ErrOut = &output, &output
+	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
+	if !adapter.replaced || foreignPID <= 1 || foreignPID == ownedPID {
+		t.Fatalf("replacement missed the retained-shell kill boundary: replaced=%v owned=%d foreign=%d output=%s", adapter.replaced, ownedPID, foreignPID, output.String())
+	}
+	foreignAlive := syscall.Kill(foreignPID, 0) == nil
+	paneAlive := false
+	for _, pane := range f.snapshot(t).Panes {
+		if pane.PaneID == task.PaneID {
+			paneAlive = true
+		}
+	}
+	contents, fileErr := os.ReadFile(work)
+	branchOut, branchErr := exec.Command("git", "-C", f.repo, "show-ref", "--verify", "refs/heads/"+task.Branch).CombinedOutput()
+	taskAfter := f.task(t, "t1")
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, mountErr := db.Mounts(ctx, f.projectID)
+	_ = db.Close()
+	t.Logf("retained shell replacement: owned=%d foreign=%d exit=%d alive=%v pane=%v file=%q fileErr=%v branchErr=%v Task=%s Mounts=%#v output=%s", ownedPID, foreignPID, code, foreignAlive, paneAlive, contents, fileErr, branchErr, taskAfter.State, mounts, output.String())
+	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") || !foreignAlive || !paneAlive || fileErr != nil || string(contents) != "preserve\n" || branchErr != nil || mountErr != nil || taskAfter.State != store.StateFailed || len(mounts) != 1 || mounts[0].State != "held" {
+		t.Fatalf("foreign replacement was damaged by retained-shell signaling: branch=%s", branchOut)
 	}
 }
 

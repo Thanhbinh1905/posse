@@ -8,7 +8,8 @@ import (
 )
 
 type mountProcessHandle struct {
-	pid int
+	pid         int
+	signalGuard func(syscall.Signal) error
 }
 
 func mountProcessGroupID(pid int) (int, error) {

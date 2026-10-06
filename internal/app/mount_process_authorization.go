@@ -52,6 +52,12 @@ func (authorization *mountProcessAuthorization) handle(pid int) *mountProcessHan
 	return authorization.handles[pid]
 }
 
+func (authorization *mountProcessAuthorization) setSignalGuard(pid int, guard func(syscall.Signal) error) {
+	if handle := authorization.handle(pid); handle != nil {
+		handle.signalGuard = guard
+	}
+}
+
 func (authorization *mountProcessAuthorization) retainProcessGroup(pgid int, handle *mountProcessHandle) {
 	if authorization == nil || pgid <= 1 || handle == nil {
 		return

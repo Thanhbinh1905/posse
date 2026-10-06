@@ -16,10 +16,11 @@ import (
 )
 
 type mountProcessHandle struct {
-	pid       int
-	fd        int
-	bootID    string
-	startTime string
+	pid         int
+	fd          int
+	bootID      string
+	startTime   string
+	signalGuard func(syscall.Signal) error
 }
 
 func processIdentityCapabilityError() string { return "" }
@@ -104,6 +105,11 @@ func openPIDFD(pid int) (int, error) {
 }
 
 func (handle *mountProcessHandle) Signal(signal syscall.Signal) error {
+	if handle.signalGuard != nil {
+		if err := handle.signalGuard(signal); err != nil {
+			return fmt.Errorf("refuse to signal Mount process instance %d after ownership changed: %w", handle.pid, err)
+		}
+	}
 	for {
 		err := unix.PidfdSendSignal(handle.fd, unix.Signal(signal), nil, 0)
 		if errors.Is(err, unix.EINTR) {
