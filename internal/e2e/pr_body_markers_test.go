@@ -148,13 +148,7 @@ func t208SnapshotRebuildCases(t *testing.T) {
 				t.Fatal("initial refresh changed human-authored text")
 			}
 
-			// Existing rebuild blockers are unrelated to marker persistence. Keep
-			// this workaround local to the disposable User-facing fixture.
-			for _, statement := range []string{"UPDATE tasks SET mount_id=NULL", "DELETE FROM decision_notice_cursors"} {
-				if _, err := f.db.ExecContext(context.Background(), statement); err != nil {
-					t.Fatal(err)
-				}
-			}
+			t208PrepareSnapshotRebuild(t, f)
 			command := exec.Command(f.binary, "recover", "--rebuild")
 			command.Dir, command.Env = f.repo, f.env
 			output, err := command.CombinedOutput()
@@ -206,11 +200,7 @@ func t208SnapshotRebuildCases(t *testing.T) {
 
 			// The Task snapshot remains authoritative and can restore the token,
 			// after which the same publish is safe to retry.
-			for _, statement := range []string{"UPDATE tasks SET mount_id=NULL", "DELETE FROM decision_notice_cursors"} {
-				if _, err := f.db.ExecContext(context.Background(), statement); err != nil {
-					t.Fatal(err)
-				}
-			}
+			t208PrepareSnapshotRebuild(t, f)
 			snapshotBeforeRebuild, err := os.ReadFile(f.db.TaskSnapshotPath(f.project.Name, f.task.Seq))
 			if err != nil || !strings.Contains(string(snapshotBeforeRebuild), marker.Token) {
 				t.Fatalf("Task snapshot lost token before recovery: %v\n%s", err, snapshotBeforeRebuild)
@@ -233,6 +223,23 @@ func t208SnapshotRebuildCases(t *testing.T) {
 				t.Fatalf("recovered marker did not permit safe retry: %s", body)
 			}
 		})
+	}
+}
+
+func t208PrepareSnapshotRebuild(t *testing.T, f *t205PRFixture) {
+	t.Helper()
+	// Hold a Decision that snapshot rebuild does not reconstruct. This exercises
+	// the known rebuild FK blocker addressed by A24 (#191).
+	if _, err := f.db.ExecContext(context.Background(), `INSERT INTO decisions(project_id,task_id,origin,question,options_json,created_at) VALUES(?,?,?,'fixture rebuild blocker','[]',?)`, f.project.ID, f.task.ID, "t208-rebuild-fixture", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	// Until A24 fixes rebuild FK cleanup, clear state outside Task snapshots
+	// locally in this disposable fixture. This test covers marker recovery,
+	// not Mount or Decision restoration.
+	for _, statement := range []string{"UPDATE tasks SET mount_id=NULL", "DELETE FROM decisions", "DELETE FROM decision_notice_cursors"} {
+		if _, err := f.db.ExecContext(context.Background(), statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
