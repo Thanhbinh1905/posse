@@ -81,6 +81,56 @@ func (db *DB) ClaimPRPoll(ctx context.Context, projectID int64, now time.Time, i
 	return token, nil
 }
 
+// ClaimMemberPRPoll reserves one workspace Member independently, so another
+// Member can be polled again while this Member's forge command remains stalled.
+func (db *DB) ClaimMemberPRPoll(ctx context.Context, projectID int64, repo string, now time.Time, interval time.Duration, force bool) (string, error) {
+	stamp := now.UnixMilli()
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(bytes)
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO member_pr_poll_state(project_id,repo) VALUES (?,?)`, projectID, repo); err != nil {
+		return "", err
+	}
+	threshold := stamp - int64(interval/time.Millisecond)
+	if force {
+		threshold = math.MaxInt64
+	}
+	result, err := db.ExecContext(ctx, `UPDATE member_pr_poll_state SET claim_until=?,claim_token=? WHERE project_id=? AND repo=? AND claim_until<=? AND pr_polled_at<=?`, stamp+int64((5*time.Minute)/time.Millisecond), token, projectID, repo, stamp, threshold)
+	if err != nil {
+		return "", err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if rows == 0 {
+		return "", nil
+	}
+	return token, nil
+}
+
+func (db *DB) FinishMemberPRPoll(ctx context.Context, projectID int64, repo, token string, polledAt int64) error {
+	result, err := db.ExecContext(ctx, `UPDATE member_pr_poll_state SET pr_polled_at=?,claim_until=0,claim_token='' WHERE project_id=? AND repo=? AND claim_token=?`, polledAt, projectID, repo, token)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrStateRace
+	}
+	return nil
+}
+
+func (db *DB) ReleaseMemberPRPoll(ctx context.Context, projectID int64, repo, token string) error {
+	_, err := db.ExecContext(ctx, `UPDATE member_pr_poll_state SET claim_until=0,claim_token='' WHERE project_id=? AND repo=? AND claim_token=?`, projectID, repo, token)
+	return err
+}
+
 func (db *DB) ReleasePRPoll(ctx context.Context, projectID int64, token string) error {
 	_, err := db.ExecContext(ctx, `UPDATE project_watch_state SET pr_poll_claim_until=0,pr_poll_claim_token='' WHERE project_id=? AND pr_poll_claim_token=?`, projectID, token)
 	return err

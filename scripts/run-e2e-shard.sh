@@ -56,7 +56,8 @@ assignments='
 3 TestFocusedRiderLaunch
 3 TestGroupCloseDuringRideRecoversLeadAndMount
 3 TestLookoutStartupGraceHonorsTimeoutAndSIGTERM
-3 TestForgeProbeTimeoutInMultiMemberWorkspace
+3 TestForgeReadinessUsesCacheInMultiMemberWorkspace
+3 TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls
 3 TestDownDoesNotSignalDifferentMainPackageInPosseModule
 3 TestDecisionCLIFromLeadAndUserShellDeliversAnswerToLead
 3 TestFixtureRootReclaimsOnlyAbandonedOwnedRoots
@@ -83,6 +84,7 @@ assignments='
 4 TestPRCreateCrashRecoveryAdoptsOpenPullRequest
 4 TestExplicitRelaunchSettlesPendingRecovery
 4 TestLookoutRecoveryBackoffSurvivesLeadRearm
+4 TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts
 4 TestDownDoesNotSignalUnrelatedExecutableNamedLookout
 4 TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault
 4 TestRideCrashImmediatelyAfterTaskCreationIsRecovered
@@ -93,6 +95,7 @@ assignments='
 4 TestPruneReclaimsMappedCacheStorage
 4 TestRiderMappingIsStoppedBeforeRelease
 4 TestPrunePreservesBranchCheckedOutAfterFinalCheck
+4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall
 '
 
 validate_assignments() {

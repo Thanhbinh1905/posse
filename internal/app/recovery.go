@@ -244,7 +244,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	}
 	groupClosed := riderGroupClosed(snapshot, project, tasks) && !serverRestarted
 	if !serverRestarted && !groupClosed {
-		if _, err := s.prepareProject(ctx, db, project); err != nil {
+		if _, err := s.prepareProjectLocalRecovery(ctx, db, project); err != nil {
 			return 0, err
 		}
 		if err := db.RememberProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt); err != nil {

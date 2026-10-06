@@ -822,6 +822,131 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	}
 }
 
+func TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "deferred-pr-recovery.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR create recovery\ndone_when: committed change exists\n---\nExercise deferred recovery of an interrupted PR creation.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.rideAndCommitLegacy(t, brief, "t1")
+
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	snapshot, err := client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.Label != "posse:shop:lookout" || pane.WorkspaceID != fixture.project.HerdrWorkspaceID {
+			continue
+		}
+		if _, err := client.Run(context.Background(), "pane", "send-keys", pane.PaneID, "ctrl+c"); err != nil {
+			t.Fatalf("stop fixture Lookout before injecting interrupted intent: %v", err)
+		}
+		if pane.TabID != "" {
+			if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": pane.TabID}); err != nil {
+				t.Fatalf("close fixture Lookout tab: %v", err)
+			}
+		}
+		break
+	}
+
+	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "land --open-pr:after:pr.create")
+	command := exec.Command(fixture.binary, "land", "t1")
+	command.Dir, command.Env = fixture.repo, crashEnv
+	output, err := command.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 86 {
+		t.Fatalf("Land did not crash at the injected post-create boundary: err=%v output=%s", err, output)
+	}
+	task := fixture.mustTask(t, "t1")
+	openPRs, err := json.Marshal([]map[string]string{{
+		"url": "https://github.com/acme/shop/pull/17", "headRefName": task.Branch, "headRefOid": task.GatedSHA,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.ghOpenPRs, openPRs, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.root, "gh.log")); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(fixture.root, "bin")
+	ghPath := filepath.Join(binDir, "gh")
+	if err := os.Rename(ghPath, filepath.Join(binDir, "gh-real")); err != nil {
+		t.Fatal(err)
+	}
+	ghWrapper := "#!/bin/sh\nprintf '%s %s\\n' \"${HERDR_PANE_ID:-none}\" \"$*\" >> \"$POSSE_TEST_GH_LOG\"\nif [ \"$1 $2\" = 'pr list' ] && [ -e \"$POSSE_TEST_ROOT/slow-recovery\" ] && [ ! -e \"$POSSE_TEST_ROOT/lead-started\" ]; then\n  : > \"$POSSE_TEST_ROOT/pr-list-before-lead\"\n  sleep 30\nfi\nexec \"$POSSE_TEST_ROOT/bin/gh-real\" \"$@\"\n"
+	if err := os.WriteFile(ghPath, []byte(ghWrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(binDir, "claude")
+	if err := os.Rename(claudePath, filepath.Join(binDir, "claude-real")); err != nil {
+		t.Fatal(err)
+	}
+	claudeWrapper := "#!/bin/sh\nprintf '%s\\n' \"$(date +%s%N)\" > \"$POSSE_TEST_ROOT/lead-started\"\nexec \"$POSSE_TEST_ROOT/bin/claude-real\" \"$@\"\n"
+	if err := os.WriteFile(claudePath, []byte(claudeWrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	newLead, err := createTab(client, fixture.project.HerdrWorkspaceID, fixture.repo, "replacement-shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldTab := envValue(fixture.leadEnv, "HERDR_TAB_ID"); oldTab != "" {
+		if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": oldTab}); err != nil {
+			t.Fatalf("close old fixture Lead tab: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "slow-recovery"), []byte("delay"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	startupStarted := time.Now()
+	if _, err := client.Run(context.Background(), "pane", "run", newLead.RootPane.PaneID, "posse up --name shop --yes"); err != nil {
+		t.Fatalf("start Lead from replacement shell: %v", err)
+	}
+	if !waitForCondition(8*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(fixture.root, "lead-started"))
+		return err == nil
+	}) {
+		screen, _ := client.Run(context.Background(), "pane", "read", newLead.RootPane.PaneID, "--lines", "60")
+		t.Fatalf("Lead did not start promptly with an interrupted PR intent:\n%s", screen)
+	}
+	if elapsed := time.Since(startupStarted); elapsed > 5*time.Second {
+		t.Fatalf("Lead startup took %s with deferred PR recovery, want under 5s", elapsed)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.root, "pr-list-before-lead")); err == nil {
+		t.Fatal("forge PR lookup ran before the Lead agent started")
+	}
+	if !waitForCondition(20*time.Second, func() bool {
+		current := fixture.mustTask(t, "t1")
+		_, intentErr := fixture.db.IntentByTask(context.Background(), current.ID)
+		return current.PRURL == "https://github.com/acme/shop/pull/17" && store.IsNotFound(intentErr)
+	}) {
+		t.Fatalf("Lookout did not recover the deferred PR intent after Lead startup: %#v", fixture.mustTask(t, "t1"))
+	}
+	ghLog, err := os.ReadFile(fixture.ghLog)
+	if err != nil || !strings.Contains(string(ghLog), "pr list") {
+		t.Fatalf("deferred recovery did not run its forge lookup after startup: %s %v", ghLog, err)
+	}
+
+	if _, err := client.Run(context.Background(), "pane", "send-keys", newLead.RootPane.PaneID, "ctrl+c"); err != nil {
+		t.Errorf("stop replacement Lead agent: %v", err)
+	}
+}
+
+func envValue(values []string, key string) string {
+	for _, value := range values {
+		name, content, found := strings.Cut(value, "=")
+		if found && name == key {
+			return content
+		}
+	}
+	return ""
+}
+
 func TestPRCreateCrashRecoveryAdoptsOpenPullRequest(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	brief := filepath.Join(fixture.root, "crash-ship.md")

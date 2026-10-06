@@ -70,6 +70,48 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 	}
 }
 
+func TestRebuildPreservesWorkspaceMemberOriginHosts(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateWorkspaceProject(ctx, "workspace", filepath.Join(home, "workspace"), []ProjectRepo{
+		{Name: "api", Path: "api", DefaultBranch: "main", Status: RepoActive, OriginHost: "github.com"},
+		{Name: "notes", Path: "notes", DefaultBranch: "main", Status: RepoActive, OriginHost: "<no-origin>"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE project_repos SET origin_host='' WHERE project_id=?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	rebuilt, err := db.ProjectRepos(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, member := range rebuilt {
+		got[member.Name] = member.OriginHost
+	}
+	want := map[string]string{"api": "github.com", "notes": "<no-origin>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rebuilt member OriginHost = %#v; want %#v", got, want)
+	}
+}
+
 func TestTaskLaunchIdentitiesPersistAndRebuildWithoutLosingProfileChanges(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

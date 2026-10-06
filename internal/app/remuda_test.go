@@ -172,6 +172,41 @@ func TestPruneCandidatesRemoveOnlyExcessIdleAndCleanBrokenMounts(t *testing.T) {
 	}
 }
 
+func TestResetWorktreeUsesLocalDefaultWhenOriginRefIsNotCached(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	remote := filepath.Join(root, "remote.git")
+	gitTest(t, root, "clone", "--bare", repo, remote)
+	gitTest(t, repo, "remote", "add", "origin", remote)
+	mount := filepath.Join(root, "mount")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mount, "main")
+	if err := os.WriteFile(filepath.Join(mount, "task-work.txt"), []byte("task work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, mount, "add", "task-work.txt")
+	gitTest(t, mount, "commit", "-m", "Task work")
+	defaultHead := strings.TrimSpace(gitTest(t, repo, "rev-parse", "refs/heads/main"))
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repo, "show-ref", "--verify", "refs/remotes/origin/main").CombinedOutput(); err == nil {
+		t.Fatalf("fixture unexpectedly has cached origin ref: %s", output)
+	}
+	if err := resetWorktree(context.Background(), mount, repoTarget{Root: repo, DefaultBranch: "main"}, "warm", false); err != nil {
+		t.Fatalf("reset without cached origin ref: %v", err)
+	}
+	if got := strings.TrimSpace(gitTest(t, mount, "rev-parse", "HEAD")); got != defaultHead {
+		t.Fatalf("reset HEAD=%s, want local default %s", got, defaultHead)
+	}
+	if branch := strings.TrimSpace(gitTest(t, mount, "branch", "--show-current")); branch != "" {
+		t.Fatalf("reset Mount remains on branch %q, want detached HEAD", branch)
+	}
+	if status := strings.TrimSpace(gitTest(t, mount, "status", "--porcelain")); status != "" {
+		t.Fatalf("reset Mount is dirty: %s", status)
+	}
+}
+
 func TestReleaseMountRemovesReadOnlyUntrackedCache(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

@@ -179,6 +179,28 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 	}
 }
 
+func cachedForgeProbeOnly(host string, cfg config.Config, mode string) (forgeProbeOutcome, bool, error) {
+	key, home, err := forgeProbeCacheKey(host, cfg)
+	if err != nil {
+		return forgeProbeOutcome{}, false, err
+	}
+	memoryKey := home + "\x00" + key
+	forgeProbeState.Lock()
+	entry := forgeProbeState.memory[memoryKey]
+	forgeProbeState.Unlock()
+	if forgeProbeCacheFresh(entry, time.Now()) && entry.Outcome.covers(mode) {
+		return entry.Outcome, true, nil
+	}
+	entry, found := readForgeProbeCache(home, key)
+	if !found || !entry.Outcome.covers(mode) {
+		return forgeProbeOutcome{}, false, nil
+	}
+	forgeProbeState.Lock()
+	forgeProbeState.memory[memoryKey] = entry
+	forgeProbeState.Unlock()
+	return entry.Outcome, true, nil
+}
+
 func missingForgeProbeMode(outcome forgeProbeOutcome, requested string) string {
 	github := requested == "auto" || requested == "github"
 	gitlab := requested == "auto" || requested == "gitlab"
