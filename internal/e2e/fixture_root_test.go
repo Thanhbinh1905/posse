@@ -31,7 +31,7 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
 	parent := os.Getenv("POSSE_E2E_TMP_ROOT")
 	if parent == "" {
-		parent = "/tmp"
+		parent = os.TempDir()
 	}
 	return newFixtureRootAt(t, parent, prefix)
 }
@@ -40,7 +40,7 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
 	configuredRoot := filepath.Clean(os.Getenv("POSSE_E2E_TMP_ROOT"))
 	customRoot := configuredRoot != "." && filepath.Clean(parent) == configuredRoot && strings.HasPrefix(configuredRoot, "/tmp/posse-") && strings.HasSuffix(configuredRoot, "-scratch")
-	if (parent != "/tmp" && parent != "/var/tmp" && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
+	if (parent != "/tmp" && parent != "/var/tmp" && parent != os.TempDir() && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
 	if customRoot {

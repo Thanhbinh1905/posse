@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -32,6 +33,8 @@ type Service struct {
 	confirm       confirmFunc
 	updateConfirm confirmFunc
 	reexecUpdate  func(string, []string, []string) error
+	maintenanceMu sync.Mutex
+	maintenance   map[string]bool
 }
 
 func New(home string, adapter herdr.Adapter) *Service {
@@ -136,6 +139,25 @@ func (s *Service) commands() *axi.Command {
 		{Name: "doctor", Summary: "Check Herdr, plugin, config, database and landing tools.", Handler: s.doctor},
 	}
 	return root
+}
+
+func (s *Service) beginMaintenance(key string) bool {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	if s.maintenance == nil {
+		s.maintenance = make(map[string]bool)
+	}
+	if s.maintenance[key] {
+		return false
+	}
+	s.maintenance[key] = true
+	return true
+}
+
+func (s *Service) endMaintenance(key string) {
+	s.maintenanceMu.Lock()
+	delete(s.maintenance, key)
+	s.maintenanceMu.Unlock()
 }
 
 func (s *Service) homePath() (string, error) {
@@ -294,16 +316,47 @@ func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Projec
 }
 
 func (s *Service) prepareProject(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
-	return s.prepareProjectMode(ctx, db, project, true)
+	return s.prepareProjectMode(ctx, db, project, true, true)
+}
+
+func (s *Service) prepareProjectForTask(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectMode(ctx, db, project, true, false)
+}
+
+// PR inspections keep their refresh behavior without attempting launch recovery.
+func (s *Service) prepareProjectInspection(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectMode(ctx, db, project, false, true)
 }
 
 // Notice and inspection commands reconcile observations, but never start a
 // Rider, retry a launch Brief, or wait for a launch-capable recovery owner.
 func (s *Service) prepareProjectObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
-	return s.prepareProjectMode(ctx, db, project, false)
+	return s.prepareProjectMode(ctx, db, project, false, false)
 }
 
-func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project store.Project, allowRecovery bool) (config.Config, error) {
+func leadAgentStarted(project store.Project, snapshot herdr.Snapshot) bool {
+	if project.LeadPaneID == "" {
+		return false
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Agent != "" && pane.AgentStatus != "" && pane.AgentStatus != "unknown" && pane.AgentStatus != "exited" && pane.AgentStatus != "stopped" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories bool) (config.Config, error) {
+	return s.prepareProjectModeWithRecoveryPolicy(ctx, db, project, allowRecovery, pollRepositories, true)
+}
+
+// prepareProjectLocalRecovery reconciles durable local state without invoking
+// forge CLIs or refreshing repositories before the Lead is running.
+func (s *Service) prepareProjectLocalRecovery(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectModeWithRecoveryPolicy(ctx, db, project, false, false, false)
+}
+
+func (s *Service) prepareProjectModeWithRecoveryPolicy(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery bool) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
 		_ = s.regenerateProjects(ctx, db)
@@ -321,6 +374,7 @@ func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project 
 		return cfg, err
 	}
 	herdrReady := false
+	allowNetworkRecovery := allowRecovery
 	if s.Herdr != nil {
 		if err := s.Herdr.CheckProtocol(ctx); err != nil {
 			if !isHerdrUnavailable(err) {
@@ -352,10 +406,11 @@ func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project 
 				}
 			} else {
 				herdrReady = true
+				allowNetworkRecovery = allowNetworkRecovery || allowRunningLeadNetworkRecovery && leadAgentStarted(project, result.Snapshot)
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 					return cfg, err
 				}
-				if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, allowRecovery); err != nil {
+				if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, allowRecovery, allowNetworkRecovery); err != nil {
 					return cfg, err
 				}
 				fresh, err := db.ProjectByID(ctx, project.ID)
@@ -372,22 +427,28 @@ func (s *Service) prepareProjectMode(ctx context.Context, db *store.DB, project 
 			}
 		}
 	}
-	if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
-		return cfg, err
+	if pollRepositories {
+		if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
+			return cfg, err
+		}
 	}
 	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
 		return cfg, err
 	}
-	if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
-		return cfg, err
-	}
-	_, _ = s.availableUpdate(ctx, db, &project)
-	if herdrReady {
-		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+	if pollRepositories {
+		if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
 			return cfg, err
 		}
-		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
-			return cfg, err
+		_, _ = s.availableUpdate(ctx, db, &project)
+	}
+	if herdrReady {
+		if pollRepositories {
+			if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+				return cfg, err
+			}
+			if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
+				return cfg, err
+			}
 		}
 		fresh, err := db.ProjectByID(ctx, project.ID)
 		if err != nil {

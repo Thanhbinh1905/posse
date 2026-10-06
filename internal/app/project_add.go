@@ -3,7 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -150,7 +150,7 @@ func (s *Service) rescanWorkspace(ctx context.Context, db *store.DB, project sto
 		if !active[repo.Name] {
 			result.Added = append(result.Added, repo.Name)
 		}
-		rows = append(rows, store.ProjectRepo{Name: repo.Name, Path: repo.Path, DefaultBranch: repo.DefaultBranch})
+		rows = append(rows, store.ProjectRepo{Name: repo.Name, Path: repo.Path, DefaultBranch: repo.DefaultBranch, OriginHost: savedOriginHost(repo.Remote)})
 	}
 	for name, isActive := range active {
 		if isActive && !seen[name] {
@@ -168,16 +168,30 @@ func (s *Service) projectRepoRows(ctx context.Context, db *store.DB, project sto
 	}
 	rows := make([]any, 0, len(repos))
 	for _, repo := range repos {
-		root := filepath.Join(project.Root, repo.Path)
-		remote := originHost(ctx, root)
+		remote := repo.OriginHost
 		shown := remote
 		if shown == "" {
+			shown = "unknown"
+		} else if shown == noOriginHost {
 			shown = "none"
+		}
+		watch, err := db.ProjectRepoWatchState(ctx, project.ID, repo.Name)
+		if err != nil {
+			return nil, err
+		}
+		checkoutStatus := watch.CheckoutStatus
+		if checkoutStatus == "" {
+			checkoutStatus = "unknown"
+		}
+		checkedAt := ""
+		if watch.CheckoutCheckedAt > 0 {
+			checkedAt = time.UnixMilli(watch.CheckoutCheckedAt).UTC().Format(time.RFC3339)
 		}
 		rows = append(rows, axi.Object{
 			{Key: "name", Value: repo.Name}, {Key: "default_branch", Value: repo.DefaultBranch},
-			{Key: "remote", Value: shown}, {Key: "landing_mode", Value: memberLandingMode(cfg, repo.Name, remote)},
-			{Key: "status", Value: repo.Status},
+			{Key: "remote", Value: shown}, {Key: "landing_mode", Value: savedMemberLandingMode(cfg, repo.Name, remote)},
+			{Key: "status", Value: repo.Status}, {Key: "checkout_status", Value: checkoutStatus},
+			{Key: "checkout_checked_at", Value: checkedAt}, {Key: "checkout_reason", Value: watch.CheckoutReason},
 		})
 	}
 	return rows, nil

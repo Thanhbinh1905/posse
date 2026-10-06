@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -198,6 +199,93 @@ func TestInterruptedUnsaddleRerunsThroughMountRelease(t *testing.T) {
 	}
 	if _, err := db.IntentByTask(ctx, taskID); !store.IsNotFound(err) {
 		t.Fatalf("unsaddle intent remains after recovery: %v", err)
+	}
+}
+
+func TestStartupUnsaddleRecoveryDoesNotFetchWhileReleasingMount(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	remote := filepath.Join(root, "remote.git")
+	gitTest(t, root, "clone", "--bare", repo, remote)
+	mountPath := filepath.Join(root, "mount")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Interrupted unsaddle", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mountPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{
+		{store.StateSpawning, store.StateWorking, "cli"},
+		{store.StateWorking, store.StateDone, "worker"},
+		{store.StateDone, store.StateLanding, "cli"},
+		{store.StateLanding, store.StateLanded, "cli"},
+	} {
+		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, mountPath, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, taskID, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.StartIntent(ctx, project.ID, taskID, "unsaddle", "done:panes.close", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "remote", "add", "origin", "https://blackhole.invalid/acme/repo.git")
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fetchLog := filepath.Join(root, "fetch.log")
+	wrapper := "#!/bin/sh\nfor arg do if [ \"$arg\" = fetch ]; then printf '%s\\n' \"$*\" >> \"$POSSE_TEST_GIT_FETCH_LOG\"; exit 86; fi; done\nexec \"$POSSE_REAL_GIT\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("POSSE_TEST_GIT_FETCH_LOG", fetchLog)
+	t.Setenv("POSSE_REAL_GIT", gitPath)
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	if err := service.reconcileIntentsMode(ctx, db, project, cfg, herdr.Snapshot{}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil || task.State != store.StateTornDown || task.MountID != 0 {
+		t.Fatalf("startup recovery Task = %#v, %v", task, err)
+	}
+	mounts, err := db.Mounts(ctx, project.ID)
+	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" || mounts[0].TaskID != 0 {
+		t.Fatalf("startup recovery Mount = %#v, %v", mounts, err)
+	}
+	if _, err := os.Stat(fetchLog); !os.IsNotExist(err) {
+		contents, _ := os.ReadFile(fetchLog)
+		t.Fatalf("startup recovery fetched origin: %q (%v)", contents, err)
+	}
+	if _, err := db.IntentByTask(ctx, taskID); !store.IsNotFound(err) {
+		t.Fatalf("unsaddle intent remains after local recovery: %v", err)
 	}
 }
 

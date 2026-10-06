@@ -83,7 +83,7 @@ jobs:
       - name: Run race-enabled tests
         run: |
           export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-test-"
-          go test -race -count=1 ./...
+          go test -race -count=1 -timeout=15m ./...
       - name: Clean test temporary roots
         if: ${{ always() }}
         run: |

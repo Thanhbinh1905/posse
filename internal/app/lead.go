@@ -322,7 +322,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 		if err := s.reconcileTaskPanes(ctx.Context, db, project, snapshot); err != nil {
 			return err
 		}
-		if err := s.reconcileIntents(ctx.Context, db, project, cfg, snapshot); err != nil {
+		if err := s.reconcileIntentsMode(ctx.Context, db, project, cfg, snapshot, true, false); err != nil {
 			return err
 		}
 		project, err = db.ProjectByID(ctx.Context, project.ID)
@@ -343,15 +343,6 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return herdrError(err)
 		}
-	}
-	if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, false); err != nil {
-		return err
-	}
-	if _, err := s.syncProjectRoot(ctx.Context, db, project, cfg, false); err != nil {
-		return err
-	}
-	if err := s.autoTeardownLandedTasks(ctx.Context, db, project, cfg); err != nil {
-		return err
 	}
 	callerPaneID := os.Getenv("HERDR_PANE_ID")
 	callerWorkspaceID := os.Getenv("HERDR_WORKSPACE_ID")

@@ -273,6 +273,12 @@ func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, 
 				lastFailure = err.Error()
 			}
 		}
+		if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
+			if lastFailure != err.Error() {
+				_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout watch failed: " + truncate(err.Error(), 240), DataJSON: `{}`})
+				lastFailure = err.Error()
+			}
+		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return nil
 		}

@@ -75,6 +75,14 @@ type LeadStartClaim struct {
 	ClaimedAt int64
 }
 
+type MemberPrPollState struct {
+	ProjectID  int64
+	Repo       string
+	PrPolledAt int64
+	ClaimUntil int64
+	ClaimToken string
+}
+
 type Message struct {
 	ID          int64
 	TaskID      int64
@@ -158,6 +166,7 @@ type ProjectRepo struct {
 	Status        string
 	CreatedAt     int64
 	UpdatedAt     int64
+	OriginHost    string
 }
 
 type ProjectRuntime struct {
@@ -183,9 +192,12 @@ type ProjectWatchState struct {
 }
 
 type RepoWatchState struct {
-	ProjectID      int64
-	Repo           string
-	RootBehindHead string
+	ProjectID         int64
+	Repo              string
+	RootBehindHead    string
+	CheckoutCheckedAt int64
+	CheckoutStatus    string
+	CheckoutReason    string
 }
 
 type Signal struct {

@@ -252,11 +252,32 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 	return store.Mount{}, fmt.Errorf("no clean Mount could be acquired")
 }
 
+var errMountDefaultRefUnavailable = errors.New("no safe local default ref is available to reset the Mount")
+
 func mountDefaultRef(ctx context.Context, target repoTarget) (string, bool) {
 	if _, err := gitOutput(ctx, target.Root, "remote", "get-url", "origin"); err == nil {
 		return "refs/remotes/origin/" + target.DefaultBranch, true
 	}
 	return "refs/heads/" + target.DefaultBranch, false
+}
+
+func mountResetRef(ctx context.Context, target repoTarget, fetch bool) (string, bool, error) {
+	remoteRef := "refs/remotes/origin/" + target.DefaultBranch
+	localRef := "refs/heads/" + target.DefaultBranch
+	_, remoteErr := gitOutput(ctx, target.Root, "remote", "get-url", "origin")
+	remote := remoteErr == nil
+	if remote && fetch {
+		return remoteRef, true, nil
+	}
+	if remote {
+		if _, err := gitOutput(ctx, target.Root, "rev-parse", "--verify", "--quiet", remoteRef+"^{commit}"); err == nil {
+			return remoteRef, false, nil
+		}
+	}
+	if _, err := gitOutput(ctx, target.Root, "rev-parse", "--verify", "--quiet", localRef+"^{commit}"); err == nil {
+		return localRef, remote, nil
+	}
+	return "", remote, fmt.Errorf("%w: checked %s and %s", errMountDefaultRefUnavailable, remoteRef, localRef)
 }
 
 func projectRepoTarget(project store.Project) repoTarget {
@@ -267,11 +288,14 @@ func resetMount(ctx context.Context, path string, project store.Project, clean s
 	return resetWorktree(ctx, path, projectRepoTarget(project), clean, true)
 }
 
-// resetWorktree detaches a Mount worktree at the repository's fresh default
-// branch and cleans it. fetch is false for workspace members a Task does not
-// request, which are reset to what the last fetch saw.
+// resetWorktree detaches a Mount worktree at the repository's default branch
+// and cleans it. Teardown and unrequested workspace Members use the last fetched
+// ref; acquisition fetches before new work starts.
 func resetWorktree(ctx context.Context, path string, target repoTarget, clean string, fetch bool) error {
-	ref, remote := mountDefaultRef(ctx, target)
+	ref, remote, err := mountResetRef(ctx, target, fetch)
+	if err != nil {
+		return err
+	}
 	if remote && fetch {
 		if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
 			return err
@@ -505,9 +529,16 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 	if project.IsWorkspace() {
 		resetErr = releaseWorkspaceMount(ctx, db, project, mount, clean)
 	} else {
-		resetErr = resetMount(ctx, mount.Path, project, clean)
+		// Teardown is local and must not wait on origin. The next Mount
+		// acquisition fetches before starting new work.
+		resetErr = resetWorktree(ctx, mount.Path, projectRepoTarget(project), clean, false)
 	}
 	if err := resetErr; err != nil {
+		if errors.Is(err, errMountDefaultRefUnavailable) {
+			// Keep the Task's Mount held and retryable until a safe default ref
+			// can be fetched; never quarantine it as broken during local recovery.
+			return killed, err
+		}
 		if breakErr := breakMount(ctx, db, project, task, mount, "Mount could not be reset during release"); breakErr != nil {
 			return killed, errors.Join(err, breakErr)
 		}
