@@ -2,6 +2,21 @@
 INSERT INTO approvals(task_id, action, user_quote, at)
 VALUES (?, ?, ?, ?);
 
+-- name: PRBodyMarkerByTaskRepo :one
+SELECT pr_url, marker_token FROM pr_body_markers WHERE task_id = ? AND repo = ?;
+
+-- name: UpsertPRBodyMarker :exec
+INSERT INTO pr_body_markers(task_id, repo, pr_url, marker_token, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(task_id, repo) DO UPDATE SET
+    pr_url = excluded.pr_url,
+    marker_token = excluded.marker_token,
+    updated_at = excluded.updated_at;
+
+-- name: BindPRBodyMarker :execresult
+UPDATE pr_body_markers SET pr_url = ?, updated_at = ?
+WHERE task_id = ? AND repo = ? AND marker_token = ? AND (pr_url = '' OR pr_url = ?);
+
 -- name: CountApproval :one
 SELECT COUNT(*) FROM approvals WHERE task_id = ? AND action = ?;
 

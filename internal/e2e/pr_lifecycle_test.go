@@ -87,7 +87,7 @@ func TestPublishRefreshesReusedPRMetadata(t *testing.T) {
 	}
 	first := []string{"First summary", "--verify", "go test ./... -> pass", "--proof", "first proof", "--risk", "Risk: first\nRollback: first rollback"}
 	publish(workerEnv, first...)
-	legacyBody := strings.ReplaceAll(strings.ReplaceAll(readTestFile(t, fixture.ghBody), "<!-- posse:publish:start -->\n", ""), "<!-- posse:publish:end -->", "")
+	legacyBody := stripManagedPublishedMarkers(readTestFile(t, fixture.ghBody))
 	if err := os.WriteFile(fixture.ghBody, []byte("Maintainer note before.\n\n"+legacyBody+"\n\n## Maintainer notes\n\nKeep this paragraph.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +153,7 @@ func TestPublishRefreshesReusedPRMetadata(t *testing.T) {
 	if err := fixture.db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	t205PRBodyMarkerCases(t)
 }
 
 func readTestFile(t *testing.T, path string) string {
@@ -165,14 +166,42 @@ func readTestFile(t *testing.T, path string) string {
 }
 
 func managedPublishedSection(body string) string {
-	const startMarker = "<!-- posse:publish:start -->"
-	const endMarker = "<!-- posse:publish:end -->"
-	start := strings.Index(body, startMarker)
-	end := strings.Index(body, endMarker)
-	if start < 0 || end < start {
+	const startPrefix = "<!-- posse:publish:start:"
+	start := strings.Index(body, startPrefix)
+	if start < 0 {
 		return ""
 	}
+	lineEnd := strings.IndexByte(body[start:], '\n')
+	if lineEnd < 0 {
+		return ""
+	}
+	marker := strings.TrimSuffix(body[start:start+lineEnd], "\r")
+	token := strings.TrimSuffix(strings.TrimPrefix(marker, startPrefix), " -->")
+	if token == "" {
+		return ""
+	}
+	endMarker := "<!-- posse:publish:end:" + token + " -->"
+	end := strings.Index(body[start+lineEnd:], endMarker)
+	if end < 0 {
+		return ""
+	}
+	end += start + lineEnd
 	return body[start : end+len(endMarker)]
+}
+
+func stripManagedPublishedMarkers(body string) string {
+	section := managedPublishedSection(body)
+	if section == "" {
+		return body
+	}
+	lineEnd := strings.IndexByte(section, '\n')
+	marker := strings.TrimSuffix(section[:lineEnd], "\r")
+	const startPrefix = "<!-- posse:publish:start:"
+	const endPrefix = "<!-- posse:publish:end:"
+	token := strings.TrimSuffix(strings.TrimPrefix(marker, startPrefix), " -->")
+	startMarker, endMarker := marker, endPrefix+token+" -->"
+	body = strings.Replace(body, startMarker+"\n", "", 1)
+	return strings.Replace(body, endMarker, "", 1)
 }
 
 func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {

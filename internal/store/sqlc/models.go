@@ -117,6 +117,14 @@ type NoticeNotification struct {
 	NotifiedAt int64
 }
 
+type PrBodyMarker struct {
+	TaskID      int64
+	Repo        string
+	PrUrl       string
+	MarkerToken string
+	UpdatedAt   int64
+}
+
 type PrObservation struct {
 	ID          int64
 	ProjectID   int64

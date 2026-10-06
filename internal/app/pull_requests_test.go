@@ -81,8 +81,9 @@ func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
 		"## Proof\n\n" + proof + "\n\n" +
 		"## Risk And Rollback\n\n" + risk + "\n\n" +
 		"## Documentation\n\n- [ ] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
-	if !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody)) {
-		t.Fatalf("PR body did not match the marked seven-section template: %q", log)
+	token := managedPublishTokenFromLog(string(log))
+	if token == "" || !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody, token)) {
+		t.Fatalf("PR body did not match the tokenized seven-section template: %q", log)
 	}
 }
 
@@ -102,8 +103,9 @@ func TestPublishWithoutOptionalBodyFieldsWritesDefaults(t *testing.T) {
 		"## Proof\n\n_No proof supplied._\n\n" +
 		"## Risk And Rollback\n\nRisk: not stated\nRollback: revert this PR\n\n" +
 		"## Documentation\n\n- [ ] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
-	if !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody)) {
-		t.Fatalf("PR body did not include the optional-field defaults: %q", log)
+	token := managedPublishTokenFromLog(string(log))
+	if token == "" || !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody, token)) {
+		t.Fatalf("PR body did not include the tokenized optional-field defaults: %q", log)
 	}
 }
 
@@ -142,7 +144,7 @@ func TestPublishAddsIssueLinksWhenReusingAnExistingPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("POSSE_TEST_GH_BODY", "Maintainer intro\n\n"+managedPublishBody(currentBody)+"\n\nMaintainer footer")
+	t.Setenv("POSSE_TEST_GH_BODY", "Maintainer intro\n\n"+managedPublishBody(currentBody, testPublishToken)+"\n\nMaintainer footer")
 	openPR := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, fixture.headSHA)
 	if err := os.WriteFile(fixture.ghOpenPRs, []byte(openPR), 0o600); err != nil {
 		t.Fatal(err)

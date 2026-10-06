@@ -335,11 +335,15 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if foundOpenPR {
 		return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
 	}
+	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, "")
+	if err != nil {
+		return "", false, err
+	}
 	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
 	if err != nil {
 		return "", false, err
 	}
-	created, err := runOutputStep(ctx, db, intent, "pr.create", project.Root, "gh", "pr", "create", "--base", project.DefaultBranch, "--head", task.Branch, "--title", title, "--body", managedPublishBody(body))
+	created, err := runOutputStep(ctx, db, intent, "pr.create", project.Root, "gh", "pr", "create", "--base", project.DefaultBranch, "--head", task.Branch, "--title", title, "--body", managedPublishBody(body, token))
 	if err != nil {
 		return "", false, axi.Failure("pr_create_failed", "could not open the pull request", true, truncate(err.Error(), 1200))
 	}
@@ -350,10 +354,17 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if err := validatePullRequestOrigin(ctx, project.Root, urlValue); err != nil {
 		return "", false, err
 	}
+	if err := db.BindPRBodyMarker(ctx, task.ID, member, urlValue, token); err != nil {
+		return "", false, err
+	}
 	return urlValue, true, nil
 }
 
 func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, intent store.Intent, project store.Project, task store.Task, forge repositoryForge, prURL, member, summary, verification, proof, risk string, refreshLegacy bool) error {
+	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, prURL)
+	if err != nil {
+		return err
+	}
 	title, nextBody, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
 	if err != nil {
 		return err
@@ -388,7 +399,7 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 		}
 		existingTitle, existingBody = pull.Title, pull.Body
 	}
-	nextBody, err = refreshPublishBody(existingBody, nextBody, refreshLegacy)
+	nextBody, err = refreshPublishBody(existingBody, nextBody, token, refreshLegacy)
 	if err != nil {
 		return err
 	}

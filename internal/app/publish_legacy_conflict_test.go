@@ -35,7 +35,12 @@ func TestT199LegacyHumanEditIsPreservedOnRefresh(t *testing.T) {
 			if !strings.HasPrefix(updated, legacyBody) || !strings.Contains(updated, "Human release note: deployment needs approval.") {
 				t.Fatalf("refresh did not preserve the entire legacy description: %s", updated)
 			}
-			if !strings.Contains(updated, publishBodyStart+"\n## Summary\n\nSecond summary") || !strings.HasSuffix(updated, publishBodyEnd) {
+			marker, err := fixture.db.GetPRBodyMarker(context.Background(), fixture.task.ID, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			managed, ok := managedPublishSection(updated, marker.Token)
+			if !ok || !strings.Contains(managed, "## Summary\n\nSecond summary") {
 				t.Fatalf("refresh did not append the current managed block: %s", updated)
 			}
 			task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")

@@ -191,8 +191,8 @@ func TestGitLabRepublishRefreshesCurrentMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(firstBody), "<!-- posse:publish:start -->") {
-		t.Fatalf("first GitLab publish did not write the ownership markers: %s", firstBody)
+	if !strings.Contains(string(firstBody), publishBodyStartPrefix) {
+		t.Fatalf("first GitLab publish did not write tokenized ownership markers: %s", firstBody)
 	}
 	state, err := os.ReadFile(f.ghState)
 	if err != nil {
@@ -308,8 +308,9 @@ func TestGitLabMRDescriptionMatchesGitHubPRBody(t *testing.T) {
 		t.Fatalf("publish: %d %s %s", code, output, stderr)
 	}
 	written, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_DESCRIPTION"))
-	if err != nil || string(written) != managedPublishBody(body) {
-		t.Fatalf("MR body differs from GitHub PR body: %q want %q: %v", written, managedPublishBody(body), err)
+	marker, markerErr := f.db.GetPRBodyMarker(context.Background(), f.task.ID, "")
+	if err != nil || markerErr != nil || string(written) != managedPublishBody(body, marker.Token) {
+		t.Fatalf("MR body differs from GitHub PR body: %q want tokenized body: %v %v", written, err, markerErr)
 	}
 	log, err := os.ReadFile(f.ghLog)
 	if err != nil || !strings.Contains(string(log), "--title "+title) {

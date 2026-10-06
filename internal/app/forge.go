@@ -212,16 +212,23 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 		}
 		return mr.WebURL, false, nil
 	}
+	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, "")
+	if err != nil {
+		return "", false, err
+	}
 	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
 	if err != nil {
 		return "", false, err
 	}
-	created, err := runOutputStep(ctx, db, intent, "pr.create", forge.Root, "glab", "mr", "create", "--repo", "https://"+forge.Host+"/"+forge.Path, "--source-branch", task.Branch, "--target-branch", project.DefaultBranch, "--title", title, "--description", managedPublishBody(body), "--yes")
+	created, err := runOutputStep(ctx, db, intent, "pr.create", forge.Root, "glab", "mr", "create", "--repo", "https://"+forge.Host+"/"+forge.Path, "--source-branch", task.Branch, "--target-branch", project.DefaultBranch, "--title", title, "--description", managedPublishBody(body, token), "--yes")
 	if err != nil {
 		return "", false, axi.Failure("pr_create_failed", "could not create GitLab merge request", true, err.Error())
 	}
 	for _, line := range strings.Fields(created) {
 		if _, err := forgeReference(line, forge); err == nil {
+			if err := db.BindPRBodyMarker(ctx, task.ID, member, line, token); err != nil {
+				return "", false, err
+			}
 			return line, true, nil
 		}
 	}

@@ -7,8 +7,10 @@ import (
 )
 
 const (
-	publishBodyStart = "<!-- posse:publish:start -->"
-	publishBodyEnd   = "<!-- posse:publish:end -->"
+	legacyPublishBodyStart = "<!-- posse:publish:start -->"
+	legacyPublishBodyEnd   = "<!-- posse:publish:end -->"
+	publishBodyStartPrefix = "<!-- posse:publish:start:"
+	publishBodyEndPrefix   = "<!-- posse:publish:end:"
 )
 
 var publishBodySections = []string{
@@ -21,39 +23,91 @@ var publishBodySections = []string{
 	"## Documentation",
 }
 
-func managedPublishBody(body string) string {
-	return publishBodyStart + "\n" + strings.TrimRight(body, "\n") + "\n" + publishBodyEnd
+func publishBodyMarker(edge, token string) string {
+	prefix := publishBodyStartPrefix
+	if edge == "end" {
+		prefix = publishBodyEndPrefix
+	}
+	return prefix + token + " -->"
 }
 
-// refreshPublishBody replaces only the region Posse owns. Legacy templates have
-// no ownership markers, so adopting one requires the Rider's explicit --refresh.
-func refreshPublishBody(existing, next string, refreshLegacy bool) (string, error) {
-	starts, ends := strings.Count(existing, publishBodyStart), strings.Count(existing, publishBodyEnd)
-	if starts == 1 && ends == 1 {
-		start := strings.Index(existing, publishBodyStart)
-		end := strings.Index(existing, publishBodyEnd)
-		if end > start && markerIsWholeLine(existing, start, publishBodyStart) && markerIsWholeLine(existing, end, publishBodyEnd) {
-			return existing[:start] + managedPublishBody(next) + existing[end+len(publishBodyEnd):], nil
-		}
+func managedPublishBody(body, token string) string {
+	return publishBodyMarker("start", token) + "\n" + strings.TrimRight(body, "\n") + "\n" + publishBodyMarker("end", token)
+}
+
+// refreshPublishBody replaces only the span paired with this PR's stored token.
+// Unrecognized marker-like text is never ownership evidence; legacy bodies are
+// adopted only by appending a new tokenized section.
+func refreshPublishBody(existing, next, token string, refreshLegacy bool) (string, error) {
+	if token == "" {
+		return "", legacyPublishConflict("pull request has no stored Posse ownership token")
 	}
+	startMarker, endMarker := publishBodyMarker("start", token), publishBodyMarker("end", token)
+	starts, ends := strings.Count(existing, startMarker), strings.Count(existing, endMarker)
 	if starts != 0 || ends != 0 {
-		return "", legacyPublishConflict("description contains incomplete Posse ownership markers")
+		if starts == 1 && ends == 1 {
+			start, end := strings.Index(existing, startMarker), strings.Index(existing, endMarker)
+			if end > start && markerIsWholeLine(existing, start, startMarker) && markerIsWholeLine(existing, end, endMarker) {
+				return existing[:start] + managedPublishBody(next, token) + existing[end+len(endMarker):], nil
+			}
+		}
+		return "", legacyPublishConflict("stored ownership token has incomplete or duplicate markers")
 	}
 	if existing == "" {
-		return managedPublishBody(next), nil
+		return managedPublishBody(next, token), nil
+	}
+	if hasUnownedTokenizedPublishMarkerPair(existing) {
+		return existing + "\n\n" + managedPublishBody(next, token), nil
 	}
 	if hasLegacyPublishSections(existing) {
 		if !refreshLegacy {
 			return "", legacyPublishConflict("description uses the unmarked Posse template")
 		}
-		return existing + "\n\n" + managedPublishBody(next), nil
+		return existing + "\n\n" + managedPublishBody(next, token), nil
 	}
 	return "", legacyPublishConflict("description has no Posse ownership markers and is not a recognized legacy template")
 }
 
 func markerIsWholeLine(value string, start int, marker string) bool {
 	end := start + len(marker)
-	return (start == 0 || value[start-1] == '\n') && (end == len(value) || value[end] == '\n')
+	lineStart := start == 0 || value[start-1] == '\n'
+	lineEnd := end == len(value) || value[end] == '\n' || (value[end] == '\r' && end+1 < len(value) && value[end+1] == '\n')
+	return lineStart && lineEnd
+}
+
+func hasUnownedTokenizedPublishMarkerPair(body string) bool {
+	starts := make(map[string]int)
+	for index, line := range strings.Split(body, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if token, ok := publishBodyMarkerToken(line, "start"); ok && token != "legacy" {
+			starts[token] = index
+			continue
+		}
+		if token, ok := publishBodyMarkerToken(line, "end"); ok && token != "legacy" {
+			if start, found := starts[token]; found && start < index {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func publishBodyMarkerToken(line, edge string) (string, bool) {
+	if edge == "start" && line == legacyPublishBodyStart || edge == "end" && line == legacyPublishBodyEnd {
+		return "legacy", true
+	}
+	prefix := publishBodyStartPrefix
+	if edge == "end" {
+		prefix = publishBodyEndPrefix
+	}
+	if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, " -->") {
+		return "", false
+	}
+	token := strings.TrimSuffix(strings.TrimPrefix(line, prefix), " -->")
+	if token == "" || strings.ContainsAny(token, " <>\r\n") {
+		return "", false
+	}
+	return token, true
 }
 
 func hasLegacyPublishSections(body string) bool {

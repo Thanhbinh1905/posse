@@ -70,10 +70,14 @@ func TestT203LegacyHumanSectionsAppendWithoutDataLoss(t *testing.T) {
 					if !strings.HasPrefix(refreshed, body) {
 						t.Fatalf("legacy body was not preserved byte-for-byte: got %s, want prefix %s", refreshed, body)
 					}
-					if strings.Count(refreshed, publishBodyStart) != 1 || strings.Count(refreshed, publishBodyEnd) != 1 || !strings.HasSuffix(refreshed, publishBodyEnd) {
+					marker, err := fixture.db.GetPRBodyMarker(context.Background(), fixture.task.ID, "")
+					if err != nil {
+						t.Fatal(err)
+					}
+					managed, ok := managedPublishSection(refreshed, marker.Token)
+					if !ok || strings.Count(refreshed, publishBodyMarker("start", marker.Token)) != 1 || strings.Count(refreshed, publishBodyMarker("end", marker.Token)) != 1 {
 						t.Fatalf("refresh did not append exactly one managed block: %s", refreshed)
 					}
-					managed := refreshed[strings.Index(refreshed, publishBodyStart):]
 					for _, expected := range []string{"Second summary", "second tests -> pass", "second proof", "Risk: second", "Rollback: second"} {
 						if !strings.Contains(managed, expected) {
 							t.Errorf("managed body omitted %q: %s", expected, managed)
