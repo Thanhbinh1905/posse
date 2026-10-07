@@ -296,7 +296,8 @@ func codexDeveloperInstructionOverride(value string) (string, bool, error) {
 	}
 	var decoded map[string]any
 	if _, err := toml.Decode("value = "+strings.TrimSpace(raw), &decoded); err != nil {
-		return "", true, fmt.Errorf("decode Codex developer_instructions override: %w", err)
+		// Codex treats values that are not valid TOML as raw strings.
+		return strings.TrimSpace(raw), true, nil
 	}
 	instructions, ok := decoded["value"].(string)
 	if !ok {

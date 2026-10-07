@@ -617,7 +617,7 @@ func TestCodexRiderSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
 		setupFollowupAgentPath(t, "pi", "codex")
 		codexHome := filepath.Join(f.root, "codex-home")
 		writeCodexInstructionsFixture(t, codexHome, globalRule)
-		writeCodexRiderProfileFixture(t, f.home, "worker", profileRule, true)
+		writeCodexRiderProfileFixture(t, f.home, "worker", profileRule, true, false)
 		t.Setenv("CODEX_HOME", codexHome)
 		f.fake.BeforeCall = func(method string) {
 			if method == "agent.start" {
@@ -635,7 +635,7 @@ func TestCodexRiderSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
 		f := newRelaunchFixture(t, store.StateLost)
 		codexHome := filepath.Join(filepath.Dir(f.home), "codex-home")
 		writeCodexInstructionsFixture(t, codexHome, globalRule)
-		writeCodexRiderProfileFixture(t, f.home, "deep", profileRule, false)
+		writeCodexRiderProfileFixture(t, f.home, "deep", profileRule, false, false)
 		t.Setenv("CODEX_HOME", codexHome)
 		cfg, err := config.Load(f.home, f.project.Name)
 		if err != nil {
@@ -662,9 +662,13 @@ func writeCodexInstructionsFixture(t *testing.T, codexHome, instructions string)
 	}
 }
 
-func writeCodexRiderProfileFixture(t *testing.T, home, name, instructions string, dispatchDefault bool) {
+func writeCodexRiderProfileFixture(t *testing.T, home, name, instructions string, dispatchDefault, raw bool) {
 	t.Helper()
-	profileArgs, err := json.Marshal([]string{"-c", "developer_instructions=" + mustJSONString(t, instructions)})
+	encodedInstructions := mustJSONString(t, instructions)
+	if raw {
+		encodedInstructions = instructions
+	}
+	profileArgs, err := json.Marshal([]string{"-c", "developer_instructions=" + encodedInstructions})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,6 +734,52 @@ func assertCodexRiderDeveloperInstructions(t *testing.T, args []string, globalRu
 			t.Fatalf("Codex developer_instructions omitted %q: %s", required, developerInstructions[0])
 		}
 	}
+}
+
+func TestCodexRiderSkillInjectionPreservesRawDeveloperInstructions(t *testing.T) {
+	const (
+		globalRule  = "Fixture safety rule: never delete user data without explicit consent."
+		profileRule = "Profile safety rule: preserve existing User changes."
+	)
+
+	t.Run("spawn", func(t *testing.T) {
+		f := newFirstOutcomeFixture(t)
+		setupFollowupAgentPath(t, "pi", "codex")
+		codexHome := filepath.Join(f.root, "codex-home")
+		writeCodexInstructionsFixture(t, codexHome, globalRule)
+		writeCodexRiderProfileFixture(t, f.home, "worker", profileRule, true, true)
+		t.Setenv("CODEX_HOME", codexHome)
+		f.fake.BeforeCall = func(method string) {
+			if method == "agent.start" {
+				f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "codex", AgentStatus: "working"})
+			}
+		}
+		t.Setenv("HERDR_ENV", "1")
+		t.Setenv("HERDR_PANE_ID", "w1:p1")
+		t.Setenv("HERDR_WORKSPACE_ID", "w1")
+		outcomeCLI(t, f.service, 0, "ride", "--brief", f.brief, "--name", "first-outcome")
+		assertCodexRiderDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
+	})
+
+	t.Run("relaunch", func(t *testing.T) {
+		f := newRelaunchFixture(t, store.StateLost)
+		codexHome := filepath.Join(filepath.Dir(f.home), "codex-home")
+		writeCodexInstructionsFixture(t, codexHome, globalRule)
+		writeCodexRiderProfileFixture(t, f.home, "deep", profileRule, false, true)
+		t.Setenv("CODEX_HOME", codexHome)
+		cfg, err := config.Load(f.home, f.project.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.service.relaunchTask(context.Background(), f.db, f.home, f.project, cfg, task, ""); err != nil {
+			t.Fatalf("relaunch Codex Rider with raw developer instructions: %v", err)
+		}
+		assertCodexRiderDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
+	})
 }
 
 func TestRelaunchRecoversNeedsDecisionAndBlockedWorkers(t *testing.T) {
