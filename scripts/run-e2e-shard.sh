@@ -26,6 +26,7 @@ assignments='
 1 TestUpStartsLeadAndSettlesRelaunchIntentWhileRecoveryWaitsForBackoff
 1 TestFailedGroupAttemptRetriesAfterLeadStarts
 1 TestSetupWithoutHerdrServer
+1 TestT229RebuildPreservesStoppedProject
 2 TestLegacyRiderTabsAfterWorktreeUpgrade
 2 TestGroupCloseDuringTeardownRestoresSurvivingRider
 2 TestLeadHarnessAndRepositoryRiderSidebar
@@ -45,6 +46,8 @@ assignments='
 2 TestRecoveryRetriesMissingRiderMarkedRecoveredInSameGroupEpisode
 2 TestAutomaticRecoveryPreservesLateFailedSignal
 2 TestFailedLandIntentDoesNotPoisonNextCLICommand
+2 TestT229RecreatedDatabaseProjectIDCollision
+2 TestT229LegacyWorkspaceRebuild
 3 TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup
 3 TestWorkspaceScoutTeardownPreservesMemberAndRootAttachments
 3 TestMergedPRSnapshotsUnmergedFollowUp
@@ -92,6 +95,7 @@ assignments='
 4 TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault
 4 TestRideCrashImmediatelyAfterTaskCreationIsRecovered
 4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall
+4 TestT229SignalSnapshotFailure
 '
 
 validate_assignments() {

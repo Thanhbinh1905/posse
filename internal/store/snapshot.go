@@ -90,6 +90,24 @@ type noticeSnapshot struct {
 	AckedAt     int64  `toml:"acked_at"`
 }
 
+func sameProjectIdentity(a, b Project) bool {
+	return a.Name == b.Name && filepath.Clean(a.Root) == filepath.Clean(b.Root)
+}
+
+func projectIdentityKey(project Project) string {
+	return project.Name + "\x00" + filepath.Clean(project.Root)
+}
+
+func projectIdentityConflict(a, b Project) error {
+	return fmt.Errorf("Project identity conflict: ID %d is recorded as %q at %q and %q at %q",
+		a.ID, a.Name, a.Root, b.Name, b.Root)
+}
+
+func databaseProjectIdentityConflict(snapshot, current Project) error {
+	return fmt.Errorf("Project identity conflict: snapshot Project %q at %q (ID %d) conflicts with current database Project %q at %q (ID %d)",
+		snapshot.Name, snapshot.Root, snapshot.ID, current.Name, current.Root, current.ID)
+}
+
 func IsCorruptDatabaseFile(path string) bool {
 	databaseURL := (&url.URL{Scheme: "file", Path: path}).String()
 	database, err := sql.Open("sqlite", databaseURL+"?mode=ro&_pragma=busy_timeout(100)")
@@ -364,6 +382,10 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 	members := map[int64][]ProjectRepo{}
 	projectStates := map[int64]projectStateSnapshot{}
 	projectSnapshotAt := map[int64]int64{}
+	projectIDsByIdentity := map[string]int64{}
+	// Legacy Workspaces without project.toml recover Members from their newest Task snapshot.
+	memberSnapshotAt := map[int64]int64{}
+	memberSnapshotSeq := map[int64]int{}
 	for _, path := range projectPaths {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -379,6 +401,14 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		if filepath.Clean(path) != filepath.Clean(db.ProjectSnapshotPath(snapshot.Project.Name)) {
 			return 0, fmt.Errorf("Project snapshot path does not match its identity: %s", path)
 		}
+		identity := projectIdentityKey(snapshot.Project)
+		if existing, ok := projects[snapshot.Project.ID]; ok && !sameProjectIdentity(existing, snapshot.Project) {
+			return 0, projectIdentityConflict(existing, snapshot.Project)
+		}
+		if existingID, ok := projectIDsByIdentity[identity]; ok && existingID != snapshot.Project.ID {
+			return 0, fmt.Errorf("Project identity conflict: snapshot Project %q at %q has IDs %d and %d", snapshot.Project.Name, snapshot.Project.Root, existingID, snapshot.Project.ID)
+		}
+		projectIDsByIdentity[identity] = snapshot.Project.ID
 		if snapshot.State.CapturedAt > projectSnapshotAt[snapshot.Project.ID] {
 			projects[snapshot.Project.ID] = snapshot.Project
 			members[snapshot.Project.ID] = snapshot.Members
@@ -401,11 +431,23 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		if filepath.Clean(path) != filepath.Clean(db.TaskSnapshotPath(snapshot.Project.Name, snapshot.Task.Seq)) {
 			return 0, fmt.Errorf("Task snapshot path does not match its identity: %s", path)
 		}
+		identity := projectIdentityKey(snapshot.Project)
+		if existing, ok := projects[snapshot.Project.ID]; ok && !sameProjectIdentity(existing, snapshot.Project) {
+			return 0, projectIdentityConflict(existing, snapshot.Project)
+		}
+		if existingID, ok := projectIDsByIdentity[identity]; ok && existingID != snapshot.Project.ID {
+			return 0, fmt.Errorf("Project identity conflict: snapshot Project %q at %q has IDs %d and %d", snapshot.Project.Name, snapshot.Project.Root, existingID, snapshot.Project.ID)
+		}
+		projectIDsByIdentity[identity] = snapshot.Project.ID
 		if projectSnapshotAt[snapshot.Project.ID] == 0 {
 			projects[snapshot.Project.ID] = snapshot.Project
 		}
-		if len(members[snapshot.Project.ID]) == 0 && len(snapshot.Members) > 0 && snapshot.Task.UpdatedAt >= latestUpdate(snapshots, snapshot.Project.ID) {
+		if projectSnapshotAt[snapshot.Project.ID] == 0 && len(snapshot.Members) > 0 &&
+			(snapshot.Task.UpdatedAt > memberSnapshotAt[snapshot.Project.ID] ||
+				snapshot.Task.UpdatedAt == memberSnapshotAt[snapshot.Project.ID] && snapshot.Task.Seq > memberSnapshotSeq[snapshot.Project.ID]) {
 			members[snapshot.Project.ID] = snapshot.Members
+			memberSnapshotAt[snapshot.Project.ID] = snapshot.Task.UpdatedAt
+			memberSnapshotSeq[snapshot.Project.ID] = snapshot.Task.Seq
 		}
 		snapshots = append(snapshots, snapshot)
 	}
@@ -417,29 +459,54 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 			maxID = snapshot.Task.ID
 		}
 	}
-	for projectID := range projects {
-		var exists bool
-		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM projects WHERE id=?)`, projectID).Scan(&exists); err != nil {
+	// A freshly initialized DB may have reused a snapshot ID for another Project.
+	currentRows, err := db.QueryContext(ctx, `SELECT id,name,root FROM projects`)
+	if err != nil {
+		return 0, err
+	}
+	var currentProjects []Project
+	for currentRows.Next() {
+		var project Project
+		if err := currentRows.Scan(&project.ID, &project.Name, &project.Root); err != nil {
+			_ = currentRows.Close()
 			return 0, err
 		}
-		if exists {
-			project, err := db.ProjectByID(ctx, projectID)
-			if err != nil {
-				return 0, err
-			}
-			projects[projectID] = project
-			if project.IsWorkspace() && projectSnapshotAt[projectID] == 0 && len(members[projectID]) == 0 {
-				members[projectID], err = db.ProjectRepos(ctx, projectID)
-				if err != nil {
-					return 0, err
-				}
-			}
-			state, err := db.projectStateSnapshot(ctx, projectID)
-			if err != nil {
-				return 0, err
-			}
-			projectStates[projectID] = state
+		currentProjects = append(currentProjects, project)
+	}
+	if err := currentRows.Err(); err != nil {
+		_ = currentRows.Close()
+		return 0, err
+	}
+	if err := currentRows.Close(); err != nil {
+		return 0, err
+	}
+	for _, current := range currentProjects {
+		snapshot, exists := projects[current.ID]
+		if exists && !sameProjectIdentity(snapshot, current) {
+			return 0, databaseProjectIdentityConflict(snapshot, current)
 		}
+		if snapshotID, found := projectIDsByIdentity[projectIdentityKey(current)]; found && snapshotID != current.ID {
+			return 0, fmt.Errorf("Project identity conflict: snapshot Project %q at %q has ID %d, but the current database has ID %d", current.Name, current.Root, snapshotID, current.ID)
+		}
+		if !exists {
+			continue
+		}
+		project, err := db.ProjectByID(ctx, current.ID)
+		if err != nil {
+			return 0, err
+		}
+		projects[current.ID] = project
+		if project.IsWorkspace() && projectSnapshotAt[current.ID] == 0 && len(members[current.ID]) == 0 {
+			members[current.ID], err = db.ProjectRepos(ctx, current.ID)
+			if err != nil {
+				return 0, err
+			}
+		}
+		state, err := db.projectStateSnapshot(ctx, current.ID)
+		if err != nil {
+			return 0, err
+		}
+		projectStates[current.ID] = state
 	}
 	for _, project := range projects {
 		recovered, err := recoverBranchSnapshots(ctx, project, known, maxID)
@@ -523,18 +590,6 @@ func recoverBranchSnapshots(ctx context.Context, project Project, known map[stri
 	return recovered, nil
 }
 
-// latestUpdate is the newest Task update among the snapshots already read for a
-// Project, so the newest snapshot's member list wins.
-func latestUpdate(snapshots []TaskSnapshot, projectID int64) int64 {
-	latest := int64(0)
-	for _, snapshot := range snapshots {
-		if snapshot.Project.ID == projectID && len(snapshot.Members) > 0 && snapshot.Task.UpdatedAt > latest {
-			latest = snapshot.Task.UpdatedAt
-		}
-	}
-	return latest
-}
-
 func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects map[int64]Project, members map[int64][]ProjectRepo, projectStates map[int64]projectStateSnapshot) error {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -563,8 +618,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if kind == "" {
 			kind = ProjectKindRepo
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id,name,root,default_branch,kind,herdr_workspace_id,lead_pane_id,lead_label,lead_absent_since,status,created_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-			project.ID, project.Name, project.Root, project.DefaultBranch, kind, project.HerdrWorkspaceID, project.LeadPaneID, project.LeadLabel, project.LeadAbsentSince, project.Status, project.CreatedAt, project.LastActivityAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id,name,root,default_branch,kind,herdr_workspace_id,lead_pane_id,lead_label,lead_absent_since,status,created_at,last_activity_at,lead_launches,down_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			project.ID, project.Name, project.Root, project.DefaultBranch, kind, project.HerdrWorkspaceID, project.LeadPaneID, project.LeadLabel, project.LeadAbsentSince, project.Status, project.CreatedAt, project.LastActivityAt, project.LeadLaunches, project.DownAt); err != nil {
 			return err
 		}
 		for _, member := range members[project.ID] {
