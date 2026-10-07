@@ -667,13 +667,13 @@ Once per machine, `install.sh` installs the `posse` binary and runs `posse setup
 2. Installs the Herdr integrations for the kinds it finds (`herdr integration install <kind>`), which Herdr needs to resume their sessions.
 3. Links the `posse-herdr` plugin into the User's Herdr (`herdr plugin link`; a running server picks it up immediately).
 4. Creates an empty `~/.posse/config.toml` when missing; schema defaults apply without persisting detected kinds, Profiles or Identity preferences. Existing config is preserved.
-5. Installs the skills into `~/.agents/skills/posse` and `~/.agents/skills/posse-setup`, symlinked into `~/.claude/skills/`.
+5. Installs no global skills by default. `posse setup --global-skills` opts into installing them under `~/.agents/skills` and linking them into `~/.claude/skills/`. Existing unchanged Posse-owned copies are detected by their recorded hashes; `posse setup` and `posse doctor` offer `posse setup --remove-global-skills`, which removes only unchanged owned files after the explicit command. Modified and foreign files are preserved.
 6. Merges a SessionStart hook running `posse _context` and a PreToolUse hook running `posse _guard` into `~/.claude/settings.json` and `~/.codex/hooks.json`, keeping every existing hook and the file's formatting, written atomically.
 7. When pi's agent directory (`${PI_CODING_AGENT_DIR:-~/.pi/agent}`) exists, installs `extensions/posse-worker-guard.ts`, which runs `posse _guard` before every bash tool call.
 
 The Claude Lead plugin is bundled in the binary and written under the Project's Posse home on Lead launch, not installed in the User's Claude settings or loaded for Riders. Its zero-height drawing, restored-row classification, redraw and animation packing are adapted from [firstmate-calm](https://github.com/kunchenguid/firstmate) (MIT, copyright 2026 Kun Chen); the plugin bundles `FIRSTMATE-LICENSE`. Posse's record-backed Notice recognition and Project preference handling are independent. Unit coverage runs through `claude plugin test internal/app/claude_lowkey`; the credentialed live TUI regression is `POSSE_CLAUDE_LOWKEY_LIVE_E2E=1 scripts/claude-lowkey-live-e2e.sh`. It uses an API key or a copied OAuth login in an isolated Claude config, and tests the collapsed `Ran 1 shell command` row on Claude Code 2.1.283.
 
-`posse setup --check --exit-code` exits 3 when required setup would change the machine and 0 when nothing is pending, which is how `install.sh` decides whether to ask. `--human` only changes the display: a checklist for people instead of TOON (`+` pending, `✓` done, `-` unchanged, `!` manual, `✗` blocked), which `install.sh` shows. `posse setup --uninstall` removes exactly what `setup.json` lists and never touches `~/.posse` data. `posse doctor` reports skills or hooks older than the binary, a failing plugin hook (from Herdr's plugin log), missing integrations, group-close risks from other repository primaries and unverified Claude Code function-hook versions.
+`posse setup --check --exit-code` exits 3 when required setup would change the machine and 0 when nothing is pending, which is how `install.sh` decides whether to ask. Optional global skills are not pending setup. `--human` only changes the display: a checklist for people instead of TOON (`+` pending, `✓` done, `-` unchanged, `!` manual, `✗` blocked), which `install.sh` shows. `posse setup --uninstall` removes exactly what `setup.json` lists and never touches `~/.posse` data. `posse doctor` reports Posse-owned global skill copies that can be removed, stale optional skills or hooks, a failing plugin hook (from Herdr's plugin log), missing integrations, group-close risks from other repository primaries and unverified Claude Code function-hook versions.
 
 **`posse _context`** prints role context only when the pane is a posse Lead or Worker (which command to run next: `posse lead` or `posse brief`, and the Task id); anywhere else it prints nothing. It runs in under 20 ms. The hook fires on session start, resume and compaction, so an agent never loses its role.
 
@@ -682,7 +682,7 @@ The Claude Lead plugin is bundled in the binary and written under the Project's 
 - `posse` (agent-triggered): what posse is, how to tell the role from the pane (`posse _context`), and where to go next (`posse lead`, `posse brief`, `posse up`, `posse --help`).
 - `posse-setup` (User-invoked `/posse-setup`): an optional full tour, beginning with the faster path of `posse up` and a first request. It interviews at three scopes: machine (verifies `posse setup --check` and applies pending changes), global config, then per Project (`posse project add`, `posse config set --project`), and ends with `posse doctor`. It reads `posse config schema`. For User-only keys, outside a Lead pane it gives the User the exact `! posse config set|unset ...` command; inside the Lead conversation it writes only after explicit consent with `--user-approved "<User's words>"`. Riders cannot write config.
 
-Skills and the hook ship inside the binary and are versioned with it.
+Skills and the hook ship inside the binary and are versioned with it. Every Claude, Codex and Pi Lead and Rider receives frozen Posse skill content at launch without global or Project-folder writes: Claude gets a process-local plugin directory through `--plugin-dir`, Pi gets exact skill file paths through `--skill`, and Codex receives exact frozen skill paths in `developer_instructions`. For Codex Riders, Posse merges that guidance with existing instructions from `CODEX_HOME/config.toml` and Profile `-c` arguments. The snapshot lives under `POSSE_HOME/projects/<project>/launch-skills/<content-hash>`; later changes to embedded assets create a different snapshot rather than modifying earlier files.
 
 ## 19. Updates and releases
 
@@ -747,7 +747,7 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse remuda [prune [--yes]]` | User, Lead | list Mounts; prune idle extras (section 12) |
 | `posse sync` | User, Lead | fast-forward the Project's default branch from `origin` when safe (section 14) |
 | `posse sweep [--yes]` | User, Lead | close orphan posse panes after ownership checks (section 15) |
-| `posse setup [--check [--exit-code]\|--uninstall] [--human]` | User | section 18 |
+| `posse setup [--check [--exit-code]\|--uninstall] [--global-skills\|--remove-global-skills] [--human]` | User | section 18 |
 | `posse _context` | SessionStart hook | section 18 |
 | `posse _guard` | PreToolUse hook, pi extension | refuse a Worker's `herdr` changes to its own session (section 13) |
 | `posse update [--check] [--version v] [--force] [--stop-lookouts]` | User | section 19 |

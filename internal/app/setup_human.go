@@ -125,11 +125,27 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 		name := filepath.Base(target)
 		switch action {
 		case "keep":
-			return kept(name + " skill already installed")
+			if note, _ := row["note"].(string); strings.Contains(note, "no Posse-owned global files") {
+				return kept("No Posse-owned global files for the " + name + " skill")
+			}
+			return kept("The global " + name + " skill is already installed")
+		case "offer_global":
+			return []string{humanManual + "  The " + name + " skill is available only to Posse-launched sessions; optionally install it globally with `posse setup --global-skills`"}
+		case "offer_removal":
+			return []string{humanManual + "  Posse-owned global " + name + " skill detected; remove unchanged files with `posse setup --remove-global-skills`"}
+		case "preserve":
+			return []string{humanManual + "  Modified or foreign files for the " + name + " skill are preserved"}
+		case "remove":
+			return change("Remove unchanged Posse-owned global files for the "+name+" skill", "Removed the Posse-owned global "+name+" skill")
+		case "remove_preserving":
+			if applied {
+				return []string{humanDone + "  Removed unchanged Posse-owned files for the " + name + " skill; modified or foreign files were preserved"}
+			}
+			return []string{humanPending + "  Remove unchanged Posse-owned files for the " + name + " skill; modified or foreign files will be preserved"}
 		case "conflict":
 			return []string{humanFailed + "  " + displayPath(target) + " was not written by posse"}
 		default:
-			return change("Install the "+name+" skill", "Installed the "+name+" skill")
+			return change("Install the "+name+" skill globally", "Installed the "+name+" skill globally")
 		}
 	case "session_start_hook", "guard_hook":
 		agent, _ := row["agent"].(string)

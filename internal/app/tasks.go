@@ -403,6 +403,18 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	}
 	kindConfig := cfg.Kinds[kind]
 	taskHome := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(sequence))
+	if kind == "claude" || kind == "codex" || kind == "pi" {
+		skills, skillErr := freezePosseLaunchSkills(home, project.Name, project.Root)
+		if skillErr != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
+			return skillErr
+		}
+		argsForAgent, skillErr = appendPosseSkillLaunchArgs(kind, argsForAgent, skills)
+		if skillErr != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
+			return skillErr
+		}
+	}
 	briefPath := filepath.Join(taskHome, "brief.md")
 	launchPath := filepath.Join(taskHome, "launch.md")
 	if err := s.runIntentStep(ctx.Context, db, intent, "brief.write", func() error { return writeFile(briefPath, briefData) }); err != nil {
@@ -1639,6 +1651,16 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			return db.ChangeTaskProfile(ctx, task.ID, task.Profile, profileName)
 		}); err != nil {
 			return failure(err)
+		}
+	}
+	if kind == "claude" || kind == "codex" || kind == "pi" {
+		skills, skillErr := freezePosseLaunchSkills(home, project.Name, project.Root)
+		if skillErr != nil {
+			return failure(skillErr)
+		}
+		startArgs, skillErr = appendPosseSkillLaunchArgs(kind, startArgs, skills)
+		if skillErr != nil {
+			return failure(skillErr)
 		}
 	}
 	if err := track("agent.start", func() error {

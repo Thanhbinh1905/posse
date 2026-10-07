@@ -351,7 +351,11 @@ func TestPrepareLeadLaunchRejectsOversizedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actualSize := len(composed.Text)
+	skills, err := freezePosseLaunchSkills(home, project.Name, project.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualSize := len(composed.Text + "\n\n## Posse skills\n\n" + skills.CodexInstructions)
 
 	launch, err := service.prepareLeadLaunch(home, project, cfg, "codex")
 	if err == nil {
@@ -394,10 +398,18 @@ func TestLeadLaunchByKind(t *testing.T) {
 		return launch
 	}
 	instructions := filepath.Join(home, "projects", "shop", "lead.md")
+	skills, err := freezePosseLaunchSkills(home, "shop", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillRoots, err := filepath.Glob(filepath.Join(home, "projects", "shop", "launch-skills", "*"))
+	if err != nil || len(skillRoots) != 1 {
+		t.Fatalf("skill snapshot roots = %q, %v", skillRoots, err)
+	}
 
 	claude := launch("claude")
 	plugin := filepath.Join(home, "projects", "shop", "lead-claude-lowkey")
-	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin}) || claude.TypedPrompt != "" ||
+	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0]}) || claude.TypedPrompt != "" ||
 		claude.Env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] != "1" || claude.Env["POSSE_LOWKEY_CONFIG"] != config.ConfigPath(home, "shop") ||
 		claude.Env["POSSE_LOWKEY_GLOBAL_CONFIG"] != config.ConfigPath(home, "") || claude.Env["POSSE_LOWKEY_NOTICES_DIR"] != claudeNoticeDirectory(home, "shop") {
 		t.Fatalf("claude launch = %#v", claude)
@@ -409,7 +421,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 	}
 
 	codex := launch("codex")
-	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=\"# Posse Lead instructions\\n\\nYou are the Lead for Project shop.") || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
+	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=\"# Posse Lead instructions\\n\\nYou are the Lead for Project shop.") || !strings.Contains(codex.Args[4], filepath.Join(skillRoots[0], "skills", "posse-setup", "SKILL.md")) || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
 		t.Fatalf("codex launch = %#v", codex)
 	}
 	for _, rule := range []string{"posse queues each batch of Notices", noPollRule, "End your turn and let that message wake you."} {
@@ -419,7 +431,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 	}
 	pi := launch("pi")
 	extension := filepath.Join(home, "projects", "shop", "lead-pi-extension.ts")
-	if !equalStrings(pi.Args, []string{"--append-system-prompt", instructions, "--extension", extension}) || pi.TypedPrompt != "" {
+	if !equalStrings(pi.Args, append([]string{"--append-system-prompt", instructions, "--extension", extension}, skills.PiArgs...)) || pi.TypedPrompt != "" {
 		t.Fatalf("pi launch = %#v", pi)
 	}
 	contents, err := os.ReadFile(extension)
@@ -446,6 +458,11 @@ func TestLeadLaunchByKind(t *testing.T) {
 	}
 	if strings.Contains(string(contents), "tui.appendPrompt") {
 		t.Fatal("pi extension touches the composer")
+	}
+	cfg.Kinds["pi"] = config.Kind{SystemPromptArgs: []string{"--append-system-prompt", "{file}"}, NoticeDelivery: config.NoticeDeliveryPrompt}
+	piWithoutExtension := launch("pi")
+	if !equalStrings(piWithoutExtension.Args, append([]string{"--append-system-prompt", instructions}, skills.PiArgs...)) {
+		t.Fatalf("Pi skill args were omitted when Notice delivery uses prompts: %#v", piWithoutExtension.Args)
 	}
 }
 
@@ -577,6 +594,7 @@ func TestDoctorClassifiesClaudeLowkeyVersions(t *testing.T) {
 }
 
 func TestOpenCodeLeadLaunchAndPluginConfig(t *testing.T) {
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
 	home := t.TempDir()
 	service := testService(home, nil)
 	cfg, err := config.Load(home, "")

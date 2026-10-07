@@ -53,7 +53,7 @@ func TestSetupPlanPreflightsHookJSONAndSkillPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := &Service{}
-	plan := service.setupPlan(root, "/usr/bin/posse", "test", setupDirs{claude: claudeDir, codex: codexDir, agents: agentsDir}, setupManifest{}, false, setupInspection{})
+	plan := service.setupPlan(root, "/usr/bin/posse", "test", setupDirs{claude: claudeDir, codex: codexDir, agents: agentsDir}, setupManifest{}, false, setupInspection{GlobalSkillsMode: "install"})
 	var hookAction, skillAction string
 	for _, row := range plan {
 		switch row["target"] {
@@ -372,6 +372,79 @@ func TestSetupCheckUsesUniformPlanAndConfiguredAvailableKinds(t *testing.T) {
 	if strings.Contains(output.String(), "needs_apply") {
 		t.Errorf("setup text output repeated the plan as needs_apply: %s", output)
 	}
+}
+
+func TestUninstallSkillDoesNotFollowReplacementDirectorySymlink(t *testing.T) {
+	_, home, _, _ := setupOutputFixture(t)
+	dirs := setupDirs{claude: filepath.Join(home, ".claude"), agents: filepath.Join(home, ".agents", "skills")}
+	record, _, err := installSkill("posse", dirs.agents, dirs.claude, "1", setupSkillRecord{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignDir := filepath.Join(home, "foreign-skill")
+	if err := os.MkdirAll(foreignDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := setupassets.Skill("posse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignDir, "SKILL.md"), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignDir, ".posse-version"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dirs.agents, "posse")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(foreignDir, filepath.Join(dirs.agents, "posse")); err != nil {
+		t.Fatal(err)
+	}
+	unchangedFile, modifiedFile := ownedSkillFileStatus(filepath.Join(dirs.agents, "posse", "SKILL.md"), record.FileHash)
+	if unchangedFile || !modifiedFile || !skillRecordHasModifiedOwnedParts(record) {
+		t.Fatal("ownership detection followed the replacement skill-directory symlink")
+	}
+	if err := uninstallSkill(record); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"SKILL.md", ".posse-version"} {
+		if _, err := os.Stat(filepath.Join(foreignDir, name)); err != nil {
+			t.Fatalf("uninstall removed foreign file %s: %v", name, err)
+		}
+	}
+	if target, err := os.Readlink(filepath.Join(dirs.agents, "posse")); err != nil || target != foreignDir {
+		t.Fatalf("uninstall changed replacement directory symlink: target=%q err=%v", target, err)
+	}
+}
+
+func TestDoctorOffersRemovalOfUnchangedGlobalSkills(t *testing.T) {
+	service, home, _, _ := setupOutputFixture(t)
+	dirs := setupDirs{claude: filepath.Join(home, ".claude"), agents: filepath.Join(home, ".agents", "skills")}
+	manifest := setupManifest{Version: "1"}
+	for _, name := range []string{"posse", "posse-setup"} {
+		record, _, err := installSkill(name, dirs.agents, dirs.claude, "1", setupSkillRecord{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest.Skills = append(manifest.Skills, record)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), manifest); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.collectDoctorChecks(&axi.Context{Context: context.Background()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range result.Checks {
+		if check.Name == "global skills" {
+			if check.Status != "warn" || !strings.Contains(check.Detail, "posse, posse-setup") || check.Action != "Run `posse setup --remove-global-skills` to remove unchanged Posse-owned files" {
+				t.Fatalf("doctor global skills check = %#v", check)
+			}
+			return
+		}
+	}
+	t.Fatalf("doctor omitted owned global skills: %#v", result.Checks)
 }
 
 func TestDoctorIsCompactAndOnlyChecksConfiguredAgentKinds(t *testing.T) {
