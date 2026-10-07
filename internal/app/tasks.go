@@ -409,12 +409,11 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
 		}
-		skillArgs, skillErr := posseSkillLaunchArgs(kind, skills)
+		argsForAgent, skillErr = appendPosseSkillLaunchArgs(kind, argsForAgent, skills)
 		if skillErr != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
 		}
-		argsForAgent = append(argsForAgent, skillArgs...)
 	}
 	briefPath := filepath.Join(taskHome, "brief.md")
 	launchPath := filepath.Join(taskHome, "launch.md")
@@ -1645,11 +1644,10 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if skillErr != nil {
 			return failure(skillErr)
 		}
-		skillArgs, skillErr := posseSkillLaunchArgs(kind, skills)
+		startArgs, skillErr = appendPosseSkillLaunchArgs(kind, startArgs, skills)
 		if skillErr != nil {
 			return failure(skillErr)
 		}
-		startArgs = append(startArgs, skillArgs...)
 	}
 	if err := track("agent.start", func() error {
 		_, callErr := s.startAgent(ctx, map[string]any{"name": workerName, "kind": kind, "pane_id": pane.PaneID, "args": startArgs})

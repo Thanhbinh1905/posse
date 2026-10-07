@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 )
 
@@ -174,21 +175,134 @@ func writeFrozenSkill(root, path string, contents []byte) error {
 	return nil
 }
 
-func posseSkillLaunchArgs(kind string, skills posseLaunchSkills) ([]string, error) {
+func appendPosseSkillLaunchArgs(kind string, args []string, skills posseLaunchSkills) ([]string, error) {
 	switch kind {
 	case "claude":
-		return []string{"--plugin-dir", skills.ClaudePluginDir}, nil
+		return append(args, "--plugin-dir", skills.ClaudePluginDir), nil
 	case "codex":
-		argument, err := codexSkillConfigArgument(skills.CodexInstructions)
-		if err != nil {
-			return nil, err
-		}
-		return []string{"-c", argument}, nil
+		return mergeCodexDeveloperInstructions(args, skills.CodexInstructions)
 	case "pi":
-		return append([]string(nil), skills.PiArgs...), nil
+		return append(args, skills.PiArgs...), nil
 	default:
-		return nil, nil
+		return args, nil
 	}
+}
+
+func mergeCodexDeveloperInstructions(args []string, injected string) ([]string, error) {
+	instructions, err := codexConfigDeveloperInstructions()
+	if err != nil {
+		return nil, err
+	}
+	var instructionParts []string
+	if instructions != "" {
+		instructionParts = append(instructionParts, instructions)
+	}
+	var preserved []string
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		configValue, attached, configOption := codexConfigOption(arg)
+		if !configOption {
+			preserved = append(preserved, arg)
+			continue
+		}
+		if !attached {
+			if index+1 >= len(args) {
+				preserved = append(preserved, arg)
+				continue
+			}
+			configValue = args[index+1]
+		}
+		value, developerInstruction, parseErr := codexDeveloperInstructionOverride(configValue)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if developerInstruction {
+			if value != "" {
+				instructionParts = append(instructionParts, value)
+			}
+			if !attached {
+				index++
+			}
+			continue
+		}
+		if attached {
+			preserved = append(preserved, arg)
+		} else {
+			preserved = append(preserved, arg, configValue)
+			index++
+		}
+	}
+	if injected != "" {
+		instructionParts = append(instructionParts, injected)
+	}
+	argument, err := codexSkillConfigArgument(strings.Join(instructionParts, "\n\n"))
+	if err != nil {
+		return nil, err
+	}
+	return append(preserved, "-c", argument), nil
+}
+
+func codexConfigDeveloperInstructions() (string, error) {
+	configHome := os.Getenv("CODEX_HOME")
+	if configHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		configHome = filepath.Join(home, ".codex")
+	}
+	path := filepath.Join(configHome, "config.toml")
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read Codex config %s: %w", path, err)
+	}
+	var config map[string]any
+	if _, err := toml.Decode(string(contents), &config); err != nil {
+		return "", fmt.Errorf("decode Codex config %s: %w", path, err)
+	}
+	value, exists := config["developer_instructions"]
+	if !exists {
+		return "", nil
+	}
+	instructions, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("codex config %s has non-string developer_instructions", path)
+	}
+	return instructions, nil
+}
+
+func codexConfigOption(argument string) (value string, attached, found bool) {
+	for _, option := range []string{"--config=", "--configuration="} {
+		if value, found := strings.CutPrefix(argument, option); found {
+			return value, true, true
+		}
+	}
+	if argument == "-c" || argument == "--config" || argument == "--configuration" {
+		return "", false, true
+	}
+	if strings.HasPrefix(argument, "-c") && len(argument) > 2 {
+		return strings.TrimPrefix(strings.TrimPrefix(argument, "-c"), "="), true, true
+	}
+	return "", false, false
+}
+
+func codexDeveloperInstructionOverride(value string) (string, bool, error) {
+	key, raw, found := strings.Cut(strings.TrimSpace(value), "=")
+	if !found || strings.TrimSpace(key) != "developer_instructions" {
+		return "", false, nil
+	}
+	var decoded map[string]any
+	if _, err := toml.Decode("value = "+strings.TrimSpace(raw), &decoded); err != nil {
+		return "", true, fmt.Errorf("decode Codex developer_instructions override: %w", err)
+	}
+	instructions, ok := decoded["value"].(string)
+	if !ok {
+		return "", true, fmt.Errorf("codex developer_instructions override must be a string")
+	}
+	return instructions, true, nil
 }
 
 func codexSkillConfigArgument(instructions string) (string, error) {

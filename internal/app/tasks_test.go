@@ -606,6 +606,132 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	return relaunchFixture{db: db, fake: fake, service: service, home: home, project: project, cfg: cfg, task: task}
 }
 
+func TestCodexRiderSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
+	const (
+		globalRule  = "Fixture safety rule: never delete user data without explicit consent."
+		profileRule = "Profile safety rule: preserve existing User changes."
+	)
+
+	t.Run("spawn", func(t *testing.T) {
+		f := newFirstOutcomeFixture(t)
+		setupFollowupAgentPath(t, "pi", "codex")
+		codexHome := filepath.Join(f.root, "codex-home")
+		writeCodexInstructionsFixture(t, codexHome, globalRule)
+		writeCodexRiderProfileFixture(t, f.home, "worker", profileRule, true)
+		t.Setenv("CODEX_HOME", codexHome)
+		f.fake.BeforeCall = func(method string) {
+			if method == "agent.start" {
+				f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "codex", AgentStatus: "working"})
+			}
+		}
+		t.Setenv("HERDR_ENV", "1")
+		t.Setenv("HERDR_PANE_ID", "w1:p1")
+		t.Setenv("HERDR_WORKSPACE_ID", "w1")
+		outcomeCLI(t, f.service, 0, "ride", "--brief", f.brief, "--name", "first-outcome")
+		assertCodexRiderDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
+	})
+
+	t.Run("relaunch", func(t *testing.T) {
+		f := newRelaunchFixture(t, store.StateLost)
+		codexHome := filepath.Join(filepath.Dir(f.home), "codex-home")
+		writeCodexInstructionsFixture(t, codexHome, globalRule)
+		writeCodexRiderProfileFixture(t, f.home, "deep", profileRule, false)
+		t.Setenv("CODEX_HOME", codexHome)
+		cfg, err := config.Load(f.home, f.project.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.service.relaunchTask(context.Background(), f.db, f.home, f.project, cfg, task, ""); err != nil {
+			t.Fatalf("relaunch Codex Rider: %v", err)
+		}
+		assertCodexRiderDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
+	})
+}
+
+func writeCodexInstructionsFixture(t *testing.T, codexHome, instructions string) {
+	t.Helper()
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("developer_instructions = "+mustJSONString(t, instructions)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeCodexRiderProfileFixture(t *testing.T, home, name, instructions string, dispatchDefault bool) {
+	t.Helper()
+	profileArgs, err := json.Marshal([]string{"-c", "developer_instructions=" + mustJSONString(t, instructions)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configText := "[defaults]\nlanding_mode = \"local\"\n\n[profiles." + name + "]\nkind = \"codex\"\nmodel = \"gpt-5\"\neffort = \"high\"\nargs = " + string(profileArgs) + "\n"
+	if dispatchDefault {
+		configText += "\n[dispatch.default]\nuse = \"" + name + "\"\n"
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func codexStartArgs(t *testing.T, fake *herdr.Fake) []string {
+	t.Helper()
+	for index := len(fake.Calls) - 1; index >= 0; index-- {
+		call := fake.Calls[index]
+		if call.Method == "agent.start" && call.Params["kind"] == "codex" {
+			args, ok := call.Params["args"].([]string)
+			if !ok {
+				t.Fatalf("Codex launch args have type %T", call.Params["args"])
+			}
+			return args
+		}
+	}
+	t.Fatal("no Codex Rider launch was recorded")
+	return nil
+}
+
+func containsArgPair(args []string, flag, value string) bool {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == flag && args[index+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+func assertCodexRiderDeveloperInstructions(t *testing.T, args []string, globalRule, profileRule string) {
+	t.Helper()
+	var developerInstructions []string
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] != "-c" {
+			continue
+		}
+		value, found := strings.CutPrefix(args[index+1], "developer_instructions=")
+		if !found {
+			continue
+		}
+		var instruction string
+		if err := json.Unmarshal([]byte(value), &instruction); err != nil {
+			t.Fatalf("Codex developer_instructions is not a quoted string: %q: %v", args[index+1], err)
+		}
+		developerInstructions = append(developerInstructions, instruction)
+	}
+	if len(developerInstructions) != 1 {
+		t.Fatalf("Codex launch has %d developer_instructions overrides, want one merged value: %#v", len(developerInstructions), args)
+	}
+	if !containsArgPair(args, "-m", "gpt-5") || !containsArgPair(args, "-c", "model_reasoning_effort=high") {
+		t.Fatalf("Codex launch lost non-developer config overrides: %#v", args)
+	}
+	for _, required := range []string{globalRule, profileRule, "launch-skills", filepath.Join("skills", "posse", "SKILL.md"), filepath.Join("skills", "posse-setup", "SKILL.md")} {
+		if !strings.Contains(developerInstructions[0], required) {
+			t.Fatalf("Codex developer_instructions omitted %q: %s", required, developerInstructions[0])
+		}
+	}
+}
+
 func TestRelaunchRecoversNeedsDecisionAndBlockedWorkers(t *testing.T) {
 	for _, initial := range []store.State{store.StateNeedsDecision, store.StateBlocked} {
 		t.Run(string(initial), func(t *testing.T) {

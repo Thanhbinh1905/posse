@@ -22,15 +22,16 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claudeArgs, err := posseSkillLaunchArgs("claude", skills)
+	claudeArgs, err := appendPosseSkillLaunchArgs("claude", nil, skills)
 	if err != nil || !equalStrings(claudeArgs, []string{"--plugin-dir", skills.ClaudePluginDir}) {
 		t.Fatalf("Claude skill args = %#v, %v", claudeArgs, err)
 	}
-	piArgs, err := posseSkillLaunchArgs("pi", skills)
+	piArgs, err := appendPosseSkillLaunchArgs("pi", nil, skills)
 	if err != nil || len(piArgs) != 4 || piArgs[0] != "--skill" || piArgs[2] != "--skill" {
 		t.Fatalf("Pi skill args = %#v, %v", piArgs, err)
 	}
-	codexArgs, err := posseSkillLaunchArgs("codex", skills)
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex-home"))
+	codexArgs, err := appendPosseSkillLaunchArgs("codex", nil, skills)
 	if err != nil || len(codexArgs) != 2 || codexArgs[0] != "-c" {
 		t.Fatalf("Codex skill args = %#v, %v", codexArgs, err)
 	}
