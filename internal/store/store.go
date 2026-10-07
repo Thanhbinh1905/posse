@@ -203,6 +203,9 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 			return err
 		}
 	}
+	if err := db.normalizeLegacyNoticeDeliveryMigration(ctx); err != nil {
+		return err
+	}
 	if err := db.normalizeLegacyProjectUUIDMigration(ctx); err != nil {
 		return err
 	}
@@ -1716,7 +1719,8 @@ func (db *DB) ReleaseExpiredDeliveryClaims(ctx context.Context, before int64) er
 	if _, err := db.ExecContext(ctx, `UPDATE messages SET status='queued',claim_token='',claimed_at=0 WHERE status='claimed' AND claimed_at>0 AND claimed_at<=?`, before); err != nil {
 		return err
 	}
-	_, err := db.ExecContext(ctx, `UPDATE notices SET claim_token='',claimed_at=0 WHERE claim_token<>'' AND delivered_at IS NULL AND acked_at IS NULL AND claimed_at>0 AND claimed_at<=?`, before)
+	_, err := db.ExecContext(ctx, `UPDATE notices SET claim_token='',claimed_at=0 WHERE claim_token<>'' AND claim_token NOT LIKE 'uncertain:%' AND delivered_at IS NULL AND acked_at IS NULL AND claimed_at>0 AND claimed_at<=?
+		AND NOT EXISTS (SELECT 1 FROM notice_delivery_receipts r WHERE r.project_id=notices.project_id AND r.owner_token=notices.claim_token AND r.state IN ('printed','uncertain'))`, before)
 	return err
 }
 
@@ -1765,29 +1769,31 @@ func (db *DB) RequeueNotices(ctx context.Context, projectID int64, ids []int64) 
 }
 
 func (db *DB) AckNotices(ctx context.Context, projectID int64, identifiers []string) (int, error) {
+	at := time.Now().UnixMilli()
+	count := 0
 	if len(identifiers) == 1 && identifiers[0] == "all" {
-		result, err := db.queries.AckAllNotices(ctx, dbgen.AckAllNoticesParams{AckedAt: sql.NullInt64{Int64: time.Now().UnixMilli(), Valid: true}, ProjectID: projectID})
+		result, err := db.queries.AckAllNotices(ctx, dbgen.AckAllNoticesParams{AckedAt: sql.NullInt64{Int64: at, Valid: true}, ProjectID: projectID})
 		if err != nil {
 			return 0, err
 		}
-		count, _ := result.RowsAffected()
-		if err := db.PersistProject(ctx, projectID); err != nil {
-			return int(count), err
-		}
-		return int(count), nil
-	}
-	count := 0
-	for _, value := range identifiers {
-		id, err := strconv.ParseInt(value, 10, 64)
-		if err != nil || id < 1 {
-			return count, fmt.Errorf("invalid Notice id %q", value)
-		}
-		result, err := db.queries.AckNotice(ctx, dbgen.AckNoticeParams{AckedAt: sql.NullInt64{Int64: time.Now().UnixMilli(), Valid: true}, ID: id, ProjectID: projectID})
-		if err != nil {
-			return count, err
-		}
 		changed, _ := result.RowsAffected()
-		count += int(changed)
+		count = int(changed)
+	} else {
+		for _, value := range identifiers {
+			id, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || id < 1 {
+				return count, fmt.Errorf("invalid Notice id %q", value)
+			}
+			result, err := db.queries.AckNotice(ctx, dbgen.AckNoticeParams{AckedAt: sql.NullInt64{Int64: at, Valid: true}, ID: id, ProjectID: projectID})
+			if err != nil {
+				return count, err
+			}
+			changed, _ := result.RowsAffected()
+			count += int(changed)
+		}
+	}
+	if err := db.PersistNoticeDeliverySnapshotIfPresent(ctx, projectID); err != nil {
+		return count, err
 	}
 	if err := db.PersistProject(ctx, projectID); err != nil {
 		return count, err

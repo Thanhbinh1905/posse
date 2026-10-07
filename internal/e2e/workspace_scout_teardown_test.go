@@ -354,14 +354,22 @@ esac
 					t.Fatalf("restore acquisition baseline for retry: %v", err)
 				}
 			}
-			runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
+			// A receipt claim can temporarily block ack, so retry the direct ack
+			// until it succeeds.
+			ackOutput := ""
+			if !waitForCondition(15*time.Second, func() bool {
+				ackOutput = runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
+				return strings.Contains(ackOutput, "acknowledged: 1")
+			}) {
+				t.Fatalf("task_done Notice %s was not acknowledged: %s", noticeID, ackOutput)
+			}
 			if !waitForCondition(30*time.Second, func() bool {
 				current, err := db.Task(context.Background(), project.ID, test.taskID)
 				return err == nil && current.State == store.StateTornDown
 			}) {
 				current, _ := db.Task(context.Background(), project.ID, test.taskID)
 				mounts, _ := db.Mounts(context.Background(), project.ID)
-				t.Fatalf("ack did not complete Teardown: task=%#v mounts=%#v", current, mounts)
+				t.Fatalf("ack did not complete Teardown: ack=%s task=%#v mounts=%#v", ackOutput, current, mounts)
 			}
 			mounts, err := db.Mounts(context.Background(), project.ID)
 			if err != nil {

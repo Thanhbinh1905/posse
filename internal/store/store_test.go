@@ -345,6 +345,7 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	for _, statement := range []string{
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
+		`DROP TABLE notice_delivery_receipts`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
@@ -400,6 +401,66 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	var prePushHeads int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='publish_pre_push_heads'`).Scan(&prePushHeads); err != nil || prePushHeads != 1 {
 		t.Fatalf("publish_pre_push_heads table count = %d, %v; want 1", prePushHeads, err)
+	}
+}
+
+func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noticeID, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "needs_decision", Summary: "receipt migration"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{noticeID}, "pi:test", "generation", "owner", 100, 1000)
+	if err != nil || !claimed {
+		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE model_error_episodes`,
+		`DROP TABLE publish_pre_push_heads`,
+		`DROP INDEX projects_project_uuid_idx`,
+		`ALTER TABLE projects DROP COLUMN project_uuid`,
+		`DELETE FROM goose_db_version WHERE version_id >= 32`,
+		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
+		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("prepare legacy receipt migration: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO posse_migration_checksums(version,sha256) VALUES(32,?)`, legacyNoticeDeliveryMigrationChecksum); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatalf("open legacy receipt database: %v", err)
+	}
+	defer db.Close()
+	project, err = db.ProjectByID(ctx, project.ID)
+	if err != nil || project.UUID == "" {
+		t.Fatalf("Project UUID after migration = %q, %v", project.UUID, err)
+	}
+	restored, err := db.NoticeDelivery(ctx, delivery.DeliveryID)
+	if err != nil || restored.State != "claimed" {
+		t.Fatalf("legacy receipt after migration = %+v, %v", restored, err)
+	}
+	for _, version := range []int64{32, 33, 34, 35} {
+		var applied int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM goose_db_version WHERE version_id=? AND is_applied=1`, version).Scan(&applied); err != nil || applied != 1 {
+			t.Fatalf("migration %d applied rows = %d, %v; want 1", version, applied, err)
+		}
 	}
 }
 
@@ -515,6 +576,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_checked_at`,
 		`ALTER TABLE project_repos DROP COLUMN origin_host`,
 		`DROP TABLE member_pr_poll_state`,
+		`DROP TABLE notice_delivery_receipts`,
 		`DROP TABLE pr_body_markers`,
 		`DROP TABLE model_error_episodes`,
 		`DROP INDEX projects_project_uuid_idx`,

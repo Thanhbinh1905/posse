@@ -135,6 +135,22 @@ type Notice struct {
 	ClaimedAt   int64
 }
 
+type NoticeDeliveryReceipt struct {
+	DeliveryID    string
+	BatchID       string
+	ProjectID     int64
+	NoticeIdsJson string
+	Destination   string
+	Generation    string
+	State         string
+	OwnerToken    string
+	ClaimedAt     int64
+	LeaseUntil    int64
+	AcceptedAt    int64
+	CreatedAt     int64
+	UpdatedAt     int64
+}
+
 type NoticeNotification struct {
 	ProjectID  int64
 	NotifiedAt int64
