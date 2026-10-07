@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -198,10 +199,12 @@ func TestT229SignalSnapshotFailure(t *testing.T) {
 }
 
 func TestT233MovedProjectRebuild(t *testing.T) {
-	for _, mode := range []string{"existing", "deleted"} {
+	for _, mode := range []string{"existing", "deleted", "deleted-with-stale-sidecars", "deleted-with-valid-sidecars"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newPRLifecycleFixture(t)
 			ctx := context.Background()
+			var sidecarSuffixes []string
+			validSidecars := map[string][]byte{}
 			t.Cleanup(func() {
 				if f.db != nil {
 					_ = f.db.Close()
@@ -232,12 +235,42 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 			if !strings.Contains(string(taskSnapshot), `root = "`+moved+`"`) || !strings.Contains(string(taskSnapshot), `uuid = "`+movedProject.UUID+`"`) {
 				t.Fatalf("Project move did not refresh Task snapshot identity: %s", taskSnapshot)
 			}
-			if mode == "deleted" {
+			if mode != "existing" {
+				database := filepath.Join(f.home, "posse.db")
+				if mode == "deleted-with-valid-sidecars" {
+					for _, suffix := range []string{"-wal", "-shm"} {
+						data, err := os.ReadFile(database + suffix)
+						if err != nil {
+							t.Fatalf("read live SQLite sidecar %s: %v", suffix, err)
+						}
+						validSidecars[suffix] = data
+						sidecarSuffixes = append(sidecarSuffixes, suffix)
+					}
+				}
 				if err := f.db.Close(); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Remove(filepath.Join(f.home, "posse.db")); err != nil {
+				if err := os.Remove(database); err != nil {
 					t.Fatal(err)
+				}
+				if mode == "deleted-with-valid-sidecars" {
+					for suffix, data := range validSidecars {
+						if _, err := os.Stat(database + suffix); errors.Is(err, os.ErrNotExist) {
+							if err := os.WriteFile(database+suffix, data, 0o600); err != nil {
+								t.Fatal(err)
+							}
+						} else if err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if mode == "deleted-with-stale-sidecars" {
+					for _, suffix := range []string{"-wal", "-shm"} {
+						if err := os.WriteFile(database+suffix, []byte("orphaned "+suffix+" from deleted database"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						sidecarSuffixes = append(sidecarSuffixes, suffix)
+					}
 				}
 			}
 			command := exec.Command(f.binary, "recover", "--rebuild")
@@ -246,7 +279,16 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 			if err != nil {
 				t.Fatalf("rebuild after Project move (%s): %v\n%s", mode, err, output)
 			}
-			if mode == "deleted" {
+			if len(sidecarSuffixes) > 0 && !strings.Contains(string(output), "orphaned_sidecars") {
+				t.Fatalf("rebuild did not report preserved orphaned sidecars: %s", output)
+			}
+			for _, suffix := range sidecarSuffixes {
+				paths, err := filepath.Glob(filepath.Join(f.home, "posse.db.orphaned-*-"+strings.TrimPrefix(suffix, "-")))
+				if err != nil || len(paths) != 1 {
+					t.Fatalf("orphaned %s sidecar paths = %v, %v", suffix, paths, err)
+				}
+			}
+			if mode != "existing" {
 				f.db, err = store.Open(f.home)
 				if err != nil {
 					t.Fatal(err)
