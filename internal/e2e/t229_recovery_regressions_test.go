@@ -204,7 +204,8 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 			f := newPRLifecycleFixture(t)
 			ctx := context.Background()
 			var sidecarSuffixes []string
-			validSidecars := map[string][]byte{}
+			database := filepath.Join(f.home, "posse.db")
+			sidecarContents := map[string][]byte{}
 			t.Cleanup(func() {
 				if f.db != nil {
 					_ = f.db.Close()
@@ -236,14 +237,14 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 				t.Fatalf("Project move did not refresh Task snapshot identity: %s", taskSnapshot)
 			}
 			if mode != "existing" {
-				database := filepath.Join(f.home, "posse.db")
+				stopBackgroundLookout(t, f)
 				if mode == "deleted-with-valid-sidecars" {
 					for _, suffix := range []string{"-wal", "-shm"} {
 						data, err := os.ReadFile(database + suffix)
 						if err != nil {
 							t.Fatalf("read live SQLite sidecar %s: %v", suffix, err)
 						}
-						validSidecars[suffix] = data
+						sidecarContents[suffix] = data
 						sidecarSuffixes = append(sidecarSuffixes, suffix)
 					}
 				}
@@ -254,7 +255,7 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 					t.Fatal(err)
 				}
 				if mode == "deleted-with-valid-sidecars" {
-					for suffix, data := range validSidecars {
+					for suffix, data := range sidecarContents {
 						if _, err := os.Stat(database + suffix); errors.Is(err, os.ErrNotExist) {
 							if err := os.WriteFile(database+suffix, data, 0o600); err != nil {
 								t.Fatal(err)
@@ -266,10 +267,22 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 				}
 				if mode == "deleted-with-stale-sidecars" {
 					for _, suffix := range []string{"-wal", "-shm"} {
-						if err := os.WriteFile(database+suffix, []byte("orphaned "+suffix+" from deleted database"), 0o600); err != nil {
+						data := []byte("orphaned " + suffix + " from deleted database")
+						if err := os.WriteFile(database+suffix, data, 0o600); err != nil {
 							t.Fatal(err)
 						}
+						sidecarContents[suffix] = data
 						sidecarSuffixes = append(sidecarSuffixes, suffix)
+					}
+				}
+			}
+			if mode != "existing" {
+				if _, err := os.Stat(database); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("database file exists before rebuild despite deletion: %v", err)
+				}
+				for _, suffix := range sidecarSuffixes {
+					if _, err := os.Stat(database + suffix); err != nil {
+						t.Fatalf("orphaned sidecar %s missing before rebuild: %v", suffix, err)
 					}
 				}
 			}
@@ -286,6 +299,10 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 				paths, err := filepath.Glob(filepath.Join(f.home, "posse.db.orphaned-*-"+strings.TrimPrefix(suffix, "-")))
 				if err != nil || len(paths) != 1 {
 					t.Fatalf("orphaned %s sidecar paths = %v, %v", suffix, paths, err)
+				}
+				preserved, err := os.ReadFile(paths[0])
+				if err != nil || string(preserved) != string(sidecarContents[suffix]) {
+					t.Fatalf("preserved %s sidecar content = %q, %v; want %q", suffix, preserved, err, sidecarContents[suffix])
 				}
 			}
 			if mode != "existing" {
