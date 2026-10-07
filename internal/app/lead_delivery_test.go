@@ -594,6 +594,7 @@ func TestDoctorClassifiesClaudeLowkeyVersions(t *testing.T) {
 }
 
 func TestOpenCodeLeadLaunchAndPluginConfig(t *testing.T) {
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
 	home := t.TempDir()
 	service := testService(home, nil)
 	cfg, err := config.Load(home, "")
