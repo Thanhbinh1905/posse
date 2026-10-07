@@ -318,6 +318,9 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 
 func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
+	// The fixture's poll-only Lookout can deliver queued messages as soon as
+	// the Rider becomes idle, racing the explicit crash-injected owner below.
+	stopBackgroundLookout(t, fixture)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "queued-crash.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCommit one change for queued message crash recovery.\n"), 0o600); err != nil {
