@@ -73,7 +73,8 @@ func normalizeNoticeIDs(ids []int64) ([]int64, error) {
 
 // ClaimNoticeDelivery records ownership before a batch is printed. The stable
 // delivery ID names the same batch for one destination; a new owner can take
-// over only after the previous lease expires.
+// over only after lease expiry. A printed batch may include acknowledged
+// Notices because its existing receipt proves their exact batch membership.
 func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []int64, destination, generation, token string, now, leaseMillis int64) (NoticeDelivery, bool, error) {
 	ids, err := normalizeNoticeIDs(ids)
 	if err != nil {
@@ -127,7 +128,7 @@ func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []in
 		if delivery.OwnerToken != token && delivery.LeaseUntil > now {
 			return delivery, false, nil
 		}
-		if err := claimDeliveryNotices(ctx, tx, projectID, ids, delivery.OwnerToken, token, now); err != nil {
+		if err := claimDeliveryNotices(ctx, tx, projectID, ids, delivery.OwnerToken, token, now, delivery.State == "printed"); err != nil {
 			return NoticeDelivery{}, false, err
 		}
 		state := delivery.State
@@ -141,7 +142,7 @@ func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []in
 		delivery.Generation, delivery.State, delivery.OwnerToken = generation, state, token
 		delivery.ClaimedAt, delivery.LeaseUntil, delivery.UpdatedAt = now, now+leaseMillis, now
 	} else {
-		if err := claimDeliveryNotices(ctx, tx, projectID, ids, "", token, now); err != nil {
+		if err := claimDeliveryNotices(ctx, tx, projectID, ids, "", token, now, false); err != nil {
 			return NoticeDelivery{}, false, err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO notice_delivery_receipts
@@ -160,11 +161,13 @@ func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []in
 	return delivery, true, nil
 }
 
+// claimDeliveryNotices keeps ordinary new claims unacknowledged. Only an
+// existing printed receipt may reacquire Notices already acknowledged in-turn.
 func claimDeliveryNotices(ctx context.Context, tx interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, projectID int64, ids []int64, oldToken, token string, now int64) error {
-	query := `UPDATE notices SET claim_token=?,claimed_at=? WHERE project_id=? AND delivered_at IS NULL AND acked_at IS NULL AND id IN (` + sqlPlaceholders(len(ids)) + `) AND (claim_token='' OR claim_token=?)`
-	args := []any{token, now, projectID}
+}, projectID int64, ids []int64, oldToken, token string, now int64, allowAcknowledged bool) error {
+	query := `UPDATE notices SET claim_token=?,claimed_at=? WHERE project_id=? AND delivered_at IS NULL AND (acked_at IS NULL OR ?=1) AND id IN (` + sqlPlaceholders(len(ids)) + `) AND (claim_token='' OR claim_token=?)`
+	args := []any{token, now, projectID, allowAcknowledged}
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -694,14 +697,15 @@ func (db *DB) RestoreNoticeDeliverySnapshot(ctx context.Context, tx interface {
 			return err
 		}
 		if delivery.State == "claimed" || delivery.State == "printed" {
+			allowAcknowledged := delivery.State == "printed"
 			for _, id := range ids {
-				if _, err := tx.ExecContext(ctx, `UPDATE notices SET claim_token=?,claimed_at=? WHERE id=? AND project_id=? AND delivered_at IS NULL AND acked_at IS NULL`, delivery.OwnerToken, delivery.ClaimedAt, id, delivery.ProjectID); err != nil {
+				if _, err := tx.ExecContext(ctx, `UPDATE notices SET claim_token=?,claimed_at=? WHERE id=? AND project_id=? AND delivered_at IS NULL AND (acked_at IS NULL OR ?=1)`, delivery.OwnerToken, delivery.ClaimedAt, id, delivery.ProjectID, allowAcknowledged); err != nil {
 					return err
 				}
 			}
 		} else if delivery.State == "uncertain" {
 			for _, id := range ids {
-				if _, err := tx.ExecContext(ctx, `UPDATE notices SET claim_token=?,claimed_at=? WHERE id=? AND project_id=? AND delivered_at IS NULL AND acked_at IS NULL`, "uncertain:"+delivery.DeliveryID, delivery.UpdatedAt, id, delivery.ProjectID); err != nil {
+				if _, err := tx.ExecContext(ctx, `UPDATE notices SET claim_token=?,claimed_at=? WHERE id=? AND project_id=? AND delivered_at IS NULL AND (acked_at IS NULL OR ?=1)`, "uncertain:"+delivery.DeliveryID, delivery.UpdatedAt, id, delivery.ProjectID, true); err != nil {
 					return err
 				}
 			}

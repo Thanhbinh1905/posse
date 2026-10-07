@@ -141,7 +141,6 @@ export const PosseLead = async ({ client, directory }) => {
       return;
     }
     sending = true;
-    idle = false;
     void (async () => {
       try {
         const priorReceipt = await sessionHasReceipt(batch.delivery);
@@ -153,6 +152,8 @@ export const PosseLead = async ({ client, directory }) => {
           return;
         }
         if (priorReceipt) {
+          // Reconciliation consumes only a persisted receipt; it does not
+          // start a model turn or change the session's idle state.
           const accepted = await settleReceipt(batch.delivery, "accepted");
           pending = undefined;
           if (accepted) {
@@ -165,6 +166,8 @@ export const PosseLead = async ({ client, directory }) => {
         const marker = `Posse delivery receipt: ${batch.delivery.delivery_id}\nPosse batch receipt: ${batch.delivery.batch_id}`;
         let promptError;
         try {
+          if (!idle) return;
+          idle = false;
           const response = await client.session.prompt({
             path: { id: session }, query: { directory },
             body: { parts: [{ type: "text", text: `${batch.wake}\n\n${marker}` }] },

@@ -228,15 +228,13 @@ func t208SnapshotRebuildCases(t *testing.T) {
 
 func t208PrepareSnapshotRebuild(t *testing.T, f *t205PRFixture) {
 	t.Helper()
-	// Hold a Decision that snapshot rebuild does not reconstruct. This exercises
-	// the known rebuild FK blocker addressed by A24 (#191).
+	// Exercise fixture cleanup for Decisions, which snapshot rebuild does not reconstruct.
 	if _, err := f.db.ExecContext(context.Background(), `INSERT INTO decisions(project_id,task_id,origin,question,options_json,created_at) VALUES(?,?,?,'fixture rebuild blocker','[]',?)`, f.project.ID, f.task.ID, "t208-rebuild-fixture", time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	// Until A24 fixes rebuild FK cleanup, clear state outside Task snapshots
-	// locally in this disposable fixture. This test covers marker recovery,
-	// not Mount or Decision restoration.
-	for _, statement := range []string{"UPDATE tasks SET mount_id=NULL", "DELETE FROM decisions", "DELETE FROM decision_notice_cursors"} {
+	// Rebuild does not reconstruct Decisions or decision cursors, so clear
+	// them here. Leave Task mount references intact for rebuild to detach.
+	for _, statement := range []string{"DELETE FROM decisions", "DELETE FROM decision_notice_cursors"} {
 		if _, err := f.db.ExecContext(context.Background(), statement); err != nil {
 			t.Fatal(err)
 		}

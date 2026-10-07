@@ -368,19 +368,19 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "UPDATE tasks SET reviews_task_id=NULL,mount_id=NULL"); err != nil {
+		return fmt.Errorf("clear Task references during rebuild: %w", err)
+	}
 	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "pr_body_markers", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
-			return err
+			return fmt.Errorf("delete %s during rebuild: %w", table, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE tasks SET reviews_task_id=NULL"); err != nil {
-		return err
-	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM tasks"); err != nil {
-		return err
+		return fmt.Errorf("delete Tasks during rebuild: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM projects"); err != nil {
-		return err
+		return fmt.Errorf("delete Projects during rebuild: %w", err)
 	}
 	for _, project := range projects {
 		kind := project.Kind
@@ -389,11 +389,11 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id,name,root,default_branch,kind,herdr_workspace_id,lead_pane_id,lead_label,lead_absent_since,status,created_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 			project.ID, project.Name, project.Root, project.DefaultBranch, kind, project.HerdrWorkspaceID, project.LeadPaneID, project.LeadLabel, project.LeadAbsentSince, project.Status, project.CreatedAt, project.LastActivityAt); err != nil {
-			return err
+			return fmt.Errorf("restore Project %d during rebuild: %w", project.ID, err)
 		}
 		for _, member := range members[project.ID] {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO project_repos(project_id,name,path,default_branch,status,created_at,updated_at,origin_host) VALUES(?,?,?,?,?,?,?,?)`, project.ID, member.Name, member.Path, member.DefaultBranch, member.Status, project.CreatedAt, project.LastActivityAt, member.OriginHost); err != nil {
-				return err
+				return fmt.Errorf("restore Project repo %s for Project %d during rebuild: %w", member.Name, project.ID, err)
 			}
 		}
 	}
@@ -405,7 +405,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,launches,gated_sha,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.ShortName, task.State, task.Profile, task.DispatchRule, task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.PRURL, task.LandedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt); err != nil {
-			return err
+			return fmt.Errorf("restore Task %d during rebuild: %w", task.ID, err)
 		}
 		for _, marker := range snapshot.PRBodyMarkers {
 			if marker.TaskID != 0 && marker.TaskID != task.ID {
@@ -415,7 +415,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				return fmt.Errorf("empty PR body marker token in snapshot for t%d", task.Seq)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO pr_body_markers(task_id,repo,pr_url,marker_token,updated_at) VALUES(?,?,?,?,?)`, task.ID, marker.Repo, marker.PRURL, marker.Token, marker.UpdatedAt); err != nil {
-				return err
+				return fmt.Errorf("restore PR body marker for Task %d during rebuild: %w", task.ID, err)
 			}
 		}
 		for _, identity := range snapshot.LaunchIdentities {
@@ -427,15 +427,15 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 			modelKnown := identity.ModelKnown && strings.TrimSpace(identity.ConfiguredModel) != ""
 			if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known) VALUES(?,?,?,?,?)`, task.ID, identity.LaunchNumber, identity.Profile, identity.ConfiguredModel, modelKnown); err != nil {
-				return err
+				return fmt.Errorf("restore launch identity for Task %d during rebuild: %w", task.ID, err)
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, "", task.State, "cli", "Rebuilt from atomic Task snapshot", task.UpdatedAt); err != nil {
-			return err
+			return fmt.Errorf("restore transition for Task %d during rebuild: %w", task.ID, err)
 		}
 		for _, repo := range snapshot.TaskRepos {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id,repo,worktree_path,base_ref,landing_mode,state,gated_sha,pr_url,landed_ref,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, task.ID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.LandingMode, repo.State, repo.GatedSHA, repo.PRURL, repo.LandedRef, task.UpdatedAt); err != nil {
-				return err
+				return fmt.Errorf("restore Task repo %s for Task %d during rebuild: %w", repo.Repo, task.ID, err)
 			}
 		}
 	}
@@ -444,5 +444,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			return fmt.Errorf("restore Notice delivery snapshot for Project %d: %w", snapshot.Project.ID, err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rebuilt database: %w", err)
+	}
+	return nil
 }
