@@ -101,6 +101,18 @@ func TestConcurrentLookoutSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.
 		}
 	}
 
+	signals, err := f.db.TaskSignals(ctx, taskID, iterations*commandsPerRole+1)
+	if err != nil {
+		t.Fatalf("read stress-run Signals: %v", err)
+	}
+	if len(signals) != iterations*commandsPerRole {
+		t.Fatalf("recorded %d Signals under load, want %d", len(signals), iterations*commandsPerRole)
+	}
+	for _, signal := range signals {
+		if signal.Verb != "working" {
+			t.Fatalf("stress-run recorded unexpected Signal: %#v", signal)
+		}
+	}
 	if got := len(lookoutPIDs(f.root)); got == 0 {
 		t.Fatal("isolated Lookout poller exited during the stress run")
 	}

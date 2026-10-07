@@ -72,6 +72,7 @@ assignments='
 3 TestLookoutStartupGraceHonorsTimeoutAndSIGTERM
 3 TestForgeReadinessUsesCacheInMultiMemberWorkspace
 3 TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls
+3 TestPostSignalMixedContentionAndPersistentFailureIsVisible
 3 TestDownDoesNotSignalDifferentMainPackageInPosseModule
 3 TestDecisionCLIFromLeadAndUserShellDeliversAnswerToLead
 3 TestFixtureRootReclaimsOnlyAbandonedOwnedRoots
@@ -104,6 +105,7 @@ assignments='
 4 TestRideCrashImmediatelyAfterTaskCreationIsRecovered
 4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall
 4 TestT229SignalSnapshotFailure
+4 TestRosterSucceedsWhenObservationOnlyHitsTransientContention
 '
 
 validate_assignments() {
