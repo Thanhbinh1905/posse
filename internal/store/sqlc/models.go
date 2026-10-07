@@ -213,6 +213,14 @@ type ProjectWatchState struct {
 	PrPollClaimToken      string
 }
 
+type PublishPrePushHead struct {
+	TaskID     int64
+	Repo       string
+	RequestUrl string
+	HeadSha    string
+	RecordedAt int64
+}
+
 type RepoWatchState struct {
 	ProjectID         int64
 	Repo              string
