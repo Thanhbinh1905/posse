@@ -36,7 +36,9 @@ type NoticeDelivery struct {
 }
 
 type NoticeDeliverySnapshot struct {
-	Version    int              `toml:"version"`
+	Version int `toml:"version"`
+	// Capture time precedes state reads so a slow write cannot make stale data appear newer.
+	CapturedAt int64            `toml:"captured_at,omitempty"`
 	Project    Project          `toml:"project"`
 	Notices    []Notice         `toml:"notices,omitempty"`
 	Deliveries []NoticeDelivery `toml:"deliveries,omitempty"`
@@ -588,7 +590,7 @@ func (db *DB) PersistNoticeDeliverySnapshot(ctx context.Context, projectID int64
 		_ = unix.Flock(int(lock.Fd()), unix.LOCK_UN)
 		_ = lock.Close()
 	}()
-	snapshot := NoticeDeliverySnapshot{Version: 1, Project: project}
+	snapshot := NoticeDeliverySnapshot{Version: 1, CapturedAt: time.Now().UnixNano(), Project: project}
 	rows, err := db.QueryContext(ctx, `SELECT delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at
 		FROM notice_delivery_receipts WHERE project_id=? ORDER BY created_at,delivery_id`, projectID)
 	if err != nil {
@@ -664,21 +666,43 @@ func acquireNoticeSnapshotLock(ctx context.Context, path string) (*os.File, erro
 
 func (db *DB) RestoreNoticeDeliverySnapshot(ctx context.Context, tx interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, snapshot NoticeDeliverySnapshot) error {
-	if snapshot.Version != 1 || snapshot.Project.ID == 0 || snapshot.Project.Name == "" {
-		return errors.New("invalid Notice delivery snapshot")
+}, snapshot NoticeDeliverySnapshot, project Project, projectSnapshotAt int64) error {
+	if snapshot.Version != 1 || snapshot.Project.ID == 0 || snapshot.Project.Name == "" || project.ID != snapshot.Project.ID || snapshot.Project.UUID == "" || snapshot.Project.UUID != project.UUID {
+		return errors.New("Notice delivery snapshot Project UUID does not match the recovered Project")
 	}
+	receiptIsNewer := snapshot.CapturedAt > 0 && projectSnapshotAt > 0 && snapshot.CapturedAt > projectSnapshotAt
+	projectIsNewer := snapshot.CapturedAt > 0 && projectSnapshotAt > 0 && projectSnapshotAt > snapshot.CapturedAt
 	for _, notice := range snapshot.Notices {
-		if notice.ProjectID != snapshot.Project.ID || notice.ID < 1 {
+		if notice.ProjectID != project.ID || notice.ID < 1 {
 			return errors.New("notice delivery snapshot contains a mismatched Notice")
 		}
 		var taskID any
 		if notice.TaskID != 0 {
 			taskID = notice.TaskID
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO notices(id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at)
-			VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, notice.ID, notice.ProjectID, taskID, notice.Kind, notice.Summary, notice.DataJSON, notice.CreatedAt, nullableInt64Value(notice.DeliveredAt), nullableInt64Value(notice.AckedAt)); err != nil {
+		query := `INSERT INTO notices(id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at)
+			VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET `
+		switch {
+		case receiptIsNewer:
+			query += `delivered_at=excluded.delivered_at,acked_at=excluded.acked_at`
+		case projectIsNewer:
+			query += `delivered_at=notices.delivered_at,acked_at=notices.acked_at`
+		default:
+			query += `delivered_at=CASE WHEN notices.delivered_at IS NULL THEN excluded.delivered_at WHEN excluded.delivered_at IS NULL THEN notices.delivered_at ELSE MAX(notices.delivered_at,excluded.delivered_at) END,
+				acked_at=CASE WHEN notices.acked_at IS NULL THEN excluded.acked_at WHEN excluded.acked_at IS NULL THEN notices.acked_at ELSE MAX(notices.acked_at,excluded.acked_at) END`
+		}
+		query += ` WHERE notices.project_id=excluded.project_id AND notices.task_id IS excluded.task_id
+			AND notices.kind=excluded.kind AND notices.summary=excluded.summary AND notices.data_json=excluded.data_json AND notices.created_at=excluded.created_at`
+		result, err := tx.ExecContext(ctx, query, notice.ID, notice.ProjectID, taskID, notice.Kind, notice.Summary, notice.DataJSON, notice.CreatedAt, nullableInt64Value(notice.DeliveredAt), nullableInt64Value(notice.AckedAt))
+		if err != nil {
 			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return fmt.Errorf("notice delivery snapshot conflicts with Notice %d", notice.ID)
 		}
 	}
 	for _, delivery := range snapshot.Deliveries {
@@ -695,6 +719,31 @@ func (db *DB) RestoreNoticeDeliverySnapshot(ctx context.Context, tx interface {
 			(delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, delivery.DeliveryID, delivery.BatchID, delivery.ProjectID, string(encoded), delivery.Destination, delivery.Generation, delivery.State, delivery.OwnerToken, delivery.ClaimedAt, delivery.LeaseUntil, delivery.AcceptedAt, delivery.CreatedAt, delivery.UpdatedAt); err != nil {
 			return err
+		}
+		if delivery.State == "accepted" {
+			acceptedAt := delivery.AcceptedAt
+			if acceptedAt == 0 {
+				acceptedAt = delivery.UpdatedAt
+			}
+			if acceptedAt == 0 {
+				return errors.New("accepted Notice delivery snapshot has no acceptance timestamp")
+			}
+			query := `UPDATE notices SET delivered_at=CASE WHEN delivered_at IS NULL OR delivered_at<? THEN ? ELSE delivered_at END,claim_token='',claimed_at=0 WHERE project_id=? AND id IN (` + sqlPlaceholders(len(ids)) + `)`
+			args := []any{acceptedAt, acceptedAt, project.ID}
+			for _, id := range ids {
+				args = append(args, id)
+			}
+			result, err := tx.ExecContext(ctx, query, args...)
+			if err != nil {
+				return err
+			}
+			count, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if count != int64(len(ids)) {
+				return errors.New("accepted Notice delivery snapshot is missing one or more Notices")
+			}
 		}
 		if delivery.State == "claimed" || delivery.State == "printed" {
 			allowAcknowledged := delivery.State == "printed"

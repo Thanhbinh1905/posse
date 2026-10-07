@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -102,6 +103,76 @@ func TestNoticeReceiptRebuildRejectsReusedProjectID(t *testing.T) {
 	notices, err := db.Notices(ctx, other.ID, false)
 	if err != nil || len(notices) != 0 {
 		t.Fatalf("old Notices were attached to the replacement Project: %+v, %v", notices, err)
+	}
+}
+
+func TestAcceptedNoticeReceiptSurvivesColdRebuild(t *testing.T) {
+	f := newAcknowledgedNoticeFixture(t)
+	ctx := context.Background()
+	acknowledgedID, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, Kind: "needs_decision", Summary: "Acknowledgment must survive cold rebuild"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, output := f.cli(t, "ack", strconv.FormatInt(acknowledgedID, 10), "--json")
+	if code != 0 {
+		t.Fatalf("acknowledge Notice before cold rebuild: %s", output)
+	}
+	acknowledgedBefore, err := f.db.NoticesByIDs(ctx, f.project.ID, []int64{acknowledgedID})
+	if err != nil || len(acknowledgedBefore) != 1 || acknowledgedBefore[0].AckedAt == 0 {
+		t.Fatalf("acknowledged Notice before cold rebuild = %+v, %v", acknowledgedBefore, err)
+	}
+	accepted := deliverAndAcceptNotice(t, f)
+	before, err := f.db.NoticesByIDs(ctx, f.project.ID, accepted.Delivery.NoticeIDs)
+	if err != nil || len(before) != 1 || before[0].DeliveredAt == 0 {
+		t.Fatalf("accepted Notice before cold rebuild = %+v, %v", before, err)
+	}
+	if err := f.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(filepath.Join(f.home, "posse.db") + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	code, output = f.cliAsUser(t, "recover", "--rebuild", "--json")
+	if code != 0 {
+		t.Fatalf("recover after database loss: %s", output)
+	}
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.db = db
+	t.Cleanup(func() { _ = db.Close() })
+	restoredReceipt, err := db.NoticeDelivery(ctx, accepted.Delivery.DeliveryID)
+	if err != nil || restoredReceipt.State != "accepted" {
+		t.Fatalf("accepted receipt after cold rebuild = %+v, %v", restoredReceipt, err)
+	}
+	acknowledgedAfter, err := db.NoticesByIDs(ctx, f.project.ID, []int64{acknowledgedID})
+	if err != nil || len(acknowledgedAfter) != 1 || acknowledgedAfter[0].AckedAt != acknowledgedBefore[0].AckedAt {
+		t.Fatalf("acknowledged Notice after cold rebuild = %+v, %v; before=%+v", acknowledgedAfter, err, acknowledgedBefore)
+	}
+	after, err := db.NoticesByIDs(ctx, f.project.ID, accepted.Delivery.NoticeIDs)
+	if err != nil || len(after) != 1 {
+		t.Fatalf("accepted Notice after cold rebuild = %+v, %v", after, err)
+	}
+	if after[0].DeliveredAt != before[0].DeliveredAt {
+		t.Errorf("accepted Notice after cold rebuild = %+v; before=%+v", after, before)
+	}
+	newerID, err := db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, Kind: "needs_decision", Summary: "Next Notice after recovery"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, output = f.cli(t, "lookout", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
+	if code != 0 {
+		t.Fatalf("handoff after cold rebuild: %s", output)
+	}
+	var next noticeHandoffPayload
+	if err := json.Unmarshal(output, &next); err != nil {
+		t.Fatalf("decode post-rebuild handoff %s: %v", output, err)
+	}
+	if len(next.Notices) != 1 || next.Notices[0].ID != newerID || next.Delivery.DeliveryID == accepted.Delivery.DeliveryID {
+		t.Fatalf("accepted Notice was replayed in a new batch: accepted=%+v next=%+v", accepted, next)
 	}
 }
 

@@ -603,10 +603,12 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 			}
 		}
 		snapshot := candidates[selected].snapshot
+		if snapshot.Project.UUID == "" || snapshot.Project.UUID != project.UUID {
+			return 0, fmt.Errorf("Notice delivery snapshot Project UUID %q does not match recovered Project UUID %q", snapshot.Project.UUID, project.UUID)
+		}
 		if snapshot.Project.ID != project.ID {
 			return 0, fmt.Errorf("Notice delivery snapshot Project UUID %q has ID %d, current Project ID is %d", projectUUID, snapshot.Project.ID, project.ID)
 		}
-		snapshot.Project = project
 		deliverySnapshots[projectID] = snapshot
 	}
 	for _, project := range projects {
@@ -692,10 +694,11 @@ func recoverBranchSnapshots(ctx context.Context, project Project, known map[stri
 }
 
 func latestDeliveryUpdate(snapshot NoticeDeliverySnapshot) int64 {
-	var latest int64
+	latest := snapshot.CapturedAt
 	for _, delivery := range snapshot.Deliveries {
-		if delivery.UpdatedAt > latest {
-			latest = delivery.UpdatedAt
+		updatedAt := delivery.UpdatedAt * int64(time.Millisecond)
+		if updatedAt > latest {
+			latest = updatedAt
 		}
 	}
 	return latest
@@ -812,9 +815,10 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 	}
-	for _, snapshot := range deliverySnapshots {
-		if err := db.RestoreNoticeDeliverySnapshot(ctx, tx, snapshot); err != nil {
-			return fmt.Errorf("restore Notice delivery snapshot for Project %d: %w", snapshot.Project.ID, err)
+	for projectID, snapshot := range deliverySnapshots {
+		project := projects[projectID]
+		if err := db.RestoreNoticeDeliverySnapshot(ctx, tx, snapshot, project, projectStates[projectID].CapturedAt); err != nil {
+			return fmt.Errorf("restore Notice delivery snapshot for Project %d: %w", projectID, err)
 		}
 	}
 	return tx.Commit()
