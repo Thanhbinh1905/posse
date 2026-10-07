@@ -48,6 +48,61 @@ func IsBusy(err error) bool {
 	return errors.Is(err, ErrBusy) || isBusyErr(err)
 }
 
+// IsOnlyBusy reports whether every constituent error represents transient
+// store contention. Unlike IsBusy, it does not classify a joined error as
+// transient when any constituent failure is non-contention.
+func IsOnlyBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return IsBusy(err)
+		}
+		for _, cause := range causes {
+			if !IsOnlyBusy(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return IsOnlyBusy(wrapped.Unwrap())
+	}
+	return IsBusy(err)
+}
+
+// WithoutBusy removes transient contention failures from an error tree while
+// retaining wrappers and non-contention failures for diagnostics.
+func WithoutBusy(err error) error {
+	if err == nil {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var retained []error
+		for _, cause := range joined.Unwrap() {
+			if remaining := WithoutBusy(cause); remaining != nil {
+				retained = append(retained, remaining)
+			}
+		}
+		return errors.Join(retained...)
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		cause := wrapped.Unwrap()
+		remaining := WithoutBusy(cause)
+		if remaining == nil {
+			return nil
+		}
+		prefix := strings.TrimSuffix(err.Error(), cause.Error())
+		return fmt.Errorf("%s%w", prefix, remaining)
+	}
+	if IsBusy(err) {
+		return nil
+	}
+	return err
+}
+
 // IsStorageError identifies SQLite and database/sql no-row errors so command
 // boundaries can return a typed storage failure instead of an internal error.
 func IsStorageError(err error) bool {
