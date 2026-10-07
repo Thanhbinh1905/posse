@@ -849,6 +849,7 @@ func (db *DB) ClearTaskGatedSHA(ctx context.Context, taskID int64) error {
 
 type Project struct {
 	ID               int64  `toml:"id"`
+	UUID             string `toml:"uuid" json:"-"`
 	Name             string `toml:"name"`
 	Root             string `toml:"root"`
 	DefaultBranch    string `toml:"default_branch"`
@@ -938,8 +939,12 @@ func (db *DB) ClearLead(ctx context.Context, projectID int64) error {
 }
 
 func (db *DB) CreateProject(ctx context.Context, name, root, defaultBranch string) (Project, error) {
+	uuid, err := newProjectUUID()
+	if err != nil {
+		return Project{}, err
+	}
 	now := time.Now().UnixMilli()
-	result, err := db.queries.InsertProject(ctx, dbgen.InsertProjectParams{Name: name, Root: root, DefaultBranch: defaultBranch, CreatedAt: now, LastActivityAt: now})
+	result, err := db.queries.InsertProject(ctx, dbgen.InsertProjectParams{Name: name, Root: root, DefaultBranch: defaultBranch, CreatedAt: now, LastActivityAt: now, ProjectUuid: uuid})
 	if err != nil {
 		return Project{}, err
 	}
@@ -947,7 +952,7 @@ func (db *DB) CreateProject(ctx context.Context, name, root, defaultBranch strin
 	if err != nil {
 		return Project{}, err
 	}
-	project := Project{ID: id, Name: name, Root: root, DefaultBranch: defaultBranch, Kind: ProjectKindRepo, Status: "active", CreatedAt: now, LastActivityAt: now}
+	project := Project{ID: id, UUID: uuid, Name: name, Root: root, DefaultBranch: defaultBranch, Kind: ProjectKindRepo, Status: "active", CreatedAt: now, LastActivityAt: now}
 	if err := db.PersistProject(ctx, id); err != nil {
 		return Project{}, err
 	}
@@ -1012,7 +1017,35 @@ func (db *DB) MoveProject(ctx context.Context, projectID int64, newRoot, default
 	if err := db.queries.MoveProject(ctx, dbgen.MoveProjectParams{Root: newRoot, DefaultBranch: defaultBranch, LastActivityAt: time.Now().UnixMilli(), ID: projectID}); err != nil {
 		return err
 	}
-	return db.PersistProject(ctx, projectID)
+	if err := db.PersistProject(ctx, projectID); err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id FROM tasks WHERE project_id=? ORDER BY id`, projectID)
+	if err != nil {
+		return err
+	}
+	var taskIDs []int64
+	for rows.Next() {
+		var taskID int64
+		if err := rows.Scan(&taskID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		taskIDs = append(taskIDs, taskID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, taskID := range taskIDs {
+		if err := db.persistTask(ctx, taskID, false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (db *DB) NextTaskSeq(ctx context.Context, projectID int64) (int, error) {
@@ -1734,7 +1767,7 @@ func (db *DB) Projects(ctx context.Context) ([]Project, error) {
 }
 
 func projectFromDB(row dbgen.Project) Project {
-	return Project{ID: row.ID, Name: row.Name, Root: row.Root, DefaultBranch: row.DefaultBranch, Kind: row.Kind, HerdrWorkspaceID: row.HerdrWorkspaceID, LeadPaneID: row.LeadPaneID, LeadLabel: row.LeadLabel, LeadLaunches: int(row.LeadLaunches), LeadAbsentSince: row.LeadAbsentSince, Status: row.Status, DownAt: row.DownAt, CreatedAt: row.CreatedAt, LastActivityAt: row.LastActivityAt}
+	return Project{ID: row.ID, UUID: row.ProjectUuid, Name: row.Name, Root: row.Root, DefaultBranch: row.DefaultBranch, Kind: row.Kind, HerdrWorkspaceID: row.HerdrWorkspaceID, LeadPaneID: row.LeadPaneID, LeadLabel: row.LeadLabel, LeadLaunches: int(row.LeadLaunches), LeadAbsentSince: row.LeadAbsentSince, Status: row.Status, DownAt: row.DownAt, CreatedAt: row.CreatedAt, LastActivityAt: row.LastActivityAt}
 }
 
 type AmbiguousTaskName struct {

@@ -91,21 +91,36 @@ type noticeSnapshot struct {
 }
 
 func sameProjectIdentity(a, b Project) bool {
-	return a.Name == b.Name && filepath.Clean(a.Root) == filepath.Clean(b.Root)
+	if a.UUID != "" && b.UUID != "" {
+		return a.UUID == b.UUID
+	}
+	if a.Name != b.Name {
+		return false
+	}
+	if filepath.Clean(a.Root) == filepath.Clean(b.Root) {
+		return true
+	}
+	return a.CreatedAt != 0 && a.CreatedAt == b.CreatedAt
 }
 
 func projectIdentityKey(project Project) string {
-	return project.Name + "\x00" + filepath.Clean(project.Root)
+	if project.UUID != "" {
+		return "uuid\x00" + project.UUID
+	}
+	if project.CreatedAt != 0 {
+		return fmt.Sprintf("legacy\x00%s\x00%d", project.Name, project.CreatedAt)
+	}
+	return "legacy\x00" + project.Name + "\x00" + filepath.Clean(project.Root)
 }
 
 func projectIdentityConflict(a, b Project) error {
-	return fmt.Errorf("Project identity conflict: ID %d is recorded as %q at %q and %q at %q",
-		a.ID, a.Name, a.Root, b.Name, b.Root)
+	return fmt.Errorf("Project identity conflict: ID %d has conflicting snapshots %q at %q (UUID %q) and %q at %q (UUID %q)",
+		a.ID, a.Name, a.Root, a.UUID, b.Name, b.Root, b.UUID)
 }
 
 func databaseProjectIdentityConflict(snapshot, current Project) error {
-	return fmt.Errorf("Project identity conflict: snapshot Project %q at %q (ID %d) conflicts with current database Project %q at %q (ID %d)",
-		snapshot.Name, snapshot.Root, snapshot.ID, current.Name, current.Root, current.ID)
+	return fmt.Errorf("Project identity conflict: snapshot Project %q at %q (ID %d, UUID %q) conflicts with current database Project %q at %q (ID %d, UUID %q)",
+		snapshot.Name, snapshot.Root, snapshot.ID, snapshot.UUID, current.Name, current.Root, current.ID, current.UUID)
 }
 
 func IsCorruptDatabaseFile(path string) bool {
@@ -172,6 +187,10 @@ func (db *DB) ProjectSnapshotPath(project string) string {
 }
 
 func (db *DB) PersistTask(ctx context.Context, taskID int64) error {
+	return db.persistTask(ctx, taskID, true)
+}
+
+func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool) error {
 	var projectID int64
 	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID); err != nil {
 		return err
@@ -230,7 +249,10 @@ func (db *DB) PersistTask(ctx context.Context, taskID int64) error {
 	if err := atomicfile.Write(db.TaskSnapshotPath(project.Name, task.Seq), encoded.Bytes(), 0o600); err != nil {
 		return err
 	}
-	return db.PersistProject(ctx, projectID)
+	if persistProject {
+		return db.PersistProject(ctx, projectID)
+	}
+	return nil
 }
 
 func (db *DB) PersistProject(ctx context.Context, projectID int64) error {
@@ -460,18 +482,18 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		}
 	}
 	// A freshly initialized DB may have reused a snapshot ID for another Project.
-	currentRows, err := db.QueryContext(ctx, `SELECT id,name,root FROM projects`)
+	currentRows, err := db.QueryContext(ctx, `SELECT id FROM projects`)
 	if err != nil {
 		return 0, err
 	}
-	var currentProjects []Project
+	var currentProjectIDs []int64
 	for currentRows.Next() {
-		var project Project
-		if err := currentRows.Scan(&project.ID, &project.Name, &project.Root); err != nil {
+		var id int64
+		if err := currentRows.Scan(&id); err != nil {
 			_ = currentRows.Close()
 			return 0, err
 		}
-		currentProjects = append(currentProjects, project)
+		currentProjectIDs = append(currentProjectIDs, id)
 	}
 	if err := currentRows.Err(); err != nil {
 		_ = currentRows.Close()
@@ -480,7 +502,11 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 	if err := currentRows.Close(); err != nil {
 		return 0, err
 	}
-	for _, current := range currentProjects {
+	for _, projectID := range currentProjectIDs {
+		current, err := db.ProjectByID(ctx, projectID)
+		if err != nil {
+			return 0, err
+		}
 		snapshot, exists := projects[current.ID]
 		if exists && !sameProjectIdentity(snapshot, current) {
 			return 0, databaseProjectIdentityConflict(snapshot, current)
@@ -491,12 +517,8 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		if !exists {
 			continue
 		}
-		project, err := db.ProjectByID(ctx, current.ID)
-		if err != nil {
-			return 0, err
-		}
-		projects[current.ID] = project
-		if project.IsWorkspace() && projectSnapshotAt[current.ID] == 0 && len(members[current.ID]) == 0 {
+		projects[current.ID] = current
+		if current.IsWorkspace() && projectSnapshotAt[current.ID] == 0 && len(members[current.ID]) == 0 {
 			members[current.ID], err = db.ProjectRepos(ctx, current.ID)
 			if err != nil {
 				return 0, err
@@ -507,6 +529,20 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 			return 0, err
 		}
 		projectStates[current.ID] = state
+	}
+	for projectID, project := range projects {
+		if project.UUID == "" {
+			project.UUID, err = newProjectUUID()
+			if err != nil {
+				return 0, err
+			}
+			projects[projectID] = project
+		}
+	}
+	for index := range snapshots {
+		if project, ok := projects[snapshots[index].Project.ID]; ok {
+			snapshots[index].Project = project
+		}
 	}
 	for _, project := range projects {
 		recovered, err := recoverBranchSnapshots(ctx, project, known, maxID)
@@ -618,8 +654,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if kind == "" {
 			kind = ProjectKindRepo
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id,name,root,default_branch,kind,herdr_workspace_id,lead_pane_id,lead_label,lead_absent_since,status,created_at,last_activity_at,lead_launches,down_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			project.ID, project.Name, project.Root, project.DefaultBranch, kind, project.HerdrWorkspaceID, project.LeadPaneID, project.LeadLabel, project.LeadAbsentSince, project.Status, project.CreatedAt, project.LastActivityAt, project.LeadLaunches, project.DownAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id,name,root,default_branch,kind,herdr_workspace_id,lead_pane_id,lead_label,lead_absent_since,status,created_at,last_activity_at,lead_launches,down_at,project_uuid) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			project.ID, project.Name, project.Root, project.DefaultBranch, kind, project.HerdrWorkspaceID, project.LeadPaneID, project.LeadLabel, project.LeadAbsentSince, project.Status, project.CreatedAt, project.LastActivityAt, project.LeadLaunches, project.DownAt, project.UUID); err != nil {
 			return err
 		}
 		for _, member := range members[project.ID] {

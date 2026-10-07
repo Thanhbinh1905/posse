@@ -197,6 +197,75 @@ func TestT229SignalSnapshotFailure(t *testing.T) {
 	}
 }
 
+func TestT233MovedProjectRebuild(t *testing.T) {
+	for _, mode := range []string{"existing", "deleted"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newPRLifecycleFixture(t)
+			ctx := context.Background()
+			t.Cleanup(func() {
+				if f.db != nil {
+					_ = f.db.Close()
+				}
+			})
+			taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "scout", Title: "Before Project move", LandingMode: "local"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			moved := filepath.Join(f.root, "moved-repo")
+			if err := os.Rename(f.repo, moved); err != nil {
+				t.Fatal(err)
+			}
+			move := exec.Command(f.binary, "project", "move", "shop", moved)
+			move.Dir, move.Env = moved, f.leadEnv
+			output, err := move.CombinedOutput()
+			if err != nil {
+				t.Fatalf("project move: %v\n%s", err, output)
+			}
+			movedProject, err := f.db.ProjectByID(ctx, f.project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			taskSnapshot, err := os.ReadFile(f.db.TaskSnapshotPath(f.project.Name, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(taskSnapshot), `root = "`+moved+`"`) || !strings.Contains(string(taskSnapshot), `uuid = "`+movedProject.UUID+`"`) {
+				t.Fatalf("Project move did not refresh Task snapshot identity: %s", taskSnapshot)
+			}
+			if mode == "deleted" {
+				if err := f.db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(f.home, "posse.db")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := exec.Command(f.binary, "recover", "--rebuild")
+			command.Dir, command.Env = moved, f.env
+			output, err = command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("rebuild after Project move (%s): %v\n%s", mode, err, output)
+			}
+			if mode == "deleted" {
+				f.db, err = store.Open(f.home)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			project, err := f.db.ProjectByID(ctx, f.project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.db.TaskByID(ctx, project.ID, taskID); err != nil {
+				t.Fatalf("Task was not attached to moved Project: %v", err)
+			}
+			if project.Root != moved {
+				t.Fatalf("moved root=%q, want %q", project.Root, moved)
+			}
+		})
+	}
+}
+
 func TestT229RebuildPreservesStoppedProject(t *testing.T) {
 	for _, mode := range []string{"existing", "deleted", "corrupt"} {
 		t.Run(mode, func(t *testing.T) {

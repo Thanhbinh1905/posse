@@ -65,13 +65,17 @@ func (p Project) IsWorkspace() bool { return p.Kind == ProjectKindWorkspace }
 
 // CreateWorkspaceProject registers a workspace Project and its members in one transaction.
 func (db *DB) CreateWorkspaceProject(ctx context.Context, name, root string, repos []ProjectRepo) (Project, error) {
+	uuid, err := newProjectUUID()
+	if err != nil {
+		return Project{}, err
+	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return Project{}, err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	result, err := tx.ExecContext(ctx, `INSERT INTO projects(name, root, default_branch, kind, status, created_at, last_activity_at) VALUES (?, ?, '', ?, 'active', ?, ?)`, name, root, ProjectKindWorkspace, now, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO projects(name, root, default_branch, kind, status, created_at, last_activity_at, project_uuid) VALUES (?, ?, '', ?, 'active', ?, ?, ?)`, name, root, ProjectKindWorkspace, now, now, uuid)
 	if err != nil {
 		return Project{}, err
 	}
@@ -87,7 +91,7 @@ func (db *DB) CreateWorkspaceProject(ctx context.Context, name, root string, rep
 	if err := tx.Commit(); err != nil {
 		return Project{}, err
 	}
-	project := Project{ID: id, Name: name, Root: root, Kind: ProjectKindWorkspace, Status: "active", CreatedAt: now, LastActivityAt: now}
+	project := Project{ID: id, UUID: uuid, Name: name, Root: root, Kind: ProjectKindWorkspace, Status: "active", CreatedAt: now, LastActivityAt: now}
 	if err := db.PersistProject(ctx, id); err != nil {
 		return Project{}, err
 	}
