@@ -298,6 +298,7 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	if err != nil {
 		return result, err
 	}
+	deferredRecovery := false
 	if current.ServerStartedAt != "" && recorded != "" && current.ServerStartedAt != recorded {
 		if !userStart && recoveryHeld(project, cfg) {
 			return result, errRecoveryHeld
@@ -307,11 +308,16 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 			return result, err
 		}
 		if _, err := s.recoverProject(ctx, db, home, project); err != nil {
-			return result, fmt.Errorf("recover Project %s after Herdr restart: %w", project.Name, err)
+			if !userStart || !errors.Is(err, errRecoveryDeferred) {
+				return result, fmt.Errorf("recover Project %s after Herdr restart: %w", project.Name, err)
+			}
+			// Start the Lead while the interrupted Rider waits for its retry
+			// backoff. Up settles explicit relaunch intents after reconciliation.
+			deferredRecovery = true
 		}
 	}
 	result, err = run()
-	if err == nil && result.GenerationMismatch {
+	if err == nil && result.GenerationMismatch && !(userStart && deferredRecovery) {
 		return result, fmt.Errorf("project %s Herdr generation changed during recovery; retry reconcile", project.Name)
 	}
 	if err != nil {
