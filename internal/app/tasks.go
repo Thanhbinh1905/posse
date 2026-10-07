@@ -1074,20 +1074,34 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	// The Signal and its Notice are committed before unrelated Project work.
 	// A retry after a post-commit failure would incorrectly imply it was lost.
+	signalResult := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "signal", Value: verb}, {Key: "state", Value: string(state)}, {Key: "help", Value: []any{"Run `posse brief` to reread the Rider protocol"}}}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
 	defer cancelMaintenance()
 	if _, err := s.prepareProject(maintenanceCtx, db, project); err != nil {
-		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project maintenance deferred: %v\n", normalizeCommandError(err))
+		if store.IsOnlyBusy(err) {
+			// Lookout retries deferred maintenance and logs its own contention.
+			return ctx.Print(signalResult)
+		}
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project maintenance deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
+		if maintenanceCtx.Err() != nil {
+			return ctx.Print(signalResult)
+		}
 	}
 	if noticeKind != "" {
 		if err := s.deliverNotices(maintenanceCtx, db, project); err != nil && !isHerdrUnavailable(err) {
-			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Notice delivery deferred: %v\n", normalizeCommandError(err))
+			if store.IsOnlyBusy(err) {
+				return ctx.Print(signalResult)
+			}
+			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Notice delivery deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
+			if maintenanceCtx.Err() != nil {
+				return ctx.Print(signalResult)
+			}
 		}
 	}
-	if err := s.regenerateProjects(maintenanceCtx, db); err != nil {
-		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project snapshot deferred: %v\n", normalizeCommandError(err))
+	if err := s.regenerateProjects(maintenanceCtx, db); err != nil && !store.IsOnlyBusy(err) {
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project snapshot deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "signal", Value: verb}, {Key: "state", Value: string(state)}, {Key: "help", Value: []any{"Run `posse brief` to reread the Rider protocol"}}})
+	return ctx.Print(signalResult)
 }
 
 func (s *Service) brief(ctx *axi.Context, args []string) error {

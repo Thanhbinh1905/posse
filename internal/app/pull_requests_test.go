@@ -81,8 +81,9 @@ func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
 		"## Proof\n\n" + proof + "\n\n" +
 		"## Risk And Rollback\n\n" + risk + "\n\n" +
 		"## Documentation\n\n- [ ] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
-	if !strings.Contains(string(log), "--body "+expectedBody) {
-		t.Fatalf("PR body did not match the seven-section template: %q", log)
+	token := managedPublishTokenFromLog(string(log))
+	if token == "" || !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody, token)) {
+		t.Fatalf("PR body did not match the tokenized seven-section template: %q", log)
 	}
 }
 
@@ -102,8 +103,9 @@ func TestPublishWithoutOptionalBodyFieldsWritesDefaults(t *testing.T) {
 		"## Proof\n\n_No proof supplied._\n\n" +
 		"## Risk And Rollback\n\nRisk: not stated\nRollback: revert this PR\n\n" +
 		"## Documentation\n\n- [ ] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
-	if !strings.Contains(string(log), "--body "+expectedBody) {
-		t.Fatalf("PR body did not include the optional-field defaults: %q", log)
+	token := managedPublishTokenFromLog(string(log))
+	if token == "" || !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody, token)) {
+		t.Fatalf("PR body did not include the tokenized optional-field defaults: %q", log)
 	}
 }
 
@@ -138,18 +140,28 @@ func TestPublishAddsIssueLinksWhenReusingAnExistingPullRequest(t *testing.T) {
 	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	_, currentBody, err := prDetails(context.Background(), fixture.db, fixture.project, fixture.task, fixture.service.homePath, "", "Worker completion summary", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/acme/shop/pull/17"
+	token, err := fixture.db.EnsurePRBodyMarker(context.Background(), fixture.task.ID, "", prURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_BODY", "Maintainer intro\n\n"+managedPublishBody(currentBody, token)+"\n\nMaintainer footer")
 	openPR := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, fixture.headSHA)
 	if err := os.WriteFile(fixture.ghOpenPRs, []byte(openPR), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
+	if code, output, stderr := fixture.run("publish", "Updated worker completion summary"); code != 0 {
 		t.Fatalf("publish: %d %s %s", code, output, stderr)
 	}
 	log, err := os.ReadFile(fixture.ghLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"pr edit https://github.com/acme/shop/pull/17 --body", "Existing PR description", "Closes #12", "Refs #14"} {
+	for _, expected := range []string{"pr edit https://github.com/acme/shop/pull/17 --title", "Updated worker completion summary", "Maintainer intro", "Maintainer footer", "Closes #12", "Refs #14"} {
 		if !strings.Contains(string(log), expected) {
 			t.Fatalf("reused PR body update omitted %q: %s", expected, log)
 		}
@@ -641,23 +653,24 @@ func TestWorkerPublishAdoptsExistingPR(t *testing.T) {
 	}
 }
 
-func TestWorkerPublishReportsPersistentPRHeadMismatch(t *testing.T) {
+func TestWorkerPublishReportsUnexpectedPRHeadMismatch(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
-	oldHead := fixture.headSHA
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
 	if err := os.WriteFile(filepath.Join(fixture.worktree, "follow-up.txt"), []byte("follow-up\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	gitTest(t, fixture.worktree, "add", "follow-up.txt")
 	gitTest(t, fixture.worktree, "commit", "-m", "follow-up commit")
 	newHead := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
-	openPRs := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, oldHead)
+	unexpectedHead := strings.Repeat("f", 40)
+	openPRs := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, unexpectedHead)
 	if err := os.WriteFile(fixture.ghOpenPRs, []byte(openPRs), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	code, output, stderr := fixture.run("publish", "Worker follow-up")
-	if code != 1 || !strings.Contains(output, oldHead) || !strings.Contains(output, newHead) {
-		t.Fatalf("persistent PR head mismatch did not report both heads: exit=%d output=%s stderr=%s", code, output, stderr)
+	if code != 1 || !strings.Contains(output, unexpectedHead) || !strings.Contains(output, newHead) || !strings.Contains(output, "branch_moved") {
+		t.Fatalf("unexpected PR head did not report branch_moved with both heads: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.remote, "rev-parse", "refs/heads/posse/t1")); got != newHead {
 		t.Fatalf("publish did not push the expected Task head before checking the PR: got=%s want=%s", got, newHead)
@@ -666,8 +679,8 @@ func TestWorkerPublishReportsPersistentPRHeadMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(log), "pr list") < 2 {
-		t.Fatalf("publish did not retry the persistent mismatch: %s", log)
+	if strings.Count(string(log), "pr list") != 1 {
+		t.Fatalf("publish should reject an unexpected PR head without polling: %s", log)
 	}
 }
 
@@ -1041,10 +1054,21 @@ case "$1 $2" in
       *) printf '{"state":"OPEN"}\n' ;;
     esac ;;
   "pr create") printf '%s\n' "$POSSE_TEST_GH_URL" ;;
-  "pr edit") printf 'Edited\n' ;;
+  "pr edit")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title)
+          if [ -n "${POSSE_TEST_GH_EDIT_TITLE:-}" ]; then printf '%s' "$2" > "$POSSE_TEST_GH_EDIT_TITLE"; fi
+          shift 2 ;;
+        --body) printf '%s' "$2" > "$POSSE_TEST_GH_EDIT_BODY"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'Edited\n' ;;
   "pr view")
     case "$*" in
-      *"--json body"*) printf '{"body":"%s"}\n' "${POSSE_TEST_GH_BODY:-Existing PR description}" ;;
+      *"--json title,body"*) python3 -c 'import json,sys; print(json.dumps({"title":sys.argv[1],"body":sys.argv[2]}))' "E2E Brief title" "${POSSE_TEST_GH_BODY-}" ;;
+      *"--json body"*) python3 -c 'import json,sys; print(json.dumps({"body":sys.argv[1]}))' "${POSSE_TEST_GH_BODY-}" ;;
       *) printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "${POSSE_TEST_GH_VIEW_STATE:-OPEN}" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "${POSSE_TEST_GH_BASE_BRANCH:-main}" "${POSSE_TEST_GH_SOURCE:-acme/shop}" ;;
     esac ;;
   "pr merge") printf 'Merged\n' ;;
@@ -1060,7 +1084,8 @@ esac
 	t.Setenv("POSSE_TEST_GH_OPEN_PRS", fixture.ghOpenPRs)
 	t.Setenv("POSSE_TEST_GH_HEAD", fixture.ghHead)
 	t.Setenv("POSSE_TEST_GH_URL", "https://github.com/acme/shop/pull/17")
-	t.Setenv("POSSE_TEST_GH_BODY", "Existing PR description")
+	t.Setenv("POSSE_TEST_GH_BODY", "")
+	t.Setenv("POSSE_TEST_GH_EDIT_BODY", filepath.Join(fixture.root, "gh-edited-body.md"))
 	t.Setenv("POSSE_TEST_GH_FAIL", "")
 	fixture.setGHHead(t, fixture.headSHA)
 	if err := os.WriteFile(fixture.ghOpenPRs, []byte("[]\n"), 0o600); err != nil {

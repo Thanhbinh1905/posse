@@ -89,7 +89,38 @@ func (db *DB) FinishTaskRecovery(ctx context.Context, task Task, ownerPID, limit
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if nextStatus == "exhausted" {
+		return db.PersistProject(ctx, task.ProjectID)
+	}
+	return nil
+}
+
+// AssociateTaskRecoveryGeneration ties an unfinished retry episode to a group
+// recovery without changing its budget, retry time, status, or owner.
+func (db *DB) AssociateTaskRecoveryGeneration(ctx context.Context, taskID int64, previousGeneration, generation string) (bool, error) {
+	result, err := db.ExecContext(ctx, `UPDATE task_recovery SET generation=? WHERE task_id=? AND generation=? AND status IN ('pending','running')`, generation, taskID, previousGeneration)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
+}
+
+// SettleTaskRecovery marks an unclaimed episode recovered without charging an
+// attempt, but only if its persisted state has not changed since observation.
+func (db *DB) SettleTaskRecovery(ctx context.Context, taskID int64, expected TaskRecovery) (bool, error) {
+	if expected.Status != "pending" && expected.Status != "running" {
+		return false, nil
+	}
+	result, err := db.ExecContext(ctx, `UPDATE task_recovery SET status='recovered',next_attempt_at=0,owner_pid=0,last_error='' WHERE task_id=? AND generation=? AND attempts=? AND next_attempt_at=? AND owner_pid=? AND status=?`, taskID, expected.Generation, expected.Attempts, expected.NextAttemptAt, expected.OwnerPID, expected.Status)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
 }
 
 // RetryRecoveredTask reopens a completed episode only after its caller verifies

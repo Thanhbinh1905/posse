@@ -39,12 +39,17 @@ case "$PWD/" in
   "$POSSE_E2E_REMUDA/"*)
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-    printf 'Report for %s\n' "$PWD" > report.md
-    printf 'root evidence\n' > root-evidence.txt
-    printf 'updated workspace context\n' > workspace-note.txt
-    printf 'See root-evidence.txt and workspace-note.txt\n' >> report.md
     mode=$(cat "$POSSE_TEST_ROOT/scout-mode" 2>/dev/null || true)
     rm -f "$POSSE_TEST_ROOT/scout-mode"
+    printf 'Report for %s\n' "$PWD" > report.md
+    if [ "$mode" = missing-baseline ]; then
+      printf 'new root evidence\n' > new-root-evidence.txt
+      printf 'See new-root-evidence.txt\n' >> report.md
+    else
+      printf 'root evidence\n' > root-evidence.txt
+      printf 'updated workspace context\n' > workspace-note.txt
+      printf 'See root-evidence.txt and workspace-note.txt\n' >> report.md
+    fi
     if [ "$mode" = nested-git ]; then
       mkdir -p git-evidence
       git -C git-evidence init -q -b main
@@ -164,11 +169,13 @@ esac
 		scenario            string
 		nestedGit           bool
 		updateProject       bool
+		missingBaseline     bool
 	}{
 		{taskID: "t1", title: "Inspect backend member", name: "inspect-backend-member", members: []string{"backend"}},
 		{taskID: "t2", title: "Inspect both members", name: "inspect-both-members", members: []string{"backend", "worker"}},
 		{taskID: "t3", title: "Inspect nested root", name: "inspect-nested-root", members: []string{"backend"}, scenario: "nested-git", nestedGit: true},
 		{taskID: "t4", title: "Preserve root evidence", name: "preserve-root-evidence", members: []string{"backend"}, updateProject: true},
+		{taskID: "t5", title: "Refuse missing baseline", name: "refuse-missing-baseline", members: []string{"backend"}, scenario: "missing-baseline", missingBaseline: true},
 	} {
 		t.Run(test.taskID, func(t *testing.T) {
 			if test.scenario != "" {
@@ -218,6 +225,53 @@ esac
 			if noticeID == "" {
 				t.Fatalf("Task %s has no task_done Notice: %#v", test.taskID, notices)
 			}
+			if test.missingBaseline {
+				baselinePath := filepath.Join(root, "posse", "projects", "stack", ".workspace-root-baselines", fmt.Sprintf("t%d.json", task.Seq))
+				baseline, err := os.ReadFile(baselinePath)
+				if err != nil {
+					t.Fatalf("read acquisition baseline: %v", err)
+				}
+				if err := os.Remove(baselinePath); err != nil {
+					t.Fatalf("remove acquisition baseline: %v", err)
+				}
+				command := exec.Command(binary, "unsaddle", test.taskID)
+				command.Dir, command.Env = workspace, leadEnv
+				output, teardownErr := command.CombinedOutput()
+				if teardownErr == nil || !strings.Contains(string(output), "unsaddle_incomplete") || !strings.Contains(string(output), "acquisition baseline") {
+					t.Fatalf("Teardown without baseline = %v, want preservation refusal; output:\n%s", teardownErr, output)
+				}
+				current, err := db.Task(context.Background(), project.ID, test.taskID)
+				if err != nil || current.State != store.StateReported {
+					t.Fatalf("Task after missing-baseline refusal = %#v, %v", current, err)
+				}
+				mounts, err := db.Mounts(context.Background(), project.ID)
+				if err != nil || len(mounts) == 0 || mounts[0].ID != task.MountID || mounts[0].State == "idle" {
+					t.Fatalf("Mount after missing-baseline refusal = %#v, %v", mounts, err)
+				}
+				if _, err := os.Stat(task.WorktreePath); err != nil {
+					t.Fatalf("Mount path after missing-baseline refusal: %v", err)
+				}
+				if contents, err := os.ReadFile(filepath.Join(task.WorktreePath, "new-root-evidence.txt")); err != nil || string(contents) != "new root evidence\n" {
+					t.Fatalf("new root evidence after missing-baseline refusal = %q, %v", contents, err)
+				}
+				failureNotices, err := db.Notices(context.Background(), project.ID, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				foundFailure := false
+				for _, notice := range failureNotices {
+					if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" && strings.Contains(notice.Summary, "acquisition baseline") {
+						foundFailure = true
+						break
+					}
+				}
+				if !foundFailure {
+					t.Fatalf("missing-baseline refusal did not record an unsaddle_incomplete Notice: %#v", failureNotices)
+				}
+				if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
+					t.Fatalf("restore acquisition baseline for retry: %v", err)
+				}
+			}
 			runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
 			if !waitForCondition(30*time.Second, func() bool {
 				current, err := db.Task(context.Background(), project.ID, test.taskID)
@@ -234,7 +288,12 @@ esac
 			if len(mounts) == 0 || mounts[0].State != "idle" {
 				t.Fatalf("Mount was not released: %#v", mounts)
 			}
-			artifacts := []string{"report.md", "root-evidence.txt", "workspace-note.txt"}
+			artifacts := []string{"report.md"}
+			if test.missingBaseline {
+				artifacts = append(artifacts, "new-root-evidence.txt")
+			} else {
+				artifacts = append(artifacts, "root-evidence.txt", "workspace-note.txt")
+			}
 			if test.nestedGit {
 				artifacts = append(artifacts, "git-evidence/proof.txt", "git-evidence/notes.txt")
 			}
@@ -250,18 +309,26 @@ esac
 					t.Errorf("saved artifact %s = %q, %v", artifact, contents, err)
 				}
 			}
-			wantReport := "Report for " + task.WorktreePath + "\nSee root-evidence.txt and workspace-note.txt\n"
-			if test.nestedGit {
-				wantReport += "See git-evidence/proof.txt\n"
+			wantReport := "Report for " + task.WorktreePath + "\n"
+			if test.missingBaseline {
+				wantReport += "See new-root-evidence.txt\n"
+			} else {
+				wantReport += "See root-evidence.txt and workspace-note.txt\n"
+				if test.nestedGit {
+					wantReport += "See git-evidence/proof.txt\n"
+				}
 			}
-			wantFiles := map[string]string{
-				"report.md":          wantReport,
-				"root-evidence.txt":  "root evidence\n",
-				"workspace-note.txt": "updated workspace context\n",
+			wantFiles := map[string]string{"report.md": wantReport}
+			if !test.missingBaseline {
+				wantFiles["root-evidence.txt"] = "root evidence\n"
+				wantFiles["workspace-note.txt"] = "updated workspace context\n"
 			}
 			if test.nestedGit {
 				wantFiles["git-evidence/proof.txt"] = "nested Git proof\n"
 				wantFiles["git-evidence/notes.txt"] = "untracked nested evidence\n"
+			}
+			if test.missingBaseline {
+				wantFiles["new-root-evidence.txt"] = "new root evidence\n"
 			}
 			for artifact, want := range wantFiles {
 				if contents, err := os.ReadFile(filepath.Join(savedDir, artifact)); err != nil || string(contents) != want {
@@ -293,32 +360,32 @@ esac
 	}
 
 	if !t.Run("scratch cleanup retry cannot reach another Rider's Mount", func(t *testing.T) {
-		brief := filepath.Join(root, "t5.md")
+		brief := filepath.Join(root, "t6.md")
 		contents := "---\ntype: scout\ntitle: scratch-failure\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
 		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "scratch-failure")
 		if !waitForCondition(60*time.Second, func() bool {
-			current, err := db.Task(context.Background(), project.ID, "t5")
+			current, err := db.Task(context.Background(), project.ID, "t6")
 			return err == nil && current.State == store.StateReported
 		}) {
-			current, _ := db.Task(context.Background(), project.ID, "t5")
-			t.Fatalf("Scout t5 did not report: %#v", current)
+			current, _ := db.Task(context.Background(), project.ID, "t6")
+			t.Fatalf("Scout t6 did not report: %#v", current)
 		}
 
-		first, err := db.Task(context.Background(), project.ID, "t5")
+		first, err := db.Task(context.Background(), project.ID, "t6")
 		if err != nil {
 			t.Fatal(err)
 		}
-		firstScratch := filepath.Join(root, "posse", "scratch", "stack", "t5")
+		firstScratch := filepath.Join(root, "posse", "scratch", "stack", "t6")
 		if err := os.RemoveAll(firstScratch); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(firstScratch, []byte("force scratch cleanup failure"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		command := exec.Command(binary, "unsaddle", "t5")
+		command := exec.Command(binary, "unsaddle", "t6")
 		command.Dir, command.Env = workspace, leadEnv
 		failure, commandErr := command.CombinedOutput()
 		if commandErr == nil || !strings.Contains(string(failure), "unsaddle_incomplete") {
@@ -329,28 +396,28 @@ esac
 			t.Fatalf("Mount became reusable before scratch cleanup completed: mount=%#v err=%v", mount, err)
 		}
 
-		brief = filepath.Join(root, "t6.md")
+		brief = filepath.Join(root, "t7.md")
 		contents = "---\ntype: scout\ntitle: scratch-successor\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
 		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "scratch-successor")
 		if !waitForCondition(60*time.Second, func() bool {
-			current, err := db.Task(context.Background(), project.ID, "t6")
+			current, err := db.Task(context.Background(), project.ID, "t7")
 			return err == nil && current.State == store.StateReported
 		}) {
-			current, _ := db.Task(context.Background(), project.ID, "t6")
-			t.Fatalf("successor Scout t6 did not report: %#v", current)
+			current, _ := db.Task(context.Background(), project.ID, "t7")
+			t.Fatalf("successor Scout t7 did not report: %#v", current)
 		}
-		second, err := db.Task(context.Background(), project.ID, "t6")
+		second, err := db.Task(context.Background(), project.ID, "t7")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if second.MountID == first.MountID {
-			t.Fatalf("successor Rider reused t5's Mount before its cleanup completed: t5=%#v t6=%#v", first, second)
+			t.Fatalf("successor Rider reused t6's Mount before its cleanup completed: t6=%#v t7=%#v", first, second)
 		}
-		foreignFile := filepath.Join(second.WorktreePath, "t6-only.txt")
-		if err := os.WriteFile(foreignFile, []byte("belongs only to t6\n"), 0o600); err != nil {
+		foreignFile := filepath.Join(second.WorktreePath, "t7-only.txt")
+		if err := os.WriteFile(foreignFile, []byte("belongs only to t7\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		process := exec.Command("sleep", "300")
@@ -379,21 +446,21 @@ esac
 		if err := os.MkdirAll(firstScratch, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t5")
+		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t6")
 		select {
 		case err := <-processExited:
 			processWaited = true
-			t.Fatalf("retrying t5 stopped the process owned by t6: %v", err)
+			t.Fatalf("retrying t6 stopped the process owned by t7: %v", err)
 		case <-time.After(150 * time.Millisecond):
 		}
 		if _, err := os.Stat(foreignFile); err != nil {
-			t.Fatalf("retrying t5 changed the successor Rider's file: %v", err)
+			t.Fatalf("retrying t6 changed the successor Rider's file: %v", err)
 		}
-		firstSaved := filepath.Join(root, "posse", "projects", "stack", "tasks", "t5")
-		if _, err := os.Stat(filepath.Join(firstSaved, "t6-only.txt")); !os.IsNotExist(err) {
-			t.Fatalf("retrying t5 captured t6's unlanded file: %v", err)
+		firstSaved := filepath.Join(root, "posse", "projects", "stack", "tasks", "t6")
+		if _, err := os.Stat(filepath.Join(firstSaved, "t7-only.txt")); !os.IsNotExist(err) {
+			t.Fatalf("retrying t6 captured t7's unlanded file: %v", err)
 		}
-		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t6")
+		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t7")
 	}) {
 		return
 	}

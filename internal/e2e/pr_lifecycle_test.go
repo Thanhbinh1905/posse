@@ -54,6 +54,157 @@ func TestHistoricalMultiIssuePublishKeepsClosingLinks(t *testing.T) {
 	}
 }
 
+func TestPublishRefreshesReusedPRMetadata(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	brief := filepath.Join(fixture.root, "ship.md")
+	initialBrief := "---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change for the PR refresh E2E.\n"
+	if err := os.WriteFile(brief, []byte(initialBrief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "pr-lifecycle-change")
+	if !strings.Contains(output, "t1") {
+		t.Fatalf("ride did not return t1: %s", output)
+	}
+	task := fixture.mustTask(t, "t1")
+	if !waitForCondition(15*time.Second, func() bool {
+		count := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-list", "--count", task.BaseRef+".."+task.Branch))
+		return count == "1"
+	}) {
+		t.Fatal("Worker did not commit its change before publish")
+	}
+	workerEnv := setEnv(fixture.leadEnv, "HERDR_PANE_ID", task.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", fixture.home)
+	publish := func(env []string, args ...string) string {
+		t.Helper()
+		command := exec.Command(fixture.binary, append([]string{"publish"}, args...)...)
+		command.Dir, command.Env = task.WorktreePath, env
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("posse publish %v: %v\n%s", args, err, output)
+		}
+		return string(output)
+	}
+	first := []string{"First summary", "--verify", "go test ./... -> pass", "--proof", "first proof", "--risk", "Risk: first\nRollback: first rollback"}
+	publish(workerEnv, first...)
+	legacyBody := stripManagedPublishedMarkers(readTestFile(t, fixture.ghBody))
+	if err := os.WriteFile(fixture.ghBody, []byte("Maintainer note before.\n\n"+legacyBody+"\n\n## Maintainer notes\n\nKeep this paragraph.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updatedBrief := strings.Replace(initialBrief, "title: PR lifecycle change", "title: Updated PR title", 1)
+	if err := os.WriteFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md"), []byte(updatedBrief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := []string{"Second summary", "--verify", "go test ./... -> second pass", "--proof", "second proof", "--risk", "Risk: second\nRollback: second rollback"}
+	beforeConflict := readTestFile(t, fixture.ghBody)
+	conflict := exec.Command(fixture.binary, append([]string{"publish"}, second...)...)
+	conflict.Dir, conflict.Env = task.WorktreePath, workerEnv
+	conflictOutput, conflictErr := conflict.CombinedOutput()
+	if conflictErr == nil || !strings.Contains(string(conflictOutput), "pr_body_conflict") {
+		t.Fatalf("legacy metadata refresh did not require --refresh: %v\n%s", conflictErr, conflictOutput)
+	}
+	if afterConflict := readTestFile(t, fixture.ghBody); afterConflict != beforeConflict {
+		t.Fatalf("conflicting legacy PR was changed without explicit refresh: %s", afterConflict)
+	}
+	callsAfterConflict := readTestFile(t, fixture.ghLog)
+	if strings.Count(callsAfterConflict, "pr create") != 1 || strings.Contains(callsAfterConflict, "pr edit") {
+		t.Fatalf("legacy conflict created or edited a PR: %s", callsAfterConflict)
+	}
+	second = append([]string{"--refresh"}, second...)
+	interruptedEnv := setEnv(workerEnv, "POSSE_TEST_GH_KILL_AFTER_EDIT", "1")
+	interrupted := exec.Command(fixture.binary, append([]string{"publish"}, second...)...)
+	interrupted.Dir, interrupted.Env = task.WorktreePath, interruptedEnv
+	if output, err := interrupted.CombinedOutput(); err == nil {
+		t.Fatalf("fake forge interruption did not terminate publish after applying its update: %s", output)
+	}
+	if !strings.Contains(readTestFile(t, fixture.ghBody), "Second summary") {
+		t.Fatal("fake forge interruption happened before the metadata update")
+	}
+	publish(workerEnv, second...)
+	body := readTestFile(t, fixture.ghBody)
+	if !strings.HasPrefix(body, beforeConflict) {
+		t.Fatalf("legacy PR description changed before the appended managed section: %s", body)
+	}
+	managed := managedPublishedSection(body)
+	if managed == "" {
+		t.Fatalf("re-published PR has no managed section: %s", body)
+	}
+	for _, expected := range []string{"Second summary", "go test ./... -> second pass", "second proof", "Risk: second", "Rollback: second rollback", "Maintainer note before.", "Keep this paragraph."} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("re-published PR body omitted %q: %s", expected, body)
+		}
+	}
+	for _, stale := range []string{"First summary", "go test ./... -> pass", "first proof", "Risk: first", "first rollback"} {
+		if strings.Contains(managed, stale) {
+			t.Errorf("re-published managed section retained stale %q: %s", stale, managed)
+		}
+	}
+	if title := readTestFile(t, fixture.ghTitle); title != "Updated PR title" {
+		t.Errorf("re-published PR title=%q want %q", title, "Updated PR title")
+	}
+	calls := readTestFile(t, fixture.ghLog)
+	if strings.Count(calls, "pr create") != 1 || strings.Count(calls, "pr edit") != 1 {
+		t.Errorf("interrupted refresh was not idempotently adopted: %s", calls)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "signal-gates", "t1"), []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.waitTaskState(t, "t1", store.StateDone)
+	if err := fixture.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t205PRBodyMarkerCases(t)
+	t208SnapshotRebuildCases(t)
+}
+
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(contents)
+}
+
+func managedPublishedSection(body string) string {
+	const startPrefix = "<!-- posse:publish:start:"
+	start := strings.Index(body, startPrefix)
+	if start < 0 {
+		return ""
+	}
+	lineEnd := strings.IndexByte(body[start:], '\n')
+	if lineEnd < 0 {
+		return ""
+	}
+	marker := strings.TrimSuffix(body[start:start+lineEnd], "\r")
+	token := strings.TrimSuffix(strings.TrimPrefix(marker, startPrefix), " -->")
+	if token == "" {
+		return ""
+	}
+	endMarker := "<!-- posse:publish:end:" + token + " -->"
+	end := strings.Index(body[start+lineEnd:], endMarker)
+	if end < 0 {
+		return ""
+	}
+	end += start + lineEnd
+	return body[start : end+len(endMarker)]
+}
+
+func stripManagedPublishedMarkers(body string) string {
+	section := managedPublishedSection(body)
+	if section == "" {
+		return body
+	}
+	lineEnd := strings.IndexByte(section, '\n')
+	marker := strings.TrimSuffix(section[:lineEnd], "\r")
+	const startPrefix = "<!-- posse:publish:start:"
+	const endPrefix = "<!-- posse:publish:end:"
+	token := strings.TrimSuffix(strings.TrimPrefix(marker, startPrefix), " -->")
+	startMarker, endMarker := marker, endPrefix+token+" -->"
+	body = strings.Replace(body, startMarker+"\n", "", 1)
+	return strings.Replace(body, endMarker, "", 1)
+}
+
 func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	brief := filepath.Join(fixture.root, "ship.md")
@@ -764,7 +915,7 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head"), []byte(oldHead), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head-remaining"), []byte("4"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head-duration-ms"), []byte("3500"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.fixGate, "t1"), []byte("continue\n"), 0o600); err != nil {
@@ -785,8 +936,16 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
 		t.Fatalf("publish rejected the temporarily stale PR head: task=%#v Worker delivery=%s", current, log)
 	}
-	if remaining, err := os.ReadFile(filepath.Join(fixture.root, "gh-list-stale-head-remaining")); err != nil || strings.TrimSpace(string(remaining)) != "0" {
-		t.Fatalf("fake forge did not serve four stale reads before the current head: remaining=%q err=%v", remaining, err)
+	startedText, err := os.ReadFile(filepath.Join(fixture.root, "gh-list-stale-head-started"))
+	if err != nil {
+		t.Fatalf("fake forge never began reporting its stale head: %v", err)
+	}
+	startedMillis, err := strconv.ParseInt(strings.TrimSpace(string(startedText)), 10, 64)
+	if err != nil {
+		t.Fatalf("invalid fake forge lag start time %q: %v", startedText, err)
+	}
+	if elapsed := time.Since(time.UnixMilli(startedMillis)); elapsed < 3500*time.Millisecond {
+		t.Fatalf("fake forge lag lasted only %s; expected at least 3.5s", elapsed)
 	}
 	newHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
 	remoteHead := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/"+task.Branch))
@@ -817,8 +976,101 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(calls), "pr list") < 6 {
-		t.Fatalf("publish did not re-read four stale PR heads before the update: %s", calls)
+	if strings.Count(string(calls), "pr list") < 5 {
+		t.Fatalf("publish did not re-read stale PR heads before the update: %s", calls)
+	}
+	if strings.Count(string(calls), "pr edit") != 1 {
+		t.Fatalf("publish should refresh PR metadata exactly once after the head catches up: %s", calls)
+	}
+}
+
+func TestWorkerPublishDistinguishesMovedHeadFromLagTimeout(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "publish-head-race.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise unexpected-head and timeout outcomes during publish.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.rideAndComplete(t, brief, "t1")
+	oldHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
+	if err := os.WriteFile(filepath.Join(fixture.root, "pause-fix-commit"), []byte("hold\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Add the publish consistency follow-up.")
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "unexpected-follow-up.txt"), []byte("unexpected follow-up\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.env, task.WorktreePath, "add", "unexpected-follow-up.txt")
+	gitTest(t, fixture.env, task.WorktreePath, "commit", "-m", "unexpected follow-up")
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head"), []byte(strings.Repeat("f", 40)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head-duration-ms"), []byte("31000"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workerEnv := setEnv(fixture.leadEnv, "HERDR_PANE_ID", task.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", fixture.home)
+	command := exec.Command(fixture.binary, "publish", "Worker unexpected-head follow-up")
+	command.Dir, command.Env = task.WorktreePath, workerEnv
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), `"branch_moved"`) || !strings.Contains(string(output), `,false,`) {
+		t.Fatalf("unexpected forge head did not fail non-retryable branch_moved: err=%v output=%s", err, output)
+	}
+	pushedHead := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/"+task.Branch))
+	if pushedHead == oldHead {
+		t.Fatalf("follow-up head was not pushed: remote=%s old=%s", pushedHead, oldHead)
+	}
+	localHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	if pushedHead != localHead {
+		t.Fatalf("publish did not push before rejecting the unexpected head: remote=%s local=%s", pushedHead, localHead)
+	}
+
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "timeout-follow-up.txt"), []byte("timeout follow-up\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.env, task.WorktreePath, "add", "timeout-follow-up.txt")
+	gitTest(t, fixture.env, task.WorktreePath, "commit", "-m", "timeout follow-up")
+	expectedHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head"), []byte(oldHead), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fixture.root, "gh-list-stale-head-started")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	command = exec.Command(fixture.binary, "publish", "Worker timeout follow-up")
+	command.Dir, command.Env = task.WorktreePath, workerEnv
+	started := time.Now()
+	output, err = command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), `"pr_head_lag_timeout"`) || !strings.Contains(string(output), `,true,`) || !strings.Contains(string(output), "forge has not caught up") {
+		t.Fatalf("stale forge head did not produce an accurately worded retryable timeout: err=%v output=%s", err, output)
+	}
+	if elapsed := time.Since(started); elapsed < 28*time.Second || elapsed > 40*time.Second {
+		t.Fatalf("publish timeout took %s, expected about 30s", elapsed)
+	}
+	calls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(calls), "pr edit") {
+		t.Fatalf("publish edited PR metadata before the forge head caught up: %s", calls)
+	}
+	command = exec.Command(fixture.binary, "publish", "Worker timeout follow-up")
+	command.Dir, command.Env = task.WorktreePath, workerEnv
+	output, err = command.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "https://github.com/acme/shop/pull/17") {
+		t.Fatalf("retry after forge catch-up did not publish successfully: err=%v output=%s", err, output)
+	}
+	calls, err = os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "pr edit") != 1 {
+		t.Fatalf("retry should edit PR metadata exactly once after the head catches up: %s", calls)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/"+task.Branch)); got != expectedHead {
+		t.Fatalf("timeout publish did not push the expected Task head: got=%s want=%s", got, expectedHead)
 	}
 }
 
@@ -1024,6 +1276,8 @@ type prLifecycleFixture struct {
 	ghState   string
 	ghOpenPRs string
 	ghMerge   string
+	ghBody    string
+	ghTitle   string
 	db        *store.DB
 	project   store.Project
 }
@@ -1066,6 +1320,8 @@ func newPRLifecycleFixtureWithLeadAndShell(t *testing.T, liveLead, slowLoginShel
 	env = setEnv(env, "POSSE_TEST_GH_STATE", filepath.Join(root, "gh-state.json"))
 	env = setEnv(env, "POSSE_TEST_GH_OPEN_PRS", filepath.Join(root, "gh-open-prs.json"))
 	env = setEnv(env, "POSSE_TEST_GH_MERGE", filepath.Join(root, "gh-merge-called"))
+	env = setEnv(env, "POSSE_TEST_GH_BODY", filepath.Join(root, "gh-body.md"))
+	env = setEnv(env, "POSSE_TEST_GH_TITLE", filepath.Join(root, "gh-title.txt"))
 	env = setEnv(env, "POSSE_TEST_REMOTE", filepath.Join(root, "origin.git"))
 	env = setEnv(env, "POSSE_TEST_GH_FAIL", "")
 	env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1146,11 +1402,13 @@ case "$1 $2" in
   "pr list")
     case " $* " in *' --head posse/pr-lifecycle-change '*) branch=posse/pr-lifecycle-change; number=17 ;; *' --head posse/pr-follow-up '*) branch=posse/pr-follow-up; number=17 ;; *' --head posse/pr-create-recovery '*) branch=posse/pr-create-recovery; number=17 ;; *' --head posse/external-merge-change '*) branch=posse/external-merge-change; number=18 ;; *) exit 90 ;; esac
     if grep -q "/pull/$number" "$POSSE_TEST_GH_OPEN_PRS"; then
-      if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ] && [ -f "$POSSE_TEST_ROOT/gh-list-stale-head-remaining" ]; then
-        remaining=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head-remaining")
-        if [ "$remaining" -gt 0 ]; then
+      if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ]; then
+        if [ ! -f "$POSSE_TEST_ROOT/gh-list-stale-head-started" ]; then date +%s%3N > "$POSSE_TEST_ROOT/gh-list-stale-head-started"; fi
+        now=$(date +%s%3N)
+        started=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head-started")
+        duration=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head-duration-ms")
+        if [ "$((now - started))" -lt "$duration" ]; then
           head=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head")
-          printf '%s\n' "$((remaining - 1))" > "$POSSE_TEST_ROOT/gh-list-stale-head-remaining"
         else
           head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
         fi
@@ -1165,14 +1423,35 @@ case "$1 $2" in
     case " $* " in *' --head posse/pr-lifecycle-change '*) branch=posse/pr-lifecycle-change; number=17 ;; *' --head posse/pr-follow-up '*) branch=posse/pr-follow-up; number=17 ;; *' --head posse/pr-create-recovery '*) branch=posse/pr-create-recovery; number=17 ;; *' --head posse/external-merge-change '*) branch=posse/external-merge-change; number=18 ;; *) exit 90 ;; esac
     head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
     url="https://github.com/acme/shop/pull/$number"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title) printf '%s' "$2" > "$POSSE_TEST_GH_TITLE"; shift 2 ;;
+        --body) printf '%s' "$2" > "$POSSE_TEST_GH_BODY"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
     printf '[{"url":"%s","headRefName":"%s","headRefOid":"%s"}]\n' "$url" "$branch" "$head" > "$POSSE_TEST_GH_OPEN_PRS"
     printf '%s\n' "$url" ;;
+  "pr edit")
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title) printf '%s' "$2" > "$POSSE_TEST_GH_TITLE"; shift 2 ;;
+        --body) printf '%s' "$2" > "$POSSE_TEST_GH_BODY"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "${POSSE_TEST_GH_KILL_AFTER_EDIT:-}" = 1 ]; then kill -9 "$PPID"; fi
+    printf 'Edited\n' ;;
   "pr view")
-    case "$3" in */17) branch=$(git --git-dir="$POSSE_TEST_REMOTE" for-each-ref --format='%(refname:short)' 'refs/heads/posse/pr-*' | head -1) ;; */18) branch=posse/external-merge-change ;; *) exit 90 ;; esac
-    head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
-    state=OPEN
-    if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then state=MERGED; fi
-    printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"main","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$state" "$head" "$branch" ;;
+    case "$*" in
+      *'--json title,body'*) python3 -c 'import json,sys; print(json.dumps({"title":open(sys.argv[1]).read(),"body":open(sys.argv[2]).read()}))' "$POSSE_TEST_GH_TITLE" "$POSSE_TEST_GH_BODY" ;;
+      *)
+        case "$3" in */17) branch=$(git --git-dir="$POSSE_TEST_REMOTE" for-each-ref --format='%(refname:short)' 'refs/heads/posse/pr-*' | head -1) ;; */18) branch=posse/external-merge-change ;; *) exit 90 ;; esac
+        head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
+        state=OPEN
+        if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then state=MERGED; fi
+        printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"main","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$state" "$head" "$branch" ;;
+    esac ;;
   "pr merge") : > "$POSSE_TEST_GH_MERGE"; printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
 esac
@@ -1260,7 +1539,8 @@ esac
 		root: root, repo: repo, remote: remote, home: home, binary: binary,
 		env: env, leadEnv: leadEnv, fixGate: fixGate, ghLog: filepath.Join(root, "gh.log"),
 		ghState: filepath.Join(root, "gh-state.json"), ghOpenPRs: filepath.Join(root, "gh-open-prs.json"),
-		ghMerge: filepath.Join(root, "gh-merge-called"), db: opened, project: project,
+		ghMerge: filepath.Join(root, "gh-merge-called"), ghBody: filepath.Join(root, "gh-body.md"),
+		ghTitle: filepath.Join(root, "gh-title.txt"), db: opened, project: project,
 	}
 }
 

@@ -104,7 +104,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--profile <name>]", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
 		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p] [--from-leftover <decision>]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
 		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note>", Summary: "Record a Rider's Signal.", Handler: s.signal},
-		{Name: "publish", Usage: "$ publish [--repo <member>] <summary> [--verify <command -> result>] [--proof <markdown>] [--risk <markdown>]", Summary: "Push this PR-mode Ship Task's branch and open or reuse its pull request.", Handler: s.publish},
+		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Ship Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "brief", Summary: "Reprint this Rider's launch Brief.", Handler: s.brief},
 		{Name: "send", Usage: "$ send <task> <message> [--queue]", Summary: "Deliver to an unfocused ready Rider, steering supported kinds mid-turn; --queue waits for idle.", Handler: s.send},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},
@@ -134,7 +134,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-lookouts]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "setup", Summary: "Install or update the Herdr plugin, skills and hooks; optionally offer the Agents sidebar layout (--check previews; --exit-code returns 3 for required changes; --human prints a checklist).", Handler: s.setup},
-		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Riders after a Herdr restart or rebuild state from Task snapshots.", Handler: s.recover},
+		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Riders or rebuild Projects, Tasks, Mounts, Decisions and Notices from snapshots.", Handler: s.recover},
 		{Name: "_context", Summary: "Print Lead or Rider context inside a posse pane.", Hidden: true, Handler: s.context},
 		{Name: "doctor", Summary: "Check Herdr, plugin, config, database and landing tools.", Handler: s.doctor},
 	}
@@ -225,7 +225,11 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 					return runtime.RunResult{}, err
 				}
 				if _, err := s.recoverProject(ctx, db, home, project); err != nil {
-					return runtime.RunResult{}, fmt.Errorf("recover Project %s after Herdr group close: %w", project.Name, err)
+					if !userStart || !errors.Is(err, errRecoveryDeferred) {
+						return runtime.RunResult{}, fmt.Errorf("recover Project %s after Herdr group close: %w", project.Name, err)
+					}
+					// Keep the Lead startup moving; userStart settles interrupted
+					// relaunch intents after reconciling the current snapshot.
 				}
 				// Concurrent workspace.closed hooks wait for the recovery owner;
 				// a partial snapshot would mark still-restoring Riders lost.
@@ -262,6 +266,28 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return result, err
 	}
 	if !result.GenerationMismatch {
+		if userStart || !recoveryHeld(project, cfg) {
+			pendingGroupRecovery, err := pendingGroupRecoveryDue(ctx, db, project.ID)
+			if err != nil {
+				return result, err
+			}
+			if pendingGroupRecovery {
+				home, err := s.homePath()
+				if err != nil {
+					return result, err
+				}
+				if _, err := s.recoverProject(ctx, db, home, project); err != nil {
+					return result, fmt.Errorf("recover Project %s after group recovery backoff: %w", project.Name, err)
+				}
+				result, err = run()
+				if err != nil {
+					return result, err
+				}
+				if result.GenerationMismatch {
+					return result, fmt.Errorf("project %s Herdr generation changed during recovery; retry reconcile", project.Name)
+				}
+			}
+		}
 		return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 	}
 	current, err := s.snapshot(ctx)
