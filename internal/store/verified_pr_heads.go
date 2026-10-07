@@ -33,7 +33,10 @@ func (db *DB) CreatePROpenedNoticeOnce(ctx context.Context, projectID, taskID in
 		return false, err
 	}
 	rows, err := result.RowsAffected()
-	return rows > 0, err
+	if err != nil || rows == 0 {
+		return rows > 0, err
+	}
+	return true, db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) WasVerifiedPRHead(ctx context.Context, taskID int64, url, sha string) (bool, error) {

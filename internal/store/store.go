@@ -203,6 +203,9 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 			return err
 		}
 	}
+	if err := db.normalizeLegacyProjectUUIDMigration(ctx); err != nil {
+		return err
+	}
 	sources, err := embeddedMigrations()
 	if err != nil {
 		return err
@@ -716,6 +719,10 @@ func (db *DB) AcquireMount(ctx context.Context, projectID, taskID int64, basePat
 // contains Task work. Its Git lock may now be removed without ever exposing
 // an unlocked checkout that the database still describes as held.
 func (db *DB) BeginMountRelease(ctx context.Context, mountID, taskID int64) error {
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM mounts WHERE id=? AND task_id=? AND state='held'`, mountID, taskID).Scan(&projectID); err != nil {
+		return err
+	}
 	result, err := db.ExecContext(ctx, `UPDATE mounts SET state='releasing' WHERE id=? AND task_id=? AND state='held'`, mountID, taskID)
 	if err != nil {
 		return err
@@ -727,7 +734,7 @@ func (db *DB) BeginMountRelease(ctx context.Context, mountID, taskID int64) erro
 	if count != 1 {
 		return ErrStateRace
 	}
-	return nil
+	return db.PersistProject(ctx, projectID)
 }
 
 // FinishMountRelease is retryable after a crash. A failed Task snapshot write
@@ -846,10 +853,13 @@ func (db *DB) DeletePrunedMount(ctx context.Context, projectID, mountID int64) e
 		return err
 	}
 	count, err := result.RowsAffected()
-	if err == nil && count != 1 {
+	if err != nil {
+		return err
+	}
+	if count != 1 {
 		return ErrStateRace
 	}
-	return err
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) Mounts(ctx context.Context, projectID int64) ([]Mount, error) {
@@ -897,6 +907,7 @@ func (db *DB) ClearTaskGatedSHA(ctx context.Context, taskID int64) error {
 
 type Project struct {
 	ID               int64  `toml:"id"`
+	UUID             string `toml:"uuid" json:"-"`
 	Name             string `toml:"name"`
 	Root             string `toml:"root"`
 	DefaultBranch    string `toml:"default_branch"`
@@ -972,17 +983,26 @@ func (db *DB) TaskLaunchIdentities(ctx context.Context, taskID int64) ([]TaskLau
 func (db *DB) NextLeadLaunch(ctx context.Context, projectID int64) (int, error) {
 	var launches int
 	err := db.QueryRowContext(ctx, `UPDATE projects SET lead_launches=lead_launches+1 WHERE id=? RETURNING lead_launches`, projectID).Scan(&launches)
-	return launches, err
+	if err != nil {
+		return 0, err
+	}
+	return launches, db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) ClearLead(ctx context.Context, projectID int64) error {
-	_, err := db.ExecContext(ctx, `UPDATE projects SET lead_pane_id='',lead_label='',lead_absent_since=0 WHERE id=?`, projectID)
-	return err
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET lead_pane_id='',lead_label='',lead_absent_since=0 WHERE id=?`, projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) CreateProject(ctx context.Context, name, root, defaultBranch string) (Project, error) {
+	uuid, err := newProjectUUID()
+	if err != nil {
+		return Project{}, err
+	}
 	now := time.Now().UnixMilli()
-	result, err := db.queries.InsertProject(ctx, dbgen.InsertProjectParams{Name: name, Root: root, DefaultBranch: defaultBranch, CreatedAt: now, LastActivityAt: now})
+	result, err := db.queries.InsertProject(ctx, dbgen.InsertProjectParams{Name: name, Root: root, DefaultBranch: defaultBranch, CreatedAt: now, LastActivityAt: now, ProjectUuid: uuid})
 	if err != nil {
 		return Project{}, err
 	}
@@ -990,7 +1010,11 @@ func (db *DB) CreateProject(ctx context.Context, name, root, defaultBranch strin
 	if err != nil {
 		return Project{}, err
 	}
-	return Project{ID: id, Name: name, Root: root, DefaultBranch: defaultBranch, Kind: ProjectKindRepo, Status: "active", CreatedAt: now, LastActivityAt: now}, nil
+	project := Project{ID: id, UUID: uuid, Name: name, Root: root, DefaultBranch: defaultBranch, Kind: ProjectKindRepo, Status: "active", CreatedAt: now, LastActivityAt: now}
+	if err := db.PersistProject(ctx, id); err != nil {
+		return Project{}, err
+	}
+	return project, nil
 }
 
 // IsDown reports that the User stopped this Project with `posse down`.
@@ -998,21 +1022,32 @@ func (db *DB) CreateProject(ctx context.Context, name, root, defaultBranch strin
 func (p Project) IsDown() bool { return p.DownAt != 0 }
 
 func (db *DB) MarkProjectDown(ctx context.Context, projectID int64) error {
-	return db.queries.MarkProjectDown(ctx, dbgen.MarkProjectDownParams{DownAt: time.Now().UnixMilli(), ID: projectID})
+	if err := db.queries.MarkProjectDown(ctx, dbgen.MarkProjectDownParams{DownAt: time.Now().UnixMilli(), ID: projectID}); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 // ClearDownProjectLead forgets the stopped Lead pane of a down Project.
 func (db *DB) ClearDownProjectLead(ctx context.Context, projectID int64) error {
-	return db.queries.ClearDownProjectLead(ctx, projectID)
+	if err := db.queries.ClearDownProjectLead(ctx, projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) SetProjectLead(ctx context.Context, projectID int64, workspaceID, paneID, label string) error {
-	return db.queries.SetProjectLead(ctx, dbgen.SetProjectLeadParams{HerdrWorkspaceID: workspaceID, LeadPaneID: paneID, LeadLabel: label, LastActivityAt: time.Now().UnixMilli(), ID: projectID})
+	if err := db.queries.SetProjectLead(ctx, dbgen.SetProjectLeadParams{HerdrWorkspaceID: workspaceID, LeadPaneID: paneID, LeadLabel: label, LastActivityAt: time.Now().UnixMilli(), ID: projectID}); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) SetProjectWorkspace(ctx context.Context, projectID int64, workspaceID string) error {
-	_, err := db.ExecContext(ctx, `UPDATE projects SET herdr_workspace_id=?,lead_pane_id='',lead_label='',lead_absent_since=0 WHERE id=?`, workspaceID, projectID)
-	return err
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET herdr_workspace_id=?,lead_pane_id='',lead_label='',lead_absent_since=0 WHERE id=?`, workspaceID, projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) ClaimLeadStart(ctx context.Context, projectID int64, now, staleBefore int64) (bool, error) {
@@ -1037,7 +1072,38 @@ func (db *DB) ReleaseLeadStart(ctx context.Context, projectID int64) error {
 }
 
 func (db *DB) MoveProject(ctx context.Context, projectID int64, newRoot, defaultBranch string) error {
-	return db.queries.MoveProject(ctx, dbgen.MoveProjectParams{Root: newRoot, DefaultBranch: defaultBranch, LastActivityAt: time.Now().UnixMilli(), ID: projectID})
+	if err := db.queries.MoveProject(ctx, dbgen.MoveProjectParams{Root: newRoot, DefaultBranch: defaultBranch, LastActivityAt: time.Now().UnixMilli(), ID: projectID}); err != nil {
+		return err
+	}
+	if err := db.PersistProject(ctx, projectID); err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id FROM tasks WHERE project_id=? ORDER BY id`, projectID)
+	if err != nil {
+		return err
+	}
+	var taskIDs []int64
+	for rows.Next() {
+		var taskID int64
+		if err := rows.Scan(&taskID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		taskIDs = append(taskIDs, taskID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, taskID := range taskIDs {
+		if err := db.persistTask(ctx, taskID, false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (db *DB) NextTaskSeq(ctx context.Context, projectID int64) (int, error) {
@@ -1182,6 +1248,9 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err
+	}
+	if err := db.PersistTask(ctx, task.ID); err != nil {
+		log.Printf("posse: Signal %q committed for Task %d, but recovery snapshot refresh failed: %v", verb, task.ID, err)
 	}
 	return current, nil
 }
@@ -1406,7 +1475,10 @@ WHERE t.project_id=? AND t.id=? AND m.id=? AND m.status='submitting'`, summary, 
 		return false, err
 	}
 	created, err := result.RowsAffected()
-	return created == 1, err
+	if err != nil || created != 1 {
+		return created == 1, err
+	}
+	return true, db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) MarkMessageDelivered(ctx context.Context, messageID int64, token string, at int64) error {
@@ -1458,7 +1530,10 @@ func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token 
 			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) RollbackMessageClaim(ctx context.Context, messageID int64, token string) error {
@@ -1486,7 +1561,14 @@ func (db *DB) MarkClaimedMessageDelivered(ctx context.Context, messageID int64, 
 	if _, err := tx.ExecContext(ctx, `UPDATE notices SET acked_at=COALESCE(acked_at,?) WHERE kind='message_delivery_uncertain' AND json_extract(data_json,'$.message_id')=?`, at, messageID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=(SELECT task_id FROM messages WHERE id=?)`, messageID).Scan(&projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) Notices(ctx context.Context, projectID int64, openOnly bool) ([]Notice, error) {
@@ -1547,7 +1629,7 @@ func (db *DB) MarkNoticesDelivered(ctx context.Context, projectID int64, ids []i
 			return err
 		}
 	}
-	return nil
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) ClaimNoticeBatch(ctx context.Context, projectID int64, ids []int64, token string, at int64) (bool, error) {
@@ -1619,7 +1701,10 @@ func (db *DB) MarkClaimedNoticesDelivered(ctx context.Context, projectID int64, 
 	if count != int64(len(ids)) {
 		return ErrStateRace
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) ReleaseExpiredDeliveryClaims(ctx context.Context, before int64) error {
@@ -1657,7 +1742,11 @@ func (db *DB) AckUndeliveredPROpened(ctx context.Context, projectID, at int64) (
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	count, err := result.RowsAffected()
+	if err != nil || count == 0 {
+		return count, err
+	}
+	return count, db.PersistProject(ctx, projectID)
 }
 
 // RequeueNotices retries a Pi message that was rejected before it entered the
@@ -1669,7 +1758,7 @@ func (db *DB) RequeueNotices(ctx context.Context, projectID int64, ids []int64) 
 			return err
 		}
 	}
-	return nil
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) AckNotices(ctx context.Context, projectID int64, identifiers []string) (int, error) {
@@ -1679,6 +1768,9 @@ func (db *DB) AckNotices(ctx context.Context, projectID int64, identifiers []str
 			return 0, err
 		}
 		count, _ := result.RowsAffected()
+		if err := db.PersistProject(ctx, projectID); err != nil {
+			return int(count), err
+		}
 		return int(count), nil
 	}
 	count := 0
@@ -1693,6 +1785,9 @@ func (db *DB) AckNotices(ctx context.Context, projectID int64, identifiers []str
 		}
 		changed, _ := result.RowsAffected()
 		count += int(changed)
+	}
+	if err := db.PersistProject(ctx, projectID); err != nil {
+		return count, err
 	}
 	return count, nil
 }
@@ -1730,7 +1825,7 @@ func (db *DB) Projects(ctx context.Context) ([]Project, error) {
 }
 
 func projectFromDB(row dbgen.Project) Project {
-	return Project{ID: row.ID, Name: row.Name, Root: row.Root, DefaultBranch: row.DefaultBranch, Kind: row.Kind, HerdrWorkspaceID: row.HerdrWorkspaceID, LeadPaneID: row.LeadPaneID, LeadLabel: row.LeadLabel, LeadLaunches: int(row.LeadLaunches), LeadAbsentSince: row.LeadAbsentSince, Status: row.Status, DownAt: row.DownAt, CreatedAt: row.CreatedAt, LastActivityAt: row.LastActivityAt}
+	return Project{ID: row.ID, UUID: row.ProjectUuid, Name: row.Name, Root: row.Root, DefaultBranch: row.DefaultBranch, Kind: row.Kind, HerdrWorkspaceID: row.HerdrWorkspaceID, LeadPaneID: row.LeadPaneID, LeadLabel: row.LeadLabel, LeadLaunches: int(row.LeadLaunches), LeadAbsentSince: row.LeadAbsentSince, Status: row.Status, DownAt: row.DownAt, CreatedAt: row.CreatedAt, LastActivityAt: row.LastActivityAt}
 }
 
 type AmbiguousTaskName struct {
@@ -1867,9 +1962,12 @@ func (db *DB) UpdateProjectObservation(ctx context.Context, projectID int64, pan
 		return err
 	}
 	params := dbgen.UpdateProjectObservationParams{LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID}
-	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateProjectObservation(ctx, params)
-	})
+	}); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) projectObservationMatches(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) (bool, error) {
@@ -1889,8 +1987,10 @@ func (db *DB) UpdateProjectStatus(ctx context.Context, projectID int64, status s
 	if status != "active" && status != "missing" {
 		return fmt.Errorf("invalid Project status %q", status)
 	}
-	_, err := db.ExecContext(ctx, `UPDATE projects SET status=? WHERE id=?`, status, projectID)
-	return err
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET status=? WHERE id=?`, status, projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) UpdateProgress(ctx context.Context, taskID int64, outputHash, worktreeHash string, at int64) error {
@@ -1942,12 +2042,21 @@ func (db *DB) CreateNotice(ctx context.Context, notice Notice) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := db.PersistProject(ctx, notice.ProjectID); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (db *DB) CreateWorkerExitedNotice(ctx context.Context, task Task, now time.Time) error {
-	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO notices(project_id, task_id, kind, summary, data_json, created_at) VALUES (?, ?, 'worker_exited', ?, '{}', ?)`, task.ProjectID, task.ID, task.Title+" Rider exited after signaling done", now.UnixMilli())
-	return err
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO notices(project_id, task_id, kind, summary, data_json, created_at) VALUES (?, ?, 'worker_exited', ?, '{}', ?)`, task.ProjectID, task.ID, task.Title+" Rider exited after signaling done", now.UnixMilli()); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, task.ProjectID)
 }
 
 func (db *DB) AddEvent(ctx context.Context, kind, paneID, dataJSON string, at int64) error {
@@ -1978,6 +2087,10 @@ func (db *DB) ProjectContents(ctx context.Context, projectID int64) (tasks, moun
 // its Project-level rows, in one transaction. A Project with either is refused
 // with ErrProjectNotEmpty, so no Task history or worktree is ever dropped.
 func (db *DB) DeleteEmptyProject(ctx context.Context, projectID int64) error {
+	var projectName string
+	if err := db.QueryRowContext(ctx, `SELECT name FROM projects WHERE id=?`, projectID).Scan(&projectName); err != nil {
+		return err
+	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
@@ -2002,5 +2115,11 @@ func (db *DB) DeleteEmptyProject(ctx context.Context, projectID int64) error {
 	} else if deleted == 0 {
 		return sql.ErrNoRows
 	}
-	return projectReferenceConstraint(tx.Commit())
+	if err := projectReferenceConstraint(tx.Commit()); err != nil {
+		return err
+	}
+	if err := os.Remove(db.ProjectSnapshotPath(projectName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }

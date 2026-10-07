@@ -283,8 +283,122 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 32 {
-		t.Fatalf("applied Goose migration version = %d, want 32", version)
+	if version != 33 {
+		t.Fatalf("applied Goose migration version = %d, want 33", version)
+	}
+}
+
+func TestOpenAddsProjectUUIDToVersion32Home(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP INDEX projects_project_uuid_idx`,
+		`ALTER TABLE projects DROP COLUMN project_uuid`,
+		`DELETE FROM goose_db_version WHERE version_id=33`,
+		`DELETE FROM posse_migration_checksums WHERE version=33`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("prepare main version 32 database: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatalf("open main version 32 database: %v", err)
+	}
+	defer db.Close()
+	migrated, err := db.ProjectByID(ctx, project.ID)
+	if err != nil || migrated.UUID == "" {
+		t.Fatalf("Project UUID after migration = %q, %v; want a generated UUID", migrated.UUID, err)
+	}
+	var applied, index int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM goose_db_version WHERE version_id=33 AND is_applied=1`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("version 33 applied rows = %d, %v; want 1", applied, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='projects_project_uuid_idx'`).Scan(&index); err != nil || index != 1 {
+		t.Fatalf("Project UUID index count = %d, %v; want 1", index, err)
+	}
+}
+
+func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
+	for _, statement := range []string{
+		`DROP TABLE publish_pre_push_heads`,
+		`DROP INDEX projects_project_uuid_idx`,
+		`ALTER TABLE projects DROP COLUMN project_uuid`,
+		`DELETE FROM goose_db_version WHERE version_id >= 32`,
+		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
+		`ALTER TABLE projects ADD COLUMN project_uuid TEXT NOT NULL DEFAULT ''`,
+		`CREATE UNIQUE INDEX projects_project_uuid_idx ON projects(project_uuid)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("prepare legacy project UUID database: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET project_uuid=? WHERE id=?`, legacyUUID, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO posse_migration_checksums(version,sha256) VALUES(32,?)`, legacyProjectUUIDMigrationChecksum); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	previousGate := MigrationGate
+	MigrationGate = func(_ string, pending []int64, _ bool) error {
+		if len(pending) != 1 || pending[0] != 32 {
+			t.Fatalf("legacy migration gate pending versions = %v, want [32]", pending)
+		}
+		return &SchemaError{Code: "migration_refused", Message: "test refusal"}
+	}
+	t.Cleanup(func() { MigrationGate = previousGate })
+	if refused, err := OpenAt(path); err == nil {
+		_ = refused.Close()
+		t.Fatal("legacy migration ignored the migration gate")
+	}
+	MigrationGate = previousGate
+
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatalf("open home migrated by the previous Project UUID migration: %v", err)
+	}
+	defer db.Close()
+	migrated, err := db.ProjectByID(ctx, project.ID)
+	if err != nil || migrated.UUID != legacyUUID {
+		t.Fatalf("legacy Project UUID after migration = %q, %v; want %q", migrated.UUID, err, legacyUUID)
+	}
+	for _, version := range []int64{32, 33} {
+		var applied int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM goose_db_version WHERE version_id=? AND is_applied=1`, version).Scan(&applied); err != nil || applied != 1 {
+			t.Fatalf("migration %d applied rows = %d, %v; want 1", version, applied, err)
+		}
+	}
+	var prePushHeads int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='publish_pre_push_heads'`).Scan(&prePushHeads); err != nil || prePushHeads != 1 {
+		t.Fatalf("publish_pre_push_heads table count = %d, %v; want 1", prePushHeads, err)
 	}
 }
 
@@ -401,6 +515,8 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE project_repos DROP COLUMN origin_host`,
 		`DROP TABLE member_pr_poll_state`,
 		`DROP TABLE pr_body_markers`,
+		`DROP INDEX projects_project_uuid_idx`,
+		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
 	} {
@@ -504,9 +620,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 32 {
+	if version != 33 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 32", version)
+		t.Fatalf("initial Goose migration version = %d, want 33", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -543,8 +659,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 32 {
-		t.Fatalf("reopened Goose migration version = %d, want 32", version)
+	if version != 33 {
+		t.Fatalf("reopened Goose migration version = %d, want 33", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
