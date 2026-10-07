@@ -103,6 +103,7 @@ type ModelErrorEpisode struct {
 	Kind          string
 	Fingerprint   string
 	Attempts      int64
+	TurnState     int64
 	Status        string
 	StartedAt     int64
 	NextAttemptAt int64

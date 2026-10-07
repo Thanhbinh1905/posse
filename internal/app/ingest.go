@@ -98,6 +98,17 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 		var modelTurnNotices []store.Notice
 		if worker && eventIs(event.Event, "pane.agent_status_changed") {
 			status := valueString(event.Data, "agent_status")
+			if status == "working" {
+				task, taskErr := db.TaskByPane(ctx, paneID)
+				if taskErr != nil && !store.IsNotFound(taskErr) {
+					return taskErr
+				}
+				if taskErr == nil && task.State == store.StateWorking {
+					if err := db.MarkModelErrorTurnStarted(ctx, task.ID, int64(task.Launches), currentTime()); err != nil {
+						return err
+					}
+				}
+			}
 			if status == "idle" || status == "done" {
 				paneSnapshot, snapshotErr := s.snapshot(ctx)
 				if snapshotErr == nil && !recoveryHeld(project, cfg) {

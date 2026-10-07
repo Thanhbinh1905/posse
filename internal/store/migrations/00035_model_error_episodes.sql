@@ -7,6 +7,7 @@ CREATE TABLE model_error_episodes (
     kind TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
+    turn_state INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     started_at INTEGER NOT NULL,
     next_attempt_at INTEGER NOT NULL DEFAULT 0,

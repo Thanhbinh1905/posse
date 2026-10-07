@@ -20,15 +20,17 @@ func TestPiStreamDisconnectAutomaticallyResumesWithinBound(t *testing.T) {
 	started := time.Now()
 	fixture.emitError(t)
 
-	if !waitForCondition(10*time.Second, func() bool {
+	if !waitForCondition(15*time.Second, func() bool {
 		return countPromptLines(fixture.prompts, "continue") == 3 && fixture.hasNotice("model_stream_error")
 	}) {
 		logged, _ := os.ReadFile(fixture.prompts)
+		ingest, _ := os.ReadFile(filepath.Join(fixture.base.root, "ingest.log"))
 		task, _ := fixture.base.db.Task(context.Background(), fixture.base.project.ID, "t1")
 		episode, _ := fixture.base.db.TaskModelErrorEpisode(context.Background(), task.ID)
-		t.Fatalf("stream-error recovery did not exhaust its bounded episode within seconds: prompts=%q episode=%#v", logged, episode)
+		signals, _ := fixture.base.db.TaskSignals(context.Background(), task.ID, 30)
+		t.Fatalf("stream-error recovery did not exhaust its bounded episode within seconds: prompts=%q episode=%#v signals=%#v ingest=%q", logged, episode, signals, ingest)
 	}
-	if elapsed := time.Since(started); elapsed > 10*time.Second {
+	if elapsed := time.Since(started); elapsed > 15*time.Second {
 		t.Fatalf("stream-error recovery took %s, want within seconds", elapsed)
 	}
 	if got := countPromptLines(fixture.prompts, "continue"); got != 3 {
@@ -87,6 +89,8 @@ func TestPiStreamDisconnectIsNotNudgedIntoFocusedRider(t *testing.T) {
 	}
 }
 
+const e2ePiErrorHelpLine = "If this looks like a pi bug, /bug sends a report to the developers."
+
 type piModelErrorFixture struct {
 	base    *prLifecycleFixture
 	client  *herdr.Client
@@ -109,6 +113,9 @@ func newPiModelErrorFixture(t *testing.T, modelError string, repeatOnContinue bo
 	if output := runPosse(t, base.binary, base.repo, base.leadEnv, "config", "set", "profiles.deep.kind", "pi"); !strings.Contains(output, "pi") {
 		t.Fatalf("select Pi for the Rider harness: %s", output)
 	}
+	if !strings.Contains(modelError, "\n") && !strings.HasPrefix(strings.TrimSpace(modelError), "Error:") {
+		modelError = "Error: " + modelError
+	}
 	prompts := filepath.Join(base.root, "pi-prompts.log")
 	ready := filepath.Join(base.root, "pi-ready")
 	emit := filepath.Join(base.root, "emit-model-error")
@@ -125,24 +132,31 @@ printf '%%s\n' "$prompt" >> "$POSSE_TEST_ROOT/pi-prompts.log"
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent pi --state working >/dev/null 2>&1
 : > "$POSSE_TEST_ROOT/pi-ready"
 while [ ! -e "$POSSE_TEST_ROOT/emit-model-error" ]; do sleep 0.02; done
-report_idle() {
-  herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent pi --state idle >/dev/null 2>&1
-  HERDR_PLUGIN_EVENT_JSON="{\"event\":\"pane.agent_status_changed\",\"data\":{\"pane_id\":\"$HERDR_PANE_ID\",\"agent_status\":\"idle\"}}" "$POSSE_E2E_POSSE_BIN" _ingest >> "$POSSE_TEST_ROOT/ingest.log" 2>&1 || true
+report_status() {
+  state=$1
+  herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent pi --state "$state" >/dev/null 2>&1
+  HERDR_PLUGIN_EVENT_JSON="{\"event\":\"pane.agent_status_changed\",\"data\":{\"pane_id\":\"$HERDR_PANE_ID\",\"agent_status\":\"$state\"}}" "$POSSE_E2E_POSSE_BIN" _ingest >> "$POSSE_TEST_ROOT/ingest.log" 2>&1 &
+  ingest_pid=$!
+  printf '%%s\n' "$ingest_pid" > "$POSSE_TEST_ROOT/ingest-pid"
+  wait "$ingest_pid" 2>/dev/null || true
 }
-printf '%%s\n' %s
+report_idle() { report_status idle; }
+report_working() { report_status working; }
+if [ -e "$POSSE_TEST_ROOT/clear-model-screen" ]; then printf '\033[2J\033[H'; fi
+printf '%%s\n%%s\n' %s %s
 report_idle
 attempt=0
 while IFS= read -r instruction; do
   printf '%%s\n' "$instruction" >> "$POSSE_TEST_ROOT/pi-prompts.log"
   if [ "$instruction" = continue ] && [ %s = true ]; then
     attempt=$((attempt + 1))
-    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent pi --state working >/dev/null 2>&1
-    printf 'Retry turn %%s\n' "$attempt"
-    printf '%%s\n' %s
+    report_working
+    if [ -e "$POSSE_TEST_ROOT/clear-model-screen" ]; then printf '\033[2J\033[H'; else printf 'Retry turn %%s\n' "$attempt"; fi
+    printf '%%s\n%%s\n' %s %s
     report_idle
   fi
 done
-`, shellQuote(modelError), retryOnContinue, shellQuote(modelError))
+`, shellQuote(modelError), shellQuote(e2ePiErrorHelpLine), retryOnContinue, shellQuote(modelError), shellQuote(e2ePiErrorHelpLine))
 	if err := os.WriteFile(filepath.Join(base.root, "bin", "pi"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

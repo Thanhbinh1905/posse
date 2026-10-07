@@ -22,42 +22,65 @@ const (
 )
 
 type modelErrorPattern struct {
-	kind        string
-	marker      string
-	maxTrailing int
+	kind   string
+	marker string
 }
+
+const piErrorHelpLine = "If this looks like a pi bug, /bug sends a report to the developers."
 
 var modelErrorPatterns = map[string][]modelErrorPattern{
 	"pi": {
-		{kind: "model_refused", marker: "this content was flagged for possible cybersecurity risk", maxTrailing: 2048},
-		{kind: "model_stream_error", marker: "stream disconnected before completion: stream closed before response.completed", maxTrailing: 0},
+		{kind: "model_refused", marker: "this content was flagged for possible cybersecurity risk"},
+		{kind: "model_stream_error", marker: "stream disconnected before completion: stream closed before response.completed"},
 	},
 }
 
 var modelTerminalControl = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))`)
 
-// classifyModelError recognizes only known harness-specific errors at the end
-// of an idle turn. It does not interpret prior transcript or User text as an
-// active failure.
+// classifyModelError recognizes Pi's rendered error result, not arbitrary
+// transcript, User, or tool-output text containing a provider error string.
 func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 	patterns := modelErrorPatterns[strings.ToLower(agent)]
 	if len(patterns) == 0 {
 		return "", "", false
 	}
-	output = normalizeModelTerminalOutput(output)
-	lower := strings.ToLower(output)
-	for _, pattern := range patterns {
-		index := strings.LastIndex(lower, pattern.marker)
-		if index < 0 {
+	lines := strings.Split(normalizeModelTerminalOutput(output), "\n")
+	for i := 0; i+1 < len(lines); i++ {
+		errorLine := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(strings.ToLower(errorLine), "error:") || strings.TrimSpace(lines[i+1]) != piErrorHelpLine {
 			continue
 		}
-		trailing := strings.TrimSpace(lower[index+len(pattern.marker):])
-		if len(trailing) > pattern.maxTrailing {
+		message := strings.ToLower(strings.TrimSpace(errorLine[len("Error:"):]))
+		if len(message) > 2048 || !piFooterOnly(lines[i+2:]) {
 			continue
 		}
-		return pattern.kind, pattern.marker, true
+		for _, pattern := range patterns {
+			if strings.Contains(message, pattern.marker) {
+				return pattern.kind, pattern.marker, true
+			}
+		}
 	}
 	return "", "", false
+}
+
+func piFooterOnly(lines []string) bool {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "/") || strings.Contains(line, "%/") {
+			continue
+		}
+		border := line != ""
+		for _, char := range line {
+			if char != '─' && char != '━' && char != '═' && char != '-' {
+				border = false
+				break
+			}
+		}
+		if !border {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeModelTerminalOutput(output string) string {
@@ -94,9 +117,20 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 
 	fingerprint := modelOutputFingerprint(output)
 	now := currentTime()
-	episode, observed, err := db.ObserveModelErrorEpisode(ctx, task.ID, task.Launches, pane.Agent, kind, fingerprint, now)
-	if err != nil || !observed {
+	episode, observed, err := db.ObserveModelErrorEpisode(ctx, task.ID, task.Launches, pane.Agent, kind, fingerprint, task.IdleSince == 0, now)
+	if err != nil {
 		return nil, err
+	}
+	if !observed {
+		if episode.Status == "active" && store.ModelErrorNudgeExpired(episode, time.UnixMilli(now)) {
+			notice := modelErrorNotice(project, task, episode, kind, "A continue attempt was interrupted or its delivery is uncertain; Posse did not replay it", marker)
+			created, err := db.InterruptExpiredModelErrorNudge(ctx, task.ID, now, notice)
+			if err != nil || created == nil {
+				return nil, err
+			}
+			return []store.Notice{*created}, nil
+		}
+		return nil, nil
 	}
 	if kind == "model_refused" {
 		notice := modelErrorNotice(project, task, episode, kind, "The provider refused the request; Posse did not retry the prompt", marker)
@@ -140,7 +174,7 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 	case <-ctx.Done():
 		err = ctx.Err()
 	case <-timer.C:
-		err = s.promptModelErrorContinue(ctx, db, task, pane)
+		err = s.promptModelErrorContinue(ctx, db, task, pane, episode.Episode)
 	}
 	if err != nil {
 		status := "blocked"
@@ -154,6 +188,8 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 			reason = "Automatic continue was withheld because a Lead instruction was queued"
 		} else if errors.As(err, &failure) && failure.Code == "model_error_not_idle" {
 			reason = "Automatic continue was withheld because the Rider was no longer idle"
+		} else if errors.As(err, &failure) && failure.Code == "model_error_task_not_working" {
+			reason = "Automatic continue was withheld because the Task is no longer working"
 		} else if ctx.Err() != nil {
 			reason = "Automatic continue was interrupted before submission"
 		}
@@ -163,7 +199,10 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 			return nil, errors.Join(err, finishErr)
 		}
 		if created == nil {
-			return nil, err
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			return nil, nil
 		}
 		return []store.Notice{*created}, nil
 	}
@@ -173,13 +212,27 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 	return nil, nil
 }
 
-func (s *Service) promptModelErrorContinue(ctx context.Context, db *store.DB, task store.Task, pane herdr.Pane) error {
-	return s.safePromptWhen(ctx, pane.PaneID, "continue", func(snapshot herdr.Snapshot) error {
+func (s *Service) promptModelErrorContinue(ctx context.Context, db *store.DB, task store.Task, pane herdr.Pane, episode int) error {
+	return s.safePromptWhenWithSubmissionGate(ctx, pane.PaneID, "continue", func(snapshot herdr.Snapshot) error {
+		currentTask, err := db.TaskByID(ctx, task.ProjectID, task.ID)
+		if err != nil {
+			return err
+		}
+		if currentTask.State != store.StateWorking || currentTask.Launches != task.Launches || currentTask.PaneID != task.PaneID || currentTask.PaneLabel != task.PaneLabel || currentTask.HerdrWorkspaceID != task.HerdrWorkspaceID {
+			return axi.Failure("model_error_task_not_working", "Task state, launch, or Rider ownership changed during model-error backoff", false)
+		}
 		current, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 		if !found || current.PaneID != pane.PaneID || current.Agent != pane.Agent || (current.AgentStatus != "idle" && current.AgentStatus != "done") {
 			return axi.Failure("model_error_not_idle", "Rider is no longer at the end of an idle turn", false)
 		}
-		_, err := db.OldestQueuedMessage(ctx, task.ID)
+		currentEpisode, err := db.TaskModelErrorEpisode(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if currentEpisode.Episode != episode || currentEpisode.Launch != currentTask.Launches || currentEpisode.Status != "active" {
+			return axi.Failure("model_error_task_not_working", "model-error episode is no longer eligible for an automatic continue", false)
+		}
+		_, err = db.OldestQueuedMessage(ctx, task.ID)
 		if err == nil {
 			return axi.Failure("model_error_message_queued", "a Lead instruction is queued for this Rider", false)
 		}
@@ -187,6 +240,12 @@ func (s *Service) promptModelErrorContinue(ctx context.Context, db *store.DB, ta
 			return err
 		}
 		return nil
+	}, func(submit func() error) error {
+		err := db.WithModelErrorPrompt(ctx, task, episode, submit)
+		if errors.Is(err, store.ErrModelErrorPromptNotAllowed) {
+			return axi.Failure("model_error_task_not_working", "Task or model-error episode changed before the continue could be submitted", false)
+		}
+		return err
 	})
 }
 
