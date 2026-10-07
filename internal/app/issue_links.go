@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -138,58 +137,6 @@ func issueState(ctx context.Context, forge repositoryForge, number int) (string,
 		return "", output, fmt.Errorf("gh returned invalid issue data")
 	}
 	return issue.State, output, nil
-}
-
-func (s *Service) ensureExistingPRIssueLinks(ctx context.Context, db *store.DB, intent store.Intent, forge repositoryForge, prURL, member string, brief dispatch.Brief) error {
-	if len(issueLinkLines(brief, member)) == 0 {
-		return nil
-	}
-	body := ""
-	if forge.Kind == "gitlab" {
-		number, err := forgeReference(prURL, forge)
-		if err != nil {
-			return err
-		}
-		endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests/" + strconv.Itoa(number)
-		output, err := runOutputStep(ctx, db, intent, "pr.issue_links.read", forge.Root, "glab", "api", "--hostname", forge.Host, endpoint)
-		if err != nil {
-			return axi.Failure("pr_issue_links_failed", "could not read the existing merge request description", true, err.Error())
-		}
-		var request gitlabMergeRequest
-		if err := json.Unmarshal([]byte(output), &request); err != nil {
-			return axi.Failure("pr_issue_links_failed", "GitLab returned invalid merge request data", true, err.Error())
-		}
-		body = request.Description
-	} else {
-		output, err := runOutputStep(ctx, db, intent, "pr.issue_links.read", forge.Root, "gh", "pr", "view", prURL, "--json", "body")
-		if err != nil {
-			return axi.Failure("pr_issue_links_failed", "could not read the existing pull request body", true, err.Error())
-		}
-		var pull struct {
-			Body string `json:"body"`
-		}
-		if err := json.Unmarshal([]byte(output), &pull); err != nil {
-			return axi.Failure("pr_issue_links_failed", "gh returned invalid pull request body data", true, err.Error())
-		}
-		body = pull.Body
-	}
-	updated, changed := appendMissingIssueLinks(body, brief, member)
-	if !changed {
-		return nil
-	}
-	if forge.Kind == "gitlab" {
-		number, _ := forgeReference(prURL, forge)
-		endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests/" + strconv.Itoa(number)
-		_, err := runOutputStep(ctx, db, intent, "pr.issue_links.write", forge.Root, "glab", "api", "--hostname", forge.Host, "--method", "PUT", "--field", "description="+updated, endpoint)
-		if err != nil {
-			return axi.Failure("pr_issue_links_failed", "could not add linked issues to the merge request", true, err.Error())
-		}
-		return nil
-	}
-	if _, err := runOutputStep(ctx, db, intent, "pr.issue_links.write", forge.Root, "gh", "pr", "edit", prURL, "--body", updated); err != nil {
-		return axi.Failure("pr_issue_links_failed", "could not add linked issues to the pull request", true, err.Error())
-	}
-	return nil
 }
 
 func issueNotFound(output string, err error) bool {

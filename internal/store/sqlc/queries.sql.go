@@ -166,6 +166,31 @@ func (q *Queries) AllocateTaskSequence(ctx context.Context, projectID int64) (in
 	return column_1, err
 }
 
+const bindPRBodyMarker = `-- name: BindPRBodyMarker :execresult
+UPDATE pr_body_markers SET pr_url = ?, updated_at = ?
+WHERE task_id = ? AND repo = ? AND marker_token = ? AND (pr_url = '' OR pr_url = ?)
+`
+
+type BindPRBodyMarkerParams struct {
+	PrUrl       string
+	UpdatedAt   int64
+	TaskID      int64
+	Repo        string
+	MarkerToken string
+	PrUrl_2     string
+}
+
+func (q *Queries) BindPRBodyMarker(ctx context.Context, arg BindPRBodyMarkerParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, bindPRBodyMarker,
+		arg.PrUrl,
+		arg.UpdatedAt,
+		arg.TaskID,
+		arg.Repo,
+		arg.MarkerToken,
+		arg.PrUrl_2,
+	)
+}
+
 const breakMount = `-- name: BreakMount :exec
 UPDATE mounts SET state = 'broken', task_id = NULL, released_at = ? WHERE id = ?
 `
@@ -858,6 +883,61 @@ func (q *Queries) OpenNotices(ctx context.Context, projectID int64) ([]OpenNotic
 			&i.CreatedAt,
 			&i.DeliveredAt,
 			&i.AckedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const pRBodyMarkerByTaskRepo = `-- name: PRBodyMarkerByTaskRepo :one
+SELECT pr_url, marker_token FROM pr_body_markers WHERE task_id = ? AND repo = ?
+`
+
+type PRBodyMarkerByTaskRepoParams struct {
+	TaskID int64
+	Repo   string
+}
+
+type PRBodyMarkerByTaskRepoRow struct {
+	PrUrl       string
+	MarkerToken string
+}
+
+func (q *Queries) PRBodyMarkerByTaskRepo(ctx context.Context, arg PRBodyMarkerByTaskRepoParams) (PRBodyMarkerByTaskRepoRow, error) {
+	row := q.db.QueryRowContext(ctx, pRBodyMarkerByTaskRepo, arg.TaskID, arg.Repo)
+	var i PRBodyMarkerByTaskRepoRow
+	err := row.Scan(&i.PrUrl, &i.MarkerToken)
+	return i, err
+}
+
+const pRBodyMarkersByTask = `-- name: PRBodyMarkersByTask :many
+SELECT task_id, repo, pr_url, marker_token, updated_at FROM pr_body_markers
+WHERE task_id = ? ORDER BY repo
+`
+
+func (q *Queries) PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PrBodyMarker, error) {
+	rows, err := q.db.QueryContext(ctx, pRBodyMarkersByTask, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PrBodyMarker{}
+	for rows.Next() {
+		var i PrBodyMarker
+		if err := rows.Scan(
+			&i.TaskID,
+			&i.Repo,
+			&i.PrUrl,
+			&i.MarkerToken,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1838,6 +1918,34 @@ func (q *Queries) UpdateTaskWorkspace(ctx context.Context, arg UpdateTaskWorkspa
 		arg.PaneID,
 		arg.UpdatedAt,
 		arg.ID,
+	)
+	return err
+}
+
+const upsertPRBodyMarker = `-- name: UpsertPRBodyMarker :exec
+INSERT INTO pr_body_markers(task_id, repo, pr_url, marker_token, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(task_id, repo) DO UPDATE SET
+    pr_url = excluded.pr_url,
+    marker_token = excluded.marker_token,
+    updated_at = excluded.updated_at
+`
+
+type UpsertPRBodyMarkerParams struct {
+	TaskID      int64
+	Repo        string
+	PrUrl       string
+	MarkerToken string
+	UpdatedAt   int64
+}
+
+func (q *Queries) UpsertPRBodyMarker(ctx context.Context, arg UpsertPRBodyMarkerParams) error {
+	_, err := q.db.ExecContext(ctx, upsertPRBodyMarker,
+		arg.TaskID,
+		arg.Repo,
+		arg.PrUrl,
+		arg.MarkerToken,
+		arg.UpdatedAt,
 	)
 	return err
 }

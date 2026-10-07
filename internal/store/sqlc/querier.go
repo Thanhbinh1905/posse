@@ -18,6 +18,7 @@ type Querier interface {
 	AllocateLeadLaunch(ctx context.Context, id int64) (int64, error)
 	AllocateTaskLaunch(ctx context.Context, arg AllocateTaskLaunchParams) (int64, error)
 	AllocateTaskSequence(ctx context.Context, projectID int64) (int64, error)
+	BindPRBodyMarker(ctx context.Context, arg BindPRBodyMarkerParams) (sql.Result, error)
 	BreakMount(ctx context.Context, arg BreakMountParams) error
 	ClearDownProjectLead(ctx context.Context, id int64) error
 	ClearGatedSHALandingToDone(ctx context.Context, id int64) error
@@ -49,6 +50,8 @@ type Querier interface {
 	Notices(ctx context.Context, projectID int64) ([]NoticesRow, error)
 	OldestQueuedMessage(ctx context.Context, taskID int64) (OldestQueuedMessageRow, error)
 	OpenNotices(ctx context.Context, projectID int64) ([]OpenNoticesRow, error)
+	PRBodyMarkerByTaskRepo(ctx context.Context, arg PRBodyMarkerByTaskRepoParams) (PRBodyMarkerByTaskRepoRow, error)
+	PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PrBodyMarker, error)
 	ProjectByID(ctx context.Context, id int64) (Project, error)
 	ProjectByLeadPane(ctx context.Context, leadPaneID string) (Project, error)
 	ProjectByName(ctx context.Context, name string) (Project, error)
@@ -83,6 +86,7 @@ type Querier interface {
 	UpdateTaskObservation(ctx context.Context, arg UpdateTaskObservationParams) error
 	UpdateTaskState(ctx context.Context, arg UpdateTaskStateParams) (sql.Result, error)
 	UpdateTaskWorkspace(ctx context.Context, arg UpdateTaskWorkspaceParams) error
+	UpsertPRBodyMarker(ctx context.Context, arg UpsertPRBodyMarkerParams) error
 }
 
 var _ Querier = (*Queries)(nil)
