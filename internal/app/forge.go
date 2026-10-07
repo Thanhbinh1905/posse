@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -183,34 +184,95 @@ type gitlabMergeRequest struct {
 	} `json:"head_pipeline"`
 }
 
-func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool) (string, bool, error) {
-	output, err := runOutputStep(ctx, db, intent, "pr.lookup", forge.Root, "glab", "api", "--hostname", forge.Host, "projects/"+url.PathEscape(forge.Path)+"/merge_requests?state=opened&source_branch="+url.QueryEscape(task.Branch)+"&target_branch="+url.QueryEscape(project.DefaultBranch))
-	if err != nil {
-		return "", false, axi.Failure("pr_list_failed", "could not list GitLab merge requests", true, err.Error())
-	}
-	var existing []gitlabMergeRequest
-	if err := json.Unmarshal([]byte(output), &existing); err != nil {
-		return "", false, err
-	}
-	for _, mr := range existing {
-		if mr.SourceBranch != task.Branch || mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID {
-			continue // A fork's branch (or an unidentified source) is not this Project's Worker branch.
+func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
+	endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests?state=opened&source_branch=" + url.QueryEscape(task.Branch) + "&target_branch=" + url.QueryEscape(project.DefaultBranch)
+	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
+	defer cancel()
+	foundOpenMR, lastHeadLagging := false, false
+	var lastHead string
+	delay := openPullRequestHeadInitialWait
+	for {
+		output, err := runOutputStep(pollCtx, db, intent, "pr.lookup", forge.Root, "glab", "api", "--hostname", forge.Host, endpoint)
+		if err != nil {
+			if pollCtx.Err() != nil {
+				if ctx.Err() != nil {
+					return "", false, ctx.Err()
+				}
+				if foundOpenMR && lastHeadLagging {
+					return "", false, pullRequestHeadLagTimeout(lastHead, task.GatedSHA)
+				}
+				if foundOpenMR {
+					return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+				}
+			}
+			return "", false, axi.Failure("pr_list_failed", "could not list GitLab merge requests", true, err.Error())
 		}
-		if mr.SHA != task.GatedSHA {
-			return "", false, axi.Failure("branch_moved", "existing merge request has a different head", false)
-		}
-		if _, err := forgeReference(mr.WebURL, forge); err != nil {
+		var existing []gitlabMergeRequest
+		if err := json.Unmarshal([]byte(output), &existing); err != nil {
 			return "", false, err
 		}
-		if err := validateWorkerPullRequest(ctx, project, task, forge, mr.WebURL, task.GatedSHA); err != nil {
-			return "", false, err
+		matched := false
+		for _, mr := range existing {
+			if mr.SourceBranch != task.Branch || mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID {
+				continue // A fork's branch (or an unidentified source) is not this Project's Worker branch.
+			}
+			matched = true
+			foundOpenMR = true
+			lastHead = mr.SHA
+			if mr.SHA == task.GatedSHA {
+				if _, err := forgeReference(mr.WebURL, forge); err != nil {
+					return "", false, err
+				}
+				if err := validateWorkerPullRequest(ctx, project, task, forge, mr.WebURL, task.GatedSHA); err != nil {
+					return "", false, err
+				}
+				if summary != "" {
+					if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, mr.WebURL, member, summary, verification, proof, risk, refreshLegacy); err != nil {
+						return "", false, err
+					}
+				}
+				return mr.WebURL, false, nil
+			}
+			lastHeadLagging = previousRemoteHead != "" && mr.SHA == previousRemoteHead
+			if !lastHeadLagging && previousRemoteHead != "" {
+				lastHeadLagging, err = db.WasVerifiedPRHead(pollCtx, task.ID, mr.WebURL, mr.SHA)
+				if err != nil {
+					return "", false, err
+				}
+			}
+			if !lastHeadLagging {
+				return "", false, pullRequestHeadMismatch(mr.SHA, task.GatedSHA)
+			}
+			break
 		}
-		if summary != "" {
-			if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, mr.WebURL, member, summary, verification, proof, risk, refreshLegacy); err != nil {
-				return "", false, err
+		if !matched {
+			if !foundOpenMR {
+				break
+			}
+			lastHeadLagging = false
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-pollCtx.Done():
+			timer.Stop()
+			if ctx.Err() != nil {
+				return "", false, ctx.Err()
+			}
+			if foundOpenMR && lastHeadLagging {
+				return "", false, pullRequestHeadLagTimeout(lastHead, task.GatedSHA)
+			}
+			if foundOpenMR {
+				return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+			}
+			return "", false, axi.Failure("pr_list_failed", "timed out while looking for an existing GitLab merge request", true)
+		}
+		if delay < openPullRequestHeadMaxWait {
+			delay *= 2
+			if delay > openPullRequestHeadMaxWait {
+				delay = openPullRequestHeadMaxWait
 			}
 		}
-		return mr.WebURL, false, nil
 	}
 	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, "")
 	if err != nil {

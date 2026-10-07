@@ -563,23 +563,24 @@ func TestWorkerPublishAdoptsExistingPR(t *testing.T) {
 	}
 }
 
-func TestWorkerPublishReportsPersistentPRHeadMismatch(t *testing.T) {
+func TestWorkerPublishReportsUnexpectedPRHeadMismatch(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
-	oldHead := fixture.headSHA
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
 	if err := os.WriteFile(filepath.Join(fixture.worktree, "follow-up.txt"), []byte("follow-up\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	gitTest(t, fixture.worktree, "add", "follow-up.txt")
 	gitTest(t, fixture.worktree, "commit", "-m", "follow-up commit")
 	newHead := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
-	openPRs := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, oldHead)
+	unexpectedHead := strings.Repeat("f", 40)
+	openPRs := fmt.Sprintf(`[{"url":"https://github.com/acme/shop/pull/17","headRefName":"posse/t1","headRefOid":"%s"}]`, unexpectedHead)
 	if err := os.WriteFile(fixture.ghOpenPRs, []byte(openPRs), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	code, output, stderr := fixture.run("publish", "Worker follow-up")
-	if code != 1 || !strings.Contains(output, oldHead) || !strings.Contains(output, newHead) {
-		t.Fatalf("persistent PR head mismatch did not report both heads: exit=%d output=%s stderr=%s", code, output, stderr)
+	if code != 1 || !strings.Contains(output, unexpectedHead) || !strings.Contains(output, newHead) || !strings.Contains(output, "branch_moved") {
+		t.Fatalf("unexpected PR head did not report branch_moved with both heads: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.remote, "rev-parse", "refs/heads/posse/t1")); got != newHead {
 		t.Fatalf("publish did not push the expected Task head before checking the PR: got=%s want=%s", got, newHead)
@@ -588,8 +589,8 @@ func TestWorkerPublishReportsPersistentPRHeadMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(log), "pr list") < 2 {
-		t.Fatalf("publish did not retry the persistent mismatch: %s", log)
+	if strings.Count(string(log), "pr list") != 1 {
+		t.Fatalf("publish should reject an unexpected PR head without polling: %s", log)
 	}
 }
 
