@@ -39,12 +39,17 @@ case "$PWD/" in
   "$POSSE_E2E_REMUDA/"*)
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-    printf 'Report for %s\n' "$PWD" > report.md
-    printf 'root evidence\n' > root-evidence.txt
-    printf 'updated workspace context\n' > workspace-note.txt
-    printf 'See root-evidence.txt and workspace-note.txt\n' >> report.md
     mode=$(cat "$POSSE_TEST_ROOT/scout-mode" 2>/dev/null || true)
     rm -f "$POSSE_TEST_ROOT/scout-mode"
+    printf 'Report for %s\n' "$PWD" > report.md
+    if [ "$mode" = missing-baseline ]; then
+      printf 'new root evidence\n' > new-root-evidence.txt
+      printf 'See new-root-evidence.txt\n' >> report.md
+    else
+      printf 'root evidence\n' > root-evidence.txt
+      printf 'updated workspace context\n' > workspace-note.txt
+      printf 'See root-evidence.txt and workspace-note.txt\n' >> report.md
+    fi
     if [ "$mode" = nested-git ]; then
       mkdir -p git-evidence
       git -C git-evidence init -q -b main
@@ -164,11 +169,13 @@ esac
 		scenario            string
 		nestedGit           bool
 		updateProject       bool
+		missingBaseline     bool
 	}{
 		{taskID: "t1", title: "Inspect backend member", name: "inspect-backend-member", members: []string{"backend"}},
 		{taskID: "t2", title: "Inspect both members", name: "inspect-both-members", members: []string{"backend", "worker"}},
 		{taskID: "t3", title: "Inspect nested root", name: "inspect-nested-root", members: []string{"backend"}, scenario: "nested-git", nestedGit: true},
 		{taskID: "t4", title: "Preserve root evidence", name: "preserve-root-evidence", members: []string{"backend"}, updateProject: true},
+		{taskID: "t5", title: "Refuse missing baseline", name: "refuse-missing-baseline", members: []string{"backend"}, scenario: "missing-baseline", missingBaseline: true},
 	} {
 		t.Run(test.taskID, func(t *testing.T) {
 			if test.scenario != "" {
@@ -218,6 +225,53 @@ esac
 			if noticeID == "" {
 				t.Fatalf("Task %s has no task_done Notice: %#v", test.taskID, notices)
 			}
+			if test.missingBaseline {
+				baselinePath := filepath.Join(root, "posse", "projects", "stack", ".workspace-root-baselines", fmt.Sprintf("t%d.json", task.Seq))
+				baseline, err := os.ReadFile(baselinePath)
+				if err != nil {
+					t.Fatalf("read acquisition baseline: %v", err)
+				}
+				if err := os.Remove(baselinePath); err != nil {
+					t.Fatalf("remove acquisition baseline: %v", err)
+				}
+				command := exec.Command(binary, "unsaddle", test.taskID)
+				command.Dir, command.Env = workspace, leadEnv
+				output, teardownErr := command.CombinedOutput()
+				if teardownErr == nil || !strings.Contains(string(output), "unsaddle_incomplete") || !strings.Contains(string(output), "acquisition baseline") {
+					t.Fatalf("Teardown without baseline = %v, want preservation refusal; output:\n%s", teardownErr, output)
+				}
+				current, err := db.Task(context.Background(), project.ID, test.taskID)
+				if err != nil || current.State != store.StateReported {
+					t.Fatalf("Task after missing-baseline refusal = %#v, %v", current, err)
+				}
+				mounts, err := db.Mounts(context.Background(), project.ID)
+				if err != nil || len(mounts) == 0 || mounts[0].ID != task.MountID || mounts[0].State == "idle" {
+					t.Fatalf("Mount after missing-baseline refusal = %#v, %v", mounts, err)
+				}
+				if _, err := os.Stat(task.WorktreePath); err != nil {
+					t.Fatalf("Mount path after missing-baseline refusal: %v", err)
+				}
+				if contents, err := os.ReadFile(filepath.Join(task.WorktreePath, "new-root-evidence.txt")); err != nil || string(contents) != "new root evidence\n" {
+					t.Fatalf("new root evidence after missing-baseline refusal = %q, %v", contents, err)
+				}
+				failureNotices, err := db.Notices(context.Background(), project.ID, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				foundFailure := false
+				for _, notice := range failureNotices {
+					if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" && strings.Contains(notice.Summary, "acquisition baseline") {
+						foundFailure = true
+						break
+					}
+				}
+				if !foundFailure {
+					t.Fatalf("missing-baseline refusal did not record an unsaddle_incomplete Notice: %#v", failureNotices)
+				}
+				if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
+					t.Fatalf("restore acquisition baseline for retry: %v", err)
+				}
+			}
 			runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
 			if !waitForCondition(30*time.Second, func() bool {
 				current, err := db.Task(context.Background(), project.ID, test.taskID)
@@ -234,7 +288,12 @@ esac
 			if len(mounts) == 0 || mounts[0].State != "idle" {
 				t.Fatalf("Mount was not released: %#v", mounts)
 			}
-			artifacts := []string{"report.md", "root-evidence.txt", "workspace-note.txt"}
+			artifacts := []string{"report.md"}
+			if test.missingBaseline {
+				artifacts = append(artifacts, "new-root-evidence.txt")
+			} else {
+				artifacts = append(artifacts, "root-evidence.txt", "workspace-note.txt")
+			}
 			if test.nestedGit {
 				artifacts = append(artifacts, "git-evidence/proof.txt", "git-evidence/notes.txt")
 			}
@@ -247,18 +306,26 @@ esac
 					t.Errorf("saved artifact %s = %q, %v", artifact, contents, err)
 				}
 			}
-			wantReport := "Report for " + task.WorktreePath + "\nSee root-evidence.txt and workspace-note.txt\n"
-			if test.nestedGit {
-				wantReport += "See git-evidence/proof.txt\n"
+			wantReport := "Report for " + task.WorktreePath + "\n"
+			if test.missingBaseline {
+				wantReport += "See new-root-evidence.txt\n"
+			} else {
+				wantReport += "See root-evidence.txt and workspace-note.txt\n"
+				if test.nestedGit {
+					wantReport += "See git-evidence/proof.txt\n"
+				}
 			}
-			wantFiles := map[string]string{
-				"report.md":          wantReport,
-				"root-evidence.txt":  "root evidence\n",
-				"workspace-note.txt": "updated workspace context\n",
+			wantFiles := map[string]string{"report.md": wantReport}
+			if !test.missingBaseline {
+				wantFiles["root-evidence.txt"] = "root evidence\n"
+				wantFiles["workspace-note.txt"] = "updated workspace context\n"
 			}
 			if test.nestedGit {
 				wantFiles["git-evidence/proof.txt"] = "nested Git proof\n"
 				wantFiles["git-evidence/notes.txt"] = "untracked nested evidence\n"
+			}
+			if test.missingBaseline {
+				wantFiles["new-root-evidence.txt"] = "new root evidence\n"
 			}
 			for artifact, want := range wantFiles {
 				if contents, err := os.ReadFile(filepath.Join(savedDir, artifact)); err != nil || string(contents) != want {

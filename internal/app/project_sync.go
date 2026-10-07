@@ -441,7 +441,7 @@ func (s *Service) sync(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if result.Err != nil {
-		if store.IsBusy(result.Err) {
+		if store.IsOnlyBusy(result.Err) {
 			return result.Err
 		}
 		return axi.Failure("project_sync_failed", "could not sync the Project default branch", true, result.Err.Error())

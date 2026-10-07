@@ -1,10 +1,15 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -57,6 +62,8 @@ func TestPollOnlyLookoutDefersFetchLockContentionWithoutNotice(t *testing.T) {
 
 	if code, output, errOutput := fixture.run("lookout", "--poll-only", "--timeout", "1"); code != 0 {
 		t.Fatalf("poll-only Lookout exited during expected fetch contention: code=%d output=%s error=%s", code, output, errOutput)
+	} else if !strings.Contains(errOutput, "deferred due to transient store contention") {
+		t.Fatalf("poll-only Lookout did not log deferred contention: %s", errOutput)
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
@@ -64,6 +71,39 @@ func TestPollOnlyLookoutDefersFetchLockContentionWithoutNotice(t *testing.T) {
 	}
 	if countNoticeKind(notices, "pr_watch_failing") != 0 {
 		t.Fatalf("transient fetch contention raised a Notice: %#v", notices)
+	}
+}
+
+func TestLookoutDefersPureContentionButNotMixedFailures(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	var diagnostics bytes.Buffer
+	ctx := &axi.Context{Context: context.Background(), ErrOut: &diagnostics}
+	lastFailure := ""
+
+	busy := errors.Join(fmt.Errorf("checkout sync: %w", store.ErrBusy), store.ErrBusy)
+	recordLookoutFailure(ctx, fixture.db, fixture.project.ID, &lastFailure, "reconcile", busy)
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "pr_watch_failing") != 0 || !strings.Contains(diagnostics.String(), "deferred due to transient store contention") {
+		t.Fatalf("pure contention was not logged and deferred without a Notice: notices=%#v diagnostics=%q", notices, diagnostics.String())
+	}
+
+	persistent := errors.New("Task t2 observation: constraint failed")
+	mixed := errors.Join(fmt.Errorf("Task t1 observation: %w", store.ErrBusy), persistent)
+	recordLookoutFailure(ctx, fixture.db, fixture.project.ID, &lastFailure, "reconcile", mixed)
+	notices, err = fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "pr_watch_failing") != 1 {
+		t.Fatalf("mixed contention and persistent failure did not create a Notice: %#v", notices)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && (!strings.Contains(notice.Summary, persistent.Error()) || strings.Contains(notice.Summary, store.ErrBusy.Error())) {
+			t.Fatalf("mixed failure Notice lost its persistent cause or exposed raw contention: %#v", notice)
+		}
 	}
 }
 

@@ -34,6 +34,20 @@ func (s *Service) recoverTask(ctx context.Context, db *store.DB, home string, pr
 	if state.Status == "exhausted" {
 		return true, false, nil
 	}
+	if groupGeneration := groupRecoveryEpisode(generation); groupGeneration != "" && groupRecoveryEpisode(state.Generation) == "" && (state.Status == "pending" || state.Status == "running") {
+		updated, err := db.AssociateTaskRecoveryGeneration(ctx, task.ID, state.Generation, groupGeneration)
+		if err != nil {
+			return false, false, err
+		}
+		if updated {
+			state.Generation = groupGeneration
+		} else {
+			state, err = db.TaskRecovery(ctx, task.ID)
+			if err != nil {
+				return false, false, err
+			}
+		}
+	}
 	recoveredPaneMissing := state.Status == "recovered"
 	if state.Status == "recovered" {
 		pane, found := findTaskPane(snapshot.Panes, task)
