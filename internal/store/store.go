@@ -1230,6 +1230,9 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 			return "", err
 		}
 		current = next
+		if err := blockModelErrorEpisodeTx(ctx, tx, task.ID, "Task transitioned to "+string(next)+" before automatic continue submission", time.Now().UnixMilli()); err != nil {
+			return "", err
+		}
 	}
 	if verb == "done" && task.Type != "ship" {
 		if err := transitionTx(ctx, queries, task.ID, StateDone, StateReported, "cli", "Rider Report copied to the Project home"); err != nil {

@@ -283,8 +283,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 34 {
-		t.Fatalf("applied Goose migration version = %d, want 34", version)
+	if version != 35 {
+		t.Fatalf("applied Goose migration version = %d, want 35", version)
 	}
 }
 
@@ -343,6 +343,7 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP TABLE notice_delivery_receipts`,
 		`DROP INDEX projects_project_uuid_idx`,
@@ -423,6 +424,7 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
@@ -454,7 +456,7 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 	if err != nil || restored.State != "claimed" {
 		t.Fatalf("legacy receipt after migration = %+v, %v", restored, err)
 	}
-	for _, version := range []int64{32, 33, 34} {
+	for _, version := range []int64{32, 33, 34, 35} {
 		var applied int
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM goose_db_version WHERE version_id=? AND is_applied=1`, version).Scan(&applied); err != nil || applied != 1 {
 			t.Fatalf("migration %d applied rows = %d, %v; want 1", version, applied, err)
@@ -576,6 +578,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`DROP TABLE member_pr_poll_state`,
 		`DROP TABLE notice_delivery_receipts`,
 		`DROP TABLE pr_body_markers`,
+		`DROP TABLE model_error_episodes`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`DROP TABLE publish_pre_push_heads`,
@@ -681,9 +684,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 34 {
+	if version != 35 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 34", version)
+		t.Fatalf("initial Goose migration version = %d, want 35", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -720,8 +723,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 34 {
-		t.Fatalf("reopened Goose migration version = %d, want 34", version)
+	if version != 35 {
+		t.Fatalf("reopened Goose migration version = %d, want 35", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {

@@ -46,11 +46,16 @@ case "$PWD/" in
       printf 'new root evidence\n' > new-root-evidence.txt
       printf 'See new-root-evidence.txt\n' >> report.md
     else
-      printf 'root evidence\n' > root-evidence.txt
-      printf 'updated workspace context\n' > workspace-note.txt
+      if [ "$mode" = deep-untracked-git ]; then
+        printf 'deep root evidence\n' > root-evidence.txt
+        printf 'deep workspace context\n' > workspace-note.txt
+      else
+        printf 'root evidence\n' > root-evidence.txt
+        printf 'updated workspace context\n' > workspace-note.txt
+      fi
       printf 'See root-evidence.txt and workspace-note.txt\n' >> report.md
     fi
-    if [ "$mode" = nested-git ]; then
+    if [ "$mode" = nested-git ] || [ "$mode" = deep-untracked-git ]; then
       mkdir -p git-evidence
       git -C git-evidence init -q -b main
       printf 'ignored.txt\n' > git-evidence/.git/info/exclude
@@ -59,6 +64,14 @@ case "$PWD/" in
       printf 'ignored nested file\n' > git-evidence/ignored.txt
       git -C git-evidence add proof.txt && git -C git-evidence commit -qm 'nested evidence' || exit 0
       printf 'See git-evidence/proof.txt\n' >> report.md
+      if [ "$mode" = deep-untracked-git ]; then
+        mkdir -p git-evidence/deeper
+        git -C git-evidence/deeper init -q -b main
+        printf 'deep tracked evidence\n' > git-evidence/deeper/tracked.txt
+        git -C git-evidence/deeper add tracked.txt && git -C git-evidence/deeper commit -qm 'deep evidence' || exit 0
+        printf 'deep untracked evidence\n' > git-evidence/deeper/untracked.txt
+        printf 'See git-evidence/deeper/tracked.txt\n' >> report.md
+      fi
     fi
     for member in */; do
       [ -e "$member/.git" ] || continue
@@ -130,7 +143,7 @@ esac
 	}
 
 	client := herdr.NewWithEnv("herdr", env)
-	startServer(t, client)
+	serverProcess := startServer(t, client)
 	if _, err := client.Run(context.Background(), "integration", "install", "claude"); err != nil {
 		t.Fatal(err)
 	}
@@ -162,22 +175,26 @@ esac
 		t.Fatalf("workspace Project = %#v, %v", project, err)
 	}
 
+	parentTest := t
 	var firstMountID int64
 	for _, test := range []struct {
 		taskID, title, name string
 		members             []string
 		scenario            string
 		nestedGit           bool
+		deepUntracked       bool
+		unrequestedMember   bool
 		updateProject       bool
 		missingBaseline     bool
 	}{
 		{taskID: "t1", title: "Inspect backend member", name: "inspect-backend-member", members: []string{"backend"}},
 		{taskID: "t2", title: "Inspect both members", name: "inspect-both-members", members: []string{"backend", "worker"}},
-		{taskID: "t3", title: "Inspect nested root", name: "inspect-nested-root", members: []string{"backend"}, scenario: "nested-git", nestedGit: true},
+		{taskID: "t3", title: "Preserve unrequested Member commit", name: "preserve-unrequested", members: []string{"backend"}, scenario: "unrequested-member", unrequestedMember: true},
 		{taskID: "t4", title: "Preserve root evidence", name: "preserve-root-evidence", members: []string{"backend"}, updateProject: true},
 		{taskID: "t5", title: "Refuse missing baseline", name: "refuse-missing-baseline", members: []string{"backend"}, scenario: "missing-baseline", missingBaseline: true},
+		{taskID: "t6", title: "Preserve deeper untracked Git repository", name: "preserve-deeper", members: []string{"backend"}, scenario: "deep-untracked-git", nestedGit: true, deepUntracked: true},
 	} {
-		t.Run(test.taskID, func(t *testing.T) {
+		if !t.Run(test.taskID, func(t *testing.T) {
 			if test.scenario != "" {
 				if err := os.WriteFile(filepath.Join(root, "scout-mode"), []byte(test.scenario), 0o600); err != nil {
 					t.Fatal(err)
@@ -226,6 +243,18 @@ esac
 				t.Fatalf("Task %s has no task_done Notice: %#v", test.taskID, notices)
 			}
 			if test.missingBaseline {
+				memberPath := filepath.Join(task.WorktreePath, "backend")
+				memberBranch := strings.TrimSpace(gitTest(t, env, memberPath, "branch", "--show-current"))
+				memberHead := strings.TrimSpace(gitTest(t, env, memberPath, "rev-parse", "HEAD"))
+				memberFiles := map[string]string{
+					"evidence.txt":  "committed evidence from backend/\n",
+					"untracked.txt": "untracked evidence from backend/\n",
+				}
+				for name, want := range memberFiles {
+					if got, err := os.ReadFile(filepath.Join(memberPath, name)); err != nil || string(got) != want {
+						t.Fatalf("Member source %s before Teardown = %q, want %q: %v", name, got, want, err)
+					}
+				}
 				baselinePath := filepath.Join(root, "posse", "projects", "stack", ".workspace-root-baselines", fmt.Sprintf("t%d.json", task.Seq))
 				baseline, err := os.ReadFile(baselinePath)
 				if err != nil {
@@ -235,24 +264,63 @@ esac
 					t.Fatalf("remove acquisition baseline: %v", err)
 				}
 				command := exec.Command(binary, "unsaddle", test.taskID)
+				command.Dir = workspace
+				command.Env = setEnv(leadEnv, "POSSE_INTENT_CRASH_AT", "unsaddle:before:report.attachments")
+				output, interruptErr := command.CombinedOutput()
+				exit, ok := interruptErr.(*exec.ExitError)
+				if !ok || exit.ExitCode() != 86 {
+					t.Fatalf("Teardown interruption before Report attachment preservation = %v, want exit 86; output:\n%s", interruptErr, output)
+				}
+
+				stopServer(t, client, serverProcess)
+				serverProcess = startServer(parentTest, client)
+				leadPane, err = createWorkspace(client, workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := client.Run(context.Background(), "pane", "run", leadPane.RootPane.PaneID, "posse up --yes"); err != nil {
+					t.Fatalf("restart workspace Lead: %v", err)
+				}
+				if !waitForCondition(30*time.Second, func() bool {
+					currentProject, err := db.ProjectByName(context.Background(), "stack")
+					return err == nil && currentProject.LeadPaneID == leadPane.RootPane.PaneID
+				}) {
+					t.Fatal("restarted private Lead did not register")
+				}
+				leadEnv = setEnv(leadEnv, "HERDR_PANE_ID", leadPane.RootPane.PaneID)
+				leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", leadPane.Workspace.WorkspaceID)
+				runPosse(t, binary, workspace, leadEnv, "roster")
+
+				command = exec.Command(binary, "unsaddle", test.taskID)
 				command.Dir, command.Env = workspace, leadEnv
 				output, teardownErr := command.CombinedOutput()
 				if teardownErr == nil || !strings.Contains(string(output), "unsaddle_incomplete") || !strings.Contains(string(output), "acquisition baseline") {
-					t.Fatalf("Teardown without baseline = %v, want preservation refusal; output:\n%s", teardownErr, output)
+					t.Fatalf("recovered Teardown without baseline = %v, want preservation refusal; output:\n%s", teardownErr, output)
 				}
 				current, err := db.Task(context.Background(), project.ID, test.taskID)
 				if err != nil || current.State != store.StateReported {
 					t.Fatalf("Task after missing-baseline refusal = %#v, %v", current, err)
 				}
-				mounts, err := db.Mounts(context.Background(), project.ID)
-				if err != nil || len(mounts) == 0 || mounts[0].ID != task.MountID || mounts[0].State == "idle" {
-					t.Fatalf("Mount after missing-baseline refusal = %#v, %v", mounts, err)
+				mount, err := db.MountByTask(context.Background(), task.ID)
+				if err != nil || mount.ID != task.MountID || mount.TaskID != task.ID || mount.State != "held" {
+					t.Fatalf("Mount after missing-baseline refusal = %#v, %v", mount, err)
 				}
 				if _, err := os.Stat(task.WorktreePath); err != nil {
 					t.Fatalf("Mount path after missing-baseline refusal: %v", err)
 				}
 				if contents, err := os.ReadFile(filepath.Join(task.WorktreePath, "new-root-evidence.txt")); err != nil || string(contents) != "new root evidence\n" {
 					t.Fatalf("new root evidence after missing-baseline refusal = %q, %v", contents, err)
+				}
+				if got := strings.TrimSpace(gitTest(t, env, memberPath, "branch", "--show-current")); got != memberBranch {
+					t.Fatalf("Member branch after recovery = %q, want %q", got, memberBranch)
+				}
+				if got := strings.TrimSpace(gitTest(t, env, memberPath, "rev-parse", "HEAD")); got != memberHead {
+					t.Fatalf("Member HEAD after recovery = %q, want %q", got, memberHead)
+				}
+				for name, want := range memberFiles {
+					if got, err := os.ReadFile(filepath.Join(memberPath, name)); err != nil || string(got) != want {
+						t.Fatalf("Member source %s after recovery = %q, want %q: %v", name, got, want, err)
+					}
 				}
 				failureNotices, err := db.Notices(context.Background(), project.ID, false)
 				if err != nil {
@@ -267,6 +335,20 @@ esac
 				}
 				if !foundFailure {
 					t.Fatalf("missing-baseline refusal did not record an unsaddle_incomplete Notice: %#v", failureNotices)
+				}
+				decisions, err := db.Decisions(context.Background(), project.ID, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				foundRepairDiscard := false
+				for _, decision := range decisions {
+					if decision.TaskID == task.ID && decision.Kind == "leftover" && strings.Join(decision.Options, ",") == "repair,discard" {
+						foundRepairDiscard = true
+						break
+					}
+				}
+				if !foundRepairDiscard {
+					t.Fatalf("missing-baseline refusal did not raise repair/discard Decision: %#v", decisions)
 				}
 				if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
 					t.Fatalf("restore acquisition baseline for retry: %v", err)
@@ -297,6 +379,12 @@ esac
 			if test.nestedGit {
 				artifacts = append(artifacts, "git-evidence/proof.txt", "git-evidence/notes.txt")
 			}
+			if test.deepUntracked {
+				artifacts = append(artifacts, "git-evidence/deeper/tracked.txt", "git-evidence/deeper/untracked.txt")
+			}
+			if test.unrequestedMember {
+				artifacts = append(artifacts, "worker/evidence.txt", "worker/untracked.txt")
+			}
 			for _, member := range test.members {
 				artifacts = append(artifacts, filepath.Join(member, "evidence.txt"), filepath.Join(member, "untracked.txt"))
 			}
@@ -314,15 +402,30 @@ esac
 				if test.nestedGit {
 					wantReport += "See git-evidence/proof.txt\n"
 				}
+				if test.deepUntracked {
+					wantReport += "See git-evidence/deeper/tracked.txt\n"
+				}
 			}
 			wantFiles := map[string]string{"report.md": wantReport}
 			if !test.missingBaseline {
 				wantFiles["root-evidence.txt"] = "root evidence\n"
 				wantFiles["workspace-note.txt"] = "updated workspace context\n"
+				if test.deepUntracked {
+					wantFiles["root-evidence.txt"] = "deep root evidence\n"
+					wantFiles["workspace-note.txt"] = "deep workspace context\n"
+				}
 			}
 			if test.nestedGit {
 				wantFiles["git-evidence/proof.txt"] = "nested Git proof\n"
 				wantFiles["git-evidence/notes.txt"] = "untracked nested evidence\n"
+			}
+			if test.deepUntracked {
+				wantFiles["git-evidence/deeper/tracked.txt"] = "deep tracked evidence\n"
+				wantFiles["git-evidence/deeper/untracked.txt"] = "deep untracked evidence\n"
+			}
+			if test.unrequestedMember {
+				wantFiles["worker/evidence.txt"] = "committed evidence from worker/\n"
+				wantFiles["worker/untracked.txt"] = "untracked evidence from worker/\n"
 			}
 			if test.missingBaseline {
 				wantFiles["new-root-evidence.txt"] = "new root evidence\n"
@@ -353,6 +456,8 @@ esac
 					t.Errorf("posse show omitted saved attachment %q:\n%s", artifact, show)
 				}
 			}
-		})
+		}) {
+			t.Fatal("stop dependent Mount-reuse scenarios after a failed subtest")
+		}
 	}
 }
