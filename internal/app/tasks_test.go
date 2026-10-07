@@ -331,12 +331,17 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	if _, err := os.Stat(indexLock); !os.IsNotExist(err) {
 		t.Fatalf("stale Git index lock was not removed: %v", err)
 	}
+	skillRoots, err := filepath.Glob(filepath.Join(home, "projects", "shop", "launch-skills", "*"))
+	if err != nil || len(skillRoots) != 1 {
+		t.Fatalf("skill snapshot roots = %q, %v", skillRoots, err)
+	}
 	started := false
 	for _, call := range fake.Calls {
 		if call.Method != "agent.start" {
 			continue
 		}
-		started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && equalStrings(call.Params["args"].([]string), []string{"--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9"})
+		args := call.Params["args"].([]string)
+		started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 10 && equalStrings(args[:8], []string{"--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9"}) && equalStrings(args[8:], []string{"--plugin-dir", skillRoots[0]})
 	}
 	if !started {
 		t.Fatalf("relaunch omitted the complete resume args: %#v", fake.Calls)
@@ -402,7 +407,8 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 	freshStart := false
 	for _, call := range fake.Calls {
 		if call.Method == "agent.start" && call.Params["kind"] == "codex" {
-			freshStart = equalStrings(call.Params["args"].([]string), []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"})
+			args := call.Params["args"].([]string)
+			freshStart = len(args) == 7 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "posse-setup", "SKILL.md"))
 		}
 	}
 	if !freshStart {

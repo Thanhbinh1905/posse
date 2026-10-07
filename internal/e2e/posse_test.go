@@ -52,11 +52,27 @@ func TestPosseSpawnNoticeLandTeardownAndRecovery(t *testing.T) {
 	leadArgsLog := filepath.Join(root, "lead-args.log")
 	workerLog := filepath.Join(root, "worker.log")
 	workerArgsLog := filepath.Join(root, "worker-args.log")
+	skillReadsLog := filepath.Join(root, "skill-reads.log")
 	sleepPIDs := filepath.Join(root, "worker-sleep-pids")
 	signalGateDir := filepath.Join(root, "worker-signal-gates")
 	launchRead := filepath.Join(root, "worker-launch-delivered.md")
 	claudeBinary := filepath.Join(binDir, "claude")
 	fakeAgent := `#!/bin/sh
+	previous=
+	for argument in "$@"; do
+	  if [ "$previous" = plugin-dir ]; then
+	    case "$argument" in
+	      "$POSSE_HOME/projects/"*/launch-skills/*)
+	        for skill in posse posse-setup; do
+	          cat "$argument/skills/$skill/SKILL.md" >> "$POSSE_E2E_SKILL_READS"
+	        done
+	        ;;
+	    esac
+	    previous=
+	    continue
+	  fi
+	  [ "$argument" = --plugin-dir ] && previous=plugin-dir || previous=
+	done
 	case "$PWD/" in
 	  "$POSSE_E2E_WORKTREES/"*)
 	    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
@@ -114,6 +130,7 @@ esac
 	env = setEnv(env, "POSSE_E2E_LEAD_ARGS_LOG", leadArgsLog)
 	env = setEnv(env, "POSSE_E2E_WORKER_LOG", workerLog)
 	env = setEnv(env, "POSSE_E2E_WORKER_ARGS_LOG", workerArgsLog)
+	env = setEnv(env, "POSSE_E2E_SKILL_READS", skillReadsLog)
 	env = setEnv(env, "POSSE_E2E_SLEEP_PIDS", sleepPIDs)
 	env = setEnv(env, "POSSE_E2E_SIGNAL_GATE", signalGateDir)
 	env = setEnv(env, "POSSE_E2E_LAUNCH_LOG", launchRead)
@@ -226,11 +243,11 @@ esac
 	for _, name := range []string{"posse", "posse-setup"} {
 		skill := filepath.Join(root, "home", ".agents", "skills", name, "SKILL.md")
 		link := filepath.Join(root, "claude", "skills", name)
-		if _, err := os.Stat(skill); err != nil {
-			t.Fatalf("embedded skill %s was not installed: %v", name, err)
+		if _, err := os.Stat(skill); !os.IsNotExist(err) {
+			t.Fatalf("default setup installed global skill %s: %v", name, err)
 		}
-		if target, err := os.Readlink(link); err != nil || target != filepath.Dir(skill) {
-			t.Fatalf("skill link %s = %q, %v", name, target, err)
+		if _, err := os.Lstat(link); !os.IsNotExist(err) {
+			t.Fatalf("default setup linked global skill %s: %v", name, err)
 		}
 	}
 	if guard, err := os.ReadFile(filepath.Join(root, "pi", "extensions", "posse-worker-guard.ts")); err != nil || !strings.Contains(string(guard), strconv.Quote(stableBinary)) {
@@ -448,6 +465,29 @@ esac
 	workerArgs, err := os.ReadFile(workerArgsLog)
 	if err != nil || !hasArgPair(strings.Fields(string(workerArgs)), "--model", "sonnet") || !hasArgPair(strings.Fields(string(workerArgs)), "--effort", "high") {
 		t.Fatalf("Profile model and effort were not rendered through kind templates: args=%q err=%v", workerArgs, err)
+	}
+	bundleRoots, err := filepath.Glob(filepath.Join(home, "projects", "shop", "launch-skills", "*"))
+	if err != nil || len(bundleRoots) != 1 {
+		t.Fatalf("Posse launch skill snapshot roots = %q, %v", bundleRoots, err)
+	}
+	leadArgs, err := os.ReadFile(leadArgsLog)
+	if err != nil || !strings.Contains(string(leadArgs), "--plugin-dir "+bundleRoots[0]) || !strings.Contains(string(workerArgs), "--plugin-dir "+bundleRoots[0]) {
+		t.Fatalf("Claude Lead and Rider were not given the isolated plugin snapshot: lead=%q worker=%q err=%v", leadArgs, workerArgs, err)
+	}
+	for _, name := range []string{"posse", "posse-setup"} {
+		path := filepath.Join(bundleRoots[0], "skills", name, "SKILL.md")
+		if contents, err := os.ReadFile(path); err != nil || !strings.Contains(string(contents), "name: "+name) {
+			t.Fatalf("frozen skill %s was not readable by the fake harness: %s err=%v", name, contents, err)
+		}
+	}
+	readSkills, err := os.ReadFile(skillReadsLog)
+	if err != nil || !strings.Contains(string(readSkills), "name: posse") || !strings.Contains(string(readSkills), "name: posse-setup") {
+		t.Fatalf("fake Claude could not read both injected skills: %s err=%v", readSkills, err)
+	}
+	for _, path := range []string{filepath.Join(repo, ".agents"), filepath.Join(repo, ".claude", "skills"), filepath.Join(task.WorktreePath, ".agents")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("Posse created skill files in Project/workspace path %s: %v", path, err)
+		}
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

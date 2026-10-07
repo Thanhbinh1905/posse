@@ -273,17 +273,26 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	} else {
 		addCheck("setup manifest", "ok", "installed", "")
 		staleSkills := []string{}
+		globalSkills := []string{}
 		for _, skill := range manifest.Skills {
 			markerPath := filepath.Join(skill.AgentsDir, skill.Name, ".posse-version")
 			marker, readErr := os.ReadFile(markerPath)
 			if readErr != nil || strings.TrimSpace(string(marker)) != s.binaryVersion() {
 				staleSkills = append(staleSkills, skill.Name)
 			}
+			if skillRecordHasUnmodifiedOwnedParts(skill) {
+				globalSkills = append(globalSkills, skill.Name)
+			}
 		}
 		if len(staleSkills) == 0 {
 			addCheck("skills", "ok", "current", "")
 		} else {
-			addCheck("skills", "warn", "out of date: "+strings.Join(staleSkills, ", "), "Run `posse setup` to refresh installed skills")
+			addCheck("skills", "warn", "out of date: "+strings.Join(staleSkills, ", "), "Run `posse setup --global-skills` to refresh the optional global copies")
+		}
+		if len(globalSkills) == 0 {
+			addCheck("global skills", "ok", "no unchanged Posse-owned global copies", "")
+		} else {
+			addCheck("global skills", "warn", "Posse-owned global copies: "+strings.Join(globalSkills, ", "), "Run `posse setup --remove-global-skills` to remove unchanged Posse-owned files")
 		}
 		staleHooks := []string{}
 		for _, hook := range manifest.Hooks {

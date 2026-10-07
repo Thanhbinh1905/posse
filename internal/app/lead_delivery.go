@@ -116,6 +116,16 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 		return leadLaunch{}, err
 	}
 	instructions := composed.Text
+	var skills posseLaunchSkills
+	if kind == "claude" || kind == "codex" || kind == "pi" {
+		skills, err = freezePosseLaunchSkills(home, project.Name, project.Root)
+		if err != nil {
+			return leadLaunch{}, err
+		}
+		if kind == "codex" {
+			instructions += "\n\n## Posse skills\n\n" + skills.CodexInstructions
+		}
+	}
 	if size := len(instructions); size > leadInstructionMaxBytes {
 		message := fmt.Sprintf("Lead instructions exceed the %d-token budget: %d bytes (maximum %d bytes at %d bytes per token)", leadInstructionTokenBudget, size, leadInstructionMaxBytes, leadInstructionBytesPerToken)
 		return leadLaunch{}, axi.Failure("lead_instructions_too_large", message, false)
@@ -148,7 +158,7 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 		if err != nil {
 			return leadLaunch{}, err
 		}
-		launch.Args = append(launch.Args, "--plugin-dir", plugin)
+		launch.Args = append(launch.Args, "--plugin-dir", plugin, "--plugin-dir", skills.ClaudePluginDir)
 		launch.Env = map[string]string{
 			"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
 			"POSSE_LOWKEY_CONFIG":               config.ConfigPath(home, project.Name),
@@ -173,6 +183,9 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 			return leadLaunch{}, err
 		}
 		launch.Args = append(launch.Args, "--extension", extension)
+	}
+	if kind == "pi" {
+		launch.Args = append(launch.Args, skills.PiArgs...)
 	}
 	if profileName := cfg.Lead.Profiles[kind]; profileName != "" {
 		profile, ok := cfg.Profiles[profileName]
