@@ -315,6 +315,15 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	var scratchPath string
+	if err := s.runIntentStep(ctx.Context, db, intent, "scratch.create", func() error {
+		var createErr error
+		scratchPath, createErr = ensureTaskScratchForTask(ctx.Context, db, home, project, task)
+		return createErr
+	}); err != nil {
+		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+		return err
+	}
 	worktreeLabel := task.PaneLabel
 	workerCount, err := db.ActiveWorkerCount(ctx.Context, project.ID)
 	if err != nil {
@@ -353,6 +362,12 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	}
 	if err := s.runIntentStep(ctx.Context, db, intent, "pane.record", func() error {
 		return db.UpdateTaskWorkspace(ctx.Context, taskID, opened.WorkspaceID, opened.PaneID)
+	}); err != nil {
+		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+		return err
+	}
+	if err := s.runIntentStep(ctx.Context, db, intent, "scratch.environment", func() error {
+		return exportTaskScratch(ctx.Context, s, opened.PaneID, scratchPath)
 	}); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
@@ -409,7 +424,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	launchContents := workerProtocol(project, task, brief, launchPath) + workspaceProtocol(project, members) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(project, task, brief, launchPath, scratchPath) + workspaceProtocol(project, members) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	preferences, err := preferenceSources(home, project, "rider")
 	if err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -621,11 +636,18 @@ func createTaskWithSequence(ctx context.Context, db *store.DB, project store.Pro
 }
 
 func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task) (int64, int, store.Intent, error) {
-	taskID, sequence, err := db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "ride", os.Getpid(), taskSequenceOccupied(ctx, db, project, home))
-	if err != nil {
-		return 0, 0, store.Intent{}, err
-	}
-	intent, err := db.IntentByTask(ctx, taskID)
+	var taskID int64
+	var sequence int
+	var intent store.Intent
+	err := withMountStateLock(ctx, db, func() error {
+		var err error
+		taskID, sequence, err = db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "ride", os.Getpid(), taskSequenceOccupied(ctx, db, project, home))
+		if err != nil {
+			return err
+		}
+		intent, err = db.IntentByTask(ctx, taskID)
+		return err
+	})
 	return taskID, sequence, intent, err
 }
 
@@ -841,7 +863,7 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 	return s.finishTaskIntent(ctx, db, id)
 }
 
-func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief, launchPath string) string {
+func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief, launchPath, scratchPath string) string {
 	landing := task.LandingMode
 	work := "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Never git push or open a PR."
 	if landing == "pr" && task.Type == "ship" && !project.IsWorkspace() {
@@ -862,7 +884,8 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 		work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base or an unrequested Member's Mount-acquisition commit, beside report.md at those paths. For workspace Tasks it also saves new or edited shared-root files, including tracked and non-ignored untracked files in nested Git repositories, against the Mount-acquisition snapshot rather than the live Project; unchanged Project copies are not saved. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Mount. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence or unchanged shared-root files the Report needs. `posse show <task>` lists saved attachments."
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
-	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, brief.DoneWhen, signal, launchPath)
+	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Mount. Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches; never create per-Task copies.", scratchPath)
+	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, brief.DoneWhen, signal, launchPath)
 }
 
 // workspaceProtocol tells a workspace Worker how its Mount mirrors the workspace.
@@ -1573,6 +1596,10 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	pane, found := findTaskPane(snapshot.Panes, task)
+	scratchPath, err := ensureTaskScratchForTask(ctx, db, home, project, task)
+	if err != nil {
+		return failure(err)
+	}
 	if !found {
 		var opened openedTab
 		if err := track("pane.open", func() error {
@@ -1620,6 +1647,11 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	s.relabelProjectTabs(ctx, db, project)
+	if err := track("scratch.environment", func() error {
+		return exportTaskScratch(ctx, s, pane.PaneID, scratchPath)
+	}); err != nil {
+		return failure(err)
+	}
 	launch := 0
 	if err := track("agent.sequence", func() error {
 		var launchErr error

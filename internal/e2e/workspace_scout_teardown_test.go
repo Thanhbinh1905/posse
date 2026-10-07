@@ -112,7 +112,7 @@ esac
 			t.Fatal(err)
 		}
 	}
-	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"finished\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"finished\"\n\n[remuda]\nkeep_idle = 10\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -396,6 +396,9 @@ esac
 			for _, member := range test.members {
 				artifacts = append(artifacts, filepath.Join(member, "evidence.txt"), filepath.Join(member, "untracked.txt"))
 			}
+			if _, err := os.Stat(filepath.Join(root, "posse", "scratch", "stack", test.taskID)); !os.IsNotExist(err) {
+				t.Fatalf("Scout Teardown kept Task scratch: %v", err)
+			}
 			savedDir := filepath.Join(root, "posse", "projects", "stack", "tasks", test.taskID)
 			for _, artifact := range artifacts {
 				if contents, err := os.ReadFile(filepath.Join(savedDir, artifact)); err != nil || len(contents) == 0 {
@@ -467,5 +470,136 @@ esac
 		}) {
 			t.Fatal("stop dependent Mount-reuse scenarios after a failed subtest")
 		}
+	}
+
+	if !t.Run("scratch cleanup retry cannot reach another Rider's Mount", func(t *testing.T) {
+		brief := filepath.Join(root, "t7.md")
+		contents := "---\ntype: scout\ntitle: scratch-failure\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
+		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "scratch-failure")
+		if !waitForCondition(60*time.Second, func() bool {
+			current, err := db.Task(context.Background(), project.ID, "t7")
+			return err == nil && current.State == store.StateReported
+		}) {
+			current, _ := db.Task(context.Background(), project.ID, "t7")
+			t.Fatalf("Scout t7 did not report: %#v", current)
+		}
+
+		first, err := db.Task(context.Background(), project.ID, "t7")
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstScratch := filepath.Join(root, "posse", "scratch", "stack", "t7")
+		if err := os.RemoveAll(firstScratch); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(firstScratch, []byte("force scratch cleanup failure"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(binary, "unsaddle", "t7")
+		command.Dir, command.Env = workspace, leadEnv
+		failure, commandErr := command.CombinedOutput()
+		if commandErr == nil || !strings.Contains(string(failure), "unsaddle_incomplete") {
+			t.Fatalf("unsaddle did not expose the injected scratch cleanup failure: err=%v output=%s", commandErr, failure)
+		}
+		mount, err := db.MountByTask(context.Background(), first.ID)
+		if err != nil || mount.ID != first.MountID || mount.TaskID != first.ID || mount.State != "held" {
+			t.Fatalf("Mount became reusable before scratch cleanup completed: mount=%#v err=%v", mount, err)
+		}
+
+		brief = filepath.Join(root, "t8.md")
+		contents = "---\ntype: scout\ntitle: scratch-successor\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
+		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "scratch-successor")
+		if !waitForCondition(60*time.Second, func() bool {
+			current, err := db.Task(context.Background(), project.ID, "t8")
+			return err == nil && current.State == store.StateReported
+		}) {
+			current, _ := db.Task(context.Background(), project.ID, "t8")
+			t.Fatalf("successor Scout t8 did not report: %#v", current)
+		}
+		second, err := db.Task(context.Background(), project.ID, "t8")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if second.MountID == first.MountID {
+			t.Fatalf("successor Rider reused t7's Mount before its cleanup completed: t7=%#v t8=%#v", first, second)
+		}
+		foreignFile := filepath.Join(second.WorktreePath, "t8-only.txt")
+		if err := os.WriteFile(foreignFile, []byte("belongs only to t8\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		process := exec.Command("sleep", "300")
+		process.Dir = second.WorktreePath
+		if err := process.Start(); err != nil {
+			t.Fatal(err)
+		}
+		processExited := make(chan error, 1)
+		go func() { processExited <- process.Wait() }()
+		processWaited := false
+		t.Cleanup(func() {
+			if processWaited {
+				return
+			}
+			_ = process.Process.Kill()
+			select {
+			case <-processExited:
+			case <-time.After(5 * time.Second):
+				t.Error("successor Rider process did not exit during cleanup")
+			}
+		})
+
+		if err := os.Remove(firstScratch); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(firstScratch, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t7")
+		select {
+		case err := <-processExited:
+			processWaited = true
+			t.Fatalf("retrying t7 stopped the process owned by t8: %v", err)
+		case <-time.After(150 * time.Millisecond):
+		}
+		if _, err := os.Stat(foreignFile); err != nil {
+			t.Fatalf("retrying t7 changed the successor Rider's file: %v", err)
+		}
+		firstSaved := filepath.Join(root, "posse", "projects", "stack", "tasks", "t7")
+		if _, err := os.Stat(filepath.Join(firstSaved, "t8-only.txt")); !os.IsNotExist(err) {
+			t.Fatalf("retrying t7 captured t8's unlanded file: %v", err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t8")
+	}) {
+		return
+	}
+
+	mounts, err := db.Mounts(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) == 0 {
+		t.Fatal("workspace Project has no idle Mount for stale registration coverage")
+	}
+	staleMount := mounts[0]
+	staleMemberWorktree := filepath.Join(staleMount.Path, "backend")
+	if err := os.RemoveAll(staleMemberWorktree); err != nil {
+		t.Fatal(err)
+	}
+	dryRun := runPosse(t, binary, workspace, leadEnv, "remuda", "prune")
+	if !strings.Contains(dryRun, "worktree-registration") || !strings.Contains(dryRun, "dry_run: true") {
+		t.Fatalf("workspace prune dry run omitted its member registration: %s", dryRun)
+	}
+	applied := runPosse(t, binary, workspace, leadEnv, "remuda", "prune", "--yes")
+	if !strings.Contains(applied, "dry_run: false") {
+		t.Fatalf("workspace prune --yes did not apply its dry-run plan: %s", applied)
+	}
+	listing := gitTest(t, env, filepath.Join(workspace, "backend"), "worktree", "list", "--porcelain")
+	if strings.Contains(listing, staleMemberWorktree) {
+		t.Fatalf("workspace prune left the stale Member worktree registration: %s", listing)
 	}
 }

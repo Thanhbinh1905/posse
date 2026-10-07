@@ -103,16 +103,35 @@ func TestUnsaddleFailedTaskDoesNotResetMountReusedByAnotherTask(t *testing.T) {
 	}
 }
 
+func TestProcMapPathPreservesSpacesAndRejectsAnonymousMappings(t *testing.T) {
+	line := "7f100000-7f101000 r--s 00000000 00:33 12345                   /tmp/cache  with spaces/file (deleted)"
+	if got, want := procMapPath(line), "/tmp/cache  with spaces/file (deleted)"; got != want {
+		t.Fatalf("mapped path = %q, want %q", got, want)
+	}
+	if got := procMapPath("7f100000-7f101000 r--p 00000000 00:00 0"); got != "" {
+		t.Fatalf("anonymous mapping path = %q, want empty", got)
+	}
+}
+
 func TestPruneCandidatesRemoveOnlyExcessIdleAndCleanBrokenMounts(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
+	idle1 := filepath.Join(root, "mount-1")
+	idle2 := filepath.Join(root, "mount-2")
 	cleanBroken := filepath.Join(root, "mount-3")
 	dirtyBroken := filepath.Join(root, "mount-4")
 	readOnlyBroken := filepath.Join(root, "mount-5")
+	outside := filepath.Join(root, "outside")
+	gitTest(t, repo, "worktree", "add", "--detach", idle1, "main")
+	gitTest(t, repo, "worktree", "add", "--detach", idle2, "main")
 	gitTest(t, repo, "worktree", "add", "--detach", cleanBroken, "main")
 	gitTest(t, repo, "worktree", "add", "--detach", dirtyBroken, "main")
 	gitTest(t, repo, "worktree", "add", "--detach", readOnlyBroken, "main")
+	gitTest(t, repo, "worktree", "add", "--detach", outside, "main")
+	if err := os.Symlink(outside, filepath.Join(root, "mount-7")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dirtyBroken, "README.md"), []byte("tracked change\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -133,12 +152,13 @@ func TestPruneCandidatesRemoveOnlyExcessIdleAndCleanBrokenMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidates := pruneCandidates(context.Background(), []store.Mount{
-		{ID: 1, Number: 1, State: "idle", Path: filepath.Join(root, "mount-1")},
-		{ID: 2, Number: 2, State: "idle", Path: filepath.Join(root, "mount-2")},
+		{ID: 1, Number: 1, State: "idle", Path: idle1},
+		{ID: 2, Number: 2, State: "idle", Path: idle2},
 		{ID: 3, Number: 3, State: "broken", Path: cleanBroken},
 		{ID: 4, Number: 4, State: "broken", Path: dirtyBroken},
 		{ID: 5, Number: 5, State: "broken", Path: readOnlyBroken},
 		{ID: 6, Number: 6, State: "held", Path: filepath.Join(root, "mount-6")},
+		{ID: 7, Number: 7, State: "broken", Path: filepath.Join(root, "mount-7")},
 	}, 1, mountWorktreeClean)
 	got := make([]int, len(candidates))
 	for i, mount := range candidates {
@@ -250,9 +270,12 @@ func TestRemudaPruneRecoversBrokenMountWithReadOnlyUntrackedCache(t *testing.T) 
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
-	mountPath := filepath.Join(root, "mount")
-	gitTest(t, repo, "worktree", "add", "--detach", mountPath, "main")
 	home := filepath.Join(root, "posse")
+	mountPath := filepath.Join(home, "remuda", "shop", "mount-1")
+	if err := os.MkdirAll(filepath.Dir(mountPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "worktree", "add", "--detach", mountPath, "main")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -319,12 +342,16 @@ func TestRemudaPruneClaimsMountBeforeGitRemoval(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
-	mount1Path := filepath.Join(root, "mount-1")
-	mount2Path := filepath.Join(root, "mount-2")
+	home := filepath.Join(root, "posse")
+	mountRoot := filepath.Join(home, "remuda", "shop")
+	mount1Path := filepath.Join(mountRoot, "mount-1")
+	mount2Path := filepath.Join(mountRoot, "mount-2")
 	initRepo(t, repo)
+	if err := os.MkdirAll(mountRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	gitTest(t, repo, "worktree", "add", "--detach", mount1Path, "refs/heads/main")
 	gitTest(t, repo, "worktree", "add", "--detach", mount2Path, "refs/heads/main")
-	home := filepath.Join(root, "posse")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}

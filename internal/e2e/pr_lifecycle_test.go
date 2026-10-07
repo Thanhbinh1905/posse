@@ -269,6 +269,9 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/main")); got != mergeOne {
 		t.Fatalf("Project checkout head=%s, merge commit=%s", got, mergeOne)
 	}
+	if output, err := exec.Command("git", "-C", fixture.repo, "show-ref", "--verify", "refs/heads/"+first.Branch).CombinedOutput(); err == nil {
+		t.Fatalf("merged PR Teardown kept Task branch %s: %s", first.Branch, output)
+	}
 	fixture.requireNotice(t, "t1", "pr_merged")
 
 	secondBrief := filepath.Join(fixture.root, "ship-second.md")
@@ -299,6 +302,9 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/main")); got != mergeTwo {
 		t.Fatalf("Project checkout was not synced after external merge: got=%s want=%s", got, mergeTwo)
+	}
+	if output, err := exec.Command("git", "-C", fixture.repo, "show-ref", "--verify", "refs/heads/"+second.Branch).CombinedOutput(); err == nil {
+		t.Fatalf("externally merged PR Teardown kept Task branch %s: %s", second.Branch, output)
 	}
 	fixture.requireNotice(t, "t2", "pr_merged")
 	ghCalls, err := os.ReadFile(fixture.ghLog)

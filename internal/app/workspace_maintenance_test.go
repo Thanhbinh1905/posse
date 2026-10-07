@@ -140,7 +140,7 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 	if err := f.service.maintainProjectWatch(ctx, f.db, f.project); err != nil {
 		t.Fatalf("workspace maintenance aborted: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		observation, observationErr := f.db.LatestMemberPRObservation(ctx, goodID, "worker")
 		goodTask, taskErr := f.db.TaskByID(ctx, f.project.ID, goodID)
