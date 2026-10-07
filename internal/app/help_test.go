@@ -40,6 +40,10 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 	if code := cli.Run([]string{"relaunch", "--help"}); code != 0 || !strings.Contains(output.String(), "posse relaunch <task> [--profile <name>]") {
 		t.Fatalf("relaunch help omitted the Profile option: code=%d output=%s", code, output.String())
 	}
+	output.Reset()
+	if code := cli.Run([]string{"publish", "--help"}); code != 0 || !strings.Contains(output.String(), "[--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...") || !strings.Contains(output.String(), "Repeated --verify, --proof and --risk values are retained in order.") {
+		t.Fatalf("publish help omitted repeatable metadata flags: code=%d output=%s", code, output.String())
+	}
 
 	var checkSummary func(*axi.Command)
 	checkSummary = func(command *axi.Command) {
