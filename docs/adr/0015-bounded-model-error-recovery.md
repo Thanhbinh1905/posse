@@ -1,0 +1,7 @@
+# 15. Bounded recovery for end-of-turn model errors
+
+A harness may end an agent turn with a transient stream failure while Herdr still reports an idle Rider. A generic `worker_idle` Notice waits for `idle_after` and loses the actionable cause. On a known harness's end-of-turn event, Posse reads the recent pane output and recognizes only explicit per-kind error signatures. The first supported signatures are Pi stream disconnects and provider content-filter refusals.
+
+The observation starts a durable, launch-scoped episode keyed by the normalized output fingerprint. A Pi stream disconnect receives at most three `continue` nudges, with 250 ms, 500 ms and 1 s backoff. Each attempt is charged before prompt submission, so interruption cannot exceed the bound. A new output fingerprint in the same launch is a new observed episode; repeated identical status events are deduplicated. A successful later turn resolves the episode. Exhaustion, refusal, focus/block safety refusal, or a queued Lead instruction produces a specific `model_stream_error` or `model_refused` Notice as appropriate. Refusals are never retried. `posse show` exposes the current episode, and `posse show --full` exposes the audit signals.
+
+All prompts pass through the standard snapshot-based focused-pane and blocked-agent checks. There is no timer service; the Herdr end-of-turn hook drives detection and recovery. The delayed `worker_idle` Notice is suppressed for a handled episode. Unknown harnesses and output that does not match a known signature retain the existing idle behavior.

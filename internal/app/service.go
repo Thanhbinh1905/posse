@@ -96,7 +96,7 @@ func (s *Service) commands() *axi.Command {
 		}},
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "roster", Usage: "$ roster [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
-		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, undelivered messages, Signals and transitions.", Handler: s.show},
+		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, model-error recovery episode, undelivered messages, Signals and transitions.", Handler: s.show},
 		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Rider's question to the User as a Decision.", Handler: s.ask},
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},

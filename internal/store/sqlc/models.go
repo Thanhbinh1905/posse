@@ -95,6 +95,20 @@ type Message struct {
 	WaitForIdle int64
 }
 
+type ModelErrorEpisode struct {
+	TaskID        int64
+	Episode       int64
+	Launch        int64
+	Agent         string
+	Kind          string
+	Fingerprint   string
+	Attempts      int64
+	Status        string
+	StartedAt     int64
+	NextAttemptAt int64
+	UpdatedAt     int64
+}
+
 type Mount struct {
 	ID         int64
 	ProjectID  int64

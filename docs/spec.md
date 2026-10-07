@@ -375,7 +375,7 @@ The Lead is reconciled the same way through `lead_pane_id` and `lead_label`. A s
 
 `posse _ingest` reads `HERDR_PLUGIN_EVENT_JSON`, writes one `events` row, and for panes that belong to a Task or a Lead does the follow-ups below. Calling back into Herdr from inside a plugin hook is safe: verified on Herdr 0.9.0, a hook's `pane list` returned in about 3 ms and its `agent prompt` reached the target pane in about 300 ms. Follow-ups never hold a SQLite transaction open across a Herdr call.
 
-- `pane.agent_status_changed`: apply the blocked mapping from section 7; if the pane is a Worker becoming idle, done or working and it has queued `messages`, deliver eligible messages; if the pane is a Lead going idle or done, run Notice delivery.
+- `pane.agent_status_changed`: apply the blocked mapping from section 7; if a Worker ends a turn, inspect the end of its output for a known model error for that harness before delivering queued `messages`; a Pi stream disconnect gets at most three `continue` nudges with exponential backoff, while a provider refusal is never retried. Each episode and retry is persisted in Task history. Automatic nudges use the existing focused-pane guard; unsafe or exhausted episodes raise a specific Notice. If the pane is a Worker becoming idle, done or working and it has queued `messages`, deliver eligible messages; if the pane is a Lead going idle or done, run Notice delivery.
 - `pane.exited` / `pane.closed`: run reconcile for that Task.
 - `pane.focused`: retry queued Worker messages and run Notice delivery after focus changes.
 - Every call also evaluates stalls for that Project (section 10).
@@ -384,7 +384,7 @@ It exits 0 even on internal errors (logged to the `events` row) so Herdr never r
 
 ## 9. Notices and waking the Lead
 
-Notice kinds: `task_done`, `needs_decision`, `task_failed`, `worker_blocked`, `worker_exited`, `task_lost`, `stalled`, `gate_failed`, `message_delivery_uncertain`, `queued_message_undeliverable` (terminal Task transition stranded queued messages), `land_ready` (a `local` Task is ready to merge, or a PR is ready to merge), the PR Notices of section 14 (`pr_opened`, `pr_checks_failed`, `pr_changes_requested`, `pr_conflict`, `pr_merged`, `pr_closed`, `pr_watch_failing`), and `root_behind` when a new upstream head cannot be synced safely.
+Notice kinds: `task_done`, `needs_decision`, `task_failed`, `worker_blocked`, `worker_exited`, `task_lost`, `stalled`, `gate_failed`, `message_delivery_uncertain`, `queued_message_undeliverable` (terminal Task transition stranded queued messages), `model_stream_error` (bounded automatic recovery exhausted or was withheld), `model_refused` (provider refusal, never retried), `land_ready` (a `local` Task is ready to merge, or a PR is ready to merge), the PR Notices of section 14 (`pr_opened`, `pr_checks_failed`, `pr_changes_requested`, `pr_conflict`, `pr_merged`, `pr_closed`, `pr_watch_failing`), and `root_behind` when a new upstream head cannot be synced safely.
 
 Not Notices: `working`/`idle` flips, `working` Signals, Herdr `done` without a Signal.
 
@@ -421,7 +421,7 @@ A Task in `working` is stalled when all hold for `stall_after`:
 
 `last_output_hash` and `last_progress_at` are updated whenever an evaluation sees a change, and reset whenever a Task enters `working` or an evaluation is skipped because the Task is not `working` in Herdr. Resetting the stall clock does not clear the separate idle-without-Signal clock. A `stalled` Task whose output or worktree changes returns to `working`. Evaluation runs on every `posse` call and ingest for the Project, and every 60 seconds inside `posse lookout`. A stall creates a `stalled` Notice; nothing is killed automatically.
 
-**Idle without a Signal.** A Task in `working` whose agent Herdr reports `idle` or `done` for `idle_after` with no new Signal creates one `worker_idle` Notice (the state stays `working`; the Lead decides: `posse peek`, `posse send`, or `posse relaunch`). This is what catches an agent resumed after a restart, or one that simply stopped without reporting.
+**Idle without a Signal.** A Task in `working` whose agent Herdr reports `idle` or `done` for `idle_after` with no new Signal creates one `worker_idle` Notice (the state stays `working`; the Lead decides: `posse peek`, `posse send`, or `posse relaunch`). This catches an agent resumed after a restart, or one that simply stopped without reporting. A recognized model-error episode suppresses this delayed generic Notice in favor of immediate bounded recovery or a specific model-error Notice. Pi stream-disconnect retries are limited to three per episode with 250 ms, 500 ms and 1 s backoff; the episode, attempts and outcome appear in `posse show` and its full Task signals. Refusals are never retried. No automatic prompt is sent to a focused or blocked Rider, and a queued Lead instruction takes precedence ([ADR 0015](adr/0015-bounded-model-error-recovery.md)).
 
 ## 11. Dispatch
 

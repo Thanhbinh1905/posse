@@ -95,6 +95,34 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			return err
 		}
+		var modelTurnNotices []store.Notice
+		if worker && eventIs(event.Event, "pane.agent_status_changed") {
+			status := valueString(event.Data, "agent_status")
+			if status == "idle" || status == "done" {
+				paneSnapshot, snapshotErr := s.snapshot(ctx)
+				if snapshotErr == nil && !recoveryHeld(project, cfg) {
+					recordedGeneration, generationErr := db.ProjectServerStartedAt(ctx, project.ID)
+					if generationErr != nil {
+						return generationErr
+					}
+					if recordedGeneration == "" || paneSnapshot.ServerStartedAt == "" || recordedGeneration == paneSnapshot.ServerStartedAt {
+						task, taskErr := db.TaskByPane(ctx, paneID)
+						if taskErr != nil && !store.IsNotFound(taskErr) {
+							return taskErr
+						}
+						if taskErr == nil && task.State == store.StateWorking {
+							pane, found := findAppPane(paneSnapshot.Panes, task.PaneID, task.PaneLabel)
+							if found && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
+								modelTurnNotices, err = s.handleModelErrorTurnEnd(ctx, db, project, task, pane)
+								if err != nil {
+									return err
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 		result, err := s.reconcileProject(ctx, db, project, cfg, false)
 		if errors.Is(err, errRecoveryHeld) || errors.Is(err, errRecoveryDeferred) {
 			continue
@@ -106,6 +134,7 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			return err
 		}
+		result.Notices = append(result.Notices, modelTurnNotices...)
 		if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 			if focusEvent {
 				failures = append(failures, err)
