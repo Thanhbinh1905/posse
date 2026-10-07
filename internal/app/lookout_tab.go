@@ -44,6 +44,26 @@ func resetLookoutRecovery(ctx context.Context, db *store.DB, projectID int64) er
 	return db.ResetLookoutRecovery(ctx, projectID)
 }
 
+func recordLookoutFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFailure *string, phase string, err error) {
+	if store.IsOnlyBusy(err) {
+		summary := "Lookout " + phase + " deferred due to transient store contention; will retry"
+		if summary != *lastFailure {
+			fmt.Fprintln(ctx.ErrOut, summary)
+			*lastFailure = summary
+		}
+		return
+	}
+	visible := store.WithoutBusy(err)
+	if visible == nil {
+		visible = err
+	}
+	summary := "Lookout " + phase + " failed: " + truncate(visible.Error(), 240)
+	if summary != *lastFailure {
+		_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: projectID, Kind: "pr_watch_failing", Summary: summary, DataJSON: `{}`})
+		*lastFailure = summary
+	}
+}
+
 func markLookoutRunning(ctx context.Context, db *store.DB, projectID int64, paneID string) error {
 	state, err := db.LookoutRecovery(ctx, projectID)
 	if err != nil {
@@ -268,16 +288,10 @@ func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, 
 			return nil
 		}
 		if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
-			if lastFailure != err.Error() {
-				_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout reconcile failed: " + truncate(err.Error(), 240), DataJSON: `{}`})
-				lastFailure = err.Error()
-			}
+			recordLookoutFailure(ctx, db, project.ID, &lastFailure, "reconcile", err)
 		}
 		if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
-			if lastFailure != err.Error() {
-				_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout watch failed: " + truncate(err.Error(), 240), DataJSON: `{}`})
-				lastFailure = err.Error()
-			}
+			recordLookoutFailure(ctx, db, project.ID, &lastFailure, "watch", err)
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return nil

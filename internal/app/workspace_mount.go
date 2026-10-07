@@ -168,7 +168,7 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 				return mount, axi.Failure("mount_setup_failed", fmt.Sprintf("setup %q failed: %s", command, truncate(strings.TrimSpace(output), 1200)), false, "Fix the Remuda setup command, then retry the Task")
 			}
 		}
-		if err := writeWorkspaceRootBaseline(home, project, task, mount.Path, targets); err != nil {
+		if err := writeWorkspaceRootBaseline(ctx, home, project, task, mount.Path, targets); err != nil {
 			return mount, fmt.Errorf("capture workspace root at Mount acquisition: %w", err)
 		}
 		return mount, nil

@@ -86,6 +86,20 @@ func TestWorkspaceRootReportAttachmentsIncludeNonIgnoredNestedGitFiles(t *testin
 	if err := os.WriteFile(filepath.Join(repository, ".git", "info", "exclude"), []byte("ignored.txt\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	deeper := filepath.Join(repository, "deeper")
+	if err := os.MkdirAll(deeper, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, deeper, "init", "-q", "-b", "main")
+	gitTest(t, deeper, "config", "user.name", "Posse Test")
+	gitTest(t, deeper, "config", "user.email", "posse@example.test")
+	for name, contents := range map[string]string{"tracked.txt": "deep committed proof\n", "untracked.txt": "deep untracked evidence\n"} {
+		if err := os.WriteFile(filepath.Join(deeper, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitTest(t, deeper, "add", "tracked.txt")
+	gitTest(t, deeper, "commit", "-m", "deep evidence")
 	for name, contents := range map[string]string{"proof.txt": "committed proof\n", "notes.txt": "untracked evidence\n", "ignored.txt": "ignored data\n"} {
 		if err := os.WriteFile(filepath.Join(repository, name), []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
@@ -98,8 +112,10 @@ func TestWorkspaceRootReportAttachmentsIncludeNonIgnoredNestedGitFiles(t *testin
 		t.Fatal(err)
 	}
 	want := map[string]reportAttachmentSource{
-		"git-evidence/proof.txt": {root: repository, name: "proof.txt"},
-		"git-evidence/notes.txt": {root: repository, name: "notes.txt"},
+		"git-evidence/proof.txt":            {root: repository, name: "proof.txt"},
+		"git-evidence/notes.txt":            {root: repository, name: "notes.txt"},
+		"git-evidence/deeper/tracked.txt":   {root: deeper, name: "tracked.txt"},
+		"git-evidence/deeper/untracked.txt": {root: deeper, name: "untracked.txt"},
 	}
 	if !reflect.DeepEqual(attachments, want) {
 		t.Fatalf("nested Git attachments = %#v, want %#v", attachments, want)
@@ -115,15 +131,22 @@ func TestWorkspaceRootBaselineUsesMountContentsAtAcquireAndRemainsHidden(t *test
 			t.Fatal(err)
 		}
 	}
+	backend := filepath.Join(task.WorktreePath, "backend")
+	gitTest(t, backend, "init", "-q", "-b", "main")
+	gitTest(t, backend, "config", "user.name", "Posse Test")
+	gitTest(t, backend, "config", "user.email", "posse@example.test")
 	for _, root := range []string{project.Root, task.WorktreePath} {
 		if err := os.WriteFile(filepath.Join(root, "workspace-note.txt"), []byte("acquired copy\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(task.WorktreePath, "backend", "member.txt"), []byte("member\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(backend, "member.txt"), []byte("member\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeWorkspaceRootBaseline(home, project, task, task.WorktreePath, []taskMember{{Path: "backend"}}); err != nil {
+	gitTest(t, backend, "add", "member.txt")
+	gitTest(t, backend, "commit", "-m", "member baseline")
+	memberBaseline := strings.TrimSpace(gitTest(t, backend, "rev-parse", "HEAD"))
+	if err := writeWorkspaceRootBaseline(context.Background(), home, project, task, task.WorktreePath, []taskMember{{repoTarget: repoTarget{Name: "backend"}, Path: "backend"}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, root := range []string{project.Root, task.WorktreePath} {
@@ -143,6 +166,9 @@ func TestWorkspaceRootBaselineUsesMountContentsAtAcquireAndRemainsHidden(t *test
 	baseline, err := readWorkspaceRootBaseline(home, project, task)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := baseline.Members["backend"]; got != memberBaseline {
+		t.Fatalf("Member acquisition baseline = %q, want %q", got, memberBaseline)
 	}
 	attachments, err := workspaceRootReportAttachments(context.Background(), task.WorktreePath, map[string]bool{"backend": true}, baseline)
 	if err != nil {
@@ -168,8 +194,9 @@ func TestWorkspaceScoutProtocolDescribesRootAttachments(t *testing.T) {
 	protocol := workerProtocol(project, task, dispatch.Brief{}, "/tmp/launch.md", "/tmp/posse/scratch/stack/t1") + workspaceProtocol(project, nil)
 	for _, phrase := range []string{
 		"new or edited shared-root files",
-		"snapshot of the Mount before the Rider starts",
-		"Later edits to the live Project do not change that baseline",
+		"Mount-acquisition snapshot",
+		"each unrequested Member's commits",
+		"Later edits to the live Project do not change the shared-root baseline",
 		"Teardown keeps the Mount",
 	} {
 		if !strings.Contains(protocol, phrase) {

@@ -50,6 +50,10 @@ func (s *Service) safePromptWhenBefore(ctx context.Context, paneID, text string,
 	return s.promptBefore(ctx, paneID, map[string]any{"target": paneID, "text": text}, allowed, beforePrompt)
 }
 
+func (s *Service) safePromptWhenWithSubmissionGate(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error, gate func(func() error) error) error {
+	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, "agent.prompt", map[string]any{"target": paneID, "text": text}, allowed, nil, gate)
+}
+
 func (s *Service) prompt(ctx context.Context, paneID string, params map[string]any, allowed func(herdr.Snapshot) error) error {
 	return s.promptBefore(ctx, paneID, params, allowed, nil)
 }
@@ -65,6 +69,10 @@ func (s *Service) typeInto(ctx context.Context, paneID, method string, params ma
 }
 
 func (s *Service) typeIntoBefore(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error) error {
+	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, method, params, allowed, beforeSend, nil)
+}
+
+func (s *Service) typeIntoBeforeWithSubmissionGate(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error, gate func(func() error) error) error {
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return err
@@ -90,11 +98,17 @@ func (s *Service) typeIntoBefore(ctx context.Context, paneID, method string, par
 			return err
 		}
 	}
-	if method == "agent.prompt" {
-		crashIntentAt("send", "before", "message.prompt")
+	submit := func() error {
+		if method == "agent.prompt" {
+			crashIntentAt("send", "before", "message.prompt")
+		}
+		_, err := s.herdrCall(ctx, method, params)
+		return err
 	}
-	_, err = s.herdrCall(ctx, method, params)
-	return err
+	if gate != nil {
+		return gate(submit)
+	}
+	return submit()
 }
 
 var (

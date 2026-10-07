@@ -233,7 +233,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	stopSignals := make(chan os.Signal, 1)
 	signal.Notify(stopSignals, syscall.SIGTERM)
 	defer signal.Stop(stopSignals)
-	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}})
+	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -258,13 +258,40 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if parsed.Bool("poll-only") {
-		if parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Bool("quiet-routine") {
+		if parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Flags["destination"] != "" || parsed.Flags["receipt"] != "" || parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" || parsed.Bool("quiet-routine") || parsed.Bool("handoff") {
 			return axi.Usage("--poll-only cannot deliver or acknowledge Notices")
 		}
 		return s.watchPullRequestsInLookoutTab(ctx, db, project, timeout, stopSignals)
 	}
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
+	}
+	if parsed.Flags["receipt"] != "" {
+		if parsed.Flags["receipt-outcome"] == "" || parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Bool("handoff") || parsed.Flags["destination"] != "" || timeout != 0 {
+			return axi.Usage("--receipt requires --receipt-outcome and cannot be combined with other delivery options")
+		}
+		var err error
+		if parsed.Flags["receipt-token"] == "" {
+			err = db.ResolveUncertainNoticeDelivery(ctx.Context, project.ID, parsed.Flags["receipt"], parsed.Flags["receipt-outcome"], currentTime())
+		} else {
+			err = db.ResolveNoticeDelivery(ctx.Context, project.ID, parsed.Flags["receipt"], parsed.Flags["receipt-token"], parsed.Flags["receipt-outcome"], currentTime())
+		}
+		if err != nil {
+			return err
+		}
+		if err := s.regenerateProjects(ctx.Context, db); err != nil {
+			return err
+		}
+		return ctx.Print(axi.Object{{Key: "delivery_id", Value: parsed.Flags["receipt"]}, {Key: "receipt", Value: parsed.Flags["receipt-outcome"]}})
+	}
+	if parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" {
+		return axi.Usage("--receipt-outcome and --receipt-token require --receipt")
+	}
+	if parsed.Bool("handoff") != (parsed.Flags["destination"] != "") {
+		return axi.Usage("--handoff requires --destination <adapter:session>")
+	}
+	if parsed.Bool("handoff") && (parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "") {
+		return axi.Usage("--handoff cannot be combined with --ack or --requeue")
 	}
 	if parsed.Flags["requeue"] != "" && parsed.Flags["ack"] != "" {
 		return axi.Usage("--requeue and --ack cannot be combined")
@@ -303,9 +330,60 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			return s.reportLookoutStopped(ctx, project, false)
 		default:
 		}
-		notices, err := db.UndeliveredNotices(ctx.Context, project.ID)
-		if err != nil {
-			return err
+		var retryDelivery *store.NoticeDelivery
+		var notices []store.Notice
+		if parsed.Bool("handoff") {
+			existing, found, err := db.NoticeDeliveryForDestination(ctx.Context, project.ID, parsed.Flags["destination"])
+			if err != nil {
+				return err
+			}
+			if found && existing.State == "uncertain" {
+				return ctx.Print(noticeDeliveryUncertaintyResult(existing, "Inspect that Lead session before retrying"))
+			}
+			prior, priorFound, err := db.NoticeDeliveryForOtherSession(ctx.Context, project.ID, parsed.Flags["destination"])
+			if err != nil {
+				return err
+			}
+			if priorFound {
+				switch prior.State {
+				case "uncertain":
+					return ctx.Print(noticeDeliveryUncertaintyResult(prior, "The previous session outcome is unresolved; inspect its history or effect before retrying"))
+				case "printed":
+					if err := db.MarkNoticeDeliveryUncertain(ctx.Context, prior.DeliveryID, currentTime()); err != nil {
+						return err
+					}
+					prior, err = db.NoticeDelivery(ctx.Context, prior.DeliveryID)
+					if err != nil {
+						return err
+					}
+					return ctx.Print(noticeDeliveryUncertaintyResult(prior, "The previous session may have received this batch; inspect its history or effect before retrying"))
+				case "claimed":
+					if prior.LeaseUntil > currentTime() {
+						if err := waitNoticeDeliveryRetry(ctx.Context); err != nil {
+							return err
+						}
+						continue
+					}
+					if err := db.RejectExpiredNoticeDeliveryClaim(ctx.Context, prior.DeliveryID, currentTime()); err != nil && !errors.Is(err, store.ErrStateRace) {
+						return err
+					}
+					continue
+				}
+			}
+			if found {
+				retryDelivery = &existing
+				notices, err = db.NoticesByIDs(ctx.Context, project.ID, existing.NoticeIDs)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if retryDelivery == nil {
+			var err error
+			notices, err = db.UndeliveredNotices(ctx.Context, project.ID)
+			if err != nil {
+				return err
+			}
 		}
 		if len(notices) == 0 {
 			if lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute {
@@ -415,15 +493,17 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					return noticeErr
 				}
 			}
-			notices, err = db.UndeliveredNotices(ctx.Context, project.ID)
-			if err != nil {
-				return err
+			if retryDelivery == nil {
+				notices, err = db.UndeliveredNotices(ctx.Context, project.ID)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		if len(notices) > 0 {
 			// Only the Pi integration requests quiet handling. Recheck the current
 			// preference for every batch so switching lowkey off takes effect now.
-			if _, quiet := parsed.Flags["quiet-routine"]; quiet {
+			if _, quiet := parsed.Flags["quiet-routine"]; quiet && retryDelivery == nil {
 				home, err := s.homePath()
 				if err != nil {
 					return err
@@ -449,12 +529,36 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			claimed, err := db.ClaimNoticeBatch(ctx.Context, project.ID, ids, token, currentTime())
-			if err != nil {
-				return err
-			}
-			if !claimed {
-				continue
+			var handoff *store.NoticeDelivery
+			if parsed.Bool("handoff") {
+				generation, err := s.noticeDeliveryGeneration(ctx.Context)
+				if err != nil {
+					return err
+				}
+				delivery, claimed, err := db.ClaimNoticeDelivery(ctx.Context, project.ID, ids, parsed.Flags["destination"], generation, token, currentTime(), noticeDeliveryLeaseTimeout.Milliseconds())
+				if err != nil {
+					return err
+				}
+				if !claimed {
+					if err := waitNoticeDeliveryRetry(ctx.Context); err != nil {
+						return err
+					}
+					continue
+				}
+				printedAt := currentTime()
+				if err := db.MarkNoticeDeliveryPrinted(ctx.Context, delivery.DeliveryID, token, printedAt); err != nil {
+					return err
+				}
+				delivery.State, delivery.UpdatedAt = "printed", printedAt
+				handoff = &delivery
+			} else {
+				claimed, err := db.ClaimNoticeBatch(ctx.Context, project.ID, ids, token, currentTime())
+				if err != nil {
+					return err
+				}
+				if !claimed {
+					continue
+				}
 			}
 			home, err := s.homePath()
 			if err != nil {
@@ -465,6 +569,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				return configError(err)
 			}
 			result := axi.Object{{Key: "project", Value: project.Name}, {Key: "notices", Value: noticeRows(ctx.Context, db, notices)}}
+			if handoff != nil {
+				result = append(result, axi.Field{Key: "delivery", Value: noticeDeliveryRow(*handoff, true)})
+			}
 			if cfg.Lowkey.Lead {
 				result = append(result, axi.Field{Key: "lowkey", Value: true}, axi.Field{Key: "reporting_rule", Value: shortReportingRule(true)})
 			} else {
@@ -475,7 +582,13 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			}
 			result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse show <task>` for Task details", "Run `posse lookout --ack <ids>` to acknowledge and keep waiting (or `posse ack all`)"}})
 			if err := ctx.Print(result); err != nil {
+				if handoff != nil {
+					return errors.Join(err, db.ResolveNoticeDelivery(ctx.Context, project.ID, handoff.DeliveryID, token, "uncertain", currentTime()))
+				}
 				return errors.Join(err, db.RollbackNoticeClaim(ctx.Context, project.ID, ids, token))
+			}
+			if handoff != nil {
+				return nil
 			}
 			if err := db.MarkClaimedNoticesDelivered(ctx.Context, project.ID, ids, token, currentTime()); err != nil {
 				return err

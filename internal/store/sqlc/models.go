@@ -95,6 +95,21 @@ type Message struct {
 	WaitForIdle int64
 }
 
+type ModelErrorEpisode struct {
+	TaskID        int64
+	Episode       int64
+	Launch        int64
+	Agent         string
+	Kind          string
+	Fingerprint   string
+	Attempts      int64
+	TurnState     int64
+	Status        string
+	StartedAt     int64
+	NextAttemptAt int64
+	UpdatedAt     int64
+}
+
 type Mount struct {
 	ID         int64
 	ProjectID  int64
@@ -118,6 +133,22 @@ type Notice struct {
 	AckedAt     sql.NullInt64
 	ClaimToken  string
 	ClaimedAt   int64
+}
+
+type NoticeDeliveryReceipt struct {
+	DeliveryID    string
+	BatchID       string
+	ProjectID     int64
+	NoticeIdsJson string
+	Destination   string
+	Generation    string
+	State         string
+	OwnerToken    string
+	ClaimedAt     int64
+	LeaseUntil    int64
+	AcceptedAt    int64
+	CreatedAt     int64
+	UpdatedAt     int64
 }
 
 type NoticeNotification struct {

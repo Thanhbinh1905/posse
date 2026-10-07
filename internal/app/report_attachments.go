@@ -30,6 +30,7 @@ type reportAttachmentSource struct {
 type workspaceRootBaseline struct {
 	Version int                                 `json:"version"`
 	Files   map[string]workspaceRootFingerprint `json:"files"`
+	Members map[string]string                   `json:"members,omitempty"`
 }
 
 type workspaceRootFingerprint struct {
@@ -44,7 +45,7 @@ func workspaceRootBaselinePath(home string, project store.Project, task store.Ta
 	return filepath.Join(home, "projects", project.Name, ".workspace-root-baselines", taskIDString(task.Seq)+".json")
 }
 
-func writeWorkspaceRootBaseline(home string, project store.Project, task store.Task, mountRoot string, targets []taskMember) error {
+func writeWorkspaceRootBaseline(ctx context.Context, home string, project store.Project, task store.Task, mountRoot string, targets []taskMember) error {
 	members, err := workspaceMemberPaths(targets)
 	if err != nil {
 		return err
@@ -53,11 +54,39 @@ func writeWorkspaceRootBaseline(home string, project store.Project, task store.T
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: files})
+	memberRefs, err := workspaceMemberBaselineRefs(ctx, mountRoot, targets)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: files, Members: memberRefs})
 	if err != nil {
 		return err
 	}
 	return writeFile(workspaceRootBaselinePath(home, project, task), data)
+}
+
+func workspaceMemberBaselineRefs(ctx context.Context, mountRoot string, targets []taskMember) (map[string]string, error) {
+	refs := make(map[string]string, len(targets))
+	for _, target := range targets {
+		worktree := filepath.Join(mountRoot, target.Path)
+		_, err := os.Stat(filepath.Join(worktree, ".git"))
+		if os.IsNotExist(err) {
+			refs[target.Path] = ""
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		ref, err := gitOutput(ctx, worktree, "rev-parse", "--verify", "HEAD")
+		if err != nil {
+			return nil, fmt.Errorf("capture workspace Member acquisition baseline for %s: %w", target.Name, err)
+		}
+		if !validGitObjectID(ref) {
+			return nil, fmt.Errorf("capture workspace Member acquisition baseline for %s: invalid commit ID %q", target.Name, ref)
+		}
+		refs[target.Path] = ref
+	}
+	return refs, nil
 }
 
 func readWorkspaceRootBaseline(home string, project store.Project, task store.Task) (workspaceRootBaseline, error) {
@@ -77,7 +106,23 @@ func readWorkspaceRootBaseline(home string, project store.Project, task store.Ta
 			return workspaceRootBaseline{}, fmt.Errorf("unsafe path %q in workspace root acquisition baseline", path)
 		}
 	}
+	for path, ref := range baseline.Members {
+		if !safeWorkspaceRootPath(path) || isGitMetadataPath(path) || isWorkspaceControlPath(path) {
+			return workspaceRootBaseline{}, fmt.Errorf("unsafe Member path %q in workspace root acquisition baseline", path)
+		}
+		if ref != "" && !validGitObjectID(ref) {
+			return workspaceRootBaseline{}, fmt.Errorf("invalid Member commit ID %q in workspace root acquisition baseline", ref)
+		}
+	}
 	return baseline, nil
+}
+
+func validGitObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func workspaceMemberPaths(targets []taskMember) (map[string]bool, error) {
@@ -115,12 +160,17 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 	}
 	repositories := []reportAttachmentRepository{{path: task.WorktreePath, baseRef: task.BaseRef}}
 	workspaceMembers := map[string]bool{}
+	workspaceBaseline := workspaceRootBaseline{}
 	if project.IsWorkspace() {
 		targets, err := workspaceMountTargets(ctx, db, project)
 		if err != nil {
 			return err
 		}
 		workspaceMembers, err = workspaceMemberPaths(targets)
+		if err != nil {
+			return err
+		}
+		workspaceBaseline, err = readWorkspaceRootBaseline(home, project, task)
 		if err != nil {
 			return err
 		}
@@ -142,7 +192,11 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 			}
 			baseRef, selected := baseRefs[target.Name]
 			if !selected {
-				baseRef = "HEAD"
+				var found bool
+				baseRef, found = workspaceBaseline.Members[target.Path]
+				if !found || baseRef == "" {
+					return fmt.Errorf("workspace Member %s acquisition baseline is missing", target.Name)
+				}
 			}
 			repositories = append(repositories, reportAttachmentRepository{path: path, relative: target.Path, baseRef: baseRef})
 		}
@@ -168,11 +222,7 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 		}
 	}
 	if project.IsWorkspace() {
-		baseline, err := readWorkspaceRootBaseline(home, project, task)
-		if err != nil {
-			return err
-		}
-		rootAttachments, err := workspaceRootReportAttachments(ctx, task.WorktreePath, workspaceMembers, baseline)
+		rootAttachments, err := workspaceRootReportAttachments(ctx, task.WorktreePath, workspaceMembers, workspaceBaseline)
 		if err != nil {
 			return err
 		}
@@ -282,6 +332,10 @@ func workspaceRootReportAttachments(ctx context.Context, mountRoot string, membe
 	}
 
 	attachments := map[string]reportAttachmentSource{}
+	nestedRepositories := make(map[string]struct{}, len(repositories))
+	for _, repository := range repositories {
+		nestedRepositories[repository.relative] = struct{}{}
+	}
 	addIfChanged := func(relative, root, name string) error {
 		if !safeWorkspaceRootPath(relative) || isGitMetadataPath(relative) || isWorkspaceControlPath(relative) {
 			return fmt.Errorf("unsafe workspace-root Report attachment path %q", relative)
@@ -316,9 +370,14 @@ func workspaceRootReportAttachments(ctx context.Context, mountRoot string, membe
 		if err != nil {
 			return nil, fmt.Errorf("list workspace-root Report attachments in %s: %w", repository.path, err)
 		}
-		for _, name := range nulPaths(output) {
+		for _, listedName := range nulPaths(output) {
+			name := listedName
+			directoryEntry := strings.HasSuffix(name, "/")
+			if directoryEntry {
+				name = strings.TrimSuffix(name, "/")
+			}
 			if !safeWorkspaceRootPath(name) || isGitMetadataPath(name) {
-				return nil, fmt.Errorf("unsafe nested Git Report attachment path %q", name)
+				return nil, fmt.Errorf("unsafe nested Git Report attachment path %q", listedName)
 			}
 			source := filepath.Join(repository.path, name)
 			info, err := os.Lstat(source)
@@ -328,10 +387,16 @@ func workspaceRootReportAttachments(ctx context.Context, mountRoot string, membe
 			if err != nil {
 				return nil, err
 			}
+			relative := filepath.Join(repository.relative, name)
 			if info.IsDir() {
+				if _, found := nestedRepositories[relative]; !found {
+					return nil, fmt.Errorf("unexpected nested Git directory entry %q", listedName)
+				}
 				continue
 			}
-			relative := filepath.Join(repository.relative, name)
+			if directoryEntry {
+				return nil, fmt.Errorf("nested Git directory entry %q is not a directory", listedName)
+			}
 			if err := addIfChanged(relative, repository.path, name); err != nil {
 				return nil, err
 			}
