@@ -236,7 +236,11 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 	snapshots := make([]TaskSnapshot, 0, len(paths))
 	projects := map[int64]Project{}
 	members := map[int64][]ProjectRepo{}
-	deliverySnapshots := map[int64]NoticeDeliverySnapshot{}
+	type deliverySnapshotCandidate struct {
+		path     string
+		snapshot NoticeDeliverySnapshot
+	}
+	deliveryCandidates := map[int64][]deliverySnapshotCandidate{}
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -271,19 +275,40 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		if _, err := toml.Decode(string(data), &snapshot); err != nil {
 			return 0, fmt.Errorf("decode %s: %w", path, err)
 		}
-		if snapshot.Version != 1 || snapshot.Project.ID == 0 || snapshot.Project.Name == "" || filepath.Clean(path) != filepath.Clean(db.NoticeDeliverySnapshotPath(snapshot.Project.Name)) {
+		if snapshot.Version != 1 || snapshot.Project.ID == 0 || snapshot.Project.Name == "" || filepath.Base(path) != "notice-delivery.toml" {
 			return 0, fmt.Errorf("invalid Notice delivery snapshot %s", path)
 		}
-		if existing, ok := projects[snapshot.Project.ID]; ok && (existing.Name != snapshot.Project.Name || existing.Root != snapshot.Project.Root) {
-			return 0, fmt.Errorf("Notice delivery snapshot Project identity conflicts: %s", path)
+		deliveryCandidates[snapshot.Project.ID] = append(deliveryCandidates[snapshot.Project.ID], deliverySnapshotCandidate{path: path, snapshot: snapshot})
+	}
+	deliverySnapshots := make(map[int64]NoticeDeliverySnapshot, len(deliveryCandidates))
+	for projectID, candidates := range deliveryCandidates {
+		project, hasTaskSnapshot := projects[projectID]
+		selected := -1
+		if hasTaskSnapshot {
+			for index, candidate := range candidates {
+				if filepath.Base(filepath.Dir(candidate.path)) == project.Name {
+					selected = index
+					break
+				}
+			}
 		}
-		if _, ok := projects[snapshot.Project.ID]; !ok {
-			projects[snapshot.Project.ID] = snapshot.Project
+		if selected < 0 {
+			selected = 0
+			for index := 1; index < len(candidates); index++ {
+				if latestDeliveryUpdate(candidates[index].snapshot) > latestDeliveryUpdate(candidates[selected].snapshot) {
+					selected = index
+				}
+			}
 		}
-		if _, duplicate := deliverySnapshots[snapshot.Project.ID]; duplicate {
-			return 0, fmt.Errorf("duplicate Notice delivery snapshot for Project %d", snapshot.Project.ID)
+		snapshot := candidates[selected].snapshot
+		// Task snapshots are the authoritative Project identity when available;
+		// receipt paths and embedded identity may predate a supported move/rename.
+		if hasTaskSnapshot {
+			snapshot.Project = project
+		} else {
+			projects[projectID] = snapshot.Project
 		}
-		deliverySnapshots[snapshot.Project.ID] = snapshot
+		deliverySnapshots[projectID] = snapshot
 	}
 	maxID := int64(0)
 	known := make(map[string]bool, len(snapshots))
@@ -348,6 +373,16 @@ func recoverBranchSnapshots(ctx context.Context, project Project, known map[stri
 		recovered = append(recovered, TaskSnapshot{Version: 1, Project: project, Task: task})
 	}
 	return recovered, nil
+}
+
+func latestDeliveryUpdate(snapshot NoticeDeliverySnapshot) int64 {
+	var latest int64
+	for _, delivery := range snapshot.Deliveries {
+		if delivery.UpdatedAt > latest {
+			latest = delivery.UpdatedAt
+		}
+	}
+	return latest
 }
 
 // latestUpdate is the newest Task update among the snapshots already read for a
