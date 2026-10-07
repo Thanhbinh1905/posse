@@ -95,7 +95,15 @@ func (s *Service) recover(ctx *axi.Context, args []string) error {
 			return axi.Failure("user_only", "recover --rebuild can only be run by the User", false)
 		}
 		databasePath := filepath.Join(home, "posse.db")
-		if store.IsCorruptDatabaseFile(databasePath) {
+		var orphanedSidecars []string
+		if _, statErr := os.Stat(databasePath); errors.Is(statErr, os.ErrNotExist) {
+			orphanedSidecars, err = preserveMissingDatabaseSidecars(databasePath)
+			if err != nil {
+				return fmt.Errorf("preserve orphaned database sidecars before rebuild: %w", err)
+			}
+		} else if statErr != nil {
+			return statErr
+		} else if store.IsCorruptDatabaseFile(databasePath) {
 			if _, moveErr := moveCorruptDatabaseAside(databasePath); moveErr != nil {
 				return fmt.Errorf("preserve corrupt database before rebuild: %w", moveErr)
 			}
@@ -112,7 +120,11 @@ func (s *Service) recover(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return axi.Failure("rebuild_failed", "could not rebuild the database from Task snapshots", false, err.Error())
 		}
-		return ctx.Print(axi.Object{{Key: "rebuilt_tasks", Value: count}, {Key: "source", Value: filepath.Join(home, "projects")}})
+		result := axi.Object{{Key: "rebuilt_tasks", Value: count}, {Key: "source", Value: filepath.Join(home, "projects")}}
+		if len(orphanedSidecars) > 0 {
+			result = append(result, axi.Field{Key: "orphaned_sidecars", Value: orphanedSidecars})
+		}
+		return ctx.Print(result)
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -173,6 +185,33 @@ func rebuildCallerMayBeUser(ctx context.Context, home string) bool {
 		return false
 	}
 	return true
+}
+
+func preserveMissingDatabaseSidecars(path string) ([]string, error) {
+	stamp := time.Now().UTC().Format("20060102T150405.000000000")
+	backup := path + ".orphaned-" + stamp
+	type movedFile struct{ source, target string }
+	var moved []movedFile
+	for _, suffix := range []string{"-wal", "-shm"} {
+		source := path + suffix
+		target := backup + suffix
+		if err := os.Rename(source, target); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			var rollbackErr error
+			for index := len(moved) - 1; index >= 0; index-- {
+				rollbackErr = errors.Join(rollbackErr, os.Rename(moved[index].target, moved[index].source))
+			}
+			return nil, errors.Join(err, rollbackErr)
+		}
+		moved = append(moved, movedFile{source: source, target: target})
+	}
+	orphaned := make([]string, len(moved))
+	for index, file := range moved {
+		orphaned[index] = file.target
+	}
+	return orphaned, nil
 }
 
 func moveCorruptDatabaseAside(path string) (string, error) {

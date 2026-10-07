@@ -630,7 +630,7 @@ There is at most one Lead per Project. Its pane title is `Lead: <project>` and i
 
 `posse down`, run by the User in the Project folder, stops the Project without unregistering it. It refuses with `tasks_open` while a Task is running (`spawning` through `landing`) and with `user_only` from a Rider or a live Lead pane; a Lead pane whose agent has exited is a User shell. It records the Project down first, so the close events it causes do not recover it, then stops the Lead agent, closes the Lead and Lookout tabs (only those panes when a tab holds foreign ones; the caller's own pane stays open, unlabeled) and stops the Project's Lookout processes. A down Project is never restarted by the startup hook, plugin events or other commands; `posse up` clears it.
 
-A moved repository makes its Project `missing`; `posse project move <name> <new-root>` fixes it.
+A moved repository makes its Project `missing`; `posse project move <name> <new-root>` fixes it, preserving the Project's stable UUID and refreshing its Task snapshots so database rebuilds remain valid.
 
 ## 17. Recovery
 
@@ -655,7 +655,7 @@ Work is never lost to a crash: commits live on the recorded `posse/<short>` bran
 
 **While Herdr is down.** Read-only commands (`posse`, `roster`, `show`, `remuda`, `config show`) and `posse holler` work from the DB and disk alone and say that Herdr is unavailable; commands that need Herdr fail with a retryable `herdr_unavailable`.
 
-**Losing the database.** Every state change also writes `~/.posse/projects/<p>/tasks/t<n>/task.toml` (atomically: temp file, fsync, rename) with the Task's type, state, branch, Mount, Profile, `gated_sha`, pane label and Launch Identity Records. `posse recover --rebuild` (User-only) rebuilds `posse.db` from these files (including each recorded branch and launch identity), legacy `posse/t*` orphan branches and the Mount directories. Missing or incomplete launch records remain unknown; rebuild never derives them from current config. `posse` backs up the DB once a day with `VACUUM INTO ~/.posse/backup/posse-<date>.db`, keeping 7.
+**Losing the database.** Every Task state change writes `~/.posse/projects/<p>/tasks/t<n>/task.toml` atomically (temp file, fsync, rename) with its type, state, branch, Mount, Profile, `gated_sha`, pane label and Launch Identity Records. `~/.posse/projects/<p>/project.toml` records the Project, Mounts, Decisions, Notices and Decision Notice cursor. Task state, Project state, Decision creation and answers, Notice changes and cursor advancement refresh the snapshots. `posse recover --rebuild` (User-only) restores Projects, Tasks, Mounts, Decisions, Notices and cursors from the snapshots, along with legacy `posse/t*` orphan branches and Mount directories. It preserves Project stop state and Lead launch counts, matches Projects by their stable UUID (with a legacy name/creation-time fallback), and refuses identity conflicts instead of reassigning Tasks. Project moves preserve the UUID and refresh Task snapshots. If the database file is missing, orphaned WAL/SHM sidecars are preserved under timestamped `.orphaned-*` names before creating a replacement database. For a legacy Workspace without `project.toml`, it uses Members from the newest Task snapshot. Missing or incomplete launch records remain unknown; rebuild never derives them from current config. `posse` backs up the DB once a day with `VACUUM INTO ~/.posse/backup/posse-<date>.db`, keeping 7.
 
 **Durability of files and deliveries.** `brief.md`, `launch.md`, `relaunch.md` and `report.md` are written atomically. `posse lookout` prints its digest before marking Notices delivered; an agent that crashes before reading them gets them again from the next delivery after a restart.
 
@@ -740,7 +740,7 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse lookout --poll-only` | dedicated Lookout tab | reconcile PRs and Teardown; never claim Notices |
 | `posse ack <id...\|all>` | Lead | close Notices |
 | `posse holler <verb> <note> [...]` | Worker | section 13 |
-| `posse publish [--repo <member>] [--refresh] "<summary>" [--verify "<command> -> <result>"] [--proof "<markdown>"] [--risk "<markdown>"]` | PR-mode Ship Worker | push own Task branch in a repository or selected workspace member and open or refresh its PR (sections 14, 24) |
+| `posse publish [--repo <member>] [--refresh] "<summary>" [--verify "<command> -> <result>"]... [--proof "<markdown>"]... [--risk "<markdown>"]...` | PR-mode Ship Worker | push own Task branch in a repository or selected workspace member and open or refresh its PR (sections 14, 24) |
 | `posse brief` | Worker | reprint own `launch.md` |
 | `posse project add\|show\|move\|scan\|remove` | User, Lead | register, inspect, move or remove an empty Project; re-detect workspace members |
 | `posse config schema\|show\|set\|unset [--project p] [--effective]` | User, Lead | the only way config is read and written (section 4) |
