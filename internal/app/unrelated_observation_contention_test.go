@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -139,7 +140,7 @@ func TestLookoutLogsAndRetriesMaintenanceContention(t *testing.T) {
 	}
 }
 
-func TestRosterObservationContentionIsRetryable(t *testing.T) {
+func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
 	if err != nil {
@@ -152,15 +153,18 @@ func TestRosterObservationContentionIsRetryable(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	for _, args := range [][]string{{"roster", "--json"}, {"--json"}} {
-		code, output, errOut := fixture.run(args...)
-		var failure axi.Error
-		if err := json.Unmarshal([]byte(output), &failure); err != nil {
-			t.Fatalf("invalid CLI failure: %s (stderr: %s): %v", output, errOut, err)
-		}
-		if code != 1 || failure.Code != "store_busy" || !failure.Retryable {
-			t.Fatalf("%v observation contention failure = %#v, exit=%d; want retryable store_busy", args, failure, code)
-		}
+	code, output, errOut := fixture.run("roster", "--json")
+	if code != 0 || strings.Contains(output, "store_busy") || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "Some Task observations were deferred") {
+		t.Fatalf("roster did not show its durable view with a deferral note: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+
+	code, output, errOut = fixture.run("--json")
+	var failure axi.Error
+	if err := json.Unmarshal([]byte(output), &failure); err != nil {
+		t.Fatalf("invalid dashboard failure: %s (stderr: %s): %v", output, errOut, err)
+	}
+	if code != 1 || failure.Code != "store_busy" || !failure.Retryable {
+		t.Fatalf("dashboard observation contention failure = %#v, exit=%d; want retryable store_busy", failure, code)
 	}
 }
 

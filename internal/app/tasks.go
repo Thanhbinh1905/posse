@@ -1055,28 +1055,28 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
 	defer cancelMaintenance()
 	if _, err := s.prepareProject(maintenanceCtx, db, project); err != nil {
-		if store.IsBusy(err) {
+		if store.IsOnlyBusy(err) {
 			// Lookout retries deferred maintenance and logs its own contention.
 			return ctx.Print(signalResult)
 		}
-		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project maintenance deferred: %v\n", normalizeCommandError(err))
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project maintenance deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 		if maintenanceCtx.Err() != nil {
 			return ctx.Print(signalResult)
 		}
 	}
 	if noticeKind != "" {
 		if err := s.deliverNotices(maintenanceCtx, db, project); err != nil && !isHerdrUnavailable(err) {
-			if store.IsBusy(err) {
+			if store.IsOnlyBusy(err) {
 				return ctx.Print(signalResult)
 			}
-			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Notice delivery deferred: %v\n", normalizeCommandError(err))
+			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Notice delivery deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 			if maintenanceCtx.Err() != nil {
 				return ctx.Print(signalResult)
 			}
 		}
 	}
-	if err := s.regenerateProjects(maintenanceCtx, db); err != nil && !store.IsBusy(err) {
-		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project snapshot deferred: %v\n", normalizeCommandError(err))
+	if err := s.regenerateProjects(maintenanceCtx, db); err != nil && !store.IsOnlyBusy(err) {
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project snapshot deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 	}
 	return ctx.Print(signalResult)
 }
