@@ -90,8 +90,9 @@ type checkSnapshot struct {
 }
 
 const (
-	openPullRequestHeadAttempts = 8
-	openPullRequestHeadDelay    = 250 * time.Millisecond
+	openPullRequestHeadTimeout     = 30 * time.Second
+	openPullRequestHeadInitialWait = 250 * time.Millisecond
+	openPullRequestHeadMaxWait     = 2 * time.Second
 )
 
 func createPROpenedNotice(ctx context.Context, db *store.DB, project store.Project, task store.Task, prURL, head, summary string) error {
@@ -241,7 +242,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 				}
 				openIntentActive = true
-				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", "", "", "", "", false)
+				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", "", "", "", "", false, "")
 				if openErr != nil {
 					return openErr
 				}
@@ -283,16 +284,30 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 	return s.mergePullRequest(out, db, project, cfg, task, userQuote)
 }
 
-func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool) (string, bool, error) {
+func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
 	if forge.Kind == "gitlab" {
-		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy)
+		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
 	}
 	args := []string{"pr", "list", "--state", "open", "--base", project.DefaultBranch, "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
+	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
+	defer cancel()
 	var urlValue, lastHead string
-	foundOpenPR := false
-	for attempt := 0; attempt < openPullRequestHeadAttempts; attempt++ {
-		output, err := runOutputStep(ctx, db, intent, "pr.lookup", project.Root, "gh", args...)
+	foundOpenPR, lastHeadLagging := false, false
+	delay := openPullRequestHeadInitialWait
+	for {
+		output, err := runOutputStep(pollCtx, db, intent, "pr.lookup", project.Root, "gh", args...)
 		if err != nil {
+			if pollCtx.Err() != nil {
+				if ctx.Err() != nil {
+					return "", false, ctx.Err()
+				}
+				if foundOpenPR && lastHeadLagging {
+					return "", false, pullRequestHeadLagTimeout(lastHead, task.GatedSHA)
+				}
+				if foundOpenPR {
+					return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+				}
+			}
 			return "", false, axi.Failure("pr_list_failed", "could not find an existing open pull request for the Task branch", true, truncate(err.Error(), 1200))
 		}
 		candidateURL, candidateHead, found, err := openPullRequestForBranch(output, task.Branch)
@@ -303,6 +318,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 			if !foundOpenPR {
 				break
 			}
+			lastHeadLagging = false
 		} else {
 			foundOpenPR = true
 			urlValue, lastHead = candidateURL, candidateHead
@@ -321,19 +337,50 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 				}
 				return urlValue, false, nil
 			}
-		}
-		if attempt+1 < openPullRequestHeadAttempts {
-			timer := time.NewTimer(openPullRequestHeadDelay)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				timer.Stop()
-				return "", false, ctx.Err()
+			lastHeadLagging = previousRemoteHead != "" && candidateHead == previousRemoteHead
+			if lastHeadLagging && intent.Command == "publish" {
+				if _, err := db.WasPublishPrePushHead(pollCtx, task.ID, member, candidateURL, candidateHead); err != nil {
+					return "", false, err
+				}
+			}
+			if !lastHeadLagging && previousRemoteHead != "" {
+				lastHeadLagging, err = db.WasVerifiedPRHead(pollCtx, task.ID, candidateURL, candidateHead)
+				if err != nil {
+					return "", false, err
+				}
+			}
+			if !lastHeadLagging && intent.Command == "publish" {
+				lastHeadLagging, err = db.WasPublishPrePushHead(pollCtx, task.ID, member, candidateURL, candidateHead)
+				if err != nil {
+					return "", false, err
+				}
+			}
+			if !lastHeadLagging {
+				return "", false, pullRequestHeadMismatch(candidateHead, task.GatedSHA)
 			}
 		}
-	}
-	if foundOpenPR {
-		return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-pollCtx.Done():
+			timer.Stop()
+			if ctx.Err() != nil {
+				return "", false, ctx.Err()
+			}
+			if foundOpenPR && lastHeadLagging {
+				return "", false, pullRequestHeadLagTimeout(lastHead, task.GatedSHA)
+			}
+			if foundOpenPR {
+				return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+			}
+			return "", false, axi.Failure("pr_list_failed", "timed out while looking for an existing open pull request", true)
+		}
+		if delay < openPullRequestHeadMaxWait {
+			delay *= 2
+			if delay > openPullRequestHeadMaxWait {
+				delay = openPullRequestHeadMaxWait
+			}
+		}
 	}
 	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, "")
 	if err != nil {
@@ -448,7 +495,11 @@ func openPullRequestForBranch(output, branch string) (string, string, bool, erro
 }
 
 func pullRequestHeadMismatch(actual, expected string) error {
-	return axi.Failure("branch_moved", fmt.Sprintf("open pull request for the Task branch has head %s; expected %s", actual, expected), false, "Re-run `posse land` to verify the Task branch tip")
+	return axi.Failure("branch_moved", fmt.Sprintf("open request for the Task branch has head %s; expected %s", actual, expected), false, "Re-run `posse land` to verify the Task branch tip")
+}
+
+func pullRequestHeadLagTimeout(actual, expected string) error {
+	return axi.Failure("pr_head_lag_timeout", fmt.Sprintf("forge has not caught up to pushed Task head %s; the request still reports previous head %s", expected, actual), true, "Re-run `posse publish` after the forge updates its request head")
 }
 
 func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {

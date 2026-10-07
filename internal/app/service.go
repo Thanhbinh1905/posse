@@ -134,7 +134,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-lookouts]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "setup", Summary: "Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).", Handler: s.setup},
-		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Riders after a Herdr restart or rebuild state from Task snapshots.", Handler: s.recover},
+		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Riders or rebuild Projects, Tasks, Mounts, Decisions and Notices from snapshots.", Handler: s.recover},
 		{Name: "_context", Summary: "Print Lead or Rider context inside a posse pane.", Hidden: true, Handler: s.context},
 		{Name: "doctor", Summary: "Check Herdr, plugin, config, database and landing tools.", Handler: s.doctor},
 	}
