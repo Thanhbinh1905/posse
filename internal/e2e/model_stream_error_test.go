@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	posseRuntime "github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -25,10 +26,11 @@ func TestPiStreamDisconnectAutomaticallyResumesWithinBound(t *testing.T) {
 	}) {
 		logged, _ := os.ReadFile(fixture.prompts)
 		ingest, _ := os.ReadFile(filepath.Join(fixture.base.root, "ingest.log"))
-		task, _ := fixture.base.db.Task(context.Background(), fixture.base.project.ID, "t1")
+		task, taskErr := fixture.base.db.Task(context.Background(), fixture.base.project.ID, "t1")
 		episode, _ := fixture.base.db.TaskModelErrorEpisode(context.Background(), task.ID)
 		signals, _ := fixture.base.db.TaskSignals(context.Background(), task.ID, 30)
-		t.Fatalf("stream-error recovery did not exhaust its bounded episode within seconds: prompts=%q episode=%#v signals=%#v ingest=%q", logged, episode, signals, ingest)
+		screen, _ := (posseRuntime.SystemProgress{}).ReadPane(context.Background(), fixture.client, task.PaneID, 200)
+		t.Fatalf("stream-error recovery did not exhaust its bounded episode within seconds: task=%#v task_err=%v prompts=%q episode=%#v signals=%#v screen=%q ingest=%q", task, taskErr, logged, episode, signals, screen, ingest)
 	}
 	if elapsed := time.Since(started); elapsed > 15*time.Second {
 		t.Fatalf("stream-error recovery took %s, want within seconds", elapsed)
@@ -135,6 +137,10 @@ while [ ! -e "$POSSE_TEST_ROOT/emit-model-error" ]; do sleep 0.02; done
 report_status() {
   state=$1
   herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent pi --state "$state" >/dev/null 2>&1
+  if [ "$state" = idle ] && [ "${attempt:-0}" -gt 0 ] && [ -e "$POSSE_TEST_ROOT/pause-retry-idle-hook" ]; then
+    : > "$POSSE_TEST_ROOT/retry-idle-ready"
+    while [ ! -e "$POSSE_TEST_ROOT/release-retry-idle-hook" ]; do sleep 0.02; done
+  fi
   HERDR_PLUGIN_EVENT_JSON="{\"event\":\"pane.agent_status_changed\",\"data\":{\"pane_id\":\"$HERDR_PANE_ID\",\"agent_status\":\"$state\"}}" "$POSSE_E2E_POSSE_BIN" _ingest >> "$POSSE_TEST_ROOT/ingest.log" 2>&1 &
   ingest_pid=$!
   printf '%%s\n' "$ingest_pid" > "$POSSE_TEST_ROOT/ingest-pid"

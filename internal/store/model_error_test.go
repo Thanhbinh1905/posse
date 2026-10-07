@@ -28,7 +28,7 @@ func TestNeedsDecisionSignalCancelsActiveModelErrorNudgeAtomically(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	episode, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "screen", true, 100)
+	episode, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "screen", 100)
 	if err != nil || !observed {
 		t.Fatalf("observe episode=%#v observed=%t err=%v", episode, observed, err)
 	}
@@ -59,7 +59,7 @@ func TestIdenticalFailedTurnAfterSubmittedNudgeConsumesNextAttempt(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	episode, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "same-screen", true, 100)
+	episode, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "same-screen", 100)
 	if err != nil || !observed {
 		t.Fatalf("first turn episode=%#v observed=%t err=%v", episode, observed, err)
 	}
@@ -73,12 +73,9 @@ func TestIdenticalFailedTurnAfterSubmittedNudgeConsumesNextAttempt(t *testing.T)
 	if err := db.CompleteModelErrorNudge(ctx, taskID, episode.Episode, 250, "stream disconnect", 350); err != nil {
 		t.Fatal(err)
 	}
-	if _, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "same-screen", false, 400); err != nil || observed {
-		t.Fatalf("same idle event was not deduplicated: observed=%t err=%v", observed, err)
-	}
-	next, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "same-screen", true, 500)
+	next, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "same-screen", 400)
 	if err != nil || !observed || next.Episode != episode.Episode || next.Attempts != 1 {
-		t.Fatalf("identical failure on a new turn was discarded: episode=%#v observed=%t err=%v", next, observed, err)
+		t.Fatalf("failed turn reported after working was discarded by a stale idle observation: episode=%#v observed=%t err=%v", next, observed, err)
 	}
 }
 
@@ -97,7 +94,7 @@ func TestExpiredModelErrorNudgeIsInterruptedWithSpecificNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	episode, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "screen", true, 100)
+	episode, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "screen", 100)
 	if err != nil || !observed {
 		t.Fatalf("observe error episode=%#v observed=%t err=%v", episode, observed, err)
 	}
@@ -140,14 +137,14 @@ func TestModelErrorEpisodeDeduplicatesAndBoundsConcurrentNudges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	episode, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "first", false, 100)
+	episode, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "first", 100)
 	if err != nil || !observed || episode.Episode != 1 || episode.Attempts != 0 {
 		t.Fatalf("initial model error episode=%#v observed=%t err=%v", episode, observed, err)
 	}
-	if _, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "first", false, 101); err != nil || observed {
+	if _, observed, err := db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "first", 101); err != nil || observed {
 		t.Fatalf("duplicate model error event observed=%t err=%v", observed, err)
 	}
-	episode, observed, err = db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "second", true, 102)
+	episode, observed, err = db.ObserveModelErrorEpisode(ctx, taskID, 1, "pi", "model_stream_error", "second", 102)
 	if err != nil || !observed || episode.Episode != 1 || episode.Fingerprint != "second" {
 		t.Fatalf("same-episode retry observation=%#v observed=%t err=%v", episode, observed, err)
 	}
@@ -193,7 +190,7 @@ func TestModelErrorEpisodeDeduplicatesAndBoundsConcurrentNudges(t *testing.T) {
 		t.Fatalf("episode notices=%#v err=%v", notices, err)
 	}
 
-	episode, observed, err = db.ObserveModelErrorEpisode(ctx, taskID, 2, "pi", "model_stream_error", "third", true, 400)
+	episode, observed, err = db.ObserveModelErrorEpisode(ctx, taskID, 2, "pi", "model_stream_error", "third", 400)
 	if err != nil || !observed || episode.Episode != 2 || episode.Attempts != 0 || episode.Status != "active" {
 		t.Fatalf("new launch did not start a fresh bounded episode: %#v observed=%t err=%v", episode, observed, err)
 	}

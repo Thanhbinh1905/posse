@@ -47,7 +47,7 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 	lines := strings.Split(normalizeModelTerminalOutput(output), "\n")
 	for i := 0; i+1 < len(lines); i++ {
 		errorLine := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(strings.ToLower(errorLine), "error:") || strings.TrimSpace(lines[i+1]) != piErrorHelpLine {
+		if !strings.HasPrefix(strings.ToLower(errorLine), "error:") || strings.TrimSpace(lines[i+1]) != piErrorHelpLine || piErrorInsideToolOutput(lines, i) {
 			continue
 		}
 		message := strings.ToLower(strings.TrimSpace(errorLine[len("Error:"):]))
@@ -63,20 +63,35 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 	return "", "", false
 }
 
+// Pi brackets tool-result panels with horizontal rules. An unmatched rule
+// before the candidate places it inside a panel; a completed prior panel does not.
+func piErrorInsideToolOutput(lines []string, errorLine int) bool {
+	insideToolOutput := false
+	for _, line := range lines[:errorLine] {
+		if piTerminalBorder(strings.TrimSpace(line)) {
+			insideToolOutput = !insideToolOutput
+		}
+	}
+	return insideToolOutput
+}
+
 func piFooterOnly(lines []string) bool {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "/") || strings.Contains(line, "%/") {
+		if line == "" || strings.HasPrefix(line, "/") || strings.Contains(line, "%/") || piTerminalBorder(line) {
 			continue
 		}
-		border := line != ""
-		for _, char := range line {
-			if char != '─' && char != '━' && char != '═' && char != '-' {
-				border = false
-				break
-			}
-		}
-		if !border {
+		return false
+	}
+	return true
+}
+
+func piTerminalBorder(line string) bool {
+	if line == "" {
+		return false
+	}
+	for _, char := range line {
+		if char != '─' && char != '━' && char != '═' && char != '-' {
 			return false
 		}
 	}
@@ -117,7 +132,7 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 
 	fingerprint := modelOutputFingerprint(output)
 	now := currentTime()
-	episode, observed, err := db.ObserveModelErrorEpisode(ctx, task.ID, task.Launches, pane.Agent, kind, fingerprint, task.IdleSince == 0, now)
+	episode, observed, err := db.ObserveModelErrorEpisode(ctx, task.ID, task.Launches, pane.Agent, kind, fingerprint, now)
 	if err != nil {
 		return nil, err
 	}

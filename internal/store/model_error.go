@@ -48,10 +48,11 @@ FROM model_error_episodes WHERE task_id=?`, taskID).Scan(
 	return episode, err
 }
 
-// ObserveModelErrorEpisode starts an episode or records a new end-of-turn
-// observation. An identical repaint is a new turn only after Herdr reports
-// working following the prior continue; duplicate idle hooks remain deduplicated.
-func (db *DB) ObserveModelErrorEpisode(ctx context.Context, taskID int64, launch int, agent, kind, fingerprint string, newTurn bool, now int64) (ModelErrorEpisode, bool, error) {
+// ObserveModelErrorEpisode starts an episode or records an end-of-turn
+// observation. The persisted turn state admits a new observation only after
+// Herdr reports working following the prior continue; duplicate idle hooks
+// remain deduplicated even when the terminal screen is repainted identically.
+func (db *DB) ObserveModelErrorEpisode(ctx context.Context, taskID int64, launch int, agent, kind, fingerprint string, now int64) (ModelErrorEpisode, bool, error) {
 	if taskID < 1 || launch < 1 || agent == "" || kind == "" || fingerprint == "" {
 		return ModelErrorEpisode{}, false, fmt.Errorf("model error episode identity is incomplete")
 	}
@@ -74,9 +75,6 @@ FROM model_error_episodes WHERE task_id=?`, taskID).Scan(
 		return ModelErrorEpisode{}, false, err
 	}
 	if err == nil && episode.Launch == launch && episode.Kind == kind && episode.Status == "active" && (episode.NextAttemptAt > 0 || episode.TurnState != modelErrorTurnReady) {
-		return episode, false, tx.Commit()
-	}
-	if err == nil && episode.Launch == launch && episode.Kind == kind && episode.Status == "active" && episode.Attempts > 0 && !newTurn {
 		return episode, false, tx.Commit()
 	}
 	if err == nil && episode.Launch == launch && episode.Kind == kind && episode.Fingerprint == fingerprint && episode.Status != "resolved" && (episode.Status != "active" || episode.Attempts == 0) {

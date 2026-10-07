@@ -16,6 +16,12 @@ func TestClassifyModelErrorAtTurnEnd(t *testing.T) {
 			want:   "model_stream_error",
 		},
 		{
+			name:   "Pi launch line is not a shell tool result",
+			agent:  "pi",
+			output: "$ pi\nRead the task brief and follow it.\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine,
+			want:   "model_stream_error",
+		},
+		{
 			name:   "Pi refusal with bounded provider details",
 			agent:  "pi",
 			output: "Error: This content was flagged for possible cybersecurity risk\n" + piErrorHelpLine + "\n────────────────",
@@ -35,6 +41,22 @@ func TestClassifyModelErrorAtTurnEnd(t *testing.T) {
 			name:   "ordinary tool output quoting stream failure",
 			agent:  "pi",
 			output: "$ grep stream-error rider.log\n2026-10-06 log entry: Error: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine,
+		},
+		{
+			name:   "successful shell result copying complete Pi error block",
+			agent:  "pi",
+			output: "────────────────\n$ grep -A1 'stream error' rider.log\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine + "\n────────────────",
+		},
+		{
+			name:   "tool result copying complete Pi error block",
+			agent:  "pi",
+			output: "────────────────\nRead rider.log\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine + "\n────────────────",
+		},
+		{
+			name:   "Pi failure after a completed tool result",
+			agent:  "pi",
+			output: "────────────────\n$ grep stream-error rider.log\nno match\n────────────────\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine,
+			want:   "model_stream_error",
 		},
 		{
 			name:   "quoted refusal is not a harness error result",

@@ -86,8 +86,40 @@ func TestT242IdenticalRepaintDoesNotStrandRecovery(t *testing.T) {
 	f.emitError(t)
 	if !waitForCondition(5*time.Second, func() bool { return f.hasNotice("model_stream_error") }) {
 		episode, _ := f.base.db.TaskModelErrorEpisode(context.Background(), task.ID)
-		t.Fatalf("repainted identical stream failures stranded recovery: prompts=%d episode=%#v", countPromptLines(f.prompts, "continue"), episode)
+		current, _ := f.base.db.Task(context.Background(), f.base.project.ID, "t1")
+		signals, _ := f.base.db.TaskSignals(context.Background(), task.ID, 20)
+		var events []string
+		rows, queryErr := f.base.db.QueryContext(context.Background(), `SELECT id,kind,data_json FROM events ORDER BY id`)
+		if queryErr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id int64
+				var kind, data string
+				if rows.Scan(&id, &kind, &data) == nil {
+					events = append(events, fmt.Sprintf("%d:%s:%s", id, kind, data))
+				}
+			}
+		}
+		ingestLog, _ := os.ReadFile(filepath.Join(f.base.root, "ingest.log"))
+		t.Fatalf("repainted identical stream failures stranded recovery: prompts=%d idle_since=%d episode=%#v signals=%#v events=%q ingest=%q", countPromptLines(f.prompts, "continue"), current.IdleSince, episode, signals, events, ingestLog)
 	}
+	episode, err := f.base.db.TaskModelErrorEpisode(context.Background(), task.ID)
+	if err != nil || episode.Status != "exhausted" || episode.Attempts != 3 || episode.NextAttemptAt != 0 {
+		t.Fatalf("failed stream turn did not deterministically exhaust the retry budget: episode=%#v err=%v", episode, err)
+	}
+	if prompts := countPromptLines(f.prompts, "continue"); prompts != 3 {
+		t.Fatalf("retry count=%d, want exactly 3", prompts)
+	}
+	notices, err := f.base.db.Notices(context.Background(), f.base.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "model_stream_error" && strings.Contains(notice.Summary, "stopped after 3 attempts") {
+			return
+		}
+	}
+	t.Fatalf("exhausted episode lacks its specific Notice: %#v", notices)
 }
 
 func TestT242InterruptedIngestRecoversOrRaisesNotice(t *testing.T) {
