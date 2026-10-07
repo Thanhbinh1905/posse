@@ -356,7 +356,7 @@ Runs during Project preparation (all Projects for `posse roster --all`), using o
 
 A reconcile that loses a compare-and-set race on a Task skips that Task (another process already moved it); it never fails the command. One Project's failure (missing repository, invalid config) is reported for that Project and does not stop commands for other Projects. Store contention and deferred reconciliation return retryable `store_busy`; the Lead Lookout retries contended preparation without exiting. Mount-state and repository-fetch flock acquisition stop after 3 seconds, even if the holder is stopped, and never steal or unlink its lock.
 
-`posse holler` validates and atomically records its own Task's Signal, transition and Notice before any whole-Project preparation. Subsequent Project maintenance, Notice delivery and snapshot regeneration are best-effort within a separate 3 second budget; failures emit diagnostics, not rejection of the committed Signal. Contention in the Signal's own transaction remains a retryable failure.
+`posse holler` validates and atomically records its own Task's Signal, transition and Notice before any whole-Project preparation. Subsequent Project maintenance, Notice delivery and snapshot regeneration are best-effort within a separate 3 second budget; failures do not reject the committed Signal. Non-contention failures emit diagnostics. Transient store contention is deferred silently to the Rider; the Lookout logs the deferral and retries maintenance. Contention in the Signal's own transaction remains a retryable failure.
 
 For each live Task:
 
