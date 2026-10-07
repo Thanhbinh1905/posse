@@ -684,6 +684,21 @@ esac
 	if err != nil || secondTask.State != store.StateTornDown {
 		t.Fatalf("land --merge did not auto-unsaddle the landed Task: %#v, %v", secondTask, err)
 	}
+	postTeardownSnapshot, snapshotErr := client.Snapshot(context.Background())
+	if snapshotErr != nil {
+		t.Fatalf("snapshot after t2 teardown: %v", snapshotErr)
+	}
+	for _, pane := range postTeardownSnapshot.Panes {
+		if pane.Label == secondTask.PaneLabel || pane.CWD == mountPath {
+			processInfo, _ := client.Run(context.Background(), "pane", "process-info", pane.PaneID)
+			t.Fatalf("t2 teardown left a Mount pane: pane=%#v processInfo=%s workspaces=%#v", pane, processInfo, postTeardownSnapshot.Workspaces)
+		}
+	}
+	for _, workspace := range postTeardownSnapshot.Workspaces {
+		if workspace.Worktree.CheckoutPath == mountPath || workspace.Root == mountPath {
+			t.Fatalf("t2 teardown left its Herdr workspace registered: %#v panes=%#v", workspace, postTeardownSnapshot.Panes)
+		}
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -896,6 +911,13 @@ esac
 	}) {
 		t.Fatalf("isolated Herdr server generation was not observed: %#v", beforeRestart.ServerStartedAt)
 	}
+	leadAlreadyLiveBeforeRestart := false
+	for _, pane := range beforeRestart.Panes {
+		if pane.Label == project.LeadLabel && pane.Agent != "" && pane.AgentStatus != "exited" && pane.AgentStatus != "stopped" {
+			leadAlreadyLiveBeforeRestart = true
+			break
+		}
+	}
 	killServer(t, server)
 	startServer(t, client)
 	var afterRestart herdr.Snapshot
@@ -908,6 +930,94 @@ esac
 		return current.ServerStartedAt != "" && current.ServerStartedAt != beforeRestart.ServerStartedAt
 	}) {
 		t.Fatalf("Herdr restart generation did not change: before=%q after=%q", beforeRestart.ServerStartedAt, afterRestart.ServerStartedAt)
+	}
+	var restoredTornDownPane *herdr.Pane
+	for index := range afterRestart.Panes {
+		pane := &afterRestart.Panes[index]
+		if pane.Label == secondTask.PaneLabel && pane.CWD == mountPath {
+			restoredTornDownPane = pane
+			break
+		}
+	}
+	if restoredTornDownPane != nil {
+		restoredAgent := ""
+		for _, agent := range afterRestart.Agents {
+			if agent.PaneID == restoredTornDownPane.PaneID {
+				restoredAgent = agent.Name
+				break
+			}
+		}
+		if secondTask.State != store.StateTornDown || restoredTornDownPane.Agent != "" || restoredAgent != "" {
+			t.Fatalf("Herdr restored an occupied pane from a torn-down Task: task=%#v pane=%#v agent=%q snapshot=%#v", secondTask, restoredTornDownPane, restoredAgent, afterRestart)
+		}
+		raw, processErr := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": restoredTornDownPane.PaneID})
+		var processResult struct {
+			ProcessInfo struct {
+				ShellPID               int `json:"shell_pid"`
+				ForegroundProcessGroup int `json:"foreground_process_group_id"`
+			} `json:"process_info"`
+		}
+		if processErr != nil || json.Unmarshal(raw, &processResult) != nil || processResult.ProcessInfo.ShellPID <= 1 || processResult.ProcessInfo.ForegroundProcessGroup != processResult.ProcessInfo.ShellPID {
+			t.Fatalf("Herdr restored a torn-down Task pane with an unverified foreground process: pane=%#v processInfo=%s err=%v", restoredTornDownPane, raw, processErr)
+		}
+		if !waitForCondition(15*time.Second, func() bool {
+			recoveryDB, openErr := store.OpenReadOnly(home)
+			if openErr != nil {
+				return false
+			}
+			defer recoveryDB.Close()
+			recovery, recoveryErr := recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
+			return recoveryErr == nil && recovery.Status == "pending" && recovery.Attempts > 0 && recovery.LastError == "another Herdr workspace already holds this Mount"
+		}) {
+			t.Fatal("startup recovery did not fail closed on the restored torn-down Task workspace")
+		}
+		if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": restoredTornDownPane.PaneID}); err != nil {
+			t.Fatalf("remove the fixture's restored torn-down Task shell after confirming recovery refused it: %v", err)
+		}
+		if !waitForCondition(5*time.Second, func() bool {
+			snapshot, snapshotErr := client.Snapshot(context.Background())
+			if snapshotErr != nil {
+				return false
+			}
+			for _, workspace := range snapshot.Workspaces {
+				if workspace.Worktree.CheckoutPath == mountPath || workspace.Root == mountPath {
+					return false
+				}
+			}
+			return true
+		}) {
+			t.Fatal("fixture cleanup did not remove the restored torn-down Task workspace")
+		}
+		if !waitForCondition(15*time.Second, func() bool {
+			recoveryDB, openErr := store.OpenReadOnly(home)
+			if openErr != nil {
+				return false
+			}
+			defer recoveryDB.Close()
+			recovery, recoveryErr := recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
+			return recoveryErr == nil && recovery.NextAttemptAt <= time.Now().UnixMilli()
+		}) {
+			t.Fatal("startup recovery retry backoff did not elapse after the stale fixture workspace was removed")
+		}
+		if output := runPosse(t, posseBinary, repo, leadEnv, "recover", "--all"); !strings.Contains(output, "restarted: 2") {
+			t.Fatalf("explicit recovery after removing the fixture's stale shell did not restart the Rider and Lead: %s", output)
+		}
+		if leadAlreadyLiveBeforeRestart {
+			recoveryDB, openErr := store.Open(home)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			project, err = recoveryDB.ProjectByName(context.Background(), "shop")
+			_ = recoveryDB.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			lookoutEnv = setEnv(lookoutEnv, "HERDR_PANE_ID", project.LeadPaneID)
+			lookoutEnv = setEnv(lookoutEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+			if output := runPosse(t, posseBinary, repo, lookoutEnv, "lookout", "--timeout", "3000"); !strings.Contains(output, "recovery-worker") {
+				t.Fatalf("live Lead's Lookout did not deliver the deferred recovery Notice: %s", output)
+			}
+		}
 	}
 	recoveryOutput := "automatic Herdr startup recovery"
 	if !waitForCondition(30*time.Second, func() bool {
@@ -937,23 +1047,26 @@ esac
 		workerArgsNow, _ := os.ReadFile(workerArgsLog)
 		leadArgsNow, _ := os.ReadFile(leadArgsLog)
 		leadPromptsNow, _ := os.ReadFile(leadLog)
+		leadRestarted := strings.Count(string(leadArgsNow), "start ") > leadStartsBefore && strings.Count(string(leadPromptsNow), "[posse | Posse -> Lead ") > leadPromptCountBefore
 		return generation == afterRestart.ServerStartedAt &&
 			currentTask.State == store.StateWorking && currentTask.Launches > thirdTask.Launches && currentTask.AgentName != thirdTask.AgentName &&
 			currentTask.MountID == thirdTask.MountID && currentTask.WorktreePath == thirdTask.WorktreePath && currentTask.Branch == thirdTask.Branch &&
 			recoveryNotices == 1 && strings.Count(string(workerArgsNow), "start ") > workerStartsBefore &&
-			strings.Count(string(leadArgsNow), "start ") > leadStartsBefore && strings.Count(string(leadPromptsNow), "[posse | Posse -> Lead ") > leadPromptCountBefore
+			(leadAlreadyLiveBeforeRestart || leadRestarted)
 	}) {
 		debugDB, debugErr := store.Open(home)
 		var intents []store.Intent
 		var recovery store.ProjectRecovery
 		var generation string
 		var task store.Task
+		var taskRecovery store.TaskRecovery
 		var transitions string
 		if debugErr == nil {
 			intents, debugErr = debugDB.Intents(context.Background(), project.ID)
 			recovery, _ = debugDB.ProjectRecovery(context.Background(), project.ID)
 			generation, _ = debugDB.ProjectServerStartedAt(context.Background(), project.ID)
 			task, _ = debugDB.Task(context.Background(), project.ID, "t3")
+			taskRecovery, _ = debugDB.TaskRecovery(context.Background(), task.ID)
 			transitions = taskTransitions(debugDB, task.ID)
 			_ = debugDB.Close()
 		}
@@ -962,7 +1075,7 @@ esac
 			panes = current.Panes
 		}
 		pluginLogs, pluginLogsErr := client.Run(context.Background(), "plugin", "log", "list", "--plugin", "posse.herdr")
-		t.Fatalf("startup recovery did not finish: generation=%q want=%q recovery=%#v task=%#v transitions=%s panes=%#v intents=%#v dbErr=%v pluginLogs=%s pluginLogsErr=%v", generation, afterRestart.ServerStartedAt, recovery, task, transitions, panes, intents, debugErr, pluginLogs, pluginLogsErr)
+		t.Fatalf("startup recovery did not finish: generation=%q want=%q recovery=%#v task=%#v taskRecovery=%#v transitions=%s panes=%#v intents=%#v dbErr=%v pluginLogs=%s pluginLogsErr=%v", generation, afterRestart.ServerStartedAt, recovery, task, taskRecovery, transitions, panes, intents, debugErr, pluginLogs, pluginLogsErr)
 	}
 	db, err = store.Open(home)
 	if err != nil {
@@ -1032,11 +1145,11 @@ esac
 		t.Fatalf("recovered Worker did not start with its Profile arguments: before=%q after=%q", workerArgsBefore, workerArgsAfter)
 	}
 	leadArgsAfter, _ := os.ReadFile(leadArgsLog)
-	if strings.Count(string(leadArgsAfter), "start ") <= leadStartsBefore || !strings.Contains(string(leadArgsAfter), "lead.md") {
+	if !leadAlreadyLiveBeforeRestart && (strings.Count(string(leadArgsAfter), "start ") <= leadStartsBefore || !strings.Contains(string(leadArgsAfter), "lead.md")) {
 		t.Fatalf("Lead was not restarted with its instruction file: before=%q after=%q", leadArgsBefore, leadArgsAfter)
 	}
 	leadPromptsAfter, _ := os.ReadFile(leadLog)
-	if strings.Count(string(leadPromptsAfter), "[posse | Posse -> Lead ") <= leadPromptCountBefore {
+	if !leadAlreadyLiveBeforeRestart && strings.Count(string(leadPromptsAfter), "[posse | Posse -> Lead ") <= leadPromptCountBefore {
 		t.Fatalf("restarted Lead did not receive the recovery Notice: before=%q after=%q", leadPromptsBefore, leadPromptsAfter)
 	}
 

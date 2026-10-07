@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,8 +38,9 @@ func TestTeardownStopsMountWriterBeforeSnapshot(t *testing.T) {
 	if _, err := f.db.RecordPRObservation(ctx, store.PRObservation{TaskID: task.ID, ProjectID: f.project.ID, PRURL: task.PRURL, State: "MERGED", HeadSHA: f.headSHA, MergeCommit: f.headSHA}, store.PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
-	writer := exec.Command("bash", "-c", "trap 'printf late\\n > late.txt; exit 0' TERM; while true; do sleep 0.1; done")
+	writer := exec.Command("bash", "-c", "trap 'printf late\\n > late.txt; exit 0' TERM; while true; do read -t 0.1 || :; done")
 	writer.Dir = f.worktree
+	writer.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := writer.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -62,8 +65,15 @@ func TestTeardownStopsMountWriterBeforeSnapshot(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
-	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
-	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	if err := f.db.UpdateTaskLaunch(ctx, task.ID, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, "posse-shop-t1-1"); err != nil {
+		t.Fatal(err)
+	}
+	task.AgentName = "posse-shop-t1-1"
+	fake.SnapshotValue.Panes[0].Agent = ""
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: task.AgentName, PaneID: "w2:p1"}}
+	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":2147483647,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"claude","cwd":%q}]}}`, writer.Process.Pid, writer.Process.Pid, f.worktree))
+	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue, autoCloseWhenFile: filepath.Join(f.worktree, "late.txt"), autoClosePaneID: task.PaneID}
+	f.service.Herdr = adapter
 	cfg, err := config.Load(f.home, f.project.Name)
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +126,7 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 	fake := f.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	removeFixtureTaskPane(f)
 	if _, err := f.service.unsaddleTask(ctx, f.db, f.project, cfg, task, false, ""); err == nil {
 		t.Fatal("conflicting Leftover snapshot should stop Teardown")
 	} else {
@@ -189,6 +200,7 @@ func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
 	fake := f.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	removeFixtureTaskPane(f)
 	if err := os.WriteFile(filepath.Join(f.worktree, ".git"), []byte("gitdir: /missing/pruned/gitdir\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

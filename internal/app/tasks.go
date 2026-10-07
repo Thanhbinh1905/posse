@@ -808,7 +808,7 @@ func (s *Service) waitAgent(ctx context.Context, paneID string, anyStatus bool) 
 func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Project, id int64, title, reason string) error {
 	if task, err := db.TaskByID(ctx, project.ID, id); err == nil {
 		if s.Herdr != nil && (task.HerdrWorkspaceID != "" || task.PaneID != "" || task.PaneLabel != "") {
-			if _, closeErr := s.closeTaskPanes(ctx, project, task); closeErr != nil {
+			if _, closeErr := s.verifyTaskPanesGone(ctx, project, task); closeErr != nil {
 				reason += "; Task pane cleanup failed: " + closeErr.Error()
 			} else {
 				s.relabelProjectTabs(ctx, db, project)

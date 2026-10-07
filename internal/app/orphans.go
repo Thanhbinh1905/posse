@@ -37,7 +37,7 @@ func (s *Service) reconcileTaskPanes(ctx context.Context, db *store.DB, project 
 		if task.State != store.StateTornDown {
 			continue
 		}
-		if _, err := s.closeTaskPanes(ctx, project, task); err != nil {
+		if _, err := s.verifyTaskPanesGone(ctx, project, task); err != nil {
 			if incompleteErr := s.recordUnsaddleIncomplete(ctx, db, project, task, err); incompleteErr != nil {
 				return incompleteErr
 			}

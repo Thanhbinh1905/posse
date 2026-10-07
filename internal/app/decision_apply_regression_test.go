@@ -55,6 +55,7 @@ func TestApplyRecoveryDiscardWithPrunedMount(t *testing.T) {
 	fake := f.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	removeFixtureTaskPane(f)
 	// Simulate a pruned worktree link without touching the Project repository.
 	if err := os.WriteFile(filepath.Join(f.worktree, ".git"), []byte("gitdir: /missing/pruned/gitdir\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -165,6 +166,7 @@ func TestReportedTeardownFailureKeepsFilesAndRaisesDecision(t *testing.T) {
 	fake := f.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	removeFixtureTaskPane(f)
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
 	if err != nil {
 		t.Fatal(err)

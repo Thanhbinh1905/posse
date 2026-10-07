@@ -29,9 +29,22 @@ func fixturePrefix(suffix string) string {
 // can reclaim only roots bearing our marker whose owning test has exited.
 func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
-	parent := os.Getenv("POSSE_E2E_TMP_ROOT")
-	if parent == "" {
-		parent = os.TempDir()
+	parent := os.TempDir()
+	if configuredRoot := os.Getenv("POSSE_E2E_TMP_ROOT"); configuredRoot != "" {
+		if !validTaskScratchRootPath(configuredRoot) {
+			t.Fatalf("unsafe POSSE_E2E_TMP_ROOT: %q", configuredRoot)
+		}
+		if _, err := os.Lstat(configuredRoot); errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(configuredRoot, 0o700); err != nil {
+				t.Fatalf("create isolated E2E scratch root %s: %v", configuredRoot, err)
+			}
+		} else if err != nil {
+			t.Fatalf("inspect isolated E2E scratch root %s: %v", configuredRoot, err)
+		}
+		if !validTaskScratchRoot(configuredRoot) {
+			t.Fatalf("unsafe POSSE_E2E_TMP_ROOT: %q", configuredRoot)
+		}
+		parent = configuredRoot
 	}
 	return newFixtureRootAt(t, parent, prefix)
 }
@@ -39,14 +52,29 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
 	configuredRoot := filepath.Clean(os.Getenv("POSSE_E2E_TMP_ROOT"))
-	customRoot := configuredRoot != "." && filepath.Clean(parent) == configuredRoot && strings.HasPrefix(configuredRoot, "/tmp/posse-") && strings.HasSuffix(configuredRoot, "-scratch")
+	parent, err := filepath.Abs(parent)
+	if err != nil {
+		t.Fatalf("resolve E2E fixture parent: %v", err)
+	}
+	customRoot := configuredRoot != "." && parent == configuredRoot && validTaskScratchRoot(configuredRoot)
 	if (parent != "/tmp" && parent != "/var/tmp" && parent != os.TempDir() && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
-	if customRoot {
-		if err := os.MkdirAll(parent, 0o700); err != nil {
-			t.Fatalf("create isolated E2E scratch root %s: %v", parent, err)
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatalf("resolve E2E fixture parent %s: %v", parent, err)
+	}
+	parent = resolvedParent
+	insideTemp := false
+	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
+		relative, err := filepath.Rel(tempRoot, parent)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			insideTemp = true
+			break
 		}
+	}
+	if !insideTemp || !strings.HasPrefix(prefix, "posse-e2e-") {
+		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {
 		t.Fatalf("reclaim abandoned E2E fixtures: %v", err)
@@ -95,6 +123,22 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		_ = lock.Close()
 	})
 	return root
+}
+
+func validTaskScratchRootPath(root string) bool {
+	return filepath.Clean(root) == root && filepath.Dir(root) == "/tmp" && strings.HasPrefix(filepath.Base(root), "posse-") && strings.HasSuffix(filepath.Base(root), "-scratch")
+}
+
+func validTaskScratchRoot(root string) bool {
+	if !validTaskScratchRootPath(root) {
+		return false
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	return err == nil && resolved == root
 }
 
 // Go's module cache makes directories read-only. WalkDir never follows links,
