@@ -234,8 +234,19 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 				return mr.WebURL, false, nil
 			}
 			lastHeadLagging = previousRemoteHead != "" && mr.SHA == previousRemoteHead
+			if lastHeadLagging && intent.Command == "publish" {
+				if _, err := db.WasPublishPrePushHead(pollCtx, task.ID, member, mr.WebURL, mr.SHA); err != nil {
+					return "", false, err
+				}
+			}
 			if !lastHeadLagging && previousRemoteHead != "" {
 				lastHeadLagging, err = db.WasVerifiedPRHead(pollCtx, task.ID, mr.WebURL, mr.SHA)
+				if err != nil {
+					return "", false, err
+				}
+			}
+			if !lastHeadLagging && intent.Command == "publish" {
+				lastHeadLagging, err = db.WasPublishPrePushHead(pollCtx, task.ID, member, mr.WebURL, mr.SHA)
 				if err != nil {
 					return "", false, err
 				}

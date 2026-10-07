@@ -132,6 +132,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return axi.Failure("pr_remote_head_failed", "could not inspect the Task branch on origin before publishing", true, err.Error())
 	}
+	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
+		return err
+	}
 	if _, err := gitOutput(out.Context, task.WorktreePath, "push", "origin", ref+":"+ref); err != nil {
 		return axi.Failure("pr_push_failed", "could not push the Task branch", true, err.Error())
 	}

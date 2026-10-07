@@ -338,8 +338,19 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 				return urlValue, false, nil
 			}
 			lastHeadLagging = previousRemoteHead != "" && candidateHead == previousRemoteHead
+			if lastHeadLagging && intent.Command == "publish" {
+				if _, err := db.WasPublishPrePushHead(pollCtx, task.ID, member, candidateURL, candidateHead); err != nil {
+					return "", false, err
+				}
+			}
 			if !lastHeadLagging && previousRemoteHead != "" {
 				lastHeadLagging, err = db.WasVerifiedPRHead(pollCtx, task.ID, candidateURL, candidateHead)
+				if err != nil {
+					return "", false, err
+				}
+			}
+			if !lastHeadLagging && intent.Command == "publish" {
+				lastHeadLagging, err = db.WasPublishPrePushHead(pollCtx, task.ID, member, candidateURL, candidateHead)
 				if err != nil {
 					return "", false, err
 				}
