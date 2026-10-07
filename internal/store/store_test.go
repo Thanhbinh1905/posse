@@ -283,8 +283,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 33 {
-		t.Fatalf("applied Goose migration version = %d, want 33", version)
+	if version != 35 {
+		t.Fatalf("applied Goose migration version = %d, want 35", version)
 	}
 }
 
@@ -343,6 +343,7 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
@@ -515,6 +516,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE project_repos DROP COLUMN origin_host`,
 		`DROP TABLE member_pr_poll_state`,
 		`DROP TABLE pr_body_markers`,
+		`DROP TABLE model_error_episodes`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`DROP TABLE publish_pre_push_heads`,
@@ -620,9 +622,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 33 {
+	if version != 35 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 33", version)
+		t.Fatalf("initial Goose migration version = %d, want 35", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -659,8 +661,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 33 {
-		t.Fatalf("reopened Goose migration version = %d, want 33", version)
+	if version != 35 {
+		t.Fatalf("reopened Goose migration version = %d, want 35", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
