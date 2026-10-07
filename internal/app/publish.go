@@ -34,7 +34,7 @@ func remoteBranchHead(ctx context.Context, root, ref string) (string, error) {
 // publish is the only supported direct delivery path for a normal PR-mode Worker.
 // It never accepts a branch, remote, refspec, or merge option from the caller.
 func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
-	parsed, err := parseArgs("publish", args, map[string]flagSpec{"repo": {}, "verify": {}, "proof": {}, "risk": {}, "refresh": {boolean: true}})
+	parsed, err := parseArgs("publish", args, map[string]flagSpec{"repo": {}, "verify": {repeatable: true}, "proof": {repeatable: true}, "risk": {repeatable: true}, "refresh": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,10 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral: only the Lead's Gate may persist a gated SHA.
-	prURL, _, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Flags["repo"], parsed.Positionals[0], parsed.Flags["verify"], parsed.Flags["proof"], parsed.Flags["risk"], parsed.Bool("refresh"), previousRemoteHead)
+	verification := strings.Join(parsed.Repeated["verify"], "\n")
+	proof := strings.Join(parsed.Repeated["proof"], "\n\n")
+	risk := strings.Join(parsed.Repeated["risk"], "\n\n")
+	prURL, _, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Flags["repo"], parsed.Positionals[0], verification, proof, risk, parsed.Bool("refresh"), previousRemoteHead)
 	if err != nil {
 		return err
 	}
