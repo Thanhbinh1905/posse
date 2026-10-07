@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -384,7 +385,10 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
-		return err
+		if !store.IsOnlyBusy(err) {
+			return err
+		}
+		fmt.Fprintln(ctx.ErrOut, "Some Task observations were deferred; showing their last recorded state.")
 	}
 	tasks, err := db.Tasks(ctx.Context, project.ID, false)
 	if err != nil {

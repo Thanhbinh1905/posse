@@ -178,6 +178,7 @@ type Project struct {
 	LeadLaunches     int64
 	Kind             string
 	DownAt           int64
+	ProjectUuid      string
 }
 
 type ProjectRepo struct {
