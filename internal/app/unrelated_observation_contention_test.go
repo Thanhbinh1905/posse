@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestHollerOwnTransactionContentionIsRetryable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer writer.Rollback()
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var out, errOut bytes.Buffer
 	err = fixture.service.signal(&axi.Context{Context: ctx, Out: &out, ErrOut: &errOut}, []string{"working", "Still working"})
@@ -96,7 +97,50 @@ func TestLookoutRemainsArmedDuringObservationContention(t *testing.T) {
 	}
 }
 
-func TestRosterObservationContentionIsRetryable(t *testing.T) {
+func TestLookoutLogsAndRetriesMaintenanceContention(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET updated_at=1 WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.ExecContext(context.Background(), `UPDATE projects SET lead_absent_since=lead_absent_since WHERE id=?`, fixture.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		released <- writer.Commit()
+	}()
+
+	started := time.Now()
+	code, out, errOut := fixture.run("lookout", "--timeout", "3000")
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("Lookout did not finish after writer release: exit=%d output=%s stderr=%s", code, out, errOut)
+	}
+	if !store.IsBusy(errors.New(errOut)) {
+		t.Fatalf("Lookout did not expose its deferred contention: %s", errOut)
+	}
+	if fake.CallCount("session.snapshot") < 2 {
+		t.Fatalf("Lookout did not retry reconciliation after contention: snapshots=%d", fake.CallCount("session.snapshot"))
+	}
+	updated, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil || updated.UpdatedAt <= 1 {
+		t.Fatalf("Lookout did not persist maintenance after writer release: updated_at=%d error=%v", updated.UpdatedAt, err)
+	}
+	if time.Since(started) < 1500*time.Millisecond {
+		t.Fatal("Lookout returned before the contending writer released its lock")
+	}
+}
+
+func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
 	if err != nil {
@@ -109,15 +153,18 @@ func TestRosterObservationContentionIsRetryable(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	for _, args := range [][]string{{"roster", "--json"}, {"--json"}} {
-		code, output, errOut := fixture.run(args...)
-		var failure axi.Error
-		if err := json.Unmarshal([]byte(output), &failure); err != nil {
-			t.Fatalf("invalid CLI failure: %s (stderr: %s): %v", output, errOut, err)
-		}
-		if code != 1 || failure.Code != "store_busy" || !failure.Retryable {
-			t.Fatalf("%v observation contention failure = %#v, exit=%d; want retryable store_busy", args, failure, code)
-		}
+	code, output, errOut := fixture.run("roster", "--json")
+	if code != 0 || strings.Contains(output, "store_busy") || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "Some Task observations were deferred") {
+		t.Fatalf("roster did not show its durable view with a deferral note: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+
+	code, output, errOut = fixture.run("--json")
+	var failure axi.Error
+	if err := json.Unmarshal([]byte(output), &failure); err != nil {
+		t.Fatalf("invalid dashboard failure: %s (stderr: %s): %v", output, errOut, err)
+	}
+	if code != 1 || failure.Code != "store_busy" || !failure.Retryable {
+		t.Fatalf("dashboard observation contention failure = %#v, exit=%d; want retryable store_busy", failure, code)
 	}
 }
 
@@ -250,6 +297,9 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	}
 	if result.code != 0 {
 		t.Fatalf("holler done failed during unrelated Task observation contention: exit=%d output=%s error=%s", result.code, result.out, result.err)
+	}
+	if store.IsBusy(errors.New(result.err)) {
+		t.Fatalf("Rider saw a contention diagnostic after its Signal committed: %s", result.err)
 	}
 
 	updated, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)

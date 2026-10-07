@@ -677,7 +677,7 @@ func (db *DB) RestoreNoticeDeliverySnapshot(ctx context.Context, tx interface {
 			taskID = notice.TaskID
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO notices(id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at)
-			VALUES(?,?,?,?,?,?,?,?,?)`, notice.ID, notice.ProjectID, taskID, notice.Kind, notice.Summary, notice.DataJSON, notice.CreatedAt, nullableInt64Value(notice.DeliveredAt), nullableInt64Value(notice.AckedAt)); err != nil {
+			VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, notice.ID, notice.ProjectID, taskID, notice.Kind, notice.Summary, notice.DataJSON, notice.CreatedAt, nullableInt64Value(notice.DeliveredAt), nullableInt64Value(notice.AckedAt)); err != nil {
 			return err
 		}
 	}

@@ -405,8 +405,8 @@ func (q *Queries) InsertNotice(ctx context.Context, arg InsertNoticeParams) (sql
 }
 
 const insertProject = `-- name: InsertProject :execresult
-INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at)
-VALUES (?, ?, ?, 'active', ?, ?)
+INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)
+VALUES (?, ?, ?, 'active', ?, ?, ?)
 `
 
 type InsertProjectParams struct {
@@ -415,6 +415,7 @@ type InsertProjectParams struct {
 	DefaultBranch  string
 	CreatedAt      int64
 	LastActivityAt int64
+	ProjectUuid    string
 }
 
 func (q *Queries) InsertProject(ctx context.Context, arg InsertProjectParams) (sql.Result, error) {
@@ -424,6 +425,7 @@ func (q *Queries) InsertProject(ctx context.Context, arg InsertProjectParams) (s
 		arg.DefaultBranch,
 		arg.CreatedAt,
 		arg.LastActivityAt,
+		arg.ProjectUuid,
 	)
 }
 
@@ -965,7 +967,7 @@ func (q *Queries) PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PrBo
 }
 
 const projectByID = `-- name: ProjectByID :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE id = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects WHERE id = ?
 `
 
 func (q *Queries) ProjectByID(ctx context.Context, id int64) (Project, error) {
@@ -986,12 +988,13 @@ func (q *Queries) ProjectByID(ctx context.Context, id int64) (Project, error) {
 		&i.LeadLaunches,
 		&i.Kind,
 		&i.DownAt,
+		&i.ProjectUuid,
 	)
 	return i, err
 }
 
 const projectByLeadPane = `-- name: ProjectByLeadPane :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE lead_pane_id = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects WHERE lead_pane_id = ?
 `
 
 func (q *Queries) ProjectByLeadPane(ctx context.Context, leadPaneID string) (Project, error) {
@@ -1012,12 +1015,13 @@ func (q *Queries) ProjectByLeadPane(ctx context.Context, leadPaneID string) (Pro
 		&i.LeadLaunches,
 		&i.Kind,
 		&i.DownAt,
+		&i.ProjectUuid,
 	)
 	return i, err
 }
 
 const projectByName = `-- name: ProjectByName :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE name = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects WHERE name = ?
 `
 
 func (q *Queries) ProjectByName(ctx context.Context, name string) (Project, error) {
@@ -1038,12 +1042,13 @@ func (q *Queries) ProjectByName(ctx context.Context, name string) (Project, erro
 		&i.LeadLaunches,
 		&i.Kind,
 		&i.DownAt,
+		&i.ProjectUuid,
 	)
 	return i, err
 }
 
 const projectByRoot = `-- name: ProjectByRoot :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE root = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects WHERE root = ?
 `
 
 func (q *Queries) ProjectByRoot(ctx context.Context, root string) (Project, error) {
@@ -1064,12 +1069,13 @@ func (q *Queries) ProjectByRoot(ctx context.Context, root string) (Project, erro
 		&i.LeadLaunches,
 		&i.Kind,
 		&i.DownAt,
+		&i.ProjectUuid,
 	)
 	return i, err
 }
 
 const projects = `-- name: Projects :many
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects ORDER BY name
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects ORDER BY name
 `
 
 func (q *Queries) Projects(ctx context.Context) ([]Project, error) {
@@ -1096,6 +1102,7 @@ func (q *Queries) Projects(ctx context.Context) ([]Project, error) {
 			&i.LeadLaunches,
 			&i.Kind,
 			&i.DownAt,
+			&i.ProjectUuid,
 		); err != nil {
 			return nil, err
 		}

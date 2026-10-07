@@ -228,18 +228,15 @@ func t208SnapshotRebuildCases(t *testing.T) {
 
 func t208PrepareSnapshotRebuild(t *testing.T, f *t205PRFixture) {
 	t.Helper()
-	// Hold a Decision that snapshot rebuild does not reconstruct. This exercises
-	// the known rebuild FK blocker addressed by A24 (#191).
-	if _, err := f.db.ExecContext(context.Background(), `INSERT INTO decisions(project_id,task_id,origin,question,options_json,created_at) VALUES(?,?,?,'fixture rebuild blocker','[]',?)`, f.project.ID, f.task.ID, "t208-rebuild-fixture", time.Now().UnixMilli()); err != nil {
+	if _, err := f.db.RaiseDecision(context.Background(), store.DecisionRequest{
+		ProjectID: f.project.ID,
+		TaskID:    f.task.ID,
+		Origin:    "t208-rebuild-fixture",
+		Kind:      "rider_question",
+		Question:  "Fixture rebuild blocker",
+		Options:   []string{"continue", "stop"},
+	}); err != nil {
 		t.Fatal(err)
-	}
-	// Until A24 fixes rebuild FK cleanup, clear state outside Task snapshots
-	// locally in this disposable fixture. This test covers marker recovery,
-	// not Mount or Decision restoration.
-	for _, statement := range []string{"UPDATE tasks SET mount_id=NULL", "DELETE FROM decisions", "DELETE FROM decision_notice_cursors"} {
-		if _, err := f.db.ExecContext(context.Background(), statement); err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 
@@ -274,10 +271,15 @@ func t205NewPRFixture(t *testing.T, forge string) *t205PRFixture {
 	}
 	runPosse(t, f.binary, f.repo, f.leadEnv, "ride", "--brief", brief, "--name", "pr-lifecycle-change")
 	task := f.mustTask(t, "t1")
+	readyPath := filepath.Join(f.root, "worker-ready-t1")
 	if !waitForCondition(15*time.Second, func() bool {
-		return strings.TrimSpace(gitTest(t, f.env, task.WorktreePath, "rev-list", "--count", task.BaseRef+".."+task.Branch)) == "1"
+		if strings.TrimSpace(gitTest(t, f.env, task.WorktreePath, "rev-list", "--count", task.BaseRef+".."+task.Branch)) != "1" {
+			return false
+		}
+		_, err := os.Stat(readyPath)
+		return err == nil
 	}) {
-		t.Fatal("Rider did not commit")
+		t.Fatal("Rider did not finish its initial commit")
 	}
 	env := setEnv(f.leadEnv, "HERDR_PANE_ID", task.PaneID)
 	env = setEnv(env, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)

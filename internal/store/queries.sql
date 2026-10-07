@@ -48,8 +48,8 @@ INSERT INTO tasks(
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertProject :execresult
-INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at)
-VALUES (?, ?, ?, 'active', ?, ?);
+INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)
+VALUES (?, ?, ?, 'active', ?, ?, ?);
 
 -- name: SetProjectLead :exec
 UPDATE projects SET herdr_workspace_id = ?, lead_pane_id = ?, lead_label = ?,

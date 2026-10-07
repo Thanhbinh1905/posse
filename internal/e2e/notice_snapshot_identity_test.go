@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
@@ -18,10 +19,9 @@ import (
 func TestNoticeReceiptsSurviveProjectMoveAndRebuild(t *testing.T) {
 	f := newAcknowledgedNoticeFixture(t)
 	ctx := context.Background()
-	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
+	if _, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
 		Seq: 1, Type: "scout", Title: "Move recovery snapshot", LandingMode: "local",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	first := deliverAndAcceptNotice(t, f)
@@ -36,11 +36,6 @@ func TestNoticeReceiptsSurviveProjectMoveAndRebuild(t *testing.T) {
 		t.Fatalf("move Project: %s", output)
 	}
 
-	// Project snapshot refresh is handled by A24. Materialize that expected
-	// post-move Task snapshot without changing the receipt snapshot.
-	if err := f.db.PersistTask(ctx, taskID); err != nil {
-		t.Fatal(err)
-	}
 	code, output = f.cliAsUser(t, "recover", "--rebuild")
 	if code != 0 {
 		t.Fatalf("recover after Project move: %s", output)
@@ -56,6 +51,57 @@ func TestNoticeReceiptsSurviveProjectMoveAndRebuild(t *testing.T) {
 	moved, err := f.db.ProjectByID(ctx, f.project.ID)
 	if err != nil || moved.Root != movedRoot {
 		t.Fatalf("Project root after move rebuild = %q, want %q: %v", moved.Root, movedRoot, err)
+	}
+}
+
+func TestNoticeReceiptRebuildRejectsReusedProjectID(t *testing.T) {
+	f := newAcknowledgedNoticeFixture(t)
+	ctx := context.Background()
+	oldProject := f.project
+	batch := deliverAndAcceptNotice(t, f)
+	if err := os.Remove(f.db.ProjectSnapshotPath(oldProject.Name)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(filepath.Join(f.home, "posse.db") + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	otherRoot := filepath.Join(f.root, "other-repo")
+	if err := os.MkdirAll(otherRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.db = db
+	t.Cleanup(func() { _ = db.Close() })
+	other, err := db.CreateProject(ctx, "other", otherRoot, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.ID != oldProject.ID || other.UUID == oldProject.UUID {
+		t.Fatalf("fixture did not reuse the numeric ID with a new UUID: old=(%d,%q) new=(%d,%q)", oldProject.ID, oldProject.UUID, other.ID, other.UUID)
+	}
+
+	code, output := f.cliAsUser(t, "recover", "--rebuild")
+	if code == 0 || !strings.Contains(string(output), "Notice delivery snapshot Project UUID") || !strings.Contains(string(output), oldProject.UUID) {
+		t.Fatalf("rebuild did not refuse the stale receipt UUID: code=%d output=%s", code, output)
+	}
+	projects, err := db.Projects(ctx)
+	if err != nil || len(projects) != 1 || projects[0].ID != other.ID || projects[0].UUID != other.UUID {
+		t.Fatalf("failed rebuild changed the replacement Project: %+v, %v", projects, err)
+	}
+	if _, err := db.NoticeDelivery(ctx, batch.Delivery.DeliveryID); !store.IsNotFound(err) {
+		t.Fatalf("old receipt was attached to the replacement Project: %v", err)
+	}
+	notices, err := db.Notices(ctx, other.ID, false)
+	if err != nil || len(notices) != 0 {
+		t.Fatalf("old Notices were attached to the replacement Project: %+v, %v", notices, err)
 	}
 }
 

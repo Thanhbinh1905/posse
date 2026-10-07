@@ -179,6 +179,7 @@ type Project struct {
 	LeadLaunches     int64
 	Kind             string
 	DownAt           int64
+	ProjectUuid      string
 }
 
 type ProjectRepo struct {
@@ -213,6 +214,14 @@ type ProjectWatchState struct {
 	RootBehindHead        string
 	PrPollClaimUntil      int64
 	PrPollClaimToken      string
+}
+
+type PublishPrePushHead struct {
+	TaskID     int64
+	Repo       string
+	RequestUrl string
+	HeadSha    string
+	RecordedAt int64
 }
 
 type RepoWatchState struct {

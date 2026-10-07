@@ -909,7 +909,7 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head"), []byte(oldHead), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head-remaining"), []byte("4"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head-duration-ms"), []byte("3500"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.fixGate, "t1"), []byte("continue\n"), 0o600); err != nil {
@@ -930,8 +930,16 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
 		t.Fatalf("publish rejected the temporarily stale PR head: task=%#v Worker delivery=%s", current, log)
 	}
-	if remaining, err := os.ReadFile(filepath.Join(fixture.root, "gh-list-stale-head-remaining")); err != nil || strings.TrimSpace(string(remaining)) != "0" {
-		t.Fatalf("fake forge did not serve four stale reads before the current head: remaining=%q err=%v", remaining, err)
+	startedText, err := os.ReadFile(filepath.Join(fixture.root, "gh-list-stale-head-started"))
+	if err != nil {
+		t.Fatalf("fake forge never began reporting its stale head: %v", err)
+	}
+	startedMillis, err := strconv.ParseInt(strings.TrimSpace(string(startedText)), 10, 64)
+	if err != nil {
+		t.Fatalf("invalid fake forge lag start time %q: %v", startedText, err)
+	}
+	if elapsed := time.Since(time.UnixMilli(startedMillis)); elapsed < 3500*time.Millisecond {
+		t.Fatalf("fake forge lag lasted only %s; expected at least 3.5s", elapsed)
 	}
 	newHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
 	remoteHead := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/"+task.Branch))
@@ -962,8 +970,101 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(calls), "pr list") < 6 {
-		t.Fatalf("publish did not re-read four stale PR heads before the update: %s", calls)
+	if strings.Count(string(calls), "pr list") < 5 {
+		t.Fatalf("publish did not re-read stale PR heads before the update: %s", calls)
+	}
+	if strings.Count(string(calls), "pr edit") != 1 {
+		t.Fatalf("publish should refresh PR metadata exactly once after the head catches up: %s", calls)
+	}
+}
+
+func TestWorkerPublishDistinguishesMovedHeadFromLagTimeout(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "publish-head-race.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise unexpected-head and timeout outcomes during publish.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.rideAndComplete(t, brief, "t1")
+	oldHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
+	if err := os.WriteFile(filepath.Join(fixture.root, "pause-fix-commit"), []byte("hold\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Add the publish consistency follow-up.")
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "unexpected-follow-up.txt"), []byte("unexpected follow-up\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.env, task.WorktreePath, "add", "unexpected-follow-up.txt")
+	gitTest(t, fixture.env, task.WorktreePath, "commit", "-m", "unexpected follow-up")
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head"), []byte(strings.Repeat("f", 40)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head-duration-ms"), []byte("31000"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workerEnv := setEnv(fixture.leadEnv, "HERDR_PANE_ID", task.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", fixture.home)
+	command := exec.Command(fixture.binary, "publish", "Worker unexpected-head follow-up")
+	command.Dir, command.Env = task.WorktreePath, workerEnv
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), `"branch_moved"`) || !strings.Contains(string(output), `,false,`) {
+		t.Fatalf("unexpected forge head did not fail non-retryable branch_moved: err=%v output=%s", err, output)
+	}
+	pushedHead := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/"+task.Branch))
+	if pushedHead == oldHead {
+		t.Fatalf("follow-up head was not pushed: remote=%s old=%s", pushedHead, oldHead)
+	}
+	localHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	if pushedHead != localHead {
+		t.Fatalf("publish did not push before rejecting the unexpected head: remote=%s local=%s", pushedHead, localHead)
+	}
+
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "timeout-follow-up.txt"), []byte("timeout follow-up\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.env, task.WorktreePath, "add", "timeout-follow-up.txt")
+	gitTest(t, fixture.env, task.WorktreePath, "commit", "-m", "timeout follow-up")
+	expectedHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-list-stale-head"), []byte(oldHead), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fixture.root, "gh-list-stale-head-started")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	command = exec.Command(fixture.binary, "publish", "Worker timeout follow-up")
+	command.Dir, command.Env = task.WorktreePath, workerEnv
+	started := time.Now()
+	output, err = command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), `"pr_head_lag_timeout"`) || !strings.Contains(string(output), `,true,`) || !strings.Contains(string(output), "forge has not caught up") {
+		t.Fatalf("stale forge head did not produce an accurately worded retryable timeout: err=%v output=%s", err, output)
+	}
+	if elapsed := time.Since(started); elapsed < 28*time.Second || elapsed > 40*time.Second {
+		t.Fatalf("publish timeout took %s, expected about 30s", elapsed)
+	}
+	calls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(calls), "pr edit") {
+		t.Fatalf("publish edited PR metadata before the forge head caught up: %s", calls)
+	}
+	command = exec.Command(fixture.binary, "publish", "Worker timeout follow-up")
+	command.Dir, command.Env = task.WorktreePath, workerEnv
+	output, err = command.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "https://github.com/acme/shop/pull/17") {
+		t.Fatalf("retry after forge catch-up did not publish successfully: err=%v output=%s", err, output)
+	}
+	calls, err = os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "pr edit") != 1 {
+		t.Fatalf("retry should edit PR metadata exactly once after the head catches up: %s", calls)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/"+task.Branch)); got != expectedHead {
+		t.Fatalf("timeout publish did not push the expected Task head: got=%s want=%s", got, expectedHead)
 	}
 }
 
@@ -1261,6 +1362,7 @@ case "$PWD/" in
     git add "e2e-worker-$task_id.txt"
     git commit -m "worker change $task_id" >/dev/null
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+    : > "$POSSE_TEST_ROOT/worker-ready-$task_id"
     while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id" ]; do sleep 0.02; done
     case "$task_id" in t1) pr_url='https://github.com/acme/shop/pull/17' ;; t2) pr_url='https://github.com/acme/shop/pull/18' ;; esac
     "$POSSE_E2E_POSSE_BIN" publish "Worker committed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
@@ -1295,11 +1397,13 @@ case "$1 $2" in
   "pr list")
     case " $* " in *' --head posse/pr-lifecycle-change '*) branch=posse/pr-lifecycle-change; number=17 ;; *' --head posse/pr-follow-up '*) branch=posse/pr-follow-up; number=17 ;; *' --head posse/pr-create-recovery '*) branch=posse/pr-create-recovery; number=17 ;; *' --head posse/external-merge-change '*) branch=posse/external-merge-change; number=18 ;; *) exit 90 ;; esac
     if grep -q "/pull/$number" "$POSSE_TEST_GH_OPEN_PRS"; then
-      if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ] && [ -f "$POSSE_TEST_ROOT/gh-list-stale-head-remaining" ]; then
-        remaining=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head-remaining")
-        if [ "$remaining" -gt 0 ]; then
+      if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ]; then
+        if [ ! -f "$POSSE_TEST_ROOT/gh-list-stale-head-started" ]; then date +%s%3N > "$POSSE_TEST_ROOT/gh-list-stale-head-started"; fi
+        now=$(date +%s%3N)
+        started=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head-started")
+        duration=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head-duration-ms")
+        if [ "$((now - started))" -lt "$duration" ]; then
           head=$(cat "$POSSE_TEST_ROOT/gh-list-stale-head")
-          printf '%s\n' "$((remaining - 1))" > "$POSSE_TEST_ROOT/gh-list-stale-head-remaining"
         else
           head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
         fi
