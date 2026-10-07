@@ -22,36 +22,69 @@ type teardownFixtureProcess struct {
 	StartTime string
 }
 
-func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, root string, env, leadEnv []string, db *store.DB, project store.Project, task store.Task) {
+func cleanupTeardownFixtureProcesses(t *testing.T, root string, names []string, processes map[string]teardownFixtureProcess) {
+	t.Helper()
+	for _, name := range names {
+		process, known := processes[name]
+		if !known {
+			// Readiness or signalling may fail before the parent records the
+			// identity. Only adopt a PID still carrying this fixture's root.
+			contents, err := os.ReadFile(filepath.Join(root, name+"-pid"))
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				t.Errorf("read %s fixture PID during cleanup: %v", name, err)
+				continue
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(contents)))
+			if err != nil || pid < 2 {
+				t.Errorf("invalid %s fixture PID during cleanup: %q", name, contents)
+				continue
+			}
+			environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil || !strings.Contains("\x00"+string(environ), "\x00POSSE_TEST_ROOT="+root+"\x00") {
+				t.Errorf("cannot verify %s process %d belongs to fixture during cleanup: %v", name, pid, err)
+				continue
+			}
+			bootID, startTime, err := store.ProcessIdentityForPID(pid)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				t.Errorf("read %s process identity during cleanup: %v", name, err)
+				continue
+			}
+			process = teardownFixtureProcess{PID: pid, BootID: bootID, StartTime: startTime}
+		}
+		bootID, startTime, err := store.ProcessIdentityForPID(process.PID)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Errorf("verify %s process identity during cleanup: %v", name, err)
+			continue
+		}
+		if bootID != process.BootID || startTime != process.StartTime {
+			continue
+		}
+		for _, pid := range []int{-process.PID, process.PID} {
+			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+				t.Errorf("stop %s fixture process %d: %v", name, pid, err)
+			}
+		}
+		if !waitForCondition(5*time.Second, func() bool { return !teardownFixtureProcessRunning(process) }) {
+			t.Errorf("%s fixture process survived cleanup: pid=%d", name, process.PID)
+		}
+	}
+}
+
+func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, root string, env, leadEnv []string, db *store.DB, project store.Project, task store.Task, processes map[string]teardownFixtureProcess) {
 	t.Helper()
 	scratch := filepath.Join(home, "scratch", "shop", "t1")
-	if !waitForCondition(15*time.Second, func() bool { _, err := os.Stat(filepath.Join(root, "rider-ready")); return err == nil }) {
-		t.Fatal("Rider did not finish its test process")
-	}
-
-	processes := map[string]teardownFixtureProcess{}
-	processNames := []string{}
-	switch mode {
-	case "scratch-child":
-		processNames = []string{"background", "global-child", "other-task-child"}
-	case "local-ordering", "failed-discard-ordering":
-		processNames = []string{"background"}
-	}
-	for _, name := range processNames {
-		ready := filepath.Join(root, name+"-ready")
-		if name == "background" {
-			ready = filepath.Join(root, "background-ready")
-		}
-		if !waitForCondition(5*time.Second, func() bool { _, err := os.Stat(ready); return err == nil }) {
-			t.Fatalf("Rider's %s process did not start", name)
-		}
-		process := readTeardownFixtureProcess(t, root, name)
-		processes[name] = process
-		t.Cleanup(func() {
-			_ = syscall.Kill(-process.PID, syscall.SIGKILL)
-			_ = syscall.Kill(process.PID, syscall.SIGKILL)
-		})
-	}
 
 	switch mode {
 	case "local-ordering", "local-held-prune":

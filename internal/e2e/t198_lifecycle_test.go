@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -23,6 +24,17 @@ func TestTeardownStopsTaskProcessesAndPruneProtectsHeldBranches(t *testing.T) {
 
 func runTeardownOwnershipLifecycle(t *testing.T, mode string) {
 	root := newFixtureRoot(t, fixturePrefix("t178-teardown-"))
+	processNames := []string{}
+	switch mode {
+	case "scratch-child":
+		processNames = []string{"background", "global-child", "other-task-child"}
+	case "local-ordering", "failed-discard-ordering":
+		processNames = []string{"background"}
+	}
+	processes := map[string]teardownFixtureProcess{}
+	// Register before launch so a refused Signal or failed readiness check
+	// cannot leave the Rider's detached fixture processes behind.
+	t.Cleanup(func() { cleanupTeardownFixtureProcesses(t, root, processNames, processes) })
 	bin := filepath.Join(root, "bin")
 	os.MkdirAll(bin, 0700)
 	binary := filepath.Join(bin, "posse")
@@ -60,6 +72,7 @@ case "$PWD/" in
     echo $! > "$POSSE_TEST_ROOT/background-pid";;
   esac
   printf ready > "$POSSE_TEST_ROOT/rider-ready"
+  while [ ! -f "$POSSE_TEST_ROOT/task-working" ]; do sleep 0.02; done
   case "$POSSE_T178_MODE" in
    failed-discard-ordering) posse holler failed 'Fixture failed before delivery' > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
    local-*) posse holler done 'Ship fixture completed' > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
@@ -156,7 +169,70 @@ while IFS= read -r line; do :; done
 		taskType, expected = "ship", store.StateFailed
 	}
 	os.WriteFile(brief, []byte("---\ntype: "+taskType+"\ntitle: Scratch release probe\ndone_when: Report retained and scratch removed\n---\nWrite evidence.\n"), 0600)
-	runPosse(t, binary, repo, leadEnv, "ride", "--brief", brief, "--name", "scratch-release-probe")
+	rideEnv := leadEnv
+	pauseMarker := filepath.Join(root, "ride-before-working")
+	if mode == "failed-discard-ordering" {
+		// Force the CI ordering: the Rider finishes its work while Ride has
+		// not yet transitioned the Task out of spawning.
+		rideEnv = setEnv(rideEnv, "POSSE_INTENT_PAUSE_AT", "ride:before:task.working")
+		rideEnv = setEnv(rideEnv, "POSSE_INTENT_PAUSE_FILE", pauseMarker)
+	}
+	rideCtx, cancelRide := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancelRide()
+	ride := exec.CommandContext(rideCtx, binary, "ride", "--brief", brief, "--name", "scratch-release-probe")
+	ride.Dir, ride.Env, ride.WaitDelay = repo, rideEnv, time.Second
+	var rideOutput bytes.Buffer
+	ride.Stdout, ride.Stderr = &rideOutput, &rideOutput
+	if err := ride.Start(); err != nil {
+		t.Fatal(err)
+	}
+	rideDone := make(chan struct{})
+	var rideErr error
+	go func() {
+		rideErr = ride.Wait()
+		close(rideDone)
+	}()
+	t.Cleanup(func() {
+		cancelRide()
+		<-rideDone
+	})
+	if !waitForCondition(30*time.Second, func() bool { _, err := os.Stat(filepath.Join(root, "rider-ready")); return err == nil }) {
+		t.Fatal("Rider did not finish its test process")
+	}
+	for _, name := range processNames {
+		if !waitForCondition(5*time.Second, func() bool { _, err := os.Stat(filepath.Join(root, name+"-ready")); return err == nil }) {
+			t.Fatalf("Rider's %s process did not start", name)
+		}
+		processes[name] = readTeardownFixtureProcess(t, root, name)
+	}
+	if mode == "failed-discard-ordering" {
+		if !waitForCondition(10*time.Second, func() bool { _, err := os.Stat(pauseMarker); return err == nil }) {
+			t.Fatal("Ride did not pause before its working transition")
+		}
+		spawning, err := db.Task(context.Background(), project.ID, "t1")
+		if err != nil || spawning.State != store.StateSpawning {
+			t.Fatalf("paused Rider Task = %#v, %v; want spawning", spawning, err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "signal.log")); !os.IsNotExist(err) {
+			t.Fatalf("Rider attempted to signal before working: %v", err)
+		}
+		if err := os.WriteFile(pauseMarker+".continue", []byte("continue\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-rideDone
+	if rideErr != nil {
+		t.Fatalf("Ride failed: %v %s", rideErr, rideOutput.String())
+	}
+	if !waitForCondition(10*time.Second, func() bool {
+		current, err := db.Task(context.Background(), project.ID, "t1")
+		return err == nil && current.State == store.StateWorking
+	}) {
+		t.Fatal("Rider Task did not reach working before its Signal")
+	}
+	if err := os.WriteFile(filepath.Join(root, "task-working"), []byte("working\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var task store.Task
 	if !waitForCondition(30*time.Second, func() bool {
 		task, err = db.Task(context.Background(), project.ID, "t1")
@@ -185,5 +261,5 @@ while IFS= read -r line; do :; done
 			}
 		}
 	}
-	finishTeardownOwnershipLifecycle(t, mode, binary, repo, home, root, env, leadEnv, db, project, task)
+	finishTeardownOwnershipLifecycle(t, mode, binary, repo, home, root, env, leadEnv, db, project, task, processes)
 }
