@@ -61,9 +61,28 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	repoFilter := ""
+	if project.IsWorkspace() {
+		if parsed.Flags["repo"] == "" {
+			return axi.Failure("publish_refused", "workspace publishing requires --repo <member>", false)
+		}
+		repoFilter = parsed.Flags["repo"]
+	}
+	if err := s.processPendingStackedTargetChanges(out.Context, db, project, cfg, repoFilter); err != nil {
+		return err
+	}
 	task, err = db.TaskByID(out.Context, project.ID, task.ID)
 	if err != nil {
 		return err
+	}
+	changes, err := db.TaskTargetChanges(out.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	for _, change := range changes {
+		if change.Repo == repoFilter && change.Status != "complete" {
+			return axi.Failure("stack_retarget_incomplete", "stacked PR/MR target change is "+change.Status+": "+change.Error, change.Status == "pending", "Resolve the stacked PR/MR target change before publishing again")
+		}
 	}
 	if task.Type != "ship" || (task.State != store.StateWorking && task.State != store.StateStalled) || task.WorktreePath == "" || task.Branch == "" {
 		return axi.Failure("publish_refused", "only a working PR-mode Ship Rider with its own Task branch can publish", false)
@@ -74,9 +93,6 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	var member *memberLanding
 	if project.IsWorkspace() {
-		if parsed.Flags["repo"] == "" {
-			return axi.Failure("publish_refused", "workspace publishing requires --repo <member>", false)
-		}
 		members, err := s.workspaceMembers(out.Context, db, project, task)
 		if err != nil {
 			return err
@@ -226,7 +242,7 @@ func validateWorkerPullRequestWithRemote(ctx context.Context, project store.Proj
 		if err != nil {
 			return axi.Failure("pr_view_failed", "could not verify the merge request", true, err.Error())
 		}
-		if mr.WebURL != prURL || (mr.State != "opened" && mr.State != "merged") || mr.SHA != sha || mr.SourceBranch != task.Branch || mr.TargetBranch != project.DefaultBranch || mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID {
+		if mr.WebURL != prURL || (mr.State != "opened" && mr.State != "merged") || mr.SHA != sha || mr.SourceBranch != task.Branch || mr.TargetBranch != taskTargetBranch(project, task) || mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID {
 			return axi.Failure("pr_head_mismatch", "merge request does not target this Project from its Task branch and commit", false)
 		}
 		if !checkRemote {
@@ -251,7 +267,7 @@ func validateWorkerPullRequestWithRemote(ctx context.Context, project store.Proj
 	if err := json.Unmarshal([]byte(output), &pull); err != nil {
 		return axi.Failure("pr_view_failed", "gh returned invalid pull request data", true, err.Error())
 	}
-	if pull.URL != prURL || (pull.State != "OPEN" && pull.State != "MERGED") || pull.HeadRefOID != sha || pull.HeadRefName != task.Branch || pull.BaseRefName != project.DefaultBranch || !strings.EqualFold(pull.HeadRepository.NameWithOwner, forge.Path) {
+	if pull.URL != prURL || (pull.State != "OPEN" && pull.State != "MERGED") || pull.HeadRefOID != sha || pull.HeadRefName != task.Branch || pull.BaseRefName != taskTargetBranch(project, task) || !strings.EqualFold(pull.HeadRepository.NameWithOwner, forge.Path) {
 		return axi.Failure("pr_head_mismatch", fmt.Sprintf("pull request does not target %s from its Task branch and commit", forge.Path), false)
 	}
 	if !checkRemote {

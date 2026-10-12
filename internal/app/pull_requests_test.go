@@ -574,6 +574,87 @@ func TestPRLandingDoesNotWriteBranchTrackingConfig(t *testing.T) {
 	}
 }
 
+func TestWorkerPublishesPRToFrozenNonDefaultTarget(t *testing.T) {
+	f := newPRLandingFixture(t, "pr", store.StateWorking)
+	mount := attachPRFixtureMount(t, f)
+	gitTest(t, f.repo, "branch", "staging", "main")
+	gitTest(t, f.repo, "push", "origin", "staging")
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET target_branch='staging' WHERE id=?`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task.TargetBranch = "staging"
+	t.Setenv("POSSE_TEST_GH_BASE_BRANCH", "staging")
+	url := "https://github.com/acme/shop/pull/17"
+
+	for i := 0; i < 2; i++ {
+		if i == 1 {
+			openPRs := fmt.Sprintf(`[{"url":%q,"headRefName":"posse/t1","headRefOid":%q}]`, url, f.headSHA)
+			if err := os.WriteFile(f.ghOpenPRs, []byte(openPRs), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if code, output, stderr := f.run("publish", "Worker completion summary"); code != 0 || !strings.Contains(output, url) {
+			t.Fatalf("publish attempt %d: %d %s %s", i+1, code, output, stderr)
+		}
+	}
+	log, err := os.ReadFile(f.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "pr create") != 1 || !strings.Contains(string(log), "--base staging") {
+		t.Fatalf("publish did not reuse one PR with frozen target staging: %s", log)
+	}
+
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\ntarget_branch = \"main\"\nauto_unsaddle = \"finished\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("holler", "done", "Worker completion summary", "--pr", url); code != 0 {
+		t.Fatalf("done against frozen target: %d %s %s", code, output, stderr)
+	}
+	if code, output, stderr := f.run("land", "t1"); code != 0 {
+		t.Fatalf("land against frozen target: %d %s %s", code, output, stderr)
+	}
+	f.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", f.headSHA)
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.pollProjectPullRequests(context.Background(), f.db, f.project, cfg, true); err != nil {
+		t.Fatalf("watch PR on frozen target: %v", err)
+	}
+	task, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil || task.TargetBranch != "staging" || task.State != store.StateLanding {
+		t.Fatalf("frozen target or landing state changed: %+v %v", task, err)
+	}
+	if code, output, stderr := f.run("land", "t1", "--merge", "--user-approved", "User approved the PR"); code != 0 {
+		t.Fatalf("merge: %d %s %s", code, output, stderr)
+	}
+	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/staging")
+	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
+	if err := f.service.pollProjectPullRequests(context.Background(), f.db, f.project, cfg, true); err != nil {
+		t.Fatalf("watch merged PR: %v", err)
+	}
+	fake, ok := f.service.Herdr.(*herdr.Fake)
+	if !ok {
+		t.Fatal("fixture does not use the fake Herdr adapter")
+	}
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	f.service.Herdr = adapter
+	removeFixtureTaskPane(f)
+	if err := f.service.autoTeardownLandedTasks(context.Background(), f.db, f.project, cfg); err != nil {
+		t.Fatalf("teardown landed Task: %v", err)
+	}
+	task, err = f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown || task.TargetBranch != "staging" {
+		notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+		t.Fatalf("non-default target Task teardown = %+v, notices=%+v, panes=%+v calls=%+v, err=%v", task, notices, adapter.currentSnapshot().Panes, fake.Calls, err)
+	}
+	if _, err := f.db.MountByTask(context.Background(), task.ID); err == nil || mount.ID == 0 {
+		t.Fatalf("Task mount was not released: mount=%+v err=%v", mount, err)
+	}
+}
+
 func TestWorkerPublishesSignalsAndLeadGatesWatchesAndMerges(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateWorking)
 	gate := filepath.Join(f.root, "gate-ran")
@@ -926,7 +1007,7 @@ func TestLeadInstructionsExplainPRNoticeActions(t *testing.T) {
 			t.Errorf("Lead instructions omit PR handling for %q: %s", expected, output)
 		}
 	}
-	for _, expected := range []string{"landing Ship Task also accepts a follow-up `posse send` before those Notices", "returns it to working until the next `posse land`", "merge `origin/<default>` into the Task branch", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists"} {
+	for _, expected := range []string{"landing Ship Task also accepts a follow-up `posse send` before those Notices", "returns it to working until the next `posse land`", "merge `origin/<target>` into the Task branch", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("Lead instructions omit recovery guidance %q: %s", expected, output)
 		}
@@ -1090,19 +1171,27 @@ case "$1 $2" in
           if [ -n "${POSSE_TEST_GH_EDIT_TITLE:-}" ]; then printf '%s' "$2" > "$POSSE_TEST_GH_EDIT_TITLE"; fi
           shift 2 ;;
         --body) printf '%s' "$2" > "$POSSE_TEST_GH_EDIT_BODY"; shift 2 ;;
+        --base)
+          if [ -n "${POSSE_TEST_GH_BASE_BRANCH_FILE:-}" ]; then printf '%s' "$2" > "$POSSE_TEST_GH_BASE_BRANCH_FILE"; fi
+          shift 2 ;;
         *) shift ;;
       esac
     done
     printf 'Edited\n' ;;
   "pr view")
+    base="${POSSE_TEST_GH_BASE_BRANCH:-main}"
+    if [ -n "${POSSE_TEST_GH_BASE_BRANCH_FILE:-}" ] && [ -f "$POSSE_TEST_GH_BASE_BRANCH_FILE" ]; then base=$(cat "$POSSE_TEST_GH_BASE_BRANCH_FILE"); fi
     case "$*" in
       *"--json title,body"*) python3 -c 'import json,sys; print(json.dumps({"title":sys.argv[1],"body":sys.argv[2]}))' "E2E Brief title" "${POSSE_TEST_GH_BODY-}" ;;
       *"--json body"*) python3 -c 'import json,sys; print(json.dumps({"body":sys.argv[1]}))' "${POSSE_TEST_GH_BODY-}" ;;
-      *) state=${POSSE_TEST_GH_VIEW_STATE:-OPEN}
-         if grep -q '\"state\":\"MERGED\"' "$POSSE_TEST_GH_STATE"; then state=MERGED
-         elif grep -q '\"state\":\"CLOSED\"' "$POSSE_TEST_GH_STATE"; then state=CLOSED
+      *) state=${POSSE_TEST_GH_VIEW_STATE:-}
+         if [ -z "$state" ]; then
+           state=OPEN
+           if grep -q '\"state\":\"MERGED\"' "$POSSE_TEST_GH_STATE"; then state=MERGED
+           elif grep -q '\"state\":\"CLOSED\"' "$POSSE_TEST_GH_STATE"; then state=CLOSED
+           fi
          fi
-         printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "${POSSE_TEST_GH_BASE_BRANCH:-main}" "${POSSE_TEST_GH_SOURCE:-acme/shop}" ;;
+         printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "${POSSE_TEST_GH_SOURCE:-acme/shop}" ;;
     esac ;;
   "pr merge") printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
@@ -1151,7 +1240,7 @@ func (fixture *prLandingFixture) setGraphQLState(t *testing.T, state, checks, re
 		contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://checks.example/unit"})
 	}
 	response := map[string]any{"data": map[string]any{"repo1": map[string]any{"pr1": map[string]any{
-		"url": "https://github.com/acme/shop/pull/17", "state": state, "headRefOid": head, "mergeable": mergeable, "reviewDecision": review,
+		"url": "https://github.com/acme/shop/pull/17", "state": state, "headRefOid": head, "baseRefName": defaultValue(os.Getenv("POSSE_TEST_GH_BASE_BRANCH"), "main"), "mergeable": mergeable, "reviewDecision": review,
 		"mergeCommit": map[string]any{"oid": mergeCommit}, "statusCheckRollup": map[string]any{"state": checks, "contexts": map[string]any{"nodes": contexts}},
 	}}}}
 	encoded, err := json.Marshal(response)

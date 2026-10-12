@@ -736,6 +736,7 @@ func (s *Service) projectShow(ctx *axi.Context, args []string) error {
 	} else {
 		cfg, err = s.prepareProjectInspection(ctx.Context, db, project)
 	}
+	err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 	if err != nil {
 		return err
 	}
@@ -744,9 +745,10 @@ func (s *Service) projectShow(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "repos", Value: repos}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set repositories.<repo>.landing_mode pr --project " + project.Name + "` to change one member's Landing Mode", "Run `posse project scan` after adding or removing a member repository"}}})
+		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "repos", Value: repos}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set repositories.<repo>.landing_mode pr --project " + project.Name + "` to change one member's Landing Mode", "Run `posse config set repositories.<repo>.target_branch <branch> --project " + project.Name + "` to set one member's PR/MR target", "Run `posse project scan` after adding or removing a member repository"}}})
 	}
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "root", Value: project.Root}, {Key: "default_branch", Value: project.DefaultBranch}, {Key: "status", Value: project.Status}, {Key: "landing_mode", Value: cfg.Defaults.LandingMode}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set defaults.landing_mode \"local\" --project " + project.Name + "` to update Project settings"}}})
+	targetBranch, _ := configTargetBranch(cfg, "", project.DefaultBranch)
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "root", Value: project.Root}, {Key: "default_branch", Value: project.DefaultBranch}, {Key: "target_branch", Value: targetBranch}, {Key: "status", Value: project.Status}, {Key: "landing_mode", Value: cfg.Defaults.LandingMode}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set defaults.landing_mode \"local\" --project " + project.Name + "` to update Project settings", "Run `posse config set defaults.target_branch <branch> --project " + project.Name + "` to change the PR/MR target"}}})
 }
 
 func (s *Service) projectMove(ctx *axi.Context, args []string) error {

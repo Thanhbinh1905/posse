@@ -22,6 +22,18 @@ type projectSyncResult struct {
 	Err           error
 }
 
+func (s *Service) syncTaskTarget(ctx context.Context, db *store.DB, project store.Project, task store.Task) (projectSyncResult, error) {
+	branch := taskTargetBranch(project, task)
+	if branch == project.DefaultBranch {
+		return projectSyncResult{Status: "current"}, nil
+	}
+	target := repoTarget{Root: project.Root, Name: project.Name, DefaultBranch: branch}
+	if project.IsWorkspace() {
+		return projectSyncResult{Status: "skipped", Reason: "workspace Task target requires a member Project"}, nil
+	}
+	return s.syncRepository(ctx, db, project, target, time.Now())
+}
+
 func (s *Service) syncProjectRoot(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) (projectSyncResult, error) {
 	results, err := s.syncProjectRepos(ctx, db, project, cfg, force)
 	if err != nil || len(results) == 0 {
@@ -126,6 +138,10 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	}
 	defer s.endMaintenance(key)
 	result := projectSyncResult{Status: "current"}
+	branchLabel := "default branch"
+	if target.DefaultBranch != project.DefaultBranch {
+		branchLabel = "target branch " + target.DefaultBranch
+	}
 	if _, err := gitOutput(ctx, target.Root, "remote", "get-url", "origin"); err != nil {
 		result.Status = "no_origin"
 		result.Err = err
@@ -177,7 +193,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	counts, countErr := gitOutput(ctx, target.Root, "rev-list", "--left-right", "--count", upstreamRef+"...refs/heads/"+target.DefaultBranch)
 	if countErr != nil {
 		result.Status = "root_behind"
-		result.Reason = "could not compare the local default branch with origin"
+		result.Reason = "could not compare the local " + branchLabel + " with origin"
 		result.Err = countErr
 		_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, 0, result.Reason)
 		return result, recordErr
@@ -196,7 +212,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	}
 	if localAhead > 0 && result.CommitsBehind > 0 {
 		result.Status = "root_behind"
-		result.Reason = "origin history diverged from the local default branch"
+		result.Reason = "origin history diverged from the local " + branchLabel
 		_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)
 		return result, recordErr
 	}
@@ -226,7 +242,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	worktrees, worktreeErr := gitOutput(ctx, target.Root, "worktree", "list", "--porcelain")
 	if worktreeErr != nil {
 		result.Status = "root_behind"
-		result.Reason = "could not determine whether the default branch is checked out"
+		result.Reason = "could not determine whether the " + branchLabel + " is checked out"
 		result.Err = worktreeErr
 		_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)
 		return result, recordErr
@@ -269,7 +285,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 			}
 			if _, err := gitOutput(ctx, target.Root, "merge", "--ff-only", upstreamRef); err != nil {
 				result.Status = "root_behind"
-				result.Reason = "the root default branch could not fast-forward"
+				result.Reason = "the root " + branchLabel + " could not fast-forward"
 				result.Err = err
 				_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)
 				return result, recordErr
@@ -302,19 +318,19 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	}
 	switch {
 	case branchUpdateErr != nil:
-		result.Reason = "the default branch could not be advanced: " + truncate(strings.TrimSpace(branchUpdateErr.Error()), 240)
+		result.Reason = "the " + branchLabel + " could not be advanced: " + truncate(strings.TrimSpace(branchUpdateErr.Error()), 240)
 	case rootStatus != "" && len(trackedChanges) > 0:
 		result.Reason = "tracked local changes: " + formatGitPaths(trackedChanges)
 	case rootStatus != "":
 		result.Reason = "the root checkout has uncommitted changes"
 	case localAhead > 0:
-		result.Reason = fmt.Sprintf("the local default branch has %d commit(s) not on origin", localAhead)
+		result.Reason = fmt.Sprintf("the local %s has %d commit(s) not on origin", branchLabel, localAhead)
 	case defaultCheckedOut && currentBranch != target.DefaultBranch:
-		result.Reason = "the default branch is checked out in another worktree"
+		result.Reason = "the " + branchLabel + " is checked out in another worktree"
 	case currentBranch != target.DefaultBranch:
 		result.Reason = "another branch is checked out in the root worktree"
 	default:
-		result.Reason = "the default branch could not be fast-forwarded"
+		result.Reason = "the " + branchLabel + " could not be fast-forwarded"
 	}
 	result.Status = "root_behind"
 	_, err = db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)

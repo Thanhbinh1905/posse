@@ -164,7 +164,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 	}
 	viewPath := filepath.Join(root, "good-pr-view.json")
 	view, err := json.Marshal(map[string]any{
-		"url": goodURL, "state": "OPEN", "headRefOid": goodHead, "mergeable": "MERGEABLE",
+		"url": goodURL, "state": "OPEN", "headRefOid": goodHead, "baseRefName": "main", "mergeable": "MERGEABLE",
 		"reviewDecision": "APPROVED", "statusCheckRollup": []any{},
 	})
 	if err != nil {
@@ -261,7 +261,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		t.Fatalf("healthy Task changed state before its PR merged: %#v, %v", task, err)
 	}
 	view, err = json.Marshal(map[string]any{
-		"url": goodURL, "state": "MERGED", "headRefOid": goodHead, "mergeable": "MERGEABLE",
+		"url": goodURL, "state": "MERGED", "headRefOid": goodHead, "baseRefName": "main", "mergeable": "MERGEABLE",
 		"reviewDecision": "APPROVED", "mergeCommit": map[string]string{"oid": goodHead}, "statusCheckRollup": []any{},
 	})
 	if err != nil {

@@ -76,6 +76,16 @@ func normalizeCommandError(err error) error {
 	return axi.Failure("store_busy", err.Error(), true, "Retry the command after the store is available")
 }
 
+func deferObservationContention(ctx *axi.Context, err error, message string) error {
+	// File-lock waits guard maintenance state, so keep them visible to callers.
+	var lockWait *fileLockWaitError
+	if err == nil || !store.IsOnlyBusy(err) || errors.As(err, &lockWait) {
+		return err
+	}
+	fmt.Fprintln(ctx.ErrOut, message)
+	return nil
+}
+
 func (s *Service) commands() *axi.Command {
 	root := &axi.Command{Usage: "$ [--full] [--json]", Summary: "A local-first Lead and Rider CLI for Herdr. `posse --full` prints the full Project dashboard."}
 	root.Handler = s.home

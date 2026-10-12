@@ -46,6 +46,49 @@ func TestPiStreamDisconnectAutomaticallyResumesWithinBound(t *testing.T) {
 	}
 }
 
+func TestPiStreamDisconnectTailBeginningInsideToolPanelAutomaticallyResumes(t *testing.T) {
+	modelError := "────────────────────────────────────────────────\n" + strings.Repeat("earlier tool panel output\n", 205) +
+		"────────────────────────────────────────────────\n Error: stream error: stream disconnected before completion: stream closed before response.completed"
+	fixture := newPiModelErrorFixture(t, modelError, false)
+	fixture.emitError(t)
+
+	if !waitForCondition(5*time.Second, func() bool { return countPromptLines(fixture.prompts, "continue") == 1 }) {
+		screen, _ := (posseRuntime.SystemProgress{}).ReadPane(context.Background(), fixture.client, fixture.base.mustTask(t, "t1").PaneID, 200)
+		lines := strings.Split(screen, "\n")
+		if len(lines) > 8 {
+			lines = lines[len(lines)-8:]
+		}
+		logged, _ := os.ReadFile(fixture.prompts)
+		t.Fatalf("truncated earlier tool panel tail did not trigger automatic resume: prompts=%q screen_tail=%q", logged, strings.Join(lines, "\n"))
+	}
+	task := fixture.base.mustTask(t, "t1")
+	episode, err := fixture.base.db.TaskModelErrorEpisode(context.Background(), task.ID)
+	if err != nil || episode.Kind != "model_stream_error" || episode.Attempts != 1 || episode.Status != "active" {
+		t.Fatalf("truncated tail recovery episode=%#v err=%v, want one active bounded attempt", episode, err)
+	}
+}
+
+func TestPiUnprefixedStreamDisconnectAfterEditAutomaticallyResumes(t *testing.T) {
+	modelError := " edit ~/.../busy_rider_steer_interrupt_test.go\n\n\n stream error: stream disconnected before completion: stream closed before response.completed"
+	fixture := newPiModelErrorFixture(t, modelError, false)
+	fixture.emitError(t)
+
+	if !waitForCondition(5*time.Second, func() bool { return countPromptLines(fixture.prompts, "continue") == 1 }) {
+		screen, _ := (posseRuntime.SystemProgress{}).ReadPane(context.Background(), fixture.client, fixture.base.mustTask(t, "t1").PaneID, 200)
+		lines := strings.Split(screen, "\n")
+		if len(lines) > 8 {
+			lines = lines[len(lines)-8:]
+		}
+		logged, _ := os.ReadFile(fixture.prompts)
+		t.Fatalf("unprefixed stream error did not trigger automatic resume: prompts=%q screen_tail=%q", logged, strings.Join(lines, "\n"))
+	}
+	task := fixture.base.mustTask(t, "t1")
+	episode, err := fixture.base.db.TaskModelErrorEpisode(context.Background(), task.ID)
+	if err != nil || episode.Kind != "model_stream_error" || episode.Attempts != 1 || episode.Status != "active" {
+		t.Fatalf("unprefixed stream-error recovery episode=%#v err=%v, want one active bounded attempt", episode, err)
+	}
+}
+
 func TestPiProviderRefusalIsNotRetried(t *testing.T) {
 	fixture := newPiModelErrorFixture(t, "This content was flagged for possible cybersecurity risk", false)
 	fixture.emitError(t)

@@ -273,7 +273,7 @@ func TestProjectAddAndScanTrackWorkspaceMembers(t *testing.T) {
 	if code := harness.run("project", "scan"); code != 0 {
 		t.Fatalf("project scan: %d\n%s", code, harness.out.String())
 	}
-	for _, want := range []string{"added[1]: guest-image", "missing[1]: e2e-tool", "e2e-tool,main,none,local,missing", "guest-image,main,none,local,active"} {
+	for _, want := range []string{"added[1]: guest-image", "missing[1]: e2e-tool", "e2e-tool,main,main,none,local,missing", "guest-image,main,main,none,local,active"} {
 		if !strings.Contains(harness.out.String(), want) {
 			t.Fatalf("scan output lacks %q:\n%s", want, harness.out.String())
 		}

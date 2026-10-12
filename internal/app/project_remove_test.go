@@ -269,6 +269,11 @@ func seedProjectReference(t *testing.T, db *store.DB, table string, foreignKeys 
 		}
 		values[column.name] = seedValue(column)
 	}
+	if table == "task_target_changes" {
+		values["status"] = "pending"
+		values["from_branch"] = "posse/lower"
+		values["to_branch"] = "main"
+	}
 	if action, ok := values["action"]; ok && action == "set" {
 		for _, column := range columns {
 			if column.name == "value" {

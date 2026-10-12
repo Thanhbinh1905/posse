@@ -32,6 +32,8 @@ type ghPullRequest struct {
 	URL            string `json:"url"`
 	State          string `json:"state"`
 	HeadRefOID     string `json:"headRefOid"`
+	HeadRefName    string `json:"headRefName"`
+	BaseRefName    string `json:"baseRefName"`
 	Mergeable      string `json:"mergeable"`
 	ReviewDecision string `json:"reviewDecision"`
 	MergeCommit    *struct {
@@ -288,7 +290,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if forge.Kind == "gitlab" {
 		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
 	}
-	args := []string{"pr", "list", "--state", "open", "--base", project.DefaultBranch, "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
+	args := []string{"pr", "list", "--state", "open", "--base", taskTargetBranch(project, task), "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()
 	var urlValue, lastHead string
@@ -390,7 +392,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if err != nil {
 		return "", false, err
 	}
-	created, err := runOutputStep(ctx, db, intent, "pr.create", project.Root, "gh", "pr", "create", "--base", project.DefaultBranch, "--head", task.Branch, "--title", title, "--body", managedPublishBody(body, token))
+	created, err := runOutputStep(ctx, db, intent, "pr.create", project.Root, "gh", "pr", "create", "--base", taskTargetBranch(project, task), "--head", task.Branch, "--title", title, "--body", managedPublishBody(body, token))
 	if err != nil {
 		return "", false, axi.Failure("pr_create_failed", "could not open the pull request", true, truncate(err.Error(), 1200))
 	}
@@ -788,28 +790,6 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	if project.IsWorkspace() {
 		return s.pollWorkspacePullRequestsAndNotify(ctx, db, project, cfg, force, onWorkspaceTaskLanded)
 	}
-	tasks, err := db.Tasks(ctx, project.ID, true)
-	if err != nil {
-		return err
-	}
-	watched := make([]store.Task, 0)
-	for _, task := range tasks {
-		if task.PRURL == "" {
-			continue
-		}
-		if task.State != store.StateLanded && task.State != store.StateTornDown && task.State != store.StateReported {
-			previous, previousErr := db.LatestPRObservation(ctx, task.ID)
-			if previousErr != nil && !store.IsNotFound(previousErr) {
-				return previousErr
-			}
-			if previousErr == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
-				if err := raiseClosedPRDecision(ctx, db, project, task, task.PRURL); err != nil {
-					return err
-				}
-			}
-			watched = append(watched, task)
-		}
-	}
 	now := time.Now()
 	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
 	claim, err := db.ClaimPRPoll(ctx, project.ID, now, interval, force)
@@ -820,6 +800,29 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		return nil
 	}
 	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
+	if err := s.processPendingStackedTargetChanges(ctx, db, project, cfg, ""); err != nil {
+		return err
+	}
+	tasks, err := db.Tasks(ctx, project.ID, true)
+	if err != nil {
+		return err
+	}
+	watched := make([]store.Task, 0)
+	for _, task := range tasks {
+		if task.PRURL == "" || task.State == store.StateLanded || task.State == store.StateTornDown || task.State == store.StateReported {
+			continue
+		}
+		previous, previousErr := db.LatestPRObservation(ctx, task.ID)
+		if previousErr != nil && !store.IsNotFound(previousErr) {
+			return previousErr
+		}
+		if previousErr == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
+			if err := raiseClosedPRDecision(ctx, db, project, task, task.PRURL); err != nil {
+				return err
+			}
+		}
+		watched = append(watched, task)
+	}
 	if len(watched) == 0 {
 		_, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), "")
 		return err
@@ -912,7 +915,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	gitlabObservations := make(map[int64]store.PRObservation)
 	gitlabFailures := make(map[int64][]failedCheck)
 	for _, task := range gitlabTargets {
-		observation, failures, pollErr := gitlabObservation(ctx, forge, task, now.UnixMilli())
+		observation, failures, pollErr := gitlabObservation(ctx, forge, task, taskTargetBranch(project, task), now.UnixMilli())
 		if pollErr != nil {
 			failedTasks[task.ID] = pollErr
 			continue
@@ -958,7 +961,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 			if strings.EqualFold(pull.Mergeable, "UNKNOWN") && hasPrevious {
 				pull.Mergeable = previous.Mergeable
 			}
-			observation, failures, err = makePRObservation(project.ID, task, pull, now)
+			observation, failures, err = makePRObservation(project.ID, task, pull, now, taskTargetBranch(project, task))
 		}
 		if observation.Mergeable == "UNKNOWN" && hasPrevious {
 			observation.Mergeable = previous.Mergeable
@@ -1019,12 +1022,28 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 			}
 		}
 		if recorded && observed.current.State == "MERGED" {
+			if _, err := s.syncTaskTarget(ctx, db, project, observed.task); err != nil {
+				if noticeErr := recordPRTaskWatchFailure(ctx, db, project, observed.task, err, now); noticeErr != nil {
+					return noticeErr
+				}
+			}
 			if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
 				if noticeErr := recordPRTaskWatchFailure(ctx, db, project, observed.task, err, now); noticeErr != nil {
 					return noticeErr
 				}
 			}
 		}
+	}
+	for _, observed := range observations {
+		if observed.current.State != "MERGED" {
+			continue
+		}
+		if err := s.enqueueStackedTargetChanges(ctx, db, project, observed.task, "", taskTargetBranch(project, observed.task)); err != nil {
+			return err
+		}
+	}
+	if err := s.processPendingStackedTargetChanges(ctx, db, project, cfg, ""); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1071,7 +1090,7 @@ func pullRequestGraphQLQuery(targets []prWatchTarget) (string, []prWatchTarget) 
 		}
 		targets[index].Repository = repository
 		groupFields[repository] = append(groupFields[repository], fmt.Sprintf(`%s: pullRequest(number: %d) {
-  url state headRefOid mergeable reviewDecision mergeCommit { oid }
+  url state headRefOid baseRefName mergeable reviewDecision mergeCommit { oid }
   statusCheckRollup {
     state
     contexts(first: 100) {
@@ -1145,12 +1164,15 @@ func recordPRTaskWatchFailure(ctx context.Context, db *store.DB, project store.P
 	return err
 }
 
-func makePRObservation(projectID int64, task store.Task, pull *ghPullRequest, now time.Time) (store.PRObservation, []failedCheck, error) {
+func makePRObservation(projectID int64, task store.Task, pull *ghPullRequest, now time.Time, expectedTarget ...string) (store.PRObservation, []failedCheck, error) {
 	if pull.URL == "" || pull.HeadRefOID == "" || pull.State == "" {
 		return store.PRObservation{}, nil, errors.New("GitHub response omitted pull request state or head SHA")
 	}
 	if pull.URL != task.PRURL {
 		return store.PRObservation{}, nil, errors.New("GitHub response URL does not match the watched pull request")
+	}
+	if len(expectedTarget) > 0 && strings.EqualFold(pull.State, "MERGED") && pull.BaseRefName != expectedTarget[0] {
+		return store.PRObservation{}, nil, fmt.Errorf("GitHub pull request targets %q, expected %q", pull.BaseRefName, expectedTarget[0])
 	}
 	checks := checkSnapshot{State: strings.ToUpper(pull.StatusCheckRollupState())}
 	if checks.State == "" || checks.State == "EXPECTED" || checks.State == "PENDING" || checks.State == "QUEUED" || checks.State == "IN_PROGRESS" || checks.State == "REQUESTED" {
@@ -1251,7 +1273,7 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			addNotice("pr_changes_requested", task.Title+": review requests changes", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "review": current.Review})
 		}
 		if current.Mergeable == "CONFLICTING" && (newHead || previous.Mergeable != "CONFLICTING") {
-			addNotice("pr_conflict", task.Title+": pull request conflicts with the Project default branch", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
+			addNotice("pr_conflict", task.Title+": pull request conflicts with the Task's frozen target branch", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 		ready := checks.State == "SUCCESS" && current.Review != "CHANGES_REQUESTED" && current.Review != "REVIEW_REQUIRED" && current.Mergeable == "MERGEABLE"
 		previousReady := hasPrevious && previous.State == "OPEN" && previous.HeadSHA == current.HeadSHA && previousChecks.State == "SUCCESS" && previous.Review != "CHANGES_REQUESTED" && previous.Review != "REVIEW_REQUIRED" && previous.Mergeable == "MERGEABLE"

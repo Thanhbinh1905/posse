@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -51,7 +52,21 @@ case "$*" in
    printf 'updated\n' ;;
  *"merge_requests?state=opened"*) if [ -n "${POSSE_TEST_GLAB_LIST:-}" ]; then cat "$POSSE_TEST_GLAB_LIST"; else printf '[]\n'; fi ;;
  *"/approvals"*) cat "$POSSE_TEST_GLAB_APPROVALS" ;;
- *"/merge_requests/17"*) cat "$POSSE_TEST_GH_STATE" ;;
+ *"/merge_requests/"*) cat "$POSSE_TEST_GH_STATE" ;;
+ "mr update "*)
+   number="$3"
+   branch=
+   while [ "$#" -gt 0 ]; do
+     if [ "$1" = "--target-branch" ]; then branch="$2"; shift 2; else shift; fi
+   done
+   python3 - "$POSSE_TEST_GH_STATE" "$branch" <<'PY'
+import json,sys
+path,branch=sys.argv[1:]
+with open(path) as f: value=json.load(f)
+value['target_branch']=branch
+with open(path,'w') as f: json.dump(value,f)
+PY
+   printf 'updated\n' ;;
  "mr create "*)
    while [ "$#" -gt 0 ]; do
      if [ "$1" = "--description" ]; then printf '%s' "$2" > "$POSSE_TEST_GLAB_DESCRIPTION"; break; fi
@@ -88,9 +103,9 @@ func (f *prLandingFixture) setGitLabApprovals(t *testing.T, approved bool, remai
 
 func (f *prLandingFixture) setGitLabState(t *testing.T, state, mergeable, pipeline, sha string) {
 	t.Helper()
-	mr := map[string]any{"web_url": "https://git.example.com/group/sub/shop/-/merge_requests/17", "state": state, "sha": sha, "source_branch": "posse/t1", "target_branch": "main", "source_project_id": 7, "target_project_id": 7, "detailed_merge_status": mergeable, "merge_commit_sha": "", "head_pipeline": map[string]any{"status": pipeline, "web_url": "https://git.example.com/group/sub/shop/-/pipelines/3"}}
+	mr := map[string]any{"web_url": "https://git.example.com/group/sub/shop/-/merge_requests/17", "state": state, "sha": sha, "source_branch": "posse/t1", "target_branch": defaultValue(os.Getenv("POSSE_TEST_GLAB_BASE_BRANCH"), "main"), "source_project_id": 7, "target_project_id": 7, "detailed_merge_status": mergeable, "merge_commit_sha": "", "head_pipeline": map[string]any{"status": pipeline, "web_url": "https://git.example.com/group/sub/shop/-/pipelines/3"}}
 	if state == "merged" {
-		mr["merge_commit_sha"] = strings.Repeat("c", 40)
+		mr["merge_commit_sha"] = defaultValue(os.Getenv("POSSE_TEST_GLAB_MERGE_COMMIT"), strings.Repeat("c", 40))
 	}
 	encoded, err := json.Marshal(mr)
 	if err != nil {
@@ -319,7 +334,42 @@ func TestGitLabMRDescriptionMatchesGitHubPRBody(t *testing.T) {
 }
 
 func TestGitLabLandingAndWatchLifecycle(t *testing.T) {
-	f := gitlabFixture(t)
+	t.Setenv("POSSE_TEST_GLAB_BASE_BRANCH", "staging")
+	f := gitlabFixture(t, store.StateWorking)
+	mount := attachPRFixtureMount(t, f)
+	gitTest(t, f.repo, "branch", "staging", "main")
+	gitTest(t, f.repo, "push", "origin", "staging")
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET target_branch='staging' WHERE id=?`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte(`[defaults]
+forge = "gitlab"
+target_branch = "main"
+auto_unsaddle = "finished"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GLAB_BASE_BRANCH", "staging")
+	f.task.TargetBranch = "staging"
+	url := "https://git.example.com/group/sub/shop/-/merge_requests/17"
+	if code, output, stderr := f.run("publish", "Worker completion summary"); code != 0 || !strings.Contains(output, url) {
+		t.Fatalf("publish MR: %d %s %s", code, output, stderr)
+	}
+	listPath := filepath.Join(f.root, "open-mrs.json")
+	if err := os.WriteFile(listPath, []byte(`[{"web_url":"`+url+`","sha":"`+f.headSHA+`","source_branch":"posse/t1","target_branch":"staging","source_project_id":7,"target_project_id":7}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GLAB_LIST", listPath)
+	if code, output, stderr := f.run("publish", "Worker completion summary"); code != 0 || !strings.Contains(output, url) {
+		t.Fatalf("republish MR: %d %s %s", code, output, stderr)
+	}
+	publishLog, err := os.ReadFile(f.ghLog)
+	if err != nil || strings.Count(string(publishLog), "mr create") != 1 || !strings.Contains(string(publishLog), "--target-branch staging") {
+		t.Fatalf("MR target or duplicate-free republish failed: %s (%v)", publishLog, err)
+	}
+	if code, output, stderr := f.run("holler", "done", "Worker completion summary", "--pr", url); code != 0 {
+		t.Fatalf("done: %d %s %s", code, output, stderr)
+	}
 	if code, output, stderr := f.run("land", "t1"); code != 0 {
 		t.Fatalf("land: %d %s %s", code, output, stderr)
 	}
@@ -358,13 +408,37 @@ func TestGitLabLandingAndWatchLifecycle(t *testing.T) {
 	if err != nil || !strings.Contains(string(log), "--sha "+task.GatedSHA) || !strings.Contains(string(log), "--squash") || !strings.Contains(string(log), "--auto-merge=false") {
 		t.Fatalf("unprotected merge: %q %v", log, err)
 	}
+	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/staging")
+	t.Setenv("POSSE_TEST_GLAB_MERGE_COMMIT", task.GatedSHA)
 	f.setGitLabState(t, "merged", "mergeable", "success", task.GatedSHA)
 	if err := f.pollGitLab(t); err != nil {
 		t.Fatal(err)
 	}
 	task, err = f.db.Task(context.Background(), f.project.ID, "t1")
-	if err != nil || task.State != store.StateLanded {
+	if err != nil || task.State != store.StateLanded || task.TargetBranch != "staging" {
 		t.Fatalf("merged task: %+v %v", task, err)
+	}
+	fake, ok := f.service.Herdr.(*herdr.Fake)
+	if !ok {
+		t.Fatal("fixture does not use the fake Herdr adapter")
+	}
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	removeFixtureTaskPane(f)
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.autoTeardownLandedTasks(context.Background(), f.db, f.project, cfg); err != nil {
+		t.Fatalf("teardown merged MR: %v", err)
+	}
+	task, err = f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown || task.TargetBranch != "staging" {
+		notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+		t.Fatalf("non-default target MR teardown = %+v, notices=%+v, err=%v", task, notices, err)
+	}
+	if _, err := f.db.MountByTask(context.Background(), task.ID); err == nil || mount.ID == 0 {
+		t.Fatalf("Task mount was not released: mount=%+v err=%v", mount, err)
 	}
 }
 
@@ -571,7 +645,7 @@ func TestGitLabMergeMethodsAndFastForwardObservation(t *testing.T) {
 			if method == "merge" {
 				f.setGitLabState(t, "merged", "mergeable", "success", f.headSHA)
 				// Fast-forward merges can omit both merge_commit_sha and squash_commit_sha.
-				if err := os.WriteFile(f.ghState, []byte(`{"web_url":"https://git.example.com/group/sub/shop/-/merge_requests/17","state":"merged","sha":"`+f.headSHA+`"}`), 0o600); err != nil {
+				if err := os.WriteFile(f.ghState, []byte(`{"web_url":"https://git.example.com/group/sub/shop/-/merge_requests/17","state":"merged","sha":"`+f.headSHA+`","target_branch":"main"}`), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				if err := f.pollGitLab(t); err != nil {

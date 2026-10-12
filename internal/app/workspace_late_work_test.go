@@ -31,7 +31,7 @@ func TestWorkspaceMemberCommittedAfterFirstPollCannotBeSkippedAsUnchanged(t *tes
 		t.Fatal(err)
 	}
 	writeView := func(state string) {
-		view, _ := json.Marshal(map[string]any{"url": url, "state": state, "headRefOid": head, "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "mergeCommit": map[string]any{"oid": head}, "statusCheckRollup": []any{}})
+		view, _ := json.Marshal(map[string]any{"url": url, "state": state, "headRefOid": head, "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "mergeCommit": map[string]any{"oid": head}, "statusCheckRollup": []any{}})
 		if err := os.WriteFile(viewPath, view, 0o600); err != nil {
 			t.Fatal(err)
 		}
