@@ -63,22 +63,34 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 	return "", "", false
 }
 
-// Pi brackets tool-result panels with horizontal rules. An unmatched rule
-// before the candidate places it inside a panel; a completed prior panel does not.
+// Pi brackets tool-result panels with horizontal rules. A pane tail may start
+// midway through an earlier panel, making its closing rule appear unmatched.
+// A rule directly before the candidate closes that truncated panel; tool text
+// after an opening rule keeps the candidate inside the panel.
 func piErrorInsideToolOutput(lines []string, errorLine int) bool {
 	insideToolOutput := false
-	for _, line := range lines[:errorLine] {
+	lastBorder := -1
+	for i, line := range lines[:errorLine] {
 		if piTerminalBorder(strings.TrimSpace(line)) {
 			insideToolOutput = !insideToolOutput
+			lastBorder = i
 		}
 	}
-	return insideToolOutput
+	if !insideToolOutput {
+		return false
+	}
+	for _, line := range lines[lastBorder+1 : errorLine] {
+		if strings.TrimSpace(line) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func piFooterOnly(lines []string) bool {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "/") || strings.Contains(line, "%/") || piTerminalBorder(line) {
+		if line == "" || strings.HasPrefix(line, "/") || strings.HasPrefix(line, "~/") || strings.Contains(line, "%/") || piTerminalBorder(line) {
 			continue
 		}
 		return false

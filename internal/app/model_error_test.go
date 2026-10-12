@@ -59,6 +59,24 @@ func TestClassifyModelErrorAtTurnEnd(t *testing.T) {
 			want:   "model_stream_error",
 		},
 		{
+			name:  "issue 228 captured tail",
+			agent: "pi",
+			output: ` Error: stream error: stream disconnected before completion: stream closed before response.completed
+ If this looks like a pi bug, /bug sends a report to the developers.
+
+────────────────────────────────────────────────
+────────────────────────────────────────────────
+~/.posse/remuda/posse/mount-17 (posse/accept-findings-report)
+↑445k ↓86k R18M $0.263 21.2%/272k (auto)                       (openai) gpt-6-luna • xhigh`,
+			want: "model_stream_error",
+		},
+		{
+			name:   "issue 228 tail begins inside an earlier tool panel",
+			agent:  "pi",
+			output: "truncated tool-panel output\n────────────────────────────────────────────────\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine,
+			want:   "model_stream_error",
+		},
+		{
 			name:   "quoted refusal is not a harness error result",
 			agent:  "pi",
 			output: "The User asked about: Error: This content was flagged for possible cybersecurity risk\n" + piErrorHelpLine,
