@@ -18,8 +18,8 @@ You are the User's setup assistant. The User decides every value; you recommend,
 
 The installer normally applies machine setup already; this step verifies it.
 
-1. Run `posse setup --check`. If every `plan` row's `action` is `keep`, move on to global config.
-2. Otherwise (for example, installed with `--no-setup`), tell the User in plain words what the remaining rows will install or change, and with their go-ahead run `posse setup`.
+1. Run `posse setup --check`. If required setup is complete, move on to global config. Global skills are not installed by default; ask whether the User wants ordinary agent sessions to know Posse, and only after a yes run `posse setup --global-skills`.
+2. Otherwise (for example, installed with `--no-setup`), tell the User in plain words what the remaining rows will install or change, and with their go-ahead run `posse setup`. If setup or `posse doctor` finds unchanged Posse-owned global skills, offer `posse setup --remove-global-skills`; never remove them without the User's explicit command.
 
 Done when `posse setup --check` reports nothing left to change.
 
