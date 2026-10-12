@@ -47,10 +47,20 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 	lines := strings.Split(normalizeModelTerminalOutput(output), "\n")
 	for i := 0; i+1 < len(lines); i++ {
 		errorLine := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(strings.ToLower(errorLine), "error:") || strings.TrimSpace(lines[i+1]) != piErrorHelpLine || piErrorInsideToolOutput(lines, i) {
+		if strings.TrimSpace(lines[i+1]) != piErrorHelpLine || piErrorInsideToolOutput(lines, i) {
 			continue
 		}
-		message := strings.ToLower(strings.TrimSpace(errorLine[len("Error:"):]))
+		lowerErrorLine := strings.ToLower(errorLine)
+		var message string
+		switch {
+		case strings.HasPrefix(lowerErrorLine, "error:"):
+			message = strings.TrimSpace(errorLine[len("Error:"):])
+		case strings.HasPrefix(lowerErrorLine, "stream error:"):
+			message = errorLine
+		default:
+			continue
+		}
+		message = strings.ToLower(strings.TrimSpace(message))
 		if len(message) > 2048 || !piFooterOnly(lines[i+2:]) {
 			continue
 		}
@@ -63,22 +73,34 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 	return "", "", false
 }
 
-// Pi brackets tool-result panels with horizontal rules. An unmatched rule
-// before the candidate places it inside a panel; a completed prior panel does not.
+// Pi brackets tool-result panels with horizontal rules. A pane tail may start
+// midway through an earlier panel, making its closing rule appear unmatched.
+// A rule directly before the candidate closes that truncated panel; tool text
+// after an opening rule keeps the candidate inside the panel.
 func piErrorInsideToolOutput(lines []string, errorLine int) bool {
 	insideToolOutput := false
-	for _, line := range lines[:errorLine] {
+	lastBorder := -1
+	for i, line := range lines[:errorLine] {
 		if piTerminalBorder(strings.TrimSpace(line)) {
 			insideToolOutput = !insideToolOutput
+			lastBorder = i
 		}
 	}
-	return insideToolOutput
+	if !insideToolOutput {
+		return false
+	}
+	for _, line := range lines[lastBorder+1 : errorLine] {
+		if strings.TrimSpace(line) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func piFooterOnly(lines []string) bool {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "/") || strings.Contains(line, "%/") || piTerminalBorder(line) {
+		if line == "" || strings.HasPrefix(line, "/") || strings.HasPrefix(line, "~/") || strings.Contains(line, "%/") || piTerminalBorder(line) {
 			continue
 		}
 		return false
