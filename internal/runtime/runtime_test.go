@@ -45,7 +45,7 @@ func TestReconcileObservationWritesReturnRetryableBusyUnderConcurrentWriter(t *t
 	writeCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
 	defer cancel()
 	started := time.Now()
-	_, err = ReconcileSnapshot(writeCtx, db, project.ID, herdr.Snapshot{Panes: panes}, time.Now())
+	_, err = ReconcileSnapshot(writeCtx, db, project.ID, herdr.Snapshot{ServerStartedAt: "generation-1", Panes: panes}, time.Now())
 	if !store.IsBusy(err) {
 		t.Fatalf("reconcile error = %v, want typed retryable store contention", err)
 	}
@@ -133,11 +133,11 @@ func TestReconcileSkipsCompareAndSetRacesDuringBlockedMapping(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			trigger := fmt.Sprintf(`CREATE TRIGGER concurrent_state_change AFTER UPDATE OF agent_absent_since ON tasks BEGIN UPDATE tasks SET state='done' WHERE id=%d; END`, task.ID)
+			trigger := fmt.Sprintf(`CREATE TRIGGER concurrent_state_change AFTER UPDATE OF pane_id ON tasks BEGIN UPDATE tasks SET state='done' WHERE id=%d; END`, task.ID)
 			if _, err := db.ExecContext(context.Background(), trigger); err != nil {
 				t.Fatal(err)
 			}
-			snapshot := herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "claude", AgentStatus: testCase.agentStatus}}}
+			snapshot := herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: task.PaneLabel, Agent: "claude", AgentStatus: testCase.agentStatus}}}
 			if _, err := ReconcileSnapshot(context.Background(), db, project.ID, snapshot, time.Now()); err != nil {
 				t.Fatalf("lost Task transition race failed reconcile: %v", err)
 			}

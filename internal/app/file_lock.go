@@ -13,6 +13,16 @@ import (
 
 const fileLockWaitBudget = 3 * time.Second
 
+type fileLockWaitError struct {
+	path string
+}
+
+func (e *fileLockWaitError) Error() string {
+	return fmt.Sprintf("%v: timed out acquiring %s", store.ErrBusy, e.path)
+}
+
+func (e *fileLockWaitError) Unwrap() error { return store.ErrBusy }
+
 // A live but stopped holder cannot release its flock. Bound acquisition even
 // when the command has no deadline; never unlink or steal an owned lock file.
 func acquireFileLock(ctx context.Context, path string) (*os.File, error) {
@@ -37,7 +47,7 @@ func acquireFileLock(ctx context.Context, path string) (*os.File, error) {
 			if errors.Is(waitCtx.Err(), context.Canceled) {
 				return nil, waitCtx.Err()
 			}
-			return nil, fmt.Errorf("%w: timed out acquiring %s", store.ErrBusy, path)
+			return nil, &fileLockWaitError{path: path}
 		case <-time.After(25 * time.Millisecond):
 		}
 	}

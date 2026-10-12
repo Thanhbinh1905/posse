@@ -1397,7 +1397,8 @@ func (s *Service) peek(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+	_, err = s.prepareProject(ctx.Context, db, project)
+	if err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])

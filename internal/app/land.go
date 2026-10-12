@@ -396,7 +396,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 1 {
 		return axi.Usage("unsaddle requires one Task id")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -408,33 +408,45 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
-	if err != nil {
-		var commandError *axi.Error
-		approvedDiscard := parsed.Bool("discard") && strings.TrimSpace(parsed.Flags["user-approved"]) != ""
-		if !approvedDiscard || !errors.As(err, &commandError) || commandError.Code != "agent_not_ready" {
-			return err
-		}
-		// Project preparation can fail while delivering to an agent that is
-		// already exiting. An approved discard continues only after checking
-		// foreground ownership before any destructive Teardown work.
-	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
 	}
-	discardable := task.State == store.StateFailed || task.State == store.StateLost || task.State == store.StateStalled
-	if !discardable && task.State != store.StateLanded && task.State != store.StateReported {
+	if task.State == store.StateTornDown {
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "already_torn_down", Value: true}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released Mounts"}}})
+	}
+	quote := parsed.Flags["user-approved"]
+	if parsed.Bool("discard") {
+		if strings.TrimSpace(quote) == "" {
+			return axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
+		}
+		if !store.IsApprovedDiscardSourceState(task.State) || task.State == store.StateLanded {
+			return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded directly", false)
+		}
+		if err := s.requireNoLiveTaskAgent(ctx.Context, project, task); err != nil {
+			return err
+		}
+		cfg, err := config.Load(home, project.Name)
+		if err != nil {
+			return configError(err)
+		}
+		result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, true, quote)
+		if err != nil {
+			return err
+		}
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released Mounts"}}})
+	}
+	if store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateLanded {
+		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false, "Pass `--discard --user-approved \"<User's words>\"`")
+	}
+	if task.State != store.StateLanded && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
-	if discardable && !parsed.Bool("discard") {
-		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false)
+	cfg, err := s.prepareProject(ctx.Context, db, project)
+	if err != nil {
+		return err
 	}
-	quote := strings.TrimSpace(parsed.Flags["user-approved"])
-	if discardable && quote == "" {
-		return axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
-	}
-	result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, discardable, quote)
+	result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, false, "")
 	if err != nil {
 		return err
 	}
@@ -443,7 +455,18 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 
 func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string) (unsaddleResult, error) {
 	result := unsaddleResult{}
-	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "unsaddle", marshalJSON(map[string]any{"discard": discardable}))
+	if discardable {
+		if strings.TrimSpace(quote) == "" {
+			return result, axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
+		}
+		if !store.IsApprovedDiscardSourceState(task.State) {
+			return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
+		}
+		if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
+			return result, err
+		}
+	}
+	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "unsaddle", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote}))
 	if err != nil {
 		return result, axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
@@ -463,9 +486,24 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if discardable && !store.IsApprovedDiscardSourceState(task.State) {
 		return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
 	}
+	if discardable {
+		if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
+			return result, err
+		}
+	}
 	mountHeld, err := taskMountHeldBy(ctx, db, task)
 	if err != nil {
 		return result, err
+	}
+	var discardPRs []discardPullRequest
+	if discardable {
+		discardPRs, err = s.discardPullRequests(ctx, db, project, task)
+		if err != nil {
+			return result, err
+		}
+		if err := s.requireDiscardPullRequestsUnmerged(ctx, db, discardPRs, cfg); err != nil {
+			return result, err
+		}
 	}
 	if discardable {
 		if mountHeld {
@@ -500,9 +538,17 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		}); err != nil {
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "discard tip capture", err)
 		}
+		if err := s.closeAndVerifyDiscardPullRequests(ctx, db, discardPRs, cfg); err != nil {
+			return result, s.unsaddleDiscardIncomplete(ctx, db, project, task, "recorded pull request closure", err)
+		}
 	}
 	var paneResult teardownPanes
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
+		if discardable {
+			if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
+				return err
+			}
+		}
 		var closeErr error
 		paneResult, closeErr = s.closeTaskPanes(ctx, project, task)
 		if closeErr == nil {
@@ -515,6 +561,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	var stopped []string
 	if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
+		if discardable {
+			return verifyNoTaskOwnedProcesses(ctx, db, home, project, task)
+		}
 		var stopErr error
 		stopped, stopErr = stopTaskOwnedProcesses(ctx, db, home, project, task)
 		return stopErr
@@ -593,11 +642,17 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		}
 	}
 	if err := s.runIntentStep(ctx, db, intent, "scratch.remove", func() error {
-		newlyStopped, err := stopTaskOwnedProcesses(ctx, db, home, project, task)
-		if err != nil {
-			return err
+		if discardable {
+			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
+				return err
+			}
+		} else {
+			newlyStopped, err := stopTaskOwnedProcesses(ctx, db, home, project, task)
+			if err != nil {
+				return err
+			}
+			stopped = append(stopped, newlyStopped...)
 		}
-		stopped = append(stopped, newlyStopped...)
 		return removeTaskScratch(home, project, task)
 	}); err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task scratch removal", err)

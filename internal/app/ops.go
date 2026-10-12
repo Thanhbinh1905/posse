@@ -736,6 +736,7 @@ func (s *Service) projectShow(ctx *axi.Context, args []string) error {
 	} else {
 		cfg, err = s.prepareProjectInspection(ctx.Context, db, project)
 	}
+	err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 	if err != nil {
 		return err
 	}

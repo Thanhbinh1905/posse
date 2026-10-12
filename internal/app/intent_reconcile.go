@@ -74,7 +74,8 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 				err = db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 			} else {
 				var payload struct {
-					Discard bool `json:"discard"`
+					Discard   bool   `json:"discard"`
+					UserQuote string `json:"user_quote"`
 				}
 				if decodeErr := json.Unmarshal([]byte(intent.PayloadJSON), &payload); decodeErr != nil {
 					err = decodeErr
@@ -82,7 +83,20 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 					if !store.IsApprovedDiscardSourceState(task.State) {
 						err = fmt.Errorf("discard recovery refused Task in state %s", task.State)
 					} else {
-						err = fmt.Errorf("discard was interrupted; recovery will not continue the approved teardown")
+						quote, quoteErr := db.LatestApprovalQuote(ctx, task.ID, "discard")
+						if quoteErr != nil && !store.IsNotFound(quoteErr) {
+							err = quoteErr
+						} else if strings.TrimSpace(quote) == "" {
+							quote = payload.UserQuote
+						}
+						if err == nil && strings.TrimSpace(quote) == "" {
+							err = fmt.Errorf("discard recovery has no recorded User approval quote")
+						} else if err == nil {
+							err = s.requireNoLiveTaskAgent(ctx, project, task)
+						}
+						if err == nil {
+							_, err = s.unsaddleTask(ctx, db, project, cfg, task, true, quote)
+						}
 					}
 				} else if task.State != store.StateLanded && task.State != store.StateReported {
 					err = fmt.Errorf("completion teardown recovery refused Task in state %s", task.State)

@@ -50,6 +50,7 @@ func TestPRWatchRetargetsOpenStackedPRAfterLowerMerge(t *testing.T) {
 	}
 	t.Setenv("POSSE_TEST_GH_BASE_BRANCH_FILE", baseFile)
 	t.Setenv("POSSE_TEST_GH_VIEW_URL", upperURL)
+	t.Setenv("POSSE_TEST_GH_VIEW_STATE", "OPEN")
 	t.Setenv("POSSE_TEST_GH_HEAD_BRANCH", "posse/t2")
 	response := map[string]any{"data": map[string]any{"repo1": map[string]any{
 		"pr1": stackedWatchPull(lowerURL, "MERGED", fixture.headSHA, "staging", fixture.headSHA),

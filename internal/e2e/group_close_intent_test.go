@@ -144,6 +144,7 @@ func TestGroupCloseDuringTeardownRestoresSurvivingRider(t *testing.T) {
 	first := f.ride(t, "t1", "Group teardown", "group-teardown")
 	second := f.ride(t, "t2", "Surviving rider", "surviving-rider")
 	f.fail(t, "t1")
+	f.exitRider(t, "t1")
 	output, err := pauseCommand(t, f, "unsaddle:after:panes.close", func() { closeRiderGroup(t, f) }, "unsaddle", "t1", "--discard", "--user-approved", "Test approved teardown")
 	if err != nil {
 		t.Fatalf("teardown after group close: %s %v", output, err)

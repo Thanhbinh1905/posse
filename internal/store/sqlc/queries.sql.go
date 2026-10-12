@@ -1790,14 +1790,19 @@ func (q *Queries) UpdateProgress(ctx context.Context, arg UpdateProgressParams) 
 }
 
 const updateProjectObservation = `-- name: UpdateProjectObservation :exec
-UPDATE projects SET lead_pane_id = ?, herdr_workspace_id = ?, lead_absent_since = ? WHERE id = ?
+UPDATE projects SET lead_pane_id = ?, herdr_workspace_id = ?, lead_absent_since = ? WHERE id = ? AND (
+    lead_pane_id IS NOT ? OR herdr_workspace_id IS NOT ? OR lead_absent_since IS NOT ?
+)
 `
 
 type UpdateProjectObservationParams struct {
-	LeadPaneID       string
-	HerdrWorkspaceID string
-	LeadAbsentSince  int64
-	ID               int64
+	LeadPaneID         string
+	HerdrWorkspaceID   string
+	LeadAbsentSince    int64
+	ID                 int64
+	LeadPaneID_2       string
+	HerdrWorkspaceID_2 string
+	LeadAbsentSince_2  int64
 }
 
 func (q *Queries) UpdateProjectObservation(ctx context.Context, arg UpdateProjectObservationParams) error {
@@ -1806,6 +1811,9 @@ func (q *Queries) UpdateProjectObservation(ctx context.Context, arg UpdateProjec
 		arg.HerdrWorkspaceID,
 		arg.LeadAbsentSince,
 		arg.ID,
+		arg.LeadPaneID_2,
+		arg.HerdrWorkspaceID_2,
+		arg.LeadAbsentSince_2,
 	)
 	return err
 }
@@ -1882,19 +1890,29 @@ func (q *Queries) UpdateTaskMount(ctx context.Context, arg UpdateTaskMountParams
 
 const updateTaskObservation = `-- name: UpdateTaskObservation :exec
 UPDATE tasks SET pane_id = ?, herdr_workspace_id = ?, agent_session = ?, agent_session_kind = ?, agent_absent_since = ?, agent_server_started_at = ?, idle_since = ?,
-    updated_at = ? WHERE id = ?
+    updated_at = ? WHERE id = ? AND (
+        pane_id IS NOT ? OR herdr_workspace_id IS NOT ? OR agent_session IS NOT ? OR agent_session_kind IS NOT ? OR
+        agent_absent_since IS NOT ? OR agent_server_started_at IS NOT ? OR idle_since IS NOT ?
+    )
 `
 
 type UpdateTaskObservationParams struct {
-	PaneID               string
-	HerdrWorkspaceID     string
-	AgentSession         string
-	AgentSessionKind     string
-	AgentAbsentSince     int64
-	AgentServerStartedAt string
-	IdleSince            int64
-	UpdatedAt            int64
-	ID                   int64
+	PaneID                 string
+	HerdrWorkspaceID       string
+	AgentSession           string
+	AgentSessionKind       string
+	AgentAbsentSince       int64
+	AgentServerStartedAt   string
+	IdleSince              int64
+	UpdatedAt              int64
+	ID                     int64
+	PaneID_2               string
+	HerdrWorkspaceID_2     string
+	AgentSession_2         string
+	AgentSessionKind_2     string
+	AgentAbsentSince_2     int64
+	AgentServerStartedAt_2 string
+	IdleSince_2            int64
 }
 
 func (q *Queries) UpdateTaskObservation(ctx context.Context, arg UpdateTaskObservationParams) error {
@@ -1908,6 +1926,13 @@ func (q *Queries) UpdateTaskObservation(ctx context.Context, arg UpdateTaskObser
 		arg.IdleSince,
 		arg.UpdatedAt,
 		arg.ID,
+		arg.PaneID_2,
+		arg.HerdrWorkspaceID_2,
+		arg.AgentSession_2,
+		arg.AgentSessionKind_2,
+		arg.AgentAbsentSince_2,
+		arg.AgentServerStartedAt_2,
+		arg.IdleSince_2,
 	)
 	return err
 }

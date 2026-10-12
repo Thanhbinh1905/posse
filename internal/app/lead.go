@@ -89,6 +89,7 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 		return err
 	}
 	cfg, err := s.prepareProjectObservation(ctx.Context, db, project)
+	err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 	if err != nil {
 		return err
 	}
