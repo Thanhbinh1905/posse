@@ -728,7 +728,7 @@ func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
 	pr := workerProtocol(project, store.Task{Seq: 2, Type: "ship", LandingMode: "pr"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t2")
 	noMistakes := workerProtocol(project, store.Task{Seq: 3, Type: "ship", LandingMode: "no-mistakes"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3")
 	workspace := workerProtocol(store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "ship"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t4")
-	if !strings.Contains(local, "Never git push or open a PR") || !strings.Contains(local, "Use the Posse-owned Task scratch directory `/home/user/.posse/scratch/shop/t1`") || !strings.Contains(local, "Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches") {
+	if !strings.Contains(local, "Never git push or open a PR") || !strings.Contains(local, "Use the Posse-owned Task scratch directory `/home/user/.posse/scratch/shop/t1`") || !strings.Contains(local, "Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`/home/user/.posse/scratch/shop/t1`)") || !strings.Contains(local, "Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches") {
 		t.Fatalf("normal Worker protocol does not ban push: %s", local)
 	}
 	if !strings.Contains(pr, `posse publish "<summary>" [--verify "<command> -> <result>"] [--proof "<markdown>"] [--risk "<markdown>"]`) || !strings.Contains(pr, "screenshots/images") || !strings.Contains(pr, "test/log evidence") || !strings.Contains(pr, "risk plus rollback") || !strings.Contains(pr, "--pr <url>") || !strings.Contains(pr, "Never push directly") || !strings.Contains(pr, "or merge") {

@@ -925,12 +925,13 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 			signal += " --pr <url>"
 		}
 	} else {
-		signal += " --report <file-in-worktree>"
+		signal += " --report <file-in-worktree-or-task-scratch>"
 		work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base or an unrequested Member's Mount-acquisition commit, beside report.md at those paths. For workspace Tasks it also saves new or edited shared-root files, including tracked and non-ignored untracked files in nested Git repositories, against the Mount-acquisition snapshot rather than the live Project; unchanged Project copies are not saved. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Mount. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence or unchanged shared-root files the Report needs. `posse show <task>` lists saved attachments."
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
 	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Mount. Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches; never create per-Task copies.", scratchPath)
-	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, brief.DoneWhen, signal, launchPath)
+	signalFiles := fmt.Sprintf("Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`%s`); paths outside those locations are refused.", scratchPath)
+	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, signalFiles, brief.DoneWhen, signal, launchPath)
 }
 
 // workspaceProtocol tells a workspace Worker how its Mount mirrors the workspace.
@@ -1095,16 +1096,20 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				}
 			}
 		} else if parsed.Flags["report"] == "" {
-			return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file-in-worktree>", false)
+			scratchPath, err := taskScratchPath(home, project, task)
+			if err != nil {
+				return err
+			}
+			return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file>", false, fmt.Sprintf("Store the report in the Rider's worktree (%s) or this Task's scratch directory (%s)", task.WorktreePath, scratchPath))
 		}
 	}
 	if verb == "needs-decision" && parsed.Flags["findings"] != "" {
-		if _, err := copyWorktreeFile(task, parsed.Flags["findings"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err != nil {
+		if _, err := copySignalFile(home, project, task, parsed.Flags["findings"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
 		}
 	}
 	if verb == "done" && task.Type != "ship" {
-		if _, err := copyWorktreeFile(task, parsed.Flags["report"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")); err != nil {
+		if _, err := copySignalFile(home, project, task, parsed.Flags["report"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
 		}
 		for _, path := range attachments {
@@ -2077,6 +2082,50 @@ func validateShipSignal(ctx context.Context, task store.Task) error {
 		return fmt.Errorf("worktree is not clean")
 	}
 	return nil
+}
+
+func copySignalFile(home string, project store.Project, task store.Task, supplied, destination string) (string, error) {
+	worktreeRoot, err := filepath.Abs(task.WorktreePath)
+	if err != nil {
+		return "", err
+	}
+	scratchRoot, err := taskScratchPath(home, project, task)
+	if err != nil {
+		return "", err
+	}
+	validatedScratchRoot, err := validatedTaskScratchRoot(home, project, task)
+	if err != nil {
+		return "", fmt.Errorf("invalid Task scratch directory %s; Signal files must be inside the Rider's worktree (%s) or this Task's scratch directory: %w", scratchRoot, worktreeRoot, err)
+	}
+	allowedRoots := []string{worktreeRoot, validatedScratchRoot}
+	allowedLocations := fmt.Sprintf("the Rider's worktree (%s) or this Task's scratch directory (%s)", worktreeRoot, scratchRoot)
+	path, err := filepath.Abs(supplied)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve Signal file %q; files must be inside %s: %w", supplied, allowedLocations, err)
+	}
+	insideAllowedRoot := false
+	for _, root := range allowedRoots {
+		relative, relErr := filepath.Rel(root, path)
+		if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			insideAllowedRoot = true
+			break
+		}
+	}
+	if !insideAllowedRoot {
+		return "", fmt.Errorf("report and findings files must be inside %s", allowedLocations)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read Signal file %q inside %s: %w", supplied, allowedLocations, err)
+	}
+	if err := writeFile(destination, contents); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func copyWorktreeFile(task store.Task, supplied, destination string) (string, error) {
