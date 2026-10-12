@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -21,8 +20,7 @@ import (
 // generation detection returned "" while other Unix sockets, including
 // connections to the server itself, opened and closed.
 func TestServerStartedAtSurvivesSocketChurn(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "herdr.sock")
+	socketPath := herdrTestSocketPath(t, "generation-server")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +31,7 @@ func TestServerStartedAtSurvivesSocketChurn(t *testing.T) {
 
 	var extra []net.Listener
 	for index := 0; index < 200; index++ {
-		other, err := net.Listen("unix", filepath.Join(dir, "extra-"+strconv.Itoa(index)+".sock"))
+		other, err := net.Listen("unix", herdrTestSocketPath(t, "extra-"+strconv.Itoa(index)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -46,11 +44,15 @@ func TestServerStartedAtSurvivesSocketChurn(t *testing.T) {
 	}()
 	stop := make(chan struct{})
 	var churn sync.WaitGroup
-	for worker := 0; worker < 4; worker++ {
+	churnPaths := make([]string, 4)
+	for worker := range churnPaths {
+		churnPaths[worker] = herdrTestSocketPath(t, "churn-"+strconv.Itoa(worker))
+	}
+	for worker := range churnPaths {
 		churn.Add(1)
 		go func(worker int) {
 			defer churn.Done()
-			path := filepath.Join(dir, "churn-"+strconv.Itoa(worker)+".sock")
+			path := churnPaths[worker]
 			for {
 				select {
 				case <-stop:
@@ -82,7 +84,7 @@ func TestServerStartedAtSurvivesSocketChurn(t *testing.T) {
 // connect to a Unix listener with a full backlog at once with EAGAIN, and the
 // generation must still be read once the server accepts again.
 func TestServerStartedAtWaitsForFullBacklog(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := herdrTestSocketPath(t, "backlog-server")
 	listener := listenUnixWithBacklog(t, socketPath, 1)
 	defer listener.Close()
 	want := selfGeneration(t)

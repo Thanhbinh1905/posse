@@ -207,13 +207,20 @@ func stripManagedPublishedMarkers(body string) string {
 
 func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
+	gitTest(t, fixture.env, fixture.repo, "branch", "staging", "main")
+	gitTest(t, fixture.env, fixture.repo, "push", "origin", "staging")
+	baseMain := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/main"))
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-base-branch"), []byte(`staging
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	brief := filepath.Join(fixture.root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change for the PR lifecycle E2E.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\nbase: staging\ntarget: staging\n---\nCreate a committed change for the PR lifecycle E2E.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	first := fixture.rideAndComplete(t, brief, "t1")
-	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA != "" || first.Branch != "posse/pr-lifecycle-change" || first.PaneLabel != "posse:shop:t1" || first.AgentName != "posse-shop-t1-1" {
+	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA != "" || first.Branch != "posse/pr-lifecycle-change" || first.PaneLabel != "posse:shop:t1" || first.AgentName != "posse-shop-t1-1" || first.TargetBranch != "staging" || first.BaseRef != "refs/remotes/origin/staging" {
 		t.Fatalf("Worker did not publish its PR before the Lead's Gate: %#v", first)
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "show-ref", "--hash", "refs/heads/posse/pr-lifecycle-change")); got != strings.TrimSpace(gitTest(t, fixture.env, first.WorktreePath, "rev-parse", "HEAD")) {
@@ -224,7 +231,7 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 	first = fixture.mustTask(t, "t1")
 	createdCalls, err := os.ReadFile(fixture.ghLog)
-	if err != nil || !strings.Contains(string(createdCalls), "--title PR lifecycle change") || strings.Contains(string(createdCalls), "--title t1") {
+	if err != nil || !strings.Contains(string(createdCalls), "--title PR lifecycle change") || !strings.Contains(string(createdCalls), "--base staging") || strings.Contains(string(createdCalls), "--title t1") {
 		t.Fatalf("forge title did not state the Task work: %q, %v", createdCalls, err)
 	}
 	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA == "" {
@@ -266,8 +273,15 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	if first.State != store.StateTornDown || first.LandedRef != mergeOne {
 		t.Fatalf("merged PR did not land and auto-teardown: %#v, merge=%s", first, mergeOne)
 	}
-	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/main")); got != mergeOne {
-		t.Fatalf("Project checkout head=%s, merge commit=%s", got, mergeOne)
+	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/staging")); got != mergeOne {
+		t.Fatalf("staging checkout head=%s, merge commit=%s", got, mergeOne)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/main")); got != baseMain {
+		t.Fatalf("syncing the frozen target changed the default branch: main=%s want=%s", got, baseMain)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-base-branch"), []byte(`main
+`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if output, err := exec.Command("git", "-C", fixture.repo, "show-ref", "--verify", "refs/heads/"+first.Branch).CombinedOutput(); err == nil {
 		t.Fatalf("merged PR Teardown kept Task branch %s: %s", first.Branch, output)
@@ -1325,6 +1339,7 @@ func newPRLifecycleFixtureWithLeadAndShell(t *testing.T, liveLead, slowLoginShel
 	env = setEnv(env, "POSSE_TEST_GH_MERGE", filepath.Join(root, "gh-merge-called"))
 	env = setEnv(env, "POSSE_TEST_GH_BODY", filepath.Join(root, "gh-body.md"))
 	env = setEnv(env, "POSSE_TEST_GH_TITLE", filepath.Join(root, "gh-title.txt"))
+	env = setEnv(env, "POSSE_TEST_GH_BASE_BRANCH_FILE", filepath.Join(root, "gh-base-branch"))
 	env = setEnv(env, "POSSE_TEST_REMOTE", filepath.Join(root, "origin.git"))
 	env = setEnv(env, "POSSE_TEST_GH_FAIL", "")
 	env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1453,8 +1468,10 @@ case "$1 $2" in
         case "$3" in */17) branch=$(git --git-dir="$POSSE_TEST_REMOTE" for-each-ref --format='%(refname:short)' 'refs/heads/posse/pr-*' | head -1) ;; */18) branch=posse/external-merge-change ;; *) exit 90 ;; esac
         head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
         state=OPEN
+        base=main
+        if [ -f "$POSSE_TEST_GH_BASE_BRANCH_FILE" ]; then base=$(cat "$POSSE_TEST_GH_BASE_BRANCH_FILE"); fi
         if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then state=MERGED; fi
-        printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"main","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$state" "$head" "$branch" ;;
+        printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$state" "$head" "$branch" "$base" ;;
     esac ;;
   "pr merge") : > "$POSSE_TEST_GH_MERGE"; printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
@@ -1737,9 +1754,18 @@ func (fixture *prLifecycleFixture) writeGraphQL(t *testing.T, alias, state, chec
 	if checks == "FAILURE" {
 		contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://checks.example/unit"})
 	}
+	taskID := map[string]string{"pr1": "t1", "pr2": "t2"}[alias]
+	task, err := fixture.db.Task(context.Background(), fixture.project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseBranch := task.TargetBranch
+	if baseBranch == "" {
+		baseBranch = fixture.project.DefaultBranch
+	}
 	pull := map[string]any{
 		"url":   "https://github.com/acme/shop/pull/" + map[string]string{"pr1": "17", "pr2": "18"}[alias],
-		"state": state, "headRefOid": head, "mergeable": mergeable, "reviewDecision": review,
+		"state": state, "headRefOid": head, "baseRefName": baseBranch, "mergeable": mergeable, "reviewDecision": review,
 		"mergeCommit":       map[string]any{"oid": mergeCommit},
 		"statusCheckRollup": map[string]any{"state": checks, "contexts": map[string]any{"nodes": contexts}},
 	}
@@ -1770,12 +1796,16 @@ func (fixture *prLifecycleFixture) requireNotice(t *testing.T, taskID, kind stri
 func (fixture *prLifecycleFixture) mergeOnLocalOrigin(t *testing.T, task store.Task, taskID string) string {
 	t.Helper()
 	checkout := filepath.Join(fixture.root, "external-merge-"+taskID)
-	gitTest(t, fixture.env, fixture.root, "clone", "--branch", "main", fixture.remote, checkout)
+	targetBranch := task.TargetBranch
+	if targetBranch == "" {
+		targetBranch = fixture.project.DefaultBranch
+	}
+	gitTest(t, fixture.env, fixture.root, "clone", "--branch", targetBranch, fixture.remote, checkout)
 	gitTest(t, fixture.env, checkout, "config", "user.name", "Posse E2E")
 	gitTest(t, fixture.env, checkout, "config", "user.email", "posse-e2e@example.test")
 	gitTest(t, fixture.env, checkout, "fetch", "origin", "refs/heads/"+task.Branch+":refs/remotes/origin/"+task.Branch)
 	gitTest(t, fixture.env, checkout, "merge", "--squash", "refs/remotes/origin/"+task.Branch)
 	gitTest(t, fixture.env, checkout, "commit", "-m", "external merge "+taskID)
-	gitTest(t, fixture.env, checkout, "push", "origin", "HEAD:refs/heads/main")
+	gitTest(t, fixture.env, checkout, "push", "origin", "HEAD:refs/heads/"+targetBranch)
 	return strings.TrimSpace(gitTest(t, fixture.env, checkout, "rev-parse", "HEAD"))
 }

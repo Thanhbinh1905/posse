@@ -115,7 +115,7 @@ func (s *Service) recoverOpenPullRequestIntent(ctx context.Context, db *store.DB
 	if task.LandingMode != "pr" || task.GatedSHA == "" || task.Branch == "" {
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	}
-	output, err := runOutputStep(ctx, db, intent, "pr.recover_lookup", project.Root, "gh", "pr", "list", "--state", "open", "--base", project.DefaultBranch, "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5")
+	output, err := runOutputStep(ctx, db, intent, "pr.recover_lookup", project.Root, "gh", "pr", "list", "--state", "open", "--base", taskTargetBranch(project, task), "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5")
 	if err != nil {
 		return err
 	}
@@ -225,7 +225,8 @@ func (s *Service) recoverLandIntent(ctx context.Context, db *store.DB, project s
 	}
 	merged := false
 	if task.GatedSHA != "" {
-		_, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", task.GatedSHA, "refs/heads/"+project.DefaultBranch)
+		targetRef := "refs/heads/" + taskTargetBranch(project, task)
+		_, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", task.GatedSHA, targetRef)
 		merged = err == nil
 	}
 	if !merged {
@@ -237,7 +238,7 @@ func (s *Service) recoverLandIntent(ctx context.Context, db *store.DB, project s
 		}
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	}
-	landedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+project.DefaultBranch)
+	landedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, task))
 	if err != nil {
 		return err
 	}

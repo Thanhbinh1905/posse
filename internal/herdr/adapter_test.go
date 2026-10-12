@@ -7,13 +7,15 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestClientCallUsesNewlineJSONSocketProtocol(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	socket := herdrTestSocketPath(t, "client-call")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +56,7 @@ func TestClientCallUsesNewlineJSONSocketProtocol(t *testing.T) {
 }
 
 func TestClientMapsHerdrErrors(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	socket := herdrTestSocketPath(t, "client-errors")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +88,14 @@ func TestClientMapsHerdrErrors(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func herdrTestSocketPath(t *testing.T, name string) string {
+	t.Helper()
+	if runtime.GOOS == "linux" {
+		return "@posse-herdr-" + strconv.Itoa(os.Getpid()) + "-" + name
+	}
+	return filepath.Join(t.TempDir(), name+".sock")
 }
 
 func TestProtocolCompatibilityIsCheckedAgainstStatus(t *testing.T) {

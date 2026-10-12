@@ -29,8 +29,10 @@ func (s *Service) captureDiscardTips(ctx context.Context, db *store.DB, home str
 			return err
 		}
 		baseRefs := make(map[string]string, len(taskRepos))
+		targetBranches := make(map[string]string, len(taskRepos))
 		for _, taskRepo := range taskRepos {
 			baseRefs[taskRepo.Repo] = taskRepo.BaseRef
+			targetBranches[taskRepo.Repo] = taskRepo.TargetBranch
 		}
 		for _, pair := range strings.Split(captured, ",") {
 			repository, sha, ok := strings.Cut(pair, "=")
@@ -43,14 +45,17 @@ func (s *Service) captureDiscardTips(ctx context.Context, db *store.DB, home str
 			}
 			baseRef := baseRefs[repository]
 			if baseRef == "" {
-				baseRef = target.DefaultBranch
+				baseRef = targetBranches[repository]
+				if baseRef == "" {
+					baseRef = target.DefaultBranch
+				}
 			}
 			tips = append(tips, discardTip{repository: repository, root: target.Root, sha: sha, baseRef: baseRef})
 		}
 	} else {
 		baseRef := task.BaseRef
 		if baseRef == "" {
-			baseRef = project.DefaultBranch
+			baseRef = taskTargetBranch(project, task)
 		}
 		tips = append(tips, discardTip{repository: project.Name, root: project.Root, sha: captured, baseRef: baseRef})
 	}

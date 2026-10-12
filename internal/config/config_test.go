@@ -69,6 +69,30 @@ use = "fast"
 	}
 }
 
+func TestTargetBranchConfigDefaultsAndMemberOverrides(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, filepath.Join(home, "config.toml"), "[defaults]\ntarget_branch = \"integration\"\n")
+	writeConfig(t, filepath.Join(home, "projects", "stack", "config.toml"), "[repositories.api]\ntarget_branch = \"staging\"\n")
+	cfg, err := Load(home, "stack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.TargetBranch != "integration" || cfg.Repositories["api"].TargetBranch != "staging" {
+		t.Fatalf("target branch settings = defaults %q repositories %#v", cfg.Defaults.TargetBranch, cfg.Repositories)
+	}
+	for _, key := range []string{"defaults.target_branch", "repositories.api.target_branch"} {
+		if IsUserOnly(key) {
+			t.Errorf("branch selection key %s unexpectedly requires User-only approval", key)
+		}
+	}
+	if _, found := Lookup("defaults.target_branch"); !found {
+		t.Fatal("target branch default is absent from the config schema")
+	}
+	if _, found := Lookup("repositories.api.target_branch"); !found {
+		t.Fatal("member target branch is absent from the config schema")
+	}
+}
+
 func TestLeadDeliveryDefaultsByKind(t *testing.T) {
 	cfg, err := Load(t.TempDir(), "")
 	if err != nil {

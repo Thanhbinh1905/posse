@@ -120,6 +120,24 @@ func TestBriefTrailingCommentsPreserveHashInsideQuotedValues(t *testing.T) {
 	}
 }
 
+func TestBriefParsesTaskBaseAndTargetBranches(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: ship\ntitle: Stacked change\ndone_when: published\nbase: posse/lower-task\ntarget: {api: staging, worker: posse/lower-task}\n---\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brief.Base != "posse/lower-task" || brief.Target != "" || len(brief.TargetByRepo) != 2 || brief.TargetByRepo["api"] != "staging" || brief.TargetByRepo["worker"] != "posse/lower-task" {
+		t.Fatalf("parsed branch selections = %#v", brief)
+	}
+}
+
+func TestBriefExplainsYAMLListFrontmatter(t *testing.T) {
+	_, err := ParseBriefText("---\ntype: ship\ntitle: List value\ndone_when:\n  - tests pass\n---\n")
+	briefErr, ok := err.(*BriefError)
+	if !ok || briefErr.Field != "frontmatter" || !strings.Contains(briefErr.Reason, "YAML lists are unsupported") {
+		t.Fatalf("YAML list error = %#v", err)
+	}
+}
+
 func TestAutonomyLandAutoCanBeTightenedInBrief(t *testing.T) {
 	brief, err := ParseBriefText("---\ntype: ship\ntitle: Fix\ndone_when: tests pass\nautonomy: { land: ask }\n---\n")
 	if err != nil {

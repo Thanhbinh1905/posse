@@ -15,6 +15,10 @@ type Brief struct {
 	Title          string
 	DoneWhen       string
 	LandingMode    string
+	Base           string
+	BaseByRepo     map[string]string
+	Target         string
+	TargetByRepo   map[string]string
 	ReviewOf       string
 	AutonomyReview string
 	AutonomyLand   string
@@ -88,11 +92,14 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		key, value, found := strings.Cut(line, ":")
 		if !found {
+			if strings.HasPrefix(line, "-") {
+				return Brief{}, &BriefError{Field: "frontmatter", Reason: fmt.Sprintf("line %d starts a YAML list; YAML lists are unsupported in Brief frontmatter", i+1)}
+			}
 			return Brief{}, &BriefError{Field: "frontmatter", Reason: fmt.Sprintf("line %d must be key: value", i+1)}
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review_of", "autonomy", "repos", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "base", "target", "review_of", "autonomy", "repos", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -107,6 +114,20 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		LandingMode: unquote(values["landing_mode"]),
 		ReviewOf:    unquote(values["review_of"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
+	}
+	if raw, found := values["base"]; found {
+		branch, byRepo, err := parseBranchSelection(raw, "base")
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.Base, brief.BaseByRepo = branch, byRepo
+	}
+	if raw, found := values["target"]; found {
+		branch, byRepo, err := parseBranchSelection(raw, "target")
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.Target, brief.TargetByRepo = branch, byRepo
 	}
 	if raw, found := values["repos"]; found {
 		repos, err := parseRepos(raw)
@@ -176,6 +197,12 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	}
 	if !oneOf(brief.Type, "ship", "scout", "review") {
 		return Brief{}, &BriefError{Field: "type", Reason: "must be ship, scout or review"}
+	}
+	if brief.Type != "ship" && (brief.Base != "" || len(brief.BaseByRepo) > 0) {
+		return Brief{}, &BriefError{Field: "base", Reason: "is valid only for a Ship Task"}
+	}
+	if brief.Type != "ship" && (brief.Target != "" || len(brief.TargetByRepo) > 0) {
+		return Brief{}, &BriefError{Field: "target", Reason: "is valid only for a Ship Task"}
 	}
 	if brief.Title == "" {
 		return Brief{}, &BriefError{Field: "title", Reason: "is required"}
@@ -252,6 +279,43 @@ func parseIssueRefs(raw, field string) ([]IssueRef, error) {
 		return nil, &BriefError{Field: field, Reason: "must list at least one issue"}
 	}
 	return refs, nil
+}
+
+// parseBranchSelection reads `base: branch` or `base: {member: branch}`.
+func parseBranchSelection(raw, field string) (string, map[string]string, error) {
+	text := strings.TrimSpace(raw)
+	if strings.HasPrefix(text, "{") {
+		if !strings.HasSuffix(text, "}") {
+			return "", nil, &BriefError{Field: field, Reason: "must be a branch or an inline member map such as {backend: staging}"}
+		}
+		selection := make(map[string]string)
+		for _, item := range strings.Split(strings.TrimSpace(text[1:len(text)-1]), ",") {
+			key, value, found := strings.Cut(item, ":")
+			if !found {
+				return "", nil, &BriefError{Field: field, Reason: "member map entries must be member: branch"}
+			}
+			member := unquote(strings.TrimSpace(key))
+			branch := unquote(strings.TrimSpace(value))
+			if !repoName.MatchString(member) {
+				return "", nil, &BriefError{Field: field, Reason: fmt.Sprintf("%q is not a member name", member)}
+			}
+			if branch == "" {
+				return "", nil, &BriefError{Field: field, Reason: "member branches cannot be empty"}
+			}
+			if _, exists := selection[member]; exists {
+				return "", nil, &BriefError{Field: field, Reason: member + " is listed twice"}
+			}
+			selection[member] = branch
+		}
+		if len(selection) == 0 {
+			return "", nil, &BriefError{Field: field, Reason: "member map must list at least one branch"}
+		}
+		return "", selection, nil
+	}
+	if text == "" || strings.HasPrefix(text, "[") || strings.Contains(text, ",") {
+		return "", nil, &BriefError{Field: field, Reason: "must be a branch or an inline member map such as {backend: staging}"}
+	}
+	return unquote(text), nil, nil
 }
 
 // parseRepos reads `repos: [a, b]` or `repos: a, b`.

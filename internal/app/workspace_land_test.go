@@ -219,6 +219,13 @@ func TestWorkspaceTeardownRemovesOnlyRecordedMergedPRHeads(t *testing.T) {
 		}
 		branchSHA := strings.TrimSpace(gitTest(t, target.Root, "rev-parse", "refs/heads/"+f.task.Branch))
 		defaultSHA := strings.TrimSpace(gitTest(t, target.Root, "rev-parse", "refs/heads/"+target.DefaultBranch))
+		if repo.Repo == "worker" {
+			gitTest(t, target.Root, "branch", "staging", target.DefaultBranch)
+			gitTest(t, target.Root, "push", "origin", "staging")
+			gitTest(t, repo.WorktreePath, "push", "origin", "HEAD:refs/heads/staging")
+			repo.TargetBranch = "staging"
+			defaultSHA = branchSHA
+		}
 		repo.State = store.TaskRepoLanded
 		repo.LandingMode = "pr"
 		repo.LandedRef = defaultSHA
@@ -234,6 +241,11 @@ func TestWorkspaceTeardownRemovesOnlyRecordedMergedPRHeads(t *testing.T) {
 		}
 		if err := f.db.UpdateTaskRepo(ctx, repo); err != nil {
 			t.Fatal(err)
+		}
+		if repo.Repo == "worker" {
+			if _, err := f.db.ExecContext(ctx, `UPDATE task_repos SET target_branch='staging' WHERE task_id=? AND repo='worker'`, f.task.ID); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	removed, err := f.service.removeWorkspaceBranches(ctx, f.db, f.project, f.task, "")
@@ -387,7 +399,7 @@ func TestWorkspacePullRequestMemberLandsWhenMerged(t *testing.T) {
 	gitTest(t, worker, "config", "remote.origin.pushurl", filepath.Join(f.root, "remotes", "worker.git"))
 	head := strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD"))
 	writeView := func(prState, mergeCommit string) {
-		view := map[string]any{"url": "https://github.com/acme/worker/pull/7", "state": prState, "headRefOid": head, "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "statusCheckRollup": []any{map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "SUCCESS"}}}
+		view := map[string]any{"url": "https://github.com/acme/worker/pull/7", "state": prState, "headRefOid": head, "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "statusCheckRollup": []any{map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "SUCCESS"}}}
 		if mergeCommit != "" {
 			view["mergeCommit"] = map[string]any{"oid": mergeCommit}
 		}

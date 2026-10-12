@@ -27,9 +27,10 @@ var landingRank = map[string]int{"local": 0, "pr": 1, "no-mistakes": 2}
 // taskMember is one member repository a workspace Task checks out.
 type taskMember struct {
 	repoTarget
-	Path        string // relative to the workspace root and to the Mount
-	LandingMode string
-	BaseRef     string
+	Path         string // relative to the workspace root and to the Mount
+	LandingMode  string
+	BaseRef      string
+	TargetBranch string
 }
 
 // planTaskMembers resolves a Brief's `repos:` against the Project and returns the
@@ -38,6 +39,9 @@ func (s *Service) planTaskMembers(ctx context.Context, db *store.DB, project sto
 	if !project.IsWorkspace() {
 		if len(brief.Repos) > 0 {
 			return nil, "", axi.Failure("brief_invalid", "repos: is valid only in a workspace Project", false, "Remove `repos:` from the Brief")
+		}
+		if len(brief.BaseByRepo) > 0 || len(brief.TargetByRepo) > 0 {
+			return nil, "", axi.Failure("brief_invalid", "base and target member maps are valid only in a workspace Project", false, "Use a scalar `base:` or `target:` branch in a repository Project")
 		}
 		return nil, "", nil
 	}
@@ -64,6 +68,12 @@ func (s *Service) planTaskMembers(ctx context.Context, db *store.DB, project sto
 	}
 	if len(requested) == 0 && brief.Type == "ship" {
 		return nil, "", axi.Failure("brief_invalid", "a Ship Brief in a workspace Project must list the members it changes in `repos:`", false, "Add `repos: [<member>, ...]` to the Brief frontmatter; `posse project show` lists members")
+	}
+	if err := validateBranchMapMembers("base", brief.BaseByRepo, requested); err != nil {
+		return nil, "", err
+	}
+	if err := validateBranchMapMembers("target", brief.TargetByRepo, requested); err != nil {
+		return nil, "", err
 	}
 	repos, err := db.ProjectRepos(ctx, project.ID)
 	if err != nil {
@@ -96,6 +106,22 @@ func (s *Service) planTaskMembers(ctx context.Context, db *store.DB, project sto
 			return nil, "", axi.Failure("brief_invalid", "member "+name+" has no origin and can only Land locally", false, "Remove landing_mode: pr from the Brief")
 		}
 		member.BaseRef = memberBaseRef(member.repoTarget, remote != "")
+		if brief.Type == "ship" {
+			baseBranch, baseSelected := branchSelection(brief.Base, brief.BaseByRepo, repo.Name, "")
+			if baseSelected {
+				member.BaseRef, err = selectedBranchRef(ctx, member.Root, baseBranch, "base")
+				if err != nil {
+					return nil, "", err
+				}
+			}
+			var targetSelected bool
+			member.TargetBranch, targetSelected = targetBranchForTask(cfg, brief, repo.Name, repo.DefaultBranch)
+			if targetSelected {
+				if _, err := selectedBranchRef(ctx, member.Root, member.TargetBranch, "target"); err != nil {
+					return nil, "", err
+				}
+			}
+		}
 		if reviewed != nil {
 			member.BaseRef = reviewed.Branch
 		}
@@ -155,7 +181,7 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 				}
 				return mount, axi.Failure("branch_check_failed", "could not create "+ref+" in repository "+member.Name, true, err.Error())
 			}
-			rows = append(rows, store.TaskRepo{Repo: member.Name, WorktreePath: worktree, BaseRef: member.BaseRef, LandingMode: member.LandingMode})
+			rows = append(rows, store.TaskRepo{Repo: member.Name, WorktreePath: worktree, BaseRef: member.BaseRef, TargetBranch: member.TargetBranch, LandingMode: member.LandingMode})
 		}
 		if err := db.CreateTaskRepos(ctx, task.ID, rows); err != nil {
 			return mount, err

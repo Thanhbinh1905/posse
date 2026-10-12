@@ -32,15 +32,23 @@ func TestWorkspaceOpenMemberMergedLands(t *testing.T) {
 	t.Setenv("POSSE_TEST_GH_LOG", filepath.Join(f.root, "gh.log"))
 	t.Setenv("POSSE_TEST_GH_VIEW", state)
 	worker := filepath.Join(f.workspace, "worker")
+	gitTest(t, worker, "branch", "staging", "main")
+	gitTest(t, worker, "push", "origin", "staging")
 	gitTest(t, worker, "remote", "set-url", "origin", "https://github.com/acme/worker.git")
-	head := strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD"))
+	gitTest(t, worker, "config", "url.file://"+filepath.Join(f.root, "remotes", "worker.git")+".insteadOf", "https://github.com/acme/worker.git")
+	memberWorktree := filepath.Join(f.task.WorktreePath, "worker")
+	head := strings.TrimSpace(gitTest(t, memberWorktree, "rev-parse", "HEAD"))
+	gitTest(t, memberWorktree, "push", "origin", "HEAD:refs/heads/staging")
 	url := "https://github.com/acme/worker/pull/7"
 	repo := f.repos()["worker"]
-	repo.PRURL = url // what `posse publish --repo worker` records; state stays open
+	repo.PRURL = url
 	if err := f.db.UpdateTaskRepo(context.Background(), repo); err != nil {
 		t.Fatal(err)
 	}
-	view, _ := json.Marshal(map[string]any{"url": url, "state": "MERGED", "headRefOid": head, "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "mergeCommit": map[string]any{"oid": head}, "statusCheckRollup": []any{}})
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_repos SET target_branch='staging' WHERE task_id=? AND repo='worker'`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := json.Marshal(map[string]any{"url": url, "state": "MERGED", "headRefOid": head, "baseRefName": "staging", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "mergeCommit": map[string]any{"oid": head}, "statusCheckRollup": []any{}})
 	if err := os.WriteFile(state, view, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -55,9 +63,14 @@ func TestWorkspaceOpenMemberMergedLands(t *testing.T) {
 	for _, n := range notices {
 		kinds = append(kinds, n.Kind)
 	}
-	t.Logf("state=%s worker=%s notices=%v", f.state(), f.repos()["worker"].State, kinds)
-	if f.state() != store.StateLanded {
-		t.Fatalf("merged member did not Land the Task: state=%s worker repo=%#v notices=%v", f.state(), f.repos()["worker"], kinds)
+	if f.state() != store.StateLanded || f.repos()["worker"].TargetBranch != "staging" {
+		t.Fatalf("merged member did not Land against staging: state=%s worker repo=%#v notices=%v", f.state(), f.repos()["worker"], kinds)
+	}
+	if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, f.config()); err != nil {
+		t.Fatalf("teardown merged workspace Task: %v", err)
+	}
+	if f.state() != store.StateTornDown {
+		t.Fatalf("merged workspace Task was not torn down: %s", f.state())
 	}
 }
 
@@ -294,7 +307,7 @@ func TestWorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
 	gitTest(t, worker, "config", "remote.origin.pushurl", filepath.Join(f.root, "remotes", "worker.git"))
 	head := strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD"))
 	writeView := func(prState, mergeCommit string) {
-		view := map[string]any{"url": "https://github.com/acme/worker/pull/7", "state": prState, "headRefOid": head, "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "statusCheckRollup": []any{}}
+		view := map[string]any{"url": "https://github.com/acme/worker/pull/7", "state": prState, "headRefOid": head, "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "statusCheckRollup": []any{}}
 		if mergeCommit != "" {
 			view["mergeCommit"] = map[string]any{"oid": mergeCommit}
 		}

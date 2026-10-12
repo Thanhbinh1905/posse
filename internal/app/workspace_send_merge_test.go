@@ -29,7 +29,7 @@ func TestWorkspaceSendRefreshesMergedMemberBeforePromptingRider(t *testing.T) {
 	if err := f.db.UpdateTaskRepo(context.Background(), repo); err != nil {
 		t.Fatal(err)
 	}
-	view, _ := json.Marshal(map[string]any{"url": url, "state": "MERGED", "headRefOid": head, "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "mergeCommit": map[string]any{"oid": head}, "statusCheckRollup": []any{}})
+	view, _ := json.Marshal(map[string]any{"url": url, "state": "MERGED", "headRefOid": head, "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "mergeCommit": map[string]any{"oid": head}, "statusCheckRollup": []any{}})
 	if err := os.WriteFile(viewPath, view, 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -44,6 +44,7 @@ type Defaults struct {
 	RecoveryAttempts int      `toml:"recovery_attempts" json:"recovery_attempts"`
 	RecoveryBackoff  string   `toml:"recovery_backoff" json:"recovery_backoff"`
 	LandingMode      string   `toml:"landing_mode" json:"landing_mode"`
+	TargetBranch     string   `toml:"target_branch" json:"target_branch"`
 	MergeMethod      string   `toml:"merge_method" json:"merge_method"`
 	Forge            string   `toml:"forge" json:"forge"`
 	PRPoll           string   `toml:"pr_poll" json:"pr_poll"`
@@ -108,9 +109,10 @@ type Autonomy struct {
 
 // Repository is the per-member policy of a workspace Project.
 type Repository struct {
-	LandingMode string   `toml:"landing_mode" json:"landing_mode"`
-	Gate        []string `toml:"gate" json:"gate"`
-	Forge       string   `toml:"forge" json:"forge"`
+	LandingMode  string   `toml:"landing_mode" json:"landing_mode"`
+	TargetBranch string   `toml:"target_branch" json:"target_branch"`
+	Gate         []string `toml:"gate" json:"gate"`
+	Forge        string   `toml:"forge" json:"forge"`
 }
 
 type Lowkey struct {

@@ -123,7 +123,7 @@ func TestProjectShowSeparatesRepositoryStatusFromLeadLiveness(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
 		t.Fatalf("decode project show: %v: %s", err, output.String())
 	}
-	if result["status"] != "active" || result["lead"] != "working" {
+	if result["status"] != "active" || result["lead"] != "working" || result["target_branch"] != "main" {
 		t.Fatalf("Project repository status and Lead liveness were conflated: %#v", result)
 	}
 }

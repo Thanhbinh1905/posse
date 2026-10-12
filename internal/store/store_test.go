@@ -362,8 +362,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 36 {
-		t.Fatalf("applied Goose migration version = %d, want 36", version)
+	if version != 38 {
+		t.Fatalf("applied Goose migration version = %d, want 38", version)
 	}
 }
 
@@ -422,12 +422,15 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`DROP TABLE task_target_changes`,
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP TABLE notice_delivery_receipts`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
+		`ALTER TABLE task_repos DROP COLUMN target_branch`,
+		`ALTER TABLE tasks DROP COLUMN target_branch`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`ALTER TABLE projects ADD COLUMN project_uuid TEXT NOT NULL DEFAULT ''`,
@@ -504,11 +507,14 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE task_target_changes`,
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
+		`ALTER TABLE task_repos DROP COLUMN target_branch`,
+		`ALTER TABLE tasks DROP COLUMN target_branch`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`,
@@ -652,6 +658,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE task_target_changes`,
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_reason`,
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_status`,
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_checked_at`,
@@ -664,6 +671,8 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`DROP TABLE publish_pre_push_heads`,
 		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
+		`ALTER TABLE task_repos DROP COLUMN target_branch`,
+		`ALTER TABLE tasks DROP COLUMN target_branch`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -766,9 +775,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 36 {
+	if version != 38 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 36", version)
+		t.Fatalf("initial Goose migration version = %d, want 38", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -805,8 +814,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 36 {
-		t.Fatalf("reopened Goose migration version = %d, want 36", version)
+	if version != 38 {
+		t.Fatalf("reopened Goose migration version = %d, want 38", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
@@ -844,17 +853,17 @@ func TestTaskShortNamePersistsThroughDatabaseAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", ShortName: "worker-tree", LandingMode: "local"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", ShortName: "worker-tree", LandingMode: "local", TargetBranch: "staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	task, err := db.TaskByID(ctx, project.ID, id)
-	if err != nil || task.ShortName != "worker-tree" {
-		t.Fatalf("Task short name = %q, %v", task.ShortName, err)
+	if err != nil || task.ShortName != "worker-tree" || task.TargetBranch != "staging" {
+		t.Fatalf("Task short name or target branch = %q / %q, %v", task.ShortName, task.TargetBranch, err)
 	}
 	data, err := os.ReadFile(db.TaskSnapshotPath(project.Name, task.Seq))
-	if err != nil || !strings.Contains(string(data), "short_name = \"worker-tree\"") {
-		t.Fatalf("Task snapshot short name missing: %q, %v", data, err)
+	if err != nil || !strings.Contains(string(data), "short_name = \"worker-tree\"") || !strings.Contains(string(data), "target_branch = \"staging\"") {
+		t.Fatalf("Task snapshot short name or target branch missing: %q, %v", data, err)
 	}
 }
 

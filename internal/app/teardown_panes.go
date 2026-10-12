@@ -101,7 +101,7 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 		if observation.MergeCommit == observation.HeadSHA {
 			return false, nil // No distinct merged commit proves the moved tip is safe.
 		}
-		// A merge of origin/main after the PR was merged is safe only if
+		// A merge of the PR target after the PR was merged is safe only if
 		// it contains both the PR head and the merge commit and carries no
 		// additional tree changes. Never discard a subsequent follow-up.
 		for _, ancestor := range []string{observation.HeadSHA, observation.MergeCommit} {
@@ -109,10 +109,14 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 				return false, nil
 			}
 		}
-		// Compare against the newest default-branch ancestor of the Task
-		// tip. Other changes that landed on main after this PR are safe;
+		// Compare against the newest target-branch ancestor of the Task
+		// tip. Other changes that landed on the target after this PR are safe;
 		// changes made only on the Task branch are not.
-		base, err := gitOutput(ctx, task.WorktreePath, "merge-base", branchSHA, "refs/heads/"+project.DefaultBranch)
+		targetRef, err := taskTargetRef(ctx, project, task)
+		if err != nil {
+			return false, nil
+		}
+		base, err := gitOutput(ctx, task.WorktreePath, "merge-base", branchSHA, targetRef)
 		if err != nil {
 			return false, nil
 		}
