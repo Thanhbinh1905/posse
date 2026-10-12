@@ -144,7 +144,7 @@ func TestSchemaDrivesUserOnlyAndNewKeys(t *testing.T) {
 			t.Errorf("%s is not User-only", key)
 		}
 	}
-	for _, key := range []string{"lead.kind", "lead.profiles.claude", "defaults.idle_after", "kinds.codex.resume_args"} {
+	for _, key := range []string{"lead.kind", "lead.profiles.claude", "defaults.idle_after", "kinds.codex.resume_args", "kinds.pi.interrupt_keys"} {
 		if _, ok := Lookup(key); !ok {
 			t.Errorf("schema does not recognize %s", key)
 		}

@@ -1264,6 +1264,15 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
 	case "queued":
 		queued, queueErr := db.OldestQueuedMessage(ctx.Context, task.ID)
+		if queueErr == nil && !message.WaitForIdle {
+			if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found &&
+				pane.AgentStatus == "working" && !pane.Focused && snapshot.FocusedPaneID != pane.PaneID &&
+				task.State != store.StateBlocked && pane.Agent != "" && cfg.Kinds[pane.Agent].Steer {
+				// An explicit --queue message waits for idle, but it must not
+				// prevent a later instruction from steering the current turn.
+				queued, queueErr = db.OldestSteerableQueuedMessage(ctx.Context, task.ID)
+			}
+		}
 		if queueErr == nil && queued.ID > messageID {
 			// Do not let this send skip its own row if another dispatcher
 			// claimed it after the status read and submit a later instruction.
@@ -1433,7 +1442,8 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+	cfg, err := s.prepareProject(ctx.Context, db, project)
+	if err != nil {
 		return err
 	}
 	task, err := s.currentTask(ctx.Context, db, project, args[0])
@@ -1444,16 +1454,72 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, pane := range snapshot.Panes {
-		if pane.PaneID == task.PaneID && (pane.Focused || snapshot.FocusedPaneID == task.PaneID) {
-			return axi.Failure("pane_focused", "refusing to interrupt a focused pane", false, "Unfocus the pane, then retry")
-		}
+	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+	if !found {
+		return axi.Failure("worker_pane_missing", "Rider pane is not available", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
 	}
-	_, err = s.herdrCall(ctx.Context, "agent.send_keys", map[string]any{"target": task.PaneID, "keys": []string{"ctrl+c"}})
-	if err != nil {
+	if pane.Focused || snapshot.FocusedPaneID == pane.PaneID {
+		return axi.Failure("pane_focused", "refusing to interrupt a focused pane", false, "Unfocus the pane, then retry")
+	}
+	if task.State == store.StateBlocked || pane.AgentStatus == "blocked" {
+		return axi.Failure("worker_blocked", "refusing to send an abort key to a blocked Rider", false, "Inspect the Rider dialog with `posse peek "+taskIDString(task.Seq)+"`")
+	}
+	if pane.AgentStatus != "working" {
+		return ctx.Print(axi.Object{
+			{Key: "task", Value: taskIDString(task.Seq)},
+			{Key: "interrupted", Value: false},
+			{Key: "reason", Value: "agent_not_working"},
+			{Key: "agent_status", Value: pane.AgentStatus},
+			{Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}},
+		})
+	}
+	kind := pane.Agent
+	if kind == "" {
+		kind = taskKind(cfg, task)
+	}
+	keys := cfg.Kinds[kind].InterruptKeys
+	if len(keys) == 0 {
+		return axi.Failure("interrupt_unsupported_kind", "no abort key sequence is configured for Rider kind "+kind, false, "Set `kinds."+kind+".interrupt_keys` to the harness sequence that stops a running turn")
+	}
+	if _, err := s.herdrCall(ctx.Context, "agent.send_keys", map[string]any{"target": pane.PaneID, "keys": keys}); err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "interrupted", Value: true}, {Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}}})
+
+	verifyCtx, cancel := context.WithTimeout(ctx.Context, 3*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		updated, snapshotErr := s.snapshot(verifyCtx)
+		if snapshotErr == nil {
+			current, present := findAppPane(updated.Panes, pane.PaneID, task.PaneLabel)
+			if !present || current.AgentStatus != "working" {
+				status := "missing"
+				if present {
+					status = current.AgentStatus
+				}
+				return ctx.Print(axi.Object{
+					{Key: "task", Value: taskIDString(task.Seq)},
+					{Key: "interrupted", Value: true},
+					{Key: "agent", Value: kind},
+					{Key: "abort_keys", Value: keys},
+					{Key: "agent_status", Value: status},
+					{Key: "verified", Value: true},
+					{Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}},
+				})
+			}
+		}
+		select {
+		case <-verifyCtx.Done():
+			message := "sent the abort key sequence but could not verify the Rider status"
+			if snapshotErr == nil {
+				message = fmt.Sprintf("sent the abort key sequence but the Rider still reports %s", pane.AgentStatus)
+			}
+			return axi.Failure("interrupt_unverified", message, false,
+				"Inspect the pane with `posse peek "+taskIDString(task.Seq)+"`; Posse did not verify that the turn stopped")
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *Service) relaunch(ctx *axi.Context, args []string) error {

@@ -138,6 +138,7 @@ prepare = "claude-trust"     # built-in pre-launch step, see section 13
 notice_delivery = "lookout"  # how Notices reach the Lead, see section 9
 background_commands = true   # can run a background command and be re-invoked when it exits
 steer = true                 # safe to submit messages while the Worker is working
+interrupt_keys = ["ctrl+c"]  # Herdr logical keys that abort a running turn
 
 [kinds.codex]
 auto_approve_args = ["--dangerously-bypass-approvals-and-sandbox"]
@@ -150,6 +151,7 @@ lead_args = ["--sandbox", "danger-full-access"]  # every Lead of this kind; poss
 prepare = "codex-trust"
 notice_delivery = "codex-queue"
 steer = true
+interrupt_keys = ["esc"]
 
 [kinds.pi]
 model_args = ["--model", "{model}"]
@@ -158,6 +160,7 @@ resume_args = ["--session", "{session}"]
 system_prompt_args = ["--append-system-prompt", "{file}"]
 notice_delivery = "pi-extension"
 steer = true
+interrupt_keys = ["esc"]
 
 [kinds.opencode]
 auto_approve_args = ["--auto"]     # Workers and, by default, Leads; set lead_auto_approve = false to opt out
@@ -165,6 +168,7 @@ lead_auto_approve = true
 model_args = ["--model", "{model}"]  # provider/model
 resume_args = ["--session", "{session}"]
 notice_delivery = "opencode-plugin"
+interrupt_keys = ["esc"]
 # No TUI effort flag, prepare step, or mid-turn Worker steering (OpenCode 1.18.32).
 
 [profiles.deep]
@@ -232,7 +236,7 @@ Rules:
 - `autonomy` is valid only in a Project file. In the global file it is a config error.
 - A Brief may tighten Landing Mode (`local` < `pr` < `no-mistakes`) or Autonomy, never loosen them.
 - `posse` validates the effective config on every call and refuses with `config_invalid` naming the file, key and reason.
-- The built-in kind defaults above can be overridden but not removed; an unknown kind with no `[kinds.<kind>]` table runs with no extra args and `steer = false`.
+- The built-in kind defaults above can be overridden but not removed; an unknown kind with no `[kinds.<kind>]` table runs with no extra args, `steer = false`, and no interrupt key sequence.
 - The Lead workspace label is `Lead:<project>`. Repository Riders are unfocused, labeled linked worktree child workspaces under the Lead; their tab label stays at Herdr's default. Workspace Project Riders remain plain `<name>` tabs in the Lead workspace. Existing tab-layout Tasks continue to reconcile by pane label and Teardown by tab. Posse never renames a User tab or workspace ([ADR 0012](adr/0012-group-repository-riders-under-lead.md)).
 - A Profile's `model` and `effort` reach the agent only through the kind's `model_args` and `effort_args` templates; a kind without a template for a set value is a `config_invalid` error naming the Profile.
 - `gate`, `[remuda] setup`, `kinds.<kind>.lead_auto_approve` and `[autonomy]` are User-only keys: `posse config set|unset` refuses them with `user_only` from the Lead pane unless passed `--user-approved "<User's words>"` with a non-blank quote. The Lead records the quote, key, action, set value and Project ID in `config_approvals` (global changes are attributed to the Lead's Project). A Worker cannot set or unset any key, even with the flag (section 13). Any other caller (the User's shell, or an agent the User runs for setup) counts as the User and needs no quote.
@@ -745,7 +749,7 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse send <task> <msg> [--queue]` | Lead | steer an unfocused Worker or wait for idle with `--queue` |
 | `posse peek <task> [--lines n]` | Lead | read the Worker pane |
 | `posse keys <task> <key...>` | Lead | answer a blocked dialog |
-| `posse interrupt <task>` | Lead | stop the Worker's current turn |
+| `posse interrupt <task>` | Lead | send the kind's configured abort keys and verify the Worker leaves `working` |
 | `posse relaunch <task> [--profile <name>]` | Lead | restart the Worker in the same Mount (section 17) |
 | `posse recover [--all] [--rebuild]` | Herdr startup hook, User | restart recovery; `--rebuild` is User-only (section 17) |
 | `posse land <task> [--merge] [--user-approved q]` | Lead | section 14 |
@@ -771,7 +775,9 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse doctor` | User | check Herdr protocol, plugin, DB, config, `gh`, `glab` authentication for each GitLab host, `no-mistakes` |
 | `posse _ingest` | Herdr | section 8 |
 
-`posse send` rules: deliver to an unfocused `idle`/`done` Worker now; to an unfocused `working` Worker, submit now only if `kinds.<kind>.steer` is true. `--queue` waits for idle even on a steer-capable kind. Unknown kinds default to false. A focused, blocked or unknown-status Worker receives no typed input; just before prompting, `agent.explain` also gates unknown live TUI screens (a dialog can preserve the prior `done` status). For native reporters that skip screen detection, posse checks the live pane for menu key hints before submission. A `landing` Ship Task accepts a Lead follow-up send without requiring a failure Notice; delivery returns it to `working` and clears `gated_sha` as described in section 14. A running `land --merge` intent blocks that send with `intent_active`. Sends to `reported`, `landed`, `torn-down`, `failed`, `lost` and `done` non-Ship Tasks are refused with the state and a next step. Queue insertion is conditional on the Task still accepting instructions. Queued messages are retried on status or focus changes and reconciliation; when a Task enters `reported`, `failed`, `lost`, `landed` or `torn-down`, queued and claimed messages become terminal `undeliverable` rows and one Notice names each message ID and a follow-up. `posse show <task>` lists queued, claimed and undeliverable messages with their instruction text. Ambiguous `submitting` messages are not retried and instead raise a Notice after claim expiry. Blocked Workers create a `worker_blocked` Notice and the command points the Lead to `posse peek` and `posse keys`. FIFO ordering and focus-safe delivery semantics are unchanged. Every message is stored with its wait-for-idle policy (including across restarts); the response reports `delivered` or `queued` with a reason. Queued messages already in the database before the migration keep wait-for-idle semantics.
+`posse send` rules: deliver to an unfocused `idle`/`done` Worker now; to an unfocused `working` Worker, submit now only if `kinds.<kind>.steer` is true. `--queue` waits for idle even on a steer-capable kind. A later steer may pass earlier explicit `--queue` messages, while delivery remains FIFO among messages eligible for the current turn. Unknown kinds default to false. A focused, blocked or unknown-status Worker receives no typed input; just before prompting, `agent.explain` also gates unknown live TUI screens (a dialog can preserve the prior `done` status). For native reporters that skip screen detection, posse checks the live pane for menu key hints before submission. A `landing` Ship Task accepts a Lead follow-up send without requiring a failure Notice; delivery returns it to `working` and clears `gated_sha` as described in section 14. A running `land --merge` intent blocks that send with `intent_active`. Sends to `reported`, `landed`, `torn-down`, `failed`, `lost` and `done` non-Ship Tasks are refused with the state and a next step. Queue insertion is conditional on the Task still accepting instructions. Queued messages are retried on status or focus changes and reconciliation; when a Task enters `reported`, `failed`, `lost`, `landed` or `torn-down`, queued and claimed messages become terminal `undeliverable` rows and one Notice names each message ID and a follow-up. `posse show <task>` lists queued, claimed and undeliverable messages with their instruction text. Ambiguous `submitting` messages are not retried and instead raise a Notice after claim expiry. Blocked Workers create a `worker_blocked` Notice and the command points the Lead to `posse peek` and `posse keys`. Every message is stored with its wait-for-idle policy (including across restarts); the response reports `delivered` or `queued` with a reason. Queued messages already in the database before the migration keep wait-for-idle semantics.
+
+`posse interrupt` uses `kinds.<kind>.interrupt_keys` only when Herdr reports the Rider `working` and unfocused; blocked dialogs are not sent abort keys. The command polls the pane status for up to 3 seconds and reports success only after the status leaves `working` or the pane disappears. It returns `interrupt_unverified` if the sequence was sent but Posse cannot verify the turn stopped. Built-in defaults use `ctrl+c` for Claude Code and `esc` for Codex, Pi and OpenCode; custom kinds must configure their verified key sequence.
 
 Example home output:
 
