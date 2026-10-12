@@ -768,7 +768,7 @@ func TestPRWatchFailureNoticeRequiresThreeConsecutiveFailures(t *testing.T) {
 		}
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "pr_watch_failing") != 2 {
+	if err != nil || countNoticeKind(notices, "pr_watch_failing") != 1 {
 		t.Fatalf("watch failure Notice count=%d notices=%#v err=%v", countNoticeKind(notices, "pr_watch_failing"), notices, err)
 	}
 	state, err := fixture.db.ProjectWatchState(context.Background(), fixture.project.ID)

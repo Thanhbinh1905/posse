@@ -111,33 +111,37 @@ func (db *DB) ClaimMemberPRPoll(ctx context.Context, projectID int64, repo strin
 	return token, nil
 }
 
-func (db *DB) RecordMemberForgeProbeFailure(ctx context.Context, projectID int64, repo string, at int64, failure string) (int, error) {
+func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID int64, repo, prURL string, at int64, failure, summary string) (int, error) {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO member_pr_poll_state(project_id,repo) VALUES (?,?)`, projectID, repo); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pr_task_watch_failures(project_id,task_id,repo,pr_url) VALUES (?,?,?,?)`, projectID, taskID, repo, prURL); err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE member_pr_poll_state SET forge_probe_failures=forge_probe_failures+1 WHERE project_id=? AND repo=?`, projectID, repo); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE pr_task_watch_failures SET consecutive_failures=CASE WHEN pr_url<>? THEN 1 ELSE consecutive_failures+1 END,pr_url=?,last_error=?,updated_at=? WHERE project_id=? AND task_id=? AND repo=?`, prURL, prURL, failure, at, projectID, taskID, repo); err != nil {
 		return 0, err
 	}
 	var failures int
-	if err := tx.QueryRowContext(ctx, `SELECT forge_probe_failures FROM member_pr_poll_state WHERE project_id=? AND repo=?`, projectID, repo).Scan(&failures); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT consecutive_failures FROM pr_task_watch_failures WHERE project_id=? AND task_id=? AND repo=?`, projectID, taskID, repo).Scan(&failures); err != nil {
 		return 0, err
 	}
 	if failures == 3 {
-		data, err := json.Marshal(map[string]any{"repo": repo, "consecutive_failures": failures, "error": failure})
+		fields := map[string]any{"pr_url": prURL, "consecutive_failures": failures, "error": failure}
+		if repo != "" {
+			fields["repo"] = repo
+		}
+		data, err := json.Marshal(fields)
 		if err != nil {
 			return 0, err
 		}
 		var exists bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND kind='pr_watch_failing' AND data_json=? AND acked_at IS NULL)`, projectID, string(data)).Scan(&exists); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND data_json=? AND acked_at IS NULL)`, projectID, taskID, string(data)).Scan(&exists); err != nil {
 			return 0, err
 		}
 		if !exists {
-			if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "pr_watch_failing", Summary: "Lookout forge probe for Member " + repo + " failed three times: " + failure, DataJSON: string(data), CreatedAt: at}); err != nil {
+			if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, TaskID: taskID, Kind: "pr_watch_failing", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
 				return 0, err
 			}
 		}
@@ -153,8 +157,8 @@ func (db *DB) RecordMemberForgeProbeFailure(ctx context.Context, projectID int64
 	return failures, nil
 }
 
-func (db *DB) ResetMemberForgeProbeFailures(ctx context.Context, projectID int64, repo string) error {
-	_, err := db.ExecContext(ctx, `UPDATE member_pr_poll_state SET forge_probe_failures=0 WHERE project_id=? AND repo=?`, projectID, repo)
+func (db *DB) ResetPRTaskWatchFailures(ctx context.Context, projectID, taskID int64, repo, prURL string, at int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE pr_task_watch_failures SET consecutive_failures=0,pr_url=?,last_error='',updated_at=? WHERE project_id=? AND task_id=? AND repo=?`, prURL, at, projectID, taskID, repo)
 	return err
 }
 

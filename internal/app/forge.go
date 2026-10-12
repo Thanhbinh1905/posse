@@ -89,11 +89,6 @@ func forgeProbeTimeoutError(host string) error {
 	return axi.Failure("pr_forge_probe_timeout", "forge CLI timed out for host "+host, true, "Check forge CLI connectivity and authentication for this host")
 }
 
-func isRetryableForgeProbeError(err error) bool {
-	var failure *axi.Error
-	return errors.As(err, &failure) && failure.Code == "pr_forge_probe_timeout" && failure.Retryable
-}
-
 func validateForgeMergeMethod(forge repositoryForge, cfg config.Config) error {
 	if forge.Kind == "gitlab" && cfg.Defaults.MergeMethod == "rebase" {
 		return axi.Failure("pr_merge_method_unsupported", "GitLab cannot use defaults.merge_method = rebase for pushed Task branches", false, "Set defaults.merge_method to squash or merge for this Project")

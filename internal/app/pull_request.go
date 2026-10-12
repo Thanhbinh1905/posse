@@ -827,10 +827,9 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	targets := make([]prWatchTarget, 0, len(watched))
 	failedTasks := make(map[int64]error)
 	forge, forgeErr := forgeForRepository(ctx, project.Root, cfg, "")
+	// Forge probe failures are attributed to each watched Task below, rather than
+	// also incrementing the Project-wide failure streak.
 	globalFailure := ""
-	if forgeErr != nil {
-		globalFailure = truncate(forgeErr.Error(), 300)
-	}
 	gitlabTargets := make([]store.Task, 0)
 	for _, task := range watched {
 		refErr := forgeErr
@@ -859,11 +858,6 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 			}
 			if _, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure); recordErr != nil {
 				return recordErr
-			}
-			for _, task := range watched {
-				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, errors.New(failure), now); recordErr != nil {
-					return recordErr
-				}
 			}
 			return nil
 		}
@@ -930,9 +924,6 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	observations := make([]pendingObservation, 0, len(targets))
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
-			if isRetryableForgeProbeError(taskErr) {
-				continue
-			}
 			if strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest") {
 				if err := raiseInvalidPRDecision(ctx, db, project, task); err != nil {
 					return err
@@ -1014,6 +1005,9 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		}
 		recorded, err := db.RecordPRObservation(ctx, observed.current, effect, observed.task)
 		if err != nil {
+			return err
+		}
+		if err := db.ResetPRTaskWatchFailures(ctx, project.ID, observed.task.ID, "", observed.current.PRURL, now.UnixMilli()); err != nil {
 			return err
 		}
 		if recorded && observed.current.State == "CLOSED" {
@@ -1121,30 +1115,16 @@ func (response *ghQueryResponse) pullRequest(target prWatchTarget) (*ghPullReque
 }
 
 func recordWorkspacePRTaskWatchFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task, repo, prURL string, cause error, now time.Time) error {
-	summary := taskDisplayName(task) + " pull request watch failed for " + repo + ": " + truncate(cause.Error(), 240)
-	data := marshalJSON(map[string]any{"repo": repo, "pr_url": prURL, "error": cause.Error()})
-	var exists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND data_json=?)`, project.ID, task.ID, data).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_watch_failing", Summary: summary, DataJSON: data, CreatedAt: now.UnixMilli()})
+	failure := cause.Error()
+	summary := taskDisplayName(task) + " pull request watch for " + repo + " failed three times: " + truncate(failure, 240)
+	_, err := db.RecordPRTaskWatchFailure(ctx, project.ID, task.ID, repo, prURL, now.UnixMilli(), failure, summary)
 	return err
 }
 
 func recordPRTaskWatchFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error, now time.Time) error {
-	summary := taskDisplayName(task) + " pull request watch failed: " + truncate(cause.Error(), 240)
-	data := marshalJSON(map[string]any{"pr_url": task.PRURL, "error": cause.Error()})
-	var exists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND data_json=?)`, project.ID, task.ID, data).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_watch_failing", Summary: summary, DataJSON: data, CreatedAt: now.UnixMilli()})
+	failure := cause.Error()
+	summary := taskDisplayName(task) + " pull request watch failed three times: " + truncate(failure, 240)
+	_, err := db.RecordPRTaskWatchFailure(ctx, project.ID, task.ID, "", task.PRURL, now.UnixMilli(), failure, summary)
 	return err
 }
 

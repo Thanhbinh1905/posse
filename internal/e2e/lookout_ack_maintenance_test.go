@@ -75,6 +75,7 @@ func TestLookoutKeepsWatchingAfterRetryableForgeProbeTimeout(t *testing.T) {
 			t.Fatal("Lookout did not retry the forge probe on the next PR poll")
 		}
 	}
+	taskID := retryableLookoutTaskID(t, f.db, f.project.ID)
 	notices, err := f.db.Notices(ctx, f.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +101,9 @@ func TestLookoutKeepsWatchingAfterRetryableForgeProbeTimeout(t *testing.T) {
 	}
 	if !strings.Contains(string(contents), "acknowledgement committed: 1") || !strings.Contains(string(contents), "acknowledged: 1") {
 		t.Fatalf("Lookout did not report the committed acknowledgement: %s", contents)
+	}
+	if failures := prTaskWatchFailureCount(t, f.db, taskID); failures != 0 {
+		t.Fatalf("successful forge observation did not reset the failure streak: %d", failures)
 	}
 	notices, err = f.db.Notices(ctx, f.project.ID, false)
 	if err != nil {
@@ -150,6 +154,7 @@ func TestLookoutReportsPersistentForgeProbeFailureAfterThreePolls(t *testing.T) 
 	}) {
 		t.Fatal("Lookout did not commit the requested acknowledgement")
 	}
+	taskID := retryableLookoutTaskID(t, f.db, f.project.ID)
 	for failure := 1; failure <= 3; failure++ {
 		wantCalls := failure
 		if !waitForCondition(4*time.Second, func() bool {
@@ -166,10 +171,9 @@ func TestLookoutReportsPersistentForgeProbeFailureAfterThreePolls(t *testing.T) 
 			}
 		}
 		if !waitForCondition(4*time.Second, func() bool {
-			state, err := f.db.ProjectWatchState(context.Background(), f.project.ID)
-			return err == nil && state.PRConsecutiveFailures >= failure
+			return prTaskWatchFailureCount(t, f.db, taskID) >= failure
 		}) {
-			t.Fatalf("Project failure streak did not reach %d", failure)
+			t.Fatalf("Task failure streak did not reach %d", failure)
 		}
 		if failure < 3 {
 			notices, err := f.db.Notices(context.Background(), f.project.ID, false)
@@ -207,10 +211,31 @@ func TestLookoutReportsPersistentForgeProbeFailureAfterThreePolls(t *testing.T) 
 	if !strings.Contains(string(contents), "pr_watch_failing") || !strings.Contains(string(contents), "acknowledgement committed: 1") {
 		t.Fatalf("persistent failure or acknowledgement outcome missing from Lookout output: %s", contents)
 	}
-	state, err := f.db.ProjectWatchState(context.Background(), f.project.ID)
-	if err != nil || state.PRConsecutiveFailures != 3 {
-		t.Fatalf("persistent failure count = %#v, %v; want three", state, err)
+	if failures := prTaskWatchFailureCount(t, f.db, taskID); failures != 3 {
+		t.Fatalf("persistent Task failure count = %d; want three", failures)
 	}
+	state, err := f.db.ProjectWatchState(context.Background(), f.project.ID)
+	if err != nil || state.PRConsecutiveFailures != 0 {
+		t.Fatalf("Task-scoped forge failures leaked into the Project streak: %#v, %v", state, err)
+	}
+}
+
+func retryableLookoutTaskID(t *testing.T, db *store.DB, projectID int64) int64 {
+	t.Helper()
+	var taskID int64
+	if err := db.QueryRowContext(context.Background(), `SELECT id FROM tasks WHERE project_id=? AND title='Retry forge probe'`, projectID).Scan(&taskID); err != nil {
+		t.Fatal(err)
+	}
+	return taskID
+}
+
+func prTaskWatchFailureCount(t *testing.T, db *store.DB, taskID int64) int {
+	t.Helper()
+	var failures int
+	if err := db.QueryRowContext(context.Background(), `SELECT COALESCE((SELECT consecutive_failures FROM pr_task_watch_failures WHERE task_id=? AND repo=''), 0)`, taskID).Scan(&failures); err != nil {
+		t.Fatal(err)
+	}
+	return failures
 }
 
 func newRetryableForgeLookoutFixture(t *testing.T) (*prLifecycleFixture, int64, string) {

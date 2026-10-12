@@ -597,8 +597,6 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 	}()
 
 	landedAny := false
-	failures := []string{}
-	probeFailures := map[string]string{}
 	var processingErr error
 	for result := range results {
 		if processingErr != nil {
@@ -606,17 +604,9 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		}
 		task, member := result.target.task, result.target.member
 		if result.err != nil {
-			if isRetryableForgeProbeError(result.err) {
-				probeFailures[member.repo.Repo] = truncate(result.err.Error(), 240)
-				if repoFilter == "" || memberClaim == "" {
-					failures = append(failures, member.repo.Repo+": "+probeFailures[member.repo.Repo])
-				}
-			} else {
-				failures = append(failures, member.repo.Repo+": "+truncate(result.err.Error(), 240))
-				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, result.err, now); err != nil {
-					processingErr = err
-					cancelPoll()
-				}
+			if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, result.err, now); err != nil {
+				processingErr = err
+				cancelPoll()
 			}
 			continue
 		}
@@ -638,14 +628,14 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			}
 			branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
 			if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
-				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
 					processingErr = err
 					cancelPoll()
 				}
 				continue
 			}
 			if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
-				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
 					processingErr = err
 					cancelPoll()
 				}
@@ -655,6 +645,11 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		}
 		recorded, err := db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, memberEffect)
 		if err != nil {
+			processingErr = err
+			cancelPoll()
+			continue
+		}
+		if err := db.ResetPRTaskWatchFailures(ctx, project.ID, task.ID, member.repo.Repo, member.repo.PRURL, now.UnixMilli()); err != nil {
 			processingErr = err
 			cancelPoll()
 			continue
@@ -675,21 +670,8 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 	if processingErr != nil {
 		return processingErr
 	}
-	if repoFilter != "" && memberClaim != "" {
-		for _, group := range groups {
-			failure := probeFailures[group.repo]
-			if failure != "" {
-				if _, err := db.RecordMemberForgeProbeFailure(ctx, project.ID, group.repo, now.UnixMilli(), failure); err != nil {
-					return err
-				}
-			} else if err := db.ResetMemberForgeProbeFailures(ctx, project.ID, group.repo); err != nil {
-				return err
-			}
-		}
-	}
-	retryableTimeoutOnly := repoFilter != "" && memberClaim != "" && len(probeFailures) > 0 && len(failures) == 0
-	if !retryableTimeoutOnly {
-		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), truncate(strings.Join(failures, "; "), 1000)); err != nil {
+	if repoFilter == "" {
+		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), ""); err != nil {
 			return err
 		}
 	}

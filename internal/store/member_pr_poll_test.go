@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,7 +61,7 @@ func TestMemberPRPollClaimsAreIndependentAndDurable(t *testing.T) {
 	}
 }
 
-func TestMemberForgeProbeFailuresRaiseAfterThreeAndRemainIndependent(t *testing.T) {
+func TestPRTaskWatchFailuresRaiseAfterThreeAndResetOnSuccess(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
 	if err != nil {
@@ -71,10 +72,16 @@ func TestMemberForgeProbeFailuresRaiseAfterThreeAndRemainIndependent(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	prURL := "https://github.com/acme/shop/pull/1"
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "First PR", LandingMode: "pr", PRURL: prURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := "First PR pull request watch failed three times: forge CLI timed out"
 	for attempt := 1; attempt <= 3; attempt++ {
-		failures, err := db.RecordMemberForgeProbeFailure(ctx, project.ID, "api", int64(attempt), "forge CLI timed out")
+		failures, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, int64(attempt), "forge CLI timed out", summary)
 		if err != nil || failures != attempt {
-			t.Fatalf("api failure %d: count=%d err=%v", attempt, failures, err)
+			t.Fatalf("PR failure %d: count=%d err=%v", attempt, failures, err)
 		}
 		notices, err := db.Notices(ctx, project.ID, false)
 		if err != nil {
@@ -85,17 +92,26 @@ func TestMemberForgeProbeFailuresRaiseAfterThreeAndRemainIndependent(t *testing.
 			wantNotices = 1
 		}
 		if len(notices) != wantNotices {
-			t.Fatalf("api failure %d created %d Notices, want %d: %#v", attempt, len(notices), wantNotices, notices)
+			t.Fatalf("PR failure %d created %d Notices, want %d: %#v", attempt, len(notices), wantNotices, notices)
 		}
 	}
-	if failures, err := db.RecordMemberForgeProbeFailure(ctx, project.ID, "worker", 4, "forge CLI timed out"); err != nil || failures != 1 {
-		t.Fatalf("independent worker failure count=%d err=%v, want 1", failures, err)
-	}
-	if err := db.ResetMemberForgeProbeFailures(ctx, project.ID, "api"); err != nil {
+	var data string
+	if err := db.QueryRowContext(ctx, `SELECT data_json FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing'`, project.ID, taskID).Scan(&data); err != nil {
 		t.Fatal(err)
 	}
-	if failures, err := db.RecordMemberForgeProbeFailure(ctx, project.ID, "api", 5, "forge CLI timed out"); err != nil || failures != 1 {
-		t.Fatalf("reset api failure count=%d err=%v, want 1", failures, err)
+	if !strings.Contains(data, `"consecutive_failures":3`) {
+		t.Fatalf("threshold Notice omitted failure count: %s", data)
+	}
+	if err := db.ResetPRTaskWatchFailures(ctx, project.ID, taskID, "", prURL, 4); err != nil {
+		t.Fatal(err)
+	}
+	if failures, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, 5, "forge CLI timed out", summary); err != nil || failures != 1 {
+		t.Fatalf("failure after successful observation count=%d err=%v, want 1", failures, err)
+	}
+	for _, repo := range []string{"api", "worker"} {
+		if failures, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, repo, prURL, 6, "forge CLI timed out", "Member PR watch failed three times"); err != nil || failures != 1 {
+			t.Fatalf("independent %s Member failure count=%d err=%v, want 1", repo, failures, err)
+		}
 	}
 }
 
