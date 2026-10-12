@@ -598,6 +598,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 
 	landedAny := false
 	failures := []string{}
+	probeFailures := map[string]string{}
 	var processingErr error
 	for result := range results {
 		if processingErr != nil {
@@ -605,10 +606,17 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		}
 		task, member := result.target.task, result.target.member
 		if result.err != nil {
-			failures = append(failures, member.repo.Repo+": "+truncate(result.err.Error(), 240))
-			if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, result.err, now); err != nil {
-				processingErr = err
-				cancelPoll()
+			if isRetryableForgeProbeError(result.err) {
+				probeFailures[member.repo.Repo] = truncate(result.err.Error(), 240)
+				if repoFilter == "" || memberClaim == "" {
+					failures = append(failures, member.repo.Repo+": "+probeFailures[member.repo.Repo])
+				}
+			} else {
+				failures = append(failures, member.repo.Repo+": "+truncate(result.err.Error(), 240))
+				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, result.err, now); err != nil {
+					processingErr = err
+					cancelPoll()
+				}
 			}
 			continue
 		}
@@ -667,8 +675,23 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 	if processingErr != nil {
 		return processingErr
 	}
-	if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), truncate(strings.Join(failures, "; "), 1000)); err != nil {
-		return err
+	if repoFilter != "" && memberClaim != "" {
+		for _, group := range groups {
+			failure := probeFailures[group.repo]
+			if failure != "" {
+				if _, err := db.RecordMemberForgeProbeFailure(ctx, project.ID, group.repo, now.UnixMilli(), failure); err != nil {
+					return err
+				}
+			} else if err := db.ResetMemberForgeProbeFailures(ctx, project.ID, group.repo); err != nil {
+				return err
+			}
+		}
+	}
+	retryableTimeoutOnly := repoFilter != "" && memberClaim != "" && len(probeFailures) > 0 && len(failures) == 0
+	if !retryableTimeoutOnly {
+		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), truncate(strings.Join(failures, "; "), 1000)); err != nil {
+			return err
+		}
 	}
 	if landedAny && syncRoot {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {

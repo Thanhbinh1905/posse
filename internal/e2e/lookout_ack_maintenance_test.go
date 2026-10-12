@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +16,252 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestLookoutKeepsWatchingAfterRetryableForgeProbeTimeout(t *testing.T) {
+	f, noticeID, probeLog := newRetryableForgeLookoutFixture(t)
+	defer f.db.Close()
+	ctx := context.Background()
+	glab := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + probeLog + "\"\ncase \"$1 $2\" in\n  'auth status')\n    count=$(grep -c '^auth status' \"" + probeLog + "\")\n    if [ \"$count\" -eq 1 ]; then exec sleep 3; fi\n    sleep 0.7\n    exit 0 ;;\n  'api --hostname')\n    case \"$*\" in\n      *approvals*) printf '%s\\n' '{\"approved\":false,\"approvals_left\":1}' ;;\n      *) printf '%s\\n' '{\"web_url\":\"https://git.paas.vn/acme/shop/-/merge_requests/17\",\"title\":\"Retry forge probe\",\"state\":\"opened\",\"sha\":\"1111111111111111111111111111111111111111\",\"source_branch\":\"posse/t1\",\"target_branch\":\"main\",\"detailed_merge_status\":\"not_approved\",\"has_conflicts\":false,\"head_pipeline\":{\"status\":\"running\"}}' ;;\n    esac ;;\n  *) exit 1 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "glab"), []byte(glab), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command(f.binary, "lookout", "--ack", strconv.FormatInt(noticeID, 10), "--timeout", "7000")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	outputPath := filepath.Join(f.root, "lookout-output.txt")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.Stdout, command.Stderr = output, output
+	if err := command.Start(); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		err := command.Wait()
+		_ = output.Close()
+		done <- err
+	}()
+	commandRunning := true
+	defer func() {
+		if commandRunning {
+			_ = command.Process.Kill()
+			<-done
+		}
+	}()
+	if !waitForCondition(2*time.Second, func() bool {
+		return noticeAckedAt(t, f.db, f.project.ID, noticeID) != 0
+	}) {
+		t.Fatal("Lookout did not commit the requested acknowledgement")
+	}
+	if !waitForCondition(2*time.Second, func() bool {
+		_, err := os.Stat(probeLog)
+		return err == nil
+	}) {
+		t.Fatal("Lookout did not start the slow fake forge probe")
+	}
+	if !waitForCondition(4*time.Second, func() bool {
+		contents, err := os.ReadFile(probeLog)
+		return err == nil && strings.Count(string(contents), "auth status") >= 2
+	}) {
+		select {
+		case err := <-done:
+			commandRunning = false
+			contents, _ := os.ReadFile(outputPath)
+			t.Fatalf("Lookout exited instead of retrying the forge probe: %v\n%s", err, contents)
+		default:
+			t.Fatal("Lookout did not retry the forge probe on the next PR poll")
+		}
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" {
+			t.Fatalf("one transient forge timeout created a pr_watch_failing Notice: %#v", notices)
+		}
+	}
+	select {
+	case err := <-done:
+		commandRunning = false
+		if err != nil {
+			contents, _ := os.ReadFile(outputPath)
+			t.Fatalf("Lookout failed after a transient forge timeout: %v\n%s", err, contents)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Lookout did not honor its bounded timeout after recovering the forge probe")
+	}
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "acknowledgement committed: 1") || !strings.Contains(string(contents), "acknowledged: 1") {
+		t.Fatalf("Lookout did not report the committed acknowledgement: %s", contents)
+	}
+	notices, err = f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" {
+			t.Fatalf("recovered forge probe left a spurious pr_watch_failing Notice: %#v", notices)
+		}
+	}
+}
+
+func TestLookoutReportsPersistentForgeProbeFailureAfterThreePolls(t *testing.T) {
+	f, noticeID, probeLog := newRetryableForgeLookoutFixture(t)
+	defer f.db.Close()
+	glab := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + probeLog + "\"\ncase \"$1 $2\" in\n  'auth status') exec sleep 3 ;;\n  *) exit 1 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "glab"), []byte(glab), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command(f.binary, "lookout", "--ack", strconv.FormatInt(noticeID, 10), "--timeout", "15000")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	outputPath := filepath.Join(f.root, "lookout-output.txt")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.Stdout, command.Stderr = output, output
+	if err := command.Start(); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		err := command.Wait()
+		_ = output.Close()
+		done <- err
+	}()
+	commandRunning := true
+	defer func() {
+		if commandRunning {
+			_ = command.Process.Kill()
+			<-done
+		}
+	}()
+	if !waitForCondition(2*time.Second, func() bool {
+		return noticeAckedAt(t, f.db, f.project.ID, noticeID) != 0
+	}) {
+		t.Fatal("Lookout did not commit the requested acknowledgement")
+	}
+	for failure := 1; failure <= 3; failure++ {
+		wantCalls := failure
+		if !waitForCondition(4*time.Second, func() bool {
+			contents, err := os.ReadFile(probeLog)
+			return err == nil && strings.Count(string(contents), "auth status") >= wantCalls
+		}) {
+			select {
+			case err := <-done:
+				commandRunning = false
+				contents, _ := os.ReadFile(outputPath)
+				t.Fatalf("Lookout exited before forge failure %d: %v\n%s", failure, err, contents)
+			default:
+				t.Fatalf("Lookout did not run forge probe %d", failure)
+			}
+		}
+		if !waitForCondition(4*time.Second, func() bool {
+			state, err := f.db.ProjectWatchState(context.Background(), f.project.ID)
+			return err == nil && state.PRConsecutiveFailures >= failure
+		}) {
+			t.Fatalf("Project failure streak did not reach %d", failure)
+		}
+		if failure < 3 {
+			notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, notice := range notices {
+				if notice.Kind == "pr_watch_failing" {
+					t.Fatalf("failure %d raised a premature pr_watch_failing Notice: %#v", failure, notice)
+				}
+			}
+			select {
+			case err := <-done:
+				commandRunning = false
+				contents, _ := os.ReadFile(outputPath)
+				t.Fatalf("Lookout exited after forge failure %d of 3: %v\n%s", failure, err, contents)
+			default:
+			}
+		}
+	}
+	select {
+	case err := <-done:
+		commandRunning = false
+		if err != nil {
+			contents, _ := os.ReadFile(outputPath)
+			t.Fatalf("Lookout failed after persistent forge errors: %v\n%s", err, contents)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Lookout did not return the persistent forge failure Notice")
+	}
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "pr_watch_failing") || !strings.Contains(string(contents), "acknowledgement committed: 1") {
+		t.Fatalf("persistent failure or acknowledgement outcome missing from Lookout output: %s", contents)
+	}
+	state, err := f.db.ProjectWatchState(context.Background(), f.project.ID)
+	if err != nil || state.PRConsecutiveFailures != 3 {
+		t.Fatalf("persistent failure count = %#v, %v; want three", state, err)
+	}
+}
+
+func newRetryableForgeLookoutFixture(t *testing.T) (*prLifecycleFixture, int64, string) {
+	t.Helper()
+	f := newPRLifecycleFixture(t)
+	stopBackgroundLookout(t, f)
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nforge = \"auto\"\npr_poll = \"1ms\"\nauto_unsaddle = \"never\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, f.repo, "remote", "set-url", "origin", "https://git.paas.vn/acme/shop.git")
+	gitTest(t, f.env, f.repo, "config", "url.file://"+f.remote+".insteadOf", "https://git.paas.vn/acme/shop.git")
+	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
+		Seq: 1, Type: "ship", Title: "Retry forge probe", LandingMode: "pr", Branch: "posse/t1",
+		PRURL: "https://git.paas.vn/acme/shop/-/merge_requests/17",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{
+		{store.StateSpawning, store.StateWorking, "cli"},
+		{store.StateWorking, store.StateFailed, "worker"},
+	} {
+		if err := f.db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, err := f.db.TaskByID(ctx, f.project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.RecordPRObservation(ctx, store.PRObservation{
+		ProjectID: f.project.ID, TaskID: taskID, PRURL: task.PRURL, HeadSHA: "1111111111111111111111111111111111111111",
+		State: "OPEN", Checks: `{"state":"PENDING","failures":[]}`, Review: "REVIEW_REQUIRED", Mergeable: "UNKNOWN", ObservedAt: time.Now().UnixMilli(),
+	}, store.PRObservationEffect{}, task); err != nil {
+		t.Fatal(err)
+	}
+	noticeID, err := f.db.CreateNotice(ctx, store.Notice{
+		ProjectID: f.project.ID, Kind: "worker_blocked", Summary: "ack before forge probing", DataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.MarkNoticesDelivered(ctx, f.project.ID, []int64{noticeID}, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	return f, noticeID, filepath.Join(f.root, "glab-probes.log")
+}
 
 func TestLookoutAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 	f := newPRLifecycleFixture(t)

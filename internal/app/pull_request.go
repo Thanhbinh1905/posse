@@ -930,6 +930,9 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	observations := make([]pendingObservation, 0, len(targets))
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
+			if isRetryableForgeProbeError(taskErr) {
+				continue
+			}
 			if strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest") {
 				if err := raiseInvalidPRDecision(ctx, db, project, task); err != nil {
 					return err

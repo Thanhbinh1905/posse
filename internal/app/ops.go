@@ -296,8 +296,13 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Flags["requeue"] != "" && parsed.Flags["ack"] != "" {
 		return axi.Usage("--requeue and --ack cannot be combined")
 	}
+	acknowledged := -1
 	if ids := parsed.Flags["ack"]; ids != "" {
-		if _, _, err := s.ackNotices(ctx, db, project, strings.Split(ids, ",")); err != nil {
+		var err error
+		acknowledged, _, err = s.ackNoticesWithCommit(ctx, db, project, strings.Split(ids, ","), func(count int) {
+			fmt.Fprintf(ctx.ErrOut, "Lookout acknowledgement committed: %d\n", count)
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -569,6 +574,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				return configError(err)
 			}
 			result := axi.Object{{Key: "project", Value: project.Name}, {Key: "notices", Value: noticeRows(ctx.Context, db, notices)}}
+			if acknowledged >= 0 {
+				result = append(result, axi.Field{Key: "acknowledged", Value: acknowledged})
+			}
 			if handoff != nil {
 				result = append(result, axi.Field{Key: "delivery", Value: noticeDeliveryRow(*handoff, true)})
 			}
@@ -604,7 +612,12 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return configError(err)
 			}
-			return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "notices", Value: []any{}}, {Key: "state", Value: "timeout"}, {Key: "lowkey", Value: cfg.Lowkey.Lead}, {Key: "reporting_rule", Value: reportingRule(cfg.Lowkey.Lead)}, {Key: "help", Value: []any{"Run `posse lookout` to keep waiting for a Notice"}}})
+			result := axi.Object{{Key: "project", Value: project.Name}, {Key: "notices", Value: []any{}}, {Key: "state", Value: "timeout"}, {Key: "lowkey", Value: cfg.Lowkey.Lead}, {Key: "reporting_rule", Value: reportingRule(cfg.Lowkey.Lead)}}
+			if acknowledged >= 0 {
+				result = append(result, axi.Field{Key: "acknowledged", Value: acknowledged})
+			}
+			result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse lookout` to keep waiting for a Notice"}})
+			return ctx.Print(result)
 		}
 		select {
 		case <-stopSignals:
@@ -653,6 +666,10 @@ func (s *Service) ack(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) ackNotices(ctx *axi.Context, db *store.DB, project store.Project, args []string) (int, []string, error) {
+	return s.ackNoticesWithCommit(ctx, db, project, args, nil)
+}
+
+func (s *Service) ackNoticesWithCommit(ctx *axi.Context, db *store.DB, project store.Project, args []string, onCommit func(int)) (int, []string, error) {
 	home, err := s.homePath()
 	if err != nil {
 		return 0, nil, err
@@ -666,8 +683,11 @@ func (s *Service) ackNotices(ctx *axi.Context, db *store.DB, project store.Proje
 		identifiers = append(identifiers, strings.Split(arg, ",")...)
 	}
 	count, err := db.AckNotices(ctx.Context, project.ID, identifiers)
+	if onCommit != nil && (err == nil || count > 0) {
+		onCommit(count)
+	}
 	if err != nil {
-		return 0, nil, axi.Failure("notice_invalid", err.Error(), false)
+		return count, nil, axi.Failure("notice_invalid", err.Error(), false)
 	}
 	autoUnsaddled := []string{}
 	if autoUnsaddleMode(cfg) == "finished" {

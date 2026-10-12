@@ -76,11 +76,12 @@ type LeadStartClaim struct {
 }
 
 type MemberPrPollState struct {
-	ProjectID  int64
-	Repo       string
-	PrPolledAt int64
-	ClaimUntil int64
-	ClaimToken string
+	ProjectID          int64
+	Repo               string
+	PrPolledAt         int64
+	ClaimUntil         int64
+	ClaimToken         string
+	ForgeProbeFailures int64
 }
 
 type Message struct {

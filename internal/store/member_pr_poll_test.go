@@ -60,6 +60,45 @@ func TestMemberPRPollClaimsAreIndependentAndDurable(t *testing.T) {
 	}
 }
 
+func TestMemberForgeProbeFailuresRaiseAfterThreeAndRemainIndependent(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		failures, err := db.RecordMemberForgeProbeFailure(ctx, project.ID, "api", int64(attempt), "forge CLI timed out")
+		if err != nil || failures != attempt {
+			t.Fatalf("api failure %d: count=%d err=%v", attempt, failures, err)
+		}
+		notices, err := db.Notices(ctx, project.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantNotices := 0
+		if attempt == 3 {
+			wantNotices = 1
+		}
+		if len(notices) != wantNotices {
+			t.Fatalf("api failure %d created %d Notices, want %d: %#v", attempt, len(notices), wantNotices, notices)
+		}
+	}
+	if failures, err := db.RecordMemberForgeProbeFailure(ctx, project.ID, "worker", 4, "forge CLI timed out"); err != nil || failures != 1 {
+		t.Fatalf("independent worker failure count=%d err=%v, want 1", failures, err)
+	}
+	if err := db.ResetMemberForgeProbeFailures(ctx, project.ID, "api"); err != nil {
+		t.Fatal(err)
+	}
+	if failures, err := db.RecordMemberForgeProbeFailure(ctx, project.ID, "api", 5, "forge CLI timed out"); err != nil || failures != 1 {
+		t.Fatalf("reset api failure count=%d err=%v, want 1", failures, err)
+	}
+}
+
 func TestMemberPRPollReleaseClearsOnlyTheMatchingClaim(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())

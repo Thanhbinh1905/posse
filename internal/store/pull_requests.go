@@ -111,6 +111,53 @@ func (db *DB) ClaimMemberPRPoll(ctx context.Context, projectID int64, repo strin
 	return token, nil
 }
 
+func (db *DB) RecordMemberForgeProbeFailure(ctx context.Context, projectID int64, repo string, at int64, failure string) (int, error) {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO member_pr_poll_state(project_id,repo) VALUES (?,?)`, projectID, repo); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE member_pr_poll_state SET forge_probe_failures=forge_probe_failures+1 WHERE project_id=? AND repo=?`, projectID, repo); err != nil {
+		return 0, err
+	}
+	var failures int
+	if err := tx.QueryRowContext(ctx, `SELECT forge_probe_failures FROM member_pr_poll_state WHERE project_id=? AND repo=?`, projectID, repo).Scan(&failures); err != nil {
+		return 0, err
+	}
+	if failures == 3 {
+		data, err := json.Marshal(map[string]any{"repo": repo, "consecutive_failures": failures, "error": failure})
+		if err != nil {
+			return 0, err
+		}
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND kind='pr_watch_failing' AND data_json=? AND acked_at IS NULL)`, projectID, string(data)).Scan(&exists); err != nil {
+			return 0, err
+		}
+		if !exists {
+			if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "pr_watch_failing", Summary: "Lookout forge probe for Member " + repo + " failed three times: " + failure, DataJSON: string(data), CreatedAt: at}); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if failures == 3 {
+		if err := db.PersistProject(ctx, projectID); err != nil {
+			return 0, err
+		}
+	}
+	return failures, nil
+}
+
+func (db *DB) ResetMemberForgeProbeFailures(ctx context.Context, projectID int64, repo string) error {
+	_, err := db.ExecContext(ctx, `UPDATE member_pr_poll_state SET forge_probe_failures=0 WHERE project_id=? AND repo=?`, projectID, repo)
+	return err
+}
+
 func (db *DB) FinishMemberPRPoll(ctx context.Context, projectID int64, repo, token string, polledAt int64) error {
 	result, err := db.ExecContext(ctx, `UPDATE member_pr_poll_state SET pr_polled_at=?,claim_until=0,claim_token='' WHERE project_id=? AND repo=? AND claim_token=?`, polledAt, projectID, repo, token)
 	if err != nil {
