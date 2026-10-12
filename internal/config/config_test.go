@@ -205,6 +205,38 @@ func TestSteeringDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestInterruptKeyDefaultsAndOverrides(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[string][]string{
+		"claude":   {"ctrl+c"},
+		"codex":    {"esc"},
+		"pi":       {"esc"},
+		"opencode": {"esc"},
+	} {
+		if !reflect.DeepEqual(cfg.Kinds[kind].InterruptKeys, want) {
+			t.Errorf("default %s interrupt keys = %v, want %v", kind, cfg.Kinds[kind].InterruptKeys, want)
+		}
+	}
+
+	writeConfig(t, filepath.Join(home, "config.toml"), "[kinds.claude]\ninterrupt_keys = [\"esc\"]\n[kinds.custom]\ninterrupt_keys = [\"ctrl+x\", \"ctrl+c\"]\n")
+	cfg, err = Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[string][]string{
+		"claude": {"esc"},
+		"custom": {"ctrl+x", "ctrl+c"},
+	} {
+		if !reflect.DeepEqual(cfg.Kinds[kind].InterruptKeys, want) {
+			t.Errorf("overridden %s interrupt keys = %v, want %v", kind, cfg.Kinds[kind].InterruptKeys, want)
+		}
+	}
+}
+
 func TestGlobalAutonomyIsRejected(t *testing.T) {
 	home := t.TempDir()
 	writeConfig(t, filepath.Join(home, "config.toml"), "[autonomy]\nland='auto'\n")

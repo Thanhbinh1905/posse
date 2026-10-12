@@ -1388,8 +1388,17 @@ func (db *DB) HasQueuedMessages(ctx context.Context, projectID int64) (bool, err
 }
 
 func (db *DB) OldestQueuedMessage(ctx context.Context, taskID int64) (Message, error) {
+	return db.queuedMessage(ctx, taskID, "")
+}
+
+func (db *DB) OldestSteerableQueuedMessage(ctx context.Context, taskID int64) (Message, error) {
+	return db.queuedMessage(ctx, taskID, " AND wait_for_idle=0")
+}
+
+func (db *DB) queuedMessage(ctx context.Context, taskID int64, predicate string) (Message, error) {
 	var message Message
-	err := db.QueryRowContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle FROM messages WHERE task_id=? AND status='queued' ORDER BY created_at, id LIMIT 1`, taskID).
+	query := `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle FROM messages WHERE task_id=? AND status='queued'` + predicate + ` ORDER BY created_at, id LIMIT 1`
+	err := db.QueryRowContext(ctx, query, taskID).
 		Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, ErrNotFound
