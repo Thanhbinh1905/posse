@@ -46,11 +46,15 @@ func TestServerStartedAtSurvivesSocketChurn(t *testing.T) {
 	}()
 	stop := make(chan struct{})
 	var churn sync.WaitGroup
-	for worker := 0; worker < 4; worker++ {
+	churnPaths := make([]string, 4)
+	for worker := range churnPaths {
+		churnPaths[worker] = filepath.Join(dir, "churn-"+strconv.Itoa(worker)+".sock")
+	}
+	for worker := range churnPaths {
 		churn.Add(1)
 		go func(worker int) {
 			defer churn.Done()
-			path := filepath.Join(dir, "churn-"+strconv.Itoa(worker)+".sock")
+			path := churnPaths[worker]
 			for {
 				select {
 				case <-stop:

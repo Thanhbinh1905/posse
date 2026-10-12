@@ -225,8 +225,24 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			return briefError(err)
 		}
 	}
+	targetBranch := ""
+	if !project.IsWorkspace() && brief.Type == "ship" {
+		if brief.Base != "" {
+			baseRef, err = selectedBranchRef(ctx.Context, project.Root, brief.Base, "base")
+			if err != nil {
+				return err
+			}
+		}
+		var targetSelected bool
+		targetBranch, targetSelected = targetBranchForTask(cfg, brief, "", project.DefaultBranch)
+		if targetSelected {
+			if _, err := selectedBranchRef(ctx.Context, project.Root, targetBranch, "target"); err != nil {
+				return err
+			}
+		}
+	}
 	if project.IsWorkspace() {
-		// Each member records its own base ref and Landing Mode; the Task keeps the strictest.
+		// Each member records its own base, target branch and Landing Mode; the Task keeps the strictest.
 		baseRef, mode = "", workspaceMode
 	}
 	if from := parsed.Flags["from-leftover"]; from != "" {
@@ -265,9 +281,16 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 							break
 						}
 					}
-					base, err := leftoverBase(ctx.Context, members[i].Root, "refs/heads/"+ref, merged, members[i].BaseRef)
+					leftoverBaseRef := members[i].BaseRef
+					if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, members[i].Name, ""); !explicit && members[i].TargetBranch != "" {
+						leftoverBaseRef, err = selectedBranchRef(ctx.Context, members[i].Root, members[i].TargetBranch, "target")
+						if err != nil {
+							return err
+						}
+					}
+					base, err := leftoverBase(ctx.Context, members[i].Root, "refs/heads/"+ref, merged, leftoverBaseRef)
 					if err != nil {
-						return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current default branch before retrying")
+						return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current target branch before retrying")
 					}
 					members[i].BaseRef = base
 					matched = true
@@ -282,9 +305,16 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			if merged == "" {
 				merged = source.BaseRef
 			}
-			baseRef, err = leftoverBase(ctx.Context, project.Root, snapshot, merged, baseRef)
+			leftoverBaseRef := baseRef
+			if brief.Base == "" && targetBranch != "" {
+				leftoverBaseRef, err = selectedBranchRef(ctx.Context, project.Root, targetBranch, "target")
+				if err != nil {
+					return err
+				}
+			}
+			baseRef, err = leftoverBase(ctx.Context, project.Root, snapshot, merged, leftoverBaseRef)
 			if err != nil {
-				return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current default branch before retrying")
+				return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current target branch before retrying")
 			}
 		}
 	}
@@ -299,7 +329,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, LandingMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
-		BaseRef: baseRef,
+		BaseRef: baseRef, TargetBranch: targetBranch,
 	}
 	crashIntentAt("ride", "before", "task.create")
 	taskID, sequence, intent, err := createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
@@ -885,6 +915,9 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 	} else if landing == "no-mistakes" {
 		work = "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Deliver only through `no-mistakes axi run --intent <from Brief>`. Never push directly or open a PR."
 	}
+	if task.Type == "ship" && !project.IsWorkspace() {
+		work += fmt.Sprintf("\n\nBranch plan: start from `%s`; PR/MR target `%s`.", task.BaseRef, taskTargetBranch(project, task))
+	}
 	signal := "posse holler done \"<summary>\""
 	if task.Type == "ship" {
 		signal += " after committing and ensuring a clean worktree"
@@ -913,7 +946,11 @@ func workspaceProtocol(project store.Project, members []taskMember) string {
 	}
 	text.WriteString("\nMember repositories checked out on the Task branch:\n")
 	for _, member := range members {
-		fmt.Fprintf(&text, "- `%s/` (Lands through %s onto %s)\n", member.Path, member.LandingMode, member.DefaultBranch)
+		targetBranch := member.TargetBranch
+		if targetBranch == "" {
+			targetBranch = member.DefaultBranch
+		}
+		fmt.Fprintf(&text, "- `%s/` (starts from %s; Lands through %s onto %s)\n", member.Path, member.BaseRef, member.LandingMode, targetBranch)
 	}
 	text.WriteString("\nCommit inside each member you change, on the checked-out branch. Leave every other folder unchanged. Other members, if present, are detached reference checkouts; read the rest at " + project.Root + "/<member>.\n")
 	return text.String()

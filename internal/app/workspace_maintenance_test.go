@@ -118,7 +118,7 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 	}
 	viewPath := filepath.Join(f.root, "good-pr-view.json")
 	view, err := json.Marshal(map[string]any{
-		"url": goodURL, "state": "MERGED", "headRefOid": goodHead, "mergeable": "MERGEABLE",
+		"url": goodURL, "state": "MERGED", "headRefOid": goodHead, "baseRefName": "main", "mergeable": "MERGEABLE",
 		"reviewDecision": "APPROVED", "mergeCommit": map[string]string{"oid": goodHead}, "statusCheckRollup": []any{},
 	})
 	if err != nil {

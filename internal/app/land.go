@@ -208,7 +208,7 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if err := runLandStep("merge", func() error { return mergeLocal(ctx.Context, project, task) }); err != nil {
 		return err
 	}
-	landedRef, err := gitOutput(ctx.Context, project.Root, "rev-parse", "refs/heads/"+project.DefaultBranch)
+	landedRef, err := gitOutput(ctx.Context, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, task))
 	if err != nil {
 		return err
 	}
@@ -286,11 +286,11 @@ func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Pro
 		}
 		merged := false
 		if current.GatedSHA != "" {
-			_, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", current.GatedSHA, "refs/heads/"+project.DefaultBranch)
+			_, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", current.GatedSHA, "refs/heads/"+taskTargetBranch(project, current))
 			merged = mergeErr == nil
 		}
 		if merged {
-			landedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+project.DefaultBranch)
+			landedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, current))
 			if err != nil {
 				return err
 			}
@@ -326,8 +326,13 @@ func verifyFastForward(ctx context.Context, project store.Project, task store.Ta
 	if task.WorktreePath == "" || task.Branch == "" {
 		return axi.Failure("land_refused", "Task has no worktree or branch", false)
 	}
-	if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", "refs/heads/"+project.DefaultBranch, "refs/heads/"+task.Branch); err != nil {
-		return axi.Failure("needs_rebase", "Task branch is not a fast-forward of the Project default branch", false, "Rebase the Task branch on "+project.DefaultBranch+" and signal done again")
+	targetRef, err := taskTargetRef(ctx, project, task)
+	if err != nil {
+		return axi.Failure("target_branch_unavailable", "could not inspect Task target branch "+taskTargetBranch(project, task), true, err.Error())
+	}
+	if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", targetRef, "refs/heads/"+task.Branch); err != nil {
+		branch := taskTargetBranch(project, task)
+		return axi.Failure("needs_rebase", "Task branch is not a fast-forward of target branch "+branch, false, "Rebase the Task branch on origin/"+branch+" and signal done again")
 	}
 	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain")
 	if err != nil {
@@ -340,24 +345,20 @@ func verifyFastForward(ctx context.Context, project store.Project, task store.Ta
 }
 
 func mergeLocal(ctx context.Context, project store.Project, task store.Task) error {
+	targetBranch := taskTargetBranch(project, task)
+	targetRef := "refs/heads/" + targetBranch
 	worktrees, err := gitOutput(ctx, project.Root, "worktree", "list", "--porcelain")
 	if err != nil {
 		return err
 	}
-	checkedOut := false
-	for _, line := range strings.Split(worktrees, "\n") {
-		if strings.TrimSpace(line) == "branch refs/heads/"+project.DefaultBranch {
-			checkedOut = true
-			break
-		}
-	}
+	checkedOut := worktreeHasBranch(worktrees, targetBranch)
 	if checkedOut {
 		branch, err := gitOutput(ctx, project.Root, "branch", "--show-current")
 		if err != nil {
 			return err
 		}
-		if branch != project.DefaultBranch {
-			return axi.Failure("land_target_busy", "default branch is checked out in a different worktree", false, "Switch the Project checkout to "+project.DefaultBranch+" and retry")
+		if branch != targetBranch {
+			return axi.Failure("land_target_busy", "target branch is checked out in a different worktree", false, "Switch the Project checkout to "+targetBranch+" and retry")
 		}
 		status, err := gitOutput(ctx, project.Root, "status", "--porcelain")
 		if err != nil {
@@ -371,7 +372,12 @@ func mergeLocal(ctx context.Context, project store.Project, task store.Task) err
 		}
 		return nil
 	}
-	output, err := gitFetch(ctx, project.Root, ".", task.GatedSHA+":refs/heads/"+project.DefaultBranch)
+	if targetBranch != project.DefaultBranch {
+		if err := ensureLocalTaskTarget(ctx, project, task); err != nil {
+			return axi.Failure("needs_rebase", "could not update target branch "+targetBranch, false, err.Error())
+		}
+	}
+	output, err := gitFetch(ctx, project.Root, ".", task.GatedSHA+":"+targetRef)
 	if err != nil {
 		details := strings.TrimSpace(output)
 		if details == "" {
@@ -726,7 +732,11 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
 					merged := false
-					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+project.DefaultBranch); mergeErr == nil {
+					targetRef, targetErr := landedTaskTargetRef(ctx, project, task)
+					if targetErr != nil {
+						return targetErr
+					}
+					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, targetRef); mergeErr == nil {
 						merged = true
 					}
 					if task.State == store.StateLanded && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {

@@ -185,7 +185,7 @@ type gitlabMergeRequest struct {
 }
 
 func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
-	endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests?state=opened&source_branch=" + url.QueryEscape(task.Branch) + "&target_branch=" + url.QueryEscape(project.DefaultBranch)
+	endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests?state=opened&source_branch=" + url.QueryEscape(task.Branch) + "&target_branch=" + url.QueryEscape(taskTargetBranch(project, task))
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()
 	foundOpenMR, lastHeadLagging := false, false
@@ -293,7 +293,7 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return "", false, err
 	}
-	created, err := runOutputStep(ctx, db, intent, "pr.create", forge.Root, "glab", "mr", "create", "--repo", "https://"+forge.Host+"/"+forge.Path, "--source-branch", task.Branch, "--target-branch", project.DefaultBranch, "--title", title, "--description", managedPublishBody(body, token), "--yes")
+	created, err := runOutputStep(ctx, db, intent, "pr.create", forge.Root, "glab", "mr", "create", "--repo", "https://"+forge.Host+"/"+forge.Path, "--source-branch", task.Branch, "--target-branch", taskTargetBranch(project, task), "--title", title, "--description", managedPublishBody(body, token), "--yes")
 	if err != nil {
 		return "", false, axi.Failure("pr_create_failed", "could not create GitLab merge request", true, err.Error())
 	}
@@ -308,7 +308,7 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 	return "", false, axi.Failure("pr_create_failed", "glab returned no merge request URL", true, created)
 }
 
-func gitlabObservation(ctx context.Context, forge repositoryForge, task store.Task, now int64) (store.PRObservation, []failedCheck, error) {
+func gitlabObservation(ctx context.Context, forge repositoryForge, task store.Task, expectedTarget string, now int64) (store.PRObservation, []failedCheck, error) {
 	number, err := forgeReference(task.PRURL, forge)
 	if err != nil {
 		return store.PRObservation{}, nil, err
@@ -326,6 +326,9 @@ func gitlabObservation(ctx context.Context, forge repositoryForge, task store.Ta
 	}
 	if state == "" {
 		return store.PRObservation{}, nil, fmt.Errorf("unknown GitLab MR state %q", mr.State)
+	}
+	if state == "MERGED" && mr.TargetBranch != expectedTarget {
+		return store.PRObservation{}, nil, fmt.Errorf("GitLab MR targets %q, expected %q", mr.TargetBranch, expectedTarget)
 	}
 	checks := checkSnapshot{State: "SUCCESS"}
 	if state == "OPEN" && mr.MergeStatus != "mergeable" {

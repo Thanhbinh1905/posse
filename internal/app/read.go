@@ -536,7 +536,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		rows := make([]any, 0, len(repos))
 		for _, repo := range repos {
-			row := axi.Object{{Key: "repo", Value: repo.Repo}, {Key: "mode", Value: repo.LandingMode}, {Key: "state", Value: repo.State}, {Key: "pr_url", Value: repo.PRURL}, {Key: "pr_state", Value: ""}}
+			row := axi.Object{{Key: "repo", Value: repo.Repo}, {Key: "mode", Value: repo.LandingMode}, {Key: "state", Value: repo.State}, {Key: "pr_url", Value: repo.PRURL}, {Key: "pr_state", Value: ""}, {Key: "target_branch", Value: repo.TargetBranch}}
 			if repo.PRURL != "" {
 				if observation, err := db.LatestMemberPRObservation(ctx.Context, task.ID, repo.Repo); err == nil {
 					row[4].Value = observation.State
@@ -627,6 +627,9 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["launch_identity_history_known"] = launchHistoryComplete(task, launchIdentities)
 		view["dispatch_rule"] = task.DispatchRule
 		view["landing_mode"] = task.LandingMode
+		if task.Type == "ship" && !project.IsWorkspace() {
+			view["target_branch"] = taskTargetBranch(project, task)
+		}
 		if task.Branch != "posse/"+taskIDString(task.Seq) {
 			view["branch"] = task.Branch
 		}

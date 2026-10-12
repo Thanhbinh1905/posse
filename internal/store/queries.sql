@@ -41,11 +41,11 @@ UPDATE projects SET last_activity_at = ? WHERE projects.id = (SELECT project_id 
 -- name: InsertTask :execresult
 INSERT INTO tasks(
     project_id, seq, type, reviews_task_id, title, short_name, state, profile, dispatch_rule,
-    landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path,
+    landing_mode, autonomy_review, autonomy_land, branch, base_ref, target_branch, worktree_path,
     herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, agent_session_kind, pr_url,
     landed_ref, last_output_hash, last_worktree_hash, last_progress_at,
     agent_absent_since, idle_since, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertProject :execresult
 INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)
