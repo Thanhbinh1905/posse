@@ -489,6 +489,16 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, err
 	}
+	var discardPRs []discardPullRequest
+	if discardable {
+		discardPRs, err = s.discardPullRequests(ctx, db, project, task)
+		if err != nil {
+			return result, err
+		}
+		if err := s.requireDiscardPullRequestsUnmerged(ctx, db, discardPRs, cfg); err != nil {
+			return result, err
+		}
+	}
 	if discardable {
 		if mountHeld {
 			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
@@ -521,6 +531,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return s.captureDiscardTips(ctx, db, home, project, task)
 		}); err != nil {
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "discard tip capture", err)
+		}
+		if err := s.closeAndVerifyDiscardPullRequests(ctx, db, discardPRs, cfg); err != nil {
+			return result, s.unsaddleDiscardIncomplete(ctx, db, project, task, "recorded pull request closure", err)
 		}
 	}
 	var paneResult teardownPanes

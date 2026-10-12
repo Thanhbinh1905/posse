@@ -113,7 +113,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Rider in the same Mount, optionally with another Profile.", Handler: s.relaunch},
 		{Name: "land", Summary: "Land a completed Ship Task.", Handler: s.land},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
-		{Name: "unsaddle", Summary: "Teardown a finished Task or discard unlanded work with User approval after its Rider exits.", Handler: s.teardown},
+		{Name: "unsaddle", Summary: "Teardown a finished Task or discard unlanded work with User approval after its Rider exits and recorded PRs are verified closed.", Handler: s.teardown},
 		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only]", Summary: "Acknowledge requested Notices and wait; adapters can use receipt-backed handoff.", Handler: s.wait},
 		{Name: "remuda", Summary: "List a Project's Remuda or prune safe, Posse-owned leftovers.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},

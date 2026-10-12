@@ -671,6 +671,116 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	}
 }
 
+func TestApprovedDiscardClosesAndVerifiesRecordedPR(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+
+	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
+	if !strings.Contains(output, "torn-down") {
+		t.Fatalf("approved discard did not complete after closing the PR: %s", output)
+	}
+	if current := fixture.mustTask(t, "t1"); current.State != store.StateTornDown || current.PRURL != task.PRURL {
+		t.Fatalf("discard did not preserve Task state and PR history: %#v", current)
+	}
+	if _, err := os.Stat(fixture.ghPRClosed); err != nil {
+		t.Fatalf("recorded PR was not closed by the forge: %v", err)
+	}
+	calls, err := os.ReadFile(fixture.ghLog)
+	if err != nil || !strings.Contains(string(calls), "pr close https://github.com/acme/shop/pull/17") {
+		t.Fatalf("discard did not close the recorded PR through gh: %s %v", calls, err)
+	}
+	observation, err := fixture.db.LatestPRObservation(context.Background(), task.ID)
+	if err != nil || observation.State != "CLOSED" || observation.PRURL != task.PRURL {
+		t.Fatalf("discard did not preserve the verified closure observation: %#v %v", observation, err)
+	}
+	if _, err := fixture.db.MountByTask(context.Background(), task.ID); !store.IsNotFound(err) {
+		t.Fatalf("verified discard did not release the Mount: %v", err)
+	}
+}
+
+func TestApprovedDiscardKeepsMountHeldWhenPRCloseFails(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+	if err := os.WriteFile(fixture.ghCloseFail, []byte("fail\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command(fixture.binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "unsaddle_incomplete") || !strings.Contains(string(output), "keeps the Mount held") {
+		t.Fatalf("failed forge close did not refuse discard: err=%v output=%s", err, output)
+	}
+	current := fixture.mustTask(t, "t1")
+	mount, mountErr := fixture.db.MountByTask(context.Background(), task.ID)
+	if current.State != store.StateLanding || mountErr != nil || mount.State != "held" {
+		t.Fatalf("failed PR close changed Task custody: task=%#v mount=%#v err=%v", current, mount, mountErr)
+	}
+	if _, err := os.Stat(fixture.ghPRClosed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed close unexpectedly changed forge state: %v", err)
+	}
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	snapshot, err := client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == task.PaneID {
+			return
+		}
+	}
+	t.Fatal("failed PR close proceeded to close the Rider pane")
+}
+
+func TestApprovedDiscardRefusesMergedPR(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", "merge-sha", task.GatedSHA)
+
+	command := exec.Command(fixture.binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "pr_merged") {
+		t.Fatalf("merged PR was not refused before discard: err=%v output=%s", err, output)
+	}
+	current := fixture.mustTask(t, "t1")
+	mount, mountErr := fixture.db.MountByTask(context.Background(), task.ID)
+	if current.State != store.StateLanding || mountErr != nil || mount.State != "held" {
+		t.Fatalf("merged-PR refusal changed Task custody: task=%#v mount=%#v err=%v", current, mount, mountErr)
+	}
+	if _, err := os.Stat(fixture.ghPRClosed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("merged PR was sent a close request: %v", err)
+	}
+	calls, err := os.ReadFile(fixture.ghLog)
+	if err != nil || strings.Contains(string(calls), "pr close") {
+		t.Fatalf("merged PR was sent a close request: %s %v", calls, err)
+	}
+	var approvals int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='discard'`, task.ID).Scan(&approvals); err != nil || approvals != 0 {
+		t.Fatalf("merged PR refusal recorded %d discard approvals: %v", approvals, err)
+	}
+}
+
+func prepareDiscardPRTask(t *testing.T, fixture *prLifecycleFixture) store.Task {
+	t.Helper()
+	brief := filepath.Join(fixture.root, "discard-pr.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change for approved-discard PR closure.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.rideAndComplete(t, brief, "t1")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
+	task := fixture.mustTask(t, "t1")
+	if task.State != store.StateLanding || task.PRURL == "" || task.GatedSHA == "" {
+		t.Fatalf("fixture did not open a recorded PR: %#v", task)
+	}
+	fixture.exitRider(t, "t1")
+	stopBackgroundLookout(t, fixture)
+	return task
+}
+
 func TestClosedPRDiscardRechecksForgeStateBeforeTeardown(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
@@ -1333,22 +1443,24 @@ func TestPRCreateCrashRecoveryAdoptsOpenPullRequest(t *testing.T) {
 }
 
 type prLifecycleFixture struct {
-	root      string
-	repo      string
-	remote    string
-	home      string
-	binary    string
-	env       []string
-	leadEnv   []string
-	fixGate   string
-	ghLog     string
-	ghState   string
-	ghOpenPRs string
-	ghMerge   string
-	ghBody    string
-	ghTitle   string
-	db        *store.DB
-	project   store.Project
+	root        string
+	repo        string
+	remote      string
+	home        string
+	binary      string
+	env         []string
+	leadEnv     []string
+	fixGate     string
+	ghLog       string
+	ghState     string
+	ghOpenPRs   string
+	ghMerge     string
+	ghBody      string
+	ghTitle     string
+	ghPRClosed  string
+	ghCloseFail string
+	db          *store.DB
+	project     store.Project
 }
 
 func newPRLifecycleFixture(t *testing.T) *prLifecycleFixture {
@@ -1391,6 +1503,8 @@ func newPRLifecycleFixtureWithLeadAndShell(t *testing.T, liveLead, slowLoginShel
 	env = setEnv(env, "POSSE_TEST_GH_MERGE", filepath.Join(root, "gh-merge-called"))
 	env = setEnv(env, "POSSE_TEST_GH_BODY", filepath.Join(root, "gh-body.md"))
 	env = setEnv(env, "POSSE_TEST_GH_TITLE", filepath.Join(root, "gh-title.txt"))
+	env = setEnv(env, "POSSE_TEST_GH_PR_CLOSED", filepath.Join(root, "gh-pr-closed"))
+	env = setEnv(env, "POSSE_TEST_GH_CLOSE_FAIL", filepath.Join(root, "gh-close-fail"))
 	env = setEnv(env, "POSSE_TEST_REMOTE", filepath.Join(root, "origin.git"))
 	env = setEnv(env, "POSSE_TEST_GH_FAIL", "")
 	env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1517,11 +1631,19 @@ case "$1 $2" in
       *'--json title,body'*) python3 -c 'import json,sys; print(json.dumps({"title":open(sys.argv[1]).read(),"body":open(sys.argv[2]).read()}))' "$POSSE_TEST_GH_TITLE" "$POSSE_TEST_GH_BODY" ;;
       *)
         case "$3" in */17) branch=$(git --git-dir="$POSSE_TEST_REMOTE" for-each-ref --format='%(refname:short)' 'refs/heads/posse/pr-*' | head -1) ;; */18) branch=posse/external-merge-change ;; *) exit 90 ;; esac
-        head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
+        head=
+        if [ -n "$branch" ]; then head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch"); fi
         state=OPEN
-        if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then state=MERGED; fi
+        if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then state=MERGED
+        elif grep -q '"state":"CLOSED"' "$POSSE_TEST_GH_STATE" || [ -e "$POSSE_TEST_GH_PR_CLOSED" ]; then state=CLOSED
+        fi
         printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"main","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$state" "$head" "$branch" ;;
     esac ;;
+  "pr close")
+    if [ -e "$POSSE_TEST_GH_CLOSE_FAIL" ]; then printf 'close failed\n' >&2; exit 1; fi
+    if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then printf 'already merged\n' >&2; exit 1; fi
+    : > "$POSSE_TEST_GH_PR_CLOSED"
+    printf 'Closed\n' ;;
   "pr merge") : > "$POSSE_TEST_GH_MERGE"; printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
 esac
@@ -1610,7 +1732,8 @@ esac
 		env: env, leadEnv: leadEnv, fixGate: fixGate, ghLog: filepath.Join(root, "gh.log"),
 		ghState: filepath.Join(root, "gh-state.json"), ghOpenPRs: filepath.Join(root, "gh-open-prs.json"),
 		ghMerge: filepath.Join(root, "gh-merge-called"), ghBody: filepath.Join(root, "gh-body.md"),
-		ghTitle: filepath.Join(root, "gh-title.txt"), db: opened, project: project,
+		ghTitle: filepath.Join(root, "gh-title.txt"), ghPRClosed: filepath.Join(root, "gh-pr-closed"),
+		ghCloseFail: filepath.Join(root, "gh-close-fail"), db: opened, project: project,
 	}
 }
 
@@ -1704,6 +1827,33 @@ func leadFinalizerPIDs(root, binary string) ([]int, error) {
 		}
 	}
 	return pids, nil
+}
+
+func (fixture *prLifecycleFixture) exitRider(t *testing.T, taskID string) {
+	t.Helper()
+	task := fixture.mustTask(t, taskID)
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if _, err := client.Run(context.Background(), "pane", "send-keys", task.PaneID, "ctrl+d"); err != nil {
+		t.Fatalf("send EOF to fixture Rider %s: %v", taskID, err)
+	}
+	var lastProcessInfo json.RawMessage
+	if !waitForCondition(5*time.Second, func() bool {
+		raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
+		if err != nil {
+			lastProcessInfo = json.RawMessage(err.Error())
+			return false
+		}
+		lastProcessInfo = append(lastProcessInfo[:0], raw...)
+		var info struct {
+			ProcessInfo struct {
+				ShellPID                 int `json:"shell_pid"`
+				ForegroundProcessGroupID int `json:"foreground_process_group_id"`
+			} `json:"process_info"`
+		}
+		return json.Unmarshal(raw, &info) == nil && info.ProcessInfo.ShellPID > 0 && (info.ProcessInfo.ForegroundProcessGroupID <= 1 || info.ProcessInfo.ForegroundProcessGroupID == info.ProcessInfo.ShellPID)
+	}) {
+		t.Fatalf("fixture Rider %s did not exit naturally: process_info=%s", taskID, lastProcessInfo)
+	}
 }
 
 func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID string) store.Task {

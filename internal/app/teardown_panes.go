@@ -542,6 +542,13 @@ func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project 
 	return axi.Failure("unsaddle_incomplete", cause.Error(), retryable, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
 }
 
+func (s *Service) unsaddleDiscardIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, step string, cause error) error {
+	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
+		return errors.Join(cause, err)
+	}
+	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+" --discard --user-approved \"<User's original words>\"`")
+}
+
 func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
 	notices, err := db.Notices(ctx, project.ID, false)
 	if err != nil {
