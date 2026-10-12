@@ -47,10 +47,20 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 	lines := strings.Split(normalizeModelTerminalOutput(output), "\n")
 	for i := 0; i+1 < len(lines); i++ {
 		errorLine := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(strings.ToLower(errorLine), "error:") || strings.TrimSpace(lines[i+1]) != piErrorHelpLine || piErrorInsideToolOutput(lines, i) {
+		if strings.TrimSpace(lines[i+1]) != piErrorHelpLine || piErrorInsideToolOutput(lines, i) {
 			continue
 		}
-		message := strings.ToLower(strings.TrimSpace(errorLine[len("Error:"):]))
+		lowerErrorLine := strings.ToLower(errorLine)
+		var message string
+		switch {
+		case strings.HasPrefix(lowerErrorLine, "error:"):
+			message = strings.TrimSpace(errorLine[len("Error:"):])
+		case strings.HasPrefix(lowerErrorLine, "stream error:"):
+			message = errorLine
+		default:
+			continue
+		}
+		message = strings.ToLower(strings.TrimSpace(message))
 		if len(message) > 2048 || !piFooterOnly(lines[i+2:]) {
 			continue
 		}

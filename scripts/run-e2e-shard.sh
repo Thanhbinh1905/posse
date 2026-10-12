@@ -92,6 +92,7 @@ assignments='
 3 TestReviewRejectsExplicitAuthorSessionResume
 3 TestFocusedRiderLaunch
 3 TestPiStreamDisconnectIsNotNudgedIntoFocusedRider
+3 TestPiUnprefixedStreamDisconnectAfterEditAutomaticallyResumes
 3 TestT242QueuedLeadInstructionWins
 3 TestT242BackoffIsPersistedAndBounded
 3 TestT247RealPiSuccessfulGrepIsNotRetried
