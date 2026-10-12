@@ -144,6 +144,26 @@ func (db *DB) ObsoletePendingLeftoverDecision(ctx context.Context, id int64) err
 	return db.PersistProject(ctx, projectID)
 }
 
+// ObsoleteAppliedLeftoverDecision retires an unrecoverable Leftover Decision
+// after its approved discard has completed Teardown.
+func (db *DB) ObsoleteAppliedLeftoverDecision(ctx context.Context, id int64) error {
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Unrecoverable Leftover resolved during Teardown'
+		WHERE id=? AND kind='leftover' AND origin LIKE 'leftover:unrecoverable:%' AND answer='discard' AND answered_at>0 AND obsolete_at=0
+		AND EXISTS(SELECT 1 FROM tasks WHERE tasks.id=decisions.task_id AND tasks.state='torn-down')`, time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM decisions WHERE id=?`, id).Scan(&projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
+}
+
 // QueueDecisionMessage makes applying a Review answer retry-safe.
 func (db *DB) QueueDecisionMessage(ctx context.Context, decision Decision, targetID int64, body string) error {
 	tx, err := db.beginTxWithRetry(ctx)
@@ -269,8 +289,8 @@ func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int
 	return db.PersistProject(ctx, projectID)
 }
 
-// ObsoleteResolvedDecisions removes resolved questions from the pending list
-// without pretending the User answered them. Answered and manual Decisions stay.
+// ObsoleteResolvedDecisions removes unanswered questions whose situation has
+// resolved. Answered Decisions are otherwise retained.
 func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) error {
 	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=CASE kind
 		WHEN 'land_ready' THEN 'Task left landing'

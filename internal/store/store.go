@@ -32,6 +32,7 @@ type DB struct {
 
 var ErrNotFound = sql.ErrNoRows
 var ErrStateRace = errors.New("Task state changed concurrently")
+var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition is only valid for User-approved discard")
 var ErrBusy = errors.New("database contention; retry the operation")
 
 const sqliteBusyTimeoutMillis = 5000
@@ -299,6 +300,13 @@ const (
 	StateTornDown      State = "torn-down"
 )
 
+// IsApprovedDiscardSourceState reports whether User approval can authorize
+// tearing down a Task from this state. Keep this predicate centralized so the
+// allowed set can expand without changing each discard path independently.
+func IsApprovedDiscardSourceState(state State) bool {
+	return oneOfState(state, StateFailed, StateLost, StateStalled, StateReported, StateLanded)
+}
+
 func taskAcceptsInstruction(state State, taskType string) bool {
 	if oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled) {
 		return true
@@ -330,8 +338,8 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 	if err := validateTransitionSource(expected, next, source); err != nil {
 		return err
 	}
-	if next == StateTornDown && (expected == StateFailed || expected == StateLost || expected == StateStalled) {
-		return fmt.Errorf("discarding unlanded work requires a recorded User approval")
+	if next == StateTornDown && source == "user" && IsApprovedDiscardSourceState(expected) {
+		return fmt.Errorf("approved discard requires a recorded User approval")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -348,8 +356,8 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 }
 
 func (db *DB) TransitionWithApproval(ctx context.Context, taskID int64, expected, next State, source, note, action, quote string) error {
-	if next != StateTornDown || !oneOfState(expected, StateFailed, StateLost, StateStalled) || source != "user" {
-		return fmt.Errorf("approval-backed transition is only valid for User-approved discard")
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" {
+		return ErrInvalidApprovedDiscardTransition
 	}
 	if strings.TrimSpace(quote) == "" {
 		return fmt.Errorf("user approval quote is required")
@@ -406,8 +414,8 @@ func (db *DB) LatestApprovalQuote(ctx context.Context, taskID int64, action stri
 }
 
 func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
-	if next != StateTornDown || !oneOfState(expected, StateFailed, StateLost, StateStalled) || source != "user" {
-		return fmt.Errorf("approval-backed transition is only valid for User-approved discard")
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" {
+		return ErrInvalidApprovedDiscardTransition
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -478,7 +486,9 @@ func validateTransitionSource(from, to State, source string) error {
 		}
 	case (from == StateFailed || from == StateLost) && to == StateWorking:
 		expected = "cli"
-	case (from == StateFailed || from == StateLost || from == StateStalled) && to == StateTornDown:
+	case to == StateTornDown && source == "user" && IsApprovedDiscardSourceState(from):
+		expected = "user"
+	case to == StateTornDown && oneOfState(from, StateFailed, StateLost, StateStalled):
 		expected = "user"
 	}
 	if source != expected {
