@@ -689,6 +689,10 @@ func TestApprovedDiscardClosesAndVerifiesRecordedPR(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	task := prepareDiscardPRTask(t, fixture)
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": task.PaneID}); err != nil {
+		t.Fatalf("close the exited Task pane before discard: %v", err)
+	}
 
 	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
 	if !strings.Contains(output, "torn-down") {
@@ -890,7 +894,8 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 			f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
 			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
 			if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
-				t.Fatalf("merged Task did not release its Rider: %#v", task)
+				notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+				t.Fatalf("merged Task did not release its Rider: %#v notices=%#v", task, notices)
 			}
 			assertMountUnlocked(t, f.env, f.repo, landing.WorktreePath)
 			f.requireNotice(t, "t1", "pr_merged")

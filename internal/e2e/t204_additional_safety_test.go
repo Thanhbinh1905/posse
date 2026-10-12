@@ -18,6 +18,26 @@ import (
 )
 
 // The shim changes timing only. All Task delivery and pruning use the real CLI.
+func showAfterActiveTeardown(t *testing.T, f *prLifecycleFixture, taskID string) string {
+	t.Helper()
+	command := exec.Command(f.binary, "show", taskID)
+	command.Dir, command.Env = f.repo, f.leadEnv
+	output, err := command.CombinedOutput()
+	if err == nil {
+		return string(output)
+	}
+	if !strings.Contains(string(output), `"teardown_in_progress"`) {
+		t.Fatalf("posse show %s: %v\n%s", taskID, err, output)
+	}
+	if !waitForCondition(30*time.Second, func() bool {
+		task, taskErr := f.db.Task(context.Background(), f.project.ID, taskID)
+		return taskErr == nil && task.State == store.StateTornDown
+	}) {
+		t.Fatalf("Task %s Teardown did not finish after its progress response: %s", taskID, output)
+	}
+	return runPosse(t, f.binary, f.repo, f.leadEnv, "show", taskID)
+}
+
 func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
@@ -30,7 +50,7 @@ func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merged, task.GatedSHA)
-	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	showAfterActiveTeardown(t, f, "t1")
 	task = f.mustTask(t, "t1")
 	if task.State != store.StateTornDown {
 		t.Fatalf("Task did not tear down: %#v", task)
@@ -285,7 +305,7 @@ func TestRiderMappingIsStoppedBeforeRelease(t *testing.T) {
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merged, task.GatedSHA)
-	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	showAfterActiveTeardown(t, f, "t1")
 	task = f.mustTask(t, "t1")
 	if task.State != store.StateTornDown {
 		t.Fatalf("actual Rider did not finish Teardown: %#v", task)

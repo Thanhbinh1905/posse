@@ -81,13 +81,25 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 		tmpDir = os.TempDir()
 	}
 	tmpDirAbs, tmpDirErr := filepath.Abs(tmpDir)
+	if tmpDirErr == nil {
+		tmpDirAbs, tmpDirErr = filepath.EvalSymlinks(tmpDirAbs)
+	}
 	scratchRoot := filepath.Clean(env["POSSE_E2E_TMP_ROOT"])
-	insideScratch := strings.HasPrefix(scratchRoot, "/tmp/posse-") && strings.HasSuffix(scratchRoot, "-scratch") && inside(scratchRoot, rootAbs)
+	insideScratch := safeTaskScratchRoot(scratchRoot) && inside(scratchRoot, rootAbs)
 	parent := filepath.Dir(rootAbs)
 	configuredTemp := filepath.IsAbs(tmpDir) && tmpDirErr == nil && filepath.Clean(tmpDirAbs) != string(filepath.Separator) && parent == filepath.Clean(tmpDirAbs)
-	parentIsTemp := parent == "/tmp" || parent == filepath.Clean(os.TempDir()) || configuredTemp
-	if env["POSSE_TEST_HERDR"] != "1" || rootErr != nil || tmpDirErr != nil || !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(rootAbs), "posse-e2e-") || !parentIsTemp && !insideScratch {
-		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires an absolute /tmp/posse-e2e-* root, a fixture under the configured E2E scratch root, or a fixture directly under TMPDIR"}
+	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || parent == filepath.Clean(os.TempDir()) || configuredTemp
+	resolvedRoot, resolveErr := filepath.EvalSymlinks(rootAbs)
+	insideTemp := false
+	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
+		relative, err := filepath.Rel(tempRoot, resolvedRoot)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			insideTemp = true
+			break
+		}
+	}
+	if env["POSSE_TEST_HERDR"] != "1" || rootErr != nil || tmpDirErr != nil || resolveErr != nil || !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(rootAbs), "posse-e2e-") || !parentIsTemp && !insideScratch || !insideTemp && !insideScratch {
+		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* root, a fixture under the configured E2E scratch root, or a fixture directly under TMPDIR"}
 	}
 	root = rootAbs
 	for key := range env {
@@ -117,6 +129,18 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr config must disable background update network checks"}
 	}
 	return root, nil
+}
+
+func safeTaskScratchRoot(root string) bool {
+	if filepath.Clean(root) != root || filepath.Dir(root) != "/tmp" || !strings.HasPrefix(filepath.Base(root), "posse-") || !strings.HasSuffix(filepath.Base(root), "-scratch") {
+		return false
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	return err == nil && resolved == root
 }
 
 func isolatedDefaultShell(config string) string {

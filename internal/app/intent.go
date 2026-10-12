@@ -79,7 +79,7 @@ func (s *Service) beginIntentStep(ctx context.Context, db *store.DB, intent stor
 }
 
 func unsaddleStepIndex(step string) int {
-	steps := []string{"approval.record", "discard.capture", "panes.close", "mount.stop", "leftover.snapshot", "report.attachments", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"}
+	steps := []string{"approval.record", "discard.capture", "process.stop", "panes.close", "mount.stop", "leftover.snapshot", "report.attachments", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"}
 	for index, candidate := range steps {
 		if candidate == step {
 			return index
@@ -97,8 +97,15 @@ func (s *Service) runIntentStep(ctx context.Context, db *store.DB, intent store.
 		priorStep := strings.TrimPrefix(current.Step, "resuming:")
 		priorDone := strings.HasPrefix(priorStep, "done:")
 		priorName := strings.TrimPrefix(strings.TrimPrefix(priorStep, "done:"), "in_progress:")
-		if priorDone && priorName == step || unsaddleStepIndex(priorName) > unsaddleStepIndex(step) {
+		if priorDone && priorName == step {
 			return nil
+		}
+		if unsaddleStepIndex(priorName) > unsaddleStepIndex(step) {
+			// Older A01 Teardown stopped processes before verifying pane removal.
+			// Recheck that safety boundary when resuming such an intent.
+			if step != "panes.close" || priorName != "mount.stop" {
+				return nil
+			}
 		}
 	}
 	if err := s.beginIntentStep(ctx, db, intent, step); err != nil {

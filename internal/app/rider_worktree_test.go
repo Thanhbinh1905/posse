@@ -27,25 +27,26 @@ func linkedRiderSession(t *testing.T) (store.Project, store.Task, *changingSnaps
 	return project, task, adapter
 }
 
-func TestTeardownClosesOnlyVerifiedLinkedChildWithoutGroupFlag(t *testing.T) {
+func TestTeardownVerifiesHerdrRemovedOnlyTheLinkedChild(t *testing.T) {
 	project, task, adapter := linkedRiderSession(t)
-	result, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
+	service := testService(t.TempDir(), adapter)
+	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Closed) != 1 || result.Closed[0] != "w2:p1" || adapter.CallCount("workspace.close") != 1 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.focus") != 0 {
-		t.Fatalf("child teardown: result=%+v calls=%+v", result, adapter.Calls)
+	adapter.removePanes("w2:p1")
+	result, err := service.verifyTaskPanesClosed(context.Background(), project, task, plan)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, call := range adapter.Calls {
-		if call.Method == "workspace.close" && (call.Params["workspace_id"] != "w2" || call.Params["close_group"] != nil) {
-			t.Fatalf("unsafe group close: %+v", call)
-		}
+	if len(result.Closed) != 1 || result.Closed[0] != "w2:p1" || adapter.CallCount("workspace.close") != 0 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 0 || adapter.CallCount("pane.focus") != 0 {
+		t.Fatalf("child teardown: result=%+v calls=%+v", result, adapter.Calls)
 	}
 	// A stale recorded workspace id cannot claim a reused User workspace.
 	project, task, adapter = riderTabSession(t)
 	task.HerdrWorkspaceID = "w3"
 	task.PaneLabel = "posse:shop:t9"
-	if _, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task); err != nil {
+	if _, err := testService(t.TempDir(), adapter).verifyTaskPanesGone(context.Background(), project, task); err != nil {
 		t.Fatal(err)
 	}
 	if adapter.CallCount("workspace.close") != 0 {
@@ -56,24 +57,36 @@ func TestTeardownClosesOnlyVerifiedLinkedChildWithoutGroupFlag(t *testing.T) {
 func TestForeignPaneKeepsLinkedChildOpen(t *testing.T) {
 	project, task, adapter := linkedRiderSession(t)
 	adapter.addPane(herdr.Pane{PaneID: "w2:p2", WorkspaceID: "w2", TabID: "w2:t1", Label: "user-notes", CWD: task.WorktreePath})
-	result, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
+	service := testService(t.TempDir(), adapter)
+	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if adapter.CallCount("workspace.close") != 0 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 1 || len(result.Foreign) != 1 || result.Foreign[0] != "w2:p2" {
-		t.Fatalf("foreign child pane was closed: result=%+v calls=%+v", result, adapter.Calls)
+	adapter.removePanes("w2:p1")
+	result, err := service.verifyTaskPanesClosed(context.Background(), project, task, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapter.CallCount("workspace.close") != 0 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 0 || len(result.Foreign) != 1 || result.Foreign[0] != "w2:p2" {
+		t.Fatalf("foreign child pane was not preserved and reported: result=%+v calls=%+v", result, adapter.Calls)
 	}
 }
 
-func TestCrashBetweenWorktreeOpenAndPaneLabelClosesOnlyEmptyChild(t *testing.T) {
+func TestCrashBetweenWorktreeOpenAndPaneLabelWaitsForHerdrRemoval(t *testing.T) {
 	project, task, adapter := linkedRiderSession(t)
 	task.ShortName = "first"
 	adapter.snapshot.Panes[2].Agent = ""
 	adapter.snapshot.Panes[2].Label = ""
 	adapter.snapshot.Agents = nil
-	result, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
-	if err != nil || adapter.CallCount("workspace.close") != 1 || len(result.Closed) != 1 {
-		t.Fatalf("unlabeled child was not recovered: %+v %v calls=%+v", result, err, adapter.Calls)
+	service := testService(t.TempDir(), adapter)
+	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.removePanes("w2:p1")
+	result, err := service.verifyTaskPanesClosed(context.Background(), project, task, plan)
+	if err != nil || adapter.CallCount("workspace.close") != 0 || len(result.Closed) != 1 {
+		t.Fatalf("unlabeled child verification: %+v %v calls=%+v", result, err, adapter.Calls)
 	}
 	project, task, adapter = linkedRiderSession(t)
 	task.ShortName = "first"
@@ -81,10 +94,22 @@ func TestCrashBetweenWorktreeOpenAndPaneLabelClosesOnlyEmptyChild(t *testing.T) 
 	adapter.snapshot.Panes[2].Label = ""
 	adapter.snapshot.Agents = nil
 	adapter.addPane(herdr.Pane{PaneID: "w2:p2", WorkspaceID: "w2", Label: "user-shell", CWD: task.WorktreePath})
-	_, err = testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
-	if err != nil || adapter.CallCount("workspace.close") != 0 {
-		t.Fatalf("unlabeled child with foreign pane was closed: %v calls=%+v", err, adapter.Calls)
+	service = testService(t.TempDir(), adapter)
+	plan, err = service.planTaskPaneTeardown(context.Background(), project, task)
+	if err != nil {
+		t.Fatal(err)
 	}
+	adapter.removePanes("w2:p1")
+	result, err = service.verifyTaskPanesClosed(context.Background(), project, task, plan)
+	if err != nil || adapter.CallCount("workspace.close") != 0 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 0 {
+		t.Fatalf("unlabeled child with foreign pane was not preserved: %+v %v calls=%+v", result, err, adapter.Calls)
+	}
+	for _, pane := range adapter.currentSnapshot().Panes {
+		if pane.PaneID == "w2:p2" {
+			return
+		}
+	}
+	t.Fatal("foreign pane disappeared during unlabeled-child verification")
 }
 
 func TestPartlyRecoveredGroupStillNeedsRecovery(t *testing.T) {

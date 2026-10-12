@@ -715,31 +715,14 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 		return nil, nil
 	}
 	if mount.State == "releasing" {
-		if approvedDiscard {
-			processes, err := ownedProcessesInRoots([]ownedProcessRoot{{path: mount.Path}})
-			if err != nil {
-				return nil, err
-			}
-			if len(processes) > 0 {
-				return nil, axi.Failure("discard_processes_present", "refusing to finish releasing a discarded Task Mount while processes remain", true, "No process was stopped or signalled. Inspect the Mount processes, then retry discard")
-			}
+		if err := requireNoMountProcesses(mount.Path, approvedDiscard); err != nil {
+			return nil, err
 		}
 		return nil, finishReleasingMount(ctx, db, project, mount, task)
 	}
 	var killed []string
-	if approvedDiscard {
-		processes, err := ownedProcessesInRoots([]ownedProcessRoot{{path: mount.Path}})
-		if err != nil {
-			return nil, err
-		}
-		if len(processes) > 0 {
-			return nil, axi.Failure("discard_processes_present", "refusing to release a discarded Task Mount while processes remain", true, "No process was stopped or signalled. Inspect the Mount processes, then retry discard")
-		}
-	} else {
-		killed, err = stopMountProcesses(mount.Path)
-		if err != nil {
-			return killed, err
-		}
+	if err := requireNoMountProcesses(mount.Path, approvedDiscard); err != nil {
+		return nil, err
 	}
 	var resetErr error
 	if project.IsWorkspace() {
@@ -769,6 +752,28 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 		}
 		return finishReleasingMountLocked(ctx, db, project, mount, task)
 	})
+}
+
+func requireNoMountProcesses(path string, approvedDiscard bool) error {
+	root, err := normalizeOwnedProcessRoot(path)
+	if err != nil {
+		return err
+	}
+	pids, err := processIDsInRoots([]ownedProcessRoot{{path: root}})
+	if err != nil {
+		return err
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+	labels := make([]string, len(pids))
+	for index, pid := range pids {
+		labels[index] = strconv.Itoa(pid)
+	}
+	if approvedDiscard {
+		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Mount while processes remain", true, strings.Join(labels, ","), "No process was stopped or signalled. Inspect the Mount processes, then retry discard")
+	}
+	return axi.Failure("mount_process_identity_unavailable", "cannot release the Mount because live processes were not authorized during ownership proof: "+strings.Join(labels, ","), true, strings.Join(labels, ","), "Inspect the Mount processes and retry Teardown after they exit")
 }
 
 func finishReleasingMount(ctx context.Context, db *store.DB, project store.Project, mount store.Mount, task store.Task) error {
@@ -938,25 +943,8 @@ type ownedProcessRoot struct {
 }
 
 type ownedProcess struct {
-	pid       int
-	bootID    string
-	startTime string
-}
-
-func stopMountProcesses(path string) ([]string, error) {
-	root, err := normalizeOwnedProcessRoot(path)
-	if err != nil {
-		return nil, err
-	}
-	return stopOwnedProcesses([]ownedProcessRoot{{path: root}})
-}
-
-func stopTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) ([]string, error) {
-	roots, err := taskOwnedProcessRoots(ctx, db, home, project, task)
-	if err != nil {
-		return nil, err
-	}
-	return stopOwnedProcesses(roots)
+	pid    int
+	handle *mountProcessHandle
 }
 
 func verifyNoTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
@@ -964,16 +952,16 @@ func verifyNoTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, 
 	if err != nil {
 		return err
 	}
-	processes, err := ownedProcessesInRoots(roots)
+	pids, err := processIDsInRoots(roots)
 	if err != nil {
 		return err
 	}
-	if len(processes) > 0 {
-		pids := make([]string, len(processes))
-		for index, process := range processes {
-			pids[index] = strconv.Itoa(process.pid)
+	if len(pids) > 0 {
+		labels := make([]string, len(pids))
+		for index, pid := range pids {
+			labels[index] = strconv.Itoa(pid)
 		}
-		return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, strings.Join(pids, ","), "No process was stopped or signalled. Inspect the Mount and scratch processes, then retry discard")
+		return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, strings.Join(labels, ","), "No process was stopped or signalled. Inspect the Mount and scratch processes, then retry discard")
 	}
 	return nil
 }
@@ -1000,7 +988,6 @@ func taskOwnedProcessRoots(ctx context.Context, db *store.DB, home string, proje
 	roots = append(roots, ownedProcessRoot{path: scratch, includeOpenFiles: true, includeMappedFiles: true})
 	return roots, nil
 }
-
 func normalizeOwnedProcessRoot(path string) (string, error) {
 	root, err := filepath.Abs(path)
 	if err != nil {
@@ -1028,6 +1015,64 @@ func stopOwnedProcesses(roots []ownedProcessRoot) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	authorization := newMountProcessAuthorization()
+	for _, process := range processes {
+		authorization.handles[process.pid] = process.handle
+		if groupID, err := mountProcessGroupID(process.pid); err == nil {
+			authorization.retainProcessGroup(groupID, process.handle)
+		}
+	}
+	return stopOwnedProcessSet(roots, processes, authorization, true)
+}
+
+func stopAuthorizedOwnedProcesses(roots []ownedProcessRoot, authorization *mountProcessAuthorization) ([]string, error) {
+	if len(roots) == 0 {
+		return nil, nil
+	}
+	if authorization == nil {
+		return stopOwnedProcesses(roots)
+	}
+	processes := make([]ownedProcess, 0, len(authorization.handles))
+	for pid, handle := range authorization.handles {
+		references, _ := processRootReferences(pid, roots)
+		if !references {
+			continue
+		}
+		alive, err := verifyMountProcessHandleIfAlive(pid, handle)
+		if err != nil {
+			return nil, err
+		}
+		if alive {
+			processes = append(processes, ownedProcess{pid: pid, handle: handle})
+		}
+	}
+	return stopOwnedProcessSet(roots, processes, authorization, false)
+}
+
+func stopOwnedProcessSet(roots []ownedProcessRoot, processes []ownedProcess, authorization *mountProcessAuthorization, closeHandles bool) ([]string, error) {
+	retained := append([]ownedProcess(nil), processes...)
+	if closeHandles {
+		defer func() {
+			for _, process := range retained {
+				_ = process.handle.Close()
+			}
+		}()
+	}
+	transients := make(map[int]*mountProcessHandle)
+	defer func() {
+		for _, handle := range transients {
+			_ = handle.Close()
+		}
+	}()
+	if len(retained) == 0 {
+		if err := verifyOwnedProcessSet(roots, retained, transients, authorization, true); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	if err := verifyOwnedProcessSet(roots, retained, transients, authorization, true); err != nil {
+		return nil, err
+	}
 	labels := make([]string, 0, len(processes))
 	for _, process := range processes {
 		labels = append(labels, strconv.Itoa(process.pid))
@@ -1037,6 +1082,9 @@ func stopOwnedProcesses(roots []ownedProcessRoot) ([]string, error) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		if err := verifyOwnedProcessSet(roots, retained, transients, authorization, true); err != nil {
+			return labels, err
+		}
 		remaining := make([]ownedProcess, 0, len(processes))
 		for _, process := range processes {
 			alive, err := ownedProcessStillInRoots(process, roots)
@@ -1053,6 +1101,9 @@ func stopOwnedProcesses(roots []ownedProcessRoot) ([]string, error) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	if err := verifyOwnedProcessSet(roots, retained, transients, authorization, true); err != nil {
+		return labels, err
+	}
 	for _, process := range processes {
 		if err := signalOwnedProcess(process, roots, syscall.SIGKILL); err != nil {
 			return labels, err
@@ -1060,62 +1111,204 @@ func stopOwnedProcesses(roots []ownedProcessRoot) ([]string, error) {
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		survivors, err := ownedProcessesInRoots(roots)
-		if err != nil {
+		if err := verifyOwnedProcessSet(roots, retained, transients, authorization, true); err != nil {
 			return labels, err
+		}
+		var survivors []string
+		for _, process := range processes {
+			alive, err := ownedProcessStillInRoots(process, roots)
+			if err != nil {
+				return labels, err
+			}
+			if alive {
+				survivors = append(survivors, strconv.Itoa(process.pid))
+			}
 		}
 		if len(survivors) == 0 {
 			return labels, nil
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	survivors, err := ownedProcessesInRoots(roots)
-	if err != nil {
-		return labels, err
+	var survivors []string
+	for _, process := range processes {
+		alive, err := ownedProcessStillInRoots(process, roots)
+		if err != nil {
+			return labels, err
+		}
+		if alive {
+			survivors = append(survivors, strconv.Itoa(process.pid))
+		}
 	}
-	remaining := make([]string, len(survivors))
-	for index, process := range survivors {
-		remaining[index] = strconv.Itoa(process.pid)
-	}
-	return labels, fmt.Errorf("task-owned processes survived teardown: %s", strings.Join(remaining, ", "))
+	return labels, fmt.Errorf("task-owned processes survived teardown: %s", strings.Join(survivors, ", "))
 }
 
-func ownedProcessesInRoots(roots []ownedProcessRoot) ([]ownedProcess, error) {
+// processIDsInRoots detects candidates for fail-closed discard checks. It does
+// not authorize signaling or Mount reset; callers use it only to refuse while
+// any process still references a Task-owned path.
+func processIDsInRoots(roots []ownedProcessRoot) ([]int, error) {
+	if message := processIdentityCapabilityError(); message != "" {
+		return nil, fmt.Errorf("%s; refusing to release Task-owned paths", message)
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, err
 	}
-	processes := []ownedProcess{}
+	pids := []int{}
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || pid <= 1 {
 			continue
 		}
-		if !processReferencesRoots(pid, roots) {
+		if references, _ := processRootReferences(pid, roots); references {
+			pids = append(pids, pid)
+		}
+	}
+	sort.Ints(pids)
+	return pids, nil
+}
+
+func ownedProcessesInRoots(roots []ownedProcessRoot) ([]ownedProcess, error) {
+	if message := processIdentityCapabilityError(); message != "" {
+		return nil, fmt.Errorf("%s; refusing to signal Task-owned processes", message)
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	processes := []ownedProcess{}
+	fail := func(err error) ([]ownedProcess, error) {
+		for _, process := range processes {
+			_ = process.handle.Close()
+		}
+		return nil, err
+	}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 {
 			continue
 		}
-		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		references, fileReference := processRootReferences(pid, roots)
+		if !references {
+			continue
+		}
+		if !fileReference {
+			return fail(fmt.Errorf("process %d is identified only by CWD; refusing to authorize a signal", pid))
+		}
+		handle, err := openMountProcessHandle(pid)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("verify identity for Task-owned process %d: %w", pid, err)
+			return fail(fmt.Errorf("retain Task-owned process %d: %w", pid, err))
 		}
-		processes = append(processes, ownedProcess{pid: pid, bootID: bootID, startTime: startTime})
+		alive, err := handle.Alive()
+		if err != nil {
+			_ = handle.Close()
+			return fail(fmt.Errorf("check Task-owned process %d: %w", pid, err))
+		}
+		if !alive {
+			_ = handle.Close()
+			continue
+		}
+		references, fileReference = processRootReferences(pid, roots)
+		if !references {
+			_ = handle.Close()
+			continue
+		}
+		if !fileReference {
+			_ = handle.Close()
+			return fail(fmt.Errorf("process %d lost its file reference during ownership proof; refusing to authorize a signal", pid))
+		}
+		processes = append(processes, ownedProcess{pid: pid, handle: handle})
 	}
 	return processes, nil
 }
 
-func ownedProcessStillInRoots(process ownedProcess, roots []ownedProcessRoot) (bool, error) {
-	bootID, startTime, err := store.ProcessIdentityForPID(process.pid)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+func verifyOwnedProcessSet(roots []ownedProcessRoot, retained []ownedProcess, transients map[int]*mountProcessHandle, authorization *mountProcessAuthorization, waitForTransients bool) error {
+	byPID := make(map[int]ownedProcess, len(retained))
+	for _, process := range retained {
+		byPID[process.pid] = process
 	}
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return false, fmt.Errorf("verify identity for Task-owned process %d: %w", process.pid, err)
+		return err
 	}
-	if bootID != process.bootID || startTime != process.startTime {
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 {
+			continue
+		}
+		references, _ := processRootReferences(pid, roots)
+		if !references {
+			continue
+		}
+		process, retained := byPID[pid]
+		if !retained {
+			handle := transients[pid]
+			if handle == nil {
+				for _, root := range roots {
+					var found bool
+					handle, found, err = trackShortLivedMountProcess(pid, root.path, authorization)
+					if err != nil {
+						return fmt.Errorf("verify short-lived process %d during teardown: %w", pid, err)
+					}
+					if found {
+						transients[pid] = handle
+						break
+					}
+				}
+			}
+			if handle != nil {
+				alive, err := verifyMountProcessHandleIfAlive(pid, handle)
+				if err != nil {
+					return err
+				}
+				if alive && waitForTransients {
+					for _, root := range roots {
+						if processInMount(pid, root.path) {
+							if err := waitForMountProcessExit(pid, root.path, handle); err != nil {
+								return err
+							}
+							break
+						}
+					}
+				}
+				continue
+			}
+			if _, _, err := store.ProcessIdentityForPID(pid); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return fmt.Errorf("verify unretained process %d during teardown: %w", pid, err)
+			}
+			return fmt.Errorf("unverified process %d appeared during teardown; preserving Task data", pid)
+		}
+		alive, err := process.handle.Alive()
+		if err != nil {
+			return fmt.Errorf("verify retained process %d during teardown: %w", pid, err)
+		}
+		if !alive {
+			if _, _, err := store.ProcessIdentityForPID(pid); err == nil {
+				return fmt.Errorf("PID %d was reused during teardown; preserving Task data", pid)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("verify process %d after exit: %w", pid, err)
+			}
+		}
+	}
+	return nil
+}
+
+func ownedProcessStillInRoots(process ownedProcess, roots []ownedProcessRoot) (bool, error) {
+	alive, err := process.handle.Alive()
+	if err != nil {
+		return false, fmt.Errorf("check Task-owned process %d: %w", process.pid, err)
+	}
+	if !alive {
 		return false, nil
+	}
+	if _, _, err := store.ProcessIdentityForPID(process.pid); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("verify identity for Task-owned process %d: %w", process.pid, err)
 	}
 	return processReferencesRoots(process.pid, roots), nil
 }
@@ -1125,18 +1318,24 @@ func signalOwnedProcess(process ownedProcess, roots []ownedProcessRoot, signal s
 	if err != nil || !stillOwned {
 		return err
 	}
-	if err := syscall.Kill(process.pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("signal Task-owned process %d: %w", process.pid, err)
+	if err := process.handle.Signal(signal); err != nil {
+		return fmt.Errorf("signal Task-owned process instance %d: %w", process.pid, err)
 	}
 	return nil
 }
 
 func processReferencesRoots(pid int, roots []ownedProcessRoot) bool {
+	references, _ := processRootReferences(pid, roots)
+	return references
+}
+
+func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileReference bool) {
 	procRoot := filepath.Join("/proc", strconv.Itoa(pid))
 	if cwd, err := os.Readlink(filepath.Join(procRoot, "cwd")); err == nil {
 		for _, root := range roots {
 			if processPathInsideRoot(cwd, root.path) {
-				return true
+				references = true
+				break
 			}
 		}
 	}
@@ -1151,7 +1350,8 @@ func processReferencesRoots(pid int, roots []ownedProcessRoot) bool {
 		for _, entry := range entries {
 			path, err := os.Readlink(filepath.Join(procRoot, "fd", entry.Name()))
 			if err == nil && processPathInsideRoot(path, root.path) {
-				return true
+				references, fileReference = true, true
+				break
 			}
 		}
 	}
@@ -1166,11 +1366,12 @@ func processReferencesRoots(pid int, roots []ownedProcessRoot) bool {
 		for _, line := range strings.Split(string(maps), "\n") {
 			mappedPath := procMapPath(line)
 			if mappedPath != "" && processPathInsideRoot(mappedPath, root.path) {
-				return true
+				references, fileReference = true, true
+				break
 			}
 		}
 	}
-	return false
+	return references, fileReference
 }
 
 func procMapPath(line string) string {

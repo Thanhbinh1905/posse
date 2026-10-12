@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -150,7 +149,6 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	fake := fixture.service.Herdr.(*herdr.Fake)
 	fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
-	fake.Errors["pane.close"] = errors.New("boom")
 	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", fixture.headSHA, fixture.headSHA)
 	worktree2 := filepath.Join(fixture.root, "mount-t2")
 	gitTest(t, fixture.repo, "worktree", "add", "-b", "posse/t2", worktree2, "refs/heads/main")
@@ -163,22 +161,35 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	}
 	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w3:p1", WorkspaceID: "w3", Label: "posse:shop:t2", CWD: worktree2, Agent: "claude", AgentStatus: "working"})
 	fake.SnapshotValue.Agents = append(fake.SnapshotValue.Agents, herdr.Agent{Name: "posse-shop-t2-1", PaneID: "w3:p1"})
+	snapshotCalls := func() int {
+		count := 0
+		for _, call := range fake.Calls {
+			if call.Method == "session.snapshot" {
+				count++
+			}
+		}
+		return count
+	}
 	for i, args := range [][]string{{"show", "t1"}, {}, {"roster"}, {"show", "t1"}} {
 		if i == 0 {
 			_, _ = fixture.db.ExecContext(context.Background(), `UPDATE project_watch_state SET pr_polled_at=0`)
 		}
+		before := snapshotCalls()
 		code, out, e := fixture.run(args...)
 		t.Logf("%v exit=%d out=%s err=%s", args, code, out, e)
 		if code != 0 {
 			t.Errorf("command %v wedged by failing auto teardown", args)
+		}
+		if got := snapshotCalls(); got <= before {
+			t.Errorf("command %v did not retry Herdr reconciliation: snapshots before=%d after=%d", args, before, got)
 		}
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil || countNoticeKind(notices, "unsaddle_incomplete") != 1 {
 		t.Fatalf("automatic Teardown failure Notice count = %d, want one: %#v, %v", countNoticeKind(notices, "unsaddle_incomplete"), notices, err)
 	}
-	if got := fake.CallCount("pane.close"); got < 2 {
-		t.Fatalf("automatic Teardown was not retried: %d attempts", got)
+	if fake.CallCount("pane.close") != 0 || fake.CallCount("tab.close") != 0 || fake.CallCount("workspace.close") != 0 {
+		t.Fatalf("automatic Teardown issued an unconditional close RPC: %#v", fake.Calls)
 	}
 	fixture.test.Chdir(worktree2)
 	cli := fixture.service.CLI()
@@ -190,8 +201,8 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	if code, output, errOutput := fixture.run("lookout", "--timeout", "1"); code != 0 {
 		t.Fatalf("lookout was blocked by another Task's teardown failure: exit=%d output=%s error=%s", code, output, errOutput)
 	}
-	if got := fake.CallCount("pane.close"); got < 2 {
-		t.Fatalf("unacknowledged automatic Teardown was not retried: %d attempts", got)
+	if got := snapshotCalls(); got < 4 {
+		t.Fatalf("automatic Teardown did not keep reconciling the surviving pane: %d snapshots", got)
 	}
 }
 

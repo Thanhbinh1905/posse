@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -120,6 +121,10 @@ func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, ro
 		}
 		runPosse(t, binary, repo, leadEnv, "unsaddle", "t1")
 	case "failed-discard-ordering":
+		client := herdr.NewWithEnv("herdr", env)
+		if _, err := client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": task.HerdrWorkspaceID}); err != nil {
+			t.Fatalf("close the exited Rider workspace before discard: %v", err)
+		}
 		command := exec.Command(binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved the isolated failed Rider discard")
 		command.Dir, command.Env = repo, leadEnv
 		output, err := command.CombinedOutput()

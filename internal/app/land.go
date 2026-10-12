@@ -505,12 +505,28 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, err
 		}
 	}
-	if discardable {
-		if mountHeld {
-			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
-				return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process ownership", err)
-			}
+	home, err := s.homePath()
+	if err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task artifact access", err)
+	}
+	var processAuthorization *mountProcessAuthorization
+	if !discardable && s.Herdr != nil && task.AgentName != "" && mountHeld {
+		processAuthorization = newMountProcessAuthorization()
+		if err := s.verifyMountForegroundOwnershipWithAuthorization(ctx, db, project, task, processAuthorization); err != nil {
+			processAuthorization.Close()
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process ownership", err)
 		}
+	}
+	defer func() {
+		if processAuthorization != nil {
+			processAuthorization.Close()
+		}
+	}()
+	panePlan, err := s.planTaskPaneTeardown(ctx, project, task)
+	if err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane inspection", err)
+	}
+	if discardable {
 		branchSHA := ""
 		if project.IsWorkspace() {
 			var tipsErr error
@@ -528,10 +544,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, err
 		}
 	}
-	home, err := s.homePath()
-	if err != nil {
-		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task artifact access", err)
-	}
 	if discardable {
 		if err := s.runIntentStep(ctx, db, intent, "discard.capture", func() error {
 			return s.captureDiscardTips(ctx, db, home, project, task)
@@ -542,6 +554,26 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, s.unsaddleDiscardIncomplete(ctx, db, project, task, "recorded pull request closure", err)
 		}
 	}
+	var stopped []string
+	if !discardable {
+		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
+			if mountHeld {
+				mountStopped, stopErr := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
+				if stopErr != nil {
+					return stopErr
+				}
+				stopped = append(stopped, mountStopped...)
+			}
+			scratchStopped, stopErr := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization)
+			if stopErr != nil {
+				return stopErr
+			}
+			stopped = append(stopped, scratchStopped...)
+			return nil
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Task process shutdown", err)
+		}
+	}
 	var paneResult teardownPanes
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
 		if discardable {
@@ -550,7 +582,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			}
 		}
 		var closeErr error
-		paneResult, closeErr = s.closeTaskPanes(ctx, project, task)
+		paneResult, closeErr = s.verifyTaskPanesClosed(ctx, project, task, panePlan)
 		if closeErr == nil {
 			s.relabelProjectTabs(ctx, db, project)
 		}
@@ -559,14 +591,19 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane closure", err)
 	}
-	var stopped []string
 	if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
 		if discardable {
 			return verifyNoTaskOwnedProcesses(ctx, db, home, project, task)
 		}
-		var stopErr error
-		stopped, stopErr = stopTaskOwnedProcesses(ctx, db, home, project, task)
-		return stopErr
+		if !mountHeld {
+			return nil
+		}
+		newlyStopped, err := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
+		if err != nil {
+			return err
+		}
+		stopped = append(stopped, newlyStopped...)
+		return nil
 	}); err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task process shutdown", err)
 	}
@@ -647,7 +684,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				return err
 			}
 		} else {
-			newlyStopped, err := stopTaskOwnedProcesses(ctx, db, home, project, task)
+			newlyStopped, err := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization)
 			if err != nil {
 				return err
 			}
@@ -659,13 +696,18 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
+		latestPanes, paneErr := s.verifyTaskPanesClosed(ctx, project, task, panePlan)
+		if paneErr != nil {
+			return paneErr
+		}
+		paneResult = latestPanes
 		if discardable && mountHeld {
-			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
+			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
 				return err
 			}
 		}
 		var releaseErr error
-		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean, discardable)
+		killed, releaseErr = releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, discardable, processAuthorization)
 		return releaseErr
 	})
 	if err != nil {

@@ -208,6 +208,9 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	second = f.task(t, "t2")
 	f.fail(t, "t2")
 	f.exitRider(t, "t2")
+	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": second.HerdrWorkspaceID}); err != nil {
+		t.Fatalf("close the exited Rider child workspace: %v", err)
+	}
 	lead, _ := findLeadInSnapshot(snap)
 	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", lead.WorkspaceID)

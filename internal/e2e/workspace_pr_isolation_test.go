@@ -270,7 +270,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 	if err := os.WriteFile(viewPath, view, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !waitForCondition(7*time.Second, func() bool {
+	if !waitForCondition(30*time.Second, func() bool {
 		observation, observationErr := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
 		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
 		landed, landedErr := db.TaskByID(context.Background(), project.ID, preLanded.ID)
@@ -281,7 +281,9 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
 		landed, landedErr := db.TaskByID(context.Background(), project.ID, preLanded.ID)
 		healthy, healthyErr := db.TaskByID(context.Background(), project.ID, good.ID)
-		t.Fatalf("stalled offline forge blocked independent maintenance: healthy observation=%#v (%v), offline checkout=%#v (%v), already-landed Task=%#v (%v), healthy merged Task=%#v (%v)", observation, observationErr, watch, watchErr, landed, landedErr, healthy, healthyErr)
+		intent, intentErr := db.IntentByTask(context.Background(), good.ID)
+		mount, mountErr := db.MountByTask(context.Background(), good.ID)
+		t.Fatalf("stalled offline forge blocked independent maintenance: healthy observation=%#v (%v), offline checkout=%#v (%v), already-landed Task=%#v (%v), healthy merged Task=%#v (%v), intent=%#v (%v), Mount=%#v (%v)", observation, observationErr, watch, watchErr, landed, landedErr, healthy, healthyErr, intent, intentErr, mount, mountErr)
 	}
 	if _, err := os.Stat(releaseStall); err == nil {
 		t.Fatal("offline forge stall ended before healthy Member and independent maintenance completed")

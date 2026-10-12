@@ -145,6 +145,9 @@ func TestGroupCloseDuringTeardownRestoresSurvivingRider(t *testing.T) {
 	second := f.ride(t, "t2", "Surviving rider", "surviving-rider")
 	f.fail(t, "t1")
 	f.exitRider(t, "t1")
+	if _, err := f.client.Call(context.Background(), "pane.close", map[string]any{"pane_id": first.PaneID}); err != nil {
+		t.Fatalf("close the exited Task pane before discard: %v", err)
+	}
 	output, err := pauseCommand(t, f, "unsaddle:after:panes.close", func() { closeRiderGroup(t, f) }, "unsaddle", "t1", "--discard", "--user-approved", "Test approved teardown")
 	if err != nil {
 		t.Fatalf("teardown after group close: %s %v", output, err)

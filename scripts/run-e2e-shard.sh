@@ -86,6 +86,12 @@ assignments='
 3 TestRosterRecoversRestartWithoutStartupHook
 3 TestDownKeepsProjectStoppedUntilUp
 3 TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard
+3 TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved
+3 TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved
+3 TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary
+3 TestTeardownStopsRetainedShellByVerifiedIdentity
+3 TestTeardownPidfdLauncherHelper
+3 TestTeardownWithoutPidfdPreservesResourcesAndReportsCapability
 3 TestLookoutRestartsWithoutRecordedGeneration
 3 TestLandReadyBeforeMergeDoesNotRaiseLatePROpened
 3 TestMergeInterruptsFollowUpAndReleasesRider
@@ -235,4 +241,4 @@ listed=$(go test -tags=e2e -list '^Test' ./internal/e2e)
 validate_assignments "$listed" "$assignments"
 pattern=$(printf '%s\n' "$assignments" | awk -v shard="$shard" '$1 == shard { if (count++) printf "|"; printf "%s", $2 } END { print "" }')
 printf 'Running E2E shard %s/4\n' "$shard"
-go test -tags=e2e -count=1 -timeout=8m ./internal/e2e -run "^(${pattern})$"
+go test -tags=e2e -count=1 -timeout=10m ./internal/e2e -run "^(${pattern})$"
