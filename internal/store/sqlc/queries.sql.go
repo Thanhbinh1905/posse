@@ -79,7 +79,7 @@ func (q *Queries) ActiveWorkerCount(ctx context.Context, projectID int64) (int64
 }
 
 const allTasks = `-- name: AllTasks :many
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name FROM tasks WHERE project_id = ? ORDER BY seq
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind FROM tasks WHERE project_id = ? ORDER BY seq
 `
 
 func (q *Queries) AllTasks(ctx context.Context, projectID int64) ([]Task, error) {
@@ -126,6 +126,7 @@ func (q *Queries) AllTasks(ctx context.Context, projectID int64) ([]Task, error)
 			&i.AgentServerStartedAt,
 			&i.IdleSince,
 			&i.ShortName,
+			&i.AgentSessionKind,
 		); err != nil {
 			return nil, err
 		}
@@ -455,10 +456,10 @@ const insertTask = `-- name: InsertTask :execresult
 INSERT INTO tasks(
     project_id, seq, type, reviews_task_id, title, short_name, state, profile, dispatch_rule,
     landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path,
-    herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url,
+    herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, agent_session_kind, pr_url,
     landed_ref, last_output_hash, last_worktree_hash, last_progress_at,
     agent_absent_since, idle_since, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertTaskParams struct {
@@ -482,6 +483,7 @@ type InsertTaskParams struct {
 	PaneLabel        string
 	AgentName        string
 	AgentSession     string
+	AgentSessionKind string
 	PrUrl            string
 	LandedRef        string
 	LastOutputHash   string
@@ -515,6 +517,7 @@ func (q *Queries) InsertTask(ctx context.Context, arg InsertTaskParams) (sql.Res
 		arg.PaneLabel,
 		arg.AgentName,
 		arg.AgentSession,
+		arg.AgentSessionKind,
 		arg.PrUrl,
 		arg.LandedRef,
 		arg.LastOutputHash,
@@ -576,7 +579,7 @@ func (q *Queries) LastNoticeNotification(ctx context.Context, projectID int64) (
 }
 
 const liveTasks = `-- name: LiveTasks :many
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind FROM tasks
 WHERE project_id = ? AND state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled', 'done', 'landing') ORDER BY seq
 `
 
@@ -624,6 +627,7 @@ func (q *Queries) LiveTasks(ctx context.Context, projectID int64) ([]Task, error
 			&i.AgentServerStartedAt,
 			&i.IdleSince,
 			&i.ShortName,
+			&i.AgentSessionKind,
 		); err != nil {
 			return nil, err
 		}
@@ -1263,7 +1267,7 @@ func (q *Queries) SetTaskGatedSHA(ctx context.Context, arg SetTaskGatedSHAParams
 }
 
 const stallTasks = `-- name: StallTasks :many
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind FROM tasks
 WHERE project_id = ? AND state IN ('working', 'stalled') ORDER BY seq
 `
 
@@ -1311,6 +1315,7 @@ func (q *Queries) StallTasks(ctx context.Context, projectID int64) ([]Task, erro
 			&i.AgentServerStartedAt,
 			&i.IdleSince,
 			&i.ShortName,
+			&i.AgentSessionKind,
 		); err != nil {
 			return nil, err
 		}
@@ -1326,7 +1331,7 @@ func (q *Queries) StallTasks(ctx context.Context, projectID int64) ([]Task, erro
 }
 
 const task = `-- name: Task :one
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind FROM tasks
 WHERE project_id = ?1 AND (
     CAST('t' || seq AS TEXT) = CAST(?2 AS TEXT)
 )
@@ -1375,12 +1380,13 @@ func (q *Queries) Task(ctx context.Context, arg TaskParams) (Task, error) {
 		&i.AgentServerStartedAt,
 		&i.IdleSince,
 		&i.ShortName,
+		&i.AgentSessionKind,
 	)
 	return i, err
 }
 
 const taskByID = `-- name: TaskByID :one
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind FROM tasks
 WHERE project_id = ? AND id = ?
 `
 
@@ -1427,12 +1433,13 @@ func (q *Queries) TaskByID(ctx context.Context, arg TaskByIDParams) (Task, error
 		&i.AgentServerStartedAt,
 		&i.IdleSince,
 		&i.ShortName,
+		&i.AgentSessionKind,
 	)
 	return i, err
 }
 
 const taskByPane = `-- name: TaskByPane :one
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind FROM tasks
 WHERE pane_id = ? AND state != 'torn-down' ORDER BY id DESC LIMIT 1
 `
 
@@ -1474,12 +1481,13 @@ func (q *Queries) TaskByPane(ctx context.Context, paneID string) (Task, error) {
 		&i.AgentServerStartedAt,
 		&i.IdleSince,
 		&i.ShortName,
+		&i.AgentSessionKind,
 	)
 	return i, err
 }
 
 const taskByWorktree = `-- name: TaskByWorktree :one
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind FROM tasks
 WHERE worktree_path = ? AND state != 'torn-down' ORDER BY id DESC LIMIT 1
 `
 
@@ -1521,6 +1529,7 @@ func (q *Queries) TaskByWorktree(ctx context.Context, worktreePath string) (Task
 		&i.AgentServerStartedAt,
 		&i.IdleSince,
 		&i.ShortName,
+		&i.AgentSessionKind,
 	)
 	return i, err
 }
@@ -1618,7 +1627,7 @@ func (q *Queries) TaskTransitions(ctx context.Context, arg TaskTransitionsParams
 }
 
 const tasks = `-- name: Tasks :many
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind FROM tasks
 WHERE project_id = ? AND state NOT IN ('landed', 'reported', 'torn-down') ORDER BY seq
 `
 
@@ -1666,6 +1675,7 @@ func (q *Queries) Tasks(ctx context.Context, projectID int64) ([]Task, error) {
 			&i.AgentServerStartedAt,
 			&i.IdleSince,
 			&i.ShortName,
+			&i.AgentSessionKind,
 		); err != nil {
 			return nil, err
 		}
@@ -1861,7 +1871,7 @@ func (q *Queries) UpdateTaskMount(ctx context.Context, arg UpdateTaskMountParams
 }
 
 const updateTaskObservation = `-- name: UpdateTaskObservation :exec
-UPDATE tasks SET pane_id = ?, herdr_workspace_id = ?, agent_session = ?, agent_absent_since = ?, agent_server_started_at = ?, idle_since = ?,
+UPDATE tasks SET pane_id = ?, herdr_workspace_id = ?, agent_session = ?, agent_session_kind = ?, agent_absent_since = ?, agent_server_started_at = ?, idle_since = ?,
     updated_at = ? WHERE id = ?
 `
 
@@ -1869,6 +1879,7 @@ type UpdateTaskObservationParams struct {
 	PaneID               string
 	HerdrWorkspaceID     string
 	AgentSession         string
+	AgentSessionKind     string
 	AgentAbsentSince     int64
 	AgentServerStartedAt string
 	IdleSince            int64
@@ -1881,6 +1892,7 @@ func (q *Queries) UpdateTaskObservation(ctx context.Context, arg UpdateTaskObser
 		arg.PaneID,
 		arg.HerdrWorkspaceID,
 		arg.AgentSession,
+		arg.AgentSessionKind,
 		arg.AgentAbsentSince,
 		arg.AgentServerStartedAt,
 		arg.IdleSince,

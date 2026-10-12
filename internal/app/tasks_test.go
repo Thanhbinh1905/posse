@@ -253,7 +253,7 @@ func TestRelaunchResumesWithFullProfileArgumentsInSameMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	project.HerdrWorkspaceID, project.LeadPaneID, project.LeadLabel = "w3", "w3:p1", "posse:shop:lead"
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Resume", ShortName: "worker-tree", Profile: "deep", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mount, HerdrWorkspaceID: "w2", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", AgentSession: `{"session_id":"session-9"}`})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Resume", ShortName: "worker-tree", Profile: "deep", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mount, HerdrWorkspaceID: "w2", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", AgentSession: `{"session_id":"session-9"}`, AgentSessionKind: "claude"})
 	if err != nil {
 		t.Fatal(err)
 	}

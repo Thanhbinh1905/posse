@@ -1272,7 +1272,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("missing Rider did not enter the absence grace period: %#v, %v", dead, err)
 	}
 	// Advance the isolated Task's observation past the two-minute grace rather than waiting in real time.
-	if err := db.UpdateTaskObservation(context.Background(), dead.ID, dead.PaneID, dead.HerdrWorkspaceID, dead.AgentSession, time.Now().Add(-3*time.Minute).UnixMilli(), dead.IdleSince, dead.AgentServerStartedAt); err != nil {
+	if err := db.UpdateTaskObservation(context.Background(), dead.ID, dead.PaneID, dead.HerdrWorkspaceID, dead.AgentSession, dead.AgentSessionKind, time.Now().Add(-3*time.Minute).UnixMilli(), dead.IdleSince, dead.AgentServerStartedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

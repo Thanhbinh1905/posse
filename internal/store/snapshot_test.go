@@ -24,7 +24,7 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local", AgentSession: `{"session_id":"pi-session"}`, AgentSessionKind: "pi"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,8 +62,8 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 		t.Fatalf("rebuild count = %d, %v", count, err)
 	}
 	rebuilt, err := db.Task(ctx, project.ID, "t1")
-	if err != nil || rebuilt.State != StateWorking {
-		t.Fatalf("rebuilt task = %#v, %v", rebuilt, err)
+	if err != nil || rebuilt.State != StateWorking || rebuilt.AgentSession != `{"session_id":"pi-session"}` || rebuilt.AgentSessionKind != "pi" {
+		t.Fatalf("rebuilt task lost its session owner: %#v, %v", rebuilt, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

@@ -292,6 +292,7 @@ type Task struct {
 	AgentServerStartedAt string
 	IdleSince            int64
 	ShortName            string
+	AgentSessionKind     string
 }
 
 type TaskLaunchIdentity struct {
