@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,14 +68,20 @@ case "$PWD/" in
     echo $! > "$POSSE_TEST_ROOT/global-child-pid"
     TMPDIR="$POSSE_TEST_OTHER_TASK_SCRATCH" setsid /bin/sh -c 'cd "$TMPDIR"; dd if=/dev/zero of="$TMPDIR/foreign-cache" bs=1024 count=64 >/dev/null 2>&1; exec 4<"$TMPDIR/foreign-cache"; printf ready > "$POSSE_TEST_ROOT/other-task-child-ready"; while :; do sleep 0.1; done' </dev/null >/dev/null 2>&1 &
     echo $! > "$POSSE_TEST_ROOT/other-task-child-pid";;
-   local-ordering|failed-discard-ordering)
+   local-ordering)
     setsid /bin/sh -c 'trap '\''mkdir -p "$TMPDIR"; printf "cache recreated during shutdown\n" > "$TMPDIR/shutdown-cache"; printf "shutdown handler ran\n" > "$POSSE_TEST_ROOT/shutdown-marker"; exit 0'\'' TERM; printf ready > "$POSSE_TEST_ROOT/background-ready"; while :; do sleep 0.1; done' </dev/null >/dev/null 2>&1 &
+    echo $! > "$POSSE_TEST_ROOT/background-pid";;
+   failed-discard-ordering)
+    setsid /bin/sh -c 'printf ready > "$POSSE_TEST_ROOT/background-ready"; while [ ! -f "$POSSE_TEST_ROOT/allow-background-exit" ]; do sleep 0.1; done; mkdir -p "$TMPDIR"; printf "cache recreated during shutdown\n" > "$TMPDIR/shutdown-cache"; printf "shutdown handler ran\n" > "$POSSE_TEST_ROOT/shutdown-marker"' </dev/null >/dev/null 2>&1 &
     echo $! > "$POSSE_TEST_ROOT/background-pid";;
   esac
   printf ready > "$POSSE_TEST_ROOT/rider-ready"
   while [ ! -f "$POSSE_TEST_ROOT/task-working" ]; do sleep 0.02; done
   case "$POSSE_T178_MODE" in
-   failed-discard-ordering) posse holler failed 'Fixture failed before delivery' > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
+   failed-discard-ordering)
+    posse holler failed 'Fixture failed before delivery' > "$POSSE_TEST_ROOT/signal.log" 2>&1
+    while [ ! -f "$POSSE_TEST_ROOT/rider-exit" ]; do sleep 0.02; done
+    exit 0;;
    local-*) posse holler done 'Ship fixture completed' > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
    *) posse holler done 'Review fixture completed' --report report.md > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
   esac
@@ -259,6 +266,26 @@ while IFS= read -r line; do :; done
 			if err := db.Transition(context.Background(), otherID, transition.from, transition.to, transition.source, "isolated other Task fixture"); err != nil {
 				t.Fatal(err)
 			}
+		}
+	}
+	if mode == "failed-discard-ordering" {
+		if err := os.WriteFile(filepath.Join(root, "rider-exit"), []byte("exit\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForCondition(5*time.Second, func() bool {
+			raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
+			if err != nil {
+				return false
+			}
+			var info struct {
+				ProcessInfo struct {
+					ShellPID                 int `json:"shell_pid"`
+					ForegroundProcessGroupID int `json:"foreground_process_group_id"`
+				} `json:"process_info"`
+			}
+			return json.Unmarshal(raw, &info) == nil && info.ProcessInfo.ShellPID > 0 && (info.ProcessInfo.ForegroundProcessGroupID <= 1 || info.ProcessInfo.ForegroundProcessGroupID == info.ProcessInfo.ShellPID)
+		}) {
+			t.Fatal("failed fake Rider did not exit naturally")
 		}
 	}
 	finishTeardownOwnershipLifecycle(t, mode, binary, repo, home, root, env, leadEnv, db, project, task, processes)

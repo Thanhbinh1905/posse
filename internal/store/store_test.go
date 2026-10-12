@@ -190,7 +190,7 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := []State{StateFailed, StateLost, StateStalled, StateReported, StateLanded}
+	allowed := []State{StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost, StateReported, StateLanded}
 	for index, state := range allowed {
 		t.Run(string(state), func(t *testing.T) {
 			if !IsApprovedDiscardSourceState(state) {
@@ -203,10 +203,23 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
-				t.Fatal(err)
+			if state != StateSpawning {
+				if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			switch state {
+			case StateSpawning, StateWorking:
+			case StateNeedsDecision:
+				err = db.Transition(ctx, id, StateWorking, state, "worker", "needs decision")
+			case StateBlocked:
+				err = db.Transition(ctx, id, StateWorking, state, "herdr", "blocked")
+			case StateDone:
+				err = db.Transition(ctx, id, StateWorking, state, "worker", "done")
+			case StateLanding:
+				if err = db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err == nil {
+					err = db.Transition(ctx, id, StateDone, state, "cli", "landing")
+				}
 			case StateFailed:
 				err = db.Transition(ctx, id, StateWorking, state, "worker", "failed")
 			case StateLost:
@@ -228,11 +241,24 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if state == StateReported || state == StateLanded {
+				if err := validateTransitionSource(state, StateTornDown, "cli"); err != nil {
+					t.Fatalf("ordinary completion source rejected for %s: %v", state, err)
+				}
+			} else if err := validateTransitionSource(state, StateTornDown, "cli"); err == nil {
+				t.Fatalf("ordinary teardown source accepted from unlanded %s", state)
+			}
 			if err := db.Transition(ctx, id, state, StateTornDown, "user", "discarded without recording approval"); err == nil {
 				t.Fatalf("Transition bypassed approval from %s", state)
 			}
 			if err := db.RecordApproval(ctx, id, "discard", "User approved discard"); err != nil {
 				t.Fatal(err)
+			}
+			if err := db.TransitionWithApproval(ctx, id, state, StateTornDown, "user", "discarded", "land", "User approved discard"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
+				t.Fatalf("TransitionWithApproval accepted non-discard action from %s: %v", state, err)
+			}
+			if err := db.TransitionAfterApproval(ctx, id, state, StateTornDown, "user", "discarded", "land"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
+				t.Fatalf("TransitionAfterApproval accepted non-discard action from %s: %v", state, err)
 			}
 			if err := db.TransitionAfterApproval(ctx, id, state, StateTornDown, "user", "discarded", "discard"); err != nil {
 				t.Fatalf("approved transition from %s: %v", state, err)
@@ -240,7 +266,7 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 		})
 	}
 
-	for _, state := range []State{StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateDone, StateLanding, StateTornDown} {
+	for _, state := range []State{StateTornDown} {
 		t.Run("refused_"+string(state), func(t *testing.T) {
 			if IsApprovedDiscardSourceState(state) {
 				t.Fatalf("%s unexpectedly qualifies for approved discard", state)

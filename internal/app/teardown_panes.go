@@ -130,13 +130,55 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 	return true, nil
 }
 
+// requireNoLiveTaskAgent refuses approved discard while a Task-owned pane has
+// a foreground process. Live Rider shutdown remains unsupported until A01 and
+// A02 bind process signaling and lifecycle cleanup to the same instance.
+func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Project, task store.Task) error {
+	const identityHelp = "Live-Rider stop requires A01 #133 and A02 #134. Retry when Herdr can verify the Task agent has exited"
+	if s.Herdr == nil {
+		return axi.Failure("discard_agent_identity_unavailable", "cannot verify whether the Task has a live agent", true, identityHelp)
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return axi.Failure("discard_agent_identity_unavailable", "cannot verify whether the Task has a live agent", true, err.Error(), identityHelp)
+	}
+	tabs := taskTabs(snapshot, project, task)
+	for _, pane := range snapshot.Panes {
+		if pane.Label == task.PaneLabel && pane.Agent != "" && !ownsTaskPane(snapshot, project, task, tabs, pane) {
+			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task-labeled pane belongs to this Rider", true, pane.PaneID, identityHelp)
+		}
+		if !ownsTaskPane(snapshot, project, task, tabs, pane) {
+			continue
+		}
+		raw, err := s.herdrCall(ctx, "pane.process_info", map[string]any{"pane_id": pane.PaneID})
+		if err != nil {
+			return axi.Failure("discard_agent_identity_unavailable", "cannot verify the Task pane's foreground process", true, err.Error(), identityHelp)
+		}
+		var info struct {
+			ProcessInfo struct {
+				PaneID                 string `json:"pane_id"`
+				ShellPID               int    `json:"shell_pid"`
+				ForegroundProcessGroup int    `json:"foreground_process_group_id"`
+			} `json:"process_info"`
+		}
+		if err := json.Unmarshal(raw, &info); err != nil || info.ProcessInfo.PaneID != pane.PaneID || info.ProcessInfo.ShellPID <= 1 {
+			return axi.Failure("discard_agent_identity_unavailable", "Herdr did not return a valid process identity for the Task pane", true, pane.PaneID, identityHelp)
+		}
+		foreground := info.ProcessInfo.ForegroundProcessGroup
+		if foreground > 1 && foreground != info.ProcessInfo.ShellPID {
+			return axi.Failure("discard_live_agent", "refusing to discard a Task while its Rider agent is still running", false, "Posse will not stop or signal a live Rider until A01 #133 and A02 #134 land. Wait for the Rider to exit, then retry the approved discard")
+		}
+	}
+	return nil
+}
+
 // closeTaskPanes closes a Task's panes as found in a fresh snapshot. A tab
 // whose panes are all the Task's closes with tab.close; in any other tab only
 // the Task's own panes close, and the other panes of its tabs are reported as
 // foreign. posse never closes a workspace: the Lead and sibling Riders share
 // the Lead's, and a legacy Rider workspace disappears with its last tab.
-// verifyMountForegroundOwnership binds each live foreground PID to Herdr's
-// agent identity before an approved readiness-race bypass can release the Mount.
+// verifyMountForegroundOwnership checks Mount processes before an approved
+// discard releases the Mount.
 func (s *Service) verifyMountForegroundOwnership(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
 	mounts, err := db.Mounts(ctx, project.ID)
 	if err != nil {
@@ -210,8 +252,11 @@ func (s *Service) verifyMountForegroundOwnership(ctx context.Context, db *store.
 			continue
 		}
 		paneOwned := ownsTaskPane(snapshot, project, task, tabs, pane) && agentNameMatchesTask(agentName, project.Name, task.Seq)
+		// Herdr can retain a Task's agent entry after its foreground process
+		// exits. The caller has checked the foreground group; accept that stale
+		// entry only when its identity still belongs to this Task.
 		if foreground <= 1 || foreground == info.ProcessInfo.ShellPID {
-			if pane.Agent != "" || agentName != "" {
+			if (pane.Agent != "" || agentName != "") && !paneOwned {
 				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("Herdr reports agent %q in Mount pane %s without an identifiable foreground agent process", agentName, pane.PaneID), true)
 			}
 			continue

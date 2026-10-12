@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -77,7 +78,29 @@ func (s *Service) beginIntentStep(ctx context.Context, db *store.DB, intent stor
 	return db.UpdateIntentStep(ctx, intent.ID, os.Getpid(), "in_progress:"+step)
 }
 
+func unsaddleStepIndex(step string) int {
+	steps := []string{"approval.record", "discard.capture", "panes.close", "mount.stop", "leftover.snapshot", "report.attachments", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"}
+	for index, candidate := range steps {
+		if candidate == step {
+			return index
+		}
+	}
+	return -1
+}
+
 func (s *Service) runIntentStep(ctx context.Context, db *store.DB, intent store.Intent, step string, action func() error) error {
+	if intent.Command == "unsaddle" && intent.TaskID > 0 {
+		current, err := db.IntentByTask(ctx, intent.TaskID)
+		if err != nil {
+			return err
+		}
+		priorStep := strings.TrimPrefix(current.Step, "resuming:")
+		priorDone := strings.HasPrefix(priorStep, "done:")
+		priorName := strings.TrimPrefix(strings.TrimPrefix(priorStep, "done:"), "in_progress:")
+		if priorDone && priorName == step || unsaddleStepIndex(priorName) > unsaddleStepIndex(step) {
+			return nil
+		}
+	}
 	if err := s.beginIntentStep(ctx, db, intent, step); err != nil {
 		return err
 	}

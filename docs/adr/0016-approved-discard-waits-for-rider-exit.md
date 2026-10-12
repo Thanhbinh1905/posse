@@ -1,0 +1,3 @@
+# Approved discard waits for Rider exit
+
+A User-approved discard of unlanded work is allowed only after Herdr verifies that the Task's Rider has exited. A direct discard refuses before recording approval; an already-answered Decision may remain answered, but applying it refuses before recording discard approval or changing custody while the Rider is live or unverifiable. Discard never signals a Rider or residual Mount/scratch process and keeps the Mount held until those processes are gone. This boundary avoids acting on an unverified process identity; live-Rider stopping and `posse stop` remain deferred until A01 #133 and A02 #134 provide safe exact-instance lifecycle handling.

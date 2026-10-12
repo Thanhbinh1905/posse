@@ -139,6 +139,9 @@ assignments='
 4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall
 4 TestT229SignalSnapshotFailure
 4 TestRosterSucceedsWhenObservationOnlyHitsTransientContention
+4 TestDoneTaskWithVanishedPaneCanBeDiscarded
+4 TestApprovedDiscardRefusesLiveAgentUntilIdentityPrerequisitesLand
+4 TestClosedPRDiscardRechecksForgeStateBeforeTeardown
 '
 
 validate_assignments() {

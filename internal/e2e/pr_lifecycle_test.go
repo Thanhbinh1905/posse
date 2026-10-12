@@ -671,6 +671,72 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	}
 }
 
+func TestClosedPRDiscardRechecksForgeStateBeforeTeardown(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	ctx := context.Background()
+	taskID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
+		Seq: 1, Type: "ship", Title: "Closed PR discard", LandingMode: "pr",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, taskID, store.StateWorking, store.StateLost, "cli", "Rider exited"); err != nil {
+		t.Fatal(err)
+	}
+	const prURL = "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskLanding(ctx, taskID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", "head-open")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	decisions, err := fixture.db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("open PR unexpectedly created a close Decision: %#v", decisions)
+	}
+	fixture.writeGraphQL(t, "pr1", "CLOSED", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", "head-closed")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	decisions, err = fixture.db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "pr_closed" || decisions[0].TaskID != taskID {
+		t.Fatalf("closed PR Decision = %#v, %v", decisions, err)
+	}
+	const quote = "User approved discarding the closed, unlanded Task"
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decide", strconv.FormatInt(decisions[0].ID, 10), "discard", "--user-approved", quote)
+
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", "head-reopened")
+	command := exec.Command(fixture.binary, "apply", strconv.FormatInt(decisions[0].ID, 10))
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "decision_refused") || !strings.Contains(string(output), "no longer verified closed") {
+		t.Fatalf("reopened PR was not refused before discard: err=%v output=%s", err, output)
+	}
+	if task := fixture.mustTask(t, "t1"); task.State != store.StateLost {
+		t.Fatalf("reopened PR refusal changed Task state to %s", task.State)
+	}
+	var approvals int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='discard'`, taskID).Scan(&approvals); err != nil || approvals != 0 {
+		t.Fatalf("reopened PR refusal recorded %d approvals: %v", approvals, err)
+	}
+
+	fixture.writeGraphQL(t, "pr1", "CLOSED", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", "head-closed")
+	output = []byte(runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "apply", strconv.FormatInt(decisions[0].ID, 10)))
+	if !strings.Contains(string(output), "torn-down") {
+		t.Fatalf("verified closed PR discard did not complete: %s", output)
+	}
+	if task := fixture.mustTask(t, "t1"); task.State != store.StateTornDown {
+		t.Fatalf("verified closed PR discard left Task in %s", task.State)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='discard' AND user_quote=?`, taskID, quote).Scan(&approvals); err != nil || approvals != 1 {
+		t.Fatalf("verified closed PR discard approval count = %d, %v", approvals, err)
+	}
+}
+
 func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 	for _, mode := range []string{"uncommitted", "committed"} {
 		t.Run(mode, func(t *testing.T) {

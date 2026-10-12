@@ -496,9 +496,10 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 	}
 }
 
-func TestApprovedDiscardTeardownSurvivesAgentNotReadyDuringPreflightNoticeDelivery(t *testing.T) {
+func TestApprovedDiscardRefusesLiveAgentBeforePreflightOrTeardown(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	ctx := context.Background()
+	attachPRFixtureMount(t, fixture)
 	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateFailed, "worker", "Rider failed"); err != nil {
 		t.Fatal(err)
 	}
@@ -520,22 +521,25 @@ func TestApprovedDiscardTeardownSurvivesAgentNotReadyDuringPreflightNoticeDelive
 	var output, errorsOut bytes.Buffer
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = &output, &errorsOut
-	if code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"}); code != 0 {
-		t.Fatalf("approved discard exit = %d; output=%s error=%s", code, output.String(), errorsOut.String())
+	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
+	combined := output.String() + errorsOut.String()
+	if code == 0 || !strings.Contains(combined, "A01 #133") || !strings.Contains(combined, "A02 #134") {
+		t.Fatalf("live-agent discard was not refused with its prerequisites: code=%d output=%s", code, combined)
 	}
 	updated, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-	if err != nil || updated.State != store.StateTornDown {
-		t.Fatalf("Task after approved discard = %#v, %v", updated, err)
+	if err != nil || updated.State != store.StateFailed {
+		t.Fatalf("Task after live-agent refusal = %#v, %v", updated, err)
 	}
-	if adapter.CallCount("agent.prompt") != 1 {
-		t.Fatalf("agent.prompt calls = %d, want 1", adapter.CallCount("agent.prompt"))
+	mount, err := fixture.db.MountByTask(ctx, fixture.task.ID)
+	if err != nil || mount.State != "held" {
+		t.Fatalf("Mount after live-agent refusal = %#v, %v", mount, err)
 	}
-	if adapter.CallCount("tab.close") != 1 {
-		t.Fatalf("tab.close calls = %d, want 1", adapter.CallCount("tab.close"))
+	var approvals int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='discard'`, fixture.task.ID).Scan(&approvals); err != nil || approvals != 0 {
+		t.Fatalf("live-agent refusal recorded %d approvals: %v", approvals, err)
 	}
-	notices, err := fixture.db.UndeliveredNotices(ctx, fixture.project.ID)
-	if err != nil || len(notices) != 1 {
-		t.Fatalf("failed preflight Notice delivery was not preserved: %#v, %v", notices, err)
+	if adapter.CallCount("agent.prompt") != 0 || adapter.CallCount("tab.close") != 0 {
+		t.Fatalf("live-agent refusal made Herdr changes: agent.prompt=%d tab.close=%d", adapter.CallCount("agent.prompt"), adapter.CallCount("tab.close"))
 	}
 }
 
