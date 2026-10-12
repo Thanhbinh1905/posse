@@ -113,6 +113,44 @@ func TestProcMapPathPreservesSpacesAndRejectsAnonymousMappings(t *testing.T) {
 	}
 }
 
+func TestProcessReferencesRootsUsesCanonicalProcPaths(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "mount")
+	alias := filepath.Join(t.TempDir(), "mount-alias")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("sleep", "30")
+	command.Dir = alias
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	})
+
+	cwdPath := filepath.Join("/proc", strconv.Itoa(command.Process.Pid), "cwd")
+	cwd, err := os.Readlink(cwdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cwd != root {
+		t.Fatalf("kernel-reported cwd = %q, want canonical path %q", cwd, root)
+	}
+	if !processReferencesRoots(command.Process.Pid, []ownedProcessRoot{{path: root}}) {
+		t.Fatalf("process with symlinked cwd %q was not found inside canonical root %q", alias, root)
+	}
+	if processPathInsideRoot(root+"-sibling/file", root) {
+		t.Fatalf("sibling path was treated as inside root %q", root)
+	}
+	if !processPathInsideRoot(root+"/deleted (deleted)", root) {
+		t.Fatalf("deleted path under root %q was not recognized", root)
+	}
+}
+
 func TestPruneCandidatesRemoveOnlyExcessIdleAndCleanBrokenMounts(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")

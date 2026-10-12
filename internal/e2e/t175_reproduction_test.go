@@ -24,18 +24,13 @@ type t175Adapter struct {
 	failures       int
 	beforeInfo     func()
 	beforeSnapshot func()
-	afterSnapshot  func(herdr.Snapshot)
 }
 
 func (a *t175Adapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
 	if a.beforeSnapshot != nil {
 		a.beforeSnapshot()
 	}
-	snapshot, err := a.Client.Snapshot(ctx)
-	if err == nil && a.afterSnapshot != nil {
-		a.afterSnapshot(snapshot)
-	}
-	return snapshot, err
+	return a.Client.Snapshot(ctx)
 }
 
 func (a *t175Adapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
@@ -153,8 +148,8 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 	var output bytes.Buffer
 	cli.Out, cli.ErrOut = &output, &output
 	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
-	if adapter.failures != 1 || ownedPID == 0 || foreignPID == 0 || ownedPID == foreignPID {
-		t.Fatalf("the real replacement sequence did not cross the guard boundary: failures=%d owned=%d foreign=%d", adapter.failures, ownedPID, foreignPID)
+	if adapter.failures != 0 || ownedPID == 0 || foreignPID == 0 || ownedPID == foreignPID {
+		t.Fatalf("discard did not preserve the same-kind replacement sequence: failures=%d owned=%d foreign=%d", adapter.failures, ownedPID, foreignPID)
 	}
 
 	contents, fileErr := os.ReadFile(work)
@@ -166,8 +161,8 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 		}
 	}
 	t.Logf("owned snapshot PID=%d, foreign process_info PID=%d, exit=%d output=%s foreign alive=%v file error=%v", ownedPID, foreignPID, code, output.String(), foreignAlive, fileErr)
-	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" {
-		t.Fatalf("foreign replacement was not preserved: exit=%d alive=%v file=%q error=%v output=%s", code, foreignAlive, contents, fileErr, output.String())
+	if code == 0 || !strings.Contains(output.String(), "discard_live_agent") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" {
+		t.Fatalf("live foreign replacement was not refused safely: exit=%d alive=%v file=%q error=%v output=%s", code, foreignAlive, contents, fileErr, output.String())
 	}
 	if taskAfter := f.task(t, "t1"); taskAfter.State != store.StateFailed {
 		t.Fatalf("Task after refused teardown = %#v", taskAfter)
@@ -187,9 +182,9 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 	}
 }
 
-// Replays the handoff race after the final Herdr ownership snapshot: a Task-named
-// process passes the first ownership gate, then is replaced before Mount cleanup.
-func TestT175ForeignRestartAfterFinalOwnershipSnapshotIsPreserved(t *testing.T) {
+// Replaces a Task-named process during the discard ownership check and verifies
+// that the live foreign replacement keeps the Mount held.
+func TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved(t *testing.T) {
 	f := newRiderTabsFixture(t)
 	ctx := context.Background()
 	task := f.ride(t, "t1", "Late foreign restart", "late-foreign-restart")
@@ -252,7 +247,7 @@ func TestT175ForeignRestartAfterFinalOwnershipSnapshotIsPreserved(t *testing.T) 
 		t.Fatal(err)
 	}
 	adapter := &t175Adapter{Client: f.client, lead: f.leadPaneID, target: task.PaneID}
-	ownedPID, foreignPID, guardSnapshots := 0, 0, 0
+	ownedPID, foreignPID := 0, 0
 	adapter.beforeSnapshot = func() {
 		ro, err := store.OpenReadOnly(f.home)
 		if err != nil {
@@ -266,23 +261,7 @@ func TestT175ForeignRestartAfterFinalOwnershipSnapshotIsPreserved(t *testing.T) 
 		stop()
 		ownedPID = start(task.PaneLabel, task.AgentName)
 	}
-	adapter.afterSnapshot = func(snapshot herdr.Snapshot) {
-		if ownedPID == 0 || foreignPID != 0 {
-			return
-		}
-		guardSnapshots++
-		if guardSnapshots != 3 {
-			return
-		}
-		owned := false
-		for _, agent := range snapshot.Agents {
-			if agent.PaneID == task.PaneID && agent.Name == task.AgentName {
-				owned = true
-			}
-		}
-		if !owned {
-			t.Fatal("final real snapshot was not Task-owned")
-		}
+	adapter.beforeInfo = func() {
 		stop()
 		foreignPID = start("foreign-late", "foreign-late")
 	}
@@ -303,8 +282,8 @@ func TestT175ForeignRestartAfterFinalOwnershipSnapshotIsPreserved(t *testing.T) 
 	var output bytes.Buffer
 	cli.Out, cli.ErrOut = &output, &output
 	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
-	if adapter.failures != 1 || guardSnapshots != 3 || ownedPID == 0 || foreignPID == 0 || ownedPID == foreignPID {
-		t.Fatalf("replacement missed final guard boundary: failures=%d snapshots=%d owned=%d foreign=%d", adapter.failures, guardSnapshots, ownedPID, foreignPID)
+	if adapter.failures != 0 || ownedPID == 0 || foreignPID == 0 || ownedPID == foreignPID {
+		t.Fatalf("replacement missed the discard ownership-check boundary: failures=%d owned=%d foreign=%d", adapter.failures, ownedPID, foreignPID)
 	}
 	contents, fileErr := os.ReadFile(work)
 	foreignAlive := false
@@ -322,8 +301,8 @@ func TestT175ForeignRestartAfterFinalOwnershipSnapshotIsPreserved(t *testing.T) 
 	mounts, mountErr := ro.Mounts(ctx, f.projectID)
 	_ = ro.Close()
 	t.Logf("owned PID=%d, foreign PID=%d, exit=%d, foreign alive=%v, file=%q, file error=%v, Task=%s, branch error=%v, Mounts=%#v, output=%s", ownedPID, foreignPID, code, foreignAlive, contents, fileErr, taskAfter.State, branchErr, mounts, output.String())
-	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" || taskAfter.State != store.StateFailed || branchErr != nil || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
-		t.Fatalf("late foreign replacement was not preserved: branch=%s mount error=%v", branchOutput, mountErr)
+	if code == 0 || !strings.Contains(output.String(), "discard_live_agent") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" || taskAfter.State != store.StateFailed || branchErr != nil || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
+		t.Fatalf("live foreign replacement was not refused safely: branch=%s mount error=%v output=%s", branchOutput, mountErr, output.String())
 	}
 }
 

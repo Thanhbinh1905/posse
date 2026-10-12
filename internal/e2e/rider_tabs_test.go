@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -167,29 +166,41 @@ func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 	// A foreign split in the first Rider's tab survives its teardown.
 	foreign := fixture.split(t, first.PaneID, fixture.root)
 	// An unlabeled pane inside the second Mount but in a User workspace is not the Rider's pane.
-	// Mount release signals its exact shell; Herdr may remove the pane when that shell exits.
+	// The first teardown must not touch the second Rider's Mount.
 	stray := fixture.split(t, fixture.userAfter.RootPane.PaneID, second.WorktreePath)
 	fixture.fail(t, "t1")
+	fixture.exitRider(t, "t1")
+	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": first.PaneID}); err != nil {
+		t.Fatalf("close the exited Task pane without closing its foreign split: %v", err)
+	}
 	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t1", "--discard", "--user-approved", "User approved the tab teardown test")
-	if !strings.Contains(output, "foreign_panes[1]: "+strconv.Quote(foreign)) || !strings.Contains(output, "closed_panes[1]: "+strconv.Quote(first.PaneID)) {
-		t.Fatalf("teardown with a foreign split reported the wrong panes: %s", output)
+	if !strings.Contains(output, "torn-down") {
+		t.Fatalf("approved discard after closing the exited pane failed: %s", output)
 	}
 	snapshot = fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
 	fixture.assertRiderLabels(t, snapshot, second)
-	fixture.assertAlive(t, snapshot, foreign, stray, second.PaneID)
+	fixture.assertAlive(t, snapshot, second.PaneID, foreign, fixture.leadPaneID)
 	fixture.assertGone(t, snapshot, first.PaneID)
 
-	// The User watches the second Rider; its whole tab closes and focus returns to the Lead.
+	// The User closes the second Rider's tab after its agent exits; discard must not steal focus.
 	ownSplit := fixture.split(t, second.PaneID, second.WorktreePath)
 	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": second.PaneID}); err != nil {
 		t.Fatal(err)
 	}
 	secondTab := tabOf(t, fixture.snapshot(t), second.PaneID)
 	fixture.fail(t, "t2")
+	fixture.exitRider(t, "t2")
+	if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": secondTab}); err != nil {
+		t.Fatalf("close the exited Task tab and its shell-only split: %v", err)
+	}
+	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": stray}); err != nil {
+		t.Fatalf("close the fixture-owned split in the second Mount: %v", err)
+	}
+	focusedBeforeUnsaddle := fixture.snapshot(t).FocusedPaneID
 	output = runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t2", "--discard", "--user-approved", "User approved the focused tab teardown test")
-	if !strings.Contains(output, "foreign_panes[0]") && !strings.Contains(output, "foreign_panes: []") || strings.Contains(output, strconv.Quote(stray)) || !strings.Contains(output, "closed_panes[2]") {
-		t.Fatalf("teardown of a Rider tab reported the wrong panes: %s", output)
+	if !strings.Contains(output, "torn-down") {
+		t.Fatalf("approved discard after closing the exited tab failed: %s", output)
 	}
 	snapshot = fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
@@ -201,8 +212,13 @@ func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 			t.Fatalf("focused Rider tab %s survived teardown", secondTab)
 		}
 	}
-	if snapshot.FocusedPaneID != fixture.leadPaneID {
-		t.Fatalf("closing the focused Rider tab left focus on %s, want the Lead %s", snapshot.FocusedPaneID, fixture.leadPaneID)
+	if snapshot.FocusedPaneID != focusedBeforeUnsaddle {
+		t.Fatalf("discard changed focus from %s to %s", focusedBeforeUnsaddle, snapshot.FocusedPaneID)
+	}
+	// The foreign split has served its teardown-ownership assertion. Close this
+	// fixture-owned shell before the separate Herdr restart/recovery exercise.
+	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": foreign}); err != nil {
+		t.Fatalf("close fixture-owned foreign split: %v", err)
 	}
 
 	// Relaunch after an upgrade uses the new child layout. Move it back to a
@@ -211,7 +227,10 @@ func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 	if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": tabOf(t, fixture.snapshot(t), third.PaneID)}); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "roster")
+	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": fixture.leadPaneID}); err != nil {
+		t.Fatalf("focus the Lead before roster recovery: %v", err)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "roster")
 	fixture.waitState(t, "t3", store.StateLost)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "relaunch", "t3")
 	fixture.waitState(t, "t3", store.StateWorking)
@@ -241,7 +260,25 @@ func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 	if !grouped {
 		t.Fatalf("restored Rider lost Mount grouping: %#v", recovered)
 	}
-
+	lead, found := findLeadInSnapshot(snapshot)
+	if !found {
+		t.Fatal("Lead pane disappeared after Herdr restart")
+	}
+	db, err := store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.ProjectByName(context.Background(), "shop")
+	_ = db.Close()
+	if err != nil || project.LeadPaneID != lead.PaneID {
+		t.Fatalf("Project Lead pane %q does not match restored pane %q: %v", project.LeadPaneID, lead.PaneID, err)
+	}
+	fixture.leadPaneID = lead.PaneID
+	fixture.leadWorkspaceID = project.HerdrWorkspaceID
+	fixture.leadEnv = setEnv(fixture.env, "HERDR_ENV", "1")
+	fixture.leadEnv = setEnv(fixture.leadEnv, "HERDR_PANE_ID", lead.PaneID)
+	fixture.leadEnv = setEnv(fixture.leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+	fixture.leadEnv = setEnv(fixture.leadEnv, "HERDR_TAB_ID", lead.TabID)
 	// A Task launched before this layout lives alone in its own workspace; it still reconciles and tears down.
 	legacy := fixture.rideLegacy(t, "t4", "Tabs legacy rider", "tabs-legacy-rider")
 	moved, err := client.Call(context.Background(), "pane.move", map[string]any{"pane_id": legacy.PaneID, "destination": map[string]any{"type": "new_workspace", "label": "└─ Tabs legacy rider"}})
@@ -263,6 +300,10 @@ func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 	}
 	fixture.assertRiderLabels(t, fixture.snapshot(t), current)
 	fixture.fail(t, "t4")
+	fixture.exitRider(t, "t4")
+	if _, err := client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": movedPane.MoveResult.Pane.WorkspaceID}); err != nil {
+		t.Fatalf("close the exited legacy Rider workspace: %v", err)
+	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t4", "--discard", "--user-approved", "User approved the legacy teardown test")
 	snapshot = fixture.snapshot(t)
 	fixture.assertGone(t, snapshot, movedPane.MoveResult.Pane.PaneID)
@@ -271,8 +312,7 @@ func TestLegacyRiderTabsAfterWorktreeUpgrade(t *testing.T) {
 			t.Fatalf("legacy Rider workspace survived teardown: %#v", workspace)
 		}
 	}
-	fixture.assertAlive(t, snapshot, recovered.PaneID, foreign, fixture.leadPaneID)
-
+	fixture.assertAlive(t, snapshot, recovered.PaneID, fixture.leadPaneID)
 }
 
 type riderTabsFixture struct {
@@ -343,7 +383,7 @@ case "$PWD/" in
     if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then sleep 3; fi
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-    while IFS= read -r line; do :; done
+    while [ ! -f "$PWD/.posse-e2e-agent-exit" ]; do sleep 0.05; done
     ;;
   *)
     while IFS= read -r line; do
@@ -543,13 +583,32 @@ func (f *riderTabsFixture) fail(t *testing.T, taskID string) {
 	}
 }
 
-func (f *riderTabsFixture) snapshot(t *testing.T) herdr.Snapshot {
+// exitRider lets the fake Rider exit through its test-only worktree marker.
+// The Task operation under test closes the now process-free pane.
+func (f *riderTabsFixture) exitRider(t *testing.T, taskID string) {
 	t.Helper()
-	snapshot, err := f.client.Snapshot(context.Background())
-	if err != nil {
+	task := f.task(t, taskID)
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, ".posse-e2e-agent-exit"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return snapshot
+	var lastProcessInfo json.RawMessage
+	if !waitForCondition(5*time.Second, func() bool {
+		raw, err := f.client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
+		if err != nil {
+			lastProcessInfo = json.RawMessage(err.Error())
+			return false
+		}
+		lastProcessInfo = append(lastProcessInfo[:0], raw...)
+		var info struct {
+			ProcessInfo struct {
+				ShellPID                 int `json:"shell_pid"`
+				ForegroundProcessGroupID int `json:"foreground_process_group_id"`
+			} `json:"process_info"`
+		}
+		return json.Unmarshal(raw, &info) == nil && info.ProcessInfo.ShellPID > 0 && (info.ProcessInfo.ForegroundProcessGroupID <= 1 || info.ProcessInfo.ForegroundProcessGroupID == info.ProcessInfo.ShellPID)
+	}) {
+		t.Fatalf("fake Rider for %s did not exit naturally: process_info=%s", taskID, lastProcessInfo)
+	}
 }
 
 func (f *riderTabsFixture) split(t *testing.T, paneID, cwd string) string {
@@ -565,6 +624,15 @@ func (f *riderTabsFixture) split(t *testing.T, paneID, cwd string) string {
 		t.Fatalf("split pane %s: %s %v", paneID, raw, err)
 	}
 	return result.Pane.PaneID
+}
+
+func (f *riderTabsFixture) snapshot(t *testing.T) herdr.Snapshot {
+	t.Helper()
+	snapshot, err := f.client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
 
 // assertUserLayout checks that the session still has exactly the User's

@@ -703,6 +703,14 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}) {
 		t.Fatalf("Herdr did not restart during Teardown: before=%q after=%q", beforeTeardownRestart.ServerStartedAt, afterTeardownRestart.ServerStartedAt)
 	}
+	for _, pane := range afterTeardownRestart.Panes {
+		if pane.Label == task.PaneLabel {
+			if _, err := client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": pane.WorkspaceID}); err != nil {
+				t.Fatalf("close the exited Task workspace restored by Herdr: %v", err)
+			}
+		}
+	}
+	runPosse(t, posseBinary, repo, leadEnv, "roster")
 	if !waitForCondition(30*time.Second, func() bool {
 		observer, openErr := store.OpenReadOnly(home)
 		if openErr != nil {

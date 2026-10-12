@@ -714,11 +714,14 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 		return nil, nil
 	}
 	if mount.State == "releasing" {
+		if err := requireNoMountProcesses(mount.Path, approvedDiscard); err != nil {
+			return nil, err
+		}
 		return nil, finishReleasingMount(ctx, db, project, mount, task)
 	}
-	killed, err := stopMountProcesses(mount.Path)
-	if err != nil {
-		return killed, err
+	var killed []string
+	if err := requireNoMountProcesses(mount.Path, approvedDiscard); err != nil {
+		return nil, err
 	}
 	var resetErr error
 	if project.IsWorkspace() {
@@ -748,6 +751,28 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 		}
 		return finishReleasingMountLocked(ctx, db, project, mount, task)
 	})
+}
+
+func requireNoMountProcesses(path string, approvedDiscard bool) error {
+	root, err := normalizeOwnedProcessRoot(path)
+	if err != nil {
+		return err
+	}
+	pids, err := processIDsInRoots([]ownedProcessRoot{{path: root}})
+	if err != nil {
+		return err
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+	labels := make([]string, len(pids))
+	for index, pid := range pids {
+		labels[index] = strconv.Itoa(pid)
+	}
+	if approvedDiscard {
+		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Mount while processes remain", true, strings.Join(labels, ","), "No process was stopped or signalled. Inspect the Mount processes, then retry discard")
+	}
+	return axi.Failure("mount_process_identity_unavailable", "cannot release the Mount because live processes were not authorized during ownership proof: "+strings.Join(labels, ","), true, strings.Join(labels, ","), "Inspect the Mount processes and retry Teardown after they exit")
 }
 
 func finishReleasingMount(ctx context.Context, db *store.DB, project store.Project, mount store.Mount, task store.Task) error {
@@ -921,14 +946,47 @@ type ownedProcess struct {
 	handle *mountProcessHandle
 }
 
-func stopMountProcesses(path string) ([]string, error) {
-	root, err := normalizeOwnedProcessRoot(path)
+func verifyNoTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
+	roots, err := taskOwnedProcessRoots(ctx, db, home, project, task)
+	if err != nil {
+		return err
+	}
+	pids, err := processIDsInRoots(roots)
+	if err != nil {
+		return err
+	}
+	if len(pids) > 0 {
+		labels := make([]string, len(pids))
+		for index, pid := range pids {
+			labels[index] = strconv.Itoa(pid)
+		}
+		return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, strings.Join(labels, ","), "No process was stopped or signalled. Inspect the Mount and scratch processes, then retry discard")
+	}
+	return nil
+}
+
+func taskOwnedProcessRoots(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) ([]ownedProcessRoot, error) {
+	roots := []ownedProcessRoot{}
+	mount, err := db.MountByTask(ctx, task.ID)
+	if err == nil && mount.TaskID == task.ID && (mount.State == "held" || mount.State == "releasing") {
+		if mount.ID != task.MountID || task.WorktreePath == "" || !pathInside(task.WorktreePath, mount.Path) {
+			return nil, fmt.Errorf("refuse to inspect processes for Task %s without a verified held or releasing Mount", taskIDString(task.Seq))
+		}
+		root, err := normalizeOwnedProcessRoot(mount.Path)
+		if err != nil {
+			return nil, err
+		}
+		roots = append(roots, ownedProcessRoot{path: root})
+	} else if err != nil && !store.IsNotFound(err) {
+		return nil, err
+	}
+	scratch, err := validatedTaskScratchRoot(home, project, task)
 	if err != nil {
 		return nil, err
 	}
-	return stopOwnedProcesses([]ownedProcessRoot{{path: root}})
+	roots = append(roots, ownedProcessRoot{path: scratch, includeOpenFiles: true, includeMappedFiles: true})
+	return roots, nil
 }
-
 func normalizeOwnedProcessRoot(path string) (string, error) {
 	root, err := filepath.Abs(path)
 	if err != nil {
@@ -1081,6 +1139,31 @@ func stopOwnedProcessSet(roots []ownedProcessRoot, processes []ownedProcess, aut
 		}
 	}
 	return labels, fmt.Errorf("task-owned processes survived teardown: %s", strings.Join(survivors, ", "))
+}
+
+// processIDsInRoots detects candidates for fail-closed discard checks. It does
+// not authorize signaling or Mount reset; callers use it only to refuse while
+// any process still references a Task-owned path.
+func processIDsInRoots(roots []ownedProcessRoot) ([]int, error) {
+	if message := processIdentityCapabilityError(); message != "" {
+		return nil, fmt.Errorf("%s; refusing to release Task-owned paths", message)
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	pids := []int{}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 {
+			continue
+		}
+		if references, _ := processRootReferences(pid, roots); references {
+			pids = append(pids, pid)
+		}
+	}
+	sort.Ints(pids)
+	return pids, nil
 }
 
 func ownedProcessesInRoots(roots []ownedProcessRoot) ([]ownedProcess, error) {
@@ -1304,12 +1387,14 @@ func procMapPath(line string) string {
 }
 
 func processPathInsideRoot(path, root string) bool {
+	// /proc cwd, fd, and maps paths are kernel-resolved. The roots are
+	// canonicalized before scanning, so avoid resolving every descriptor again.
 	path = strings.TrimSuffix(path, " (deleted)")
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
+	separator := string(filepath.Separator)
+	if root == separator {
+		return filepath.IsAbs(path)
 	}
-	relative, err := filepath.Rel(root, path)
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	return path == root || strings.HasPrefix(path, root+separator)
 }
 
 func mountProcessIDs(path string) ([]int, error) {

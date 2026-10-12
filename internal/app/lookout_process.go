@@ -82,7 +82,7 @@ func linuxLookoutProcessRunning(paneID, home string) bool {
 			continue
 		}
 		executable, verified := inspectLookoutExecutable(pid)
-		if !verified {
+		if !verified || !lookoutExecutableVerifier(executable.Path) {
 			continue
 		}
 		process, found := lookoutFromArgs(pid, splitProcessArgs(string(command)), env, home)
@@ -101,7 +101,8 @@ func systemLookoutProcesses(home string) ([]lookoutProcess, error) {
 			return nil, fmt.Errorf("list processes: %w", err)
 		}
 		return lookoutProcessesInListingWithExecutableLookup(string(output), home, func(pid int, _ string) (lookoutExecutableIdentity, bool) {
-			return inspectLookoutExecutable(pid)
+			executable, verified := inspectLookoutExecutable(pid)
+			return executable, verified && lookoutExecutableVerifier(executable.Path)
 		}), nil
 	}
 	if runtime.GOOS != "linux" {
@@ -131,7 +132,7 @@ func systemLookoutProcesses(home string) ([]lookoutProcess, error) {
 			continue
 		}
 		executable, verified := inspectLookoutExecutable(pid)
-		if !verified {
+		if !verified || !lookoutExecutableVerifier(executable.Path) {
 			continue
 		}
 		process.Executable = executable

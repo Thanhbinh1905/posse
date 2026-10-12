@@ -7,7 +7,7 @@ Posse treated Land as a step of the Task state machine: only a `landing` Task, o
 - In `pr` and `no-mistakes` modes, a Task becomes `landed` as soon as the forge reports its pull request merged, from any live state and from `lost`, `failed` or `stalled`. This goes straight to `landed` and does not pass through `done`, so the invariant that only a Signal moves a Task to `done` holds.
 - Posse watches every Task that has an open pull request, whatever its state, until the pull request is merged or closed.
 - Work in the Mount beyond the merged head (later commits, or tracked and untracked non-ignored changes) is a Leftover. It never moves the Task back to `working`. Posse snapshots it as one commit on `posse/<name>-leftover`, then tears the Task down and releases its Mount. The Decision points at that branch: open a new Task from it, or discard it. Waiting for the User never holds a Mount or a tab.
-- A workspace Task Lands when every Member's pull request has merged. A Member whose pull request merges is recorded as landed at once. A Member closed without merging becomes a Decision.
+- A workspace Task Lands when every Member's pull request has merged. A Member whose pull request merges is recorded as landed at once. A Member closed without merging becomes a Decision; applying its discard answer polls the forge again and proceeds only while the request remains `CLOSED` and the Task remains unlanded.
 - A merged head counts as the Worker's own when that commit is on the Task branch in its Mount, or was recorded by `posse publish`. A head that is neither raises a Notice and is never skipped silently.
 
 ## Considered options

@@ -28,11 +28,22 @@ func releaseMountWithAuthorization(ctx context.Context, db *store.DB, project st
 	if mount.ID == 0 || mount.TaskID != task.ID || (mount.State != "held" && mount.State != "releasing") {
 		return nil, nil
 	}
+	if mount.State == "releasing" || approvedDiscard {
+		if err := requireNoMountProcesses(mount.Path, approvedDiscard); err != nil {
+			return nil, err
+		}
+	}
 	if mount.State == "releasing" {
 		return nil, finishReleasingMount(ctx, db, project, mount, task)
 	}
-	killed, err := stopMountProcessesAuthorized(mount.Path, authorization)
-	if err != nil {
+	var killed []string
+	if !approvedDiscard {
+		killed, err = stopMountProcessesAuthorized(mount.Path, authorization)
+		if err != nil {
+			return killed, err
+		}
+	}
+	if err := requireNoMountProcesses(mount.Path, approvedDiscard); err != nil {
 		return killed, err
 	}
 	var resetErr error

@@ -53,7 +53,7 @@ func TestApplyRecoveryDiscardWithPrunedMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
-	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	markPRFixtureRiderExited(fake)
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	removeFixtureTaskPane(f)
 	// Simulate a pruned worktree link without touching the Project repository.

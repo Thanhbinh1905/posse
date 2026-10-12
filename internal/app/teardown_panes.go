@@ -150,6 +150,51 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 	return true, nil
 }
 
+// requireNoLiveTaskAgent refuses approved discard while a Task-owned pane has
+// a foreground process. Live Rider shutdown remains unsupported until A01 and
+// A02 bind process signaling and lifecycle cleanup to the same instance.
+func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Project, task store.Task) error {
+	const identityHelp = "Live-Rider stop requires A01 #133 and A02 #134. Retry when Herdr can verify the Task agent has exited"
+	if s.Herdr == nil {
+		return axi.Failure("discard_agent_identity_unavailable", "cannot verify whether the Task has a live agent", true, identityHelp)
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return axi.Failure("discard_agent_identity_unavailable", "cannot verify whether the Task has a live agent", true, err.Error(), identityHelp)
+	}
+	tabs := taskTabs(snapshot, project, task)
+	for _, pane := range snapshot.Panes {
+		if pane.Label == task.PaneLabel && pane.Agent != "" && !ownsTaskPane(snapshot, project, task, tabs, pane) {
+			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task-labeled pane belongs to this Rider", true, pane.PaneID, identityHelp)
+		}
+		if !ownsTaskPane(snapshot, project, task, tabs, pane) {
+			continue
+		}
+		raw, err := s.herdrCall(ctx, "pane.process_info", map[string]any{"pane_id": pane.PaneID})
+		if err != nil {
+			return axi.Failure("discard_agent_identity_unavailable", "cannot verify the Task pane's foreground process", true, err.Error(), identityHelp)
+		}
+		var info struct {
+			ProcessInfo struct {
+				PaneID                 string `json:"pane_id"`
+				ShellPID               int    `json:"shell_pid"`
+				ForegroundProcessGroup int    `json:"foreground_process_group_id"`
+			} `json:"process_info"`
+		}
+		if err := json.Unmarshal(raw, &info); err != nil || info.ProcessInfo.PaneID != pane.PaneID || info.ProcessInfo.ShellPID <= 1 {
+			return axi.Failure("discard_agent_identity_unavailable", "Herdr did not return a valid process identity for the Task pane", true, pane.PaneID, identityHelp)
+		}
+		foreground := info.ProcessInfo.ForegroundProcessGroup
+		if foreground > 1 && foreground != info.ProcessInfo.ShellPID {
+			if pane.Agent != "" {
+				return axi.Failure("discard_live_agent", "refusing to discard a Task while its Rider agent is still running", false, "Posse will not stop or signal a live Rider until A01 #133 and A02 #134 land. Wait for the Rider to exit, then retry the approved discard")
+			}
+			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task pane's non-shell foreground process has exited", true, pane.PaneID, identityHelp)
+		}
+	}
+	return nil
+}
+
 // verifyMountForegroundOwnershipWithAuthorization retains exact process
 // handles for Task panes and shell-only panes in the held Mount. CWD discovery
 // may detect a process but cannot authorize cleanup. Herdr 0.9.1 has no atomic
@@ -748,6 +793,13 @@ func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project 
 	}
 	help = append(help, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
 	return axi.Failure("unsaddle_incomplete", cause.Error(), retryable, help...)
+}
+
+func (s *Service) unsaddleDiscardIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, step string, cause error) error {
+	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
+		return errors.Join(cause, err)
+	}
+	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+" --discard --user-approved \"<User's original words>\"`")
 }
 
 func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {

@@ -125,7 +125,7 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
-	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	markPRFixtureRiderExited(fake)
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	removeFixtureTaskPane(f)
 	if _, err := f.service.unsaddleTask(ctx, f.db, f.project, cfg, task, false, ""); err == nil {
@@ -203,7 +203,8 @@ func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
-	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
+	markPRFixtureRiderExited(fake)
+	fake.SnapshotValue.Agents = []herdr.Agent{{Name: agentName(f.project.Name, f.task.Seq, 1), PaneID: f.task.PaneID}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	removeFixtureTaskPane(f)
 	if err := os.WriteFile(filepath.Join(f.worktree, ".git"), []byte("gitdir: /missing/pruned/gitdir\n"), 0o600); err != nil {
@@ -217,6 +218,21 @@ func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
 	if err != nil || task.State != store.StateTornDown {
 		t.Fatalf("discard did not release Task: %#v %v", task, err)
 	}
+	transitions, err := f.db.TaskTransitions(ctx, task.ID, 10)
+	if err != nil || len(transitions) == 0 || transitions[0].From != string(store.StateLanding) || transitions[0].To != string(store.StateTornDown) || transitions[0].Source != "user" {
+		t.Fatalf("closed-PR discard did not transition directly from landing: %#v %v", transitions, err)
+	}
+}
+
+func markPRFixtureRiderExited(fake *herdr.Fake) {
+	fake.SnapshotValue.Agents = nil
+	for index := range fake.SnapshotValue.Panes {
+		if fake.SnapshotValue.Panes[index].PaneID == "w2:p1" {
+			fake.SnapshotValue.Panes[index].Agent = ""
+			fake.SnapshotValue.Panes[index].AgentStatus = ""
+		}
+	}
+	fake.Results["pane.process_info"] = []byte(`{"process_info":{"pane_id":"w2:p1","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[]}}`)
 }
 
 func TestAnsweredLeftoverDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
@@ -274,22 +290,30 @@ func TestAnsweredLeftoverDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
 	}
 }
 
-func TestApprovedDiscardRejectsIllegalStateBeforeDestructiveWork(t *testing.T) {
-	f := newPRLandingFixture(t, "local", store.StateWorking)
+func TestApprovedDiscardRequiresQuoteBeforeDestructiveWork(t *testing.T) {
+	f := newPRLandingFixture(t, "local", store.StateFailed)
 	defer f.db.Close()
 	ctx := context.Background()
 	mount := attachPRFixtureMount(t, f)
+	if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, store.StateFailed, "worker", "Worker failed"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.task = task
 	cfg, err := config.Load(f.home, f.project.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.service.unsaddleTask(ctx, f.db, f.project, cfg, f.task, true, "User approved discard")
+	_, err = f.service.unsaddleTask(ctx, f.db, f.project, cfg, f.task, true, "")
 	commandError, ok := err.(*axi.Error)
 	if !ok || commandError.Code != "teardown_refused" || commandError.Retryable {
-		t.Fatalf("illegal discard refusal = %#v, want non-retryable teardown_refused", err)
+		t.Fatalf("missing-quote discard refusal = %#v, want non-retryable teardown_refused", err)
 	}
 	current, err := f.db.Task(ctx, f.project.ID, "t1")
-	if err != nil || current.State != store.StateWorking {
+	if err != nil || current.State != store.StateFailed {
 		t.Fatalf("Task after refusal = %#v, %v", current, err)
 	}
 	currentMount, err := f.db.MountByTask(ctx, f.task.ID)
