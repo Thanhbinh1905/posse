@@ -304,7 +304,7 @@ const (
 // tearing down a Task from this state. Keep this predicate centralized so the
 // allowed set can expand without changing each discard path independently.
 func IsApprovedDiscardSourceState(state State) bool {
-	return oneOfState(state, StateFailed, StateLost, StateStalled, StateReported, StateLanded)
+	return oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost, StateReported, StateLanded)
 }
 
 func taskAcceptsInstruction(state State, taskType string) bool {
@@ -315,13 +315,13 @@ func taskAcceptsInstruction(state State, taskType string) bool {
 }
 
 var transitions = map[State]map[State]bool{
-	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
-	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateLanded: true},
-	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
-	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
+	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
+	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateLanded: true, StateTornDown: true},
+	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
+	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
 	StateStalled:       {StateWorking: true, StateTornDown: true, StateLost: true, StateLanded: true},
-	StateDone:          {StateLanding: true, StateLanded: true, StateReported: true, StateWorking: true},
-	StateLanding:       {StateLanded: true, StateDone: true, StateWorking: true},
+	StateDone:          {StateLanding: true, StateLanded: true, StateReported: true, StateWorking: true, StateTornDown: true},
+	StateLanding:       {StateLanded: true, StateDone: true, StateWorking: true, StateTornDown: true},
 	StateLanded:        {StateTornDown: true},
 	StateReported:      {StateTornDown: true},
 	StateFailed:        {StateWorking: true, StateTornDown: true, StateLanded: true},
@@ -356,7 +356,7 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 }
 
 func (db *DB) TransitionWithApproval(ctx context.Context, taskID int64, expected, next State, source, note, action, quote string) error {
-	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" {
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
 	}
 	if strings.TrimSpace(quote) == "" {
@@ -414,7 +414,7 @@ func (db *DB) LatestApprovalQuote(ctx context.Context, taskID int64, action stri
 }
 
 func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
-	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" {
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
 	}
 	tx, err := db.beginTxWithRetry(ctx)
@@ -488,7 +488,7 @@ func validateTransitionSource(from, to State, source string) error {
 		expected = "cli"
 	case to == StateTornDown && source == "user" && IsApprovedDiscardSourceState(from):
 		expected = "user"
-	case to == StateTornDown && oneOfState(from, StateFailed, StateLost, StateStalled):
+	case to == StateTornDown && oneOfState(from, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost):
 		expected = "user"
 	}
 	if source != expected {
