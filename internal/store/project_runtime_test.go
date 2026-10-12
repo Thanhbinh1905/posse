@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t *testing.T) {
@@ -100,6 +103,60 @@ func TestUnchangedProjectObservationDoesNotWaitForWriter(t *testing.T) {
 	defer cancel()
 	if err := db.UpdateProjectObservation(writeCtx, project.ID, "w1:p1", "w1", 0); err != nil {
 		t.Fatalf("unchanged Project observation waited for a write lock: %v", err)
+	}
+}
+
+func TestUnchangedTaskObservationDoesNotWaitForWriter(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Observation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := struct {
+		paneID, workspaceID, agentSession, agentSessionKind string
+		absentSince, idleSince                              int64
+		serverStartedAt                                     string
+	}{"w1:p1", "w1", "session-1", "claude", 10, 20, "server-1"}
+	if err := db.UpdateTaskObservation(ctx, taskID, observation.paneID, observation.workspaceID, observation.agentSession, observation.agentSessionKind, observation.absentSince, observation.idleSince, observation.serverStartedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET updated_at=1 WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.ExecContext(ctx, `UPDATE projects SET status='missing' WHERE id=?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	writeCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := db.UpdateTaskObservation(writeCtx, taskID, observation.paneID, observation.workspaceID, observation.agentSession, observation.agentSessionKind, observation.absentSince, observation.idleSince, observation.serverStartedAt); err != nil {
+		t.Fatalf("unchanged Task observation waited for a write lock: %v", err)
+	}
+	var updatedAt int64
+	if err := db.QueryRowContext(ctx, `SELECT updated_at FROM tasks WHERE id=?`, taskID).Scan(&updatedAt); err != nil || updatedAt != 1 {
+		t.Fatalf("unchanged Task observation changed updated_at to %d: %v", updatedAt, err)
+	}
+	snapshotData, err := os.ReadFile(db.TaskSnapshotPath(project.Name, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot TaskSnapshot
+	if _, err := toml.Decode(string(snapshotData), &snapshot); err != nil || snapshot.Task.UpdatedAt != 1 {
+		t.Fatalf("unchanged Task observation did not refresh the recovery snapshot: updated_at=%d error=%v", snapshot.Task.UpdatedAt, err)
 	}
 }
 

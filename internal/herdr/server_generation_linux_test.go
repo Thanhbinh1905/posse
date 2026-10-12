@@ -21,7 +21,7 @@ import (
 // generation detection returned "" while other Unix sockets, including
 // connections to the server itself, opened and closed.
 func TestServerStartedAtSurvivesSocketChurn(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortTestSocketDir(t)
 	socketPath := filepath.Join(dir, "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestServerStartedAtSurvivesSocketChurn(t *testing.T) {
 // connect to a Unix listener with a full backlog at once with EAGAIN, and the
 // generation must still be read once the server accepts again.
 func TestServerStartedAtWaitsForFullBacklog(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(shortTestSocketDir(t), "herdr.sock")
 	listener := listenUnixWithBacklog(t, socketPath, 1)
 	defer listener.Close()
 	want := selfGeneration(t)
