@@ -63,7 +63,7 @@ func TestRecoveryDoesNotUndoFailedSignalCommittedAfterTaskEnumeration(t *testing
 	if err := db.UpdateTaskLaunch(ctx, taskID, mount.Path, "w2", "w2:p1", "posse:shop:t1", "old-rider"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateTaskObservation(ctx, taskID, "w2:p1", "w2", "", 0, 0, "same-server"); err != nil {
+	if err := db.UpdateTaskObservation(ctx, taskID, "w2:p1", "w2", "", "", 0, 0, "same-server"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "same-server"); err != nil {

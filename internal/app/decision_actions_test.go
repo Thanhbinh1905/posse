@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -163,6 +164,10 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 	if err != nil || len(pending) != 1 || pending[0].Origin != "leftover:posse/t1-leftover" {
 		t.Fatalf("discard of unrecoverable work retired another Member's saved Leftover: %#v %v", pending, err)
 	}
+	applied, err := f.db.Decision(ctx, f.project.ID, unrecoverable.ID)
+	if err != nil || applied.ObsoleteAt == 0 || applied.ObsoleteReason != "Unrecoverable Leftover resolved during Teardown" {
+		t.Fatalf("applied unrecoverable Leftover Decision was not obsoleted: %#v %v", applied, err)
+	}
 }
 
 func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
@@ -266,5 +271,56 @@ func TestAnsweredLeftoverDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestApprovedDiscardRejectsIllegalStateBeforeDestructiveWork(t *testing.T) {
+	f := newPRLandingFixture(t, "local", store.StateWorking)
+	defer f.db.Close()
+	ctx := context.Background()
+	mount := attachPRFixtureMount(t, f)
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.service.unsaddleTask(ctx, f.db, f.project, cfg, f.task, true, "User approved discard")
+	commandError, ok := err.(*axi.Error)
+	if !ok || commandError.Code != "teardown_refused" || commandError.Retryable {
+		t.Fatalf("illegal discard refusal = %#v, want non-retryable teardown_refused", err)
+	}
+	current, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil || current.State != store.StateWorking {
+		t.Fatalf("Task after refusal = %#v, %v", current, err)
+	}
+	currentMount, err := f.db.MountByTask(ctx, f.task.ID)
+	if err != nil || currentMount.ID != mount.ID || currentMount.State != "held" {
+		t.Fatalf("Mount after refusal = %#v, %v", currentMount, err)
+	}
+	if _, err := os.Stat(f.worktree); err != nil {
+		t.Fatalf("worktree after refusal: %v", err)
+	}
+	if got := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "refs/heads/posse/t1")); got != f.headSHA {
+		t.Fatalf("branch after refusal = %s, want %s", got, f.headSHA)
+	}
+	hasApproval, err := f.db.HasApproval(ctx, f.task.ID, "discard")
+	if err != nil || hasApproval {
+		t.Fatalf("illegal discard recorded approval: has=%v err=%v", hasApproval, err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "unsaddle_incomplete") != 0 {
+		t.Fatalf("deterministic refusal raised an incomplete Teardown Notice: %#v", notices)
+	}
+}
+
+func TestUnsaddleIncompleteDeterministicRefusalIsNotRetryable(t *testing.T) {
+	f := newPRLandingFixture(t, "local", store.StateWorking)
+	defer f.db.Close()
+	err := f.service.unsaddleIncomplete(context.Background(), f.db, f.project, f.task, "Task state update", store.ErrInvalidApprovedDiscardTransition)
+	commandError, ok := err.(*axi.Error)
+	if !ok || commandError.Code != "unsaddle_incomplete" || commandError.Retryable {
+		t.Fatalf("deterministic incomplete refusal = %#v, want non-retryable unsaddle_incomplete", err)
 	}
 }

@@ -256,8 +256,7 @@ esac
 					}
 				}
 				baselinePath := filepath.Join(root, "posse", "projects", "stack", ".workspace-root-baselines", fmt.Sprintf("t%d.json", task.Seq))
-				baseline, err := os.ReadFile(baselinePath)
-				if err != nil {
+				if _, err := os.ReadFile(baselinePath); err != nil {
 					t.Fatalf("read acquisition baseline: %v", err)
 				}
 				if err := os.Remove(baselinePath); err != nil {
@@ -336,22 +335,82 @@ esac
 				if !foundFailure {
 					t.Fatalf("missing-baseline refusal did not record an unsaddle_incomplete Notice: %#v", failureNotices)
 				}
+				incompleteBeforeApply := 0
+				for _, notice := range failureNotices {
+					if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" {
+						incompleteBeforeApply++
+					}
+				}
 				decisions, err := db.Decisions(context.Background(), project.ID, true)
 				if err != nil {
 					t.Fatal(err)
 				}
-				foundRepairDiscard := false
+				var repairDiscardID int64
 				for _, decision := range decisions {
 					if decision.TaskID == task.ID && decision.Kind == "leftover" && strings.Join(decision.Options, ",") == "repair,discard" {
-						foundRepairDiscard = true
+						repairDiscardID = decision.ID
 						break
 					}
 				}
-				if !foundRepairDiscard {
+				if repairDiscardID == 0 {
 					t.Fatalf("missing-baseline refusal did not raise repair/discard Decision: %#v", decisions)
 				}
-				if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
-					t.Fatalf("restore acquisition baseline for retry: %v", err)
+				answer := exec.Command(binary, "decide", fmt.Sprint(repairDiscardID), "discard", "--user-approved", "User approved discarding the unsaved Report attachments")
+				answer.Dir, answer.Env = workspace, leadEnv
+				if output, err := answer.CombinedOutput(); err != nil {
+					t.Fatalf("answer leftover discard: %v\n%s", err, output)
+				}
+				apply := exec.Command(binary, "apply", fmt.Sprint(repairDiscardID))
+				apply.Dir, apply.Env = workspace, leadEnv
+				output, err = apply.CombinedOutput()
+				if err != nil || !strings.Contains(string(output), "torn-down") {
+					t.Fatalf("apply answered leftover discard: %v\n%s", err, output)
+				}
+				current, err = db.Task(context.Background(), project.ID, test.taskID)
+				if err != nil || current.State != store.StateTornDown {
+					t.Fatalf("discarded Task state = %#v, %v", current, err)
+				}
+				mounts, err := db.Mounts(context.Background(), project.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mountIdle := false
+				for _, mount := range mounts {
+					if mount.ID == task.MountID && mount.State == "idle" {
+						mountIdle = true
+					}
+				}
+				if !mountIdle {
+					t.Fatalf("discard did not release Mount %d: %#v", task.MountID, mounts)
+				}
+				var approvals int
+				var quote, branchSHA string
+				if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*),MAX(user_quote),MAX(branch_sha) FROM approvals WHERE task_id=? AND action='discard'`, task.ID).Scan(&approvals, &quote, &branchSHA); err != nil {
+					t.Fatal(err)
+				}
+				if approvals != 1 || quote != "User approved discarding the unsaved Report attachments" || branchSHA == "" {
+					t.Fatalf("discard approval = count %d, quote %q, branch %q", approvals, quote, branchSHA)
+				}
+				bundlePaths, err := filepath.Glob(filepath.Join(root, "posse", "projects", "stack", "tasks", test.taskID, "discard", "*.bundle"))
+				if err != nil || len(bundlePaths) == 0 {
+					t.Fatalf("approved discard bundle paths = %v, %v", bundlePaths, err)
+				}
+				appliedDecision, err := db.Decision(context.Background(), project.ID, repairDiscardID)
+				if err != nil || appliedDecision.ObsoleteAt == 0 {
+					t.Fatalf("applied leftover Decision is not obsolete: %#v %v", appliedDecision, err)
+				}
+				afterNotices, err := db.Notices(context.Background(), project.ID, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				incompleteAfterApply := 0
+				for _, notice := range afterNotices {
+					if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" {
+						incompleteAfterApply++
+					}
+				}
+				if incompleteAfterApply != incompleteBeforeApply {
+					t.Fatalf("discard created %d new unsaddle_incomplete Notices", incompleteAfterApply-incompleteBeforeApply)
 				}
 			}
 			// A receipt claim can temporarily block ack, so retry the direct ack
@@ -379,22 +438,22 @@ esac
 				t.Fatalf("Mount was not released: %#v", mounts)
 			}
 			artifacts := []string{"report.md"}
-			if test.missingBaseline {
-				artifacts = append(artifacts, "new-root-evidence.txt")
-			} else {
+			if !test.missingBaseline {
 				artifacts = append(artifacts, "root-evidence.txt", "workspace-note.txt")
 			}
-			if test.nestedGit {
-				artifacts = append(artifacts, "git-evidence/proof.txt", "git-evidence/notes.txt")
-			}
-			if test.deepUntracked {
-				artifacts = append(artifacts, "git-evidence/deeper/tracked.txt", "git-evidence/deeper/untracked.txt")
-			}
-			if test.unrequestedMember {
-				artifacts = append(artifacts, "worker/evidence.txt", "worker/untracked.txt")
-			}
-			for _, member := range test.members {
-				artifacts = append(artifacts, filepath.Join(member, "evidence.txt"), filepath.Join(member, "untracked.txt"))
+			if !test.missingBaseline {
+				if test.nestedGit {
+					artifacts = append(artifacts, "git-evidence/proof.txt", "git-evidence/notes.txt")
+				}
+				if test.deepUntracked {
+					artifacts = append(artifacts, "git-evidence/deeper/tracked.txt", "git-evidence/deeper/untracked.txt")
+				}
+				if test.unrequestedMember {
+					artifacts = append(artifacts, "worker/evidence.txt", "worker/untracked.txt")
+				}
+				for _, member := range test.members {
+					artifacts = append(artifacts, filepath.Join(member, "evidence.txt"), filepath.Join(member, "untracked.txt"))
+				}
 			}
 			if _, err := os.Stat(filepath.Join(root, "posse", "scratch", "stack", test.taskID)); !os.IsNotExist(err) {
 				t.Fatalf("Scout Teardown kept Task scratch: %v", err)
@@ -438,12 +497,14 @@ esac
 				wantFiles["worker/evidence.txt"] = "committed evidence from worker/\n"
 				wantFiles["worker/untracked.txt"] = "untracked evidence from worker/\n"
 			}
-			if test.missingBaseline {
-				wantFiles["new-root-evidence.txt"] = "new root evidence\n"
-			}
 			for artifact, want := range wantFiles {
 				if contents, err := os.ReadFile(filepath.Join(savedDir, artifact)); err != nil || string(contents) != want {
 					t.Errorf("saved root artifact %s = %q, want %q: %v", artifact, contents, want, err)
+				}
+			}
+			if test.missingBaseline {
+				if _, err := os.Stat(filepath.Join(savedDir, "new-root-evidence.txt")); !os.IsNotExist(err) {
+					t.Errorf("approved discard preserved an attachment the User chose to discard: %v", err)
 				}
 			}
 			if _, err := os.Stat(filepath.Join(savedDir, "unchanged-context.txt")); !os.IsNotExist(err) {

@@ -191,14 +191,16 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 			err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices)
 			return notices, err
 		}
-		return nil, observationFailure(db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, sessionref.Sanitize("", task.AgentSession), absentSince, 0, task.AgentServerStartedAt))
+		return nil, observationFailure(db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, sessionref.Sanitize("", task.AgentSession), task.AgentSessionKind, absentSince, 0, task.AgentServerStartedAt))
 	}
 	absentSince := task.AgentAbsentSince
 	agentPresent := pane.Agent != ""
 	session := sessionref.Sanitize(pane.Agent, task.AgentSession)
+	sessionKind := task.AgentSessionKind
 	if len(pane.AgentSession) > 0 && string(pane.AgentSession) != "null" {
 		if reported := sessionref.Sanitize(pane.Agent, string(pane.AgentSession)); reported != "" {
 			session = reported
+			sessionKind = sessionref.NormalizeKind(pane.Agent)
 		}
 	}
 	if !agentPresent {
@@ -228,7 +230,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	} else {
 		idleSince = 0
 	}
-	if err := db.UpdateTaskObservation(ctx, task.ID, pane.PaneID, pane.WorkspaceID, session, absentSince, idleSince, serverStartedAt); err != nil {
+	if err := db.UpdateTaskObservation(ctx, task.ID, pane.PaneID, pane.WorkspaceID, session, sessionKind, absentSince, idleSince, serverStartedAt); err != nil {
 		return nil, observationFailure(err)
 	}
 	episode, err := db.TaskModelErrorEpisode(ctx, task.ID)

@@ -454,6 +454,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, fmt.Errorf("%w: Task %d is not in %q", store.ErrStateRace, task.ID, task.State)
 	}
 	task = current
+	if discardable && !store.IsApprovedDiscardSourceState(task.State) {
+		return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
+	}
 	mountHeld, err := taskMountHeldBy(ctx, db, task)
 	if err != nil {
 		return result, err
@@ -721,9 +724,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	err = s.runIntentStep(ctx, db, intent, "task.torn_down", func() error {
 		if discardable {
-			if task.State == store.StateLanded {
-				return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", "Unrecoverable Leftover discarded with recorded User approval")
-			}
 			return db.TransitionAfterApproval(ctx, task.ID, task.State, store.StateTornDown, "user", "Task Mount discarded with User approval", "discard")
 		}
 		return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", "Task Mount released after completion")

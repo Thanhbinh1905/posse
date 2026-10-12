@@ -61,7 +61,7 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 	for _, want := range []string{
 		"+  Install the Herdr integration for claude\n",
 		"+  Link the posse plugin into Herdr\n",
-		"+  Install the posse-setup skill\n",
+		"!  The posse skill is available only to Posse-launched sessions; optionally install it globally with `posse setup --global-skills`\n",
 		"+  Add the Claude Code SessionStart hook to ~/.claude/settings.json\n",
 		"+  Add the Codex SessionStart hook to ~/.codex/hooks.json; Codex asks once to trust it\n",
 		"✓  claude is on PATH\n",
@@ -82,7 +82,7 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 	for _, want := range []string{
 		"✓  Installed the Herdr integration for claude\n",
 		"✓  Linked the posse plugin into Herdr\n",
-		"✓  Installed the posse skill\n",
+		"!  The posse skill is available only to Posse-launched sessions; optionally install it globally with `posse setup --global-skills`\n",
 		"✓  Added the Claude Code SessionStart hook to ~/.claude/settings.json\n",
 	} {
 		if !strings.Contains(applied, want) {
@@ -91,6 +91,32 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 	}
 	if len(adapter.Calls) != 0 {
 		t.Fatalf("setup used the Herdr socket although the server is not running: %#v", adapter.Calls)
+	}
+	for _, name := range []string{"posse", "posse-setup"} {
+		if _, err := os.Stat(filepath.Join(userHome, ".agents", "skills", name, "SKILL.md")); !os.IsNotExist(err) {
+			t.Fatalf("default setup installed global skill %s: %v", name, err)
+		}
+	}
+	installed, code := runHumanSetup(t, service, "--global-skills")
+	if code != 0 || !strings.Contains(installed, "✓  Installed the posse skill globally") {
+		t.Fatalf("opt-in global install exit=%d output=%s", code, installed)
+	}
+	modifiedSkill := filepath.Join(userHome, ".agents", "skills", "posse", "SKILL.md")
+	if err := os.WriteFile(modifiedSkill, []byte("user modification\\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removed, code := runHumanSetup(t, service, "--remove-global-skills")
+	if code != 0 || !strings.Contains(removed, "modified or foreign files were preserved") {
+		t.Fatalf("consented removal did not preserve the modified skill: exit=%d output=%s", code, removed)
+	}
+	if contents, err := os.ReadFile(modifiedSkill); err != nil || string(contents) != "user modification\\n" {
+		t.Fatalf("consented removal changed modified skill: contents=%q err=%v", contents, err)
+	}
+	if _, err := os.Stat(filepath.Join(userHome, ".agents", "skills", "posse-setup", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("consented removal kept the unchanged posse-setup skill: %v", err)
+	}
+	if _, code := runHumanSetup(t, service, "--remove-global-skills"); code != 0 {
+		t.Fatalf("repeated global skill removal failed with exit %d", code)
 	}
 
 	adapter.RunOut["integration status"] = []byte("claude: current (v9)\ncodex: not installed\n")
@@ -116,7 +142,7 @@ func TestHumanSetupPreviewFailsReadablyOnConflict(t *testing.T) {
 	if err := os.WriteFile(skill, []byte("my own skill\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output, code := runHumanSetup(t, service, "--check")
+	output, code := runHumanSetup(t, service, "--global-skills", "--check")
 	if code == 0 {
 		t.Fatalf("human preview accepted an unmanaged skill path:\n%s", output)
 	}

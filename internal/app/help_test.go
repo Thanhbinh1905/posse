@@ -28,7 +28,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		"Restart the Rider in the same Mount, optionally with another Profile.",
 		"Start a Rider from a Brief with a short name.",
 		"List a Project's Remuda or prune safe, Posse-owned leftovers.",
-		"Install or update the Herdr plugin, skills and hooks; optionally offer the Agents sidebar layout (--check previews; --exit-code returns 3 for required changes; --human prints a checklist)",
+		"Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("posse --help omitted summary %q: %s", want, help)

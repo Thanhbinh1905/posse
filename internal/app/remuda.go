@@ -1005,6 +1005,12 @@ func stopOwnedProcessSet(roots []ownedProcessRoot, processes []ownedProcess, aut
 			_ = handle.Close()
 		}
 	}()
+	if len(retained) == 0 {
+		if err := verifyOwnedProcessSet(roots, retained, transients, authorization, true); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
 	if err := verifyOwnedProcessSet(roots, retained, transients, authorization, true); err != nil {
 		return nil, err
 	}

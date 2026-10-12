@@ -32,6 +32,7 @@ type DB struct {
 
 var ErrNotFound = sql.ErrNoRows
 var ErrStateRace = errors.New("Task state changed concurrently")
+var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition is only valid for User-approved discard")
 var ErrBusy = errors.New("database contention; retry the operation")
 
 const sqliteBusyTimeoutMillis = 5000
@@ -299,6 +300,13 @@ const (
 	StateTornDown      State = "torn-down"
 )
 
+// IsApprovedDiscardSourceState reports whether User approval can authorize
+// tearing down a Task from this state. Keep this predicate centralized so the
+// allowed set can expand without changing each discard path independently.
+func IsApprovedDiscardSourceState(state State) bool {
+	return oneOfState(state, StateFailed, StateLost, StateStalled, StateReported, StateLanded)
+}
+
 func taskAcceptsInstruction(state State, taskType string) bool {
 	if oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled) {
 		return true
@@ -330,8 +338,8 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 	if err := validateTransitionSource(expected, next, source); err != nil {
 		return err
 	}
-	if next == StateTornDown && (expected == StateFailed || expected == StateLost || expected == StateStalled) {
-		return fmt.Errorf("discarding unlanded work requires a recorded User approval")
+	if next == StateTornDown && source == "user" && IsApprovedDiscardSourceState(expected) {
+		return fmt.Errorf("approved discard requires a recorded User approval")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -348,8 +356,8 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 }
 
 func (db *DB) TransitionWithApproval(ctx context.Context, taskID int64, expected, next State, source, note, action, quote string) error {
-	if next != StateTornDown || !oneOfState(expected, StateFailed, StateLost, StateStalled) || source != "user" {
-		return fmt.Errorf("approval-backed transition is only valid for User-approved discard")
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" {
+		return ErrInvalidApprovedDiscardTransition
 	}
 	if strings.TrimSpace(quote) == "" {
 		return fmt.Errorf("user approval quote is required")
@@ -406,8 +414,8 @@ func (db *DB) LatestApprovalQuote(ctx context.Context, taskID int64, action stri
 }
 
 func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
-	if next != StateTornDown || !oneOfState(expected, StateFailed, StateLost, StateStalled) || source != "user" {
-		return fmt.Errorf("approval-backed transition is only valid for User-approved discard")
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" {
+		return ErrInvalidApprovedDiscardTransition
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -478,7 +486,9 @@ func validateTransitionSource(from, to State, source string) error {
 		}
 	case (from == StateFailed || from == StateLost) && to == StateWorking:
 		expected = "cli"
-	case (from == StateFailed || from == StateLost || from == StateStalled) && to == StateTornDown:
+	case to == StateTornDown && source == "user" && IsApprovedDiscardSourceState(from):
+		expected = "user"
+	case to == StateTornDown && oneOfState(from, StateFailed, StateLost, StateStalled):
 		expected = "user"
 	}
 	if source != expected {
@@ -516,7 +526,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		LandingMode: task.LandingMode, AutonomyReview: task.AutonomyReview, AutonomyLand: task.AutonomyLand,
 		Branch: task.Branch, BaseRef: task.BaseRef, WorktreePath: task.WorktreePath,
 		HerdrWorkspaceID: task.HerdrWorkspaceID, PaneID: task.PaneID, PaneLabel: task.PaneLabel,
-		AgentName: task.AgentName, AgentSession: task.AgentSession, PrUrl: task.PRURL, LandedRef: task.LandedRef,
+		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, LandedRef: task.LandedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
 		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now,
 	})
@@ -588,6 +598,7 @@ type Task struct {
 	PaneLabel            string `toml:"pane_label"`
 	AgentName            string `toml:"agent_name"`
 	AgentSession         string `toml:"agent_session"`
+	AgentSessionKind     string `toml:"agent_session_kind"`
 	AgentAbsentSince     int64  `toml:"agent_absent_since"`
 	IdleSince            int64  `toml:"idle_since"`
 	AgentServerStartedAt string `toml:"agent_server_started_at"`
@@ -1944,15 +1955,15 @@ func taskFromDB(row dbgen.Task) Task {
 		LandingMode: row.LandingMode, AutonomyReview: row.AutonomyReview, AutonomyLand: row.AutonomyLand,
 		Branch: row.Branch, BaseRef: row.BaseRef, WorktreePath: row.WorktreePath, MountID: mountID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
-		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
+		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
 		PRURL: row.PrUrl, LandedRef: row.LandedRef, LastOutputHash: row.LastOutputHash,
 		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }
 
-func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {
+func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {
 	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
 	defer cancel()
-	params := dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}
+	params := dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentSessionKind: agentSessionKind, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}
 	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateTaskObservation(ctx, params)
 	}); err != nil {

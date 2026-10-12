@@ -48,6 +48,7 @@ assignments='
 2 TestLeadHarnessAndRepositoryRiderSidebar
 2 TestAutoRecoverOffHoldsGroupCloseUntilUp
 2 TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown
+2 TestRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession
 2 TestReviewResumeTemplateRejectsSecondSessionSelector
 2 TestReviewRejectsCodexProfileSelectorAtSpawnAndRelaunch
 2 TestWorkspaceProjectRegistersRidesAndLandsAcrossMembers
@@ -55,6 +56,7 @@ assignments='
 2 TestMergedPRAutoTearsDownEvenWhenAutoUnsaddleIsNever
 2 TestExpiredQueuedMessageCrashRaisesNotice
 2 TestFirstOutcomeFreshHome
+2 TestLaunchSkillsAreInjectedOnlyIntoPosseSessions
 2 TestDownRefusesRunningTasks
 2 TestReviewRejectsCodexTOMLModelLiteralAndCommentsAtSpawnAndRelaunch
 2 TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce
@@ -228,4 +230,4 @@ listed=$(go test -tags=e2e -list '^Test' ./internal/e2e)
 validate_assignments "$listed" "$assignments"
 pattern=$(printf '%s\n' "$assignments" | awk -v shard="$shard" '$1 == shard { if (count++) printf "|"; printf "%s", $2 } END { print "" }')
 printf 'Running E2E shard %s/4\n' "$shard"
-go test -tags=e2e -count=1 -timeout=8m ./internal/e2e -run "^(${pattern})$"
+go test -tags=e2e -count=1 -timeout=10m ./internal/e2e -run "^(${pattern})$"

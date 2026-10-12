@@ -713,7 +713,7 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 	if err := db.UpdateTaskLaunch(ctx, taskID, mount.Path, "w1", "w1:p2", "posse:shop:t1", "posse-shop-t1-"+strconv.Itoa(launch)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateTaskObservation(ctx, taskID, "w1:p2", "w1", "", 0, 0, "old-generation"); err != nil {
+	if err := db.UpdateTaskObservation(ctx, taskID, "w1:p2", "w1", "", "", 0, 0, "old-generation"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "old-generation"); err != nil {
