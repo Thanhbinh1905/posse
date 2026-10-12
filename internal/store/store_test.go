@@ -362,8 +362,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 35 {
-		t.Fatalf("applied Goose migration version = %d, want 35", version)
+	if version != 36 {
+		t.Fatalf("applied Goose migration version = %d, want 36", version)
 	}
 }
 
@@ -427,6 +427,7 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 		`DROP TABLE notice_delivery_receipts`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
+		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`ALTER TABLE projects ADD COLUMN project_uuid TEXT NOT NULL DEFAULT ''`,
@@ -507,6 +508,7 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
+		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`,
@@ -661,6 +663,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`DROP TABLE publish_pre_push_heads`,
+		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -763,9 +766,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 35 {
+	if version != 36 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 35", version)
+		t.Fatalf("initial Goose migration version = %d, want 36", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -802,8 +805,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 35 {
-		t.Fatalf("reopened Goose migration version = %d, want 35", version)
+	if version != 36 {
+		t.Fatalf("reopened Goose migration version = %d, want 36", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {

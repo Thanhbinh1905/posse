@@ -1533,7 +1533,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	kindChanged := kind != taskKind(cfg, task)
 	session := ""
-	if !kindChanged {
+	if sessionref.NormalizeKind(task.AgentSessionKind) == sessionref.NormalizeKind(kind) {
 		session = agentSessionID(kind, task.AgentSession)
 	}
 	startArgs := workerAgentArgs(profile, kindConfig, session)
@@ -1678,13 +1678,6 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}); err != nil {
 		return failure(err)
 	}
-	if profileName != task.Profile {
-		if err := track("task.profile", func() error {
-			return db.ChangeTaskProfile(ctx, task.ID, task.Profile, profileName)
-		}); err != nil {
-			return failure(err)
-		}
-	}
 	if kind == "claude" || kind == "codex" || kind == "pi" {
 		skills, skillErr := freezePosseLaunchSkills(home, project.Name, project.Root)
 		if skillErr != nil {
@@ -1703,6 +1696,13 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	if err := s.waitAgentReady(ctx, pane.PaneID); err != nil {
 		return failure(err)
+	}
+	if profileName != task.Profile {
+		if err := track("task.profile", func() error {
+			return db.ChangeTaskProfile(ctx, task.ID, task.Profile, profileName)
+		}); err != nil {
+			return failure(err)
+		}
 	}
 	if err := track("pane.metadata", func() error {
 		return s.refreshWorkerDisplay(ctx, db, project, task.ID, kind)
@@ -1752,7 +1752,7 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 			}
 			// Record the successful launch's generation before another event
 			// can mistake this Rider for an unrecovered process.
-			return db.UpdateTaskObservation(ctx, taskID, current.PaneID, current.HerdrWorkspaceID, current.AgentSession, 0, 0, generation)
+			return db.UpdateTaskObservation(ctx, taskID, current.PaneID, current.HerdrWorkspaceID, current.AgentSession, current.AgentSessionKind, 0, 0, generation)
 		}
 		if current.State == store.StateWorking {
 			return track("task.progress", progress)

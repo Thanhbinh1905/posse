@@ -526,7 +526,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		LandingMode: task.LandingMode, AutonomyReview: task.AutonomyReview, AutonomyLand: task.AutonomyLand,
 		Branch: task.Branch, BaseRef: task.BaseRef, WorktreePath: task.WorktreePath,
 		HerdrWorkspaceID: task.HerdrWorkspaceID, PaneID: task.PaneID, PaneLabel: task.PaneLabel,
-		AgentName: task.AgentName, AgentSession: task.AgentSession, PrUrl: task.PRURL, LandedRef: task.LandedRef,
+		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, LandedRef: task.LandedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
 		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now,
 	})
@@ -598,6 +598,7 @@ type Task struct {
 	PaneLabel            string `toml:"pane_label"`
 	AgentName            string `toml:"agent_name"`
 	AgentSession         string `toml:"agent_session"`
+	AgentSessionKind     string `toml:"agent_session_kind"`
 	AgentAbsentSince     int64  `toml:"agent_absent_since"`
 	IdleSince            int64  `toml:"idle_since"`
 	AgentServerStartedAt string `toml:"agent_server_started_at"`
@@ -1954,15 +1955,15 @@ func taskFromDB(row dbgen.Task) Task {
 		LandingMode: row.LandingMode, AutonomyReview: row.AutonomyReview, AutonomyLand: row.AutonomyLand,
 		Branch: row.Branch, BaseRef: row.BaseRef, WorktreePath: row.WorktreePath, MountID: mountID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
-		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
+		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
 		PRURL: row.PrUrl, LandedRef: row.LandedRef, LastOutputHash: row.LastOutputHash,
 		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }
 
-func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {
+func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {
 	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
 	defer cancel()
-	params := dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}
+	params := dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentSessionKind: agentSessionKind, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}
 	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateTaskObservation(ctx, params)
 	}); err != nil {

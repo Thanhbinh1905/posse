@@ -10,6 +10,18 @@ import (
 
 var plainID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 
+// NormalizeKind maps harness aliases to the kind Herdr sessions are recorded under.
+func NormalizeKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "claude", "claude-code":
+		return "claude"
+	case "codex", "codex-cli":
+		return "codex"
+	default:
+		return strings.ToLower(strings.TrimSpace(kind))
+	}
+}
+
 // Sanitize extracts a resumable session reference from Herdr's session value.
 // It accepts plain IDs and paths contained in the named harness's session store.
 func Sanitize(agent, raw string) string {

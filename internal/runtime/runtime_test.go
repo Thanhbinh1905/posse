@@ -601,8 +601,27 @@ func TestIngestSanitizesReportedAgentSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated, err = db.Task(ctx, project.ID, "t1")
-	if err != nil || updated.AgentSession != "session-123" {
-		t.Fatalf("valid Herdr session was not normalized: %#v, %v", updated, err)
+	if err != nil || updated.AgentSession != "session-123" || updated.AgentSessionKind != "pi" {
+		t.Fatalf("valid Herdr session was not normalized with its owner kind: %#v, %v", updated, err)
+	}
+
+	fake.SnapshotValue.Panes[0].Agent = "claude"
+	fake.SnapshotValue.Panes[0].AgentSession = nil
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, fake.SnapshotValue, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err = db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.AgentSession != "session-123" || updated.AgentSessionKind != "pi" {
+		t.Fatalf("a pane without a reported session changed the stored session owner: %#v, %v", updated, err)
+	}
+
+	fake.SnapshotValue.Panes[0].AgentSession = json.RawMessage(`{"session_id":"claude-session"}`)
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, fake.SnapshotValue, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err = db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.AgentSession != "claude-session" || updated.AgentSessionKind != "claude" {
+		t.Fatalf("reported Claude session was not recorded with its owner kind: %#v, %v", updated, err)
 	}
 }
 
@@ -709,7 +728,7 @@ func TestTaskGenerationStillGetsRestartGraceAfterProjectGenerationWasRecorded(t 
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, "", 0, 0, "old-generation"); err != nil {
+	if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, "", "", 0, 0, "old-generation"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "new-generation"); err != nil {
@@ -758,7 +777,7 @@ func TestRunWithMissingGenerationPreservesLastObservedProjectAndAgentGenerations
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, "", 0, 0, "generation-1"); err != nil {
+	if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, "", "", 0, 0, "generation-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "generation-1"); err != nil {

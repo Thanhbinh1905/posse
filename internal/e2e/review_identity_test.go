@@ -152,7 +152,7 @@ func TestReviewResumeTemplateRejectsSecondSessionSelector(t *testing.T) {
 		t.Fatalf("initial independent review: code=%d %s", code, output)
 	}
 	review := fixture.mustTask(t, "t2")
-	if _, err := fixture.db.ExecContext(context.Background(), "UPDATE tasks SET agent_session=? WHERE id=?", `{"session_id":"review-session"}`, review.ID); err != nil {
+	if _, err := fixture.db.ExecContext(context.Background(), "UPDATE tasks SET agent_session=?,agent_session_kind='claude' WHERE id=?", `{"session_id":"review-session"}`, review.ID); err != nil {
 		t.Fatal(err)
 	}
 	resumeArgs, _ := json.Marshal([]string{"--resume", "{session}", "-r" + authorSession})
@@ -186,7 +186,7 @@ func TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown(t *testing.T) {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
 	author := fixture.mustTask(t, "t1")
-	if _, err := fixture.db.ExecContext(context.Background(), "UPDATE tasks SET agent_session=? WHERE id=?", `{"session_id":"author-session"}`, author.ID); err != nil {
+	if _, err := fixture.db.ExecContext(context.Background(), "UPDATE tasks SET agent_session=?,agent_session_kind='claude' WHERE id=?", `{"session_id":"author-session"}`, author.ID); err != nil {
 		t.Fatal(err)
 	}
 	resumeArgs, _ := json.Marshal([]string{"--resume", "{session}", "--model", "model-b"})

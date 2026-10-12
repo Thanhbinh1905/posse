@@ -268,6 +268,7 @@ tasks(
   idle_since INTEGER,                -- when Herdr last reported this Worker idle without a Signal
   herdr_workspace_id TEXT, pane_id TEXT, pane_label TEXT, agent_name TEXT,
   agent_session TEXT,                -- from Herdr, for resume
+  agent_session_kind TEXT,           -- harness owner; empty legacy values are not resumed
   pr_url TEXT, landed_ref TEXT,
   last_output_hash TEXT, last_progress_at INTEGER,
   created_at INTEGER, updated_at INTEGER,
@@ -651,8 +652,8 @@ Work is never lost to a crash: commits live on the recorded `posse/<short>` bran
 
 1. Allowed from `working`, `stalled`, `lost` and `failed` (a `failed` Task only if its Mount is still held). Writes a `relaunch` intent.
 2. Finds the Task's pane (by id, then label); if none, reopens the Mount in a new workspace exactly as `posse ride` does and labels the new pane.
-3. Uses the Task's current Profile unless `--profile` is given. If the kind is unchanged, the new model and effort arguments are used with the recorded session resume arguments. If the kind changes, it starts a fresh session without passing the old session and runs the new kind's `prepare` step for the Mount. A Profile change is recorded in state history with the old and new names, and becomes the Profile shown by `posse show` and `posse roster`.
-4. Stops any live agent in the pane (see Stopping an agent in section 16), increments `launches`, and starts the agent with the full Profile arguments (`auto_approve_args`, `model_args`, `effort_args`, `args`).
+3. Uses the Task's current Profile unless `--profile` is given. A recorded session is resumed only when its recorded owner kind matches the selected Profile's harness kind; a different or unknown owner starts a fresh session. The new model and effort arguments still apply when resuming. A kind change runs the new kind's `prepare` step for the Mount.
+4. Stops any live agent in the pane (see Stopping an agent in section 16), increments `launches`, and starts the agent with the full Profile arguments (`auto_approve_args`, `model_args`, `effort_args`, `args`). Once Herdr reports the agent ready, a Profile change is recorded in state history with the old and new names, and becomes the Profile shown by `posse show` and `posse roster`. Failed attempts before readiness leave the Profile unchanged. Launch Identity Records still capture each attempted launch's selected Profile and model, including attempts whose prompt delivery later fails.
 5. Clears stale Git state in the Mount: removes `index.lock` only when no git process runs in the Mount, and reports an in-progress merge, rebase or cherry-pick instead of touching it.
 6. Prompts one line pointing at a generated `relaunch.md`: re-read `launch.md`; inspect `git status` and `git log`; continue the Task; report with `posse holler`. It includes delivered Lead messages sent after the Brief in order, bounded to the most recent 32 messages and 1,200 bytes per message; later messages supersede earlier ones. Then moves the Task to `working`.
 

@@ -7,6 +7,19 @@ import (
 	"testing"
 )
 
+func TestNormalizeKindMapsHarnessAliases(t *testing.T) {
+	for input, want := range map[string]string{
+		"claude":        "claude",
+		" Claude-Code ": "claude",
+		"codex-cli":     "codex",
+		"Pi":            "pi",
+	} {
+		if got := NormalizeKind(input); got != want {
+			t.Errorf("NormalizeKind(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestSanitizeAcceptsPlainIDsAndHarnessSessionPaths(t *testing.T) {
 	useDefaultSessionRoots(t)
 	for _, agent := range []string{"claude", "codex", "pi"} {
