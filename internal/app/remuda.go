@@ -329,7 +329,8 @@ func (s *Service) listMounts(ctx *axi.Context) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+	_, err = s.prepareProject(ctx.Context, db, project)
+	if err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}
 	mounts, err := db.Mounts(ctx.Context, project.ID)

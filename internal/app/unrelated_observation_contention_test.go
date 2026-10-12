@@ -159,12 +159,8 @@ func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 	}
 
 	code, output, errOut = fixture.run("--json")
-	var failure axi.Error
-	if err := json.Unmarshal([]byte(output), &failure); err != nil {
-		t.Fatalf("invalid dashboard failure: %s (stderr: %s): %v", output, errOut, err)
-	}
-	if code != 1 || failure.Code != "store_busy" || !failure.Retryable {
-		t.Fatalf("dashboard observation contention failure = %#v, exit=%d; want retryable store_busy", failure, code)
+	if code != 0 || strings.Contains(output, "store_busy") || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "Project observations were deferred") {
+		t.Fatalf("dashboard did not show its durable Project view with a deferral note: exit=%d output=%s stderr=%s", code, output, errOut)
 	}
 }
 
