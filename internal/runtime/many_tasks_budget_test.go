@@ -16,7 +16,7 @@ func TestReviewRunBudgetWithManyContendedTasks(t *testing.T) {
 	db, project, first := createWorkingTask(t)
 	defer db.Close()
 	ctx := context.Background()
-	panes := []herdr.Pane{{PaneID: first.PaneID, WorkspaceID: first.HerdrWorkspaceID, Label: first.PaneLabel, Agent: "claude", AgentStatus: "working"}}
+	panes := []herdr.Pane{{PaneID: first.PaneID, WorkspaceID: first.HerdrWorkspaceID, Label: first.PaneLabel, Agent: "claude", AgentStatus: "idle"}}
 	for seq := 2; seq <= 16; seq++ {
 		paneID := fmt.Sprintf("w1:p%d", seq)
 		label := fmt.Sprintf("posse:shop:t%d", seq)
@@ -27,7 +27,7 @@ func TestReviewRunBudgetWithManyContendedTasks(t *testing.T) {
 		if err := db.Transition(ctx, id, store.StateSpawning, store.StateWorking, "cli", "agent ready"); err != nil {
 			t.Fatal(err)
 		}
-		panes = append(panes, herdr.Pane{PaneID: paneID, WorkspaceID: "w1", Label: label, Agent: "claude", AgentStatus: "working"})
+		panes = append(panes, herdr.Pane{PaneID: paneID, WorkspaceID: "w1", Label: label, Agent: "claude", AgentStatus: "idle"})
 	}
 	writer, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -70,7 +70,7 @@ func TestRunPrioritizesDeferredTaskObservations(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		adapter.SnapshotValue.Panes = append(adapter.SnapshotValue.Panes, herdr.Pane{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"})
+		adapter.SnapshotValue.Panes = append(adapter.SnapshotValue.Panes, herdr.Pane{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "idle"})
 	}
 	// Model a prior pass that observed t1/t2 but deferred the older t3/t4.
 	// Audit actual observation writes, not the implementation's sorted slice.
@@ -116,6 +116,9 @@ func TestRunPrioritizesDeferredTaskObservations(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET updated_at=1 WHERE project_id=? AND seq=2`, project.ID); err != nil {
 		t.Fatal(err)
+	}
+	for index := range adapter.SnapshotValue.Panes {
+		adapter.SnapshotValue.Panes[index].AgentStatus = "working"
 	}
 	if order := observe(); len(order) != 4 || order[0] != 2 {
 		t.Fatalf("next-pass observation order = %v, want newly deferred t2 first", order)

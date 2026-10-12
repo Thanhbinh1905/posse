@@ -478,7 +478,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					t.Fatal(err)
 				}
 				branchSHA = strings.TrimSpace(gitTest(t, fixture.harness.baseEnv, fixture.repo, "rev-parse", "refs/heads/posse/t1"))
-				if err := fixture.attachTaskPane(t, "t1", true); err != nil {
+				if err := fixture.attachTaskPane(t, "t1", false); err != nil {
 					t.Fatal(err)
 				}
 				crashAt := item.command + ":" + item.phase + ":" + item.step
@@ -588,15 +588,8 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 						return fmt.Errorf("Land crash at %s/%s recovered landed ref %q, merge completed=%v branch=%q", item.phase, item.step, task.LandedRef, mergeCompleted, branchSHA)
 					}
 				case "unsaddle":
-					wantState := store.StateFailed
-					if item.step == "scratch.remove" {
-						wantState = store.StateLost
-					}
-					if item.step == "task.torn_down" && item.phase == "after" {
-						wantState = store.StateTornDown
-					}
-					if task.State != wantState {
-						return fmt.Errorf("discard crash at %s/%s recovered Task to %s, want %s", item.phase, item.step, task.State, wantState)
+					if task.State != store.StateTornDown {
+						return fmt.Errorf("discard crash at %s/%s recovered Task to %s, want torn-down", item.phase, item.step, task.State)
 					}
 				case "relaunch":
 					if task.State != store.StateLost && task.State != store.StateWorking {
@@ -610,26 +603,6 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if item.command == "unsaddle" && item.step == "approval.record" && item.phase == "before" {
-				if got := strings.TrimSpace(gitTest(t, fixture.harness.baseEnv, fixture.repo, "rev-parse", "refs/heads/posse/t1")); got != branchSHA {
-					t.Fatalf("discard crash changed branch tip to %s, want %s", got, branchSHA)
-				}
-				if err := fixture.openDB(t, func(db *store.DB) error {
-					var approvals, notices int
-					if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='discard'`, fixture.taskDBID).Scan(&approvals); err != nil {
-						return err
-					}
-					if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE project_id=? AND task_id=? AND kind='intent_stuck'`, fixture.project.ID, fixture.taskDBID).Scan(&notices); err != nil {
-						return err
-					}
-					if approvals != 0 || notices != 1 {
-						return fmt.Errorf("discard crash left %d approvals and %d intent_stuck Notices, want 0 and 1", approvals, notices)
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
 			if item.command == "land --merge" {
 				mergeCompleted := item.step == "merge" && item.phase == "after" || item.step == "landed_ref.record" || item.step == "task.landed"
 				wantDefaultSHA := defaultSHA
@@ -642,27 +615,12 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			}
 			if item.command == "unsaddle" {
 				scratchPath := filepath.Join(fixture.home, "scratch", fixture.project.Name, "t1")
-				if item.step == "scratch.remove" && item.phase == "before" {
-					if _, err := os.Stat(scratchPath); err != nil {
-						t.Fatalf("pre-removal crash unexpectedly changed Task scratch: %v", err)
-					}
-					_, output := fixture.run(t, "", "unsaddle", taskID, "--discard", "--user-approved", "User approved discard retry")
-					if !strings.Contains(output, "torn-down") {
-						t.Fatalf("retry did not complete interrupted discard: %s", output)
-					}
+				if _, err := os.Stat(scratchPath); !os.IsNotExist(err) {
+					t.Fatalf("discard recovery kept Task scratch after %s/%s: %v", item.phase, item.step, err)
 				}
-				if item.step == "scratch.remove" || item.step == "task.torn_down" {
-					if _, err := os.Stat(scratchPath); !os.IsNotExist(err) {
-						t.Fatalf("discard recovery kept Task scratch after %s/%s: %v", item.phase, item.step, err)
-					}
-				}
-				branchRemoved := item.step == "task.torn_down" || item.step == "branch.remove" && item.phase == "after" || item.step == "scratch.remove" && item.phase == "before"
 				branchTip, branchErr := gitCommand(fixture.harness.baseEnv, fixture.repo, "rev-parse", "--verify", "refs/heads/posse/t1")
-				if branchRemoved && branchErr == nil {
-					t.Fatalf("discard crash at %s/%s left branch at %s", item.phase, item.step, strings.TrimSpace(branchTip))
-				}
-				if !branchRemoved && (branchErr != nil || strings.TrimSpace(branchTip) != branchSHA) {
-					t.Fatalf("discard crash at %s/%s changed branch tip to %s, want %s (err %v)", item.phase, item.step, strings.TrimSpace(branchTip), branchSHA, branchErr)
+				if branchErr == nil {
+					t.Fatalf("discard recovery at %s/%s left branch at %s", item.phase, item.step, strings.TrimSpace(branchTip))
 				}
 				if err := fixture.openDB(t, func(db *store.DB) error {
 					var approvals, notices int
@@ -672,16 +630,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE project_id=? AND task_id=? AND kind='intent_stuck'`, fixture.project.ID, fixture.taskDBID).Scan(&notices); err != nil {
 						return err
 					}
-					wantApprovals, wantNotices := 1, 1
-					if item.step == "approval.record" && item.phase == "before" {
-						wantApprovals = 0
-					}
-					if item.step == "scratch.remove" && item.phase == "before" {
-						wantApprovals = 2
-					}
-					if item.step == "task.torn_down" && item.phase == "after" {
-						wantNotices = 0
-					}
+					wantApprovals, wantNotices := 1, 0
 					if approvals != wantApprovals || notices != wantNotices {
 						return fmt.Errorf("discard crash at %s/%s left %d approvals and %d intent_stuck Notices, want %d and %d", item.phase, item.step, approvals, notices, wantApprovals, wantNotices)
 					}
@@ -689,11 +638,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					if err := db.QueryRowContext(context.Background(), `SELECT state FROM mounts WHERE path=?`, filepath.Join(fixture.home, "remuda", fixture.project.Name, "mount-1")).Scan(&mountState); err != nil {
 						return err
 					}
-					mountReleased := item.step == "mount.release" && item.phase == "after" || item.step == "branch.remove" || item.step == "task.torn_down" || item.step == "scratch.remove" && item.phase == "before"
-					wantMountState := "held"
-					if mountReleased {
-						wantMountState = "idle"
-					}
+					wantMountState := "idle"
 					if mountState != wantMountState {
 						return fmt.Errorf("discard crash at %s/%s left Mount %s, want %s", item.phase, item.step, mountState, wantMountState)
 					}

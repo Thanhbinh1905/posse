@@ -62,6 +62,9 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if task.State == store.StateTornDown {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 			}
+			if task.State == store.StateLanded {
+				return axi.Failure("decision_refused", "a landed Task cannot be discarded; resolve its Leftover separately", false)
+			}
 			if !store.IsApprovedDiscardSourceState(task.State) {
 				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)
 			}
@@ -147,17 +150,50 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if task.State == store.StateTornDown {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 			}
-			if task.State == store.StateLanding || task.State == store.StateDone {
-				if err := db.Transition(out.Context, task.ID, task.State, store.StateWorking, "lead", "User chose to discard closed PR"); err != nil {
+			if !strings.HasPrefix(decision.Origin, "pr_closed:invalid:") {
+				if err := s.pollProjectPullRequests(out.Context, db, project, cfg, true); err != nil {
 					return err
 				}
-				task.State = store.StateWorking
+				task, err = db.TaskByID(out.Context, project.ID, task.ID)
+				if err != nil {
+					return err
+				}
+				if task.State == store.StateLanded || task.State == store.StateTornDown {
+					return axi.Failure("decision_refused", "Task has landed; use normal Teardown so unmerged work is preserved", false)
+				}
+				url := closedPRDecisionURL(decision.Origin)
+				state := ""
+				if !project.IsWorkspace() {
+					observation, observationErr := db.LatestPRObservation(out.Context, task.ID)
+					if observationErr != nil {
+						return observationErr
+					}
+					if observation.PRURL == url {
+						state = observation.State
+					}
+				} else {
+					repos, reposErr := db.TaskRepos(out.Context, task.ID)
+					if reposErr != nil {
+						return reposErr
+					}
+					for _, repo := range repos {
+						if repo.PRURL != url {
+							continue
+						}
+						observation, observationErr := db.LatestMemberPRObservation(out.Context, task.ID, repo.Repo)
+						if observationErr != nil {
+							return observationErr
+						}
+						state = observation.State
+						break
+					}
+				}
+				if state != "CLOSED" {
+					return axi.Failure("decision_refused", "the PR is no longer verified closed; inspect its current state before discarding", true)
+				}
 			}
-			if task.State == store.StateWorking || task.State == store.StateNeedsDecision || task.State == store.StateBlocked {
-				if err := db.Transition(out.Context, task.ID, task.State, store.StateLost, "cli", "User approved discard after closed PR"); err != nil {
-					return err
-				}
-				task.State = store.StateLost
+			if err := s.requireNoLiveTaskAgent(out.Context, project, task); err != nil {
+				return err
 			}
 			if !store.IsApprovedDiscardSourceState(task.State) {
 				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)

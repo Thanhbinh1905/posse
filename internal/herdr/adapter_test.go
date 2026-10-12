@@ -13,7 +13,7 @@ import (
 )
 
 func TestClientCallUsesNewlineJSONSocketProtocol(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	socket := filepath.Join(shortTestSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestClientCallUsesNewlineJSONSocketProtocol(t *testing.T) {
 }
 
 func TestClientMapsHerdrErrors(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	socket := filepath.Join(shortTestSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

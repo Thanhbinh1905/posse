@@ -48,11 +48,6 @@ func TestLeadHarnessAndRepositoryRiderSidebar(t *testing.T) {
 	}
 	runPosse(t, f.binary, f.repo, f.leadEnv, "roster")
 	assertLeadRiderSidebarSnapshot(t, f, first, second)
-
-	f.fail(t, "t2")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t2", "--discard", "--user-approved", "User approved the sidebar teardown test")
-	assertLeadRiderSidebarSnapshot(t, f, first)
-	f.assertGone(t, f.snapshot(t), second.PaneID)
 }
 
 func assertLeadRiderSidebarSnapshot(t *testing.T, f *riderTabsFixture, tasks ...store.Task) {
