@@ -348,7 +348,7 @@ func (s *Service) machineSetupCheck(ctx context.Context) []doctorCheck {
 		plan := s.setupPlan(home, binary, s.binaryVersion(), dirs, manifest, found, state)
 		for _, row := range plan {
 			action, _ := row["action"].(string)
-			if action != "keep" && action != "offer" {
+			if action != "keep" && action != "offer" && action != "offer_global" && action != "offer_removal" && action != "preserve" && action != "manual" {
 				return fmt.Errorf("machine setup has remaining changes (%s: %s)", row["step"], action)
 			}
 		}

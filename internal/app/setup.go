@@ -73,6 +73,7 @@ type setupHookRecord struct {
 }
 
 type setupInspection struct {
+	GlobalSkillsMode string
 	Kinds            []string
 	ReferencedKinds  []string
 	AvailableKinds   []string
@@ -93,12 +94,12 @@ type setupRun struct {
 }
 
 func (s *Service) setup(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("setup", args, map[string]flagSpec{"check": {boolean: true}, "uninstall": {boolean: true}, "human": {boolean: true}, "exit-code": {boolean: true}, "sidebar-layout": {boolean: true}, "no-sidebar-layout": {boolean: true}, "binary": {}})
+	parsed, err := parseArgs("setup", args, map[string]flagSpec{"check": {boolean: true}, "uninstall": {boolean: true}, "human": {boolean: true}, "exit-code": {boolean: true}, "sidebar-layout": {boolean: true}, "no-sidebar-layout": {boolean: true}, "global-skills": {boolean: true}, "remove-global-skills": {boolean: true}, "binary": {}})
 	if err != nil {
 		return err
 	}
-	if len(parsed.Positionals) != 0 || parsed.Bool("check") && parsed.Bool("uninstall") {
-		return axi.Usage("setup accepts either --check or --uninstall")
+	if len(parsed.Positionals) != 0 || parsed.Bool("check") && parsed.Bool("uninstall") || parsed.Bool("global-skills") && parsed.Bool("remove-global-skills") || parsed.Bool("uninstall") && (parsed.Bool("global-skills") || parsed.Bool("remove-global-skills")) {
+		return axi.Usage("setup accepts either --check or --uninstall and at most one of --global-skills or --remove-global-skills")
 	}
 	human := parsed.Bool("human")
 	if human && (parsed.Bool("uninstall") || ctx.JSON) {
@@ -122,7 +123,13 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	if parsed.Bool("uninstall") {
 		return s.uninstallSetup(ctx, home, manifestPath, manifest, found)
 	}
-	run, err := s.runSetup(ctx.Context, home, manifestPath, manifest, found, parsed.Flags["binary"], !parsed.Bool("check"), human)
+	skillMode := ""
+	if parsed.Bool("global-skills") {
+		skillMode = "install"
+	} else if parsed.Bool("remove-global-skills") {
+		skillMode = "remove"
+	}
+	run, err := s.runSetup(ctx.Context, home, manifestPath, manifest, found, parsed.Flags["binary"], !parsed.Bool("check"), human, skillMode)
 	if human {
 		printHumanSetup(ctx.Out, run, err)
 		if err != nil {
@@ -134,7 +141,7 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	plan := renderSetupPlan(run.plan)
 	if !run.applied {
 		if !human {
-			if err := ctx.Print(axi.Object{{Key: "plan", Value: plan}, {Key: "prerequisites", Value: run.prerequisites}, {Key: "available_agent_kinds", Value: run.inspection.AvailableKinds}, {Key: "changed", Value: []any{}}, {Key: "help", Value: []any{"Codex will ask once to trust the new hook", "Run `posse setup` to apply this plan"}}}); err != nil {
+			if err := ctx.Print(axi.Object{{Key: "plan", Value: plan}, {Key: "prerequisites", Value: run.prerequisites}, {Key: "available_agent_kinds", Value: run.inspection.AvailableKinds}, {Key: "changed", Value: []any{}}, {Key: "help", Value: []any{"Codex will ask once to trust the new hook", "Global skills are optional: use `posse setup --global-skills` to install them", "Run `posse setup` to apply this plan"}}}); err != nil {
 				return err
 			}
 		}
@@ -146,12 +153,12 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	if human {
 		return nil
 	}
-	return ctx.Print(axi.Object{{Key: "plan", Value: plan}, {Key: "prerequisites", Value: run.prerequisites}, {Key: "available_agent_kinds", Value: run.inspection.AvailableKinds}, {Key: "changed", Value: run.changed}, {Key: "manifest", Value: run.manifestPath}, {Key: "help", Value: []any{"Codex will ask once to trust the new hook", "Run `posse doctor` to verify the installed hooks and integrations"}}})
+	return ctx.Print(axi.Object{{Key: "plan", Value: plan}, {Key: "prerequisites", Value: run.prerequisites}, {Key: "available_agent_kinds", Value: run.inspection.AvailableKinds}, {Key: "changed", Value: run.changed}, {Key: "manifest", Value: run.manifestPath}, {Key: "help", Value: []any{"Codex will ask once to trust the new hook", "Global skills are optional: use `posse setup --global-skills` to install them", "Run `posse doctor` to verify the installed hooks and integrations"}}})
 }
 
 // runSetup inspects the machine and, when apply is set, applies the plan. A
 // human preview also validates the plan so conflicts surface before the prompt.
-func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manifest setupManifest, found bool, binaryFlag string, apply, human bool) (setupRun, error) {
+func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manifest setupManifest, found bool, binaryFlag string, apply, human bool, skillMode string) (setupRun, error) {
 	run := setupRun{manifestPath: manifestPath}
 	binary, err := resolveSetupBinary(binaryFlag)
 	if err != nil {
@@ -164,6 +171,7 @@ func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manif
 	if err != nil {
 		return run, err
 	}
+	run.inspection.GlobalSkillsMode = skillMode
 	version := s.binaryVersion()
 	dirs, err := setupDirectories()
 	if err != nil {
@@ -257,7 +265,7 @@ func (s *Service) inspectSetup(ctx context.Context, home string) (setupInspectio
 }
 
 func (s *Service) setupPlan(home, binary, version string, dirs setupDirs, manifest setupManifest, hasManifest bool, state setupInspection) []map[string]any {
-	claudeDir, codexDir, agentsDir := dirs.claude, dirs.codex, dirs.agents
+	claudeDir, codexDir := dirs.claude, dirs.codex
 	rows := []map[string]any{}
 	for _, kind := range state.Kinds {
 		action := "install"
@@ -295,36 +303,7 @@ func (s *Service) setupPlan(home, binary, version string, dirs setupDirs, manife
 	}
 	rows = append(rows, map[string]any{"step": "default_config", "target": configPath, "action": configAction})
 	for _, name := range []string{"posse", "posse-setup"} {
-		directory := filepath.Join(agentsDir, name)
-		link := filepath.Join(claudeDir, "skills", name)
-		action := "install"
-		contents, _ := setupassets.Skill(name)
-		installed, fileErr := os.ReadFile(filepath.Join(directory, "SKILL.md"))
-		marker, markerErr := os.ReadFile(filepath.Join(directory, ".posse-version"))
-		linkTarget, linkErr := os.Readlink(link)
-		if fileErr == nil && markerErr == nil && strings.TrimSpace(string(marker)) == version && fileHash(installed) == fileHash(contents) && linkErr == nil && linkTarget == directory {
-			action = "keep"
-		} else {
-			previous := previousSkill(manifest.Skills, name)
-			fileIsManaged := fileErr != nil || previous.FileMade && fileHash(installed) == previous.FileHash
-			markerIsManaged := markerErr != nil || previous.MarkerMade && strings.TrimSpace(string(marker)) == previous.MarkerVersion
-			linkInfo, lstatErr := os.Lstat(link)
-			linkExists := lstatErr == nil
-			linkIsSymlink := linkExists && linkInfo.Mode()&os.ModeSymlink != 0
-			linkIsManaged := errors.Is(lstatErr, os.ErrNotExist)
-			if linkIsSymlink {
-				resolvedLink, linkResolveErr := filepath.EvalSymlinks(link)
-				resolvedDirectory, dirResolveErr := filepath.EvalSymlinks(directory)
-				linkIsManaged = linkResolveErr == nil && dirResolveErr == nil && resolvedLink == resolvedDirectory
-				if !linkIsManaged && previous.LinkMade && linkErr == nil && linkTarget == previous.LinkTarget {
-					linkIsManaged = true
-				}
-			}
-			if lstatErr != nil && !errors.Is(lstatErr, os.ErrNotExist) || fileErr == nil && !fileIsManaged || markerErr == nil && !markerIsManaged || linkExists && !linkIsManaged {
-				action = "conflict"
-			}
-		}
-		rows = append(rows, map[string]any{"step": "skill", "target": directory, "link": link, "action": action})
+		rows = append(rows, skillSetupPlanRow(name, version, dirs, manifest.Skills, state.GlobalSkillsMode))
 	}
 	for _, hook := range setupHookTargets(claudeDir, codexDir) {
 		path, spec := hook.path, hook.spec
@@ -375,6 +354,188 @@ func (s *Service) setupPlan(home, binary, version string, dirs setupDirs, manife
 	return rows
 }
 
+func skillSetupPlanRow(name, version string, dirs setupDirs, records []setupSkillRecord, mode string) map[string]any {
+	directory := filepath.Join(dirs.agents, name)
+	link := filepath.Join(dirs.claude, "skills", name)
+	previous := previousSkill(records, name)
+	recordExists := false
+	for _, record := range records {
+		if record.Name == name {
+			recordExists = true
+			break
+		}
+	}
+	row := map[string]any{"step": "skill", "target": directory, "link": link}
+	if mode == "" {
+		if skillRecordHasUnmodifiedOwnedParts(previous) {
+			row["action"] = "offer_removal"
+			row["note"] = "optional removal: run `posse setup --remove-global-skills`"
+		} else if recordExists {
+			row["action"] = "preserve"
+			row["note"] = "modified or foreign skill files are preserved"
+		} else {
+			row["action"] = "offer_global"
+			row["note"] = "optional global install: run `posse setup --global-skills`"
+		}
+		return row
+	}
+	if mode == "remove" {
+		switch {
+		case skillRecordHasUnmodifiedOwnedParts(previous) && skillRecordHasModifiedOwnedParts(previous):
+			row["action"] = "remove_preserving"
+		case skillRecordHasUnmodifiedOwnedParts(previous):
+			row["action"] = "remove"
+		case recordExists:
+			row["action"] = "preserve"
+			row["note"] = "modified or foreign skill files are preserved"
+		default:
+			row["action"] = "keep"
+			row["note"] = "no Posse-owned global files found"
+		}
+		return row
+	}
+
+	contents, _ := setupassets.Skill(name)
+	installed, fileErr := os.ReadFile(filepath.Join(directory, "SKILL.md"))
+	marker, markerErr := os.ReadFile(filepath.Join(directory, ".posse-version"))
+	linkTarget, linkErr := os.Readlink(link)
+	if fileErr == nil && markerErr == nil && strings.TrimSpace(string(marker)) == version && fileHash(installed) == fileHash(contents) && linkErr == nil && linkTarget == directory {
+		row["action"] = "keep"
+		return row
+	}
+	fileIsManaged := fileErr != nil || previous.FileMade && fileHash(installed) == previous.FileHash
+	markerIsManaged := markerErr != nil || previous.MarkerMade && strings.TrimSpace(string(marker)) == previous.MarkerVersion
+	linkInfo, lstatErr := os.Lstat(link)
+	linkExists := lstatErr == nil
+	linkIsSymlink := linkExists && linkInfo.Mode()&os.ModeSymlink != 0
+	linkIsManaged := errors.Is(lstatErr, os.ErrNotExist)
+	if linkIsSymlink {
+		resolvedLink, linkResolveErr := filepath.EvalSymlinks(link)
+		resolvedDirectory, dirResolveErr := filepath.EvalSymlinks(directory)
+		linkIsManaged = linkResolveErr == nil && dirResolveErr == nil && resolvedLink == resolvedDirectory
+		if !linkIsManaged && previous.LinkMade && linkErr == nil && linkTarget == previous.LinkTarget {
+			linkIsManaged = true
+		}
+	}
+	if lstatErr != nil && !errors.Is(lstatErr, os.ErrNotExist) || fileErr == nil && !fileIsManaged || markerErr == nil && !markerIsManaged || linkExists && !linkIsManaged {
+		row["action"] = "conflict"
+	} else {
+		row["action"] = "install"
+	}
+	return row
+}
+
+func skillRecordHasModifiedOwnedParts(record setupSkillRecord) bool {
+	if record.FileMade {
+		_, modified := ownedSkillFileStatus(filepath.Join(record.AgentsDir, record.Name, "SKILL.md"), record.FileHash)
+		if modified {
+			return true
+		}
+	}
+	if record.MarkerMade {
+		_, modified := ownedSkillFileStatus(filepath.Join(record.AgentsDir, record.Name, ".posse-version"), fileHash([]byte(record.MarkerVersion+"\n")))
+		if modified {
+			return true
+		}
+	}
+	if record.LinkMade {
+		_, modified := ownedSkillLinkStatus(record.LinkPath, record.LinkTarget)
+		if modified {
+			return true
+		}
+	}
+	return false
+}
+
+func skillRecordHasUnmodifiedOwnedParts(record setupSkillRecord) bool {
+	if record.FileMade {
+		unchanged, _ := ownedSkillFileStatus(filepath.Join(record.AgentsDir, record.Name, "SKILL.md"), record.FileHash)
+		if unchanged {
+			return true
+		}
+	}
+	if record.MarkerMade {
+		unchanged, _ := ownedSkillFileStatus(filepath.Join(record.AgentsDir, record.Name, ".posse-version"), fileHash([]byte(record.MarkerVersion+"\n")))
+		if unchanged {
+			return true
+		}
+	}
+	if record.LinkMade {
+		unchanged, _ := ownedSkillLinkStatus(record.LinkPath, record.LinkTarget)
+		if unchanged {
+			return true
+		}
+	}
+	return false
+}
+
+func ownedSkillFileStatus(path, expectedHash string) (unchanged, modified bool) {
+	if !ownedPathParentsAreSafe(path) {
+		return false, true
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, false
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return false, true
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, true
+	}
+	if fileHash(data) != expectedHash {
+		return false, true
+	}
+	return true, false
+}
+
+func ownedSkillLinkStatus(path, expectedTarget string) (unchanged, modified bool) {
+	if path == "" || !ownedPathParentsAreSafe(path) {
+		return false, true
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, false
+	}
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false, true
+	}
+	target, err := os.Readlink(path)
+	if err != nil || target != expectedTarget {
+		return false, true
+	}
+	return true, false
+}
+
+// ownedPathParentsAreSafe prevents ownership hashes from authorizing operations
+// through a directory replaced by a symlink. The final path component is checked
+// separately because owned Claude links are themselves symlinks.
+func ownedPathParentsAreSafe(path string) bool {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	parent := filepath.Dir(absolute)
+	volume := filepath.VolumeName(parent)
+	current := volume + string(os.PathSeparator)
+	relative := strings.TrimPrefix(parent, current)
+	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
 // setupPendingExitCode is what `setup --check --exit-code` returns when
 // applying the plan would change the machine.
 const setupPendingExitCode = 3
@@ -383,7 +544,7 @@ const setupPendingExitCode = 3
 // read-only hook link stays a manual step, so it is never pending.
 func setupPending(plan []map[string]any) bool {
 	for _, row := range plan {
-		if action, _ := row["action"].(string); action != "keep" && action != "setup_hook_symlink" && action != "offer" && action != "manual" {
+		if action, _ := row["action"].(string); action != "keep" && action != "setup_hook_symlink" && action != "offer" && action != "offer_global" && action != "offer_removal" && action != "preserve" && action != "manual" {
 			return true
 		}
 	}
@@ -674,17 +835,40 @@ func (s *Service) applySetup(ctx context.Context, home, manifestPath string, man
 	if err := writeSetupManifest(manifestPath, manifest); err != nil {
 		return changed, err
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
-		record, skillChanged, err := installSkill(name, agentsDir, claudeDir, version, previousSkill(manifest.Skills, name))
-		if err != nil {
-			return changed, axi.Failure("setup_path_conflict", "cannot install skill "+name, false, err.Error())
+	if state.GlobalSkillsMode == "install" {
+		for _, name := range []string{"posse", "posse-setup"} {
+			record, skillChanged, err := installSkill(name, agentsDir, claudeDir, version, previousSkill(manifest.Skills, name))
+			if err != nil {
+				return changed, axi.Failure("setup_path_conflict", "cannot install skill "+name, false, err.Error())
+			}
+			manifest.Skills = replaceSkillRecord(manifest.Skills, record)
+			if skillChanged {
+				changed = append(changed, "global_skill:"+name)
+			}
+			if err := writeSetupManifest(manifestPath, manifest); err != nil {
+				return changed, err
+			}
 		}
-		manifest.Skills = replaceSkillRecord(manifest.Skills, record)
-		if skillChanged {
-			changed = append(changed, "skill:"+name)
-		}
-		if err := writeSetupManifest(manifestPath, manifest); err != nil {
-			return changed, err
+	} else if state.GlobalSkillsMode == "remove" {
+		for _, name := range []string{"posse", "posse-setup"} {
+			record := previousSkill(manifest.Skills, name)
+			if !skillRecordExists(manifest.Skills, name) {
+				continue
+			}
+			owned := skillRecordHasUnmodifiedOwnedParts(record)
+			if err := uninstallSkill(record); err != nil {
+				return changed, err
+			}
+			manifest.Skills = removeSkillRecord(manifest.Skills, name)
+			removeCreatedSkillDirs(record, dirs)
+			if owned {
+				changed = append(changed, "global_skill_removed:"+name)
+			} else {
+				changed = append(changed, "global_skill_preserved:"+name)
+			}
+			if err := writeSetupManifest(manifestPath, manifest); err != nil {
+				return changed, err
+			}
 		}
 	}
 	for _, hook := range setupHookTargets(claudeDir, codexDir) {
@@ -748,6 +932,10 @@ func (s *Service) uninstallSetup(ctx *axi.Context, home, manifestPath string, ma
 	if err := validateSetupMutationScope(); err != nil {
 		return err
 	}
+	dirs, err := setupDirectories()
+	if err != nil {
+		return err
+	}
 	var removed []any
 	if manifest.PluginLinked && s.Herdr == nil {
 		return axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
@@ -806,7 +994,7 @@ func (s *Service) uninstallSetup(ctx *axi.Context, home, manifestPath string, ma
 		if err := writeSetupManifest(manifestPath, manifest); err != nil {
 			return err
 		}
-		removeCreatedDirs(record.CreatedDirs)
+		removeCreatedSkillDirs(record, dirs)
 	}
 	if manifest.PiGuardPath != "" && manifest.PiGuardHash != "" {
 		data, err := os.ReadFile(manifest.PiGuardPath)
@@ -1343,16 +1531,44 @@ func installSkill(name, agentsDir, claudeDir, version string, previous setupSkil
 	return record, directoryMade || fileMade || markerMade || !previous.LinkMade && linkMade, nil
 }
 
+func removeCreatedSkillDirs(record setupSkillRecord, dirs setupDirs) {
+	roots := []string{filepath.Dir(dirs.agents), filepath.Join(dirs.claude, "skills")}
+	var safe []string
+	for _, path := range record.CreatedDirs {
+		withinRoot := false
+		for _, root := range roots {
+			if pathWithin(root, path) {
+				withinRoot = true
+				break
+			}
+		}
+		if !withinRoot || !ownedPathParentsAreSafe(filepath.Join(path, "child")) {
+			continue
+		}
+		if info, err := os.Lstat(path); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			safe = append(safe, path)
+		}
+	}
+	removeCreatedDirs(safe)
+}
+
 func uninstallSkill(record setupSkillRecord) error {
 	if record.Name != "posse" && record.Name != "posse-setup" {
 		return nil
 	}
-	directory := filepath.Join(record.AgentsDir, record.Name)
 	if record.AgentsDir == "" {
 		return fmt.Errorf("setup manifest does not record the skill directory for %s", record.Name)
 	}
-	if record.LinkMade && record.LinkPath != "" {
-		if target, err := os.Readlink(record.LinkPath); err == nil && target == record.LinkTarget {
+	dirs, err := setupDirectories()
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(record.AgentsDir) != filepath.Clean(dirs.agents) {
+		return nil
+	}
+	directory := filepath.Join(record.AgentsDir, record.Name)
+	if record.LinkMade && record.LinkPath == filepath.Join(dirs.claude, "skills", record.Name) && record.LinkTarget == directory {
+		if unchanged, _ := ownedSkillLinkStatus(record.LinkPath, record.LinkTarget); unchanged {
 			if err := os.Remove(record.LinkPath); err != nil {
 				return err
 			}
@@ -1360,7 +1576,7 @@ func uninstallSkill(record setupSkillRecord) error {
 	}
 	if record.FileMade {
 		path := filepath.Join(directory, "SKILL.md")
-		if data, err := os.ReadFile(path); err == nil && fileHash(data) == record.FileHash {
+		if unchanged, _ := ownedSkillFileStatus(path, record.FileHash); unchanged {
 			if err := os.Remove(path); err != nil {
 				return err
 			}
@@ -1368,14 +1584,16 @@ func uninstallSkill(record setupSkillRecord) error {
 	}
 	if record.MarkerMade {
 		path := filepath.Join(directory, ".posse-version")
-		if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) == record.MarkerVersion {
+		if unchanged, _ := ownedSkillFileStatus(path, fileHash([]byte(record.MarkerVersion+"\n"))); unchanged {
 			if err := os.Remove(path); err != nil {
 				return err
 			}
 		}
 	}
-	if record.DirectoryMade {
-		_ = os.Remove(directory)
+	if record.DirectoryMade && ownedPathParentsAreSafe(directory) {
+		if info, err := os.Lstat(directory); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			_ = os.Remove(directory)
+		}
 	}
 	return nil
 }
@@ -1397,6 +1615,25 @@ func replaceSkillRecord(records []setupSkillRecord, record setupSkillRecord) []s
 		}
 	}
 	return append(records, record)
+}
+
+func skillRecordExists(records []setupSkillRecord, name string) bool {
+	for _, record := range records {
+		if record.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func removeSkillRecord(records []setupSkillRecord, name string) []setupSkillRecord {
+	filtered := make([]setupSkillRecord, 0, len(records))
+	for _, record := range records {
+		if record.Name != name {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
 }
 
 // hookSpec is one agent hook posse installs: the event, the tool or source

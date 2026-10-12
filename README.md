@@ -25,7 +25,7 @@ Review the [installer](install.sh) before running it:
 curl -fsSL https://raw.githubusercontent.com/Thanhbinh1905/posse/main/install.sh | sh
 ```
 
-The installer downloads a release to `~/.local/bin` by default and offers to set up Herdr integrations, agent skills and configuration. To install without setup, pass `--no-setup` after `sh -s --`. Run `posse setup` later to complete setup. Pass `--help` after `sh -s --` to see all options.
+The installer downloads a release to `~/.local/bin` by default and offers to set up Herdr integrations and configuration. Posse skills are injected only into sessions it launches; `posse setup --global-skills` optionally installs them for ordinary agent sessions. To install without setup, pass `--no-setup` after `sh -s --`. Run `posse setup` later to complete setup. Pass `--help` after `sh -s --` to see all options.
 
 ## Get started
 
