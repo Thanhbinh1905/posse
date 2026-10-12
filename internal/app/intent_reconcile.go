@@ -79,7 +79,7 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 				if decodeErr := json.Unmarshal([]byte(intent.PayloadJSON), &payload); decodeErr != nil {
 					err = decodeErr
 				} else if payload.Discard {
-					if task.State != store.StateFailed && task.State != store.StateLost && task.State != store.StateStalled {
+					if !store.IsApprovedDiscardSourceState(task.State) {
 						err = fmt.Errorf("discard recovery refused Task in state %s", task.State)
 					} else {
 						err = fmt.Errorf("discard was interrupted; recovery will not continue the approved teardown")

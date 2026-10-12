@@ -179,6 +179,85 @@ func TestStateTransitionsAreCompareAndSetAndAudited(t *testing.T) {
 	}
 }
 
+func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := []State{StateFailed, StateLost, StateStalled, StateReported, StateLanded}
+	for index, state := range allowed {
+		t.Run(string(state), func(t *testing.T) {
+			if !IsApprovedDiscardSourceState(state) {
+				t.Fatalf("%s is not an approved-discard source", state)
+			}
+			if err := validateTransitionSource(state, StateTornDown, "user"); err != nil {
+				t.Fatalf("approved transition source rejected for %s: %v", state, err)
+			}
+			id, err := db.CreateTask(ctx, project.ID, Task{Seq: index + 1, Type: "scout", Title: string(state), LandingMode: "local"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
+				t.Fatal(err)
+			}
+			switch state {
+			case StateFailed:
+				err = db.Transition(ctx, id, StateWorking, state, "worker", "failed")
+			case StateLost:
+				err = db.Transition(ctx, id, StateWorking, state, "cli", "lost")
+			case StateStalled:
+				err = db.Transition(ctx, id, StateWorking, state, "cli", "stalled")
+			case StateReported:
+				if err = db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err == nil {
+					err = db.Transition(ctx, id, StateDone, state, "cli", "reported")
+				}
+			case StateLanded:
+				if err = db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err == nil {
+					err = db.Transition(ctx, id, StateDone, StateLanding, "cli", "landing")
+				}
+				if err == nil {
+					err = db.Transition(ctx, id, StateLanding, state, "cli", "landed")
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, id, state, StateTornDown, "user", "discarded without recording approval"); err == nil {
+				t.Fatalf("Transition bypassed approval from %s", state)
+			}
+			if err := db.RecordApproval(ctx, id, "discard", "User approved discard"); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.TransitionAfterApproval(ctx, id, state, StateTornDown, "user", "discarded", "discard"); err != nil {
+				t.Fatalf("approved transition from %s: %v", state, err)
+			}
+		})
+	}
+
+	for _, state := range []State{StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateDone, StateLanding, StateTornDown} {
+		t.Run("refused_"+string(state), func(t *testing.T) {
+			if IsApprovedDiscardSourceState(state) {
+				t.Fatalf("%s unexpectedly qualifies for approved discard", state)
+			}
+			if err := validateTransitionSource(state, StateTornDown, "user"); err == nil {
+				t.Fatalf("approved transition source accepted from %s", state)
+			}
+			if err := db.TransitionAfterApproval(ctx, 0, state, StateTornDown, "user", "discarded", "discard"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
+				t.Fatalf("TransitionAfterApproval(%s) = %v, want deterministic refusal", state, err)
+			}
+			if err := db.TransitionWithApproval(ctx, 0, state, StateTornDown, "user", "discarded", "discard", "User approved discard"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
+				t.Fatalf("TransitionWithApproval(%s) = %v, want deterministic refusal", state, err)
+			}
+		})
+	}
+}
+
 func TestTerminalTaskTransitionsMakeQueuedMessagesUndeliverable(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))

@@ -62,7 +62,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if task.State == store.StateTornDown {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 			}
-			if task.State != store.StateFailed && task.State != store.StateLost && task.State != store.StateStalled {
+			if !store.IsApprovedDiscardSourceState(task.State) {
 				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)
 			}
 			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
@@ -101,9 +101,18 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "help", Value: []any{"Repair the Mount, then run `posse unsaddle " + taskIDString(task.Seq) + "` to retry Teardown"}}})
 			}
 			if task.State == store.StateTornDown {
+				if err := db.ObsoleteAppliedLeftoverDecision(out.Context, decision.ID); err != nil {
+					return err
+				}
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 			}
+			if !store.IsApprovedDiscardSourceState(task.State) {
+				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)
+			}
 			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+				return err
+			}
+			if err := db.ObsoleteAppliedLeftoverDecision(out.Context, decision.ID); err != nil {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
@@ -150,7 +159,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				}
 				task.State = store.StateLost
 			}
-			if task.State != store.StateLost && task.State != store.StateFailed && task.State != store.StateStalled {
+			if !store.IsApprovedDiscardSourceState(task.State) {
 				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)
 			}
 			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {

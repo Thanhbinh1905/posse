@@ -493,7 +493,8 @@ func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project 
 	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
 		return errors.Join(cause, err)
 	}
-	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
+	retryable := !errors.Is(cause, store.ErrInvalidApprovedDiscardTransition)
+	return axi.Failure("unsaddle_incomplete", cause.Error(), retryable, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
 }
 
 func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
