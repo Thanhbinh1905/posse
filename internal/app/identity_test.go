@@ -96,7 +96,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		contents := workerProtocol(project, task, brief, launchPath) + "\n\n" + brief.Body + "\n"
+		contents := workerProtocol(project, task, brief, launchPath, filepath.Join(home, "scratch", project.Name, taskIDString(sequence))) + "\n\n" + brief.Body + "\n"
 		if err := writeFile(launchPath, []byte(contents)); err != nil {
 			t.Fatal(err)
 		}

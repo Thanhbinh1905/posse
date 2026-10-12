@@ -170,6 +170,11 @@ func (db *DB) RecordPRPoll(ctx context.Context, projectID int64, at int64, failu
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	if failures == 3 {
+		if err := db.PersistProject(ctx, projectID); err != nil {
+			return 0, err
+		}
+	}
 	return failures, nil
 }
 
@@ -233,6 +238,11 @@ func (db *DB) RecordRootBehind(ctx context.Context, projectID int64, repo string
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
+	}
+	if created {
+		if err := db.PersistProject(ctx, projectID); err != nil {
+			return false, err
+		}
 	}
 	return created, nil
 }
@@ -318,12 +328,17 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	changed := !unchanged || transitioned
 	if transitioned {
 		if err := db.PersistTask(ctx, observation.TaskID); err != nil {
 			return false, err
 		}
+	} else if changed {
+		if err := db.PersistProject(ctx, observation.ProjectID); err != nil {
+			return false, err
+		}
 	}
-	return !unchanged || transitioned, nil
+	return changed, nil
 }
 
 func latestPRObservationTx(ctx context.Context, tx *writeTx, taskID int64) (PRObservation, error) {

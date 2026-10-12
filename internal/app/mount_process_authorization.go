@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"syscall"
 
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -34,6 +36,81 @@ func (authorization *mountProcessAuthorization) bind(pid int) (*mountProcessHand
 	}
 	authorization.handles[pid] = handle
 	return handle, nil
+}
+
+func (authorization *mountProcessAuthorization) captureDescendants() error {
+	if authorization == nil || processIdentityCapabilityError() != "" {
+		return nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return err
+	}
+	children := make(map[int][]int, len(entries))
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 {
+			continue
+		}
+		parent, err := mountProcessParentID(pid)
+		if err == nil && parent > 1 && parent != pid {
+			children[parent] = append(children[parent], pid)
+		}
+	}
+	queue := make([]int, 0, len(authorization.handles))
+	for pid := range authorization.handles {
+		queue = append(queue, pid)
+	}
+	seen := make(map[int]bool, len(children))
+	var candidates []int
+	for len(queue) != 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		for _, pid := range children[parent] {
+			if seen[pid] || authorization.handle(pid) != nil {
+				continue
+			}
+			seen[pid] = true
+			candidates = append(candidates, pid)
+			queue = append(queue, pid)
+		}
+	}
+	sort.Ints(candidates)
+	for _, pid := range candidates {
+		descendant, err := hasRetainedMountProcessAncestor(pid, authorization)
+		if processGone(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("verify descendant process %d: %w", pid, err)
+		}
+		if !descendant {
+			continue
+		}
+		handle, err := openMountProcessHandle(pid)
+		if processGone(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("retain descendant process %d: %w", pid, err)
+		}
+		descendant, err = hasRetainedMountProcessAncestor(pid, authorization)
+		if processGone(err) || err == nil && !descendant {
+			_ = handle.Close()
+			continue
+		}
+		if err != nil {
+			_ = handle.Close()
+			return fmt.Errorf("recheck descendant process %d: %w", pid, err)
+		}
+		authorization.handles[pid] = handle
+		if groupID, groupErr := mountProcessGroupID(pid); groupErr == nil {
+			authorization.retainProcessGroup(groupID, handle)
+		} else if !processGone(groupErr) {
+			return fmt.Errorf("verify descendant process group %d: %w", pid, groupErr)
+		}
+	}
+	return nil
 }
 
 func (authorization *mountProcessAuthorization) Close() {

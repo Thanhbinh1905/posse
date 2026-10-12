@@ -185,3 +185,45 @@ func TestConcurrentTaskRecoveryClaimsChargeOneAttempt(t *testing.T) {
 		t.Fatalf("dead owner takeover=%v state=%#v err=%v readErr=%v", claimed, state, err, readErr)
 	}
 }
+
+func TestSettleTaskRecoveryPreservesBudgetAndRequiresObservedState(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Rider"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := db.ClaimTaskRecovery(ctx, id, "server/group/lead/pane", 0, 101, 3, 1000, 2000); err != nil || !claimed {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	if err := db.FinishTaskRecovery(ctx, task, 101, 3, false, "transient failure", 2500); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.TaskRecovery(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled, err := db.SettleTaskRecovery(ctx, id, pending)
+	if err != nil || !settled {
+		t.Fatalf("settle=%v err=%v", settled, err)
+	}
+	state, err := db.TaskRecovery(ctx, id)
+	if err != nil || state.Status != "recovered" || state.Attempts != 1 || state.NextAttemptAt != 0 || state.OwnerPID != 0 || state.LastError != "" {
+		t.Fatalf("settled recovery=%#v err=%v", state, err)
+	}
+	if settled, err := db.SettleTaskRecovery(ctx, id, pending); err != nil || settled {
+		t.Fatalf("stale settlement=%v err=%v, want no update", settled, err)
+	}
+}

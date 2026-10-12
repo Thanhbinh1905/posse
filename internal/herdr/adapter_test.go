@@ -101,7 +101,7 @@ func TestProtocolCompatibilityIsCheckedAgainstStatus(t *testing.T) {
 }
 
 func TestIsolatedTestEnvironmentRedirectsAllWritableState(t *testing.T) {
-	root, err := os.MkdirTemp("/tmp", TestRootName())
+	root, err := os.MkdirTemp(os.TempDir(), TestRootName())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestIsolatedTestEnvironmentRedirectsAllWritableState(t *testing.T) {
 }
 
 func TestIsolatedTestEnvironmentDisablesHerdrNetworkUpdates(t *testing.T) {
-	root, err := os.MkdirTemp("/tmp", TestRootName())
+	root, err := os.MkdirTemp(os.TempDir(), TestRootName())
 	if err != nil {
 		t.Fatal(err)
 	}

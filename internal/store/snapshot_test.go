@@ -70,6 +70,32 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 	}
 }
 
+func TestDeleteEmptyProjectRemovesRecoverySnapshot(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "empty", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteEmptyProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(db.ProjectSnapshotPath(project.Name)); !os.IsNotExist(err) {
+		t.Fatalf("deleted Project snapshot still exists: %v", err)
+	}
+	if count, err := db.RebuildFromSnapshots(ctx, home); err != nil || count != 0 {
+		t.Fatalf("rebuild resurrected the deleted empty Project: count=%d err=%v", count, err)
+	}
+	if _, err := db.ProjectByName(ctx, project.Name); !IsNotFound(err) {
+		t.Fatalf("deleted Project was restored: %v", err)
+	}
+}
+
 func TestRebuildPreservesWorkspaceMemberOriginHosts(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

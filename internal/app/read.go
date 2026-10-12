@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -384,7 +385,10 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
-		return err
+		if !store.IsOnlyBusy(err) {
+			return err
+		}
+		fmt.Fprintln(ctx.ErrOut, "Some Task observations were deferred; showing their last recorded state.")
 	}
 	tasks, err := db.Tasks(ctx.Context, project.ID, false)
 	if err != nil {
@@ -483,6 +487,18 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if recovery.Status != "" {
 		view["recovery"] = recovery
 	}
+	modelEpisode, err := db.TaskModelErrorEpisode(ctx.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	if modelEpisode.Status != "" {
+		view["model_error_recovery"] = map[string]any{
+			"episode": modelEpisode.Episode, "launch": modelEpisode.Launch, "agent": modelEpisode.Agent,
+			"kind": modelEpisode.Kind, "attempts": modelEpisode.Attempts, "max_attempts": modelStreamRetryLimit,
+			"status": modelEpisode.Status, "started_at": modelEpisode.StartedAt,
+			"next_attempt_at": modelEpisode.NextAttemptAt,
+		}
+	}
 	issues, refs, err := taskIssueReferences(home, project, task)
 	if err != nil {
 		return err
@@ -532,6 +548,9 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	commandName := taskCLIName(task)
 	help := []any{"Run `posse peek " + commandName + "` to read recent Rider output"}
+	if modelEpisode.Status != "" && modelEpisode.Status != "resolved" {
+		help = append(help, "Inspect `model_error_recovery` and its Task signals in `posse show "+commandName+" --full`")
+	}
 	undeliveredMessages, err := db.UndeliveredTaskMessages(ctx.Context, task.ID)
 	if err != nil {
 		return err

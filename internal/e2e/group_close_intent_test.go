@@ -115,7 +115,7 @@ func TestGroupCloseDuringRelaunchRestoresLeadAndRider(t *testing.T) {
 		if !strings.Contains(output, "t1") {
 			t.Fatalf("relaunch succeeded without reporting Task t1: %s", output)
 		}
-	} else if !strings.Contains(output, `"agent_pane_not_found"`) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse recover --all") {
+	} else if (!strings.Contains(output, `"agent_pane_not_found"`) && !strings.Contains(output, `"pane_not_found"`)) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse recover --all") {
 		t.Fatalf("relaunch failed without a recoverable pane-close error: %s %v", output, commandErr)
 	}
 	restoreRiderGroup(t, f)

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/runtime"
@@ -71,6 +72,273 @@ func TestRecoverRebuildMovesCorruptDatabaseAside(t *testing.T) {
 	restored, err := rebuilt.Task(context.Background(), project.ID, "t1")
 	if err != nil || restored.Title != "Snapshot" {
 		t.Fatalf("snapshot Task was not restored: %#v, %v", restored, err)
+	}
+}
+
+func TestRecoverRebuildWithHeldMountAndAcknowledgedDecisionNotices(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shipID, err := db.CreateTask(ctx, project.ID, store.Task{
+		Seq: 1, Type: "ship", ShortName: "ship", Title: "Ship with a held Mount", LandingMode: "pr",
+		Branch: "posse/ship", PRURL: "https://example.test/pr/1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, shipID, store.StateSpawning, store.StateWorking, "cli", "Rider started"); err != nil {
+		t.Fatal(err)
+	}
+	mount, err := db.AcquireMount(ctx, project.ID, shipID, filepath.Join(home, "remuda", "shop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoutID, err := db.CreateTask(ctx, project.ID, store.Task{
+		Seq: 2, Type: "scout", ShortName: "scout", Title: "Scout report", LandingMode: "local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, scoutID, store.StateSpawning, store.StateWorking, "cli", "Rider started"); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(home, "projects", project.Name, "tasks", "t2", "report.md")
+	if err := os.WriteFile(reportPath, []byte("# Findings\n\nThe Project is healthy.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scout, err := db.TaskByID(ctx, project.ID, scoutID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := db.RecordWorkerSignal(ctx, scout, "done", "Report ready", nil, "task_done")
+	if err != nil || state != store.StateReported {
+		t.Fatalf("Scout done Signal state = %q, %v", state, err)
+	}
+	decision, err := db.RaiseDecision(ctx, store.DecisionRequest{
+		ProjectID: project.ID, TaskID: shipID, Origin: "recover-rebuild-e2e", Kind: "rider_question",
+		Question: "Should the Ship continue?", Options: []string{"continue", "stop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "continue", "Continue the Ship."); err != nil {
+		t.Fatal(err)
+	}
+	noticeID, err := db.CreateNotice(ctx, store.Notice{
+		ProjectID: project.ID, TaskID: scoutID, Kind: "report_ready", Summary: "Scout report is ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AckNotices(ctx, project.ID, []string{"all"}); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) < 2 {
+		t.Fatalf("fixture Notices = %#v, %v", notices, err)
+	}
+	lastNoticeID := notices[len(notices)-1].ID
+	if err := db.AdvanceDecisionNoticeCursor(ctx, project.ID, lastNoticeID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	service := testService(home, herdr.NewFake())
+	output, errorsOut := &bytes.Buffer{}, &bytes.Buffer{}
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, errorsOut
+	t.Setenv("HERDR_PANE_ID", "")
+	t.Chdir(repo)
+	if code := cli.Run([]string{"recover", "--rebuild"}); code != 0 {
+		t.Fatalf("recover --rebuild failed: code=%d out=%s err=%s", code, output, errorsOut)
+	}
+
+	assertRestored := func() {
+		rebuilt, err := store.Open(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rebuilt.Close()
+		foreignKeys, err := rebuilt.QueryContext(ctx, "PRAGMA foreign_key_check")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer foreignKeys.Close()
+		if foreignKeys.Next() {
+			var table string
+			var rowID, parent string
+			var foreignKeyID int
+			if err := foreignKeys.Scan(&table, &rowID, &parent, &foreignKeyID); err != nil {
+				t.Fatal(err)
+			}
+			t.Fatalf("rebuilt database has foreign-key violation: table=%s row=%s parent=%s fk=%d", table, rowID, parent, foreignKeyID)
+		}
+		if err := foreignKeys.Err(); err != nil {
+			t.Fatal(err)
+		}
+		restoredProject, err := rebuilt.ProjectByName(ctx, "shop")
+		if err != nil || restoredProject.Root != repo {
+			t.Fatalf("rebuilt Project = %#v, %v", restoredProject, err)
+		}
+		restoredShip, err := rebuilt.Task(ctx, project.ID, "t1")
+		if err != nil || restoredShip.PRURL != "https://example.test/pr/1" || restoredShip.MountID != mount.ID {
+			t.Fatalf("rebuilt Ship lost its PR or held Mount reference: %#v, %v", restoredShip, err)
+		}
+		restoredMount, err := rebuilt.MountByTask(ctx, shipID)
+		if err != nil || restoredMount.State != "held" || restoredMount.Path != mount.Path {
+			t.Fatalf("rebuilt held Mount = %#v, %v", restoredMount, err)
+		}
+		restoredScout, err := rebuilt.Task(ctx, project.ID, "t2")
+		if err != nil || restoredScout.State != store.StateReported {
+			t.Fatalf("rebuilt Scout = %#v, %v", restoredScout, err)
+		}
+		if _, err := os.Stat(reportPath); err != nil {
+			t.Fatalf("Scout Report was lost: %v", err)
+		}
+		restoredDecision, err := rebuilt.Decisions(ctx, project.ID, false)
+		if err != nil || len(restoredDecision) != 1 || restoredDecision[0].Answer != "continue" {
+			t.Fatalf("rebuilt Decision = %#v, %v", restoredDecision, err)
+		}
+		restoredNotices, err := rebuilt.Notices(ctx, project.ID, false)
+		if err != nil || len(restoredNotices) < 2 {
+			t.Fatalf("rebuilt Notices = %#v, %v", restoredNotices, err)
+		}
+		acked := false
+		for _, notice := range restoredNotices {
+			if notice.ID == noticeID && notice.AckedAt != 0 {
+				acked = true
+			}
+		}
+		if !acked {
+			t.Fatalf("acknowledged Notice %d was not restored: %#v", noticeID, restoredNotices)
+		}
+		var restoredCursor int64
+		if err := rebuilt.QueryRowContext(ctx, `SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?`, project.ID).Scan(&restoredCursor); err != nil || restoredCursor != lastNoticeID {
+			t.Fatalf("Decision Notice cursor = %d, %v; want %d", restoredCursor, err, lastNoticeID)
+		}
+	}
+	assertRosterWorks := func() {
+		output.Reset()
+		errorsOut.Reset()
+		cli := service.CLI()
+		cli.Out, cli.ErrOut = output, errorsOut
+		if code := cli.Run([]string{"config", "show", "--project", "shop"}); code != 0 || !strings.Contains(output.String(), "shop") {
+			t.Fatalf("posse config show after rebuild failed: code=%d out=%s err=%s", code, output, errorsOut)
+		}
+	}
+	assertRestored()
+	assertRosterWorks()
+
+	if err := os.Remove(filepath.Join(home, "posse.db")); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	errorsOut.Reset()
+	cli = service.CLI()
+	cli.Out, cli.ErrOut = output, errorsOut
+	if code := cli.Run([]string{"recover", "--rebuild"}); code != 0 {
+		t.Fatalf("recover --rebuild after deleting posse.db failed: code=%d out=%s err=%s", code, output, errorsOut)
+	}
+	assertRestored()
+	assertRosterWorks()
+}
+
+func TestRecoverRebuildFailureKeepsBeforeRebuildBackup(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "scout", Title: "Original state", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotPath := filepath.Join(home, "projects", project.Name, "tasks", "t1", "task.toml")
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot store.TaskSnapshot
+	if _, err := toml.Decode(string(data), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.LaunchIdentities = []store.TaskLaunchIdentity{{TaskID: taskID, LaunchNumber: 1}}
+	var damaged bytes.Buffer
+	if err := toml.NewEncoder(&damaged).Encode(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(snapshotPath, damaged.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	service := testService(home, herdr.NewFake())
+	output, errorsOut := &bytes.Buffer{}, &bytes.Buffer{}
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, errorsOut
+	t.Setenv("HERDR_PANE_ID", "")
+	t.Chdir(repo)
+	if code := cli.Run([]string{"recover", "--rebuild"}); code == 0 || !strings.Contains(output.String(), "invalid launch number") {
+		t.Fatalf("damaged rebuild result: code=%d out=%s err=%s", code, output, errorsOut)
+	}
+
+	backups, err := filepath.Glob(filepath.Join(home, "backup", "posse-before-rebuild-*.db"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("pre-rebuild backup missing after interruption: %v, %v", backups, err)
+	}
+	backupHome := filepath.Join(root, "backup-check")
+	if err := os.MkdirAll(backupHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backupData, err := os.ReadFile(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backupHome, "posse.db"), backupData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backupDB, err := store.OpenReadOnly(backupHome)
+	if err != nil {
+		t.Fatalf("pre-rebuild backup is not a readable database: %v", err)
+	}
+	backupTask, err := backupDB.Task(ctx, project.ID, "t1")
+	if closeErr := backupDB.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil || backupTask.Title != "Original state" {
+		t.Fatalf("pre-rebuild backup lost its original Task: %#v, %v", backupTask, err)
+	}
+	untouched, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer untouched.Close()
+	original, err := untouched.Task(ctx, project.ID, "t1")
+	if err != nil || original.Title != "Original state" {
+		t.Fatalf("failed rebuild changed the original database: %#v, %v", original, err)
 	}
 }
 

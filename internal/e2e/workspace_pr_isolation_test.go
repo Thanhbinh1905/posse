@@ -270,7 +270,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 	if err := os.WriteFile(viewPath, view, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !waitForCondition(7*time.Second, func() bool {
+	if !waitForCondition(15*time.Second, func() bool {
 		observation, observationErr := db.LatestMemberPRObservation(context.Background(), good.ID, "good")
 		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
 		landed, landedErr := db.TaskByID(context.Background(), project.ID, preLanded.ID)

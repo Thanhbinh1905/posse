@@ -233,7 +233,7 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 				}); err != nil {
 					return axi.Failure("pr_push_failed", repo.Repo+": could not push the gated Task branch", true, err.Error())
 				}
-				prURL, opened, err := s.findOrCreatePullRequest(ctx, db, member.project, gated, intent, forge, member.target.Name, "", "", "", "")
+				prURL, opened, err := s.findOrCreatePullRequest(ctx, db, member.project, gated, intent, forge, member.target.Name, "", "", "", "", false, "")
 				if err != nil {
 					return prefixFailure(repo.Repo, err)
 				}
@@ -820,7 +820,11 @@ func (s *Service) removeWorkspaceBranches(ctx context.Context, db *store.DB, pro
 				continue
 			}
 		} else if _, mergeErr := gitOutput(ctx, target.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+target.DefaultBranch); mergeErr != nil {
-			continue
+			// Squash and rebase merges need not contain the branch ref. Delete
+			// only the exact gated head that the recorded PR delivered.
+			if repo.State != store.TaskRepoLanded || repo.LandingMode != "pr" || repo.LandedRef == "" || repo.GatedSHA != sha {
+				continue
+			}
 		}
 		if _, err := gitOutput(ctx, target.Root, "update-ref", "-d", ref, sha); err != nil {
 			return removed, memberFailure(repo.Repo, err)

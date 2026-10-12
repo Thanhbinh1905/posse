@@ -87,7 +87,7 @@ func guardCommand(script string, scope guardScope) (bool, guardReason) {
 	state := newShellEnv(scope.env)
 	g := &guard{realSocket: herdr.SocketPath(scope.env), userHome: state.values["HOME"], workerHome: scope.workerHome, posse: scope.posse, visited: map[string]bool{}}
 	state.cwd = scope.cwd
-	return g.check(state, script, 0)
+	return g.check(state, script, 0, false)
 }
 
 // guardHerdrCommand is guardCommand for a Worker of no posse home.
@@ -113,7 +113,7 @@ func refuse(command, why string) (bool, guardReason) {
 	return true, guardReason{command: "`" + firstLine(command) + "`", why: why}
 }
 
-func (g *guard) check(e *shellEnv, script string, depth int) (bool, guardReason) {
+func (g *guard) check(e *shellEnv, script string, depth int, stdinRedirected bool) (bool, guardReason) {
 	if depth > guardMaxDepth {
 		if g.mentionsHerdr(script) {
 			return refuse(script, "it nests commands too deeply for posse to check")
@@ -127,35 +127,35 @@ func (g *guard) check(e *shellEnv, script string, depth int) (bool, guardReason)
 		}
 		return false, guardReason{}
 	}
-	return g.statements(e, script, file.Stmts, depth)
+	return g.statements(e, script, file.Stmts, depth, stdinRedirected)
 }
 
-func (g *guard) statements(e *shellEnv, script string, stmts []*syntax.Stmt, depth int) (bool, guardReason) {
+func (g *guard) statements(e *shellEnv, script string, stmts []*syntax.Stmt, depth int, stdinRedirected bool) (bool, guardReason) {
 	for _, stmt := range stmts {
-		if refused, reason := g.statement(e, script, stmt, depth); refused {
+		if refused, reason := g.statement(e, script, stmt, depth, stdinRedirected); refused {
 			return true, reason
 		}
 	}
 	return false, guardReason{}
 }
 
-func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth int) (bool, guardReason) {
+func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth int, stdinRedirected bool) (bool, guardReason) {
 	switch cmd := stmt.Cmd.(type) {
 	case *syntax.IfClause:
 		if len(cmd.Cond) == 0 {
-			return g.statements(e, script, cmd.Then, depth)
+			return g.statements(e, script, cmd.Then, depth, stdinRedirected)
 		}
-		if refused, reason := g.statements(e, script, cmd.Cond, depth); refused {
+		if refused, reason := g.statements(e, script, cmd.Cond, depth, stdinRedirected); refused {
 			return true, reason
 		}
 		before := e.clone()
 		thenEnv := e.clone()
-		if refused, reason := g.statements(thenEnv, script, cmd.Then, depth); refused {
+		if refused, reason := g.statements(thenEnv, script, cmd.Then, depth, stdinRedirected); refused {
 			return true, reason
 		}
 		elseEnv := before.clone()
 		if cmd.Else != nil {
-			if refused, reason := g.statement(elseEnv, script, &syntax.Stmt{Cmd: cmd.Else}, depth); refused {
+			if refused, reason := g.statement(elseEnv, script, &syntax.Stmt{Cmd: cmd.Else}, depth, stdinRedirected); refused {
 				return true, reason
 			}
 		}
@@ -163,39 +163,39 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		return false, guardReason{}
 	case *syntax.FuncDecl:
 		body := e.clone()
-		if refused, reason := g.statement(body, script, cmd.Body, depth); refused {
+		if refused, reason := g.statement(body, script, cmd.Body, depth, stdinRedirected); refused {
 			return true, reason
 		}
 		e.merge(e, body)
 		return false, guardReason{}
 	case *syntax.Block:
-		return g.statements(e, script, cmd.Stmts, depth)
+		return g.statements(e, script, cmd.Stmts, depth, stdinRedirected)
 	case *syntax.Subshell:
-		return g.statements(e.clone(), script, cmd.Stmts, depth)
+		return g.statements(e.clone(), script, cmd.Stmts, depth, stdinRedirected)
 	case *syntax.BinaryCmd:
 		left := e.clone()
-		if refused, reason := g.statement(left, script, cmd.X, depth); refused {
+		if refused, reason := g.statement(left, script, cmd.X, depth, stdinRedirected); refused {
 			return true, reason
 		}
 		right := left.clone()
-		if refused, reason := g.statement(right, script, cmd.Y, depth); refused {
+		if refused, reason := g.statement(right, script, cmd.Y, depth, stdinRedirected || cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll); refused {
 			return true, reason
 		}
 		e.merge(left, right, e)
 		return false, guardReason{}
 	case *syntax.WhileClause:
 		body := e.clone()
-		if refused, reason := g.statements(body, script, cmd.Cond, depth); refused {
+		if refused, reason := g.statements(body, script, cmd.Cond, depth, stdinRedirected); refused {
 			return true, reason
 		}
-		if refused, reason := g.statements(body, script, cmd.Do, depth); refused {
+		if refused, reason := g.statements(body, script, cmd.Do, depth, stdinRedirected); refused {
 			return true, reason
 		}
 		e.merge(e, body)
 		return false, guardReason{}
 	case *syntax.ForClause:
 		body := e.clone()
-		if refused, reason := g.statements(body, script, cmd.Do, depth); refused {
+		if refused, reason := g.statements(body, script, cmd.Do, depth, stdinRedirected); refused {
 			return true, reason
 		}
 		e.merge(e, body)
@@ -204,7 +204,7 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		paths := []*shellEnv{e.clone()} // no pattern need match
 		for _, item := range cmd.Items {
 			branch := e.clone()
-			if refused, reason := g.statements(branch, script, item.Stmts, depth); refused {
+			if refused, reason := g.statements(branch, script, item.Stmts, depth, stdinRedirected); refused {
 				return true, reason
 			}
 			paths = append(paths, branch)
@@ -227,7 +227,7 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 				}
 			}
 		case *syntax.CallExpr:
-			refused, reason = g.call(e, script, node, stmt, depth)
+			refused, reason = g.call(e, script, node, stmt, depth, stdinRedirected)
 		}
 		return !refused
 	})
@@ -274,7 +274,7 @@ func (e *shellEnv) merge(paths ...*shellEnv) {
 
 // call evaluates one simple command. Bare assignments, `unset` and `cd`
 // change the tracked state; everything else is checked by command.
-func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *syntax.Stmt, depth int) (bool, guardReason) {
+func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *syntax.Stmt, depth int, stdinRedirected bool) (bool, guardReason) {
 	if len(call.Args) == 0 {
 		for _, assign := range call.Assigns {
 			e.assign(script, assign, false)
@@ -330,10 +330,10 @@ func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *sy
 		// A program reading a pipe may receive anything the script produces.
 		stdin = script
 	}
-	return g.command(child, args, literal, raw, stdin, depth)
+	return g.command(child, args, literal, raw, stdin, depth, stdinRedirected || stmt != nil && len(stmt.Redirs) > 0)
 }
 
-func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin string, depth int) (bool, guardReason) {
+func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin string, depth int, stdinRedirected bool) (bool, guardReason) {
 	for len(args) > 0 {
 		if !literal[0] || args[0] == "" {
 			if g.mentionsHerdr(raw) {
@@ -355,7 +355,7 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			var split string
 			args, literal, split = e.envPrefix(args[1:], literal[1:])
 			if split != "" {
-				return g.check(e, split+" "+strings.Join(quoteArgv(args), " "), depth+1)
+				return g.check(e, split+" "+strings.Join(quoteArgv(args), " "), depth+1, stdinRedirected)
 			}
 			continue
 		case name == "find":
@@ -365,7 +365,7 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 					for end < len(args) && args[end] != ";" && args[end] != "+" {
 						end++
 					}
-					return g.command(e, args[index+1:end], literal[index+1:end], raw, stdin, depth)
+					return g.command(e, args[index+1:end], literal[index+1:end], raw, stdin, depth, stdinRedirected)
 				}
 			}
 			return false, guardReason{}
@@ -413,23 +413,23 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			}
 			return false, guardReason{}
 		case shells[name]:
-			return g.shell(e, args, literal, raw, stdin, depth)
+			return g.shell(e, args, literal, raw, stdin, depth, stdinRedirected)
 		case name == "source" || name == ".":
 			if len(args) < 2 || !literal[1] {
 				return g.opaque(e, raw, raw)
 			}
-			return g.script(e, args[1], raw, stdin, depth)
+			return g.script(e, args[1], raw, stdin, depth, stdinRedirected)
 		case name == "eval":
-			return g.check(e.clone(), strings.Join(args[1:], " "), depth+1)
+			return g.check(e.clone(), strings.Join(args[1:], " "), depth+1, stdinRedirected)
 		case interpreters.MatchString(name):
-			return g.interpreter(e, args, literal, raw, stdin)
+			return g.interpreter(e, args, literal, raw, stdin, stdinRedirected)
 		case socketTools[name]:
 			return g.opaque(e, raw, strings.Join(args, " "))
 		case strings.Contains(program, "/"):
 			if g.isPosseBinary(e, program) {
 				return g.posseBuild(e, program, raw)
 			}
-			return g.executable(e, program, args, literal, raw, stdin, depth)
+			return g.executable(e, program, args, literal, raw, stdin, depth, stdinRedirected)
 		}
 		if resolved := e.lookPath(program); resolved != "" && g.isPosseBinary(e, resolved) {
 			return g.posseBuild(e, resolved, raw)
@@ -490,7 +490,7 @@ var (
 	socketTools  = map[string]bool{"socat": true, "nc": true, "ncat": true, "netcat": true, "curl": true, "websocat": true, "wscat": true}
 )
 
-func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin string, depth int) (bool, guardReason) {
+func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin string, depth int, stdinRedirected bool) (bool, guardReason) {
 	start := 1
 	if filepath.Base(args[0]) == "busybox" {
 		if len(args) < 2 || !shells[args[1]] {
@@ -505,7 +505,7 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 			if index+1 >= len(args) || !literal[index+1] {
 				return g.opaque(e, raw, raw)
 			}
-			return g.check(e.clone(), args[index+1], depth+1)
+			return g.check(e.clone(), args[index+1], depth+1, stdinRedirected)
 		case arg == "-o" || arg == "+o" || arg == "--rcfile" || arg == "--init-file":
 			index++
 		case strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+"):
@@ -513,14 +513,14 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 			if !literal[index] {
 				return g.opaque(e, raw, raw)
 			}
-			return g.script(e, arg, raw, stdin, depth)
+			return g.script(e, arg, raw, stdin, depth, stdinRedirected)
 		}
 	}
-	return g.check(e.clone(), stdin, depth+1)
+	return g.check(e.clone(), stdin, depth+1, stdinRedirected)
 }
 
 // script checks a shell script file the command runs.
-func (g *guard) script(e *shellEnv, name, raw, source string, depth int) (bool, guardReason) {
+func (g *guard) script(e *shellEnv, name, raw, source string, depth int, stdinRedirected bool) (bool, guardReason) {
 	contents, ok := g.readFile(e, name)
 	if !ok {
 		// A file written earlier in this tool call does not exist yet.
@@ -529,10 +529,10 @@ func (g *guard) script(e *shellEnv, name, raw, source string, depth int) (bool, 
 		}
 		return false, guardReason{}
 	}
-	return g.check(e.clone(), contents, depth+1)
+	return g.check(e.clone(), contents, depth+1, stdinRedirected)
 }
 
-func (g *guard) interpreter(e *shellEnv, args []string, literal []bool, raw, stdin string) (bool, guardReason) {
+func (g *guard) interpreter(e *shellEnv, args []string, literal []bool, raw, stdin string, stdinRedirected bool) (bool, guardReason) {
 	code := ""
 	for index := 1; index < len(args); index++ {
 		arg := args[index]
@@ -555,12 +555,15 @@ func (g *guard) interpreter(e *shellEnv, args []string, literal []bool, raw, std
 	if strings.TrimSpace(code) == "" {
 		code = stdin
 	}
+	if pythonInterpreter(filepath.Base(args[0])) && provenPythonInvocation(e, args, literal, stdinRedirected) {
+		return false, guardReason{}
+	}
 	return g.opaque(e, raw, raw+"\n"+code)
 }
 
 // executable checks a program named by path: a text script is read and
 // checked by its interpreter; a binary is opaque.
-func (g *guard) executable(e *shellEnv, program string, args []string, literal []bool, raw, stdin string, depth int) (bool, guardReason) {
+func (g *guard) executable(e *shellEnv, program string, args []string, literal []bool, raw, stdin string, depth int, stdinRedirected bool) (bool, guardReason) {
 	contents, ok := g.readFile(e, program)
 	if !ok {
 		if strings.Contains(stdin, ">") {
@@ -573,7 +576,7 @@ func (g *guard) executable(e *shellEnv, program string, args []string, literal [
 		if bytes.IndexByte([]byte(contents), 0) >= 0 {
 			return false, guardReason{}
 		}
-		return g.check(e.clone(), contents, depth+1)
+		return g.check(e.clone(), contents, depth+1, stdinRedirected)
 	}
 	fields := strings.Fields(strings.TrimPrefix(firstLine, "#!"))
 	if len(fields) == 0 {
@@ -584,7 +587,7 @@ func (g *guard) executable(e *shellEnv, program string, args []string, literal [
 		interpreter = filepath.Base(fields[len(fields)-1])
 	}
 	if shells[interpreter] {
-		return g.check(e.clone(), contents, depth+1)
+		return g.check(e.clone(), contents, depth+1, stdinRedirected)
 	}
 	return g.opaque(e, raw, raw+"\n"+contents)
 }
@@ -805,6 +808,49 @@ var (
 	validName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	simpleVar = regexp.MustCompile(`^\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$`)
 )
+
+var provenPythonInspections = func() []*regexp.Regexp {
+	literal := `(?:'[^'\\\r\n]*(?:\\.[^'\\\r\n]*)*'|"[^"\\\r\n]*(?:\\.[^"\\\r\n]*)*")`
+	return []*regexp.Regexp{
+		regexp.MustCompile(`(?s)^\s*print\s*\(\s*` + literal + `\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*from\s+pathlib\s+import\s+Path\s*[;\n]\s*print\s*\(\s*Path\s*\(\s*` + literal + `\s*\)\s*\.\s*read_text\s*\(\s*\)\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*import\s+importlib\.metadata\s*;\s*print\s*\(\s*importlib\.metadata\.version\s*\(\s*` + literal + `\s*\)\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*from\s+importlib\.metadata\s+import\s+version\s*;\s*print\s*\(\s*version\s*\(\s*` + literal + `\s*\)\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*import\s+sys\s*;\s*print\s*\(\s*sys\.version(?:_info)?\s*\)\s*;?\s*$`),
+		regexp.MustCompile(`(?s)^\s*import\s+sys\s*;\s*print\s*\(\s*` + literal + `\s*,\s*sys\.version(?:_info)?\s*\)\s*;?\s*$`),
+	}
+}()
+
+func pythonInterpreter(name string) bool {
+	return strings.HasPrefix(name, "python") || strings.HasPrefix(name, "pypy")
+}
+
+// provenPythonInvocation allows only a literal -c command in the default,
+// non-interactive mode. Other arguments, explicit stdin and startup environment
+// overrides leave Python execution outside the guard's narrow proof.
+func provenPythonInvocation(e *shellEnv, args []string, literal []bool, stdinRedirected bool) bool {
+	if stdinRedirected || len(args) != 3 || len(literal) != 3 || !literal[0] || !literal[1] || !literal[2] || args[1] != "-c" {
+		return false
+	}
+	for _, name := range []string{"PYTHONINSPECT", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"} {
+		if e.unknown[name] || e.exported[name] {
+			return false
+		}
+	}
+	return provenPythonInspection(args[2])
+}
+
+// provenPythonInspection recognizes a few single-purpose read-only probes.
+// Other interpreter programs remain opaque and are checked conservatively.
+func provenPythonInspection(code string) bool {
+	code = strings.TrimSpace(code)
+	for _, pattern := range provenPythonInspections {
+		if pattern.MatchString(code) {
+			return true
+		}
+	}
+	return false
+}
 
 // shellEnv tracks the environment and working directory a command will see,
 // as far as the script shows them. A variable set from an expansion posse

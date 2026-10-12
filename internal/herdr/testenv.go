@@ -75,21 +75,33 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 		}
 		root = filepath.Dir(configHome)
 	}
+	rootAbs, rootErr := filepath.Abs(root)
+	tmpDir := env["TMPDIR"]
+	if tmpDir == "" {
+		tmpDir = os.TempDir()
+	}
+	tmpDirAbs, tmpDirErr := filepath.Abs(tmpDir)
+	if tmpDirErr == nil {
+		tmpDirAbs, tmpDirErr = filepath.EvalSymlinks(tmpDirAbs)
+	}
+	scratchRoot := filepath.Clean(env["POSSE_E2E_TMP_ROOT"])
+	insideScratch := safeTaskScratchRoot(scratchRoot) && inside(scratchRoot, rootAbs)
+	parent := filepath.Dir(rootAbs)
+	configuredTemp := filepath.IsAbs(tmpDir) && tmpDirErr == nil && filepath.Clean(tmpDirAbs) != string(filepath.Separator) && parent == filepath.Clean(tmpDirAbs)
+	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || parent == filepath.Clean(os.TempDir()) || configuredTemp
+	resolvedRoot, resolveErr := filepath.EvalSymlinks(rootAbs)
 	insideTemp := false
 	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
-		relative, err := filepath.Rel(tempRoot, root)
+		relative, err := filepath.Rel(tempRoot, resolvedRoot)
 		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			insideTemp = true
 			break
 		}
 	}
-	scratchRoot := filepath.Clean(env["POSSE_E2E_TMP_ROOT"])
-	insideScratch := safeTaskScratchRoot(scratchRoot) && inside(scratchRoot, root)
-	fixtureParent := filepath.Dir(root)
-	allowedParent := fixtureParent == "/tmp" || fixtureParent == "/var/tmp" || fixtureParent == os.TempDir() || insideScratch
-	if env["POSSE_TEST_HERDR"] != "1" || !strings.HasPrefix(filepath.Base(root), "posse-e2e-") || !allowedParent || !insideTemp && !insideScratch || !filepath.IsAbs(root) {
-		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* or /var/tmp/posse-e2e-* root, or a fixture under POSSE_E2E_TMP_ROOT"}
+	if env["POSSE_TEST_HERDR"] != "1" || rootErr != nil || tmpDirErr != nil || resolveErr != nil || !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(rootAbs), "posse-e2e-") || !parentIsTemp && !insideScratch || !insideTemp && !insideScratch {
+		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* root, a fixture under the configured E2E scratch root, or a fixture directly under TMPDIR"}
 	}
+	root = rootAbs
 	for key := range env {
 		if strings.HasPrefix(key, "HERDR_") {
 			return "", &Error{Code: "unsafe_test_environment", Message: fmt.Sprintf("isolated Herdr environment retained %s", key)}

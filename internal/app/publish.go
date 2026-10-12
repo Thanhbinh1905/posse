@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -12,10 +11,30 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func remoteBranchHead(ctx context.Context, root, ref string) (string, error) {
+	output, err := gitOutput(ctx, root, "ls-remote", "--heads", "origin", ref)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			return "", fmt.Errorf("unexpected git ls-remote output %q", line)
+		}
+		if fields[1] == ref {
+			return fields[0], nil
+		}
+	}
+	return "", nil
+}
+
 // publish is the only supported direct delivery path for a normal PR-mode Worker.
 // It never accepts a branch, remote, refspec, or merge option from the caller.
 func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
-	parsed, err := parseArgs("publish", args, map[string]flagSpec{"repo": {}, "verify": {}, "proof": {}, "risk": {}})
+	parsed, err := parseArgs("publish", args, map[string]flagSpec{"repo": {}, "verify": {repeatable: true}, "proof": {repeatable: true}, "risk": {repeatable: true}, "refresh": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -109,29 +128,27 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		}
 	}()
 	ref := "refs/heads/" + task.Branch
+	previousRemoteHead, err := remoteBranchHead(out.Context, task.WorktreePath, ref)
+	if err != nil {
+		return axi.Failure("pr_remote_head_failed", "could not inspect the Task branch on origin before publishing", true, err.Error())
+	}
+	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
+		return err
+	}
 	if _, err := gitOutput(out.Context, task.WorktreePath, "push", "origin", ref+":"+ref); err != nil {
 		return axi.Failure("pr_push_failed", "could not push the Task branch", true, err.Error())
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral: only the Lead's Gate may persist a gated SHA.
-	prURL, created, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Flags["repo"], parsed.Positionals[0], parsed.Flags["verify"], parsed.Flags["proof"], parsed.Flags["risk"])
+	verification := strings.Join(parsed.Repeated["verify"], "\n")
+	proof := strings.Join(parsed.Repeated["proof"], "\n\n")
+	risk := strings.Join(parsed.Repeated["risk"], "\n\n")
+	prURL, _, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Flags["repo"], parsed.Positionals[0], verification, proof, risk, parsed.Bool("refresh"), previousRemoteHead)
 	if err != nil {
 		return err
 	}
 	if err := validateWorkerPullRequest(out.Context, project, task, forge, prURL, sha); err != nil {
 		return err
-	}
-	if !created {
-		brief, err := readTaskBrief(home, project, task)
-		if os.IsNotExist(err) {
-			return axi.Failure("brief_missing", "could not read the Task Brief for linked issues", false, err.Error())
-		}
-		if err != nil {
-			return err
-		}
-		if err := s.ensureExistingPRIssueLinks(out.Context, db, intent, forge, prURL, parsed.Flags["repo"], brief); err != nil {
-			return err
-		}
 	}
 	if member == nil {
 		if err := db.RecordVerifiedPRHead(out.Context, task.ID, prURL, sha); err != nil {

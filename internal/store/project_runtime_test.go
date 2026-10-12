@@ -73,6 +73,36 @@ func TestRememberKnownGenerationDoesNotContendWithWriters(t *testing.T) {
 	}
 }
 
+func TestUnchangedProjectObservationDoesNotWaitForWriter(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateProjectObservation(ctx, project.ID, "w1:p1", "w1", 0); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.ExecContext(ctx, `UPDATE projects SET status='missing' WHERE id=?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	writeCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := db.UpdateProjectObservation(writeCtx, project.ID, "w1:p1", "w1", 0); err != nil {
+		t.Fatalf("unchanged Project observation waited for a write lock: %v", err)
+	}
+}
+
 func TestLookoutRecoveryPersistsAcrossStoreReopen(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

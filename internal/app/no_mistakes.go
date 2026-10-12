@@ -89,7 +89,7 @@ func timeoutForExternalCommand(name string, args []string) time.Duration {
 	}
 	if name == "git" {
 		for _, arg := range args {
-			if arg == "fetch" {
+			if arg == "fetch" || arg == "ls-remote" {
 				return externalCommandTimeout
 			}
 		}

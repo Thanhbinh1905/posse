@@ -11,7 +11,13 @@ import (
 )
 
 const ackAllNotices = `-- name: AckAllNotices :execresult
-UPDATE notices SET acked_at = ? WHERE project_id = ? AND acked_at IS NULL
+UPDATE notices SET acked_at = ? WHERE notices.project_id = ? AND notices.acked_at IS NULL AND (
+    notices.claim_token = '' OR EXISTS (
+        SELECT 1 FROM notice_delivery_receipts r, json_each(r.notice_ids_json) n
+        WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token
+          AND r.state = 'printed' AND CAST(n.value AS INTEGER) = notices.id
+    )
+)
 `
 
 type AckAllNoticesParams struct {
@@ -24,7 +30,13 @@ func (q *Queries) AckAllNotices(ctx context.Context, arg AckAllNoticesParams) (s
 }
 
 const ackNotice = `-- name: AckNotice :execresult
-UPDATE notices SET acked_at = ? WHERE id = ? AND project_id = ? AND acked_at IS NULL
+UPDATE notices SET acked_at = ? WHERE notices.id = ? AND notices.project_id = ? AND notices.acked_at IS NULL AND (
+    notices.claim_token = '' OR EXISTS (
+        SELECT 1 FROM notice_delivery_receipts r, json_each(r.notice_ids_json) n
+        WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token
+          AND r.state = 'printed' AND CAST(n.value AS INTEGER) = notices.id
+    )
+)
 `
 
 type AckNoticeParams struct {
@@ -164,6 +176,31 @@ func (q *Queries) AllocateTaskSequence(ctx context.Context, projectID int64) (in
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const bindPRBodyMarker = `-- name: BindPRBodyMarker :execresult
+UPDATE pr_body_markers SET pr_url = ?, updated_at = ?
+WHERE task_id = ? AND repo = ? AND marker_token = ? AND (pr_url = '' OR pr_url = ?)
+`
+
+type BindPRBodyMarkerParams struct {
+	PrUrl       string
+	UpdatedAt   int64
+	TaskID      int64
+	Repo        string
+	MarkerToken string
+	PrUrl_2     string
+}
+
+func (q *Queries) BindPRBodyMarker(ctx context.Context, arg BindPRBodyMarkerParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, bindPRBodyMarker,
+		arg.PrUrl,
+		arg.UpdatedAt,
+		arg.TaskID,
+		arg.Repo,
+		arg.MarkerToken,
+		arg.PrUrl_2,
+	)
 }
 
 const breakMount = `-- name: BreakMount :exec
@@ -368,8 +405,8 @@ func (q *Queries) InsertNotice(ctx context.Context, arg InsertNoticeParams) (sql
 }
 
 const insertProject = `-- name: InsertProject :execresult
-INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at)
-VALUES (?, ?, ?, 'active', ?, ?)
+INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)
+VALUES (?, ?, ?, 'active', ?, ?, ?)
 `
 
 type InsertProjectParams struct {
@@ -378,6 +415,7 @@ type InsertProjectParams struct {
 	DefaultBranch  string
 	CreatedAt      int64
 	LastActivityAt int64
+	ProjectUuid    string
 }
 
 func (q *Queries) InsertProject(ctx context.Context, arg InsertProjectParams) (sql.Result, error) {
@@ -387,6 +425,7 @@ func (q *Queries) InsertProject(ctx context.Context, arg InsertProjectParams) (s
 		arg.DefaultBranch,
 		arg.CreatedAt,
 		arg.LastActivityAt,
+		arg.ProjectUuid,
 	)
 }
 
@@ -872,8 +911,63 @@ func (q *Queries) OpenNotices(ctx context.Context, projectID int64) ([]OpenNotic
 	return items, nil
 }
 
+const pRBodyMarkerByTaskRepo = `-- name: PRBodyMarkerByTaskRepo :one
+SELECT pr_url, marker_token FROM pr_body_markers WHERE task_id = ? AND repo = ?
+`
+
+type PRBodyMarkerByTaskRepoParams struct {
+	TaskID int64
+	Repo   string
+}
+
+type PRBodyMarkerByTaskRepoRow struct {
+	PrUrl       string
+	MarkerToken string
+}
+
+func (q *Queries) PRBodyMarkerByTaskRepo(ctx context.Context, arg PRBodyMarkerByTaskRepoParams) (PRBodyMarkerByTaskRepoRow, error) {
+	row := q.db.QueryRowContext(ctx, pRBodyMarkerByTaskRepo, arg.TaskID, arg.Repo)
+	var i PRBodyMarkerByTaskRepoRow
+	err := row.Scan(&i.PrUrl, &i.MarkerToken)
+	return i, err
+}
+
+const pRBodyMarkersByTask = `-- name: PRBodyMarkersByTask :many
+SELECT task_id, repo, pr_url, marker_token, updated_at FROM pr_body_markers
+WHERE task_id = ? ORDER BY repo
+`
+
+func (q *Queries) PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PrBodyMarker, error) {
+	rows, err := q.db.QueryContext(ctx, pRBodyMarkersByTask, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PrBodyMarker{}
+	for rows.Next() {
+		var i PrBodyMarker
+		if err := rows.Scan(
+			&i.TaskID,
+			&i.Repo,
+			&i.PrUrl,
+			&i.MarkerToken,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const projectByID = `-- name: ProjectByID :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE id = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects WHERE id = ?
 `
 
 func (q *Queries) ProjectByID(ctx context.Context, id int64) (Project, error) {
@@ -894,12 +988,13 @@ func (q *Queries) ProjectByID(ctx context.Context, id int64) (Project, error) {
 		&i.LeadLaunches,
 		&i.Kind,
 		&i.DownAt,
+		&i.ProjectUuid,
 	)
 	return i, err
 }
 
 const projectByLeadPane = `-- name: ProjectByLeadPane :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE lead_pane_id = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects WHERE lead_pane_id = ?
 `
 
 func (q *Queries) ProjectByLeadPane(ctx context.Context, leadPaneID string) (Project, error) {
@@ -920,12 +1015,13 @@ func (q *Queries) ProjectByLeadPane(ctx context.Context, leadPaneID string) (Pro
 		&i.LeadLaunches,
 		&i.Kind,
 		&i.DownAt,
+		&i.ProjectUuid,
 	)
 	return i, err
 }
 
 const projectByName = `-- name: ProjectByName :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE name = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects WHERE name = ?
 `
 
 func (q *Queries) ProjectByName(ctx context.Context, name string) (Project, error) {
@@ -946,12 +1042,13 @@ func (q *Queries) ProjectByName(ctx context.Context, name string) (Project, erro
 		&i.LeadLaunches,
 		&i.Kind,
 		&i.DownAt,
+		&i.ProjectUuid,
 	)
 	return i, err
 }
 
 const projectByRoot = `-- name: ProjectByRoot :one
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects WHERE root = ?
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects WHERE root = ?
 `
 
 func (q *Queries) ProjectByRoot(ctx context.Context, root string) (Project, error) {
@@ -972,12 +1069,13 @@ func (q *Queries) ProjectByRoot(ctx context.Context, root string) (Project, erro
 		&i.LeadLaunches,
 		&i.Kind,
 		&i.DownAt,
+		&i.ProjectUuid,
 	)
 	return i, err
 }
 
 const projects = `-- name: Projects :many
-SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at FROM projects ORDER BY name
+SELECT id, name, root, default_branch, herdr_workspace_id, lead_pane_id, lead_label, lead_absent_since, status, created_at, last_activity_at, lead_launches, kind, down_at, project_uuid FROM projects ORDER BY name
 `
 
 func (q *Queries) Projects(ctx context.Context) ([]Project, error) {
@@ -1004,6 +1102,7 @@ func (q *Queries) Projects(ctx context.Context) ([]Project, error) {
 			&i.LeadLaunches,
 			&i.Kind,
 			&i.DownAt,
+			&i.ProjectUuid,
 		); err != nil {
 			return nil, err
 		}
@@ -1838,6 +1937,34 @@ func (q *Queries) UpdateTaskWorkspace(ctx context.Context, arg UpdateTaskWorkspa
 		arg.PaneID,
 		arg.UpdatedAt,
 		arg.ID,
+	)
+	return err
+}
+
+const upsertPRBodyMarker = `-- name: UpsertPRBodyMarker :exec
+INSERT INTO pr_body_markers(task_id, repo, pr_url, marker_token, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(task_id, repo) DO UPDATE SET
+    pr_url = excluded.pr_url,
+    marker_token = excluded.marker_token,
+    updated_at = excluded.updated_at
+`
+
+type UpsertPRBodyMarkerParams struct {
+	TaskID      int64
+	Repo        string
+	PrUrl       string
+	MarkerToken string
+	UpdatedAt   int64
+}
+
+func (q *Queries) UpsertPRBodyMarker(ctx context.Context, arg UpsertPRBodyMarkerParams) error {
+	_, err := q.db.ExecContext(ctx, upsertPRBodyMarker,
+		arg.TaskID,
+		arg.Repo,
+		arg.PrUrl,
+		arg.MarkerToken,
+		arg.UpdatedAt,
 	)
 	return err
 }

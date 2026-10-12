@@ -13,9 +13,16 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
 const fixtureLockName = ".posse-e2e-fixture.lock"
+
+func isTaskScratchRoot(path string) bool {
+	path = filepath.Clean(path)
+	return filepath.IsAbs(path) && strings.HasPrefix(path, "/tmp/posse-") && strings.HasSuffix(path, "-scratch")
+}
 
 func fixturePrefix(suffix string) string {
 	prefix := os.Getenv("POSSE_E2E_TMP_PREFIX")
@@ -29,7 +36,10 @@ func fixturePrefix(suffix string) string {
 // can reclaim only roots bearing our marker whose owning test has exited.
 func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
-	parent := os.TempDir()
+	parent := os.Getenv("TMPDIR")
+	if parent == "" {
+		parent = os.TempDir()
+	}
 	if configuredRoot := os.Getenv("POSSE_E2E_TMP_ROOT"); configuredRoot != "" {
 		if !validTaskScratchRootPath(configuredRoot) {
 			t.Fatalf("unsafe POSSE_E2E_TMP_ROOT: %q", configuredRoot)
@@ -45,6 +55,11 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 			t.Fatalf("unsafe POSSE_E2E_TMP_ROOT: %q", configuredRoot)
 		}
 		parent = configuredRoot
+	} else if isTaskScratchRoot(parent) {
+		if !validTaskScratchRoot(parent) {
+			t.Fatalf("unsafe Task scratch TMPDIR: %q", parent)
+		}
+		t.Setenv("POSSE_E2E_TMP_ROOT", parent)
 	}
 	return newFixtureRootAt(t, parent, prefix)
 }
@@ -56,18 +71,27 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	if err != nil {
 		t.Fatalf("resolve E2E fixture parent: %v", err)
 	}
+	parent = filepath.Clean(parent)
 	customRoot := configuredRoot != "." && parent == configuredRoot && validTaskScratchRoot(configuredRoot)
-	if (parent != "/tmp" && parent != "/var/tmp" && parent != os.TempDir() && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
+	tmpDir := os.Getenv("TMPDIR")
+	if tmpDir == "" {
+		tmpDir = os.TempDir()
+	}
+	tmpDir, err = filepath.Abs(tmpDir)
+	if err != nil {
+		t.Fatalf("resolve E2E TMPDIR: %v", err)
+	}
+	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || parent == filepath.Clean(tmpDir)
+	if (!parentIsTemp && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
 	resolvedParent, err := filepath.EvalSymlinks(parent)
 	if err != nil {
 		t.Fatalf("resolve E2E fixture parent %s: %v", parent, err)
 	}
-	parent = resolvedParent
 	insideTemp := false
 	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
-		relative, err := filepath.Rel(tempRoot, parent)
+		relative, err := filepath.Rel(tempRoot, resolvedParent)
 		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			insideTemp = true
 			break
@@ -139,6 +163,53 @@ func validTaskScratchRoot(root string) bool {
 	}
 	resolved, err := filepath.EvalSymlinks(root)
 	return err == nil && resolved == root
+}
+
+func TestIsolatedHerdrAcceptsDefaultTaskScratchTMPDIR(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux procfs to keep the non-/tmp fixture physically inside Task scratch")
+	}
+	taskScratch := newFixtureRoot(t, "posse-e2e-task-scratch-")
+	tmpDir := filepath.Join(taskScratch, "posse", "scratch", "shop", "t1")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmpHandle, err := os.Open(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tmpHandle.Close() })
+	configuredTMPDIR := fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), tmpHandle.Fd())
+	if _, err := os.Stat(configuredTMPDIR); err != nil {
+		t.Fatalf("Task TMPDIR alias is unavailable: %v", err)
+	}
+	t.Setenv("TMPDIR", configuredTMPDIR)
+	t.Setenv("POSSE_E2E_TMP_ROOT", "")
+
+	root := newFixtureRoot(t, herdr.TestRootName())
+	resolvedTMPDir, err := filepath.EvalSymlinks(configuredTMPDIR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedParent != resolvedTMPDir {
+		t.Fatalf("isolated E2E fixture is not directly under the Task TMPDIR: root=%q parent=%q TMPDIR=%q", root, resolvedParent, resolvedTMPDir)
+	}
+	if relative, err := filepath.Rel(taskScratch, resolvedParent); err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		t.Fatalf("isolated E2E fixture escaped Task scratch: root=%q parent=%q relative=%q err=%v", root, resolvedParent, relative, err)
+	}
+	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
+		t.Fatal(err)
+	}
+	client := herdr.NewWithEnv("herdr", isolatedE2EEnv(t, root))
+	startServer(t, client)
+	status, err := client.Status(t.Context())
+	if err != nil || !status.Running {
+		t.Fatalf("private Herdr server did not start under Task TMPDIR: status=%#v err=%v", status, err)
+	}
 }
 
 // Go's module cache makes directories read-only. WalkDir never follows links,

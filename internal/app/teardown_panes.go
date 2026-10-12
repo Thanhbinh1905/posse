@@ -252,6 +252,9 @@ func (s *Service) verifyMountForegroundOwnershipWithAuthorization(ctx context.Co
 				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("Mount PID %d changed process identity while retaining its cleanup handle", pid), true)
 			}
 		}
+		if err := authorization.captureDescendants(); err != nil {
+			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not retain Task process descendants in pane %s", pane.PaneID), true, err.Error())
+		}
 		currentSnapshot, err := s.snapshot(ctx)
 		if err != nil {
 			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not recheck Herdr ownership for pane %s", pane.PaneID), true, err.Error())

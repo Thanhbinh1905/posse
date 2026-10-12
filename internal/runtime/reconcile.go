@@ -231,12 +231,37 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	if err := db.UpdateTaskObservation(ctx, task.ID, pane.PaneID, pane.WorkspaceID, session, absentSince, idleSince, serverStartedAt); err != nil {
 		return nil, observationFailure(err)
 	}
+	episode, err := db.TaskModelErrorEpisode(ctx, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	if task.State == store.StateWorking && episode.Launch == task.Launches && episode.Status == "active" && store.ModelErrorNudgeExpired(episode, now) {
+		notice := store.Notice{
+			ProjectID: project.ID,
+			TaskID:    task.ID,
+			Kind:      "model_stream_error",
+			Summary:   fmt.Sprintf("%s: a continue attempt was interrupted or its delivery is uncertain; Posse did not replay it (episode %d, %d/%d continue nudges)", task.Title, episode.Episode, episode.Attempts, 3),
+			DataJSON:  fmt.Sprintf(`{"episode":%d,"launch":%d,"agent":%q,"kind":"model_stream_error","attempts":%d,"max_attempts":3,"interrupted":true}`, episode.Episode, episode.Launch, episode.Agent, episode.Attempts),
+		}
+		created, err := db.InterruptExpiredModelErrorNudge(ctx, task.ID, now.UnixMilli(), notice)
+		if err != nil {
+			return nil, err
+		}
+		if created != nil {
+			notices = append(notices, *created)
+		}
+		episode, err = db.TaskModelErrorEpisode(ctx, task.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if task.State == store.StateWorking && idleAfter > 0 && idleSince > 0 && now.Sub(time.UnixMilli(idleSince)) >= idleAfter {
 		exists, err := db.HasNotice(ctx, task.ProjectID, task.ID, "worker_idle", task.Launches)
 		if err != nil {
 			return nil, err
 		}
-		if !exists {
+		modelErrorHandled := episode.Launch == task.Launches && episode.Status != "" && episode.Status != "resolved" && !store.ModelErrorAwaitingTurn(episode) && (episode.Status != "active" || episode.NextAttemptAt > 0)
+		if !exists && !modelErrorHandled {
 			notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d}`, task.Launches), now)
 			if err != nil {
 				return nil, err
