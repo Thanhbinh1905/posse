@@ -141,6 +141,120 @@ func (f *workspaceLandFixture) state() store.State {
 
 const localWorkspaceConfig = "[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\n"
 
+func TestWorkspaceDiscardCaptureBundlesEveryApprovedMemberTip(t *testing.T) {
+	f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"backend", "worker"}, []string{"backend", "worker"})
+	ctx := context.Background()
+	tips, err := f.service.workspaceBranchTips(ctx, f.db, f.project, f.task)
+	if err != nil || tips == "" {
+		t.Fatalf("approved workspace tips = %q, %v", tips, err)
+	}
+	if err := f.db.RecordApprovalWithBranch(ctx, f.task.ID, "discard", "approved workspace discard", tips); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.captureDiscardTips(ctx, f.db, f.home, f.project, f.task); err != nil {
+		t.Fatalf("capture workspace discard tips: %v", err)
+	}
+	artifactDir, err := ensureDiscardArtifactDirectory(f.home, f.project, f.task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairs := strings.Split(tips, ",")
+	if len(pairs) != 2 {
+		t.Fatalf("workspace approved tips = %q, want two member tips", tips)
+	}
+	for _, pair := range pairs {
+		repository, commit, ok := strings.Cut(pair, "=")
+		if !ok {
+			t.Fatalf("invalid workspace tip %q", pair)
+		}
+		target, err := f.service.projectTarget(ctx, f.db, f.project, repository)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundle := filepath.Join(artifactDir, discardTipName(repository, commit))
+		heads, err := gitOutput(ctx, target.Root, "bundle", "list-heads", bundle)
+		if err != nil || !bundleHasCommit(heads, commit) {
+			t.Fatalf("bundle for %s does not capture approved tip %s: heads=%q err=%v", repository, commit, heads, err)
+		}
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET state=? WHERE id=?`, string(store.StateTornDown), f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.db.TaskByID(ctx, f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseMount(ctx, f.db, f.project, task, "", false); err != nil {
+		t.Fatalf("release workspace Mount before pruning its landed branches: %v", err)
+	}
+	task, err = f.db.TaskByID(ctx, f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := landedOrDiscardedBranchItems(ctx, f.db, f.home, f.project, []store.Task{task})
+	if err != nil || len(items) != 2 {
+		t.Fatalf("captured workspace branch prune candidates = %#v, %v; want both approved member tips", items, err)
+	}
+	for _, item := range items {
+		if err := f.service.applyPruneItem(ctx, f.db, f.home, f.project, item); err != nil {
+			t.Fatalf("remove captured workspace branch %s in %s: %v", item.label, item.path, err)
+		}
+		if _, err := gitOutput(ctx, item.path, "rev-parse", "--verify", "refs/heads/"+item.label); !isMissingGitRef(err) {
+			t.Errorf("workspace branch %s remains in %s: %v", item.label, item.path, err)
+		}
+	}
+}
+
+func TestWorkspaceTeardownRemovesOnlyRecordedMergedPRHeads(t *testing.T) {
+	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"backend", "worker"}, []string{"backend", "worker"})
+	ctx := context.Background()
+	repos, err := f.db.TaskRepos(ctx, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range repos {
+		target, err := f.service.projectTarget(ctx, f.db, f.project, repo.Repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		branchSHA := strings.TrimSpace(gitTest(t, target.Root, "rev-parse", "refs/heads/"+f.task.Branch))
+		defaultSHA := strings.TrimSpace(gitTest(t, target.Root, "rev-parse", "refs/heads/"+target.DefaultBranch))
+		repo.State = store.TaskRepoLanded
+		repo.LandingMode = "pr"
+		repo.LandedRef = defaultSHA
+		repo.GatedSHA = branchSHA
+		if repo.Repo == "backend" {
+			// A later commit on the Task branch must survive the recorded PR head.
+			followUp := filepath.Join(repo.WorktreePath, "after-pr.txt")
+			if err := os.WriteFile(followUp, []byte("follow-up\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitTest(t, repo.WorktreePath, "add", "after-pr.txt")
+			gitTest(t, repo.WorktreePath, "commit", "-m", "follow-up after merged PR")
+		}
+		if err := f.db.UpdateTaskRepo(ctx, repo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := f.service.removeWorkspaceBranches(ctx, f.db, f.project, f.task, "")
+	if err != nil || !removed {
+		t.Fatalf("remove merged workspace PR branch: removed=%v err=%v", removed, err)
+	}
+	for _, repo := range repos {
+		target, err := f.service.projectTarget(ctx, f.db, f.project, repo.Repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = gitOutput(ctx, target.Root, "rev-parse", "--verify", "refs/heads/"+f.task.Branch)
+		if repo.Repo == "worker" && !isMissingGitRef(err) {
+			t.Errorf("recorded merged PR branch remains in worker: %v", err)
+		}
+		if repo.Repo == "backend" && err != nil {
+			t.Errorf("follow-up work on advanced backend branch was removed: %v", err)
+		}
+	}
+}
+
 func TestWorkspaceMountMirrorsSharedFilesAndRequestedMembers(t *testing.T) {
 	f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"backend", "worker"}, []string{"worker"})
 	mount := f.task.WorktreePath

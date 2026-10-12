@@ -454,9 +454,15 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, fmt.Errorf("%w: Task %d is not in %q", store.ErrStateRace, task.ID, task.State)
 	}
 	task = current
+	mountHeld, err := taskMountHeldBy(ctx, db, task)
+	if err != nil {
+		return result, err
+	}
 	if discardable {
-		if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
-			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process ownership", err)
+		if mountHeld {
+			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
+				return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process ownership", err)
+			}
 		}
 		branchSHA := ""
 		if project.IsWorkspace() {
@@ -475,6 +481,17 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, err
 		}
 	}
+	home, err := s.homePath()
+	if err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task artifact access", err)
+	}
+	if discardable {
+		if err := s.runIntentStep(ctx, db, intent, "discard.capture", func() error {
+			return s.captureDiscardTips(ctx, db, home, project, task)
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "discard tip capture", err)
+		}
+	}
 	var paneResult teardownPanes
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
 		var closeErr error
@@ -488,16 +505,14 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane closure", err)
 	}
 	var stopped []string
-	if task.State == store.StateLanded && !discardable && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
-		// Background processes may write after the Rider pane closes. Stop
-		// them before taking the snapshot, never after it.
-		if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
-			var stopErr error
-			stopped, stopErr = stopMountProcesses(task.WorktreePath)
-			return stopErr
-		}); err != nil {
-			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process shutdown", err)
-		}
+	if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
+		var stopErr error
+		stopped, stopErr = stopTaskOwnedProcesses(ctx, db, home, project, task)
+		return stopErr
+	}); err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task process shutdown", err)
+	}
+	if mountHeld && task.State == store.StateLanded && !discardable && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes" || project.IsWorkspace()) {
 		if err := s.runIntentStep(ctx, db, intent, "leftover.snapshot", func() error {
 			if !project.IsWorkspace() {
 				return snapshotPRLeftover(ctx, db, project, task)
@@ -553,13 +568,8 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "Leftover snapshot", err)
 		}
 	}
-	if task.State == store.StateReported && !discardable {
+	if mountHeld && task.State == store.StateReported && !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "report.attachments", func() error {
-			if task.WorktreePath != "" {
-				if _, err := stopMountProcesses(task.WorktreePath); err != nil {
-					return err
-				}
-			}
 			home, err := s.homePath()
 			if err != nil {
 				return err
@@ -573,9 +583,19 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "Report attachment preservation", err)
 		}
 	}
+	if err := s.runIntentStep(ctx, db, intent, "scratch.remove", func() error {
+		newlyStopped, err := stopTaskOwnedProcesses(ctx, db, home, project, task)
+		if err != nil {
+			return err
+		}
+		stopped = append(stopped, newlyStopped...)
+		return removeTaskScratch(home, project, task)
+	}); err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task scratch removal", err)
+	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
-		if discardable {
+		if discardable && mountHeld {
 			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
 				return err
 			}
@@ -633,7 +653,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
 				// A PR branch advanced after its external merge stays at its
 				// existing tip even when the Mount can be safely released.
-				if task.LandingMode == "pr" {
+				if task.LandingMode == "pr" || task.LandingMode == "no-mistakes" {
 					observation, observationErr := db.LatestPRObservation(ctx, task.ID)
 					if observationErr != nil && !store.IsNotFound(observationErr) {
 						return observationErr
@@ -647,7 +667,23 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				}
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
+					merged := false
 					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+project.DefaultBranch); mergeErr == nil {
+						merged = true
+					}
+					if task.State == store.StateLanded && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {
+						observation, observationErr := db.LatestPRObservation(ctx, task.ID)
+						if observationErr != nil && !store.IsNotFound(observationErr) {
+							return observationErr
+						}
+						if observationErr == nil && observation.State == "MERGED" {
+							if sha != observation.HeadSHA {
+								return nil // Preserve work added after the merged PR head.
+							}
+							merged = true // Squash and rebase merges need not contain the branch ref.
+						}
+					}
+					if merged {
 						if _, err := gitOutput(ctx, project.Root, "update-ref", "-d", ref, sha); err != nil {
 							return err
 						}
@@ -680,6 +716,17 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, err
 	}
 	return result, nil
+}
+
+func taskMountHeldBy(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	mount, err := db.MountByTask(ctx, task.ID)
+	if store.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return mount.ID == task.MountID && mount.TaskID == task.ID && mount.State == "held", nil
 }
 
 func isMissingGitRef(err error) bool {

@@ -70,8 +70,17 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	addCheck := func(name, status, detail, action string) {
 		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail, Action: action})
 	}
-
+	ownedBytes, usageErr := pathBytes(home)
 	cfg, configErr := config.Load(home, "")
+	if usageErr != nil {
+		addCheck("Posse-owned disk usage", "warn", usageErr.Error(), "Check permissions under POSSE_HOME")
+	} else {
+		retention := "retention.task_artifacts unavailable"
+		if configErr == nil {
+			retention = "retention.task_artifacts=" + cfg.Retention.TaskArtifacts
+		}
+		addCheck("Posse-owned disk usage", "ok", fmt.Sprintf("%d bytes under %s (scratch, Remuda, Project data and state); %s", ownedBytes, home, retention), "")
+	}
 	if configErr != nil {
 		addCheck("config", "fail", configErr.Error(), "Fix the reported configuration key")
 	} else {

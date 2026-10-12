@@ -264,8 +264,7 @@ jobs:
           echo "${dash_bin%/*}" >> "$GITHUB_PATH"
       - name: Check POSIX shell
         run: |
-          shellcheck -s sh install.sh
-          shellcheck scripts/*.sh
+          shellcheck install.sh scripts/*.sh
       - name: Exercise installer under both shells
         run: |
           dash scripts/test-install.sh

@@ -269,6 +269,9 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/main")); got != mergeOne {
 		t.Fatalf("Project checkout head=%s, merge commit=%s", got, mergeOne)
 	}
+	if output, err := exec.Command("git", "-C", fixture.repo, "show-ref", "--verify", "refs/heads/"+first.Branch).CombinedOutput(); err == nil {
+		t.Fatalf("merged PR Teardown kept Task branch %s: %s", first.Branch, output)
+	}
 	fixture.requireNotice(t, "t1", "pr_merged")
 
 	secondBrief := filepath.Join(fixture.root, "ship-second.md")
@@ -300,6 +303,9 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/main")); got != mergeTwo {
 		t.Fatalf("Project checkout was not synced after external merge: got=%s want=%s", got, mergeTwo)
 	}
+	if output, err := exec.Command("git", "-C", fixture.repo, "show-ref", "--verify", "refs/heads/"+second.Branch).CombinedOutput(); err == nil {
+		t.Fatalf("externally merged PR Teardown kept Task branch %s: %s", second.Branch, output)
+	}
 	fixture.requireNotice(t, "t2", "pr_merged")
 	ghCalls, err := os.ReadFile(fixture.ghLog)
 	if err != nil {
@@ -318,6 +324,9 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 
 func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
+	// The fixture's poll-only Lookout can deliver queued messages as soon as
+	// the Rider becomes idle, racing the explicit crash-injected owner below.
+	stopBackgroundLookout(t, fixture)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "queued-crash.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCommit one change for queued message crash recovery.\n"), 0o600); err != nil {
@@ -1362,6 +1371,7 @@ case "$PWD/" in
     git add "e2e-worker-$task_id.txt"
     git commit -m "worker change $task_id" >/dev/null
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+    : > "$POSSE_TEST_ROOT/worker-ready-$task_id"
     while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id" ]; do sleep 0.02; done
     case "$task_id" in t1) pr_url='https://github.com/acme/shop/pull/17' ;; t2) pr_url='https://github.com/acme/shop/pull/18' ;; esac
     "$POSSE_E2E_POSSE_BIN" publish "Worker committed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1

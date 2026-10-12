@@ -57,6 +57,10 @@ type Remuda struct {
 	KeepIdle int      `toml:"keep_idle" json:"keep_idle"`
 }
 
+type Retention struct {
+	TaskArtifacts string `toml:"task_artifacts" json:"task_artifacts"`
+}
+
 type Kind struct {
 	AutoApproveArgs    []string `toml:"auto_approve_args" json:"auto_approve_args"`
 	LeadAutoApprove    bool     `toml:"lead_auto_approve" json:"lead_auto_approve"`
@@ -120,6 +124,7 @@ type Config struct {
 	Lead                Lead                  `toml:"lead" json:"lead"`
 	Defaults            Defaults              `toml:"defaults" json:"defaults"`
 	Remuda              Remuda                `toml:"remuda" json:"remuda"`
+	Retention           Retention             `toml:"retention" json:"retention"`
 	Kinds               map[string]Kind       `toml:"kinds" json:"kinds"`
 	Profiles            map[string]Profile    `toml:"profiles" json:"profiles"`
 	Dispatch            []Rule                `toml:"dispatch_rules" json:"dispatch"`
@@ -358,9 +363,10 @@ func defaultMap() map[string]any {
 			"lead":   map[string]any{"name": "Lead", "persona": "", "language": "en", "address_user": ""},
 			"worker": map[string]any{"display_prefix": "rider"},
 		},
-		"remuda": map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
-		"lead":   map[string]any{"kind": "", "profiles": map[string]any{}},
-		"lowkey": map[string]any{"lead": false},
+		"remuda":    map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
+		"retention": map[string]any{"task_artifacts": "2160h"},
+		"lead":      map[string]any{"kind": "", "profiles": map[string]any{}},
+		"lowkey":    map[string]any{"lead": false},
 		"defaults": map[string]any{
 			"max_workers": 4, "stall_after": "20m", "idle_after": "3m", "auto_unsaddle": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "landing_mode": "pr",
 			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "on_risk", "gate": []string{},
@@ -394,6 +400,9 @@ func (c *Config) normalizeBuiltins() {
 	}
 	if c.Remuda.Clean == "" {
 		c.Remuda.Clean = "warm"
+	}
+	if c.Retention.TaskArtifacts == "" {
+		c.Retention.TaskArtifacts = "2160h"
 	}
 	if c.Profiles == nil {
 		c.Profiles = map[string]Profile{}

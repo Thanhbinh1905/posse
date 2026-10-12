@@ -271,10 +271,15 @@ func t205NewPRFixture(t *testing.T, forge string) *t205PRFixture {
 	}
 	runPosse(t, f.binary, f.repo, f.leadEnv, "ride", "--brief", brief, "--name", "pr-lifecycle-change")
 	task := f.mustTask(t, "t1")
+	readyPath := filepath.Join(f.root, "worker-ready-t1")
 	if !waitForCondition(15*time.Second, func() bool {
-		return strings.TrimSpace(gitTest(t, f.env, task.WorktreePath, "rev-list", "--count", task.BaseRef+".."+task.Branch)) == "1"
+		if strings.TrimSpace(gitTest(t, f.env, task.WorktreePath, "rev-list", "--count", task.BaseRef+".."+task.Branch)) != "1" {
+			return false
+		}
+		_, err := os.Stat(readyPath)
+		return err == nil
 	}) {
-		t.Fatal("Rider did not commit")
+		t.Fatal("Rider did not finish its initial commit")
 	}
 	env := setEnv(f.leadEnv, "HERDR_PANE_ID", task.PaneID)
 	env = setEnv(env, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)

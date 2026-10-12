@@ -78,6 +78,9 @@ esac
 	if !exited || exit.ExitCode() != 86 {
 		t.Fatalf("explicit relaunch did not crash after agent.start: err=%v output=%s", commandErr, output)
 	}
+	if !waitForCondition(5*time.Second, func() bool { return workerStarts() >= startsBeforeCrash+1 }) {
+		t.Fatalf("crashed relaunch process start was not logged: starts=%d, want at least %d", workerStarts(), startsBeforeCrash+1)
+	}
 	if got := workerStarts(); got != startsBeforeCrash+1 {
 		t.Fatalf("crashed relaunch starts=%d, want one new Rider launch", got-startsBeforeCrash)
 	}
@@ -141,6 +144,159 @@ esac
 		t.Fatal("replacement Lead is not live")
 	}
 	f.assertAlive(t, snapshot, task.PaneID, lead.PaneID)
+	if err := func() error {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		_, err = db.IntentByTask(context.Background(), task.ID)
+		if !store.IsNotFound(err) {
+			return fmt.Errorf("relaunch intent remains after startup: %v", err)
+		}
+		return nil
+	}(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpStartsLeadAndSettlesRelaunchIntentDuringRestartBackoff(t *testing.T) {
+	f := newRiderTabsFixture(t)
+	t.Cleanup(func() { stopIsolatedFinalizers(t, f.root) })
+	startLog := filepath.Join(f.root, "restart-backoff-starts.log")
+	agentPath := filepath.Join(f.root, "bin", "claude")
+	agent, err := os.ReadFile(agentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instrument := `case "$PWD/" in
+  "$POSSE_E2E_WORKTREES/"*) printf 'worker\n' >> "$POSSE_TEST_ROOT/restart-backoff-starts.log" ;;
+  *) printf 'lead\n' >> "$POSSE_TEST_ROOT/restart-backoff-starts.log" ;;
+esac
+`
+	agent = []byte(strings.Replace(string(agent), "#!/bin/sh\n", "#!/bin/sh\n"+instrument, 1))
+	if err := os.WriteFile(agentPath, agent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workerStarts := func() int {
+		t.Helper()
+		contents, err := os.ReadFile(startLog)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return strings.Count(string(contents), "worker\n")
+	}
+	leadStarts := func() int {
+		t.Helper()
+		contents, err := os.ReadFile(startLog)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return strings.Count(string(contents), "lead\n")
+	}
+
+	initial := f.ride(t, "t1", "Restart waits for backoff", "restart-waits-backoff")
+	if !waitForCondition(5*time.Second, func() bool { return workerStarts() == 1 }) {
+		t.Fatalf("initial Rider process start was not logged: starts=%d", workerStarts())
+	}
+	backoffEnds := time.Now().Add(time.Minute).UnixMilli()
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	claimed, err := db.ClaimTaskRecovery(context.Background(), initial.ID, f.snapshot(t).ServerStartedAt, 0, os.Getpid(), 3, now.UnixMilli(), backoffEnds)
+	if err == nil && !claimed {
+		err = fmt.Errorf("could not seed a pending recovery attempt")
+	}
+	if err == nil {
+		err = db.FinishTaskRecovery(context.Background(), initial, os.Getpid(), 3, false, "injected transient recovery failure", backoffEnds)
+	}
+	closeErr := db.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	crashEnv := setEnv(f.leadEnv, "POSSE_INTENT_CRASH_AT", "relaunch:after:agent.start")
+	command := exec.Command(f.binary, "relaunch", "t1")
+	command.Dir, command.Env = f.repo, crashEnv
+	output, commandErr := command.CombinedOutput()
+	exit, exited := commandErr.(*exec.ExitError)
+	if !exited || exit.ExitCode() != 86 {
+		t.Fatalf("explicit relaunch did not crash after agent.start: err=%v output=%s", commandErr, output)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return workerStarts() == 2 }) {
+		t.Fatalf("crashed relaunch process start was not logged: starts=%d, want 2", workerStarts())
+	}
+	if got := leadStarts(); got != 0 {
+		t.Fatalf("instrumented Lead starts before replacement=%d, want 0", got)
+	}
+	if err := func() error {
+		db, err := store.Open(f.home)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		intent, err := db.IntentByTask(context.Background(), initial.ID)
+		if err != nil {
+			return err
+		}
+		if intent.Command != "relaunch" || intent.Step != "done:agent.start" {
+			return fmt.Errorf("interrupted relaunch intent = %#v", intent)
+		}
+		recovery, err := db.TaskRecovery(context.Background(), initial.ID)
+		if err != nil {
+			return err
+		}
+		if recovery.Status != "pending" || recovery.NextAttemptAt <= time.Now().UnixMilli() {
+			return fmt.Errorf("recovery is not waiting for backoff: %#v", recovery)
+		}
+		return nil
+	}(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldGeneration := f.snapshot(t).ServerStartedAt
+	stopServer(t, f.client, f.server)
+	f.server = startServer(t, f.client)
+	newSnapshot := f.snapshot(t)
+	if newSnapshot.ServerStartedAt == oldGeneration {
+		t.Fatalf("Herdr generation did not change: %q", oldGeneration)
+	}
+	restoredLead := false
+	for _, pane := range newSnapshot.Panes {
+		if pane.Label == "posse:shop:lead" {
+			restoredLead = true
+			break
+		}
+	}
+	if !restoredLead {
+		t.Fatal("fixture lost its Lead pane label after Herdr restart; this would exercise group-close recovery instead")
+	}
+	caller, err := createWorkspace(f.client, f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.Run(context.Background(), "pane", "run", caller.RootPane.PaneID, "posse up --name shop --yes --replace"); err != nil {
+		t.Fatalf("run replacement posse up in isolated Herdr pane: %v", err)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return leadStarts() == 1 }) {
+		pane, readErr := f.client.Run(context.Background(), "pane", "read", caller.RootPane.PaneID, "--source", "recent-unwrapped", "--lines", "80")
+		t.Fatalf("replacement Lead did not start: starts=%d output=%s read_err=%v", leadStarts(), pane, readErr)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return workerStarts() >= 3 }) {
+		t.Fatalf("replacement Rider process start was not logged: starts=%d, want at least 3", workerStarts())
+	}
+	if got := workerStarts(); got != 3 {
+		t.Fatalf("Rider starts after replacement up=%d, want one explicit relaunch to settle the intent", got)
+	}
+	task := f.task(t, "t1")
+	if task.State != store.StateWorking || task.Launches != initial.Launches+2 {
+		t.Fatalf("interrupted Rider relaunch was not settled exactly once: initial=%#v current=%#v", initial, task)
+	}
 	if err := func() error {
 		db, err := store.OpenReadOnly(f.home)
 		if err != nil {

@@ -26,11 +26,19 @@ func TestT229RecreatedDatabaseProjectIDCollision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := f.db.Transition(ctx, originalTaskID, store.StateSpawning, store.StateFailed, "cli", "fixture snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	// This test deletes the database to set up an identity collision. Stop
+	// the fixture's live Lookout first so it cannot race SQLite recreation.
+	runPosse(t, f.binary, f.repo, f.env, "down")
 	if err := f.db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(f.home, "posse.db")); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{filepath.Join(f.home, "posse.db"), filepath.Join(f.home, "posse.db-wal"), filepath.Join(f.home, "posse.db-shm")} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("remove database fixture file %s: %v", path, err)
+		}
 	}
 	f.db, err = store.Open(f.home)
 	if err != nil {

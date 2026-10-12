@@ -386,7 +386,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 		{command: "ride", step: "task.create", phase: "before"},
 		{command: "ride", step: "task.create", phase: "after"},
 	}
-	for _, step := range []string{"mount.acquire", "pane.open", "pane.record", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"} {
+	for _, step := range []string{"scratch.create", "mount.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"} {
 		steps = append(steps, struct {
 			command string
 			step    string
@@ -408,7 +408,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			phase   string
 		}{"land --merge", step, "after"})
 	}
-	for _, step := range []string{"approval.record", "panes.close", "mount.release", "branch.remove", "task.torn_down"} {
+	for _, step := range []string{"approval.record", "discard.capture", "panes.close", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"} {
 		steps = append(steps, struct {
 			command string
 			step    string
@@ -419,7 +419,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			phase   string
 		}{"unsaddle", step, "after"})
 	}
-	for _, step := range []string{"git.inspect", "pane.open", "agent.stop", "pane.label", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"} {
+	for _, step := range []string{"git.inspect", "pane.open", "agent.stop", "pane.label", "scratch.environment", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"} {
 		steps = append(steps, struct {
 			command string
 			step    string
@@ -462,8 +462,19 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 				code, output := fixture.run(t, crashAt, "land", taskID, "--merge", "--user-approved", "User approved the test merge")
 				assertCrashExit(t, code, output, crashAt)
 			case "unsaddle":
-				taskID, err = fixture.addShipTask(t, store.StateFailed)
+				state := store.StateFailed
+				if item.step == "scratch.remove" {
+					state = store.StateLost
+				}
+				taskID, err = fixture.addShipTask(t, state)
 				if err != nil {
+					t.Fatal(err)
+				}
+				scratch := filepath.Join(fixture.home, "scratch", fixture.project.Name, "t1")
+				if err := os.MkdirAll(scratch, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(scratch, "teardown.tmp"), []byte("remove after teardown\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				branchSHA = strings.TrimSpace(gitTest(t, fixture.harness.baseEnv, fixture.repo, "rev-parse", "refs/heads/posse/t1"))
@@ -578,6 +589,9 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					}
 				case "unsaddle":
 					wantState := store.StateFailed
+					if item.step == "scratch.remove" {
+						wantState = store.StateLost
+					}
 					if item.step == "task.torn_down" && item.phase == "after" {
 						wantState = store.StateTornDown
 					}
@@ -627,7 +641,22 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 				}
 			}
 			if item.command == "unsaddle" {
-				branchRemoved := item.step == "task.torn_down" || item.step == "branch.remove" && item.phase == "after"
+				scratchPath := filepath.Join(fixture.home, "scratch", fixture.project.Name, "t1")
+				if item.step == "scratch.remove" && item.phase == "before" {
+					if _, err := os.Stat(scratchPath); err != nil {
+						t.Fatalf("pre-removal crash unexpectedly changed Task scratch: %v", err)
+					}
+					_, output := fixture.run(t, "", "unsaddle", taskID, "--discard", "--user-approved", "User approved discard retry")
+					if !strings.Contains(output, "torn-down") {
+						t.Fatalf("retry did not complete interrupted discard: %s", output)
+					}
+				}
+				if item.step == "scratch.remove" || item.step == "task.torn_down" {
+					if _, err := os.Stat(scratchPath); !os.IsNotExist(err) {
+						t.Fatalf("discard recovery kept Task scratch after %s/%s: %v", item.phase, item.step, err)
+					}
+				}
+				branchRemoved := item.step == "task.torn_down" || item.step == "branch.remove" && item.phase == "after" || item.step == "scratch.remove" && item.phase == "before"
 				branchTip, branchErr := gitCommand(fixture.harness.baseEnv, fixture.repo, "rev-parse", "--verify", "refs/heads/posse/t1")
 				if branchRemoved && branchErr == nil {
 					t.Fatalf("discard crash at %s/%s left branch at %s", item.phase, item.step, strings.TrimSpace(branchTip))
@@ -647,6 +676,9 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					if item.step == "approval.record" && item.phase == "before" {
 						wantApprovals = 0
 					}
+					if item.step == "scratch.remove" && item.phase == "before" {
+						wantApprovals = 2
+					}
 					if item.step == "task.torn_down" && item.phase == "after" {
 						wantNotices = 0
 					}
@@ -657,7 +689,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					if err := db.QueryRowContext(context.Background(), `SELECT state FROM mounts WHERE path=?`, filepath.Join(fixture.home, "remuda", fixture.project.Name, "mount-1")).Scan(&mountState); err != nil {
 						return err
 					}
-					mountReleased := item.step == "mount.release" && item.phase == "after" || item.step == "branch.remove" || item.step == "task.torn_down"
+					mountReleased := item.step == "mount.release" && item.phase == "after" || item.step == "branch.remove" || item.step == "task.torn_down" || item.step == "scratch.remove" && item.phase == "before"
 					wantMountState := "held"
 					if mountReleased {
 						wantMountState = "idle"

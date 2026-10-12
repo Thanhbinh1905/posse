@@ -186,6 +186,10 @@ func (db *DB) ProjectSnapshotPath(project string) string {
 	return filepath.Join(filepath.Dir(db.Path), "projects", project, "project.toml")
 }
 
+func (db *DB) NoticeDeliverySnapshotPath(project string) string {
+	return filepath.Join(filepath.Dir(db.Path), "projects", project, "notice-delivery.toml")
+}
+
 func (db *DB) PersistTask(ctx context.Context, taskID int64) error {
 	return db.persistTask(ctx, taskID, true)
 }
@@ -402,6 +406,11 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 	snapshots := make([]TaskSnapshot, 0, len(paths))
 	projects := map[int64]Project{}
 	members := map[int64][]ProjectRepo{}
+	type deliverySnapshotCandidate struct {
+		path     string
+		snapshot NoticeDeliverySnapshot
+	}
+	deliveryCandidates := map[string][]deliverySnapshotCandidate{}
 	projectStates := map[int64]projectStateSnapshot{}
 	projectSnapshotAt := map[int64]int64{}
 	projectIDsByIdentity := map[string]int64{}
@@ -472,6 +481,24 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 			memberSnapshotSeq[snapshot.Project.ID] = snapshot.Task.Seq
 		}
 		snapshots = append(snapshots, snapshot)
+	}
+	deliveryPaths, err := filepath.Glob(filepath.Join(home, "projects", "*", "notice-delivery.toml"))
+	if err != nil {
+		return 0, err
+	}
+	for _, path := range deliveryPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return 0, err
+		}
+		var snapshot NoticeDeliverySnapshot
+		if _, err := toml.Decode(string(data), &snapshot); err != nil {
+			return 0, fmt.Errorf("decode %s: %w", path, err)
+		}
+		if snapshot.Version != 1 || snapshot.Project.ID == 0 || snapshot.Project.Name == "" || filepath.Base(path) != "notice-delivery.toml" {
+			return 0, fmt.Errorf("invalid Notice delivery snapshot %s", path)
+		}
+		deliveryCandidates[snapshot.Project.UUID] = append(deliveryCandidates[snapshot.Project.UUID], deliverySnapshotCandidate{path: path, snapshot: snapshot})
 	}
 	maxID := int64(0)
 	known := make(map[string]bool, len(snapshots))
@@ -544,6 +571,46 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 			snapshots[index].Project = project
 		}
 	}
+	projectIDsByUUID := make(map[string]int64, len(projects))
+	for projectID, project := range projects {
+		if existingID, exists := projectIDsByUUID[project.UUID]; project.UUID != "" && exists && existingID != projectID {
+			return 0, fmt.Errorf("Project UUID %q identifies both Project IDs %d and %d", project.UUID, existingID, projectID)
+		}
+		if project.UUID != "" {
+			projectIDsByUUID[project.UUID] = projectID
+		}
+	}
+	deliverySnapshots := make(map[int64]NoticeDeliverySnapshot, len(deliveryCandidates))
+	for projectUUID, candidates := range deliveryCandidates {
+		projectID, exists := projectIDsByUUID[projectUUID]
+		if !exists {
+			return 0, fmt.Errorf("Notice delivery snapshot Project UUID %q does not match any Project", projectUUID)
+		}
+		project := projects[projectID]
+		selected := -1
+		for index, candidate := range candidates {
+			if filepath.Base(filepath.Dir(candidate.path)) == project.Name {
+				selected = index
+				break
+			}
+		}
+		if selected < 0 {
+			selected = 0
+			for index := 1; index < len(candidates); index++ {
+				if latestDeliveryUpdate(candidates[index].snapshot) > latestDeliveryUpdate(candidates[selected].snapshot) {
+					selected = index
+				}
+			}
+		}
+		snapshot := candidates[selected].snapshot
+		if snapshot.Project.UUID == "" || snapshot.Project.UUID != project.UUID {
+			return 0, fmt.Errorf("Notice delivery snapshot Project UUID %q does not match recovered Project UUID %q", snapshot.Project.UUID, project.UUID)
+		}
+		if snapshot.Project.ID != project.ID {
+			return 0, fmt.Errorf("Notice delivery snapshot Project UUID %q has ID %d, current Project ID is %d", projectUUID, snapshot.Project.ID, project.ID)
+		}
+		deliverySnapshots[projectID] = snapshot
+	}
 	for _, project := range projects {
 		recovered, err := recoverBranchSnapshots(ctx, project, known, maxID)
 		if err != nil {
@@ -581,7 +648,7 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		projectStates[snapshot.Project.ID] = state
 	}
 	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].Task.ID < snapshots[j].Task.ID })
-	if err := db.rebuild(ctx, snapshots, projects, members, projectStates); err != nil {
+	if err := db.rebuild(ctx, snapshots, projects, members, projectStates, deliverySnapshots); err != nil {
 		return 0, err
 	}
 	for _, snapshot := range snapshots {
@@ -626,7 +693,18 @@ func recoverBranchSnapshots(ctx context.Context, project Project, known map[stri
 	return recovered, nil
 }
 
-func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects map[int64]Project, members map[int64][]ProjectRepo, projectStates map[int64]projectStateSnapshot) error {
+func latestDeliveryUpdate(snapshot NoticeDeliverySnapshot) int64 {
+	latest := snapshot.CapturedAt
+	for _, delivery := range snapshot.Deliveries {
+		updatedAt := delivery.UpdatedAt * int64(time.Millisecond)
+		if updatedAt > latest {
+			latest = updatedAt
+		}
+	}
+	return latest
+}
+
+func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects map[int64]Project, members map[int64][]ProjectRepo, projectStates map[int64]projectStateSnapshot, deliverySnapshots map[int64]NoticeDeliverySnapshot) error {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
@@ -635,7 +713,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notices", "decisions", "decision_notice_cursors", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "pr_body_markers", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "pr_body_markers", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -735,6 +813,12 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if _, err := tx.ExecContext(ctx, `INSERT INTO decision_notice_cursors(project_id,last_notice_id) VALUES(?,?)`, projectID, state.DecisionNoticeCursor); err != nil {
 				return err
 			}
+		}
+	}
+	for projectID, snapshot := range deliverySnapshots {
+		project := projects[projectID]
+		if err := db.RestoreNoticeDeliverySnapshot(ctx, tx, snapshot, project, projectStates[projectID].CapturedAt); err != nil {
+			return fmt.Errorf("restore Notice delivery snapshot for Project %d: %w", projectID, err)
 		}
 	}
 	return tx.Commit()
