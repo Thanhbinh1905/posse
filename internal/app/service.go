@@ -77,7 +77,9 @@ func normalizeCommandError(err error) error {
 }
 
 func deferObservationContention(ctx *axi.Context, err error, message string) error {
-	if err == nil || !store.IsOnlyBusy(err) {
+	// File-lock waits guard maintenance state, so keep them visible to callers.
+	var lockWait *fileLockWaitError
+	if err == nil || !store.IsOnlyBusy(err) || errors.As(err, &lockWait) {
 		return err
 	}
 	fmt.Fprintln(ctx.ErrOut, message)
