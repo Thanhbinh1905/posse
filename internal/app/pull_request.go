@@ -830,10 +830,9 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	targets := make([]prWatchTarget, 0, len(watched))
 	failedTasks := make(map[int64]error)
 	forge, forgeErr := forgeForRepository(ctx, project.Root, cfg, "")
+	// Forge probe failures are attributed to each watched Task below, rather than
+	// also incrementing the Project-wide failure streak.
 	globalFailure := ""
-	if forgeErr != nil {
-		globalFailure = truncate(forgeErr.Error(), 300)
-	}
 	gitlabTargets := make([]store.Task, 0)
 	for _, task := range watched {
 		refErr := forgeErr
@@ -863,22 +862,18 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 			if _, recordErr := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), failure); recordErr != nil {
 				return recordErr
 			}
-			for _, task := range watched {
-				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, errors.New(failure), now); recordErr != nil {
-					return recordErr
-				}
-			}
 			return nil
 		}
 		if commandErr != nil && (len(response.Errors) == 0 || errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded)) {
 			globalFailure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
 		}
-		if response.Data.Repositories == nil {
-			globalFailure = "GraphQL response omitted data"
+		hasRepositoryData := len(response.Data.Repositories) > 0
+		if !hasRepositoryData {
+			globalFailure = truncate(strings.TrimSpace(globalFailure+" GraphQL response omitted repository data"), 300)
 		}
 		for _, failure := range response.Errors {
 			attributed := false
-			if len(failure.Path) > 0 {
+			if hasRepositoryData && len(failure.Path) > 0 {
 				repository, _ := failure.Path[0].(string)
 				pull := ""
 				if len(failure.Path) > 1 {
@@ -895,16 +890,23 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 				globalFailure = truncate(strings.TrimSpace(globalFailure+" "+failure.Message), 300)
 			}
 		}
-		for _, target := range targets {
-			if failedTasks[target.Task.ID] != nil {
-				continue
+		if hasRepositoryData {
+			for _, target := range targets {
+				if failedTasks[target.Task.ID] != nil {
+					continue
+				}
+				repositoryData, repositoryExists := response.Data.Repositories[target.Repository]
+				if !repositoryExists || len(repositoryData) == 0 || string(repositoryData) == "null" {
+					globalFailure = truncate(strings.TrimSpace(globalFailure+" GraphQL response omitted repository alias "+target.Repository), 300)
+					continue
+				}
+				pull, pullErr := response.pullRequest(target)
+				if pullErr != nil {
+					failedTasks[target.Task.ID] = pullErr
+					continue
+				}
+				pulls[target.Task.ID] = pull
 			}
-			pull, pullErr := response.pullRequest(target)
-			if pullErr != nil {
-				failedTasks[target.Task.ID] = pullErr
-				continue
-			}
-			pulls[target.Task.ID] = pull
 		}
 		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
 			return err
@@ -1137,30 +1139,16 @@ func (response *ghQueryResponse) pullRequest(target prWatchTarget) (*ghPullReque
 }
 
 func recordWorkspacePRTaskWatchFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task, repo, prURL string, cause error, now time.Time) error {
-	summary := taskDisplayName(task) + " pull request watch failed for " + repo + ": " + truncate(cause.Error(), 240)
-	data := marshalJSON(map[string]any{"repo": repo, "pr_url": prURL, "error": cause.Error()})
-	var exists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND data_json=?)`, project.ID, task.ID, data).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_watch_failing", Summary: summary, DataJSON: data, CreatedAt: now.UnixMilli()})
+	failure := cause.Error()
+	summary := taskDisplayName(task) + " pull request watch for " + repo + " failed three times: " + truncate(failure, 240)
+	_, err := db.RecordPRTaskWatchFailure(ctx, project.ID, task.ID, repo, prURL, now.UnixMilli(), failure, summary)
 	return err
 }
 
 func recordPRTaskWatchFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error, now time.Time) error {
-	summary := taskDisplayName(task) + " pull request watch failed: " + truncate(cause.Error(), 240)
-	data := marshalJSON(map[string]any{"pr_url": task.PRURL, "error": cause.Error()})
-	var exists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND data_json=?)`, project.ID, task.ID, data).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_watch_failing", Summary: summary, DataJSON: data, CreatedAt: now.UnixMilli()})
+	failure := cause.Error()
+	summary := taskDisplayName(task) + " pull request watch failed three times: " + truncate(failure, 240)
+	_, err := db.RecordPRTaskWatchFailure(ctx, project.ID, task.ID, "", task.PRURL, now.UnixMilli(), failure, summary)
 	return err
 }
 

@@ -553,10 +553,10 @@ func TestGitLabDoctorChecksHostAuthentication(t *testing.T) {
 	}
 	started := time.Now()
 	code, output, stderr = f.run("doctor")
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("doctor waited %s for a hanging forge CLI: %d %s %s", elapsed, code, output, stderr)
 	}
-	if code != 0 || !strings.Contains(output, "glab auth git.example.com,warn") || !strings.Contains(output, "timed out after 500ms") {
+	if code != 0 || !strings.Contains(output, "glab auth git.example.com,warn") || !strings.Contains(output, "timed out after 2s") {
 		t.Fatalf("doctor did not report the forge CLI timeout: %d %s %s", code, output, stderr)
 	}
 }

@@ -280,6 +280,19 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 	if _, err := tx.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=pr_polled_at WHERE project_id=?`, observation.ProjectID); err != nil {
 		return false, err
 	}
+	var currentPRURL, currentRepoState string
+	if err := tx.QueryRowContext(ctx, `SELECT pr_url,state FROM task_repos WHERE task_id=? AND repo=?`, observation.TaskID, repo).Scan(&currentPRURL, &currentRepoState); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if currentPRURL != observation.PRURL || currentRepoState == TaskRepoLanded {
+		return false, nil
+	}
+	if err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.ObservedAt); err != nil {
+		return false, err
+	}
 	var previous PRObservation
 	err = tx.QueryRowContext(ctx, `SELECT pr_url, head_sha, state, checks, review, mergeable, merge_commit FROM pr_observations WHERE task_id=? AND repo=? ORDER BY id DESC LIMIT 1`, observation.TaskID, repo).
 		Scan(&previous.PRURL, &previous.HeadSHA, &previous.State, &previous.Checks, &previous.Review, &previous.Mergeable, &previous.MergeCommit)

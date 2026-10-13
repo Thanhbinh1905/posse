@@ -577,9 +577,10 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 					}
 				}()
 			}
+			forge, forgeErr := forgeForRepository(pollCtx, group.targets[0].member.target.Root, cfg, group.repo)
 			for _, target := range group.targets {
 				member := target.member
-				forge, err := forgeForRepository(pollCtx, member.target.Root, cfg, group.repo)
+				err := forgeErr
 				var observation store.PRObservation
 				var checks []failedCheck
 				if err == nil {
@@ -637,14 +638,14 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			}
 			branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
 			if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
-				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
 					processingErr = err
 					cancelPoll()
 				}
 				continue
 			}
 			if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
-				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("%s: merged head is not on the Member's Task branch", member.repo.Repo), now); err != nil {
+				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
 					processingErr = err
 					cancelPoll()
 				}

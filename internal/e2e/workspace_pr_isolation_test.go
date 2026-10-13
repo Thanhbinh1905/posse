@@ -318,7 +318,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		}
 		foundFailure := false
 		for _, notice := range notices {
-			if notice.TaskID == offline.ID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "offline") {
+			if notice.TaskID == offline.ID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "offline") && strings.Contains(notice.DataJSON, `"consecutive_failures":3`) {
 				foundFailure = true
 			}
 		}

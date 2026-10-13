@@ -81,8 +81,10 @@ func TestReviewCrossRepoPRsWedgeReconcile(t *testing.T) {
 	_ = fixture.db.Transition(ctx, id, store.StateDone, store.StateLanding, "cli", "x")
 	_, _ = fixture.db.ExecContext(ctx, `UPDATE tasks SET state='landing', pr_url='https://github.com/other/fork/pull/3' WHERE id=?`, id)
 	cfg, _ := config.Load(fixture.home, fixture.project.Name)
-	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
-		t.Fatalf("one repository's invalid PR blocked the Project poll: %v", err)
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatalf("one repository's invalid PR blocked the Project poll: %v", err)
+		}
 	}
 	if _, err := fixture.db.LatestPRObservation(ctx, fixture.task.ID); err != nil {
 		t.Fatalf("valid PR alias was not observed: %v", err)

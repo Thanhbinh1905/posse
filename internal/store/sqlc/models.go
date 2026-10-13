@@ -179,6 +179,16 @@ type PrObservation struct {
 	Repo        string
 }
 
+type PrTaskWatchFailure struct {
+	ProjectID           int64
+	TaskID              int64
+	Repo                string
+	PrUrl               string
+	ConsecutiveFailures int64
+	LastError           string
+	UpdatedAt           int64
+}
+
 type Project struct {
 	ID               int64
 	Name             string

@@ -98,7 +98,7 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 			break
 		}
 	}
-	if env["POSSE_TEST_HERDR"] != "1" || rootErr != nil || tmpDirErr != nil || resolveErr != nil || !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(rootAbs), "posse-e2e-") || !parentIsTemp && !insideScratch || !insideTemp && !insideScratch {
+	if env["POSSE_TEST_HERDR"] != "1" || rootErr != nil || tmpDirErr != nil || resolveErr != nil || !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(rootAbs), "posse-e2e-") || !parentIsTemp && !insideScratch || !insideTemp && !insideScratch && !configuredTemp {
 		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* root, a fixture under the configured E2E scratch root, or a fixture directly under TMPDIR"}
 	}
 	root = rootAbs

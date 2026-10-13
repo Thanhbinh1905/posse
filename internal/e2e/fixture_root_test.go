@@ -97,7 +97,7 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 			break
 		}
 	}
-	if !insideTemp || !strings.HasPrefix(prefix, "posse-e2e-") {
+	if (!insideTemp && parent != filepath.Clean(tmpDir)) || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {

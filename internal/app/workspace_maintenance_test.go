@@ -146,17 +146,12 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 		goodTask, taskErr := f.db.TaskByID(ctx, f.project.ID, goodID)
 		backend, backendErr := f.db.ProjectRepoWatchState(ctx, f.project.ID, "backend")
 		worker, workerErr := f.db.ProjectRepoWatchState(ctx, f.project.ID, "worker")
-		notices, noticeErr := f.db.Notices(ctx, f.project.ID, false)
-		foundOfflineFailure := false
-		for _, notice := range notices {
-			if notice.TaskID == f.task.ID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "backend") && strings.Contains(notice.Summary, "vpn-t181.invalid") {
-				foundOfflineFailure = true
-			}
-		}
+		var watchFailures int
+		watchFailureErr := f.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT consecutive_failures FROM pr_task_watch_failures WHERE project_id=? AND task_id=? AND repo='backend'), 0)`, f.project.ID, f.task.ID).Scan(&watchFailures)
 		f.service.maintenanceMu.Lock()
 		maintenancePending := len(f.service.maintenance) != 0
 		f.service.maintenanceMu.Unlock()
-		if observationErr == nil && observation.State == "MERGED" && taskErr == nil && goodTask.State == store.StateTornDown && backendErr == nil && backend.CheckoutCheckedAt > 0 && workerErr == nil && worker.CheckoutCheckedAt > 0 && noticeErr == nil && foundOfflineFailure && !maintenancePending {
+		if observationErr == nil && observation.State == "MERGED" && taskErr == nil && goodTask.State == store.StateTornDown && backendErr == nil && backend.CheckoutCheckedAt > 0 && workerErr == nil && worker.CheckoutCheckedAt > 0 && watchFailureErr == nil && watchFailures == 1 && !maintenancePending {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -175,17 +170,17 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 			t.Fatalf("Member %s checkout was not checked after forge discovery failed: %#v, %v", name, watch, err)
 		}
 	}
+	var watchFailures int
+	if err := f.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT consecutive_failures FROM pr_task_watch_failures WHERE project_id=? AND task_id=? AND repo='backend'), 0)`, f.project.ID, f.task.ID).Scan(&watchFailures); err != nil || watchFailures != 1 {
+		t.Fatalf("offline Member failure streak = %d, %v; want one", watchFailures, err)
+	}
 	notices, err := f.db.Notices(ctx, f.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	foundOfflineFailure := false
 	for _, notice := range notices {
-		if notice.TaskID == f.task.ID && notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "backend") && strings.Contains(notice.Summary, "vpn-t181.invalid") {
-			foundOfflineFailure = true
+		if notice.TaskID == f.task.ID && notice.Kind == "pr_watch_failing" {
+			t.Fatalf("one Member failure raised an early Notice: %#v", notice)
 		}
-	}
-	if !foundOfflineFailure {
-		t.Fatalf("offline Member-specific PR discovery Notice missing: %#v", notices)
 	}
 }

@@ -329,6 +329,13 @@ func TestRebuildClearsMountIntentAndRuntimeForeignKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	prURL := "https://github.com/acme/shop/pull/1"
+	if err := db.UpdateTaskLanding(ctx, taskID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, 1, "offline", "watch failed"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, filepath.Join(home, "mount"), taskID); err != nil {
 		t.Fatal(err)
 	}
@@ -340,5 +347,9 @@ func TestRebuildClearsMountIntentAndRuntimeForeignKeys(t *testing.T) {
 	}
 	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
 		t.Fatalf("rebuild failed with dependent rows present: %v", err)
+	}
+	var failureRows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pr_task_watch_failures`).Scan(&failureRows); err != nil || failureRows != 0 {
+		t.Fatalf("rebuild retained stale PR watch failures: rows=%d err=%v", failureRows, err)
 	}
 }
