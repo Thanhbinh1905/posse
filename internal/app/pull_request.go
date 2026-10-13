@@ -176,7 +176,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 			if task.WorktreePath == "" || task.Branch == "" {
 				return axi.Failure("land_refused", "Task has no branch or Mount", false)
 			}
-			status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain")
+			status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain")
 			if err != nil {
 				return err
 			}

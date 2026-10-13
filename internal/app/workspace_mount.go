@@ -455,7 +455,7 @@ func validateWorkspaceShipSignal(ctx context.Context, db *store.DB, task store.T
 	changed := 0
 	for _, repo := range repos {
 		requested[filepath.Clean(repo.WorktreePath)] = true
-		status, err := gitOutput(ctx, repo.WorktreePath, "status", "--porcelain")
+		status, err := gitStatusOutput(ctx, repo.WorktreePath, "--porcelain")
 		if err != nil {
 			return fmt.Errorf("%s: %w", repo.Repo, err)
 		}
@@ -482,7 +482,7 @@ func validateWorkspaceShipSignal(ctx context.Context, db *store.DB, task store.T
 		if _, statErr := os.Stat(filepath.Join(worktree, ".git")); !entry.IsDir() || statErr != nil || requested[worktree] {
 			continue
 		}
-		status, err := gitOutput(ctx, worktree, "status", "--porcelain")
+		status, err := gitStatusOutput(ctx, worktree, "--porcelain")
 		if err != nil {
 			return fmt.Errorf("%s: %w", entry.Name(), err)
 		}

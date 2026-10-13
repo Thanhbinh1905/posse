@@ -147,7 +147,7 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 			return false, nil
 		}
 	}
-	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain", "--untracked-files=all")
+	status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain", "--untracked-files=all")
 	if err != nil || status != "" {
 		return false, nil
 	}

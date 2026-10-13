@@ -599,6 +599,10 @@ func gitTop(ctx context.Context, path string) (string, error) {
 	return filepath.Clean(root), nil
 }
 
+func gitStatusOutput(ctx context.Context, root string, args ...string) (string, error) {
+	return gitOutput(ctx, root, append([]string{"--no-optional-locks", "status"}, args...)...)
+}
+
 func gitOutput(ctx context.Context, root string, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", root}, args...)
 	output, err := commandStdoutArgs(ctx, "", "git", commandArgs...)

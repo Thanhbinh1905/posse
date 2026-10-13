@@ -513,7 +513,7 @@ func resetWorktree(ctx context.Context, path string, target repoTarget, clean st
 	if _, err := gitOutput(ctx, path, args...); err != nil {
 		return err
 	}
-	status, err := gitOutput(ctx, path, "status", "--porcelain")
+	status, err := gitStatusOutput(ctx, path, "--porcelain")
 	if err != nil {
 		return err
 	}
@@ -646,7 +646,7 @@ func mountWorktreeClean(ctx context.Context, path string) bool {
 	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
 		return false
 	}
-	status, err := gitOutput(ctx, path, "status", "--porcelain")
+	status, err := gitStatusOutput(ctx, path, "--porcelain")
 	return err == nil && status == ""
 }
 
@@ -654,7 +654,7 @@ func mountTrackedWorktreeClean(ctx context.Context, path string) bool {
 	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
 		return false
 	}
-	status, err := gitOutput(ctx, path, "status", "--porcelain", "--untracked-files=no")
+	status, err := gitStatusOutput(ctx, path, "--porcelain", "--untracked-files=no")
 	return err == nil && status == ""
 }
 

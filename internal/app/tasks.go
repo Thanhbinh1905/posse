@@ -2074,7 +2074,7 @@ func validateShipSignal(ctx context.Context, task store.Task) error {
 	if err != nil || ahead < 1 {
 		return fmt.Errorf("branch has no commits ahead of %s", task.BaseRef)
 	}
-	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain")
+	status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain")
 	if err != nil {
 		return err
 	}

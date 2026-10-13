@@ -334,7 +334,7 @@ func verifyFastForward(ctx context.Context, project store.Project, task store.Ta
 		branch := taskTargetBranch(project, task)
 		return axi.Failure("needs_rebase", "Task branch is not a fast-forward of target branch "+branch, false, "Rebase the Task branch on origin/"+branch+" and signal done again")
 	}
-	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain")
+	status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain")
 	if err != nil {
 		return err
 	}
@@ -360,7 +360,7 @@ func mergeLocal(ctx context.Context, project store.Project, task store.Task) err
 		if branch != targetBranch {
 			return axi.Failure("land_target_busy", "target branch is checked out in a different worktree", false, "Switch the Project checkout to "+targetBranch+" and retry")
 		}
-		status, err := gitOutput(ctx, project.Root, "status", "--porcelain")
+		status, err := gitStatusOutput(ctx, project.Root, "--porcelain")
 		if err != nil {
 			return err
 		}
