@@ -571,9 +571,10 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 					}
 				}()
 			}
+			forge, forgeErr := forgeForRepository(pollCtx, group.targets[0].member.target.Root, cfg, group.repo)
 			for _, target := range group.targets {
 				member := target.member
-				forge, err := forgeForRepository(pollCtx, member.target.Root, cfg, group.repo)
+				err := forgeErr
 				var observation store.PRObservation
 				var checks []failedCheck
 				if err == nil {
@@ -645,11 +646,6 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		}
 		recorded, err := db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, memberEffect)
 		if err != nil {
-			processingErr = err
-			cancelPoll()
-			continue
-		}
-		if err := db.ResetPRTaskWatchFailures(ctx, project.ID, task.ID, member.repo.Repo, member.repo.PRURL, now.UnixMilli()); err != nil {
 			processingErr = err
 			cancelPoll()
 			continue

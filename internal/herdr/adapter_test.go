@@ -4,16 +4,32 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
+// Unix socket paths have a small platform-specific limit, so alias long test roots.
+func shortSocketTestDir(t *testing.T, dir string) string {
+	t.Helper()
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || len(filepath.Join(dir, "extra-100.sock")) < 90 {
+		return dir
+	}
+	handle, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handle.Close() })
+	return fmt.Sprintf("/dev/fd/%d", handle.Fd())
+}
+
 func TestClientCallUsesNewlineJSONSocketProtocol(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	socket := filepath.Join(shortSocketTestDir(t, t.TempDir()), "herdr.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +70,7 @@ func TestClientCallUsesNewlineJSONSocketProtocol(t *testing.T) {
 }
 
 func TestClientMapsHerdrErrors(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "herdr.sock")
+	socket := filepath.Join(shortSocketTestDir(t, t.TempDir()), "herdr.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

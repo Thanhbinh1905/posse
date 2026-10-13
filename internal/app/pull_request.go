@@ -864,12 +864,13 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		if commandErr != nil && (len(response.Errors) == 0 || errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded)) {
 			globalFailure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
 		}
-		if response.Data.Repositories == nil {
-			globalFailure = "GraphQL response omitted data"
+		hasRepositoryData := len(response.Data.Repositories) > 0
+		if !hasRepositoryData {
+			globalFailure = truncate(strings.TrimSpace(globalFailure+" GraphQL response omitted repository data"), 300)
 		}
 		for _, failure := range response.Errors {
 			attributed := false
-			if len(failure.Path) > 0 {
+			if hasRepositoryData && len(failure.Path) > 0 {
 				repository, _ := failure.Path[0].(string)
 				pull := ""
 				if len(failure.Path) > 1 {
@@ -886,16 +887,23 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 				globalFailure = truncate(strings.TrimSpace(globalFailure+" "+failure.Message), 300)
 			}
 		}
-		for _, target := range targets {
-			if failedTasks[target.Task.ID] != nil {
-				continue
+		if hasRepositoryData {
+			for _, target := range targets {
+				if failedTasks[target.Task.ID] != nil {
+					continue
+				}
+				repositoryData, repositoryExists := response.Data.Repositories[target.Repository]
+				if !repositoryExists || len(repositoryData) == 0 || string(repositoryData) == "null" {
+					globalFailure = truncate(strings.TrimSpace(globalFailure+" GraphQL response omitted repository alias "+target.Repository), 300)
+					continue
+				}
+				pull, pullErr := response.pullRequest(target)
+				if pullErr != nil {
+					failedTasks[target.Task.ID] = pullErr
+					continue
+				}
+				pulls[target.Task.ID] = pull
 			}
-			pull, pullErr := response.pullRequest(target)
-			if pullErr != nil {
-				failedTasks[target.Task.ID] = pullErr
-				continue
-			}
-			pulls[target.Task.ID] = pull
 		}
 		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
 			return err
@@ -1005,9 +1013,6 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		}
 		recorded, err := db.RecordPRObservation(ctx, observed.current, effect, observed.task)
 		if err != nil {
-			return err
-		}
-		if err := db.ResetPRTaskWatchFailures(ctx, project.ID, observed.task.ID, "", observed.current.PRURL, now.UnixMilli()); err != nil {
 			return err
 		}
 		if recorded && observed.current.State == "CLOSED" {

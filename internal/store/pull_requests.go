@@ -117,6 +117,31 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 		return 0, err
 	}
 	defer tx.Rollback()
+	if repo == "" {
+		var currentPRURL string
+		var state State
+		if err := tx.QueryRowContext(ctx, `SELECT pr_url,state FROM tasks WHERE project_id=? AND id=?`, projectID, taskID).Scan(&currentPRURL, &state); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, nil
+			}
+			return 0, err
+		}
+		if currentPRURL != prURL || state == StateLanded || state == StateTornDown || state == StateReported {
+			return 0, nil
+		}
+	} else {
+		var currentPRURL, repoState string
+		var taskState State
+		if err := tx.QueryRowContext(ctx, `SELECT r.pr_url,r.state,t.state FROM task_repos r JOIN tasks t ON t.id=r.task_id WHERE t.project_id=? AND r.task_id=? AND r.repo=?`, projectID, taskID, repo).Scan(&currentPRURL, &repoState, &taskState); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, nil
+			}
+			return 0, err
+		}
+		if currentPRURL != prURL || repoState == TaskRepoLanded || taskState == StateLanded || taskState == StateTornDown || taskState == StateReported {
+			return 0, nil
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pr_task_watch_failures(project_id,task_id,repo,pr_url) VALUES (?,?,?,?)`, projectID, taskID, repo, prURL); err != nil {
 		return 0, err
 	}
@@ -155,11 +180,6 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 		}
 	}
 	return failures, nil
-}
-
-func (db *DB) ResetPRTaskWatchFailures(ctx context.Context, projectID, taskID int64, repo, prURL string, at int64) error {
-	_, err := db.ExecContext(ctx, `UPDATE pr_task_watch_failures SET consecutive_failures=0,pr_url=?,last_error='',updated_at=? WHERE project_id=? AND task_id=? AND repo=?`, prURL, at, projectID, taskID, repo)
-	return err
 }
 
 func (db *DB) FinishMemberPRPoll(ctx context.Context, projectID int64, repo, token string, polledAt int64) error {
@@ -348,6 +368,9 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	if current.PRURL != observation.PRURL || current.State != expected.State || current.GatedSHA != expected.GatedSHA || current.PRURL != expected.PRURL {
 		return false, nil
 	}
+	if err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, "", observation.PRURL, observation.ObservedAt); err != nil {
+		return false, err
+	}
 	unchanged := err == nil && samePRObservation(previous, observation)
 	if !unchanged {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
@@ -390,6 +413,14 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 		}
 	}
 	return changed, nil
+}
+
+func resetPRTaskWatchFailuresTx(ctx context.Context, tx *writeTx, projectID, taskID int64, repo, prURL string, at int64) error {
+	if at == 0 {
+		at = time.Now().UnixMilli()
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE pr_task_watch_failures SET consecutive_failures=0,last_error='',updated_at=? WHERE project_id=? AND task_id=? AND repo=? AND pr_url=?`, at, projectID, taskID, repo, prURL)
+	return err
 }
 
 func latestPRObservationTx(ctx context.Context, tx *writeTx, taskID int64) (PRObservation, error) {

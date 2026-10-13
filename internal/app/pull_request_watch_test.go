@@ -1201,3 +1201,41 @@ func TestProjectSyncLeavesLocalCommitsAheadOfOriginUntouched(t *testing.T) {
 		t.Fatalf("local-ahead checkout emitted a false root_behind Notice: %#v, %v", notices, err)
 	}
 }
+
+func TestPRWatchMissingGraphQLRepositoryDataEscalatesAtProjectScope(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
+	}
+	if err := os.WriteFile(fixture.ghState, []byte("{\"data\":{}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failures []store.Notice
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" {
+			failures = append(failures, notice)
+		}
+	}
+	if len(failures) != 1 || failures[0].TaskID != 0 {
+		t.Fatalf("missing GraphQL repository data created non-Project failures: %#v", failures)
+	}
+	state, err := fixture.db.ProjectWatchState(ctx, fixture.project.ID)
+	if err != nil || state.PRConsecutiveFailures != 3 {
+		t.Fatalf("Project failure streak=%d err=%v, want 3", state.PRConsecutiveFailures, err)
+	}
+}

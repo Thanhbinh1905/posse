@@ -61,7 +61,7 @@ func TestMemberPRPollClaimsAreIndependentAndDurable(t *testing.T) {
 	}
 }
 
-func TestPRTaskWatchFailuresRaiseAfterThreeAndResetOnSuccess(t *testing.T) {
+func TestPRTaskWatchFailuresRaiseAfterThree(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
 	if err != nil {
@@ -76,6 +76,14 @@ func TestPRTaskWatchFailuresRaiseAfterThreeAndResetOnSuccess(t *testing.T) {
 	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "First PR", LandingMode: "pr", PRURL: prURL})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: "api", LandingMode: "pr"}, {Repo: "worker", LandingMode: "pr"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range []string{"api", "worker"} {
+		if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: repo, LandingMode: "pr", State: TaskRepoOpen, PRURL: prURL}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	summary := "First PR pull request watch failed three times: forge CLI timed out"
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -102,16 +110,70 @@ func TestPRTaskWatchFailuresRaiseAfterThreeAndResetOnSuccess(t *testing.T) {
 	if !strings.Contains(data, `"consecutive_failures":3`) {
 		t.Fatalf("threshold Notice omitted failure count: %s", data)
 	}
-	if err := db.ResetPRTaskWatchFailures(ctx, project.ID, taskID, "", prURL, 4); err != nil {
-		t.Fatal(err)
-	}
-	if failures, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, 5, "forge CLI timed out", summary); err != nil || failures != 1 {
-		t.Fatalf("failure after successful observation count=%d err=%v, want 1", failures, err)
-	}
 	for _, repo := range []string{"api", "worker"} {
 		if failures, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, repo, prURL, 6, "forge CLI timed out", "Member PR watch failed three times"); err != nil || failures != 1 {
 			t.Fatalf("independent %s Member failure count=%d err=%v, want 1", repo, failures, err)
 		}
+	}
+}
+
+func TestPRTaskWatchFailureIgnoresStalePRURL(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		repo string
+	}{
+		{name: "Task"},
+		{name: "Member", repo: "api"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldURL := "https://github.com/acme/shop/pull/1"
+			newURL := "https://github.com/acme/shop/pull/2"
+			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "First PR", LandingMode: "pr", PRURL: oldURL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.repo != "" {
+				if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: test.repo, LandingMode: "pr"}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: test.repo, LandingMode: "pr", State: TaskRepoOpen, PRURL: oldURL}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, test.repo, oldURL, 1, "offline", "watch failed"); err != nil {
+				t.Fatal(err)
+			}
+			if test.repo == "" {
+				if err := db.UpdateTaskLanding(ctx, taskID, newURL, ""); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: test.repo, LandingMode: "pr", State: TaskRepoOpen, PRURL: newURL}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failures, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, test.repo, oldURL, 2, "stale response", "watch failed"); err != nil || failures != 0 {
+				t.Fatalf("stale failure write returned count=%d err=%v, want no write", failures, err)
+			}
+			var failures int
+			if err := db.QueryRowContext(ctx, `SELECT consecutive_failures FROM pr_task_watch_failures WHERE project_id=? AND task_id=? AND repo=?`, project.ID, taskID, test.repo).Scan(&failures); err != nil || failures != 1 {
+				t.Fatalf("stale response changed failure count to %d: %v", failures, err)
+			}
+			notices, err := db.Notices(ctx, project.ID, false)
+			if err != nil || len(notices) != 0 {
+				t.Fatalf("stale response created Notices: %#v, %v", notices, err)
+			}
+		})
 	}
 }
 
