@@ -48,8 +48,10 @@ func snapshotUnmergedMemberWork(ctx context.Context, db *store.DB, project store
 		if tipErr != nil {
 			return nil
 		}
-		if _, err := gitOutput(ctx, project.Root, "diff", "--quiet", tip, "refs/heads/"+project.DefaultBranch); err == nil {
-			return nil
+		if targetRef, err := landedTaskTargetRef(ctx, project, task); err == nil {
+			if _, err := gitOutput(ctx, project.Root, "diff", "--quiet", tip, targetRef); err == nil {
+				return nil
+			}
 		}
 		name := task.Branch + "-leftover"
 		leftoverRef := "refs/heads/" + name
@@ -83,7 +85,7 @@ func persistLeftoverSnapshot(ctx context.Context, db *store.DB, project store.Pr
 	name := task.Branch + "-leftover"
 	ref := "refs/heads/" + name
 	// A merge-only follow-up contains no content to carry forward. Compare
-	// both the merged head and the current default, including staged edits.
+	// both the merged head and the current target, including staged edits.
 	if _, err := gitOutput(ctx, path, "add", "-A"); err != nil {
 		return err
 	}
@@ -91,7 +93,11 @@ func persistLeftoverSnapshot(ctx context.Context, db *store.DB, project store.Pr
 	if err != nil {
 		return err
 	}
-	for _, base := range []string{task.LandedRef, "refs/heads/" + project.DefaultBranch} {
+	bases := []string{task.LandedRef}
+	if targetRef, err := landedTaskTargetRef(ctx, project, task); err == nil {
+		bases = append(bases, targetRef)
+	}
+	for _, base := range bases {
 		if base == "" {
 			continue
 		}
@@ -144,7 +150,11 @@ func persistLeftoverSnapshot(ctx context.Context, db *store.DB, project store.Pr
 }
 
 func raiseLeftoverDecision(ctx context.Context, db *store.DB, project store.Project, task store.Task, member, name string) error {
-	if sameLeftoverTree(ctx, project.Root, "refs/heads/"+name, "refs/heads/"+project.DefaultBranch, task.LandedRef) {
+	bases := []string{task.LandedRef}
+	if targetRef, err := landedTaskTargetRef(ctx, project, task); err == nil {
+		bases = append(bases, targetRef)
+	}
+	if sameLeftoverTree(ctx, project.Root, "refs/heads/"+name, bases...) {
 		return nil
 	}
 	origin := "leftover:" + name
@@ -187,7 +197,9 @@ func (s *Service) obsoleteEmptyLeftovers(ctx context.Context, db *store.DB, proj
 		if err != nil {
 			return err
 		}
-		root, defaultBranch, ref := project.Root, project.DefaultBranch, strings.TrimPrefix(decision.Origin, "leftover:")
+		memberTask := task
+		memberProject := project
+		ref := strings.TrimPrefix(decision.Origin, "leftover:")
 		if project.IsWorkspace() {
 			member, branch, ok := strings.Cut(ref, ":")
 			if !ok {
@@ -197,9 +209,27 @@ func (s *Service) obsoleteEmptyLeftovers(ctx context.Context, db *store.DB, proj
 			if err != nil {
 				return err
 			}
-			root, defaultBranch, ref = target.Root, target.DefaultBranch, branch
+			memberProject.Root, memberProject.DefaultBranch, memberProject.Kind = target.Root, target.DefaultBranch, store.ProjectKindRepo
+			memberTask.TargetBranch = ""
+			memberTask.LandingMode = ""
+			repos, err := db.TaskRepos(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			for _, repo := range repos {
+				if repo.Repo == member {
+					memberTask.TargetBranch = repo.TargetBranch
+					memberTask.LandingMode = repo.LandingMode
+					break
+				}
+			}
+			ref = branch
 		}
-		if sameLeftoverTree(ctx, root, "refs/heads/"+ref, "refs/heads/"+defaultBranch, task.LandedRef) {
+		targetRef, err := landedTaskTargetRef(ctx, memberProject, memberTask)
+		if err != nil {
+			continue
+		}
+		if sameLeftoverTree(ctx, memberProject.Root, "refs/heads/"+ref, targetRef, task.LandedRef) {
 			if err := db.ObsoletePendingLeftoverDecision(ctx, decision.ID); err != nil {
 				return err
 			}

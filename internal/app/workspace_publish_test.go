@@ -28,6 +28,12 @@ func TestWorkspaceWorkerPublishesOnlyItsPRMemberAndLeadGates(t *testing.T) {
 		t.Fatal(err)
 	}
 	origin := filepath.Join(f.workspace, "worker")
+	gitTest(t, origin, "branch", "staging", "main")
+	gitTest(t, origin, "push", "origin", "staging")
+	if _, err := f.db.ExecContext(ctx, `UPDATE task_repos SET target_branch='staging' WHERE task_id=? AND repo='worker'`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_BASE_BRANCH", "staging")
 	gitTest(t, origin, "remote", "set-url", "origin", "https://github.com/acme/worker.git")
 	gitTest(t, origin, "config", "url.file://"+filepath.Join(f.root, "remotes", "worker.git")+".insteadOf", "https://github.com/acme/worker.git")
 	bin := filepath.Join(f.root, "bin")
@@ -39,9 +45,10 @@ func TestWorkspaceWorkerPublishesOnlyItsPRMemberAndLeadGates(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 case "$1 $2" in
- "pr list") printf '[]\n' ;;
+ "pr list") if [ -n "${POSSE_TEST_GH_OPEN_PRS:-}" ]; then cat "$POSSE_TEST_GH_OPEN_PRS"; else printf '[]\n'; fi ;;
  "pr create") printf 'https://github.com/acme/worker/pull/7\n' ;;
- "pr view") printf '{"url":"https://github.com/acme/worker/pull/7","state":"OPEN","headRefOid":"%s","headRefName":"posse/span-members","baseRefName":"main","headRepository":{"nameWithOwner":"%s"}}\n' "$(git -C "$POSSE_TEST_WORKTREE" rev-parse HEAD)" "${POSSE_TEST_GH_SOURCE:-acme/worker}" ;;
+ "pr edit") printf 'Edited\n' ;;
+ "pr view") printf '{"url":"https://github.com/acme/worker/pull/7","state":"OPEN","headRefOid":"%s","headRefName":"posse/span-members","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "$(git -C "$POSSE_TEST_WORKTREE" rev-parse HEAD)" "${POSSE_TEST_GH_BASE_BRANCH:-main}" "${POSSE_TEST_GH_SOURCE:-acme/worker}" ;;
  *) exit 90 ;;
 esac
 `
@@ -63,8 +70,21 @@ esac
 	if code := f.run("publish", "--repo", "worker", "Worker summary"); code != 0 || !strings.Contains(f.out.String(), url) {
 		t.Fatalf("publish: %d %s task=%#v state=%s", code, f.out.String(), f.task, f.state())
 	}
-	if f.repos()["worker"].PRURL != url {
-		t.Fatalf("PR not recorded for the member: %#v", f.repos())
+	if f.repos()["worker"].PRURL != url || f.repos()["worker"].TargetBranch != "staging" {
+		t.Fatalf("PR or frozen target not recorded for the member: %#v", f.repos())
+	}
+	openPRs := `[{"url":"` + url + `","headRefName":"posse/span-members","headRefOid":"` + strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD")) + `","baseRefName":"staging"}]`
+	openPRPath := filepath.Join(f.root, "open-prs.json")
+	if err := os.WriteFile(openPRPath, []byte(openPRs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_OPEN_PRS", openPRPath)
+	if code := f.run("publish", "--repo", "worker", "Worker summary"); code != 0 || !strings.Contains(f.out.String(), url) {
+		t.Fatalf("republish: %d %s", code, f.out.String())
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil || strings.Count(string(calls), "pr create") != 1 || !strings.Contains(string(calls), "--base staging") {
+		t.Fatalf("workspace PR target or duplicate-free republish failed: %s (%v)", calls, err)
 	}
 	t.Setenv("POSSE_TEST_GH_SOURCE", "another/worker")
 	if code := f.run("holler", "done", "Worker summary"); code == 0 || !strings.Contains(f.out.String(), "pr_head_mismatch") {
@@ -91,7 +111,7 @@ esac
 	if repos["worker"].State != store.TaskRepoLanding || repos["worker"].PRURL != url || repos["e2e-tool"].State != store.TaskRepoGated || f.state() != store.StateLanding {
 		t.Fatalf("Land changed the member states: %#v / %s", repos, f.state())
 	}
-	calls, err := os.ReadFile(log)
+	calls, err = os.ReadFile(log)
 	if err != nil || strings.Count(string(calls), "pr create") != 1 {
 		t.Fatalf("Lead created another PR: %s (%v)", calls, err)
 	}

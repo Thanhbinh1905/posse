@@ -115,22 +115,12 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 	}
 	metadata["tokens"].(map[string]string)["posse_row"] = row
 	if _, err := s.herdrCall(ctx, "pane.report_metadata", metadata); err != nil {
-		s.closeUnlabeledRider(ctx, project, opened)
 		return openedTab{}, err
 	}
 	if _, err := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": opened.PaneID, "label": task.PaneLabel}); err != nil {
-		s.closeUnlabeledRider(ctx, project, opened)
 		return openedTab{}, err
 	}
 	return opened, nil
-}
-
-func (s *Service) closeUnlabeledRider(ctx context.Context, project store.Project, opened openedTab) {
-	if !project.IsWorkspace() && opened.WorkspaceID != "" {
-		_, _ = s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": opened.WorkspaceID})
-	} else if opened.TabID != "" {
-		_, _ = s.herdrCall(ctx, "tab.close", map[string]any{"tab_id": opened.TabID})
-	}
 }
 
 func findTaskPane(panes []herdr.Pane, task store.Task) (herdr.Pane, bool) {

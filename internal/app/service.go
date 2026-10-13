@@ -76,6 +76,16 @@ func normalizeCommandError(err error) error {
 	return axi.Failure("store_busy", err.Error(), true, "Retry the command after the store is available")
 }
 
+func deferObservationContention(ctx *axi.Context, err error, message string) error {
+	// File-lock waits guard maintenance state, so keep them visible to callers.
+	var lockWait *fileLockWaitError
+	if err == nil || !store.IsOnlyBusy(err) || errors.As(err, &lockWait) {
+		return err
+	}
+	fmt.Fprintln(ctx.ErrOut, message)
+	return nil
+}
+
 func (s *Service) commands() *axi.Command {
 	root := &axi.Command{Usage: "$ [--full] [--json]", Summary: "A local-first Lead and Rider CLI for Herdr. `posse --full` prints the full Project dashboard."}
 	root.Handler = s.home
@@ -103,17 +113,17 @@ func (s *Service) commands() *axi.Command {
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Leftover or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--profile <name>]", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
 		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p] [--from-leftover <decision>]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
-		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note>", Summary: "Record a Rider's Signal.", Handler: s.signal},
+		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Rider's Signal.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Ship Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "brief", Summary: "Reprint this Rider's launch Brief.", Handler: s.brief},
 		{Name: "send", Usage: "$ send <task> <message> [--queue]", Summary: "Deliver to an unfocused ready Rider, steering supported kinds mid-turn; --queue waits for idle.", Handler: s.send},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},
 		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Rider.", Handler: s.keys},
-		{Name: "interrupt", Summary: "Interrupt the Rider's current turn.", Handler: s.interrupt},
+		{Name: "interrupt", Summary: "Send the configured abort keys and verify the Rider stopped working.", Handler: s.interrupt},
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Rider in the same Mount, optionally with another Profile.", Handler: s.relaunch},
 		{Name: "land", Summary: "Land a completed Ship Task.", Handler: s.land},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
-		{Name: "unsaddle", Summary: "Teardown a finished Task and release its Mount.", Handler: s.teardown},
+		{Name: "unsaddle", Summary: "Teardown a finished Task or discard unlanded work with User approval after its Rider exits, its pane is gone, and recorded PRs are verified closed.", Handler: s.teardown},
 		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only]", Summary: "Acknowledge requested Notices, report the commit, and wait; adapters can use receipt-backed handoff.", Handler: s.wait},
 		{Name: "remuda", Summary: "List a Project's Remuda or prune safe, Posse-owned leftovers.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},

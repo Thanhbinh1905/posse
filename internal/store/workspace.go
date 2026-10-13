@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -54,12 +55,30 @@ type TaskRepo struct {
 	Repo         string `toml:"repo"`
 	WorktreePath string `toml:"worktree_path"`
 	BaseRef      string `toml:"base_ref"`
+	TargetBranch string `toml:"target_branch"`
 	LandingMode  string `toml:"landing_mode"`
 	State        string `toml:"state"`
 	GatedSHA     string `toml:"gated_sha"`
 	PRURL        string `toml:"pr_url"`
 	LandedRef    string `toml:"landed_ref"`
 }
+
+type TaskTargetChange struct {
+	ID           int64
+	ProjectID    int64
+	TaskID       int64
+	Repo         string
+	SourceTaskID int64
+	FromBranch   string
+	ToBranch     string
+	PRURL        string
+	Status       string
+	Error        string
+	CreatedAt    int64
+	CompletedAt  int64
+}
+
+var ErrTargetBranchChanged = errors.New("Task target branch changed during stacked retarget")
 
 func (p Project) IsWorkspace() bool { return p.Kind == ProjectKindWorkspace }
 
@@ -169,8 +188,8 @@ func (db *DB) CreateTaskRepos(ctx context.Context, taskID int64, repos []TaskRep
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
 	for _, repo := range repos {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id, repo, worktree_path, base_ref, landing_mode, state, updated_at) VALUES (?, ?, ?, ?, ?, 'open', ?)
-ON CONFLICT(task_id, repo) DO UPDATE SET worktree_path=excluded.worktree_path, base_ref=excluded.base_ref, landing_mode=excluded.landing_mode, updated_at=excluded.updated_at`, taskID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.LandingMode, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id, repo, worktree_path, base_ref, target_branch, landing_mode, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)
+ON CONFLICT(task_id, repo) DO UPDATE SET worktree_path=excluded.worktree_path, base_ref=excluded.base_ref, target_branch=excluded.target_branch, landing_mode=excluded.landing_mode, updated_at=excluded.updated_at`, taskID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.LandingMode, now); err != nil {
 			return err
 		}
 	}
@@ -181,7 +200,7 @@ ON CONFLICT(task_id, repo) DO UPDATE SET worktree_path=excluded.worktree_path, b
 }
 
 func (db *DB) TaskRepos(ctx context.Context, taskID int64) ([]TaskRepo, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, task_id, repo, worktree_path, base_ref, landing_mode, state, gated_sha, pr_url, landed_ref FROM task_repos WHERE task_id=? ORDER BY repo`, taskID)
+	rows, err := db.QueryContext(ctx, `SELECT id, task_id, repo, worktree_path, base_ref, target_branch, landing_mode, state, gated_sha, pr_url, landed_ref FROM task_repos WHERE task_id=? ORDER BY repo`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +208,7 @@ func (db *DB) TaskRepos(ctx context.Context, taskID int64) ([]TaskRepo, error) {
 	repos := []TaskRepo{}
 	for rows.Next() {
 		var repo TaskRepo
-		if err := rows.Scan(&repo.ID, &repo.TaskID, &repo.Repo, &repo.WorktreePath, &repo.BaseRef, &repo.LandingMode, &repo.State, &repo.GatedSHA, &repo.PRURL, &repo.LandedRef); err != nil {
+		if err := rows.Scan(&repo.ID, &repo.TaskID, &repo.Repo, &repo.WorktreePath, &repo.BaseRef, &repo.TargetBranch, &repo.LandingMode, &repo.State, &repo.GatedSHA, &repo.PRURL, &repo.LandedRef); err != nil {
 			return nil, err
 		}
 		repos = append(repos, repo)
@@ -380,4 +399,175 @@ func settleWorkspaceTaskTx(ctx context.Context, db *DB, tx *writeTx, taskID int6
 		return false, err
 	}
 	return true, transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, state, StateLanded, "cli", note)
+}
+
+func (db *DB) BeginTaskTargetChange(ctx context.Context, projectID, taskID int64, repo string, sourceTaskID int64, fromBranch, toBranch string) (TaskTargetChange, error) {
+	if taskID == sourceTaskID || fromBranch == "" || toBranch == "" || fromBranch == toBranch {
+		return TaskTargetChange{}, nil
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return TaskTargetChange{}, err
+	}
+	defer tx.Rollback()
+	var sourceProjectID int64
+	if err := tx.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, sourceTaskID).Scan(&sourceProjectID); err != nil {
+		return TaskTargetChange{}, err
+	}
+	if sourceProjectID != projectID {
+		return TaskTargetChange{}, fmt.Errorf("stacked target source Task belongs to another Project")
+	}
+	var current, prURL string
+	if repo == "" {
+		err = tx.QueryRowContext(ctx, `SELECT target_branch, pr_url FROM tasks WHERE id=? AND project_id=?`, taskID, projectID).Scan(&current, &prURL)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT r.target_branch, r.pr_url FROM task_repos r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=? AND t.project_id=? AND r.repo=?`, taskID, projectID, repo).Scan(&current, &prURL)
+	}
+	if err != nil {
+		return TaskTargetChange{}, err
+	}
+	if current != fromBranch && current != toBranch {
+		if err := tx.Commit(); err != nil {
+			return TaskTargetChange{}, err
+		}
+		return TaskTargetChange{}, nil
+	}
+	if current == fromBranch {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_target_changes(project_id,task_id,repo,source_task_id,from_branch,to_branch,pr_url,status,created_at) VALUES(?,?,?,?,?,?,?,'pending',?) ON CONFLICT(task_id,repo,source_task_id) DO NOTHING`, projectID, taskID, repo, sourceTaskID, fromBranch, toBranch, prURL, time.Now().UnixMilli()); err != nil {
+			return TaskTargetChange{}, err
+		}
+	}
+	change, err := scanTaskTargetChange(tx.QueryRowContext(ctx, `SELECT id,project_id,task_id,repo,source_task_id,from_branch,to_branch,pr_url,status,error,created_at,completed_at FROM task_target_changes WHERE task_id=? AND repo=? AND source_task_id=?`, taskID, repo, sourceTaskID))
+	if errors.Is(err, sql.ErrNoRows) {
+		change, err = TaskTargetChange{}, nil
+	}
+	if err != nil {
+		return TaskTargetChange{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TaskTargetChange{}, err
+	}
+	return change, nil
+}
+
+func (db *DB) PendingTaskTargetChanges(ctx context.Context, projectID int64) ([]TaskTargetChange, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,repo,source_task_id,from_branch,to_branch,pr_url,status,error,created_at,completed_at FROM task_target_changes WHERE project_id=? AND status='pending' ORDER BY id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	changes := []TaskTargetChange{}
+	for rows.Next() {
+		change, err := scanTaskTargetChange(rows)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
+	}
+	return changes, rows.Err()
+}
+
+func (db *DB) TaskTargetChanges(ctx context.Context, taskID int64) ([]TaskTargetChange, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,repo,source_task_id,from_branch,to_branch,pr_url,status,error,created_at,completed_at FROM task_target_changes WHERE task_id=? ORDER BY id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	changes := []TaskTargetChange{}
+	for rows.Next() {
+		change, err := scanTaskTargetChange(rows)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
+	}
+	return changes, rows.Err()
+}
+
+func (db *DB) CompleteTaskTargetChange(ctx context.Context, changeID int64) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	change, err := scanTaskTargetChange(tx.QueryRowContext(ctx, `SELECT id,project_id,task_id,repo,source_task_id,from_branch,to_branch,pr_url,status,error,created_at,completed_at FROM task_target_changes WHERE id=?`, changeID))
+	if err != nil {
+		return err
+	}
+	if change.Status == "complete" {
+		return tx.Commit()
+	}
+	if change.Status != "pending" {
+		return fmt.Errorf("target change %d is %s", changeID, change.Status)
+	}
+	var current string
+	if change.Repo == "" {
+		err = tx.QueryRowContext(ctx, `SELECT target_branch FROM tasks WHERE id=? AND project_id=?`, change.TaskID, change.ProjectID).Scan(&current)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT r.target_branch FROM task_repos r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=? AND t.project_id=? AND r.repo=?`, change.TaskID, change.ProjectID, change.Repo).Scan(&current)
+	}
+	if err != nil {
+		return err
+	}
+	if current == change.FromBranch {
+		var result sql.Result
+		if change.Repo == "" {
+			result, err = tx.ExecContext(ctx, `UPDATE tasks SET target_branch=?, updated_at=? WHERE id=? AND target_branch=?`, change.ToBranch, time.Now().UnixMilli(), change.TaskID, change.FromBranch)
+		} else {
+			result, err = tx.ExecContext(ctx, `UPDATE task_repos SET target_branch=?, updated_at=? WHERE task_id=? AND repo=? AND target_branch=?`, change.ToBranch, time.Now().UnixMilli(), change.TaskID, change.Repo, change.FromBranch)
+		}
+		if err != nil {
+			return err
+		}
+		if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+			return rowsErr
+		} else if rows == 0 {
+			if change.Repo == "" {
+				err = tx.QueryRowContext(ctx, `SELECT target_branch FROM tasks WHERE id=? AND project_id=?`, change.TaskID, change.ProjectID).Scan(&current)
+			} else {
+				err = tx.QueryRowContext(ctx, `SELECT target_branch FROM task_repos WHERE task_id=? AND repo=?`, change.TaskID, change.Repo).Scan(&current)
+			}
+			if err != nil {
+				return err
+			}
+			if current != change.ToBranch {
+				return ErrTargetBranchChanged
+			}
+		}
+	} else if current != change.ToBranch {
+		return ErrTargetBranchChanged
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE task_target_changes SET status='complete',error='',completed_at=? WHERE id=? AND status='pending'`, time.Now().UnixMilli(), changeID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, change.TaskID)
+}
+
+func (db *DB) BlockTaskTargetChange(ctx context.Context, changeID int64, cause error) error {
+	if cause == nil {
+		return errors.New("target change block reason is required")
+	}
+	_, err := db.ExecContext(ctx, `UPDATE task_target_changes SET status='blocked',error=? WHERE id=? AND status='pending'`, cause.Error(), changeID)
+	return err
+}
+
+func (db *DB) SkipTaskTargetChange(ctx context.Context, changeID int64, cause error) error {
+	if cause == nil {
+		return errors.New("target change skip reason is required")
+	}
+	_, err := db.ExecContext(ctx, `UPDATE task_target_changes SET status='skipped',error=?,completed_at=? WHERE id=? AND status='pending'`, cause.Error(), time.Now().UnixMilli(), changeID)
+	return err
+}
+
+type taskTargetChangeScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanTaskTargetChange(scanner taskTargetChangeScanner) (TaskTargetChange, error) {
+	var change TaskTargetChange
+	err := scanner.Scan(&change.ID, &change.ProjectID, &change.TaskID, &change.Repo, &change.SourceTaskID, &change.FromBranch, &change.ToBranch, &change.PRURL, &change.Status, &change.Error, &change.CreatedAt, &change.CompletedAt)
+	return change, err
 }

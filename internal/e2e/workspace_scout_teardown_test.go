@@ -634,6 +634,24 @@ esac
 		if _, err := os.Stat(filepath.Join(firstSaved, "t8-only.txt")); !os.IsNotExist(err) {
 			t.Fatalf("retrying t7 captured t8's unlanded file: %v", err)
 		}
+		teardown := exec.Command(binary, "unsaddle", "t8")
+		teardown.Dir, teardown.Env = workspace, leadEnv
+		output, err := teardown.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "unverified process") {
+			t.Fatalf("Teardown did not refuse the unproved t8 process: err=%v output=%s", err, output)
+		}
+		if err := process.Process.Kill(); err != nil {
+			t.Fatalf("stop the E2E-owned t8 process after fail-closed refusal: %v", err)
+		}
+		select {
+		case <-processExited:
+			processWaited = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("E2E-owned t8 process did not exit after explicit cleanup")
+		}
+		if _, err := os.Stat(foreignFile); err != nil {
+			t.Fatalf("refused t8 Teardown changed its work: %v", err)
+		}
 		runPosse(t, binary, workspace, leadEnv, "unsaddle", "t8")
 	}) {
 		return

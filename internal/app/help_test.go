@@ -45,6 +45,10 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 	if code := cli.Run([]string{"publish", "--help"}); code != 0 || !strings.Contains(output.String(), "[--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...") || !strings.Contains(output.String(), "Repeated --verify, --proof and --risk values are retained in order.") {
 		t.Fatalf("publish help omitted repeatable metadata flags: code=%d output=%s", code, output.String())
 	}
+	output.Reset()
+	if code := cli.Run([]string{"holler", "--help"}); code != 0 || !strings.Contains(output.String(), "[--findings <file>] [--report <file>]") {
+		t.Fatalf("holler help omitted Signal file flags: code=%d output=%s", code, output.String())
+	}
 
 	var checkSummary func(*axi.Command)
 	checkSummary = func(command *axi.Command) {

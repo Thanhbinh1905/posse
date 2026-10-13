@@ -8,11 +8,11 @@ import (
 	"strings"
 )
 
-// leftoverBase creates an unreferenced commit on the current default branch.
+// leftoverBase creates an unreferenced commit on the selected target branch.
 // The saved snapshot itself can contain commits already squash-merged, so only
 // its tree difference from the merged head belongs in the new Task.
-func leftoverBase(ctx context.Context, root, snapshotRef, mergedRef, defaultRef string) (string, error) {
-	base, err := gitOutput(ctx, root, "rev-parse", "--verify", defaultRef+"^{commit}")
+func leftoverBase(ctx context.Context, root, snapshotRef, mergedRef, targetRef string) (string, error) {
+	base, err := gitOutput(ctx, root, "rev-parse", "--verify", targetRef+"^{commit}")
 	if err != nil {
 		return "", err
 	}
@@ -52,11 +52,11 @@ func leftoverBase(ctx context.Context, root, snapshotRef, mergedRef, defaultRef 
 		return "", err
 	}
 	if _, err := git(patch, "apply", "--cached", "--3way", "-"); err != nil {
-		return "", fmt.Errorf("leftover conflicts with the current default branch: %w", err)
+		return "", fmt.Errorf("leftover conflicts with the selected target branch: %w", err)
 	}
 	tree, err := git(nil, "write-tree")
 	if err != nil {
 		return "", err
 	}
-	return git(nil, "commit-tree", tree, "-p", base, "-m", "Rebase approved Leftover onto current default branch")
+	return git(nil, "commit-tree", tree, "-p", base, "-m", "Rebase approved Leftover onto selected target branch")
 }

@@ -331,34 +331,50 @@ func landedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 			}
 			return nil, err
 		}
+		targetRef := "refs/heads/" + taskTargetBranch(project, task)
+		var targetErr error
+		if task.LandingMode == "local" {
+			_, targetErr = gitOutput(ctx, project.Root, "rev-parse", "--verify", targetRef+"^{commit}")
+		} else {
+			targetRef, targetErr = taskTargetRef(ctx, project, task)
+		}
+		discardBaseRef := task.BaseRef
+		if discardBaseRef == "" {
+			discardBaseRef = project.DefaultBranch
+		}
 		eligible, reason := false, ""
 		if approved != "" && sha == approved {
-			baseRef := task.BaseRef
-			if baseRef == "" {
-				baseRef = project.DefaultBranch
-			}
-			captured, err := discardTipBundleExists(ctx, home, project, task, project.Name, project.Root, sha, baseRef)
+			captured, err := discardTipBundleExists(ctx, home, project, task, project.Name, project.Root, sha, discardBaseRef)
 			if err != nil {
 				return nil, err
 			}
 			if captured {
 				eligible, reason = true, "approved discard tip is captured"
 			}
-		} else if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", branchRef, "refs/heads/"+project.DefaultBranch); err == nil {
-			eligible, reason = true, "Task branch is landed"
-		} else if task.LandingMode == "pr" || task.LandingMode == "no-mistakes" {
-			observation, observationErr := db.LatestPRObservation(ctx, task.ID)
-			if observationErr != nil && !store.IsNotFound(observationErr) {
-				return nil, observationErr
+		} else {
+			if targetErr == nil {
+				if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", branchRef, targetRef); err == nil {
+					eligible, reason = true, "Task branch is landed"
+				}
 			}
-			if observationErr == nil && observation.State == "MERGED" && sha == observation.HeadSHA {
-				eligible, reason = true, "merged PR head is captured"
+			if !eligible && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {
+				observation, observationErr := db.LatestPRObservation(ctx, task.ID)
+				if observationErr != nil && !store.IsNotFound(observationErr) {
+					return nil, observationErr
+				}
+				if observationErr == nil && observation.State == "MERGED" && sha == observation.HeadSHA {
+					eligible, reason = true, "merged PR head is captured"
+				}
 			}
 		}
 		if !eligible {
 			continue
 		}
-		bytes, err := gitReachableBytes(ctx, project.Root, branchRef, "refs/heads/"+project.DefaultBranch)
+		baseRef := discardBaseRef
+		if targetErr == nil {
+			baseRef = targetRef
+		}
+		bytes, err := gitReachableBytes(ctx, project.Root, branchRef, baseRef)
 		if err != nil {
 			return nil, err
 		}
@@ -464,9 +480,24 @@ func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, p
 			continue
 		}
 		branchRef := "refs/heads/" + task.Branch
-		branchBase := repo.BaseRef
-		if branchBase == "" {
-			branchBase = defaultBranch
+		discardBase := repo.BaseRef
+		if discardBase == "" {
+			discardBase = defaultBranch
+		}
+		memberProject := project
+		memberProject.Root, memberProject.DefaultBranch, memberProject.Kind = root, defaultBranch, store.ProjectKindRepo
+		memberTask := task
+		memberTask.TargetBranch = repo.TargetBranch
+		targetRef := "refs/heads/" + taskTargetBranch(memberProject, memberTask)
+		var targetErr error
+		if repo.LandingMode == "local" {
+			_, targetErr = gitOutput(ctx, root, "rev-parse", "--verify", targetRef+"^{commit}")
+		} else {
+			targetRef, targetErr = taskTargetRef(ctx, memberProject, memberTask)
+		}
+		branchBase := discardBase
+		if targetErr == nil {
+			branchBase = targetRef
 		}
 		sha, err := gitOutput(ctx, root, "rev-parse", "--verify", branchRef)
 		if err != nil {
@@ -477,7 +508,7 @@ func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, p
 		}
 		eligible, reason := false, ""
 		if approvedSHA := approvedTips[repo.Repo]; approvedSHA != "" && sha == approvedSHA {
-			captured, err := discardTipBundleExists(ctx, home, project, task, repo.Repo, root, sha, branchBase)
+			captured, err := discardTipBundleExists(ctx, home, project, task, repo.Repo, root, sha, discardBase)
 			if err != nil {
 				return nil, err
 			}

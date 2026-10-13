@@ -50,20 +50,37 @@ func (adapter *changingSnapshotAdapter) addPane(pane herdr.Pane) {
 	adapter.snapshot.Panes = append(adapter.snapshot.Panes, pane)
 }
 
-func TestTeardownClosesOnlyTheRiderTab(t *testing.T) {
+func (adapter *changingSnapshotAdapter) removePanes(paneIDs ...string) {
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	remove := make(map[string]bool, len(paneIDs))
+	for _, paneID := range paneIDs {
+		remove[paneID] = true
+	}
+	panes := adapter.snapshot.Panes[:0]
+	for _, pane := range adapter.snapshot.Panes {
+		if !remove[pane.PaneID] {
+			panes = append(panes, pane)
+		}
+	}
+	adapter.snapshot.Panes = panes
+}
+
+func TestTeardownVerifiesHerdrRemovedOnlyTheRiderTab(t *testing.T) {
 	project, task, adapter := riderTabSession(t)
-	adapter.addPane(herdr.Pane{PaneID: "w1:p5", WorkspaceID: "w1", TabID: "w1:t3", CWD: filepath.Join(task.WorktreePath)})
-	result, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
+	adapter.addPane(herdr.Pane{PaneID: "w1:p5", WorkspaceID: "w1", TabID: "w1:t3", CWD: task.WorktreePath})
+	service := testService(t.TempDir(), adapter)
+	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if adapter.CallCount("tab.close") != 1 || adapter.CallCount("pane.close") != 0 || adapter.CallCount("workspace.close") != 0 {
-		t.Fatalf("teardown did not close exactly the Rider tab: %#v", adapter.Calls)
+	adapter.removePanes("w1:p3", "w1:p5") // Herdr removes the Rider tab when its shell exits.
+	result, err := service.verifyTaskPanesClosed(context.Background(), project, task, plan)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, call := range adapter.Calls {
-		if call.Method == "tab.close" && call.Params["tab_id"] != "w1:t3" {
-			t.Fatalf("teardown closed tab %v", call.Params["tab_id"])
-		}
+	if adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 0 || adapter.CallCount("workspace.close") != 0 {
+		t.Fatalf("Teardown issued an unconditional close RPC: %#v", adapter.Calls)
 	}
 	if !reflect.DeepEqual(result.Closed, []string{"w1:p3", "w1:p5"}) || len(result.Foreign) != 0 {
 		t.Fatalf("teardown result = %#v", result)
@@ -74,20 +91,26 @@ func TestTeardownClosesOnlyTheRiderTab(t *testing.T) {
 	}
 	// The User's shell inside the Mount is in another tab and is not the Rider's.
 	if !reflect.DeepEqual(left, []string{"w1:p1", "w1:p2", "w1:p4"}) {
-		t.Fatalf("panes left after teardown = %v", left)
+		t.Fatalf("panes left after Herdr removed the Rider tab = %v", left)
 	}
 }
 
-func TestTeardownKeepsForeignPaneInTheRiderTab(t *testing.T) {
+func TestTeardownReportsForeignPanesAfterHerdrRemovesTheRiderPane(t *testing.T) {
 	project, task, adapter := riderTabSession(t)
 	adapter.addPane(herdr.Pane{PaneID: "w1:p5", WorkspaceID: "w1", TabID: "w1:t3", CWD: "/"})
 	adapter.addPane(herdr.Pane{PaneID: "w1:p6", WorkspaceID: "w1", TabID: "w1:t3", CWD: task.WorktreePath, Agent: "claude"})
-	result, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
+	service := testService(t.TempDir(), adapter)
+	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 1 || adapter.CallCount("workspace.close") != 0 {
-		t.Fatalf("teardown with foreign panes did not close only the Rider pane: %#v", adapter.Calls)
+	adapter.removePanes("w1:p3")
+	result, err := service.verifyTaskPanesClosed(context.Background(), project, task, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 0 || adapter.CallCount("workspace.close") != 0 {
+		t.Fatalf("Teardown issued an unconditional close RPC: %#v", adapter.Calls)
 	}
 	// Siblings, the Lead and the User tab are not listed: only the Rider tab's other panes are.
 	if !reflect.DeepEqual(result.Closed, []string{"w1:p3"}) || !reflect.DeepEqual(result.Foreign, []string{"w1:p5", "w1:p6"}) {
@@ -95,22 +118,19 @@ func TestTeardownKeepsForeignPaneInTheRiderTab(t *testing.T) {
 	}
 }
 
-func TestTeardownTreatsMissingTabAsClosed(t *testing.T) {
+func TestTeardownAcceptsTaskPaneRemovedBeforeVerification(t *testing.T) {
 	project, task, adapter := riderTabSession(t)
-	adapter.Errors["tab.close"] = &herdr.Error{Code: "tab_not_found", Message: "tab w1:t3 not found"}
-	adapter.mu.Lock()
-	adapter.snapshot.Panes = adapter.snapshot.Panes[:2]
-	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "w1:p3", WorkspaceID: "w1", TabID: "w1:t3", Label: "posse:shop:t1", CWD: task.WorktreePath})
-	adapter.mu.Unlock()
-	adapter.BeforeCall = func(method string) {
-		if method == "tab.close" {
-			adapter.mu.Lock()
-			adapter.snapshot.Panes = adapter.snapshot.Panes[:2]
-			adapter.mu.Unlock()
-		}
+	service := testService(t.TempDir(), adapter)
+	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task); err != nil {
-		t.Fatalf("a tab closed concurrently failed teardown: %v", err)
+	adapter.removePanes(task.PaneID) // Herdr removed the tab before verification.
+	if _, err := service.verifyTaskPanesClosed(context.Background(), project, task, plan); err != nil {
+		t.Fatalf("a pane removed by Herdr failed teardown: %v", err)
+	}
+	if adapter.CallCount("pane.close") != 0 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("workspace.close") != 0 {
+		t.Fatalf("Teardown issued an unconditional close RPC: %#v", adapter.Calls)
 	}
 	if !missingPaneError(&herdr.Error{Code: "tab_not_found"}) || !missingPaneError(axi.Failure("tab_not_found", "gone", false)) {
 		t.Fatal("tab_not_found is not treated as already closed")
@@ -120,7 +140,13 @@ func TestTeardownTreatsMissingTabAsClosed(t *testing.T) {
 func TestTeardownReturnsFocusToTheLead(t *testing.T) {
 	project, task, adapter := riderTabSession(t)
 	adapter.snapshot.FocusedPaneID = "w1:p3"
-	if _, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task); err != nil {
+	service := testService(t.TempDir(), adapter)
+	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.removePanes(task.PaneID)
+	if _, err := service.verifyTaskPanesClosed(context.Background(), project, task, plan); err != nil {
 		t.Fatal(err)
 	}
 	focused := ""
@@ -134,7 +160,13 @@ func TestTeardownReturnsFocusToTheLead(t *testing.T) {
 	}
 
 	project, task, adapter = riderTabSession(t)
-	if _, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task); err != nil {
+	service = testService(t.TempDir(), adapter)
+	plan, err = service.planTaskPaneTeardown(context.Background(), project, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.removePanes(task.PaneID)
+	if _, err := service.verifyTaskPanesClosed(context.Background(), project, task, plan); err != nil {
 		t.Fatal(err)
 	}
 	if adapter.CallCount("pane.focus") != 0 {
@@ -158,7 +190,7 @@ func TestStaleRecordedIdsDoNotClaimAnotherPane(t *testing.T) {
 	if _, found := findTaskPane(adapter.snapshot.Panes, task); !found {
 		t.Fatal("an unlabeled pane inside the Mount with the recorded id was not found")
 	}
-	result, err := testService(t.TempDir(), adapter).closeTaskPanes(context.Background(), project, task)
+	result, err := testService(t.TempDir(), adapter).verifyTaskPanesGone(context.Background(), project, task)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +250,20 @@ func TestOpenRiderTabUsesTheLeadWorkspace(t *testing.T) {
 	var cliErr *axi.Error
 	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("worktree.open") != 0 || adapter.CallCount("workspace.create") != 0 {
 		t.Fatalf("openRiderTab without the Lead = %v, calls %#v", err, adapter.Calls)
+	}
+}
+
+func TestOpenRiderTabDoesNotCloseAnUnlabeledPaneAfterMetadataFailure(t *testing.T) {
+	project, task, adapter := riderTabSession(t)
+	adapter.Errors["pane.report_metadata"] = errors.New("metadata write failed")
+	_, err := testService(t.TempDir(), adapter).openRiderTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
+	if err == nil {
+		t.Fatal("openRiderTab succeeded after metadata failure")
+	}
+	for _, method := range []string{"pane.close", "tab.close", "workspace.close"} {
+		if adapter.CallCount(method) != 0 {
+			t.Fatalf("failed Rider open issued an unconditional %s RPC: %#v", method, adapter.Calls)
+		}
 	}
 }
 

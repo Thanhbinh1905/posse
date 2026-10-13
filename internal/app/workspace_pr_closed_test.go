@@ -30,7 +30,7 @@ func TestWorkspaceClosedMemberRaisesDecisionWithoutReopeningTask(t *testing.T) {
 	head := strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD"))
 	url := "https://github.com/acme/worker/pull/7"
 	writeView := func(stateName string) {
-		body := `{"url":"` + url + `","state":"` + stateName + `","headRefOid":"` + head + `","mergeable":"MERGEABLE","reviewDecision":"APPROVED","statusCheckRollup":[]}`
+		body := `{"url":"` + url + `","state":"` + stateName + `","headRefOid":"` + head + `","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"APPROVED","statusCheckRollup":[]}`
 		if err := os.WriteFile(state, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}

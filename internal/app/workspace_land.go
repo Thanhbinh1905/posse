@@ -44,7 +44,7 @@ func (s *Service) workspaceMembers(ctx context.Context, db *store.DB, project st
 		view := project
 		view.Root, view.DefaultBranch, view.Kind = target.Root, target.DefaultBranch, store.ProjectKindRepo
 		memberTask := task
-		memberTask.WorktreePath, memberTask.BaseRef, memberTask.LandingMode = repo.WorktreePath, repo.BaseRef, repo.LandingMode
+		memberTask.WorktreePath, memberTask.BaseRef, memberTask.TargetBranch, memberTask.LandingMode = repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.LandingMode
 		memberTask.GatedSHA, memberTask.PRURL, memberTask.LandedRef = repo.GatedSHA, repo.PRURL, repo.LandedRef
 		memberTask.Title = repo.Repo + ": " + task.Title
 		members = append(members, memberLanding{repo: repo, target: target, project: view, task: memberTask})
@@ -286,7 +286,7 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 			if err := s.runIntentStep(ctx, db, intent, "merge:"+repo.Repo, func() error { return mergeLocal(ctx, member.project, member.task) }); err != nil {
 				return prefixFailure(repo.Repo, err)
 			}
-			landedRef, err := gitOutput(ctx, member.target.Root, "rev-parse", "refs/heads/"+member.target.DefaultBranch)
+			landedRef, err := gitOutput(ctx, member.target.Root, "rev-parse", "refs/heads/"+taskTargetBranch(member.project, member.task))
 			if err != nil {
 				return memberFailure(repo.Repo, err)
 			}
@@ -378,7 +378,7 @@ func (s *Service) reopenWorkspaceTask(ctx context.Context, db *store.DB, task st
 }
 
 // recoverWorkspaceLandIntent settles a workspace Land that was interrupted: a
-// gated local member whose commit already reached its default branch is landed.
+// gated local member whose commit already reached its frozen target is landed.
 func (s *Service) recoverWorkspaceLandIntent(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent) error {
 	members, err := s.workspaceMembers(ctx, db, project, task)
 	if err != nil {
@@ -389,10 +389,11 @@ func (s *Service) recoverWorkspaceLandIntent(ctx context.Context, db *store.DB, 
 		if repo.State != store.TaskRepoGated || repo.GatedSHA == "" {
 			continue
 		}
-		if _, err := gitOutput(ctx, member.target.Root, "merge-base", "--is-ancestor", repo.GatedSHA, "refs/heads/"+member.target.DefaultBranch); err != nil {
+		targetRef := "refs/heads/" + taskTargetBranch(member.project, member.task)
+		if _, err := gitOutput(ctx, member.target.Root, "merge-base", "--is-ancestor", repo.GatedSHA, targetRef); err != nil {
 			continue
 		}
-		landedRef, err := gitOutput(ctx, member.target.Root, "rev-parse", "refs/heads/"+member.target.DefaultBranch)
+		landedRef, err := gitOutput(ctx, member.target.Root, "rev-parse", "refs/heads/"+taskTargetBranch(member.project, member.task))
 		if err != nil {
 			return err
 		}
@@ -478,6 +479,11 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		defer func() {
 			_ = finishMemberPRPollOrRelease(context.Background(), db, project.ID, repoFilter, memberClaim, time.Now().UnixMilli())
 		}()
+	}
+	if claimProject || memberClaim != "" {
+		if err := s.processPendingStackedTargetChanges(ctx, db, project, cfg, repoFilter); err != nil {
+			return err
+		}
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {
@@ -579,12 +585,12 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				var checks []failedCheck
 				if err == nil {
 					if forge.Kind == "gitlab" {
-						observation, checks, err = gitlabObservation(pollCtx, forge, member.task, now.UnixMilli())
+						observation, checks, err = gitlabObservation(pollCtx, forge, member.task, taskTargetBranch(member.project, member.task), now.UnixMilli())
 					} else {
 						var pull *ghPullRequest
 						pull, err = viewMemberPullRequest(pollCtx, member)
 						if err == nil {
-							observation, checks, err = makePRObservation(project.ID, member.task, pull, now)
+							observation, checks, err = makePRObservation(project.ID, member.task, pull, now, taskTargetBranch(member.project, member.task))
 						}
 					}
 				}
@@ -598,6 +604,8 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 	}()
 
 	landedAny := false
+	mergedTargets := []pollTarget{}
+	failures := []string{}
 	var processingErr error
 	for result := range results {
 		if processingErr != nil {
@@ -605,6 +613,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		}
 		task, member := result.target.task, result.target.member
 		if result.err != nil {
+			failures = append(failures, member.repo.Repo+": "+truncate(result.err.Error(), 240))
 			if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, result.err, now); err != nil {
 				processingErr = err
 				cancelPoll()
@@ -650,6 +659,9 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			cancelPoll()
 			continue
 		}
+		if observation.State == "MERGED" {
+			mergedTargets = append(mergedTargets, result.target)
+		}
 		if recorded && observation.State == "CLOSED" {
 			if err := raiseClosedPRDecision(ctx, db, project, task, member.repo.PRURL); err != nil {
 				processingErr = err
@@ -658,6 +670,13 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			}
 		}
 		newlyLanded := recorded && memberEffect.RepoState == store.TaskRepoLanded
+		if newlyLanded && syncRoot {
+			if _, err := s.syncTaskTarget(ctx, db, member.project, member.task); err != nil {
+				processingErr = err
+				cancelPoll()
+				continue
+			}
+		}
 		landedAny = landedAny || newlyLanded
 		if newlyLanded && onLanded != nil {
 			onLanded()
@@ -666,10 +685,18 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 	if processingErr != nil {
 		return processingErr
 	}
-	if repoFilter == "" {
-		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), ""); err != nil {
+	for _, merged := range mergedTargets {
+		if err := s.enqueueStackedTargetChanges(ctx, db, project, merged.member.task, merged.member.repo.Repo, taskTargetBranch(merged.member.project, merged.member.task)); err != nil {
 			return err
 		}
+	}
+	if claimProject || memberClaim != "" {
+		if err := s.processPendingStackedTargetChanges(ctx, db, project, cfg, repoFilter); err != nil {
+			return err
+		}
+	}
+	if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), truncate(strings.Join(failures, "; "), 1000)); err != nil {
+		return err
 	}
 	if landedAny && syncRoot {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
@@ -707,7 +734,7 @@ func settleUnchangedWorkspaceMembers(ctx context.Context, db *store.DB, members 
 // viewMemberPullRequest reads one member pull request with `gh pr view`, in the
 // shape the GraphQL watch of a repository Project produces.
 func viewMemberPullRequest(ctx context.Context, member memberLanding) (*ghPullRequest, error) {
-	output, err := commandOutputArgs(ctx, member.target.Root, "gh", "pr", "view", member.repo.PRURL, "--json", "url,state,headRefOid,mergeable,reviewDecision,mergeCommit,statusCheckRollup")
+	output, err := commandOutputArgs(ctx, member.target.Root, "gh", "pr", "view", member.repo.PRURL, "--json", "url,state,headRefOid,baseRefName,mergeable,reviewDecision,mergeCommit,statusCheckRollup")
 	if err != nil {
 		return nil, fmt.Errorf("gh pr view: %w: %s", err, strings.TrimSpace(output))
 	}
@@ -715,6 +742,7 @@ func viewMemberPullRequest(ctx context.Context, member memberLanding) (*ghPullRe
 		URL            string `json:"url"`
 		State          string `json:"state"`
 		HeadRefOID     string `json:"headRefOid"`
+		BaseRefName    string `json:"baseRefName"`
 		Mergeable      string `json:"mergeable"`
 		ReviewDecision string `json:"reviewDecision"`
 		MergeCommit    *struct {
@@ -725,7 +753,7 @@ func viewMemberPullRequest(ctx context.Context, member memberLanding) (*ghPullRe
 	if err := json.Unmarshal([]byte(output), &view); err != nil {
 		return nil, fmt.Errorf("invalid gh pr view output: %w", err)
 	}
-	pull := &ghPullRequest{URL: view.URL, State: view.State, HeadRefOID: view.HeadRefOID, Mergeable: view.Mergeable, ReviewDecision: view.ReviewDecision}
+	pull := &ghPullRequest{URL: view.URL, State: view.State, HeadRefOID: view.HeadRefOID, BaseRefName: view.BaseRefName, Mergeable: view.Mergeable, ReviewDecision: view.ReviewDecision}
 	if view.MergeCommit != nil {
 		pull.MergeCommit = &struct {
 			OID string `json:"oid"`
@@ -792,7 +820,7 @@ func (s *Service) workspaceBranchTips(ctx context.Context, db *store.DB, project
 }
 
 // removeWorkspaceBranches deletes the Task branch in each member: after Landing
-// only where it is merged into the member's default branch; when discarding,
+// only where it is merged into the member's frozen target branch; when discarding,
 // exactly the tips recorded with the User's approval.
 func (s *Service) removeWorkspaceBranches(ctx context.Context, db *store.DB, project store.Project, task store.Task, discardTips string) (bool, error) {
 	repos, err := db.TaskRepos(ctx, task.ID)
@@ -820,11 +848,25 @@ func (s *Service) removeWorkspaceBranches(ctx context.Context, db *store.DB, pro
 			if approved[repo.Repo] != sha {
 				continue
 			}
-		} else if _, mergeErr := gitOutput(ctx, target.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+target.DefaultBranch); mergeErr != nil {
-			// Squash and rebase merges need not contain the branch ref. Delete
-			// only the exact gated head that the recorded PR delivered.
-			if repo.State != store.TaskRepoLanded || repo.LandingMode != "pr" || repo.LandedRef == "" || repo.GatedSHA != sha {
-				continue
+		} else {
+			memberProject := project
+			memberProject.Root, memberProject.DefaultBranch, memberProject.Kind = target.Root, target.DefaultBranch, store.ProjectKindRepo
+			memberTask := task
+			memberTask.TargetBranch = repo.TargetBranch
+			targetRef := "refs/heads/" + taskTargetBranch(memberProject, memberTask)
+			if repo.LandingMode != "local" {
+				var targetErr error
+				targetRef, targetErr = taskTargetRef(ctx, memberProject, memberTask)
+				if targetErr != nil {
+					continue
+				}
+			}
+			if _, mergeErr := gitOutput(ctx, target.Root, "merge-base", "--is-ancestor", ref, targetRef); mergeErr != nil {
+				// Squash and rebase merges need not contain the branch ref. Delete
+				// only the exact gated head that the recorded PR delivered.
+				if repo.State != store.TaskRepoLanded || repo.LandingMode != "pr" || repo.LandedRef == "" || repo.GatedSHA != sha {
+					continue
+				}
 			}
 		}
 		if _, err := gitOutput(ctx, target.Root, "update-ref", "-d", ref, sha); err != nil {

@@ -69,6 +69,30 @@ use = "fast"
 	}
 }
 
+func TestTargetBranchConfigDefaultsAndMemberOverrides(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, filepath.Join(home, "config.toml"), "[defaults]\ntarget_branch = \"integration\"\n")
+	writeConfig(t, filepath.Join(home, "projects", "stack", "config.toml"), "[repositories.api]\ntarget_branch = \"staging\"\n")
+	cfg, err := Load(home, "stack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.TargetBranch != "integration" || cfg.Repositories["api"].TargetBranch != "staging" {
+		t.Fatalf("target branch settings = defaults %q repositories %#v", cfg.Defaults.TargetBranch, cfg.Repositories)
+	}
+	for _, key := range []string{"defaults.target_branch", "repositories.api.target_branch"} {
+		if IsUserOnly(key) {
+			t.Errorf("branch selection key %s unexpectedly requires User-only approval", key)
+		}
+	}
+	if _, found := Lookup("defaults.target_branch"); !found {
+		t.Fatal("target branch default is absent from the config schema")
+	}
+	if _, found := Lookup("repositories.api.target_branch"); !found {
+		t.Fatal("member target branch is absent from the config schema")
+	}
+}
+
 func TestLeadDeliveryDefaultsByKind(t *testing.T) {
 	cfg, err := Load(t.TempDir(), "")
 	if err != nil {
@@ -178,6 +202,38 @@ func TestSteeringDefaultsAndOverrides(t *testing.T) {
 	}
 	if cfg.Kinds["claude"].Steer || !cfg.Kinds["codex"].Steer || !cfg.Kinds["pi"].Steer || cfg.Kinds["unknown"].Steer || cfg.Kinds["opencode"].Steer {
 		t.Fatalf("steering capabilities = %#v", cfg.Kinds)
+	}
+}
+
+func TestInterruptKeyDefaultsAndOverrides(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[string][]string{
+		"claude":   {"ctrl+c"},
+		"codex":    {"esc"},
+		"pi":       {"esc"},
+		"opencode": {"esc"},
+	} {
+		if !reflect.DeepEqual(cfg.Kinds[kind].InterruptKeys, want) {
+			t.Errorf("default %s interrupt keys = %v, want %v", kind, cfg.Kinds[kind].InterruptKeys, want)
+		}
+	}
+
+	writeConfig(t, filepath.Join(home, "config.toml"), "[kinds.claude]\ninterrupt_keys = [\"esc\"]\n[kinds.custom]\ninterrupt_keys = [\"ctrl+x\", \"ctrl+c\"]\n")
+	cfg, err = Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[string][]string{
+		"claude": {"esc"},
+		"custom": {"ctrl+x", "ctrl+c"},
+	} {
+		if !reflect.DeepEqual(cfg.Kinds[kind].InterruptKeys, want) {
+			t.Errorf("overridden %s interrupt keys = %v, want %v", kind, cfg.Kinds[kind].InterruptKeys, want)
+		}
 	}
 }
 

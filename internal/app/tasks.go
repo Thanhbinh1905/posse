@@ -225,8 +225,24 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			return briefError(err)
 		}
 	}
+	targetBranch := ""
+	if !project.IsWorkspace() && brief.Type == "ship" {
+		if brief.Base != "" {
+			baseRef, err = selectedBranchRef(ctx.Context, project.Root, brief.Base, "base")
+			if err != nil {
+				return err
+			}
+		}
+		var targetSelected bool
+		targetBranch, targetSelected = targetBranchForTask(cfg, brief, "", project.DefaultBranch)
+		if targetSelected {
+			if _, err := selectedBranchRef(ctx.Context, project.Root, targetBranch, "target"); err != nil {
+				return err
+			}
+		}
+	}
 	if project.IsWorkspace() {
-		// Each member records its own base ref and Landing Mode; the Task keeps the strictest.
+		// Each member records its own base, target branch and Landing Mode; the Task keeps the strictest.
 		baseRef, mode = "", workspaceMode
 	}
 	if from := parsed.Flags["from-leftover"]; from != "" {
@@ -265,9 +281,16 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 							break
 						}
 					}
-					base, err := leftoverBase(ctx.Context, members[i].Root, "refs/heads/"+ref, merged, members[i].BaseRef)
+					leftoverBaseRef := members[i].BaseRef
+					if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, members[i].Name, ""); !explicit && members[i].TargetBranch != "" {
+						leftoverBaseRef, err = selectedBranchRef(ctx.Context, members[i].Root, members[i].TargetBranch, "target")
+						if err != nil {
+							return err
+						}
+					}
+					base, err := leftoverBase(ctx.Context, members[i].Root, "refs/heads/"+ref, merged, leftoverBaseRef)
 					if err != nil {
-						return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current default branch before retrying")
+						return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current target branch before retrying")
 					}
 					members[i].BaseRef = base
 					matched = true
@@ -282,9 +305,16 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			if merged == "" {
 				merged = source.BaseRef
 			}
-			baseRef, err = leftoverBase(ctx.Context, project.Root, snapshot, merged, baseRef)
+			leftoverBaseRef := baseRef
+			if brief.Base == "" && targetBranch != "" {
+				leftoverBaseRef, err = selectedBranchRef(ctx.Context, project.Root, targetBranch, "target")
+				if err != nil {
+					return err
+				}
+			}
+			baseRef, err = leftoverBase(ctx.Context, project.Root, snapshot, merged, leftoverBaseRef)
 			if err != nil {
-				return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current default branch before retrying")
+				return axi.Failure("leftover_conflict", err.Error(), false, "Repair the Leftover on the current target branch before retrying")
 			}
 		}
 	}
@@ -299,7 +329,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, LandingMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
-		BaseRef: baseRef,
+		BaseRef: baseRef, TargetBranch: targetBranch,
 	}
 	crashIntentAt("ride", "before", "task.create")
 	taskID, sequence, intent, err := createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
@@ -842,7 +872,7 @@ func (s *Service) waitAgent(ctx context.Context, paneID string, anyStatus bool) 
 func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Project, id int64, title, reason string) error {
 	if task, err := db.TaskByID(ctx, project.ID, id); err == nil {
 		if s.Herdr != nil && (task.HerdrWorkspaceID != "" || task.PaneID != "" || task.PaneLabel != "") {
-			if _, closeErr := s.closeTaskPanes(ctx, project, task); closeErr != nil {
+			if _, closeErr := s.verifyTaskPanesGone(ctx, project, task); closeErr != nil {
 				reason += "; Task pane cleanup failed: " + closeErr.Error()
 			} else {
 				s.relabelProjectTabs(ctx, db, project)
@@ -885,6 +915,9 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 	} else if landing == "no-mistakes" {
 		work = "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Deliver only through `no-mistakes axi run --intent <from Brief>`. Never push directly or open a PR."
 	}
+	if task.Type == "ship" && !project.IsWorkspace() {
+		work += fmt.Sprintf("\n\nBranch plan: start from `%s`; PR/MR target `%s`.", task.BaseRef, taskTargetBranch(project, task))
+	}
 	signal := "posse holler done \"<summary>\""
 	if task.Type == "ship" {
 		signal += " after committing and ensuring a clean worktree"
@@ -892,12 +925,13 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 			signal += " --pr <url>"
 		}
 	} else {
-		signal += " --report <file-in-worktree>"
+		signal += " --report <file-in-worktree-or-task-scratch>"
 		work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base or an unrequested Member's Mount-acquisition commit, beside report.md at those paths. For workspace Tasks it also saves new or edited shared-root files, including tracked and non-ignored untracked files in nested Git repositories, against the Mount-acquisition snapshot rather than the live Project; unchanged Project copies are not saved. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Mount. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence or unchanged shared-root files the Report needs. `posse show <task>` lists saved attachments."
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
 	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Mount. Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches; never create per-Task copies.", scratchPath)
-	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, brief.DoneWhen, signal, launchPath)
+	signalFiles := fmt.Sprintf("Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`%s`); paths outside those locations are refused.", scratchPath)
+	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, signalFiles, brief.DoneWhen, signal, launchPath)
 }
 
 // workspaceProtocol tells a workspace Worker how its Mount mirrors the workspace.
@@ -913,7 +947,11 @@ func workspaceProtocol(project store.Project, members []taskMember) string {
 	}
 	text.WriteString("\nMember repositories checked out on the Task branch:\n")
 	for _, member := range members {
-		fmt.Fprintf(&text, "- `%s/` (Lands through %s onto %s)\n", member.Path, member.LandingMode, member.DefaultBranch)
+		targetBranch := member.TargetBranch
+		if targetBranch == "" {
+			targetBranch = member.DefaultBranch
+		}
+		fmt.Fprintf(&text, "- `%s/` (starts from %s; Lands through %s onto %s)\n", member.Path, member.BaseRef, member.LandingMode, targetBranch)
 	}
 	text.WriteString("\nCommit inside each member you change, on the checked-out branch. Leave every other folder unchanged. Other members, if present, are detached reference checkouts; read the rest at " + project.Root + "/<member>.\n")
 	return text.String()
@@ -1058,16 +1096,20 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				}
 			}
 		} else if parsed.Flags["report"] == "" {
-			return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file-in-worktree>", false)
+			scratchPath, err := taskScratchPath(home, project, task)
+			if err != nil {
+				return err
+			}
+			return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file>", false, fmt.Sprintf("Store the report in the Rider's worktree (%s) or this Task's scratch directory (%s)", task.WorktreePath, scratchPath))
 		}
 	}
 	if verb == "needs-decision" && parsed.Flags["findings"] != "" {
-		if _, err := copyWorktreeFile(task, parsed.Flags["findings"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err != nil {
+		if _, err := copySignalFile(home, project, task, parsed.Flags["findings"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
 		}
 	}
 	if verb == "done" && task.Type != "ship" {
-		if _, err := copyWorktreeFile(task, parsed.Flags["report"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")); err != nil {
+		if _, err := copySignalFile(home, project, task, parsed.Flags["report"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
 		}
 		for _, path := range attachments {
@@ -1264,6 +1306,15 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
 	case "queued":
 		queued, queueErr := db.OldestQueuedMessage(ctx.Context, task.ID)
+		if queueErr == nil && !message.WaitForIdle {
+			if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found &&
+				pane.AgentStatus == "working" && !pane.Focused && snapshot.FocusedPaneID != pane.PaneID &&
+				task.State != store.StateBlocked && pane.Agent != "" && cfg.Kinds[pane.Agent].Steer {
+				// An explicit --queue message waits for idle, but it must not
+				// prevent a later instruction from steering the current turn.
+				queued, queueErr = db.OldestSteerableQueuedMessage(ctx.Context, task.ID)
+			}
+		}
 		if queueErr == nil && queued.ID > messageID {
 			// Do not let this send skip its own row if another dispatcher
 			// claimed it after the status read and submit a later instruction.
@@ -1360,7 +1411,8 @@ func (s *Service) peek(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+	_, err = s.prepareProject(ctx.Context, db, project)
+	if err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
@@ -1432,7 +1484,8 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+	cfg, err := s.prepareProject(ctx.Context, db, project)
+	if err != nil {
 		return err
 	}
 	task, err := s.currentTask(ctx.Context, db, project, args[0])
@@ -1443,16 +1496,72 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, pane := range snapshot.Panes {
-		if pane.PaneID == task.PaneID && (pane.Focused || snapshot.FocusedPaneID == task.PaneID) {
-			return axi.Failure("pane_focused", "refusing to interrupt a focused pane", false, "Unfocus the pane, then retry")
-		}
+	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+	if !found {
+		return axi.Failure("worker_pane_missing", "Rider pane is not available", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
 	}
-	_, err = s.herdrCall(ctx.Context, "agent.send_keys", map[string]any{"target": task.PaneID, "keys": []string{"ctrl+c"}})
-	if err != nil {
+	if pane.Focused || snapshot.FocusedPaneID == pane.PaneID {
+		return axi.Failure("pane_focused", "refusing to interrupt a focused pane", false, "Unfocus the pane, then retry")
+	}
+	if task.State == store.StateBlocked || pane.AgentStatus == "blocked" {
+		return axi.Failure("worker_blocked", "refusing to send an abort key to a blocked Rider", false, "Inspect the Rider dialog with `posse peek "+taskIDString(task.Seq)+"`")
+	}
+	if pane.AgentStatus != "working" {
+		return ctx.Print(axi.Object{
+			{Key: "task", Value: taskIDString(task.Seq)},
+			{Key: "interrupted", Value: false},
+			{Key: "reason", Value: "agent_not_working"},
+			{Key: "agent_status", Value: pane.AgentStatus},
+			{Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}},
+		})
+	}
+	kind := pane.Agent
+	if kind == "" {
+		kind = taskKind(cfg, task)
+	}
+	keys := cfg.Kinds[kind].InterruptKeys
+	if len(keys) == 0 {
+		return axi.Failure("interrupt_unsupported_kind", "no abort key sequence is configured for Rider kind "+kind, false, "Set `kinds."+kind+".interrupt_keys` to the harness sequence that stops a running turn")
+	}
+	if _, err := s.herdrCall(ctx.Context, "agent.send_keys", map[string]any{"target": pane.PaneID, "keys": keys}); err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "interrupted", Value: true}, {Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}}})
+
+	verifyCtx, cancel := context.WithTimeout(ctx.Context, 3*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		updated, snapshotErr := s.snapshot(verifyCtx)
+		if snapshotErr == nil {
+			current, present := findAppPane(updated.Panes, pane.PaneID, task.PaneLabel)
+			if !present || current.AgentStatus != "working" {
+				status := "missing"
+				if present {
+					status = current.AgentStatus
+				}
+				return ctx.Print(axi.Object{
+					{Key: "task", Value: taskIDString(task.Seq)},
+					{Key: "interrupted", Value: true},
+					{Key: "agent", Value: kind},
+					{Key: "abort_keys", Value: keys},
+					{Key: "agent_status", Value: status},
+					{Key: "verified", Value: true},
+					{Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}},
+				})
+			}
+		}
+		select {
+		case <-verifyCtx.Done():
+			message := "sent the abort key sequence but could not verify the Rider status"
+			if snapshotErr == nil {
+				message = fmt.Sprintf("sent the abort key sequence but the Rider still reports %s", pane.AgentStatus)
+			}
+			return axi.Failure("interrupt_unverified", message, false,
+				"Inspect the pane with `posse peek "+taskIDString(task.Seq)+"`; Posse did not verify that the turn stopped")
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *Service) relaunch(ctx *axi.Context, args []string) error {
@@ -1973,6 +2082,50 @@ func validateShipSignal(ctx context.Context, task store.Task) error {
 		return fmt.Errorf("worktree is not clean")
 	}
 	return nil
+}
+
+func copySignalFile(home string, project store.Project, task store.Task, supplied, destination string) (string, error) {
+	worktreeRoot, err := filepath.Abs(task.WorktreePath)
+	if err != nil {
+		return "", err
+	}
+	scratchRoot, err := taskScratchPath(home, project, task)
+	if err != nil {
+		return "", err
+	}
+	validatedScratchRoot, err := validatedTaskScratchRoot(home, project, task)
+	if err != nil {
+		return "", fmt.Errorf("invalid Task scratch directory %s; Signal files must be inside the Rider's worktree (%s) or this Task's scratch directory: %w", scratchRoot, worktreeRoot, err)
+	}
+	allowedRoots := []string{worktreeRoot, validatedScratchRoot}
+	allowedLocations := fmt.Sprintf("the Rider's worktree (%s) or this Task's scratch directory (%s)", worktreeRoot, scratchRoot)
+	path, err := filepath.Abs(supplied)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve Signal file %q; files must be inside %s: %w", supplied, allowedLocations, err)
+	}
+	insideAllowedRoot := false
+	for _, root := range allowedRoots {
+		relative, relErr := filepath.Rel(root, path)
+		if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			insideAllowedRoot = true
+			break
+		}
+	}
+	if !insideAllowedRoot {
+		return "", fmt.Errorf("report and findings files must be inside %s", allowedLocations)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read Signal file %q inside %s: %w", supplied, allowedLocations, err)
+	}
+	if err := writeFile(destination, contents); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func copyWorktreeFile(task store.Task, supplied, destination string) (string, error) {

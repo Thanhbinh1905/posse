@@ -20,6 +20,7 @@ func TestAckReportedReviewPreservesMountAttachments(t *testing.T) {
 	fake := f.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	removeFixtureTaskPane(f)
 	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET type='review' WHERE id=?`, f.task.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,13 @@ func TestAckReportedReviewPreservesMountAttachments(t *testing.T) {
 	}
 	code, out, stderr := f.run("ack", fmt.Sprint(id))
 	if code != 0 {
-		t.Fatalf("ack: %s %s", out, stderr)
+		if !strings.Contains(out, "herdr_conditional_close_unavailable") {
+			t.Fatalf("ack failed for an unexpected reason: %s %s", out, stderr)
+		}
+		if content, err := os.ReadFile(filepath.Join(f.worktree, "change.txt")); err != nil || string(content) != "uncommitted edit" {
+			t.Fatalf("failed teardown did not preserve Mount edit: %q %v", content, err)
+		}
+		return
 	}
 	path := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "reports", "t1-probes", "probe.txt")
 	content, err := os.ReadFile(path)

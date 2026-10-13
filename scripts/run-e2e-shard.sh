@@ -26,6 +26,7 @@ assignments='
 1 TestStartupAndExplicitRecoveryDoNotDoubleRelaunch
 1 TestRecoveryRepairsRidersFromAnInterruptedGroupEpisode
 1 TestPiStreamDisconnectAutomaticallyResumesWithinBound
+1 TestPiStreamDisconnectTailBeginningInsideToolPanelAutomaticallyResumes
 1 TestT242OrdinaryToolOutputIsNotRetried
 1 TestT242QuotedRefusalTranscriptIsNotRetried
 1 TestT242IdenticalRepaintDoesNotStrandRecovery
@@ -37,6 +38,8 @@ assignments='
 1 TestUpStartsLeadAndSettlesRelaunchIntentDuringRestartBackoff
 1 TestFailedGroupAttemptRetriesAfterLeadStarts
 1 TestSetupWithoutHerdrServer
+1 TestBusyPiSteerPastQueuedMessageAndInterruptE2E
+1 TestRealPiInterruptStopsBusyTurnE2E
 1 TestT229RebuildPreservesStoppedProject
 2 TestLegacyRiderTabsAfterWorktreeUpgrade
 2 TestNoticeHandoffSurvivesHarnessCrashAndAvoidsRecordedReplay
@@ -83,8 +86,15 @@ assignments='
 3 TestWorkspaceScoutTeardownPreservesMemberAndRootAttachments
 3 TestMergedPRSnapshotsUnmergedFollowUp
 3 TestRosterRecoversRestartWithoutStartupHook
+3 TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots
 3 TestDownKeepsProjectStoppedUntilUp
 3 TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard
+3 TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved
+3 TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved
+3 TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary
+3 TestTeardownStopsRetainedShellByVerifiedIdentity
+3 TestTeardownPidfdLauncherHelper
+3 TestTeardownWithoutPidfdPreservesResourcesAndReportsCapability
 3 TestLookoutRestartsWithoutRecordedGeneration
 3 TestLandReadyBeforeMergeDoesNotRaiseLatePROpened
 3 TestMergeInterruptsFollowUpAndReleasesRider
@@ -92,7 +102,9 @@ assignments='
 3 TestConcurrentLookoutTeardownRaisesNoFalseReason
 3 TestReviewRejectsExplicitAuthorSessionResume
 3 TestFocusedRiderLaunch
+3 TestBuiltInInterruptKeysVerifyStoppedRiderForEachKindE2E
 3 TestPiStreamDisconnectIsNotNudgedIntoFocusedRider
+3 TestPiUnprefixedStreamDisconnectAfterEditAutomaticallyResumes
 3 TestT242QueuedLeadInstructionWins
 3 TestT242BackoffIsPersistedAndBounded
 3 TestT247RealPiSuccessfulGrepIsNotRetried
@@ -142,6 +154,12 @@ assignments='
 4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall
 4 TestT229SignalSnapshotFailure
 4 TestRosterSucceedsWhenObservationOnlyHitsTransientContention
+4 TestDoneTaskWithVanishedPaneCanBeDiscarded
+4 TestApprovedDiscardRefusesLiveAgentUntilIdentityPrerequisitesLand
+4 TestApprovedDiscardClosesAndVerifiesRecordedPR
+4 TestApprovedDiscardKeepsMountHeldWhenPRCloseFails
+4 TestApprovedDiscardRefusesMergedPR
+4 TestClosedPRDiscardRechecksForgeStateBeforeTeardown
 '
 
 validate_assignments() {
@@ -226,4 +244,4 @@ listed=$(go test -tags=e2e -list '^Test' ./internal/e2e)
 validate_assignments "$listed" "$assignments"
 pattern=$(printf '%s\n' "$assignments" | awk -v shard="$shard" '$1 == shard { if (count++) printf "|"; printf "%s", $2 } END { print "" }')
 printf 'Running E2E shard %s/4\n' "$shard"
-go test -tags=e2e -count=1 -timeout=8m ./internal/e2e -run "^(${pattern})$"
+go test -tags=e2e -count=1 -timeout=10m ./internal/e2e -run "^(${pattern})$"

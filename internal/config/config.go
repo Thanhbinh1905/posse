@@ -44,6 +44,7 @@ type Defaults struct {
 	RecoveryAttempts int      `toml:"recovery_attempts" json:"recovery_attempts"`
 	RecoveryBackoff  string   `toml:"recovery_backoff" json:"recovery_backoff"`
 	LandingMode      string   `toml:"landing_mode" json:"landing_mode"`
+	TargetBranch     string   `toml:"target_branch" json:"target_branch"`
 	MergeMethod      string   `toml:"merge_method" json:"merge_method"`
 	Forge            string   `toml:"forge" json:"forge"`
 	PRPoll           string   `toml:"pr_poll" json:"pr_poll"`
@@ -73,6 +74,7 @@ type Kind struct {
 	NoticeDelivery     string   `toml:"notice_delivery" json:"notice_delivery"`
 	BackgroundCommands bool     `toml:"background_commands" json:"background_commands"`
 	Steer              bool     `toml:"steer" json:"steer"`
+	InterruptKeys      []string `toml:"interrupt_keys" json:"interrupt_keys"`
 }
 
 // Notice delivery modes: how Notices reach a Lead of this kind. An empty value
@@ -108,9 +110,10 @@ type Autonomy struct {
 
 // Repository is the per-member policy of a workspace Project.
 type Repository struct {
-	LandingMode string   `toml:"landing_mode" json:"landing_mode"`
-	Gate        []string `toml:"gate" json:"gate"`
-	Forge       string   `toml:"forge" json:"forge"`
+	LandingMode  string   `toml:"landing_mode" json:"landing_mode"`
+	TargetBranch string   `toml:"target_branch" json:"target_branch"`
+	Gate         []string `toml:"gate" json:"gate"`
+	Forge        string   `toml:"forge" json:"forge"`
 }
 
 type Lowkey struct {
@@ -372,10 +375,10 @@ func defaultMap() map[string]any {
 			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "on_risk", "gate": []string{},
 		},
 		"kinds": map[string]any{
-			"claude":   map[string]any{"auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryLookout, "background_commands": true, "steer": true},
-			"codex":    map[string]any{"auto_approve_args": []string{"--dangerously-bypass-approvals-and-sandbox"}, "lead_auto_approve": true, "model_args": []string{"-m", "{model}"}, "effort_args": []string{"-c", "model_reasoning_effort={effort}"}, "resume_args": []string{"resume", "{session}"}, "system_prompt_args": []string{"-c", "developer_instructions={text}"}, "lead_args": []string{"--sandbox", "danger-full-access"}, "prepare": "codex-trust", "notice_delivery": NoticeDeliveryCodexQueue, "steer": true},
-			"pi":       map[string]any{"model_args": []string{"--model", "{model}"}, "effort_args": []string{"--thinking", "{effort}"}, "resume_args": []string{"--session", "{session}"}, "system_prompt_args": []string{"--append-system-prompt", "{file}"}, "notice_delivery": NoticeDeliveryPiExtension, "steer": true},
-			"opencode": map[string]any{"auto_approve_args": []string{"--auto"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "resume_args": []string{"--session", "{session}"}, "notice_delivery": NoticeDeliveryOpenCodePlugin},
+			"claude":   map[string]any{"auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryLookout, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},
+			"codex":    map[string]any{"auto_approve_args": []string{"--dangerously-bypass-approvals-and-sandbox"}, "lead_auto_approve": true, "model_args": []string{"-m", "{model}"}, "effort_args": []string{"-c", "model_reasoning_effort={effort}"}, "resume_args": []string{"resume", "{session}"}, "system_prompt_args": []string{"-c", "developer_instructions={text}"}, "lead_args": []string{"--sandbox", "danger-full-access"}, "prepare": "codex-trust", "notice_delivery": NoticeDeliveryCodexQueue, "steer": true, "interrupt_keys": []string{"esc"}},
+			"pi":       map[string]any{"model_args": []string{"--model", "{model}"}, "effort_args": []string{"--thinking", "{effort}"}, "resume_args": []string{"--session", "{session}"}, "system_prompt_args": []string{"--append-system-prompt", "{file}"}, "notice_delivery": NoticeDeliveryPiExtension, "steer": true, "interrupt_keys": []string{"esc"}},
+			"opencode": map[string]any{"auto_approve_args": []string{"--auto"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "resume_args": []string{"--session", "{session}"}, "notice_delivery": NoticeDeliveryOpenCodePlugin, "interrupt_keys": []string{"esc"}},
 		},
 		"profiles":         map[string]any{},
 		"dispatch_default": map[string]any{"use": ""},
@@ -387,16 +390,16 @@ func (c *Config) normalizeBuiltins() {
 		c.Kinds = map[string]Kind{}
 	}
 	if _, ok := c.Kinds["claude"]; !ok {
-		c.Kinds["claude"] = Kind{AutoApproveArgs: []string{"--dangerously-skip-permissions"}, LeadAutoApprove: true, ModelArgs: []string{"--model", "{model}"}, EffortArgs: []string{"--effort", "{effort}"}, ResumeArgs: []string{"--resume", "{session}"}, SystemPromptArgs: []string{"--append-system-prompt-file", "{file}"}, Prepare: "claude-trust", NoticeDelivery: NoticeDeliveryLookout, BackgroundCommands: true, Steer: true}
+		c.Kinds["claude"] = Kind{AutoApproveArgs: []string{"--dangerously-skip-permissions"}, LeadAutoApprove: true, ModelArgs: []string{"--model", "{model}"}, EffortArgs: []string{"--effort", "{effort}"}, ResumeArgs: []string{"--resume", "{session}"}, SystemPromptArgs: []string{"--append-system-prompt-file", "{file}"}, Prepare: "claude-trust", NoticeDelivery: NoticeDeliveryLookout, BackgroundCommands: true, Steer: true, InterruptKeys: []string{"ctrl+c"}}
 	}
 	if _, ok := c.Kinds["codex"]; !ok {
-		c.Kinds["codex"] = Kind{AutoApproveArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}, LeadAutoApprove: true, ModelArgs: []string{"-m", "{model}"}, EffortArgs: []string{"-c", "model_reasoning_effort={effort}"}, ResumeArgs: []string{"resume", "{session}"}, SystemPromptArgs: []string{"-c", "developer_instructions={text}"}, LeadArgs: []string{"--sandbox", "danger-full-access"}, Prepare: "codex-trust", NoticeDelivery: NoticeDeliveryCodexQueue, Steer: true}
+		c.Kinds["codex"] = Kind{AutoApproveArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}, LeadAutoApprove: true, ModelArgs: []string{"-m", "{model}"}, EffortArgs: []string{"-c", "model_reasoning_effort={effort}"}, ResumeArgs: []string{"resume", "{session}"}, SystemPromptArgs: []string{"-c", "developer_instructions={text}"}, LeadArgs: []string{"--sandbox", "danger-full-access"}, Prepare: "codex-trust", NoticeDelivery: NoticeDeliveryCodexQueue, Steer: true, InterruptKeys: []string{"esc"}}
 	}
 	if _, ok := c.Kinds["pi"]; !ok {
-		c.Kinds["pi"] = Kind{ModelArgs: []string{"--model", "{model}"}, EffortArgs: []string{"--thinking", "{effort}"}, ResumeArgs: []string{"--session", "{session}"}, SystemPromptArgs: []string{"--append-system-prompt", "{file}"}, NoticeDelivery: NoticeDeliveryPiExtension, Steer: true}
+		c.Kinds["pi"] = Kind{ModelArgs: []string{"--model", "{model}"}, EffortArgs: []string{"--thinking", "{effort}"}, ResumeArgs: []string{"--session", "{session}"}, SystemPromptArgs: []string{"--append-system-prompt", "{file}"}, NoticeDelivery: NoticeDeliveryPiExtension, Steer: true, InterruptKeys: []string{"esc"}}
 	}
 	if _, ok := c.Kinds["opencode"]; !ok {
-		c.Kinds["opencode"] = Kind{AutoApproveArgs: []string{"--auto"}, LeadAutoApprove: true, ModelArgs: []string{"--model", "{model}"}, ResumeArgs: []string{"--session", "{session}"}, NoticeDelivery: NoticeDeliveryOpenCodePlugin}
+		c.Kinds["opencode"] = Kind{AutoApproveArgs: []string{"--auto"}, LeadAutoApprove: true, ModelArgs: []string{"--model", "{model}"}, ResumeArgs: []string{"--session", "{session}"}, NoticeDelivery: NoticeDeliveryOpenCodePlugin, InterruptKeys: []string{"esc"}}
 	}
 	if c.Remuda.Clean == "" {
 		c.Remuda.Clean = "warm"

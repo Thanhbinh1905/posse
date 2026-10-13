@@ -36,12 +36,30 @@ func fixturePrefix(suffix string) string {
 // can reclaim only roots bearing our marker whose owning test has exited.
 func newFixtureRoot(t *testing.T, prefix string) string {
 	t.Helper()
-	parent := os.Getenv("POSSE_E2E_TMP_ROOT")
+	parent := os.Getenv("TMPDIR")
 	if parent == "" {
 		parent = os.TempDir()
-		if isTaskScratchRoot(parent) {
-			t.Setenv("POSSE_E2E_TMP_ROOT", parent)
+	}
+	if configuredRoot := os.Getenv("POSSE_E2E_TMP_ROOT"); configuredRoot != "" {
+		if !validTaskScratchRootPath(configuredRoot) {
+			t.Fatalf("unsafe POSSE_E2E_TMP_ROOT: %q", configuredRoot)
 		}
+		if _, err := os.Lstat(configuredRoot); errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(configuredRoot, 0o700); err != nil {
+				t.Fatalf("create isolated E2E scratch root %s: %v", configuredRoot, err)
+			}
+		} else if err != nil {
+			t.Fatalf("inspect isolated E2E scratch root %s: %v", configuredRoot, err)
+		}
+		if !validTaskScratchRoot(configuredRoot) {
+			t.Fatalf("unsafe POSSE_E2E_TMP_ROOT: %q", configuredRoot)
+		}
+		parent = configuredRoot
+	} else if isTaskScratchRoot(parent) {
+		if !validTaskScratchRoot(parent) {
+			t.Fatalf("unsafe Task scratch TMPDIR: %q", parent)
+		}
+		t.Setenv("POSSE_E2E_TMP_ROOT", parent)
 	}
 	return newFixtureRootAt(t, parent, prefix)
 }
@@ -49,16 +67,38 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
 	configuredRoot := filepath.Clean(os.Getenv("POSSE_E2E_TMP_ROOT"))
-	customRoot := configuredRoot != "." && filepath.Clean(parent) == configuredRoot && isTaskScratchRoot(configuredRoot)
-	configuredTemp := filepath.Clean(os.TempDir())
-	parentIsTemp := filepath.IsAbs(parent) && filepath.Clean(parent) == configuredTemp && configuredTemp != string(filepath.Separator)
-	if (parent != "/tmp" && parent != "/var/tmp" && !customRoot && !parentIsTemp) || !strings.HasPrefix(prefix, "posse-e2e-") {
+	parent, err := filepath.Abs(parent)
+	if err != nil {
+		t.Fatalf("resolve E2E fixture parent: %v", err)
+	}
+	parent = filepath.Clean(parent)
+	customRoot := configuredRoot != "." && parent == configuredRoot && validTaskScratchRoot(configuredRoot)
+	tmpDir := os.Getenv("TMPDIR")
+	if tmpDir == "" {
+		tmpDir = os.TempDir()
+	}
+	tmpDir, err = filepath.Abs(tmpDir)
+	if err != nil {
+		t.Fatalf("resolve E2E TMPDIR: %v", err)
+	}
+	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || parent == filepath.Clean(tmpDir)
+	if (!parentIsTemp && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
-	if customRoot {
-		if err := os.MkdirAll(parent, 0o700); err != nil {
-			t.Fatalf("create isolated E2E scratch root %s: %v", parent, err)
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatalf("resolve E2E fixture parent %s: %v", parent, err)
+	}
+	insideTemp := false
+	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
+		relative, err := filepath.Rel(tempRoot, resolvedParent)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			insideTemp = true
+			break
 		}
+	}
+	if (!insideTemp && parent != filepath.Clean(tmpDir)) || !strings.HasPrefix(prefix, "posse-e2e-") {
+		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {
 		t.Fatalf("reclaim abandoned E2E fixtures: %v", err)
@@ -109,6 +149,22 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	return root
 }
 
+func validTaskScratchRootPath(root string) bool {
+	return filepath.Clean(root) == root && filepath.Dir(root) == "/tmp" && strings.HasPrefix(filepath.Base(root), "posse-") && strings.HasSuffix(filepath.Base(root), "-scratch")
+}
+
+func validTaskScratchRoot(root string) bool {
+	if !validTaskScratchRootPath(root) {
+		return false
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	return err == nil && resolved == root
+}
+
 func TestIsolatedHerdrAcceptsDefaultTaskScratchTMPDIR(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("requires Linux procfs to keep the non-/tmp fixture physically inside Task scratch")
@@ -131,8 +187,19 @@ func TestIsolatedHerdrAcceptsDefaultTaskScratchTMPDIR(t *testing.T) {
 	t.Setenv("POSSE_E2E_TMP_ROOT", "")
 
 	root := newFixtureRoot(t, herdr.TestRootName())
-	if filepath.Dir(root) != configuredTMPDIR || strings.HasPrefix(root, "/tmp/") {
-		t.Fatalf("isolated E2E fixture is not directly under the non-/tmp Task TMPDIR: %q", root)
+	resolvedTMPDir, err := filepath.EvalSymlinks(configuredTMPDIR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedParent != resolvedTMPDir {
+		t.Fatalf("isolated E2E fixture is not directly under the Task TMPDIR: root=%q parent=%q TMPDIR=%q", root, resolvedParent, resolvedTMPDir)
+	}
+	if relative, err := filepath.Rel(taskScratch, resolvedParent); err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		t.Fatalf("isolated E2E fixture escaped Task scratch: root=%q parent=%q relative=%q err=%v", root, resolvedParent, relative, err)
 	}
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)

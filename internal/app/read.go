@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -108,6 +107,7 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 	for _, project := range projects {
 		projectName := project.Name
 		cfg, err := s.prepareProject(ctx.Context, db, project)
+		err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 		if err != nil {
 			summaries = append(summaries, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
 			continue
@@ -145,6 +145,7 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 
 func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store.Project, full bool) error {
 	cfg, err := s.prepareProject(ctx.Context, db, project)
+	err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 	if err != nil {
 		return err
 	}
@@ -354,6 +355,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 		for _, project := range projects {
 			projectName := project.Name
 			cfg, err := s.prepareProject(ctx.Context, db, project)
+			err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 			if err != nil {
 				rows = append(rows, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
 				continue
@@ -384,11 +386,9 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
-		if !store.IsOnlyBusy(err) {
-			return err
-		}
-		fmt.Fprintln(ctx.ErrOut, "Some Task observations were deferred; showing their last recorded state.")
+	_, err = s.prepareProject(ctx.Context, db, project)
+	if err = deferObservationContention(ctx, err, "Some Task observations were deferred; showing their last recorded state."); err != nil {
+		return err
 	}
 	tasks, err := db.Tasks(ctx.Context, project.ID, false)
 	if err != nil {
@@ -446,11 +446,13 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
+	var preparationErr error
 	if project.IsWorkspace() {
-		if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
-			return err
-		}
-	} else if _, err := s.prepareProjectInspection(ctx.Context, db, project); err != nil {
+		_, preparationErr = s.prepareProjectObservation(ctx.Context, db, project)
+	} else {
+		_, preparationErr = s.prepareProjectInspection(ctx.Context, db, project)
+	}
+	if err := deferObservationContention(ctx, preparationErr, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
@@ -534,7 +536,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		rows := make([]any, 0, len(repos))
 		for _, repo := range repos {
-			row := axi.Object{{Key: "repo", Value: repo.Repo}, {Key: "mode", Value: repo.LandingMode}, {Key: "state", Value: repo.State}, {Key: "pr_url", Value: repo.PRURL}, {Key: "pr_state", Value: ""}}
+			row := axi.Object{{Key: "repo", Value: repo.Repo}, {Key: "mode", Value: repo.LandingMode}, {Key: "state", Value: repo.State}, {Key: "pr_url", Value: repo.PRURL}, {Key: "pr_state", Value: ""}, {Key: "target_branch", Value: repo.TargetBranch}}
 			if repo.PRURL != "" {
 				if observation, err := db.LatestMemberPRObservation(ctx.Context, task.ID, repo.Repo); err == nil {
 					row[4].Value = observation.State
@@ -625,6 +627,9 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["launch_identity_history_known"] = launchHistoryComplete(task, launchIdentities)
 		view["dispatch_rule"] = task.DispatchRule
 		view["landing_mode"] = task.LandingMode
+		if task.Type == "ship" && !project.IsWorkspace() {
+			view["target_branch"] = taskTargetBranch(project, task)
+		}
 		if task.Branch != "posse/"+taskIDString(task.Seq) {
 			view["branch"] = task.Branch
 		}

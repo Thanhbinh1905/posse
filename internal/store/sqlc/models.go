@@ -303,6 +303,7 @@ type Task struct {
 	IdleSince            int64
 	ShortName            string
 	AgentSessionKind     string
+	TargetBranch         string
 }
 
 type TaskLaunchIdentity struct {
@@ -335,6 +336,22 @@ type TaskRepo struct {
 	PrUrl        string
 	LandedRef    string
 	UpdatedAt    int64
+	TargetBranch string
+}
+
+type TaskTargetChange struct {
+	ID           int64
+	ProjectID    int64
+	TaskID       int64
+	Repo         string
+	SourceTaskID int64
+	FromBranch   string
+	ToBranch     string
+	PrUrl        string
+	Status       string
+	Error        string
+	CreatedAt    int64
+	CompletedAt  int64
 }
 
 type Transition struct {

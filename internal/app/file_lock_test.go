@@ -29,6 +29,10 @@ func TestContendedFileLockIsBoundedRetryableAndDoesNotStealOwnership(t *testing.
 	if !store.IsBusy(err) || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("lock error = %v, want typed contention", err)
 	}
+	var lockWait *fileLockWaitError
+	if !errors.As(err, &lockWait) {
+		t.Fatalf("lock error = %v, want typed file-lock contention", err)
+	}
 	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
 		t.Fatalf("lock wait ignored caller's bound: %s", elapsed)
 	}

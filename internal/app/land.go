@@ -208,7 +208,7 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if err := runLandStep("merge", func() error { return mergeLocal(ctx.Context, project, task) }); err != nil {
 		return err
 	}
-	landedRef, err := gitOutput(ctx.Context, project.Root, "rev-parse", "refs/heads/"+project.DefaultBranch)
+	landedRef, err := gitOutput(ctx.Context, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, task))
 	if err != nil {
 		return err
 	}
@@ -286,11 +286,11 @@ func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Pro
 		}
 		merged := false
 		if current.GatedSHA != "" {
-			_, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", current.GatedSHA, "refs/heads/"+project.DefaultBranch)
+			_, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", current.GatedSHA, "refs/heads/"+taskTargetBranch(project, current))
 			merged = mergeErr == nil
 		}
 		if merged {
-			landedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+project.DefaultBranch)
+			landedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, current))
 			if err != nil {
 				return err
 			}
@@ -326,8 +326,13 @@ func verifyFastForward(ctx context.Context, project store.Project, task store.Ta
 	if task.WorktreePath == "" || task.Branch == "" {
 		return axi.Failure("land_refused", "Task has no worktree or branch", false)
 	}
-	if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", "refs/heads/"+project.DefaultBranch, "refs/heads/"+task.Branch); err != nil {
-		return axi.Failure("needs_rebase", "Task branch is not a fast-forward of the Project default branch", false, "Rebase the Task branch on "+project.DefaultBranch+" and signal done again")
+	targetRef, err := taskTargetRef(ctx, project, task)
+	if err != nil {
+		return axi.Failure("target_branch_unavailable", "could not inspect Task target branch "+taskTargetBranch(project, task), true, err.Error())
+	}
+	if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", targetRef, "refs/heads/"+task.Branch); err != nil {
+		branch := taskTargetBranch(project, task)
+		return axi.Failure("needs_rebase", "Task branch is not a fast-forward of target branch "+branch, false, "Rebase the Task branch on origin/"+branch+" and signal done again")
 	}
 	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain")
 	if err != nil {
@@ -340,24 +345,20 @@ func verifyFastForward(ctx context.Context, project store.Project, task store.Ta
 }
 
 func mergeLocal(ctx context.Context, project store.Project, task store.Task) error {
+	targetBranch := taskTargetBranch(project, task)
+	targetRef := "refs/heads/" + targetBranch
 	worktrees, err := gitOutput(ctx, project.Root, "worktree", "list", "--porcelain")
 	if err != nil {
 		return err
 	}
-	checkedOut := false
-	for _, line := range strings.Split(worktrees, "\n") {
-		if strings.TrimSpace(line) == "branch refs/heads/"+project.DefaultBranch {
-			checkedOut = true
-			break
-		}
-	}
+	checkedOut := worktreeHasBranch(worktrees, targetBranch)
 	if checkedOut {
 		branch, err := gitOutput(ctx, project.Root, "branch", "--show-current")
 		if err != nil {
 			return err
 		}
-		if branch != project.DefaultBranch {
-			return axi.Failure("land_target_busy", "default branch is checked out in a different worktree", false, "Switch the Project checkout to "+project.DefaultBranch+" and retry")
+		if branch != targetBranch {
+			return axi.Failure("land_target_busy", "target branch is checked out in a different worktree", false, "Switch the Project checkout to "+targetBranch+" and retry")
 		}
 		status, err := gitOutput(ctx, project.Root, "status", "--porcelain")
 		if err != nil {
@@ -371,7 +372,12 @@ func mergeLocal(ctx context.Context, project store.Project, task store.Task) err
 		}
 		return nil
 	}
-	output, err := gitFetch(ctx, project.Root, ".", task.GatedSHA+":refs/heads/"+project.DefaultBranch)
+	if targetBranch != project.DefaultBranch {
+		if err := ensureLocalTaskTarget(ctx, project, task); err != nil {
+			return axi.Failure("needs_rebase", "could not update target branch "+targetBranch, false, err.Error())
+		}
+	}
+	output, err := gitFetch(ctx, project.Root, ".", task.GatedSHA+":"+targetRef)
 	if err != nil {
 		details := strings.TrimSpace(output)
 		if details == "" {
@@ -390,7 +396,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 1 {
 		return axi.Usage("unsaddle requires one Task id")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -402,33 +408,45 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
-	if err != nil {
-		var commandError *axi.Error
-		approvedDiscard := parsed.Bool("discard") && strings.TrimSpace(parsed.Flags["user-approved"]) != ""
-		if !approvedDiscard || !errors.As(err, &commandError) || commandError.Code != "agent_not_ready" {
-			return err
-		}
-		// Project preparation can fail while delivering to an agent that is
-		// already exiting. An approved discard continues only after checking
-		// foreground ownership before any destructive Teardown work.
-	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
 	}
-	discardable := task.State == store.StateFailed || task.State == store.StateLost || task.State == store.StateStalled
-	if !discardable && task.State != store.StateLanded && task.State != store.StateReported {
+	if task.State == store.StateTornDown {
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "already_torn_down", Value: true}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released Mounts"}}})
+	}
+	quote := parsed.Flags["user-approved"]
+	if parsed.Bool("discard") {
+		if strings.TrimSpace(quote) == "" {
+			return axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
+		}
+		if !store.IsApprovedDiscardSourceState(task.State) || task.State == store.StateLanded {
+			return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded directly", false)
+		}
+		if err := s.requireNoLiveTaskAgent(ctx.Context, project, task); err != nil {
+			return err
+		}
+		cfg, err := config.Load(home, project.Name)
+		if err != nil {
+			return configError(err)
+		}
+		result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, true, quote)
+		if err != nil {
+			return err
+		}
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released Mounts"}}})
+	}
+	if store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateLanded {
+		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false, "Pass `--discard --user-approved \"<User's words>\"`")
+	}
+	if task.State != store.StateLanded && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
-	if discardable && !parsed.Bool("discard") {
-		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false)
+	cfg, err := s.prepareProject(ctx.Context, db, project)
+	if err != nil {
+		return err
 	}
-	quote := strings.TrimSpace(parsed.Flags["user-approved"])
-	if discardable && quote == "" {
-		return axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
-	}
-	result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, discardable, quote)
+	result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, false, "")
 	if err != nil {
 		return err
 	}
@@ -437,7 +455,18 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 
 func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string) (unsaddleResult, error) {
 	result := unsaddleResult{}
-	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "unsaddle", marshalJSON(map[string]any{"discard": discardable}))
+	if discardable {
+		if strings.TrimSpace(quote) == "" {
+			return result, axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
+		}
+		if !store.IsApprovedDiscardSourceState(task.State) {
+			return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
+		}
+		if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
+			return result, err
+		}
+	}
+	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "unsaddle", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote}))
 	if err != nil {
 		return result, axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
@@ -457,16 +486,47 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if discardable && !store.IsApprovedDiscardSourceState(task.State) {
 		return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
 	}
+	if discardable {
+		if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
+			return result, err
+		}
+	}
 	mountHeld, err := taskMountHeldBy(ctx, db, task)
 	if err != nil {
 		return result, err
 	}
+	var discardPRs []discardPullRequest
 	if discardable {
-		if mountHeld {
-			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
-				return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process ownership", err)
-			}
+		discardPRs, err = s.discardPullRequests(ctx, db, project, task)
+		if err != nil {
+			return result, err
 		}
+		if err := s.requireDiscardPullRequestsUnmerged(ctx, db, discardPRs, cfg); err != nil {
+			return result, err
+		}
+	}
+	home, err := s.homePath()
+	if err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task artifact access", err)
+	}
+	var processAuthorization *mountProcessAuthorization
+	if !discardable && s.Herdr != nil && task.AgentName != "" && mountHeld {
+		processAuthorization = newMountProcessAuthorization()
+		if err := s.verifyMountForegroundOwnershipWithAuthorization(ctx, db, project, task, processAuthorization); err != nil {
+			processAuthorization.Close()
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Mount process ownership", err)
+		}
+	}
+	defer func() {
+		if processAuthorization != nil {
+			processAuthorization.Close()
+		}
+	}()
+	panePlan, err := s.planTaskPaneTeardown(ctx, project, task)
+	if err != nil {
+		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane inspection", err)
+	}
+	if discardable {
 		branchSHA := ""
 		if project.IsWorkspace() {
 			var tipsErr error
@@ -484,21 +544,45 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, err
 		}
 	}
-	home, err := s.homePath()
-	if err != nil {
-		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task artifact access", err)
-	}
 	if discardable {
 		if err := s.runIntentStep(ctx, db, intent, "discard.capture", func() error {
 			return s.captureDiscardTips(ctx, db, home, project, task)
 		}); err != nil {
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "discard tip capture", err)
 		}
+		if err := s.closeAndVerifyDiscardPullRequests(ctx, db, discardPRs, cfg); err != nil {
+			return result, s.unsaddleDiscardIncomplete(ctx, db, project, task, "recorded pull request closure", err)
+		}
+	}
+	var stopped []string
+	if !discardable {
+		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
+			if mountHeld {
+				mountStopped, stopErr := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
+				if stopErr != nil {
+					return stopErr
+				}
+				stopped = append(stopped, mountStopped...)
+			}
+			scratchStopped, stopErr := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization)
+			if stopErr != nil {
+				return stopErr
+			}
+			stopped = append(stopped, scratchStopped...)
+			return nil
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "Task process shutdown", err)
+		}
 	}
 	var paneResult teardownPanes
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
+		if discardable {
+			if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
+				return err
+			}
+		}
 		var closeErr error
-		paneResult, closeErr = s.closeTaskPanes(ctx, project, task)
+		paneResult, closeErr = s.verifyTaskPanesClosed(ctx, project, task, panePlan)
 		if closeErr == nil {
 			s.relabelProjectTabs(ctx, db, project)
 		}
@@ -507,11 +591,19 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane closure", err)
 	}
-	var stopped []string
 	if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
-		var stopErr error
-		stopped, stopErr = stopTaskOwnedProcesses(ctx, db, home, project, task)
-		return stopErr
+		if discardable {
+			return verifyNoTaskOwnedProcesses(ctx, db, home, project, task)
+		}
+		if !mountHeld {
+			return nil
+		}
+		newlyStopped, err := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
+		if err != nil {
+			return err
+		}
+		stopped = append(stopped, newlyStopped...)
+		return nil
 	}); err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task process shutdown", err)
 	}
@@ -587,24 +679,35 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		}
 	}
 	if err := s.runIntentStep(ctx, db, intent, "scratch.remove", func() error {
-		newlyStopped, err := stopTaskOwnedProcesses(ctx, db, home, project, task)
-		if err != nil {
-			return err
+		if discardable {
+			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
+				return err
+			}
+		} else {
+			newlyStopped, err := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization)
+			if err != nil {
+				return err
+			}
+			stopped = append(stopped, newlyStopped...)
 		}
-		stopped = append(stopped, newlyStopped...)
 		return removeTaskScratch(home, project, task)
 	}); err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task scratch removal", err)
 	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
+		latestPanes, paneErr := s.verifyTaskPanesClosed(ctx, project, task, panePlan)
+		if paneErr != nil {
+			return paneErr
+		}
+		paneResult = latestPanes
 		if discardable && mountHeld {
-			if err := s.verifyMountForegroundOwnership(ctx, db, project, task); err != nil {
+			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
 				return err
 			}
 		}
 		var releaseErr error
-		killed, releaseErr = releaseMount(ctx, db, project, task, cfg.Remuda.Clean, discardable)
+		killed, releaseErr = releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, discardable, processAuthorization)
 		return releaseErr
 	})
 	if err != nil {
@@ -671,7 +774,11 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
 					merged := false
-					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, "refs/heads/"+project.DefaultBranch); mergeErr == nil {
+					targetRef, targetErr := landedTaskTargetRef(ctx, project, task)
+					if targetErr != nil {
+						return targetErr
+					}
+					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, targetRef); mergeErr == nil {
 						merged = true
 					}
 					if task.State == store.StateLanded && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {

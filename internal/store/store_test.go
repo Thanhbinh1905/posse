@@ -190,7 +190,7 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := []State{StateFailed, StateLost, StateStalled, StateReported, StateLanded}
+	allowed := []State{StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost, StateReported, StateLanded}
 	for index, state := range allowed {
 		t.Run(string(state), func(t *testing.T) {
 			if !IsApprovedDiscardSourceState(state) {
@@ -203,10 +203,23 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
-				t.Fatal(err)
+			if state != StateSpawning {
+				if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			switch state {
+			case StateSpawning, StateWorking:
+			case StateNeedsDecision:
+				err = db.Transition(ctx, id, StateWorking, state, "worker", "needs decision")
+			case StateBlocked:
+				err = db.Transition(ctx, id, StateWorking, state, "herdr", "blocked")
+			case StateDone:
+				err = db.Transition(ctx, id, StateWorking, state, "worker", "done")
+			case StateLanding:
+				if err = db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err == nil {
+					err = db.Transition(ctx, id, StateDone, state, "cli", "landing")
+				}
 			case StateFailed:
 				err = db.Transition(ctx, id, StateWorking, state, "worker", "failed")
 			case StateLost:
@@ -228,11 +241,24 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if state == StateReported || state == StateLanded {
+				if err := validateTransitionSource(state, StateTornDown, "cli"); err != nil {
+					t.Fatalf("ordinary completion source rejected for %s: %v", state, err)
+				}
+			} else if err := validateTransitionSource(state, StateTornDown, "cli"); err == nil {
+				t.Fatalf("ordinary teardown source accepted from unlanded %s", state)
+			}
 			if err := db.Transition(ctx, id, state, StateTornDown, "user", "discarded without recording approval"); err == nil {
 				t.Fatalf("Transition bypassed approval from %s", state)
 			}
 			if err := db.RecordApproval(ctx, id, "discard", "User approved discard"); err != nil {
 				t.Fatal(err)
+			}
+			if err := db.TransitionWithApproval(ctx, id, state, StateTornDown, "user", "discarded", "land", "User approved discard"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
+				t.Fatalf("TransitionWithApproval accepted non-discard action from %s: %v", state, err)
+			}
+			if err := db.TransitionAfterApproval(ctx, id, state, StateTornDown, "user", "discarded", "land"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
+				t.Fatalf("TransitionAfterApproval accepted non-discard action from %s: %v", state, err)
 			}
 			if err := db.TransitionAfterApproval(ctx, id, state, StateTornDown, "user", "discarded", "discard"); err != nil {
 				t.Fatalf("approved transition from %s: %v", state, err)
@@ -240,7 +266,7 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 		})
 	}
 
-	for _, state := range []State{StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateDone, StateLanding, StateTornDown} {
+	for _, state := range []State{StateTornDown} {
 		t.Run("refused_"+string(state), func(t *testing.T) {
 			if IsApprovedDiscardSourceState(state) {
 				t.Fatalf("%s unexpectedly qualifies for approved discard", state)
@@ -362,8 +388,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 37 {
-		t.Fatalf("applied Goose migration version = %d, want 37", version)
+	if version != 39 {
+		t.Fatalf("applied Goose migration version = %d, want 39", version)
 	}
 }
 
@@ -422,12 +448,15 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`DROP TABLE task_target_changes`,
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP TABLE notice_delivery_receipts`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
+		`ALTER TABLE task_repos DROP COLUMN target_branch`,
+		`ALTER TABLE tasks DROP COLUMN target_branch`,
 		`DROP TABLE pr_task_watch_failures`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
@@ -505,11 +534,14 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE task_target_changes`,
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
+		`ALTER TABLE task_repos DROP COLUMN target_branch`,
+		`ALTER TABLE tasks DROP COLUMN target_branch`,
 		`DROP TABLE pr_task_watch_failures`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
@@ -654,6 +686,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE task_target_changes`,
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_reason`,
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_status`,
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_checked_at`,
@@ -666,6 +699,8 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`DROP TABLE publish_pre_push_heads`,
 		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
+		`ALTER TABLE task_repos DROP COLUMN target_branch`,
+		`ALTER TABLE tasks DROP COLUMN target_branch`,
 		`DROP TABLE pr_task_watch_failures`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
 	} {
@@ -769,9 +804,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != 37 {
+	if version != 39 {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want 37", version)
+		t.Fatalf("initial Goose migration version = %d, want 39", version)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -808,8 +843,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 37 {
-		t.Fatalf("reopened Goose migration version = %d, want 37", version)
+	if version != 39 {
+		t.Fatalf("reopened Goose migration version = %d, want 39", version)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
@@ -847,17 +882,17 @@ func TestTaskShortNamePersistsThroughDatabaseAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", ShortName: "worker-tree", LandingMode: "local"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", ShortName: "worker-tree", LandingMode: "local", TargetBranch: "staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	task, err := db.TaskByID(ctx, project.ID, id)
-	if err != nil || task.ShortName != "worker-tree" {
-		t.Fatalf("Task short name = %q, %v", task.ShortName, err)
+	if err != nil || task.ShortName != "worker-tree" || task.TargetBranch != "staging" {
+		t.Fatalf("Task short name or target branch = %q / %q, %v", task.ShortName, task.TargetBranch, err)
 	}
 	data, err := os.ReadFile(db.TaskSnapshotPath(project.Name, task.Seq))
-	if err != nil || !strings.Contains(string(data), "short_name = \"worker-tree\"") {
-		t.Fatalf("Task snapshot short name missing: %q, %v", data, err)
+	if err != nil || !strings.Contains(string(data), "short_name = \"worker-tree\"") || !strings.Contains(string(data), "target_branch = \"staging\"") {
+		t.Fatalf("Task snapshot short name or target branch missing: %q, %v", data, err)
 	}
 }
 

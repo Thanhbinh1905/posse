@@ -304,7 +304,7 @@ const (
 // tearing down a Task from this state. Keep this predicate centralized so the
 // allowed set can expand without changing each discard path independently.
 func IsApprovedDiscardSourceState(state State) bool {
-	return oneOfState(state, StateFailed, StateLost, StateStalled, StateReported, StateLanded)
+	return oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost, StateReported, StateLanded)
 }
 
 func taskAcceptsInstruction(state State, taskType string) bool {
@@ -315,13 +315,13 @@ func taskAcceptsInstruction(state State, taskType string) bool {
 }
 
 var transitions = map[State]map[State]bool{
-	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
-	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateLanded: true},
-	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
-	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true},
+	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
+	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateLanded: true, StateTornDown: true},
+	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
+	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
 	StateStalled:       {StateWorking: true, StateTornDown: true, StateLost: true, StateLanded: true},
-	StateDone:          {StateLanding: true, StateLanded: true, StateReported: true, StateWorking: true},
-	StateLanding:       {StateLanded: true, StateDone: true, StateWorking: true},
+	StateDone:          {StateLanding: true, StateLanded: true, StateReported: true, StateWorking: true, StateTornDown: true},
+	StateLanding:       {StateLanded: true, StateDone: true, StateWorking: true, StateTornDown: true},
 	StateLanded:        {StateTornDown: true},
 	StateReported:      {StateTornDown: true},
 	StateFailed:        {StateWorking: true, StateTornDown: true, StateLanded: true},
@@ -356,7 +356,7 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 }
 
 func (db *DB) TransitionWithApproval(ctx context.Context, taskID int64, expected, next State, source, note, action, quote string) error {
-	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" {
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
 	}
 	if strings.TrimSpace(quote) == "" {
@@ -414,7 +414,7 @@ func (db *DB) LatestApprovalQuote(ctx context.Context, taskID int64, action stri
 }
 
 func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
-	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" {
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
 	}
 	tx, err := db.beginTxWithRetry(ctx)
@@ -488,7 +488,7 @@ func validateTransitionSource(from, to State, source string) error {
 		expected = "cli"
 	case to == StateTornDown && source == "user" && IsApprovedDiscardSourceState(from):
 		expected = "user"
-	case to == StateTornDown && oneOfState(from, StateFailed, StateLost, StateStalled):
+	case to == StateTornDown && oneOfState(from, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost):
 		expected = "user"
 	}
 	if source != expected {
@@ -524,7 +524,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		ProjectID: projectID, Seq: int64(task.Seq), Type: task.Type, ReviewsTaskID: nullableID(task.ReviewsTaskID),
 		Title: task.Title, ShortName: task.ShortName, State: string(task.State), Profile: task.Profile, DispatchRule: task.DispatchRule,
 		LandingMode: task.LandingMode, AutonomyReview: task.AutonomyReview, AutonomyLand: task.AutonomyLand,
-		Branch: task.Branch, BaseRef: task.BaseRef, WorktreePath: task.WorktreePath,
+		Branch: task.Branch, BaseRef: task.BaseRef, TargetBranch: task.TargetBranch, WorktreePath: task.WorktreePath,
 		HerdrWorkspaceID: task.HerdrWorkspaceID, PaneID: task.PaneID, PaneLabel: task.PaneLabel,
 		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, LandedRef: task.LandedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
@@ -589,6 +589,7 @@ type Task struct {
 	AutonomyLand         string `toml:"autonomy_land"`
 	Branch               string `toml:"branch"`
 	BaseRef              string `toml:"base_ref"`
+	TargetBranch         string `toml:"target_branch"`
 	WorktreePath         string `toml:"worktree_path"`
 	MountID              int64  `toml:"mount_id"`
 	Launches             int    `toml:"launches"`
@@ -677,10 +678,10 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 		}
 		seq++
 	}
-	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,worktree_path,pane_label,created_at,updated_at)
-VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?) RETURNING id`,
+	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at)
+VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?) RETURNING id`,
 		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, task.Profile, task.DispatchRule,
-		task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.WorktreePath,
+		task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
 		projectName, seq, now, now).Scan(&id)
 	if err != nil {
 		return 0, 0, err
@@ -1387,8 +1388,17 @@ func (db *DB) HasQueuedMessages(ctx context.Context, projectID int64) (bool, err
 }
 
 func (db *DB) OldestQueuedMessage(ctx context.Context, taskID int64) (Message, error) {
+	return db.queuedMessage(ctx, taskID, "")
+}
+
+func (db *DB) OldestSteerableQueuedMessage(ctx context.Context, taskID int64) (Message, error) {
+	return db.queuedMessage(ctx, taskID, " AND wait_for_idle=0")
+}
+
+func (db *DB) queuedMessage(ctx context.Context, taskID int64, predicate string) (Message, error) {
 	var message Message
-	err := db.QueryRowContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle FROM messages WHERE task_id=? AND status='queued' ORDER BY created_at, id LIMIT 1`, taskID).
+	query := `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle FROM messages WHERE task_id=? AND status='queued'` + predicate + ` ORDER BY created_at, id LIMIT 1`
+	err := db.QueryRowContext(ctx, query, taskID).
 		Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, ErrNotFound
@@ -1953,7 +1963,7 @@ func taskFromDB(row dbgen.Task) Task {
 	return Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, ReviewsTaskID: reviewsTaskID,
 		Title: row.Title, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule,
 		LandingMode: row.LandingMode, AutonomyReview: row.AutonomyReview, AutonomyLand: row.AutonomyLand,
-		Branch: row.Branch, BaseRef: row.BaseRef, WorktreePath: row.WorktreePath, MountID: mountID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
+		Branch: row.Branch, BaseRef: row.BaseRef, TargetBranch: row.TargetBranch, WorktreePath: row.WorktreePath, MountID: mountID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
 		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
 		PRURL: row.PrUrl, LandedRef: row.LandedRef, LastOutputHash: row.LastOutputHash,
@@ -1963,13 +1973,41 @@ func taskFromDB(row dbgen.Task) Task {
 func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {
 	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
 	defer cancel()
-	params := dbgen.UpdateTaskObservationParams{PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentSessionKind: agentSessionKind, AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince, UpdatedAt: time.Now().UnixMilli(), ID: taskID}
+	unchanged, err := db.taskObservationMatches(ctx, taskID, paneID, workspaceID, agentSession, agentSessionKind, agentAbsentSince, idleSince, agentServerStartedAt)
+	if err != nil {
+		return fmt.Errorf("check Task observation: %w", err)
+	}
+	if unchanged {
+		// A prior database update may have committed before its snapshot write failed.
+		return db.PersistTask(ctx, taskID)
+	}
+	params := dbgen.UpdateTaskObservationParams{
+		PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentSessionKind: agentSessionKind,
+		AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince,
+		UpdatedAt: time.Now().UnixMilli(), ID: taskID,
+		PaneID_2: paneID, HerdrWorkspaceID_2: workspaceID, AgentSession_2: agentSession, AgentSessionKind_2: agentSessionKind,
+		AgentAbsentSince_2: agentAbsentSince, AgentServerStartedAt_2: agentServerStartedAt, IdleSince_2: idleSince,
+	}
 	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateTaskObservation(ctx, params)
 	}); err != nil {
-		return err
+		return fmt.Errorf("write Task observation: %w", err)
 	}
 	return db.PersistTask(ctx, taskID)
+}
+
+func (db *DB) taskObservationMatches(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) (bool, error) {
+	var currentPaneID, currentWorkspaceID, currentAgentSession, currentAgentSessionKind, currentAgentServerStartedAt string
+	var currentAgentAbsentSince, currentIdleSince int64
+	err := db.QueryRowContext(ctx, `SELECT pane_id, herdr_workspace_id, agent_session, agent_session_kind, agent_absent_since, idle_since, agent_server_started_at FROM tasks WHERE id=?`, taskID).Scan(
+		&currentPaneID, &currentWorkspaceID, &currentAgentSession, &currentAgentSessionKind, &currentAgentAbsentSince, &currentIdleSince, &currentAgentServerStartedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, retryableContention(err)
+	}
+	return currentPaneID == paneID && currentWorkspaceID == workspaceID && currentAgentSession == agentSession && currentAgentSessionKind == agentSessionKind && currentAgentAbsentSince == agentAbsentSince && currentIdleSince == idleSince && currentAgentServerStartedAt == agentServerStartedAt, nil
 }
 
 func (db *DB) UpdateProjectObservation(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) error {
@@ -1981,7 +2019,10 @@ func (db *DB) UpdateProjectObservation(ctx context.Context, projectID int64, pan
 	if err != nil || unchanged {
 		return err
 	}
-	params := dbgen.UpdateProjectObservationParams{LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID}
+	params := dbgen.UpdateProjectObservationParams{
+		LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID,
+		LeadPaneID_2: paneID, HerdrWorkspaceID_2: workspaceID, LeadAbsentSince_2: absentSince,
+	}
 	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateProjectObservation(ctx, params)
 	}); err != nil {
