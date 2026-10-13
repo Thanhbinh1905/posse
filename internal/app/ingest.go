@@ -481,7 +481,7 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 		if (task.State == store.StateDone && task.Type != "ship") || task.State == store.StateReported || task.State == store.StateLanded || task.State == store.StateTornDown || task.State == store.StateFailed || task.State == store.StateLost {
 			continue
 		}
-		active, err := db.HasDeliveryInProgress(ctx, task.ID)
+		active, err := db.HasDeliveryInProgress(ctx, task.ID, currentTime()-deliveryClaimTimeout.Milliseconds())
 		if err != nil {
 			return err
 		}
