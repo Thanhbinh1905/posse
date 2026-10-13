@@ -7,13 +7,12 @@
 ## Decision
 
 - Configure the Herdr logical key sequence in `kinds.<kind>.interrupt_keys`. Defaults are Ctrl+C for Claude Code and Escape for Codex, Pi and OpenCode. Unknown kinds have no default and must be configured explicitly.
-- Send abort keys only to an unfocused busy Rider. For Pi, a standalone `Auto-compacting...` line on the current visible pane may identify a busy turn when Herdr reports `unknown`; historical or quoted mentions do not. Do not send keys to a blocked dialog or an idle composer.
+- Send abort keys only to an unfocused busy Rider. For Pi, visible `Auto-compacting` output may identify a busy turn when Herdr reports `unknown`. Do not send keys to a blocked dialog or an idle composer.
 - Poll the pane for up to three seconds. Report interruption as verified only after the busy state ends or the pane disappears; otherwise return `interrupt_unverified`.
 - Keep ordinary steering separate from interruption. `posse send <task> --interrupt <message>` is the explicit abort-and-redirect path: claim queued messages before sending abort keys, verify the turn stopped, deliver the redirect, then restore the queued messages in their original order. This prevents the idle event caused by interruption from racing background delivery.
-- Add `posse unsend <message-id>` for atomic withdrawal while a message is still `queued`; its project preparation does not deliver messages. Claimed or submitting messages cannot be withdrawn.
+- Add `posse unsend <message-id>` for atomic withdrawal while a message is still `queued`; claimed or submitting messages cannot be withdrawn.
 - Background delivery and send-time delivery both select the oldest steerable message past a `wait_for_idle` head. The send result reason is derived from the message just sent.
-- Treat only Pi's standalone current-visible `Auto-compacting...` indicator as busy when Herdr reports `unknown`. Attempt steering through Herdr; if it explicitly refuses the prompt, keep the message queued and report `compacting`. Definite `agent_not_ready` prompt rejection also restores an interrupted redirect ahead of its reserved queue; ambiguous outcomes stay held.
-- Refresh message claims while a Herdr submission is active, and refresh the whole interrupt reservation while its command is alive, so an expired lease cannot permit concurrent delivery or release queued messages ahead of an in-flight redirect. An expired uncertain submission remains `submitting` with its Notice and is never replayed, but no longer blocks fresh delivery indefinitely.
+- Treat Pi's visible `Auto-compacting` state as busy when Herdr reports `unknown`. Attempt steering through Herdr; if it explicitly refuses the prompt, keep the message queued and report `compacting`.
 
 ## Evidence
 

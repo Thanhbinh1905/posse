@@ -1227,7 +1227,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	var cfg config.Config
 	if interrupting {
-		cfg, err = s.prepareProjectWithoutMessageDelivery(ctx.Context, db, project)
+		cfg, err = s.prepareProjectForInterrupt(ctx.Context, db, project)
 	} else {
 		cfg, err = s.prepareProject(ctx.Context, db, project)
 	}
@@ -1434,7 +1434,7 @@ func (s *Service) unsend(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProjectWithoutMessageDelivery(ctx.Context, db, project); err != nil {
+	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
 		return err
 	}
 	message, err := db.MessageByID(ctx.Context, messageID)
@@ -1676,13 +1676,12 @@ func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config
 	}
 }
 
-func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task, body string, cfg config.Config) (returnErr error) {
+func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task, body string, cfg config.Config) error {
 	token, err := newDeliveryClaimToken()
 	if err != nil {
 		return err
 	}
-	at := currentTime()
-	messageID, err := db.QueueInterruptMessage(ctx.Context, task.ID, body, token, at, at-deliveryClaimTimeout.Milliseconds())
+	messageID, err := db.QueueInterruptMessage(ctx.Context, task.ID, body, token, currentTime())
 	if errors.Is(err, store.ErrStateRace) {
 		return axi.Failure("message_refused", "Task stopped accepting Rider instructions before the interrupt message could be queued", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect the Task")
 	}
@@ -1692,13 +1691,6 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task,
 	if err != nil {
 		return err
 	}
-	reservationCtx, stopReservation := keepMessageDeliveryClaimsAlive(ctx.Context, db, task.ID, messageID, token)
-	reservationStopped := false
-	defer func() {
-		if !reservationStopped {
-			returnErr = errors.Join(returnErr, stopReservation())
-		}
-	}()
 	cleanupUnsent := func() error {
 		if err := db.WithdrawInterruptMessage(ctx.Context, messageID, token); err != nil {
 			return err
@@ -1708,7 +1700,7 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task,
 		}
 		return s.regenerateProjects(ctx.Context, db)
 	}
-	outcome, err := s.interruptTask(reservationCtx, task, cfg)
+	outcome, err := s.interruptTask(ctx.Context, task, cfg)
 	if err != nil {
 		return errors.Join(err, cleanupUnsent())
 	}
@@ -1720,7 +1712,7 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task,
 	if outcome.Pane.PaneID != "" {
 		paneID = outcome.Pane.PaneID
 	}
-	delivered, deliveryReason, deliveryErr := s.submitClaimedMessage(reservationCtx, db, task, message, paneID, cfg, token)
+	delivered, deliveryReason, deliveryErr := s.submitClaimedMessage(ctx.Context, db, task, message, paneID, cfg, token)
 	message, readErr := db.MessageByID(ctx.Context, messageID)
 	if readErr == nil && message.Status == "delivered" {
 		delivered = true
@@ -1765,11 +1757,6 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task,
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
 	}
-	if err := stopReservation(); err != nil {
-		reservationStopped = true
-		return err
-	}
-	reservationStopped = true
 	return ctx.Print(axi.Object{
 		{Key: "task", Value: taskIDString(task.Seq)},
 		{Key: "message", Value: messageID},
