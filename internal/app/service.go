@@ -399,7 +399,7 @@ func (s *Service) prepareProjectLocalRecovery(ctx context.Context, db *store.DB,
 	return s.prepareProjectModeWithRecoveryPolicy(ctx, db, project, false, false, false)
 }
 
-func (s *Service) prepareProjectForInterrupt(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+func (s *Service) prepareProjectWithoutMessageDelivery(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
 	return s.prepareProjectModeWithMessageDelivery(ctx, db, project, true, true, true, false)
 }
 

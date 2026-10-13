@@ -13,11 +13,46 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
-	posseRuntime "github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 const deliveryClaimTimeout = 2 * time.Minute
+
+var deliveryClaimRefreshInterval = 30 * time.Second
+
+func keepMessageDeliveryClaimsAlive(ctx context.Context, db *store.DB, taskID, messageID int64, token string) (context.Context, func() error) {
+	reservationCtx, cancel := context.WithCancel(ctx)
+	interval := deliveryClaimRefreshInterval
+	if interval <= 0 {
+		interval = deliveryClaimTimeout / 3
+	}
+	done := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reservationCtx.Done():
+				done <- nil
+				return
+			case <-ticker.C:
+				if err := db.RefreshMessageDeliveryClaims(reservationCtx, taskID, messageID, token, currentTime()); err != nil {
+					if reservationCtx.Err() != nil {
+						done <- nil
+					} else {
+						done <- err
+						cancel()
+					}
+					return
+				}
+			}
+		}
+	}()
+	return reservationCtx, func() error {
+		cancel()
+		return <-done
+	}
+}
 
 func (s *Service) raiseExpiredMessageDeliveryNotices(ctx context.Context, db *store.DB, project store.Project) (bool, error) {
 	submissions, err := db.ExpiredMessageSubmissions(ctx, project.ID, 0, currentTime()-deliveryClaimTimeout.Milliseconds())
@@ -54,9 +89,22 @@ func (s *Service) piCompactingPane(ctx context.Context, pane herdr.Pane) (herdr.
 	if pane.Agent != "pi" || pane.AgentStatus != "unknown" {
 		return pane, false, nil
 	}
-	output, err := (posseRuntime.SystemProgress{}).ReadPane(ctx, s.Herdr, pane.PaneID, 80)
+	raw, err := s.herdrCall(ctx, "pane.read", map[string]any{"pane_id": pane.PaneID, "source": "visible"})
 	if err != nil {
 		return pane, false, herdrError(err)
+	}
+	var screen struct {
+		Text string `json:"text"`
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	if err := json.Unmarshal(raw, &screen); err != nil {
+		return pane, false, err
+	}
+	output := screen.Read.Text
+	if output == "" {
+		output = screen.Text
 	}
 	if !piAutoCompacting(output) {
 		return pane, false, nil
@@ -66,8 +114,13 @@ func (s *Service) piCompactingPane(ctx context.Context, pane herdr.Pane) (herdr.
 }
 
 func piAutoCompacting(output string) bool {
-	text := strings.ToLower(strings.Join(strings.Fields(output), " "))
-	return strings.Contains(text, "auto-compacting") || strings.Contains(text, "auto compacting")
+	for _, line := range strings.Split(output, "\n") {
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "auto-compacting...", "auto-compacting…", "auto compacting...", "auto compacting…":
+			return true
+		}
+	}
+	return false
 }
 
 func deliveredMessageReason(pane herdr.Pane, compacting bool) string {
@@ -129,7 +182,8 @@ func newDeliveryClaimToken() (string, error) {
 }
 
 func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config) (bool, string, error) {
-	active, err := db.HasDeliveryInProgress(ctx, task.ID)
+	at := currentTime()
+	active, err := db.HasDeliveryInProgress(ctx, task.ID, at-deliveryClaimTimeout.Milliseconds())
 	if err != nil || active {
 		if active && err == nil {
 			return false, "delivery_in_progress", nil
@@ -140,11 +194,13 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 	if err != nil {
 		return false, "", err
 	}
-	claimed, err := db.ClaimMessage(ctx, message.ID, token, currentTime())
+	claimed, err := db.ClaimMessage(ctx, message.ID, token, at, at-deliveryClaimTimeout.Milliseconds())
 	if err != nil || !claimed {
 		return false, "", err
 	}
-	return s.submitClaimedMessage(ctx, db, task, message, paneID, cfg, token)
+	claimCtx, stopClaim := keepMessageDeliveryClaimsAlive(ctx, db, task.ID, message.ID, token)
+	delivered, reason, submitErr := s.submitClaimedMessage(claimCtx, db, task, message, paneID, cfg, token)
+	return delivered, reason, errors.Join(submitErr, stopClaim())
 }
 
 func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config, token string) (bool, string, error) {
@@ -210,7 +266,7 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		submitting = true
 		return nil
 	}); err != nil {
-		if submitting && compacting && messagePromptRejected(err) {
+		if submitting && messagePromptRejected(err) {
 			var rollbackErr error
 			if message.Status == "interrupting" {
 				rollbackErr = db.RollbackInterruptMessage(ctx, message.ID, token)
@@ -220,7 +276,11 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 			if rollbackErr != nil {
 				return false, "", errors.Join(err, rollbackErr)
 			}
-			return false, "compacting", nil
+			reason := "agent_not_ready"
+			if compacting {
+				reason = "compacting"
+			}
+			return false, reason, nil
 		}
 		if submitting {
 			created, noticeErr := s.createMessageDeliveryUncertainNotice(ctx, db, task.ProjectID, task.Seq, message)

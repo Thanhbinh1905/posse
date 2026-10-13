@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -16,6 +18,76 @@ import (
 type snapshotHookAdapter struct {
 	*herdr.Fake
 	beforeSnapshot func(context.Context)
+}
+
+type sourcePaneReadAdapter struct {
+	*herdr.Fake
+	textBySource map[string]string
+	sources      []string
+}
+
+func (a *sourcePaneReadAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	if method != "pane.read" {
+		return a.Fake.Call(ctx, method, params)
+	}
+	source, _ := params["source"].(string)
+	a.sources = append(a.sources, source)
+	return json.Marshal(map[string]any{"read": map[string]string{"text": a.textBySource[source]}})
+}
+
+type blockedInterruptAdapter struct {
+	*herdr.Fake
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (a *blockedInterruptAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	if method == "agent.send_keys" {
+		select {
+		case a.started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-a.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return a.Fake.Call(ctx, method, params)
+}
+
+func (a *blockedInterruptAdapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
+	snapshot, err := a.Fake.Snapshot(ctx)
+	if err != nil {
+		return snapshot, err
+	}
+	select {
+	case <-a.release:
+		if len(snapshot.Panes) > 0 {
+			snapshot.Panes[0].AgentStatus = "idle"
+		}
+	default:
+	}
+	return snapshot, nil
+}
+
+type blockedPromptAdapter struct {
+	*herdr.Fake
+	started chan struct{}
+	release <-chan struct{}
+	blocked atomic.Bool
+}
+
+func (a *blockedPromptAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	if method == "agent.prompt" && a.blocked.CompareAndSwap(false, true) {
+		a.started <- struct{}{}
+		select {
+		case <-a.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return a.Fake.Call(ctx, method, params)
 }
 
 func (a *snapshotHookAdapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
@@ -154,6 +226,373 @@ func TestSendDeliveryPolicy(t *testing.T) {
 	}
 }
 
+func TestSendInterruptDefinitePromptRejectionRestoresRedirectAheadOfQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name, promptError, wantStatus string
+		wantCommandSuccess            bool
+	}{
+		{name: "definite not-ready rejection", promptError: "agent_not_ready", wantStatus: "queued", wantCommandSuccess: true},
+		{name: "ambiguous timeout remains held", promptError: "agent_prompt_timeout", wantStatus: "submitting", wantCommandSuccess: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			repo := filepath.Join(root, "repo")
+			initRepo(t, repo)
+			home := filepath.Join(root, "posse")
+			db, err := store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := db.CreateProject(ctx, "shop", repo, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+				t.Fatal(err)
+			}
+			olderID, err := db.QueueMessage(ctx, taskID, "Older queued follow-up", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			fake := herdr.NewFake()
+			fake.Results["pane.read"] = []byte(`{"read":{"text":"worker output"}}`)
+			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"}}}
+			fake.BeforeCall = func(method string) {
+				if method == "agent.send_keys" {
+					fake.SnapshotValue.Panes[0].AgentStatus = "idle"
+				}
+			}
+			fake.Errors["agent.prompt"] = &herdr.Error{Code: tc.promptError, Message: "Pi rejected the prompt"}
+			service := testService(home, fake)
+			t.Chdir(repo)
+			var output bytes.Buffer
+			cli := service.CLI()
+			cli.Out = &output
+			code := cli.Run([]string{"send", "t1", "--interrupt", "Fresh redirect"})
+			if tc.wantCommandSuccess && (code != 0 || !strings.Contains(output.String(), "state: queued") || !strings.Contains(output.String(), "reason: agent_not_ready")) {
+				t.Fatalf("definite rejection did not leave a retryable redirect: exit=%d output=%s", code, output.String())
+			}
+			if !tc.wantCommandSuccess && (code == 0 || !strings.Contains(output.String(), "message_delivery_uncertain")) {
+				t.Fatalf("ambiguous rejection was not held for review: exit=%d output=%s", code, output.String())
+			}
+
+			db, err = store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var redirectID int64
+			if err := db.QueryRowContext(ctx, `SELECT id FROM messages WHERE task_id=? AND body='Fresh redirect'`, taskID).Scan(&redirectID); err != nil {
+				t.Fatal(err)
+			}
+			redirect, err := db.MessageByID(ctx, redirectID)
+			if err != nil || redirect.Status != tc.wantStatus {
+				t.Fatalf("redirect=%#v err=%v, want status %s", redirect, err, tc.wantStatus)
+			}
+			older, err := db.MessageByID(ctx, olderID)
+			if err != nil || older.Status != "queued" {
+				t.Fatalf("older message=%#v err=%v, want queued", older, err)
+			}
+			var uncertainNotices int
+			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='message_delivery_uncertain'`, taskID).Scan(&uncertainNotices); err != nil {
+				t.Fatal(err)
+			}
+			if (tc.wantStatus == "submitting") != (uncertainNotices > 0) {
+				t.Fatalf("uncertain Notice count=%d for redirect status %s", uncertainNotices, tc.wantStatus)
+			}
+
+			delete(fake.Errors, "agent.prompt")
+			beforeRetry := fake.CallCount("agent.prompt")
+			if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+				t.Fatal(err)
+			}
+			redirect, err = db.MessageByID(ctx, redirectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			older, err = db.MessageByID(ctx, olderID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantStatus == "queued" {
+				if redirect.Status != "delivered" || older.Status != "queued" || fake.CallCount("agent.prompt") != beforeRetry+1 {
+					t.Fatalf("retry did not deliver the redirect first: redirect=%s older=%s prompts=%d before=%d", redirect.Status, older.Status, fake.CallCount("agent.prompt"), beforeRetry)
+				}
+			} else if redirect.Status != "submitting" || older.Status != "queued" || fake.CallCount("agent.prompt") != beforeRetry {
+				t.Fatalf("ambiguous redirect was replayed or queue advanced: redirect=%s older=%s prompts=%d before=%d", redirect.Status, older.Status, fake.CallCount("agent.prompt"), beforeRetry)
+			}
+		})
+	}
+}
+
+func TestPiInterruptUsesOnlyVisibleCompactionIndicator(t *testing.T) {
+	for _, tc := range []struct {
+		name, visible, recent string
+		wantInterrupted       bool
+	}{
+		{name: "historical compaction text does not authorize abort", visible: "Model picker\nEnter to select · Escape to cancel", recent: "Earlier output: Auto-compacting...", wantInterrupted: false},
+		{name: "quoted visible mention does not authorize abort", visible: `The prior answer said "Auto-compacting..."`, recent: `The prior answer said "Auto-compacting..."`, wantInterrupted: false},
+		{name: "unknown dialog does not authorize abort", visible: "Permission required\nEnter to select · Escape to cancel", recent: "Permission required", wantInterrupted: false},
+		{name: "current indicator authorizes abort", visible: "Auto-compacting...", recent: "Earlier output had no status indicator", wantInterrupted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			repo := filepath.Join(root, "repo")
+			initRepo(t, repo)
+			home := filepath.Join(root, "posse")
+			db, err := store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := db.CreateProject(ctx, "shop", repo, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			fake := herdr.NewFake()
+			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "unknown"}}}
+			fake.BeforeCall = func(method string) {
+				if method == "agent.send_keys" {
+					fake.SnapshotValue.Panes[0].AgentStatus = "idle"
+				}
+			}
+			adapter := &sourcePaneReadAdapter{Fake: fake, textBySource: map[string]string{"visible": tc.visible, "recent_unwrapped": tc.recent}}
+			service := testService(home, adapter)
+			t.Chdir(repo)
+			var output bytes.Buffer
+			cli := service.CLI()
+			cli.Out = &output
+			if code := cli.Run([]string{"interrupt", "t1"}); code != 0 {
+				t.Fatalf("interrupt exit=%d output=%s", code, output.String())
+			}
+			if tc.wantInterrupted {
+				if !strings.Contains(output.String(), "interrupted: true") || !strings.Contains(output.String(), "verified: true") || fake.CallCount("agent.send_keys") != 1 {
+					t.Fatalf("current visible compaction was not safely interrupted: output=%s sends=%d sources=%v", output.String(), fake.CallCount("agent.send_keys"), adapter.sources)
+				}
+			} else if !strings.Contains(output.String(), "interrupted: false") || fake.CallCount("agent.send_keys") != 0 {
+				t.Fatalf("historical text or unknown dialog authorized an abort: output=%s sends=%d sources=%v", output.String(), fake.CallCount("agent.send_keys"), adapter.sources)
+			}
+			if len(adapter.sources) != 1 || adapter.sources[0] != "visible" {
+				t.Fatalf("Pi compaction detector read sources %v, want only visible", adapter.sources)
+			}
+		})
+	}
+}
+
+func TestInterruptReservationRenewalPreventsBackgroundOvertake(t *testing.T) {
+	previousInterval := deliveryClaimRefreshInterval
+	deliveryClaimRefreshInterval = 10 * time.Millisecond
+	t.Cleanup(func() { deliveryClaimRefreshInterval = previousInterval })
+
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	olderID, err := db.QueueMessage(ctx, taskID, "Older queued instruction", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := herdr.NewFake()
+	fake.Results["pane.read"] = []byte(`{"read":{"text":"worker output"}}`)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"}}}
+	release := make(chan struct{})
+	adapter := &blockedInterruptAdapter{Fake: fake, started: make(chan struct{}, 1), release: release}
+	service := testService(home, adapter)
+	t.Chdir(repo)
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	type commandResult struct {
+		code int
+	}
+	finished := make(chan commandResult, 1)
+	go func() {
+		finished <- commandResult{code: cli.Run([]string{"send", "t1", "--interrupt", "Fresh redirect"})}
+	}()
+	select {
+	case <-adapter.started:
+	case result := <-finished:
+		t.Fatalf("send --interrupt finished before the abort key: exit=%d output=%s", result.code, output.String())
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("send --interrupt did not reach its in-flight abort key")
+	}
+
+	db, err = store.Open(home)
+	if err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET claimed_at=1 WHERE task_id=? AND status IN ('claimed','interrupting')`, taskID); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	time.Sleep(3 * deliveryClaimRefreshInterval)
+	if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	older, err := db.MessageByID(ctx, olderID)
+	if err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	promptsBeforeRelease := fake.CallCount("agent.prompt")
+	close(release)
+	var result commandResult
+	select {
+	case result = <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("send --interrupt did not finish after releasing the fake abort key")
+	}
+	var redirectID int64
+	redirectReadErr := db.QueryRowContext(ctx, `SELECT id FROM messages WHERE task_id=? AND body='Fresh redirect'`, taskID).Scan(&redirectID)
+	redirect, redirectErr := db.MessageByID(ctx, redirectID)
+	older, err = db.MessageByID(ctx, olderID)
+	if result.code != 0 || !strings.Contains(output.String(), "state: delivered") || redirectReadErr != nil || redirectErr != nil || redirect.Status != "delivered" || err != nil || older.Status != "queued" || promptsBeforeRelease != 0 || fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("expired interrupt reservation let background delivery overtake the redirect: exit=%d output=%s redirect=%#v redirectErr=%v older=%#v err=%v promptsBefore=%d promptsAfter=%d", result.code, output.String(), redirect, redirectErr, older, err, promptsBeforeRelease, fake.CallCount("agent.prompt"))
+	}
+}
+
+func TestActiveSubmissionLeaseRefreshPreventsConcurrentDelivery(t *testing.T) {
+	previousInterval := deliveryClaimRefreshInterval
+	deliveryClaimRefreshInterval = 10 * time.Millisecond
+	t.Cleanup(func() { deliveryClaimRefreshInterval = previousInterval })
+
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := herdr.NewFake()
+	fake.Results["pane.read"] = []byte(`{"read":{"text":"worker output"}}`)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	adapter := &blockedPromptAdapter{Fake: fake, started: make(chan struct{}, 1), release: release}
+	service := testService(home, adapter)
+	t.Chdir(repo)
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	type commandResult struct {
+		code int
+	}
+	finished := make(chan commandResult, 1)
+	go func() {
+		finished <- commandResult{code: cli.Run([]string{"send", "t1", "First active submission"})}
+	}()
+	select {
+	case <-adapter.started:
+	case result := <-finished:
+		t.Fatalf("send finished before the prompt began: exit=%d output=%s", result.code, output.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("send did not reach the blocked prompt")
+	}
+
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	secondID, err := db.QueueMessage(ctx, taskID, "Second queued message", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET claimed_at=1 WHERE task_id=? AND body='First active submission'`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * deliveryClaimRefreshInterval)
+	if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.MessageByID(ctx, secondID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uncertainNotices int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='message_delivery_uncertain'`, taskID).Scan(&uncertainNotices); err != nil {
+		t.Fatal(err)
+	}
+	promptsBeforeRelease := fake.CallCount("agent.prompt")
+	close(release)
+	result := <-finished
+	var firstID int64
+	if err := db.QueryRowContext(ctx, `SELECT id FROM messages WHERE task_id=? AND body='First active submission'`, taskID).Scan(&firstID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.MessageByID(ctx, firstID)
+	if result.code != 0 || !strings.Contains(output.String(), "state: delivered") || err != nil || first.Status != "delivered" || second.Status != "queued" || uncertainNotices != 0 || promptsBeforeRelease != 0 || fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("expired lease allowed concurrent delivery during an active prompt: exit=%d output=%s first=%#v err=%v second=%#v notices=%d promptsBefore=%d promptsAfter=%d", result.code, output.String(), first, err, second, uncertainNotices, promptsBeforeRelease, fake.CallCount("agent.prompt"))
+	}
+}
+
 func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 	for _, tc := range []struct {
 		name, wantState, wantReason, wantStatus string
@@ -217,7 +656,7 @@ func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 				}
 				deliveryStarted = true
 				if tc.claimOnly {
-					_, deliveryErr = deliveryDB.ClaimMessage(ctx, message.ID, "concurrent-delivery", currentTime())
+					_, deliveryErr = deliveryDB.ClaimMessage(ctx, message.ID, "concurrent-delivery", currentTime(), currentTime()-deliveryClaimTimeout.Milliseconds())
 					if deliveryErr == nil && tc.queueLater {
 						_, deliveryErr = deliveryDB.QueueMessage(ctx, taskID, "Later queued instruction", true)
 					}

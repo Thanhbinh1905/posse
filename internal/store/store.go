@@ -1398,7 +1398,7 @@ func (db *DB) OldestSteerableQueuedMessage(ctx context.Context, taskID int64) (M
 
 // QueueInterruptMessage claims the Task's queued messages and the new redirect
 // in one transaction, preventing background delivery from racing the abort.
-func (db *DB) QueueInterruptMessage(ctx context.Context, taskID int64, body, token string, at int64) (int64, error) {
+func (db *DB) QueueInterruptMessage(ctx context.Context, taskID int64, body, token string, at, activeBefore int64) (int64, error) {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return 0, err
@@ -1415,7 +1415,7 @@ func (db *DB) QueueInterruptMessage(ctx context.Context, taskID int64, body, tok
 		return 0, ErrStateRace
 	}
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status IN ('claimed','interrupting','submitting')`, taskID).Scan(&active); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status IN ('claimed','interrupting','submitting') AND (claimed_at=0 OR claimed_at>?)`, taskID, activeBefore).Scan(&active); err != nil {
 		return 0, err
 	}
 	if active > 0 {
@@ -1466,10 +1466,22 @@ WHERE id=? AND status IN ('interrupting','submitting') AND claim_token=?`, messa
 	return err
 }
 
-func (db *DB) HasDeliveryInProgress(ctx context.Context, taskID int64) (bool, error) {
+// HasDeliveryInProgress expires only the mutual-exclusion lease. Old submitting
+// rows remain ambiguous evidence and are never reset for automatic replay.
+func (db *DB) HasDeliveryInProgress(ctx context.Context, taskID, activeBefore int64) (bool, error) {
 	var active bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE task_id=? AND status IN ('claimed','interrupting','submitting'))`, taskID).Scan(&active)
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE task_id=? AND status IN ('claimed','interrupting','submitting') AND (claimed_at=0 OR claimed_at>?))`, taskID, activeBefore).Scan(&active)
 	return active, err
+}
+
+// RefreshMessageDeliveryClaims extends the lease while the command owns its
+// submission. Interrupt redirects refresh their whole reserved queue; ordinary
+// sends refresh only their own claim. Uncertain rows remain held after exit.
+func (db *DB) RefreshMessageDeliveryClaims(ctx context.Context, taskID, messageID int64, token string, at int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE messages SET claimed_at=?
+WHERE task_id=? AND claim_token=? AND status IN ('claimed','interrupting','submitting')
+  AND EXISTS (SELECT 1 FROM messages owner WHERE owner.id=? AND owner.task_id=? AND owner.claim_token=? AND owner.status IN ('claimed','interrupting','submitting'))`, at, taskID, token, messageID, taskID, token)
+	return err
 }
 
 func (db *DB) ReleaseMessageClaims(ctx context.Context, taskID int64, token string, exceptID int64) error {
@@ -1599,11 +1611,11 @@ func (db *DB) MarkMessageDelivered(ctx context.Context, messageID int64, token s
 	return db.MarkClaimedMessageDelivered(ctx, messageID, token, at)
 }
 
-func (db *DB) ClaimMessage(ctx context.Context, messageID int64, token string, at int64) (bool, error) {
+func (db *DB) ClaimMessage(ctx context.Context, messageID int64, token string, at, activeBefore int64) (bool, error) {
 	result, err := db.ExecContext(ctx, `UPDATE messages SET status='claimed',claim_token=?,claimed_at=?
 WHERE id=? AND status='queued' AND NOT EXISTS (
-	SELECT 1 FROM messages active WHERE active.task_id=messages.task_id AND active.status IN ('claimed','interrupting','submitting')
-)`, token, at, messageID)
+	SELECT 1 FROM messages active WHERE active.task_id=messages.task_id AND active.status IN ('claimed','interrupting','submitting') AND (active.claimed_at=0 OR active.claimed_at>?)
+)`, token, at, messageID, activeBefore)
 	if err != nil {
 		return false, err
 	}
