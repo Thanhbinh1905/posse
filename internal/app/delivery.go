@@ -13,6 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	posseRuntime "github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -49,6 +50,38 @@ func (s *Service) createMessageDeliveryUncertainNotice(ctx context.Context, db *
 
 // An empty reason means it is safe to submit now. The persisted message policy
 // is checked on every retry so --queue cannot turn into a mid-turn steer.
+func (s *Service) piCompactingPane(ctx context.Context, pane herdr.Pane) (herdr.Pane, bool, error) {
+	if pane.Agent != "pi" || pane.AgentStatus != "unknown" {
+		return pane, false, nil
+	}
+	output, err := (posseRuntime.SystemProgress{}).ReadPane(ctx, s.Herdr, pane.PaneID, 80)
+	if err != nil {
+		return pane, false, herdrError(err)
+	}
+	if !piAutoCompacting(output) {
+		return pane, false, nil
+	}
+	pane.AgentStatus = "working"
+	return pane, true, nil
+}
+
+func piAutoCompacting(output string) bool {
+	text := strings.ToLower(strings.Join(strings.Fields(output), " "))
+	return strings.Contains(text, "auto-compacting") || strings.Contains(text, "auto compacting")
+}
+
+func deliveredMessageReason(pane herdr.Pane, compacting bool) string {
+	if compacting || pane.AgentStatus == "working" {
+		return "steered"
+	}
+	return "agent_ready_and_unfocused"
+}
+
+func canSteerPane(task store.Task, pane herdr.Pane, snapshot herdr.Snapshot, cfg config.Config) bool {
+	return pane.AgentStatus == "working" && !pane.Focused && snapshot.FocusedPaneID != pane.PaneID &&
+		task.State != store.StateBlocked && pane.Agent != "" && cfg.Kinds[pane.Agent].Steer
+}
+
 func queuedMessageReason(task store.Task, message store.Message, pane herdr.Pane, snapshot herdr.Snapshot, cfg config.Config) string {
 	if pane.Focused || snapshot.FocusedPaneID == pane.PaneID {
 		return "focused"
@@ -96,6 +129,13 @@ func newDeliveryClaimToken() (string, error) {
 }
 
 func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config) (bool, string, error) {
+	active, err := db.HasDeliveryInProgress(ctx, task.ID)
+	if err != nil || active {
+		if active && err == nil {
+			return false, "delivery_in_progress", nil
+		}
+		return false, "", err
+	}
 	token, err := newDeliveryClaimToken()
 	if err != nil {
 		return false, "", err
@@ -104,9 +144,22 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 	if err != nil || !claimed {
 		return false, "", err
 	}
+	return s.submitClaimedMessage(ctx, db, task, message, paneID, cfg, token)
+}
+
+func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config, token string) (bool, string, error) {
+	compacting := false
 	check := func(snapshot herdr.Snapshot) error {
 		pane, found := findAppPane(snapshot.Panes, paneID, task.PaneLabel)
-		if !found || pane.PaneID != paneID || queuedMessageReason(task, message, pane, snapshot, cfg) != "" {
+		if !found || pane.PaneID != paneID {
+			return axi.Failure("message_not_ready", "Rider is not ready for this message", true)
+		}
+		var err error
+		pane, compacting, err = s.piCompactingPane(ctx, pane)
+		if err != nil {
+			return err
+		}
+		if queuedMessageReason(task, message, pane, snapshot, cfg) != "" {
 			return axi.Failure("message_not_ready", "Rider is not ready for this message", true)
 		}
 		// Herdr can keep the previous idle/done status when a modal matches
@@ -157,6 +210,18 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 		submitting = true
 		return nil
 	}); err != nil {
+		if submitting && compacting && messagePromptRejected(err) {
+			var rollbackErr error
+			if message.Status == "interrupting" {
+				rollbackErr = db.RollbackInterruptMessage(ctx, message.ID, token)
+			} else {
+				rollbackErr = db.RollbackMessageSubmission(ctx, message.ID, token)
+			}
+			if rollbackErr != nil {
+				return false, "", errors.Join(err, rollbackErr)
+			}
+			return false, "compacting", nil
+		}
 		if submitting {
 			created, noticeErr := s.createMessageDeliveryUncertainNotice(ctx, db, task.ProjectID, task.Seq, message)
 			if noticeErr == nil && created {
@@ -168,7 +233,12 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 			}
 			return false, "", uncertainErr
 		}
-		rollbackErr := db.RollbackMessageClaim(ctx, message.ID, token)
+		var rollbackErr error
+		if message.Status == "interrupting" {
+			rollbackErr = db.RollbackInterruptMessage(ctx, message.ID, token)
+		} else {
+			rollbackErr = db.RollbackMessageClaim(ctx, message.ID, token)
+		}
 		if failure, ok := err.(*axi.Error); ok {
 			switch failure.Code {
 			case "pane_focused":
@@ -190,4 +260,9 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 		return true, "", err
 	}
 	return true, "", nil
+}
+
+func messagePromptRejected(err error) bool {
+	var failure *axi.Error
+	return errors.As(err, &failure) && failure.Code == "agent_not_ready"
 }

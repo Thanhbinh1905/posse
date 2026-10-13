@@ -70,3 +70,136 @@ func TestMessageSubmissionAndTaskReopenAreAtomic(t *testing.T) {
 		})
 	}
 }
+
+func TestMessageClaimIsExclusivePerTask(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	firstID, err := db.QueueMessage(ctx, taskID, "first", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := db.QueueMessage(ctx, taskID, "second", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := db.ClaimMessage(ctx, firstID, "first-token", time.Now().UnixMilli())
+	if err != nil || !claimed {
+		t.Fatalf("first message claim=%t err=%v", claimed, err)
+	}
+	claimed, err = db.ClaimMessage(ctx, secondID, "second-token", time.Now().UnixMilli())
+	if err != nil || claimed {
+		t.Fatalf("second message claim=%t err=%v, want exclusive claim", claimed, err)
+	}
+}
+
+func TestRejectedInterruptRedirectStaysAheadOfQueuedMessages(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	queuedID, err := db.QueueMessage(ctx, taskID, "older queue item", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UnixMilli()
+	redirectID, err := db.QueueInterruptMessage(ctx, taskID, "urgent redirect", "interrupt-token", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkMessageSubmitting(ctx, redirectID, "interrupt-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RollbackInterruptMessage(ctx, redirectID, "interrupt-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReleaseMessageClaims(ctx, taskID, "interrupt-token", 0); err != nil {
+		t.Fatal(err)
+	}
+	oldest, err := db.OldestQueuedMessage(ctx, taskID)
+	if err != nil || oldest.ID != redirectID {
+		t.Fatalf("oldest queued message after rejected redirect = %#v, %v", oldest, err)
+	}
+	queued, err := db.MessageByID(ctx, queuedID)
+	if err != nil || queued.Status != "queued" {
+		t.Fatalf("older message after redirect rollback = %#v, %v", queued, err)
+	}
+}
+
+func TestInterruptReservationExpiresWithoutReplayingRedirect(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	queuedID, err := db.QueueMessage(ctx, taskID, "wait for idle", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UnixMilli()
+	redirectID, err := db.QueueInterruptMessage(ctx, taskID, "stop and redirect", "interrupt-token", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := db.HasDeliveryInProgress(ctx, taskID)
+	if err != nil || !active {
+		t.Fatalf("interrupt reservation active=%t err=%v", active, err)
+	}
+	if _, err := db.QueueInterruptMessage(ctx, taskID, "second redirect", "other-token", at); err != ErrMessageDeliveryInProgress {
+		t.Fatalf("competing interrupt error=%v, want ErrMessageDeliveryInProgress", err)
+	}
+	if err := db.ReleaseExpiredDeliveryClaims(ctx, at+3*60*1000); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := db.MessageByID(ctx, queuedID)
+	if err != nil || queued.Status != "queued" {
+		t.Fatalf("reserved older message after expiry = %#v, %v", queued, err)
+	}
+	redirect, err := db.MessageByID(ctx, redirectID)
+	if err != nil || redirect.Status != "withdrawn" {
+		t.Fatalf("unverified redirect after expiry = %#v, %v", redirect, err)
+	}
+	active, err = db.HasDeliveryInProgress(ctx, taskID)
+	if err != nil || active {
+		t.Fatalf("expired interrupt remains active=%t err=%v", active, err)
+	}
+}

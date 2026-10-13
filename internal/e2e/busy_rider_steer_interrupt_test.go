@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,6 +39,9 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	if err := os.WriteFile(brief, []byte(briefText), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "simulate-auto-compacting"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "busy-pi-rider")
 	task := fixture.mustTask(t, "t1")
 	t.Cleanup(func() {
@@ -58,50 +62,114 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		t.Fatal("fake Pi Rider did not become busy and unfocused")
 	}
 
+	if _, err := client.Run(context.Background(), "pane", "report-agent", task.PaneID, "--source", "posse.e2e", "--agent", "pi", "--state", "unknown"); err != nil {
+		t.Fatalf("simulate Pi's unclassified auto-compaction busy state: %v", err)
+	}
 	queued := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Wait until the current turn ends", "--queue")
 	if !strings.Contains(queued, "waiting_for_idle (--queue)") {
 		t.Fatalf("explicitly queued message was not held: %s", queued)
 	}
-	steering := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Steer this turn now")
-	steeringDelivered := strings.Contains(steering, "state: delivered")
-	if !steeringDelivered {
-		t.Errorf("later steering message was blocked by the earlier --queue message: %s", steering)
-	}
 	pending, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)
 	if err != nil || pending.Body != "Wait until the current turn ends" || !pending.WaitForIdle {
-		t.Errorf("steering consumed or changed the earlier --queue message: message=%#v err=%v", pending, err)
-	}
-	inputLog := filepath.Join(fixture.root, "fake-agent-input.log")
-	if steeringDelivered && !waitForCondition(5*time.Second, func() bool {
-		contents, err := os.ReadFile(inputLog)
-		return err == nil && strings.Contains(string(contents), "Steer this turn now")
-	}) {
-		contents, _ := os.ReadFile(inputLog)
-		t.Errorf("fake Pi did not receive steering while busy: %s", contents)
+		t.Fatalf("missing wait-for-idle head: message=%#v err=%v", pending, err)
 	}
 
-	interrupt := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "interrupt", "t1")
-	if !strings.Contains(interrupt, "interrupted: true") {
-		t.Fatalf("interrupt result: %s", interrupt)
+	backgroundID, err := fixture.db.QueueMessage(context.Background(), task.ID, "Background steering", false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	statusChanged := waitForCondition(5*time.Second, func() bool {
-		snapshot, err := client.Snapshot(context.Background())
+	backgroundEnv := setEnv(fixture.leadEnv, "HERDR_PLUGIN_EVENT_JSON", `{"event":"pane.focused","data":{"pane_id":"`+task.PaneID+`"}}`)
+	backgroundOutput := runPosse(t, fixture.binary, fixture.repo, backgroundEnv, "_ingest")
+	backgroundMessage, err := fixture.db.MessageByID(context.Background(), backgroundID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(5*time.Second, func() bool {
+		message, err := fixture.db.MessageByID(context.Background(), backgroundID)
 		if err != nil {
 			return false
 		}
-		for _, pane := range snapshot.Panes {
-			if pane.PaneID == task.PaneID {
-				return pane.AgentStatus != "working"
-			}
-		}
-		return false
-	})
-	if !statusChanged {
-		t.Errorf("interrupt reported success without a verified Pi status change: %#v", currentPane(t, client, task.PaneID))
+		backgroundMessage = message
+		return message.Status == "delivered"
+	}) {
+		screen, _ := client.Call(context.Background(), "pane.read", map[string]any{"pane_id": task.PaneID, "source": "recent_unwrapped", "lines": 80})
+		input, _ := os.ReadFile(filepath.Join(fixture.root, "fake-agent-input.log"))
+		logs, _ := client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.herdr", "limit": 20})
+		notices, _ := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+		t.Fatalf("background delivery did not steer past the wait-for-idle head: output=%s message=%#v pane=%#v screen=%s input=%q logs=%s notices=%#v", backgroundOutput, backgroundMessage, currentPane(t, client, task.PaneID), screen, input, logs, notices)
+	}
+
+	steering := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Send-time steering")
+	if !strings.Contains(steering, "state: delivered") || !strings.Contains(steering, "reason: steered") {
+		t.Fatalf("send-time steering did not report the sent message: %s", steering)
+	}
+	inputLog := filepath.Join(fixture.root, "fake-agent-input.log")
+	if !waitForCondition(5*time.Second, func() bool {
+		contents, err := os.ReadFile(inputLog)
+		return err == nil && strings.Contains(string(contents), "Background steering") && strings.Contains(string(contents), "Send-time steering")
+	}) {
+		contents, _ := os.ReadFile(inputLog)
+		t.Fatalf("fake Pi did not receive both steering messages while busy: %s", contents)
+	}
+
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsend", strconv.FormatInt(pending.ID, 10)); !strings.Contains(output, "state: withdrawn") {
+		t.Fatalf("unsend did not withdraw the wait-for-idle message: %s", output)
+	}
+	queuedAgain := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Keep this queued", "--queue")
+	if !strings.Contains(queuedAgain, "state: queued") {
+		t.Fatalf("could not create a message to test claimed refusal: %s", queuedAgain)
+	}
+	claimed, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)
+	if err != nil || claimed.Body != "Keep this queued" {
+		t.Fatalf("queued message for claim test = %#v, %v", claimed, err)
+	}
+	if _, err := fixture.db.ClaimMessage(context.Background(), claimed.ID, "e2e-claimed", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	refused := exec.Command(fixture.binary, "unsend", strconv.FormatInt(claimed.ID, 10))
+	refused.Dir, refused.Env = fixture.repo, fixture.leadEnv
+	if output, err := refused.CombinedOutput(); err == nil || !strings.Contains(string(output), "message_not_queued") {
+		t.Fatalf("unsend did not refuse a claimed message: err=%v output=%s", err, output)
+	}
+	if err := fixture.db.RollbackMessageClaim(context.Background(), claimed.ID, "e2e-claimed"); err != nil {
+		t.Fatal(err)
+	}
+	steerableID, err := fixture.db.QueueMessage(context.Background(), task.ID, "Older steerable queue item", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	interrupt := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "--interrupt", "Stop and redirect this turn")
+	if !strings.Contains(interrupt, "state: delivered") || !strings.Contains(interrupt, "reason: delivered_after_interrupt") {
+		t.Fatalf("send --interrupt did not verify and deliver the redirect: %s", interrupt)
+	}
+	remaining, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)
+	if err != nil || remaining.ID != claimed.ID || remaining.Body != "Keep this queued" {
+		t.Fatalf("interrupt reordered or duplicated a queued message: %#v, %v", remaining, err)
+	}
+	steerable, err := fixture.db.MessageByID(context.Background(), steerableID)
+	if err != nil || steerable.Status != "queued" {
+		t.Fatalf("interrupt pre-delivered an older steerable message: %#v, %v", steerable, err)
+	}
+	if !waitForCondition(5*time.Second, func() bool {
+		contents, err := os.ReadFile(inputLog)
+		return err == nil && strings.Contains(string(contents), "Stop and redirect this turn")
+	}) {
+		contents, _ := os.ReadFile(inputLog)
+		t.Fatalf("fake Pi did not receive the interrupt redirect: %s", contents)
 	}
 	keyLog, err := os.ReadFile(filepath.Join(fixture.root, "fake-agent-keys.log"))
 	if err != nil || !strings.Contains(string(keyLog), "pi:escape") {
 		t.Errorf("Pi abort key log = %q, err=%v; want Escape", keyLog, err)
+	}
+	contents, err := os.ReadFile(inputLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notDelivered := range []string{"Wait until the current turn ends", "Keep this queued", "Older steerable queue item"} {
+		if strings.Contains(string(contents), notDelivered) {
+			t.Errorf("queued instruction was delivered out of order: %s", contents)
+		}
 	}
 }
 
@@ -253,6 +321,8 @@ line = bytearray()
 busy = os.environ.get("POSSE_TEST_BUSY_NOW") == "1"
 if busy:
     report("working")
+if kind == "pi" and os.path.exists(os.path.join(root, "simulate-auto-compacting")):
+    print("Auto-compacting...")
 try:
     while True:
         value = os.read(fd, 1)

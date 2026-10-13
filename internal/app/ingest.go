@@ -481,6 +481,13 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 		if (task.State == store.StateDone && task.Type != "ship") || task.State == store.StateReported || task.State == store.StateLanded || task.State == store.StateTornDown || task.State == store.StateFailed || task.State == store.StateLost {
 			continue
 		}
+		active, err := db.HasDeliveryInProgress(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if active {
+			continue
+		}
 		message, err := db.OldestQueuedMessage(ctx, task.ID)
 		if err == store.ErrNotFound {
 			continue
@@ -489,7 +496,23 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 			return err
 		}
 		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-		if !found || queuedMessageReason(task, message, pane, snapshot, cfg) != "" {
+		if !found {
+			continue
+		}
+		pane, _, err = s.piCompactingPane(ctx, pane)
+		if err != nil {
+			return err
+		}
+		if message.WaitForIdle && canSteerPane(task, pane, snapshot, cfg) {
+			message, err = db.OldestSteerableQueuedMessage(ctx, task.ID)
+			if store.IsNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if queuedMessageReason(task, message, pane, snapshot, cfg) != "" {
 			continue
 		}
 		if _, _, err := s.deliverClaimedMessage(ctx, db, task, message, pane.PaneID, cfg); err != nil {

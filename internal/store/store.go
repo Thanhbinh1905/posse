@@ -32,6 +32,7 @@ type DB struct {
 
 var ErrNotFound = sql.ErrNoRows
 var ErrStateRace = errors.New("Task state changed concurrently")
+var ErrMessageDeliveryInProgress = errors.New("a message delivery is already in progress")
 var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition is only valid for User-approved discard")
 var ErrBusy = errors.New("database contention; retry the operation")
 
@@ -1395,6 +1396,92 @@ func (db *DB) OldestSteerableQueuedMessage(ctx context.Context, taskID int64) (M
 	return db.queuedMessage(ctx, taskID, " AND wait_for_idle=0")
 }
 
+// QueueInterruptMessage claims the Task's queued messages and the new redirect
+// in one transaction, preventing background delivery from racing the abort.
+func (db *DB) QueueInterruptMessage(ctx context.Context, taskID int64, body, token string, at int64) (int64, error) {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var state, taskType string
+	if err := tx.QueryRowContext(ctx, `SELECT state,type FROM tasks WHERE id=?`, taskID).Scan(&state, &taskType); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, err
+	}
+	if !taskAcceptsInstruction(State(state), taskType) {
+		return 0, ErrStateRace
+	}
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status IN ('claimed','interrupting','submitting')`, taskID).Scan(&active); err != nil {
+		return 0, err
+	}
+	if active > 0 {
+		return 0, ErrMessageDeliveryInProgress
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='claimed',claim_token=?,claimed_at=? WHERE task_id=? AND status='queued'`, token, at, taskID); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO messages(task_id,body,created_at,status,wait_for_idle,claim_token,claimed_at) VALUES(?,?,?,'interrupting',0,?,?)`, taskID, body, at, token, at)
+	if err != nil {
+		return 0, err
+	}
+	messageID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return messageID, nil
+}
+
+func (db *DB) WithdrawQueuedMessage(ctx context.Context, messageID int64) (Message, bool, error) {
+	result, err := db.ExecContext(ctx, `UPDATE messages SET status='withdrawn' WHERE id=? AND status='queued'`, messageID)
+	if err != nil {
+		return Message{}, false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return Message{}, false, err
+	}
+	message, err := db.MessageByID(ctx, messageID)
+	return message, count == 1, err
+}
+
+func (db *DB) WithdrawInterruptMessage(ctx context.Context, messageID int64, token string) error {
+	_, err := db.ExecContext(ctx, `UPDATE messages SET status='withdrawn',claim_token='',claimed_at=0 WHERE id=? AND status='interrupting' AND claim_token=?`, messageID, token)
+	return err
+}
+
+func (db *DB) RollbackInterruptMessage(ctx context.Context, messageID int64, token string) error {
+	_, err := db.ExecContext(ctx, `UPDATE messages
+SET status='queued', created_at=COALESCE((
+	SELECT MIN(created_at)-1 FROM messages older
+	WHERE older.task_id=messages.task_id AND older.id<>messages.id AND older.status IN ('queued','claimed')
+), created_at), claim_token='', claimed_at=0
+WHERE id=? AND status IN ('interrupting','submitting') AND claim_token=?`, messageID, token)
+	return err
+}
+
+func (db *DB) HasDeliveryInProgress(ctx context.Context, taskID int64) (bool, error) {
+	var active bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE task_id=? AND status IN ('claimed','interrupting','submitting'))`, taskID).Scan(&active)
+	return active, err
+}
+
+func (db *DB) ReleaseMessageClaims(ctx context.Context, taskID int64, token string, exceptID int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE messages SET status='queued',claim_token='',claimed_at=0 WHERE task_id=? AND status='claimed' AND claim_token=? AND (?=0 OR id<>?)`, taskID, token, exceptID, exceptID)
+	return err
+}
+
+func (db *DB) RollbackMessageSubmission(ctx context.Context, messageID int64, token string) error {
+	_, err := db.ExecContext(ctx, `UPDATE messages SET status='queued',claim_token='',claimed_at=0 WHERE id=? AND status='submitting' AND claim_token=?`, messageID, token)
+	return err
+}
+
 func (db *DB) queuedMessage(ctx context.Context, taskID int64, predicate string) (Message, error) {
 	var message Message
 	query := `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle FROM messages WHERE task_id=? AND status='queued'` + predicate + ` ORDER BY created_at, id LIMIT 1`
@@ -1418,7 +1505,7 @@ func (db *DB) MessageByID(ctx context.Context, messageID int64) (Message, error)
 
 func (db *DB) UndeliveredTaskMessages(ctx context.Context, taskID int64) ([]Message, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
-FROM messages WHERE task_id=? AND status IN ('queued', 'claimed', 'undeliverable') ORDER BY created_at, id`, taskID)
+FROM messages WHERE task_id=? AND status IN ('queued', 'claimed', 'interrupting', 'undeliverable', 'withdrawn') ORDER BY created_at, id`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -1513,7 +1600,10 @@ func (db *DB) MarkMessageDelivered(ctx context.Context, messageID int64, token s
 }
 
 func (db *DB) ClaimMessage(ctx context.Context, messageID int64, token string, at int64) (bool, error) {
-	result, err := db.ExecContext(ctx, `UPDATE messages SET status='claimed',claim_token=?,claimed_at=? WHERE id=? AND status='queued'`, token, at, messageID)
+	result, err := db.ExecContext(ctx, `UPDATE messages SET status='claimed',claim_token=?,claimed_at=?
+WHERE id=? AND status='queued' AND NOT EXISTS (
+	SELECT 1 FROM messages active WHERE active.task_id=messages.task_id AND active.status IN ('claimed','interrupting','submitting')
+)`, token, at, messageID)
 	if err != nil {
 		return false, err
 	}
@@ -1532,7 +1622,7 @@ func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token 
 	defer tx.Rollback()
 	var taskID int64
 	var state, taskType string
-	if err := tx.QueryRowContext(ctx, `SELECT t.id,t.state,t.type FROM tasks t JOIN messages m ON m.task_id=t.id WHERE m.id=? AND m.status='claimed' AND m.claim_token=?`, messageID, token).Scan(&taskID, &state, &taskType); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT t.id,t.state,t.type FROM tasks t JOIN messages m ON m.task_id=t.id WHERE m.id=? AND m.status IN ('claimed','interrupting') AND m.claim_token=?`, messageID, token).Scan(&taskID, &state, &taskType); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrStateRace
 		}
@@ -1541,7 +1631,7 @@ func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token 
 	if !taskAcceptsInstruction(State(state), taskType) {
 		return ErrStateRace
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='submitting' WHERE id=? AND claim_token=?`, messageID, token); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='submitting' WHERE id=? AND status IN ('claimed','interrupting') AND claim_token=?`, messageID, token); err != nil {
 		return err
 	}
 	// Commit the authorized Task transition before Herdr can expose the
@@ -1564,7 +1654,7 @@ func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token 
 }
 
 func (db *DB) RollbackMessageClaim(ctx context.Context, messageID int64, token string) error {
-	_, err := db.ExecContext(ctx, `UPDATE messages SET status='queued',claim_token='',claimed_at=0 WHERE id=? AND status='claimed' AND claim_token=?`, messageID, token)
+	_, err := db.ExecContext(ctx, `UPDATE messages SET status='queued',claim_token='',claimed_at=0 WHERE id=? AND status IN ('claimed','interrupting') AND claim_token=?`, messageID, token)
 	return err
 }
 
@@ -1735,9 +1825,12 @@ func (db *DB) MarkClaimedNoticesDelivered(ctx context.Context, projectID int64, 
 }
 
 func (db *DB) ReleaseExpiredDeliveryClaims(ctx context.Context, before int64) error {
-	// Only pre-submission claims are safe to retry. `submitting` rows represent
-	// an ambiguous external outcome and intentionally remain held for review.
+	// Pre-submission delivery claims are safe to retry. An interrupted redirect
+	// that never reached submission expires as withdrawn, not as a normal queue item.
 	if _, err := db.ExecContext(ctx, `UPDATE messages SET status='queued',claim_token='',claimed_at=0 WHERE status='claimed' AND claimed_at>0 AND claimed_at<=?`, before); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET status='withdrawn',claim_token='',claimed_at=0 WHERE status='interrupting' AND claimed_at>0 AND claimed_at<=?`, before); err != nil {
 		return err
 	}
 	_, err := db.ExecContext(ctx, `UPDATE notices SET claim_token='',claimed_at=0 WHERE claim_token<>'' AND claim_token NOT LIKE 'uncertain:%' AND delivered_at IS NULL AND acked_at IS NULL AND claimed_at>0 AND claimed_at<=?

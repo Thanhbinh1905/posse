@@ -30,10 +30,11 @@ func TestSendDeliveryPolicy(t *testing.T) {
 		name, kind, status, wantState, wantReason string
 		queue, focused, blockedTask, dialog       bool
 	}{
-		{"claude working", "claude", "working", "delivered", "agent_ready_and_unfocused", false, false, false, false},
-		{"adversarial body", "claude", "working", "delivered", "agent_ready_and_unfocused", false, false, false, false},
-		{"codex working", "codex", "working", "delivered", "agent_ready_and_unfocused", false, false, false, false},
-		{"pi working", "pi", "working", "delivered", "agent_ready_and_unfocused", false, false, false, false},
+		{"claude working", "claude", "working", "delivered", "steered", false, false, false, false},
+		{"adversarial body", "claude", "working", "delivered", "steered", false, false, false, false},
+		{"codex working", "codex", "working", "delivered", "steered", false, false, false, false},
+		{"pi working", "pi", "working", "delivered", "steered", false, false, false, false},
+		{"pi unknown without compaction signal", "pi", "unknown", "queued", "agent_not_ready", false, false, false, false},
 		{"unknown kind", "custom", "working", "queued", "kind_does_not_support_steering", false, false, false, false},
 		{"forced queue", "claude", "working", "queued", "waiting_for_idle (--queue)", true, false, false, false},
 		{"focused", "claude", "working", "queued", "focused", false, true, false, false},
@@ -159,10 +160,10 @@ func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 		claimOnly, queueLater                   bool
 		wantPrompts                             int
 	}{
-		{"delivered", "delivered", "agent_ready_and_unfocused", "delivered", false, false, 1},
+		{"delivered", "delivered", "steered", "delivered", false, false, 1},
 		{"claimed", "queued", "delivery_in_progress", "claimed", true, false, 0},
 		{"claimed with later queued message", "queued", "delivery_in_progress", "claimed", true, true, 0},
-		{"delivered with later queued message", "delivered", "agent_ready_and_unfocused", "delivered", false, true, 1},
+		{"delivered with later queued message", "delivered", "steered", "delivered", false, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -314,6 +315,82 @@ func TestSendReturnsTypedErrorForSQLiteStorageFailure(t *testing.T) {
 	}
 	if !injected || faultErr != nil {
 		t.Fatalf("SQLite fault was not injected: injected=%t err=%v", injected, faultErr)
+	}
+}
+
+func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantState, wantReason   string
+		rejectPrompt, headWaitForIdle bool
+		wantPromptCalls               int
+	}{
+		{"accepted", "delivered", "steered", false, true, 1},
+		{"rejected", "queued", "compacting", true, true, 1},
+		{"earlier steerable message pending", "queued", "earlier_message_pending", true, false, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			repo := filepath.Join(root, "repo")
+			initRepo(t, repo)
+			home := filepath.Join(root, "posse")
+			db, err := store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := db.CreateProject(ctx, "shop", repo, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+				t.Fatal(err)
+			}
+			headID, err := db.QueueMessage(ctx, taskID, "wait for the current turn", tc.headWaitForIdle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			fake := herdr.NewFake()
+			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "unknown"}}}
+			fake.Results["pane.read"] = []byte(`{"read":{"text":"\nAuto-compacting...\n"}}`)
+			if tc.rejectPrompt {
+				fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_not_ready", Message: "Pi is compacting"}
+			}
+			service := testService(home, fake)
+			t.Chdir(repo)
+			var output bytes.Buffer
+			cli := service.CLI()
+			cli.Out = &output
+			if code := cli.Run([]string{"send", "t1", "Steer during compaction"}); code != 0 {
+				t.Fatalf("send exit=%d output=%s", code, output.String())
+			}
+			if !strings.Contains(output.String(), "state: "+tc.wantState) || !strings.Contains(output.String(), "reason: "+tc.wantReason) {
+				t.Fatalf("send result = %s, want state=%s reason=%s", output.String(), tc.wantState, tc.wantReason)
+			}
+			if fake.CallCount("agent.prompt") != tc.wantPromptCalls {
+				t.Fatalf("agent.prompt calls = %d, want %d", fake.CallCount("agent.prompt"), tc.wantPromptCalls)
+			}
+			db, err = store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			head, err := db.MessageByID(ctx, headID)
+			if err != nil || head.Status != "queued" {
+				t.Fatalf("wait-for-idle head changed: %#v %v", head, err)
+			}
+			var status string
+			if err := db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=? AND id<>?`, taskID, headID).Scan(&status); err != nil || status != tc.wantState {
+				t.Fatalf("sent message state = %q, %v; want %s", status, err, tc.wantState)
+			}
+		})
 	}
 }
 
