@@ -116,10 +116,11 @@ func (s *Service) commands() *axi.Command {
 		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Rider's Signal.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Ship Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "brief", Summary: "Reprint this Rider's launch Brief.", Handler: s.brief},
-		{Name: "send", Usage: "$ send <task> <message> [--queue]", Summary: "Deliver to an unfocused ready Rider, steering supported kinds mid-turn; --queue waits for idle.", Handler: s.send},
+		{Name: "send", Usage: "$ send <task> <message> [--queue] | send <task> --interrupt <message>", Summary: "Send a message, optionally queueing it or interrupting and redirecting a busy Rider.", Handler: s.send},
+		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Rider message before delivery begins.", Handler: s.unsend},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},
 		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Rider.", Handler: s.keys},
-		{Name: "interrupt", Summary: "Send the configured abort keys and verify the Rider stopped working.", Handler: s.interrupt},
+		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Send the configured abort keys and verify the Rider stopped its busy turn.", Handler: s.interrupt},
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Rider in the same Mount, optionally with another Profile.", Handler: s.relaunch},
 		{Name: "land", Summary: "Land a completed Ship Task.", Handler: s.land},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
@@ -398,7 +399,15 @@ func (s *Service) prepareProjectLocalRecovery(ctx context.Context, db *store.DB,
 	return s.prepareProjectModeWithRecoveryPolicy(ctx, db, project, false, false, false)
 }
 
+func (s *Service) prepareProjectWithoutMessageDelivery(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectModeWithMessageDelivery(ctx, db, project, true, true, true, false)
+}
+
 func (s *Service) prepareProjectModeWithRecoveryPolicy(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery bool) (config.Config, error) {
+	return s.prepareProjectModeWithMessageDelivery(ctx, db, project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery, true)
+}
+
+func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery, deliverMessages bool) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
 		_ = s.regenerateProjects(ctx, db)
@@ -460,8 +469,10 @@ func (s *Service) prepareProjectModeWithRecoveryPolicy(ctx context.Context, db *
 					return cfg, err
 				}
 				s.relabelProjectTabs(ctx, db, fresh)
-				if err := s.deliverQueuedMessagesWithConfig(ctx, db, fresh, result.Snapshot, cfg); err != nil && !isHerdrUnavailable(err) {
-					return cfg, herdrError(err)
+				if deliverMessages {
+					if err := s.deliverQueuedMessagesWithConfig(ctx, db, fresh, result.Snapshot, cfg); err != nil && !isHerdrUnavailable(err) {
+						return cfg, herdrError(err)
+					}
 				}
 				if err := s.regenerateProjects(ctx, db); err != nil {
 					return cfg, err

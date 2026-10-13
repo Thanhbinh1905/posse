@@ -188,22 +188,22 @@ func TestFreshLookoutPaneWaitsWithoutBlockingPastStartupGrace(t *testing.T) {
 	if err := service.ensureLookoutTab(ctx, db, project, fake.SnapshotValue, false); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(startedAt); elapsed >= 500*time.Millisecond {
+	finishedAt := time.Now()
+	if elapsed := finishedAt.Sub(startedAt); elapsed >= 500*time.Millisecond {
 		t.Fatalf("startup grace blocked Lookout reconciliation for %s", elapsed)
 	}
 	if fake.CallCount("tab.close") != 0 || fake.CallCount("tab.create") != 0 {
 		t.Fatalf("fresh pane was replaced inside its startup grace: %#v", fake.Calls)
 	}
+	// The short test grace can expire before this database read under -race.
+	time.Sleep(lookoutStartupGracePeriod + 10*time.Millisecond)
 	state, err := db.LookoutRecovery(ctx, project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.PaneID != pane.PaneID || state.RetryAt <= time.Now().UnixMilli() {
-		t.Fatalf("fresh pane grace state = %#v", state)
-	}
-	state.RetryAt = time.Now().Add(-time.Second).UnixMilli()
-	if err := db.SetLookoutRecovery(ctx, project.ID, state); err != nil {
-		t.Fatal(err)
+	graceStarted, graceFinished := startedAt.Add(lookoutStartupGracePeriod).UnixMilli(), finishedAt.Add(lookoutStartupGracePeriod).UnixMilli()
+	if state.PaneID != pane.PaneID || state.RetryAt < graceStarted || state.RetryAt > graceFinished || state.FailedStarts != 0 || state.NoticeRaised {
+		t.Fatalf("fresh pane grace state = %#v; retry deadline should be between %d and %d", state, graceStarted, graceFinished)
 	}
 	if err := service.ensureLookoutTab(ctx, db, project, fake.SnapshotValue, false); err != nil {
 		t.Fatal(err)

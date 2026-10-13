@@ -1201,11 +1201,16 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 			returnErr = axi.Failure("store_error", "the message store could not read or update this instruction", false, "Run `posse doctor` to inspect the local store")
 		}
 	}()
-	parsed, err := parseArgs("send", args, map[string]flagSpec{"queue": {boolean: true}})
+	parsed, err := parseArgs("send", args, map[string]flagSpec{"queue": {boolean: true}, "interrupt": {}})
 	if err != nil {
 		return err
 	}
-	if len(parsed.Positionals) < 2 {
+	interruptMessage, interrupting := parsed.Flags["interrupt"]
+	if interrupting {
+		if len(parsed.Positionals) != 1 || interruptMessage == "" || parsed.Bool("queue") {
+			return axi.Usage("send --interrupt requires <task> --interrupt <message> and cannot be combined with --queue")
+		}
+	} else if len(parsed.Positionals) < 2 {
 		return axi.Usage("send requires <task> <message>")
 	}
 	db, _, err := s.openDB()
@@ -1220,7 +1225,12 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	var cfg config.Config
+	if interrupting {
+		cfg, err = s.prepareProjectWithoutMessageDelivery(ctx.Context, db, project)
+	} else {
+		cfg, err = s.prepareProject(ctx.Context, db, project)
+	}
 	if err != nil {
 		return err
 	}
@@ -1276,6 +1286,9 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		}
 	}
 	body := strings.Join(parsed.Positionals[1:], " ")
+	if interrupting {
+		return s.sendInterrupt(ctx, db, task, interruptMessage, cfg)
+	}
 	messageID, err := db.QueueMessage(ctx.Context, task.ID, body, parsed.Bool("queue"))
 	if errors.Is(err, store.ErrStateRace) {
 		return axi.Failure("message_refused", "Task stopped accepting Rider instructions before the message could be queued", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect the Task")
@@ -1296,26 +1309,31 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return err
 	}
 	reason := "agent_not_ready"
+	var sendPane herdr.Pane
+	paneFound := false
+	compacting := false
+	if sendPane, paneFound = findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); paneFound {
+		sendPane, compacting, err = s.piCompactingPane(ctx.Context, sendPane)
+		if err != nil {
+			return err
+		}
+	}
 	switch message.Status {
 	case "delivered":
 		delivered = true
-		reason = "agent_ready_and_unfocused"
+		reason = deliveredMessageReason(sendPane, compacting)
 	case "claimed":
 		reason = "delivery_in_progress"
 	case "submitting":
 		return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
 	case "queued":
-		queued, queueErr := db.OldestQueuedMessage(ctx.Context, task.ID)
-		if queueErr == nil && !message.WaitForIdle {
-			if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found &&
-				pane.AgentStatus == "working" && !pane.Focused && snapshot.FocusedPaneID != pane.PaneID &&
-				task.State != store.StateBlocked && pane.Agent != "" && cfg.Kinds[pane.Agent].Steer {
-				// An explicit --queue message waits for idle, but it must not
-				// prevent a later instruction from steering the current turn.
-				queued, queueErr = db.OldestSteerableQueuedMessage(ctx.Context, task.ID)
-			}
+		candidate, queueErr := db.OldestQueuedMessage(ctx.Context, task.ID)
+		if queueErr == nil && !message.WaitForIdle && paneFound && canSteerPane(task, sendPane, snapshot, cfg) {
+			// An explicit --queue message waits for idle, but it must not
+			// prevent a later instruction from steering the current turn.
+			candidate, queueErr = db.OldestSteerableQueuedMessage(ctx.Context, task.ID)
 		}
-		if queueErr == nil && queued.ID > messageID {
+		if queueErr == nil && candidate.ID > messageID {
 			// Do not let this send skip its own row if another dispatcher
 			// claimed it after the status read and submit a later instruction.
 			queueErr = store.ErrNotFound
@@ -1323,20 +1341,22 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		if queueErr != nil && !store.IsNotFound(queueErr) {
 			return queueErr
 		}
-		if queueErr == nil {
-			if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found {
-				reason = queuedMessageReason(task, queued, pane, snapshot, cfg)
-				if reason == "" {
-					wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, queued, pane.PaneID, cfg)
-					if err != nil {
-						return err
-					}
-					if wasDelivered {
-						if queued.ID != messageID {
-							reason = "earlier_message_delivered_first"
-						}
-					} else if deliveryReason != "" {
-						reason = deliveryReason
+		attemptedReason := ""
+		earlierDelivered := false
+		earlierPending := false
+		if queueErr == nil && paneFound {
+			attemptedReason = queuedMessageReason(task, candidate, sendPane, snapshot, cfg)
+			if attemptedReason == "" {
+				wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, candidate, sendPane.PaneID, cfg)
+				if err != nil {
+					return err
+				}
+				earlierDelivered = wasDelivered && candidate.ID != messageID
+				if !wasDelivered {
+					if candidate.ID != messageID && deliveryReason != "" && deliveryReason != "delivery_in_progress" {
+						earlierPending = true
+					} else {
+						attemptedReason = deliveryReason
 					}
 				}
 			}
@@ -1351,12 +1371,22 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		switch message.Status {
 		case "delivered":
 			delivered = true
-			reason = "agent_ready_and_unfocused"
+			reason = deliveredMessageReason(sendPane, compacting)
 		case "claimed":
 			reason = "delivery_in_progress"
 		case "submitting":
 			return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
 		case "queued":
+			switch {
+			case candidate.ID == messageID && attemptedReason != "":
+				reason = attemptedReason
+			case earlierDelivered:
+				reason = "earlier_message_delivered_first"
+			case earlierPending:
+				reason = "earlier_message_pending"
+			case paneFound:
+				reason = queuedMessageReason(task, message, sendPane, snapshot, cfg)
+			}
 			if reason == "" {
 				reason = "delivery_in_progress"
 			}
@@ -1381,7 +1411,63 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: "agent_ready_and_unfocused"}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"}}})
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"}}})
+}
+
+func (s *Service) unsend(ctx *axi.Context, args []string) error {
+	if len(args) != 1 {
+		return axi.Usage("unsend requires one message ID")
+	}
+	messageID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil || messageID < 1 {
+		return axi.Usage("unsend requires a positive message ID")
+	}
+	db, _, err := s.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	project, err := s.projectForCWD(ctx.Context, db)
+	if err != nil {
+		return err
+	}
+	if err := s.requireLead(ctx.Context, db, project); err != nil {
+		return err
+	}
+	if _, err := s.prepareProjectWithoutMessageDelivery(ctx.Context, db, project); err != nil {
+		return err
+	}
+	message, err := db.MessageByID(ctx.Context, messageID)
+	if store.IsNotFound(err) {
+		return axi.Failure("message_not_found", "message does not exist in this Project", false)
+	}
+	if err != nil {
+		return err
+	}
+	task, err := db.TaskByID(ctx.Context, project.ID, message.TaskID)
+	if store.IsNotFound(err) {
+		return axi.Failure("message_not_found", "message does not exist in this Project", false)
+	}
+	if err != nil {
+		return err
+	}
+	message, withdrawn, err := db.WithdrawQueuedMessage(ctx.Context, messageID)
+	if err != nil {
+		return err
+	}
+	if !withdrawn {
+		return axi.Failure("message_not_queued", fmt.Sprintf("message #%d is %s and cannot be withdrawn", messageID, message.Status), false, "Only queued messages can be withdrawn; inspect the Task with `posse show "+taskIDString(task.Seq)+"`")
+	}
+	if err := s.regenerateProjects(ctx.Context, db); err != nil {
+		return err
+	}
+	return ctx.Print(axi.Object{
+		{Key: "task", Value: taskIDString(task.Seq)},
+		{Key: "message", Value: messageID},
+		{Key: "state", Value: "withdrawn"},
+		{Key: "reason", Value: "withdrawn"},
+		{Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect the Task's messages"}},
+	})
 }
 
 func (s *Service) peek(ctx *axi.Context, args []string) error {
@@ -1468,9 +1554,18 @@ func (s *Service) keys(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "keys", Value: args[1:]}, {Key: "state", Value: "sent"}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the pane"}}})
 }
 
+type interruptOutcome struct {
+	Pane        herdr.Pane
+	Kind        string
+	Keys        []string
+	Status      string
+	Interrupted bool
+	Verified    bool
+}
+
 func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	if len(args) != 1 {
-		return axi.Usage("interrupt requires one Task id")
+		return axi.Usage("interrupt requires <task>")
 	}
 	db, _, err := s.openDB()
 	if err != nil {
@@ -1492,28 +1587,51 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := s.snapshot(ctx.Context)
+	outcome, err := s.interruptTask(ctx.Context, task, cfg)
 	if err != nil {
 		return err
 	}
-	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-	if !found {
-		return axi.Failure("worker_pane_missing", "Rider pane is not available", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
-	}
-	if pane.Focused || snapshot.FocusedPaneID == pane.PaneID {
-		return axi.Failure("pane_focused", "refusing to interrupt a focused pane", false, "Unfocus the pane, then retry")
-	}
-	if task.State == store.StateBlocked || pane.AgentStatus == "blocked" {
-		return axi.Failure("worker_blocked", "refusing to send an abort key to a blocked Rider", false, "Inspect the Rider dialog with `posse peek "+taskIDString(task.Seq)+"`")
-	}
-	if pane.AgentStatus != "working" {
+	if !outcome.Interrupted {
 		return ctx.Print(axi.Object{
 			{Key: "task", Value: taskIDString(task.Seq)},
 			{Key: "interrupted", Value: false},
 			{Key: "reason", Value: "agent_not_working"},
-			{Key: "agent_status", Value: pane.AgentStatus},
+			{Key: "agent_status", Value: outcome.Status},
 			{Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}},
 		})
+	}
+	return ctx.Print(axi.Object{
+		{Key: "task", Value: taskIDString(task.Seq)},
+		{Key: "interrupted", Value: true},
+		{Key: "agent", Value: outcome.Kind},
+		{Key: "abort_keys", Value: outcome.Keys},
+		{Key: "agent_status", Value: outcome.Status},
+		{Key: "verified", Value: outcome.Verified},
+		{Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}},
+	})
+}
+
+func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config.Config) (interruptOutcome, error) {
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return interruptOutcome{}, err
+	}
+	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+	if !found {
+		return interruptOutcome{}, axi.Failure("worker_pane_missing", "Rider pane is not available", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
+	}
+	if pane.Focused || snapshot.FocusedPaneID == pane.PaneID {
+		return interruptOutcome{}, axi.Failure("pane_focused", "refusing to interrupt a focused pane", false, "Unfocus the pane, then retry")
+	}
+	if task.State == store.StateBlocked || pane.AgentStatus == "blocked" {
+		return interruptOutcome{}, axi.Failure("worker_blocked", "refusing to send an abort key to a blocked Rider", false, "Inspect the Rider dialog with `posse peek "+taskIDString(task.Seq)+"`")
+	}
+	pane, _, err = s.piCompactingPane(ctx, pane)
+	if err != nil {
+		return interruptOutcome{}, err
+	}
+	if pane.AgentStatus != "working" {
+		return interruptOutcome{Pane: pane, Status: pane.AgentStatus}, nil
 	}
 	kind := pane.Agent
 	if kind == "" {
@@ -1521,13 +1639,13 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	}
 	keys := cfg.Kinds[kind].InterruptKeys
 	if len(keys) == 0 {
-		return axi.Failure("interrupt_unsupported_kind", "no abort key sequence is configured for Rider kind "+kind, false, "Set `kinds."+kind+".interrupt_keys` to the harness sequence that stops a running turn")
+		return interruptOutcome{}, axi.Failure("interrupt_unsupported_kind", "no abort key sequence is configured for Rider kind "+kind, false, "Set `kinds."+kind+".interrupt_keys` to the harness sequence that stops a running turn")
 	}
-	if _, err := s.herdrCall(ctx.Context, "agent.send_keys", map[string]any{"target": pane.PaneID, "keys": keys}); err != nil {
-		return err
+	if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": pane.PaneID, "keys": keys}); err != nil {
+		return interruptOutcome{}, err
 	}
 
-	verifyCtx, cancel := context.WithTimeout(ctx.Context, 3*time.Second)
+	verifyCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -1535,20 +1653,14 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 		updated, snapshotErr := s.snapshot(verifyCtx)
 		if snapshotErr == nil {
 			current, present := findAppPane(updated.Panes, pane.PaneID, task.PaneLabel)
-			if !present || current.AgentStatus != "working" {
-				status := "missing"
-				if present {
-					status = current.AgentStatus
-				}
-				return ctx.Print(axi.Object{
-					{Key: "task", Value: taskIDString(task.Seq)},
-					{Key: "interrupted", Value: true},
-					{Key: "agent", Value: kind},
-					{Key: "abort_keys", Value: keys},
-					{Key: "agent_status", Value: status},
-					{Key: "verified", Value: true},
-					{Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect its state"}},
-				})
+			if !present {
+				return interruptOutcome{Pane: pane, Kind: kind, Keys: keys, Status: "missing", Interrupted: true, Verified: true}, nil
+			}
+			current, _, compactErr := s.piCompactingPane(verifyCtx, current)
+			if compactErr != nil {
+				snapshotErr = compactErr
+			} else if current.AgentStatus != "working" {
+				return interruptOutcome{Pane: current, Kind: kind, Keys: keys, Status: current.AgentStatus, Interrupted: true, Verified: true}, nil
 			}
 		}
 		select {
@@ -1557,11 +1669,117 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 			if snapshotErr == nil {
 				message = fmt.Sprintf("sent the abort key sequence but the Rider still reports %s", pane.AgentStatus)
 			}
-			return axi.Failure("interrupt_unverified", message, false,
+			return interruptOutcome{}, axi.Failure("interrupt_unverified", message, false,
 				"Inspect the pane with `posse peek "+taskIDString(task.Seq)+"`; Posse did not verify that the turn stopped")
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task, body string, cfg config.Config) (returnErr error) {
+	token, err := newDeliveryClaimToken()
+	if err != nil {
+		return err
+	}
+	at := currentTime()
+	messageID, err := db.QueueInterruptMessage(ctx.Context, task.ID, body, token, at, at-deliveryClaimTimeout.Milliseconds())
+	if errors.Is(err, store.ErrStateRace) {
+		return axi.Failure("message_refused", "Task stopped accepting Rider instructions before the interrupt message could be queued", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect the Task")
+	}
+	if errors.Is(err, store.ErrMessageDeliveryInProgress) {
+		return axi.Failure("message_delivery_in_progress", "another message is already being delivered to this Rider", true, "Inspect the Rider with `posse peek "+taskIDString(task.Seq)+"`, then retry")
+	}
+	if err != nil {
+		return err
+	}
+	reservationCtx, stopReservation := keepMessageDeliveryClaimsAlive(ctx.Context, db, task.ID, messageID, token)
+	reservationStopped := false
+	defer func() {
+		if !reservationStopped {
+			returnErr = errors.Join(returnErr, stopReservation())
+		}
+	}()
+	cleanupUnsent := func() error {
+		if err := db.WithdrawInterruptMessage(ctx.Context, messageID, token); err != nil {
+			return err
+		}
+		if err := db.ReleaseMessageClaims(ctx.Context, task.ID, token, 0); err != nil {
+			return err
+		}
+		return s.regenerateProjects(ctx.Context, db)
+	}
+	outcome, err := s.interruptTask(reservationCtx, task, cfg)
+	if err != nil {
+		return errors.Join(err, cleanupUnsent())
+	}
+	message, err := db.MessageByID(ctx.Context, messageID)
+	if err != nil {
+		return errors.Join(err, cleanupUnsent())
+	}
+	paneID := task.PaneID
+	if outcome.Pane.PaneID != "" {
+		paneID = outcome.Pane.PaneID
+	}
+	delivered, deliveryReason, deliveryErr := s.submitClaimedMessage(reservationCtx, db, task, message, paneID, cfg, token)
+	message, readErr := db.MessageByID(ctx.Context, messageID)
+	if readErr == nil && message.Status == "delivered" {
+		delivered = true
+	}
+	exceptID := int64(0)
+	if readErr == nil && message.Status == "submitting" {
+		exceptID = messageID
+	}
+	releaseErr := db.ReleaseMessageClaims(ctx.Context, task.ID, token, exceptID)
+	if deliveryErr != nil || readErr != nil || releaseErr != nil {
+		return errors.Join(deliveryErr, readErr, releaseErr, s.regenerateProjects(ctx.Context, db))
+	}
+	state := message.Status
+	if state == "claimed" {
+		state = "queued"
+	}
+	reason := deliveryReason
+	if delivered {
+		state = "delivered"
+		reason = "delivered"
+		if outcome.Interrupted && outcome.Verified {
+			reason = "delivered_after_interrupt"
+		}
+	} else if reason == "" {
+		snapshot, snapshotErr := s.snapshot(ctx.Context)
+		if snapshotErr == nil {
+			if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); found {
+				pane, compacting, compactErr := s.piCompactingPane(ctx.Context, pane)
+				if compactErr != nil {
+					return compactErr
+				}
+				reason = queuedMessageReason(task, message, pane, snapshot, cfg)
+				if compacting && reason == "agent_not_ready" {
+					reason = "compacting"
+				}
+			}
+		}
+		if reason == "" {
+			reason = "agent_not_ready"
+		}
+	}
+	if err := s.regenerateProjects(ctx.Context, db); err != nil {
+		return err
+	}
+	if err := stopReservation(); err != nil {
+		reservationStopped = true
+		return err
+	}
+	reservationStopped = true
+	return ctx.Print(axi.Object{
+		{Key: "task", Value: taskIDString(task.Seq)},
+		{Key: "message", Value: messageID},
+		{Key: "state", Value: state},
+		{Key: "reason", Value: reason},
+		{Key: "interrupted", Value: outcome.Interrupted},
+		{Key: "verified", Value: outcome.Verified},
+		{Key: "abort_keys", Value: outcome.Keys},
+		{Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"}},
+	})
 }
 
 func (s *Service) relaunch(ctx *axi.Context, args []string) error {

@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,13 +30,13 @@ func TestRealPiInterruptStopsBusyTurnE2E(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(piHome, "extensions"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	requestStarted := make(chan struct{}, 1)
+	requestStarted := make(chan struct{}, 4)
+	requestBodies := make(chan string, 4)
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case requestStarted <- struct{}{}:
-		default:
-		}
+		body, _ := io.ReadAll(r.Body)
+		requestBodies <- string(body)
+		requestStarted <- struct{}{}
 		select {
 		case <-r.Context().Done():
 			return
@@ -74,6 +75,11 @@ func TestRealPiInterruptStopsBusyTurnE2E(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("real Pi did not start its local model request")
 	}
+	select {
+	case <-requestBodies:
+	case <-time.After(5 * time.Second):
+		t.Fatal("local model request body was not captured")
+	}
 	if !waitForCondition(10*time.Second, func() bool {
 		snapshot, err := client.Snapshot(context.Background())
 		if err != nil {
@@ -89,9 +95,33 @@ func TestRealPiInterruptStopsBusyTurnE2E(t *testing.T) {
 		t.Fatalf("real Pi did not remain busy and unfocused before interrupt: %#v", currentPane(t, client, task.PaneID))
 	}
 
-	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "interrupt", "t1")
-	if !strings.Contains(output, "interrupted: true") || !strings.Contains(output, "verified: true") {
-		t.Fatalf("real Pi interrupt was not verified: %s", output)
+	queued := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Wait for the current turn", "--queue")
+	if !strings.Contains(queued, "waiting_for_idle (--queue)") {
+		t.Fatalf("real Pi queue head was not held: %s", queued)
+	}
+	redirect := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "--interrupt", "Stop and redirect this turn")
+	for _, expected := range []string{"state: delivered", "reason: delivered_after_interrupt", "interrupted: true", "verified: true"} {
+		if !strings.Contains(redirect, expected) {
+			t.Fatalf("real Pi send --interrupt omitted %q: %s", expected, redirect)
+		}
+	}
+	pending, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)
+	if err != nil || pending.Body != "Wait for the current turn" || !pending.WaitForIdle {
+		t.Fatalf("send --interrupt reordered or consumed the queued message: %#v %v", pending, err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("real Pi did not start a new model request for the redirect")
+	}
+	var redirectRequest string
+	select {
+	case redirectRequest = <-requestBodies:
+	case <-time.After(5 * time.Second):
+		t.Fatal("redirect model request body was not captured")
+	}
+	if !strings.Contains(redirectRequest, "Stop and redirect this turn") || strings.Contains(redirectRequest, "Wait for the current turn") {
+		t.Fatalf("real Pi's next model input was not the redirect: %s", redirectRequest)
 	}
 	paneOutput, err := (posseRuntime.SystemProgress{}).ReadPane(context.Background(), client, task.PaneID, 160)
 	if err != nil {
