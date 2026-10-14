@@ -26,7 +26,7 @@ func TestPrunePreservesBranchCheckedOutAfterFinalCheck(t *testing.T) {
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merged, task.GatedSHA)
-	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	showAfterActiveTeardown(t, f, "t1")
 	task = f.mustTask(t, "t1")
 	if task.State != store.StateTornDown {
 		t.Fatalf("Task did not tear down: %#v", task)

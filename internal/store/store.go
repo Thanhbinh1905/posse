@@ -478,10 +478,11 @@ func validateTransitionSource(from, to State, source string) error {
 		expected = "herdr"
 	case from == StateNeedsDecision && to == StateWorking:
 		expected = "lead"
-	case from == StateDone && to == StateWorking:
+	case (from == StateDone || from == StateLanding) && to == StateWorking:
 		expected = "lead"
-	case from == StateLanding && to == StateWorking:
-		expected = "lead"
+		if source == "watcher" {
+			expected = "watcher"
+		}
 	case from == StateStalled && to == StateWorking:
 		if source != "cli" {
 			expected = "worker"

@@ -14,28 +14,117 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// The shim changes timing only. All Task delivery and pruning use the real CLI.
+// A successful read may defer maintenance. Wait for the recorded Teardown
+// outcome, not just the foreground CLI's exit status.
 func showAfterActiveTeardown(t *testing.T, f *prLifecycleFixture, taskID string) string {
 	t.Helper()
 	command := exec.Command(f.binary, "show", taskID)
 	command.Dir, command.Env = f.repo, f.leadEnv
 	output, err := command.CombinedOutput()
-	if err == nil {
-		return string(output)
+	result, err := finishShowAfterTeardown(t, f, taskID, output, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(output), `"teardown_in_progress"`) {
-		t.Fatalf("posse show %s: %v\n%s", taskID, err, output)
+	return result
+}
+
+func finishShowAfterTeardown(t *testing.T, f *prLifecycleFixture, taskID string, output []byte, err error) (string, error) {
+	t.Helper()
+	if err != nil && !strings.Contains(string(output), `"teardown_in_progress"`) {
+		return "", fmt.Errorf("posse show %s: %w\n%s", taskID, err, output)
 	}
 	if !waitForCondition(30*time.Second, func() bool {
 		task, taskErr := f.db.Task(context.Background(), f.project.ID, taskID)
 		return taskErr == nil && task.State == store.StateTornDown
 	}) {
-		t.Fatalf("Task %s Teardown did not finish after its progress response: %s", taskID, output)
+		task, taskErr := f.db.Task(context.Background(), f.project.ID, taskID)
+		notices, noticeErr := f.db.Notices(context.Background(), f.project.ID, false)
+		return "", fmt.Errorf("Task %s Teardown did not finish: task=%#v taskErr=%v Notices=%#v noticeErr=%v show=%s", taskID, task, taskErr, notices, noticeErr, output)
 	}
-	return runPosse(t, f.binary, f.repo, f.leadEnv, "show", taskID)
+	command := exec.Command(f.binary, "show", taskID)
+	command.Dir, command.Env = f.repo, f.leadEnv
+	result, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("posse show %s after Teardown: %w\n%s", taskID, err, result)
+	}
+	return string(result), nil
+}
+
+func TestShowWaitsForDeferredTeardown(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	ctx := context.Background()
+	brief := filepath.Join(f.root, "ship.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.rideAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
+	task := f.mustTask(t, "t1")
+	merged := f.mergeOnLocalOrigin(t, task, "t1")
+	// Hold the poll until the foreground read has returned, so the Lookout
+	// cannot complete Teardown before this test exercises its wait condition.
+	var token string
+	if !waitForCondition(5*time.Second, func() bool {
+		var err error
+		token, err = f.db.ClaimPRPoll(ctx, f.project.ID, time.Now(), 0, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token != ""
+	}) {
+		t.Fatal("could not reserve the fixture PR poll")
+	}
+	defer f.db.ReleasePRPoll(ctx, f.project.ID, token)
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merged, task.GatedSHA)
+	writer, err := f.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	// Change Herdr evidence while SQLite is locked. The read-only show must
+	// defer its observation write and successfully display recorded state.
+	client := herdr.NewWithEnv("herdr", f.env)
+	if _, err := client.Run(ctx, "pane", "report-agent", task.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle", "--agent-session-id", "7f78f9b4-a44b-4c86-844b-6cb5c0dc9d4a"); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(f.binary, "show", "t1")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	output, showErr := command.CombinedOutput()
+	if showErr != nil || !strings.Contains(string(output), "observations were deferred") {
+		t.Fatalf("show did not reproduce a successful deferred read: err=%v output=%s", showErr, output)
+	}
+	if err := writer.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() {
+		_, err := finishShowAfterTeardown(t, f, "t1", output, showErr)
+		finished <- err
+	}()
+	select {
+	case err := <-finished:
+		t.Fatalf("successful deferred show was mistaken for completed Teardown: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := f.db.ReleasePRPoll(ctx, f.project.ID, token); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(35 * time.Second):
+		t.Fatal("Teardown waiter did not finish after releasing the fixture poll")
+	}
+	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown {
+		t.Fatalf("deferred Teardown did not complete: %#v", task)
+	}
 }
 
 func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
