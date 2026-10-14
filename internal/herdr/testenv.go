@@ -199,5 +199,5 @@ func TestRootName() string {
 	if prefix == "" {
 		prefix = "posse-e2e-"
 	}
-	return fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
+	return prefix + strconv.FormatInt(time.Now().UnixNano(), 36)
 }

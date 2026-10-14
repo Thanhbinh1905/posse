@@ -323,12 +323,21 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 			}
 		}
 		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
-		return foundFailure && watchErr == nil && watch.CheckoutCheckedAt > 0 && watch.CheckoutStatus == "root_behind"
+		return foundFailure && watchErr == nil && watch.CheckoutCheckedAt > 0 && watch.CheckoutStatus == "fetch_failed"
 	}) {
 		t.Fatal("released forge failure and blackholed checkout failure were not recorded against the offline Member")
 	}
 	if _, err := client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c"); err != nil {
 		t.Errorf("stop isolated Lookout: %v", err)
 	}
-	t.Logf("while offline PR query and git fetch remained stalled, the healthy Member observation and landed-Task Teardown completed; failures became visible after release")
+	notices, err := db.Notices(context.Background(), project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "root_behind" && strings.Contains(notice.Summary, "offline") {
+			t.Fatalf("offline Member fetch failure produced a false root_behind Notice: %#v", notice)
+		}
+	}
+	t.Logf("while offline PR query and git fetch remained stalled, the healthy Member observation and landed-Task Teardown completed; checkout fetch failure remained distinct from root_behind")
 }

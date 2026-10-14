@@ -158,17 +158,21 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	defer lock.Close()
 	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
 	if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
-		// Local contention says nothing about whether origin is ahead. Let
-		// the caller retry instead of creating a misleading root_behind Notice.
+		// A failed fetch says nothing about whether origin is ahead. Let local
+		// contention retry without adding to the persistent failure streak.
 		if store.IsBusy(err) || ctx.Err() != nil {
 			return result, err
 		}
-		result.Status = "root_behind"
+		result.Status = "fetch_failed"
 		result.Err = err
-		result.UpstreamHead, _ = gitOutput(ctx, target.Root, "rev-parse", "refs/remotes/origin/"+target.DefaultBranch)
 		result.Reason = "could not fetch origin: " + truncate(strings.TrimSpace(err.Error()), 240)
-		_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), result.UpstreamHead, 0, result.Reason)
-		return result, recordErr
+		if _, recordErr := db.RecordRepoFetchFailure(ctx, project.ID, target.Name, now.UnixMilli(), result.Reason); recordErr != nil {
+			return result, recordErr
+		}
+		return result, nil
+	}
+	if err := db.RecordRepoFetchSuccess(ctx, project.ID, target.Name, now.UnixMilli()); err != nil {
+		return result, err
 	}
 	upstreamRef := "refs/remotes/origin/" + target.DefaultBranch
 	upstreamHead, err := gitOutput(ctx, target.Root, "rev-parse", upstreamRef)
@@ -179,7 +183,14 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 			}
 			result.Status = "fetch_failed"
 			result.Err = fetchErr
+			result.Reason = "could not fetch origin branch " + target.DefaultBranch + ": " + truncate(strings.TrimSpace(fetchErr.Error()), 240)
+			if _, recordErr := db.RecordRepoFetchFailure(ctx, project.ID, target.Name, now.UnixMilli(), result.Reason); recordErr != nil {
+				return result, recordErr
+			}
 			return result, nil
+		}
+		if err := db.RecordRepoFetchSuccess(ctx, project.ID, target.Name, now.UnixMilli()); err != nil {
+			return result, err
 		}
 		upstreamHead, err = gitOutput(ctx, target.Root, "rev-parse", upstreamRef)
 		if err != nil {
