@@ -499,7 +499,7 @@ func TestUnsaddleChecksReAdoptedWorkspaceAgainstMountBeforeClosing(t *testing.T)
 	}
 }
 
-func TestApprovedDiscardRefusesLiveAgentBeforePreflightOrTeardown(t *testing.T) {
+func TestApprovedDiscardRefusesUnverifiableAgentBeforeTeardown(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	attachPRFixtureMount(t, fixture)
 	ctx := context.Background()
@@ -526,8 +526,8 @@ func TestApprovedDiscardRefusesLiveAgentBeforePreflightOrTeardown(t *testing.T) 
 	cli.Out, cli.ErrOut = &output, &errorsOut
 	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
 	combined := output.String() + errorsOut.String()
-	if code == 0 || !strings.Contains(combined, "A01 #133") || !strings.Contains(combined, "A02 #134") {
-		t.Fatalf("live-agent discard was not refused with its prerequisites: code=%d output=%s", code, combined)
+	if code == 0 || !strings.Contains(combined, "discard_agent_identity_unavailable") {
+		t.Fatalf("unverifiable-agent discard was not refused: code=%d output=%s", code, combined)
 	}
 	updated, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
 	if err != nil || updated.State != store.StateFailed {

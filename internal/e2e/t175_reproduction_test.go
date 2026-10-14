@@ -161,7 +161,7 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 		}
 	}
 	t.Logf("owned snapshot PID=%d, foreign process_info PID=%d, exit=%d output=%s foreign alive=%v file error=%v", ownedPID, foreignPID, code, output.String(), foreignAlive, fileErr)
-	if code == 0 || !strings.Contains(output.String(), "discard_live_agent") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" {
+	if code == 0 || !strings.Contains(output.String(), "discard_agent_identity_unavailable") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" {
 		t.Fatalf("live foreign replacement was not refused safely: exit=%d alive=%v file=%q error=%v output=%s", code, foreignAlive, contents, fileErr, output.String())
 	}
 	if taskAfter := f.task(t, "t1"); taskAfter.State != store.StateFailed {
@@ -301,7 +301,7 @@ func TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved(t *testing.T) 
 	mounts, mountErr := ro.Mounts(ctx, f.projectID)
 	_ = ro.Close()
 	t.Logf("owned PID=%d, foreign PID=%d, exit=%d, foreign alive=%v, file=%q, file error=%v, Task=%s, branch error=%v, Mounts=%#v, output=%s", ownedPID, foreignPID, code, foreignAlive, contents, fileErr, taskAfter.State, branchErr, mounts, output.String())
-	if code == 0 || !strings.Contains(output.String(), "discard_live_agent") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" || taskAfter.State != store.StateFailed || branchErr != nil || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
+	if code == 0 || !strings.Contains(output.String(), "discard_agent_identity_unavailable") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" || taskAfter.State != store.StateFailed || branchErr != nil || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
 		t.Fatalf("live foreign replacement was not refused safely: branch=%s mount error=%v output=%s", branchOutput, mountErr, output.String())
 	}
 }

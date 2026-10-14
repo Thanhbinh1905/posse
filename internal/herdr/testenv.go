@@ -90,6 +90,10 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 	resolvedRoot, resolveErr := filepath.EvalSymlinks(rootAbs)
 	parent := filepath.Dir(resolvedRoot)
 	configuredTemp := filepath.IsAbs(tmpDir) && tmpDirErr == nil && filepath.Clean(tmpDirAbs) != string(filepath.Separator) && parent == filepath.Clean(tmpDirAbs)
+	// A fixture may override its child TMPDIR with a subdirectory after being
+	// created directly under this test process's Task scratch directory.
+	processTemp, processTempErr := filepath.EvalSymlinks(os.TempDir())
+	configuredTemp = configuredTemp || processTempErr == nil && filepath.IsAbs(processTemp) && processTemp != string(filepath.Separator) && parent == filepath.Clean(processTemp)
 	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || parent == filepath.Clean(os.TempDir()) || configuredTemp
 	insideTemp := false
 	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {

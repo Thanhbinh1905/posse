@@ -27,6 +27,11 @@ func TestMain(m *testing.M) {
 		runE2EServerReaper()
 		os.Exit(0)
 	}
+	if os.Getenv("POSSE_T193_BLOCK_PIDFD") == "1" {
+		// This helper execs Posse in an existing fixture, creates no servers,
+		// and must retain the fixture's explicit Lead caller identity.
+		os.Exit(m.Run())
+	}
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
 		if found && strings.HasPrefix(key, "HERDR_") {

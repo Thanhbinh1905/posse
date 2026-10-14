@@ -423,9 +423,6 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if !store.IsApprovedDiscardSourceState(task.State) || task.State == store.StateLanded {
 			return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded directly", false)
 		}
-		if err := s.requireNoLiveTaskAgent(ctx.Context, project, task); err != nil {
-			return err
-		}
 		cfg, err := config.Load(home, project.Name)
 		if err != nil {
 			return configError(err)
@@ -462,9 +459,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		if !store.IsApprovedDiscardSourceState(task.State) {
 			return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
 		}
-		if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
-			return result, err
-		}
 	}
 	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "unsaddle", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote}))
 	if err != nil {
@@ -482,14 +476,12 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if current.State != task.State {
 		return result, fmt.Errorf("%w: Task %d is not in %q", store.ErrStateRace, task.ID, task.State)
 	}
+	if discardable && (current.Launches != task.Launches || current.AgentName != task.AgentName || current.PaneID != task.PaneID || current.WorktreePath != task.WorktreePath) {
+		return result, discardIdentityRefused("Task Rider changed before approved discard acquired its intent")
+	}
 	task = current
 	if discardable && !store.IsApprovedDiscardSourceState(task.State) {
 		return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
-	}
-	if discardable {
-		if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
-			return result, err
-		}
 	}
 	mountHeld, err := taskMountHeldBy(ctx, db, task)
 	if err != nil {
@@ -526,7 +518,38 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane inspection", err)
 	}
+	var stopped []string
+	var riderPlan *discardRiderPlan
 	if discardable {
+		riderPlan, err = s.retainDiscardRider(ctx, db, project, task, intent, panePlan)
+		if err != nil {
+			return result, err
+		}
+		defer riderPlan.Close()
+		if err := s.closeAndVerifyDiscardPullRequests(ctx, db, discardPRs, cfg); err != nil {
+			return result, s.unsaddleDiscardIncomplete(ctx, db, project, task, "recorded pull request closure", err)
+		}
+		// The User quote and exact instance bindings are already durable in
+		// the intent. Stop before recording the branch tip: interruption can
+		// finish a commit, which must be captured and discarded at its final SHA.
+		if err := s.runIntentStep(ctx, db, intent, "rider.stop", func() error {
+			var stopErr error
+			stopped, stopErr = s.stopDiscardRider(ctx, project, task, riderPlan)
+			return stopErr
+		}); err != nil {
+			return result, s.unsaddleDiscardIncomplete(ctx, db, project, task, "Rider stop", err)
+		}
+		// A shutdown handler can emit a final Signal. Accept its new unlanded
+		// state, but never reinterpret approval as permission to discard a
+		// relaunched Rider or work that has Landed.
+		stoppedTask, err := db.TaskByID(ctx, project.ID, task.ID)
+		if err != nil {
+			return result, err
+		}
+		if stoppedTask.State == store.StateLanded && task.State != store.StateLanded || !store.IsApprovedDiscardSourceState(stoppedTask.State) || stoppedTask.Launches != task.Launches || stoppedTask.AgentName != task.AgentName || stoppedTask.WorktreePath != task.WorktreePath || stoppedTask.PaneID != task.PaneID || stoppedTask.PRURL != task.PRURL {
+			return result, discardIdentityRefused("Task changed launch, PR identity or custody during Rider shutdown")
+		}
+		task = stoppedTask
 		branchSHA := ""
 		if project.IsWorkspace() {
 			var tipsErr error
@@ -550,11 +573,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		}); err != nil {
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "discard tip capture", err)
 		}
-		if err := s.closeAndVerifyDiscardPullRequests(ctx, db, discardPRs, cfg); err != nil {
-			return result, s.unsaddleDiscardIncomplete(ctx, db, project, task, "recorded pull request closure", err)
-		}
 	}
-	var stopped []string
 	if !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
 			if mountHeld {
@@ -577,7 +596,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	var paneResult teardownPanes
 	err = s.runIntentStep(ctx, db, intent, "panes.close", func() error {
 		if discardable {
-			if err := s.requireNoLiveTaskAgent(ctx, project, task); err != nil {
+			if err := s.closeDiscardRiderPanes(ctx, project, task, riderPlan); err != nil {
 				return err
 			}
 		}
@@ -589,6 +608,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return closeErr
 	})
 	if err != nil {
+		if discardable {
+			return result, s.unsaddleDiscardIncomplete(ctx, db, project, task, "pane closure", err)
+		}
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane closure", err)
 	}
 	if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {

@@ -79,7 +79,7 @@ func (s *Service) beginIntentStep(ctx context.Context, db *store.DB, intent stor
 }
 
 func unsaddleStepIndex(step string) int {
-	steps := []string{"approval.record", "discard.capture", "process.stop", "panes.close", "mount.stop", "leftover.snapshot", "report.attachments", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"}
+	steps := []string{"rider.stop", "approval.record", "discard.capture", "process.stop", "panes.close", "mount.stop", "leftover.snapshot", "report.attachments", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"}
 	for index, candidate := range steps {
 		if candidate == step {
 			return index

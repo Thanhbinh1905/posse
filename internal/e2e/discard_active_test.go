@@ -231,35 +231,160 @@ esac
 	}
 }
 
-func TestApprovedDiscardRefusesLiveAgentUntilIdentityPrerequisitesLand(t *testing.T) {
+func TestApprovedDiscardStopsWorkingRider(t *testing.T) {
+	for _, state := range []store.State{store.StateWorking, store.StateNeedsDecision} {
+		t.Run(string(state), func(t *testing.T) { testApprovedDiscardStopsRider(t, state) })
+	}
+}
+
+func TestApprovedDiscardStopsReopenedDoneRider(t *testing.T) {
+	testApprovedDiscardStopsRider(t, store.StateDone)
+}
+
+func testApprovedDiscardStopsRider(t *testing.T, state store.State) {
 	f := newRiderTabsFixture(t)
-	task := f.ride(t, "t1", "Refuse live Rider discard", "refuse-live-rider")
-	command := exec.Command(f.binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this active Task")
+	agent := `#!/bin/sh
+trap ': > "$POSSE_TEST_ROOT/rider-interrupted"; printf "late Rider commit\n" > cancel-late.txt; git add cancel-late.txt; git commit -m "late Rider commit" > "$POSSE_TEST_ROOT/late-commit.log" 2>&1' INT
+trap ': > "$POSSE_TEST_ROOT/rider-terminated"; posse holler failed "Rider stopped during approved cancellation" > "$POSSE_TEST_ROOT/stop-signal.log" 2>&1; exit 0' TERM
+herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
+IFS= read -r prompt || exit 0
+herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+while :; do
+  IFS= read -r line || :
+  if [ "$line" = 'Resume cancelled Task' ]; then
+    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+  fi
+done
+`
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "claude"), []byte(agent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	task := f.ride(t, "t1", "Cancel working Rider", "cancel-working-rider")
+	pid := foregroundPID(t, f, task.PaneID)
+	riderEnv := setEnv(f.env, "HERDR_ENV", "1")
+	riderEnv = setEnv(riderEnv, "HERDR_PANE_ID", task.PaneID)
+	if state == store.StateNeedsDecision {
+		runPosse(t, f.binary, task.WorktreePath, riderEnv, "holler", "needs-decision", "Should this Task be cancelled?")
+	}
+	if state == store.StateDone {
+		if err := os.WriteFile(filepath.Join(task.WorktreePath, "completed-change.txt"), []byte("completed Rider work\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, f.env, task.WorktreePath, "add", "completed-change.txt")
+		gitTest(t, f.env, task.WorktreePath, "commit", "-m", "complete Rider change")
+		if _, err := f.client.Run(t.Context(), "pane", "report-agent", task.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, f.binary, task.WorktreePath, riderEnv, "holler", "done", "Rider work is complete")
+		if completed := f.task(t, "t1"); completed.State != store.StateDone {
+			t.Fatalf("Rider completion left Task in %s", completed.State)
+		}
+		// Direct User input, not posse send or a working Signal, must reopen
+		// this Ship Task before the Lead cancels that same Rider instance.
+		if _, err := f.client.Run(t.Context(), "pane", "run", task.PaneID, "Resume cancelled Task"); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForCondition(12*time.Second, func() bool {
+			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+			return f.task(t, "t1").State == store.StateWorking
+		}) {
+			t.Fatalf("resumed done Rider left Task in %s", f.task(t, "t1").State)
+		}
+		reopened := f.task(t, "t1")
+		if reopened.Launches != task.Launches || reopened.AgentName != task.AgentName || reopened.PaneID != task.PaneID || reopened.Branch != task.Branch || reopened.PRURL != task.PRURL || foregroundPID(t, f, task.PaneID) != pid {
+			t.Fatalf("watcher reopening changed the Rider instance or custody: before=%#v after=%#v", task, reopened)
+		}
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var transitions, notices int
+		if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM transitions WHERE task_id=? AND from_state='done' AND to_state='working' AND source='watcher'`, task.ID).Scan(&transitions); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='rider_resumed'`, task.ID).Scan(&notices); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		_ = db.Close()
+		if transitions != 1 || notices != 1 {
+			t.Fatalf("done Rider reopening recorded %d transitions and %d Notices, want one of each", transitions, notices)
+		}
+	}
+	for _, args := range [][]string{{"unsaddle", "t1"}, {"unsaddle", "t1", "--discard"}, {"unsaddle", "t1", "--discard", "--user-approved", " "}} {
+		command := exec.Command(f.binary, args...)
+		command.Dir, command.Env = f.repo, f.leadEnv
+		if output, err := command.CombinedOutput(); err == nil || !strings.Contains(string(output), "teardown_refused") {
+			t.Fatalf("unapproved cancellation was not refused: args=%v err=%v output=%s", args, err, output)
+		}
+		f.assertAlive(t, f.snapshot(t), task.PaneID)
+	}
+	riderCommand := exec.Command(f.binary, "unsaddle", "t1", "--discard", "--user-approved", "destroy t3 now")
+	riderCommand.Dir, riderCommand.Env = task.WorktreePath, riderEnv
+	if output, err := riderCommand.CombinedOutput(); err == nil || !strings.Contains(string(output), "worker_forbidden") {
+		t.Fatalf("Rider cancellation was not refused: %v %s", err, output)
+	}
+	change := filepath.Join(task.WorktreePath, "cancel-change.txt")
+	if err := os.WriteFile(change, []byte("committed cancelled work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, task.WorktreePath, "add", ".")
+	gitTest(t, f.env, task.WorktreePath, "commit", "-m", "cancelled change")
+	command := exec.Command(f.binary, "unsaddle", "t1", "--discard", "--user-approved", "destroy t3 now")
 	command.Dir, command.Env = f.repo, f.leadEnv
 	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "A01 #133") || !strings.Contains(string(output), "A02 #134") {
-		t.Fatalf("live-agent discard did not name its safety prerequisites: err=%v output=%s", err, output)
+	if err != nil || !strings.Contains(string(output), "torn-down") {
+		t.Fatalf("approved cancellation did not stop and discard the working Rider: err=%v output=%s", err, output)
 	}
-	if current := f.task(t, "t1"); current.State != store.StateWorking {
-		t.Fatalf("refused live-agent discard changed Task state to %s", current.State)
+	if current := f.task(t, "t1"); current.State != store.StateTornDown {
+		t.Fatalf("approved cancellation left Task in %s", current.State)
 	}
 	db, err := store.OpenReadOnly(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mount, err := db.MountByTask(context.Background(), task.ID)
+	mounts, err := db.Mounts(context.Background(), f.projectID)
 	if err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
 	var approvals int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='discard'`, task.ID).Scan(&approvals); err != nil {
+	var quote, approvedTip string
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*),MAX(user_quote),MAX(branch_sha) FROM approvals WHERE task_id=? AND action='discard'`, task.ID).Scan(&approvals, &quote, &approvedTip); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	if mount.State != "held" || approvals != 0 {
-		t.Fatalf("live-agent refusal changed custody or approval: Mount=%#v approvals=%d", mount, approvals)
+	for _, mount := range mounts {
+		if mount.ID == task.MountID && (mount.State == "held" || mount.TaskID != 0) {
+			t.Fatalf("cancellation kept the Mount held: %#v", mount)
+		}
 	}
-	f.assertAlive(t, f.snapshot(t), task.PaneID, f.leadPaneID)
+	if approvals != 1 || quote != "destroy t3 now" {
+		t.Fatalf("cancellation approvals = %d, quote %q", approvals, quote)
+	}
+	for _, name := range []string{"rider-interrupted", "rider-terminated"} {
+		if _, err := os.Stat(filepath.Join(f.root, name)); err != nil {
+			t.Fatalf("Rider did not receive verified %s: %v (pid %d)", name, err, pid)
+		}
+	}
+	if _, _, err := store.ProcessIdentityForPID(pid); err == nil {
+		t.Fatalf("Rider process %d survived cancellation", pid)
+	}
+	f.assertGone(t, f.snapshot(t), task.PaneID)
+	f.assertAlive(t, f.snapshot(t), f.leadPaneID, f.userTab.RootPane.PaneID)
+	bundles, err := filepath.Glob(filepath.Join(f.home, "projects", "shop", "tasks", "t1", "discard", "*.bundle"))
+	if err != nil || len(bundles) != 1 {
+		t.Fatalf("cancelled commits were not captured: %v %v", bundles, err)
+	}
+	if contents := strings.TrimSpace(gitTest(t, f.env, f.repo, "show", approvedTip+":cancel-late.txt")); contents != "late Rider commit" {
+		t.Fatalf("discard omitted the commit completed during interruption: %q", contents)
+	}
+	if heads := gitTest(t, f.env, f.repo, "bundle", "list-heads", bundles[0]); !strings.Contains(heads, approvedTip) {
+		t.Fatalf("discard bundle did not retain the final approved tip %s: %s", approvedTip, heads)
+	}
+	if output, err := gitCommand(f.env, f.repo, "rev-parse", "--verify", "refs/heads/"+task.Branch); err == nil {
+		t.Fatalf("cancellation kept Task branch: %s", output)
+	}
 }
