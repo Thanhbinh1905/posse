@@ -33,6 +33,7 @@ type DB struct {
 var ErrNotFound = sql.ErrNoRows
 var ErrStateRace = errors.New("Task state changed concurrently")
 var ErrMessageDeliveryInProgress = errors.New("a message delivery is already in progress")
+var ErrQueuedInstructionsPending = errors.New("queued instructions remain undelivered")
 var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition is only valid for User-approved discard")
 var ErrBusy = errors.New("database contention; retry the operation")
 
@@ -1223,6 +1224,15 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	if current != StateWorking {
 		return "", fmt.Errorf("%w: Task %d is %q", ErrStateRace, task.ID, current)
 	}
+	if verb == "done" {
+		pending, err := hasPendingTaskInstructions(ctx, tx.Tx, task.ID)
+		if err != nil {
+			return "", err
+		}
+		if pending {
+			return "", ErrQueuedInstructionsPending
+		}
+	}
 	if _, err := queries.InsertSignal(ctx, dbgen.InsertSignalParams{TaskID: task.ID, Verb: verb, Note: note, DataJson: string(encoded), At: time.Now().UnixMilli()}); err != nil {
 		return "", err
 	}
@@ -1513,6 +1523,18 @@ func (db *DB) MessageByID(ctx context.Context, messageID int64) (Message, error)
 		return Message{}, ErrNotFound
 	}
 	return message, err
+}
+
+func hasPendingTaskInstructions(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, taskID int64) (bool, error) {
+	var pending bool
+	err := queryer.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE task_id=? AND status IN ('queued','claimed','interrupting'))`, taskID).Scan(&pending)
+	return pending, err
+}
+
+func (db *DB) HasPendingTaskInstructions(ctx context.Context, taskID int64) (bool, error) {
+	return hasPendingTaskInstructions(ctx, db.DB, taskID)
 }
 
 func (db *DB) UndeliveredTaskMessages(ctx context.Context, taskID int64) ([]Message, error) {

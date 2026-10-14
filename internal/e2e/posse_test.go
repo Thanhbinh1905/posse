@@ -447,9 +447,6 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if output := runPosse(t, posseBinary, repo, leadEnv, "send", "t1", "Steer the current work"); !strings.Contains(output, "delivered") {
 		t.Fatalf("mid-turn send did not deliver: %s", output)
 	}
-	if output := runPosse(t, posseBinary, repo, leadEnv, "send", "t1", "Queue after the current turn", "--queue"); !strings.Contains(output, "queued") {
-		t.Fatalf("queued instruction was not held: %s", output)
-	}
 	// The fake Lead reports idle on startup. Have its input loop report busy
 	// only after startup, so a late idle report cannot undo the working state.
 	if !waitForCondition(15*time.Second, func() bool {
@@ -595,8 +592,11 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if leadSnapshot.FocusedPaneID == project.LeadPaneID {
 		t.Fatalf("could not move focus away from the Lead before testing pane-prompt delivery: %#v", leadSnapshot.Panes)
 	}
-	// Only now let the focused Rider become idle. The queued instruction
-	// cannot reopen the Task before the first completion has been inspected.
+	// Queue a follow-up only after the first completion is accepted. The
+	// queued message cannot reopen the Task before that completion is inspected.
+	if output := runPosse(t, posseBinary, repo, leadEnv, "send", "t1", "Queue after the current turn", "--queue"); !strings.Contains(output, "queued") {
+		t.Fatalf("queued instruction was not held: %s", output)
+	}
 	if err := os.WriteFile(filepath.Join(signalGateDir, "t1-idle"), []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
