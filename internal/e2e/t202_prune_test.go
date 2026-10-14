@@ -209,7 +209,9 @@ func TestPruneReclaimsOrphanOpenCacheStorage(t *testing.T) {
 
 func startScratchCacheHolder(t *testing.T, env []string, cwd, cache, ready, fd string) *exec.Cmd {
 	t.Helper()
-	command := exec.Command("/bin/sh", "-c", "exec "+fd+"<"+shellQuote(cache)+"; printf ready > "+shellQuote(ready)+"; while :; do sleep 0.1; done")
+	// Keep one process holding the descriptor. A spawning loop races child
+	// exit against Prune's CWD and file-descriptor observations.
+	command := exec.Command("/bin/sh", "-c", "exec "+fd+"<"+shellQuote(cache)+"; printf ready > "+shellQuote(ready)+"; exec sleep 600")
 	command.Dir, command.Env = cwd, env
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := command.Start(); err != nil {
