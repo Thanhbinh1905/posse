@@ -87,8 +87,14 @@ esac
 	queuedMessageID := queueRelaunchHelpMessage(t, fixture, task.ID, queuedBody)
 	show := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	for _, expected := range []string{
-		fmt.Sprintf("%d,%s,undeliverable", oldMessageID, undeliverableBody),
-		fmt.Sprintf("%d,%s,queued", queuedMessageID, queuedBody),
+		fmt.Sprintf("id: %d", oldMessageID),
+		"instruction: " + undeliverableBody,
+		"status: undeliverable",
+		"history: true",
+		"blocks_sends: false",
+		fmt.Sprintf("id: %d", queuedMessageID),
+		"instruction: " + queuedBody,
+		"status: queued",
 		"Undeliverable instructions are not retried automatically; resend each with `posse send t1 <message>`",
 		"Queued instructions will be delivered when the Rider is ready and unfocused",
 	} {
