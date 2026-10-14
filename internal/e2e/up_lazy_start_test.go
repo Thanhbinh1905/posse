@@ -229,30 +229,25 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 	}
 	if !waitForCondition(15*time.Second, func() bool {
 		state, err := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
-		return err == nil && state.CheckoutStatus == "root_behind" && state.CheckoutCheckedAt > 0
+		return err == nil && state.CheckoutStatus == "fetch_failed" && state.CheckoutCheckedAt > 0
 	}) {
 		state, _ := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
 		t.Fatalf("Lookout did not record the offline Member's checkout status: %+v", state)
 	}
 	show := runPosse(t, binary, workspaceRoot, env, "project", "show", "stack")
-	if !strings.Contains(show, "root_behind") || !strings.Contains(show, "could not fetch origin") {
+	if !strings.Contains(show, "fetch_failed") || !strings.Contains(show, "could not fetch origin") {
 		t.Fatalf("Project show did not expose the background per-Member checkout status: %s", show)
 	}
 	notices, err := db.Notices(context.Background(), project.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	foundOfflineNotice := false
 	for _, notice := range notices {
 		if notice.Kind == "root_behind" && strings.Contains(notice.Summary, "offline") {
-			foundOfflineNotice = true
-			break
+			t.Fatalf("offline Member fetch failure produced root_behind: %#v", notice)
 		}
 	}
-	if !foundOfflineNotice {
-		t.Fatalf("offline Member has no background checkout Notice: %#v", notices)
-	}
-	t.Log("Lookout recorded offline checkout root_behind with a Member-specific Notice")
+	t.Log("Lookout recorded the offline Member fetch failure without a false root_behind Notice")
 
 	brief := filepath.Join(root, "good-member-ship.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: fix(good): verify lazy member fetch\ndone_when: the reachable Member Task starts\nrepos: [good]\n---\nChange only the reachable Member.\n"), 0o600); err != nil {

@@ -355,8 +355,12 @@ func TestReviewReconcileFailuresDoNotBlockCommandSurface(t *testing.T) {
 		t.Cleanup(func() { _ = os.Rename(offlineRemote, fixture.remote) })
 		assertReviewCommandSurface(t, fixture, workerRoot, false)
 		notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-		if err != nil || countNoticeKind(notices, "root_behind") != 1 {
-			t.Fatalf("fetch failure was not recorded once: notices=%#v err=%v", notices, err)
+		if err != nil || countNoticeKind(notices, "root_behind") != 0 {
+			t.Fatalf("fetch failure produced a false root_behind Notice: notices=%#v err=%v", notices, err)
+		}
+		var failures int
+		if err := fixture.db.QueryRowContext(context.Background(), `SELECT consecutive_failures FROM repo_fetch_failures WHERE project_id=? AND repo=''`, fixture.project.ID).Scan(&failures); err != nil || failures == 0 {
+			t.Fatalf("fetch failure streak = %d, %v; want a recorded failure", failures, err)
 		}
 	})
 
