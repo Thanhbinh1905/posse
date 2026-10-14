@@ -260,17 +260,31 @@ var (
 )
 
 // stopPaneAgent ends the agent in the pane and waits until the pane's shell is
-// back in the foreground. Herdr has no call that stops an agent, so posse
-// signals the pane's foreground process group: SIGTERM, then SIGKILL. Herdr may
-// retain lifecycle authority after the process exits, so clear it once the shell
-// is available for a new launch.
-func (s *Service) stopPaneAgent(ctx context.Context, paneID string) error {
+// back in the foreground. Herdr may retain lifecycle authority after the
+// process exits, so the final clear uses the stopped authority's source and
+// sequence when Herdr exposes that session identity. The extra shell check
+// also closes the common interleaving in which a User starts a replacement
+// while the stop operation is in flight.
+func (s *Service) stopPaneAgent(ctx context.Context, paneID string, expectedAgent ...string) error {
+	kind := ""
+	if len(expectedAgent) > 0 {
+		kind = expectedAgent[0]
+	}
 	group, err := s.paneAgentGroup(ctx, paneID)
 	if err != nil {
 		return err
 	}
 	if group == 0 {
-		return s.clearPaneAgentAuthority(ctx, paneID)
+		if kind != "" || s.paneHasAgentAuthority(ctx, paneID) {
+			current, err := s.paneAgentGroup(ctx, paneID)
+			if err != nil {
+				return err
+			}
+			if current != 0 {
+				return agentStopPaneChanged(paneID)
+			}
+		}
+		return s.clearStoppedPaneAgentAuthority(ctx, paneID, kind)
 	}
 	for _, step := range []struct {
 		signal syscall.Signal
@@ -286,7 +300,19 @@ func (s *Service) stopPaneAgent(ctx context.Context, paneID string) error {
 				return err
 			}
 			if current == 0 {
-				return s.clearPaneAgentAuthority(ctx, paneID)
+				// Do not clear after observing a shell if another process became
+				// foreground between the wait and this mutation.
+				current, err = s.paneAgentGroup(ctx, paneID)
+				if err != nil {
+					return err
+				}
+				if current != 0 {
+					return agentStopPaneChanged(paneID)
+				}
+				return s.clearStoppedPaneAgentAuthority(ctx, paneID, kind)
+			}
+			if current != group {
+				return agentStopPaneChanged(paneID)
 			}
 			select {
 			case <-ctx.Done():
@@ -298,8 +324,70 @@ func (s *Service) stopPaneAgent(ctx context.Context, paneID string) error {
 	return axi.Failure("agent_stop_failed", fmt.Sprintf("the agent in pane %s did not exit", paneID), true, "Close the pane, then retry")
 }
 
-func (s *Service) clearPaneAgentAuthority(ctx context.Context, paneID string) error {
-	_, err := s.herdrCall(ctx, "pane.clear_agent_authority", map[string]any{"pane_id": paneID})
+func agentStopPaneChanged(paneID string) error {
+	return axi.Failure("agent_stop_failed", fmt.Sprintf("the foreground process in pane %s changed while stopping the Rider", paneID), true, "Preserve the replacement agent, then retry")
+}
+
+func (s *Service) paneHasAgentAuthority(ctx context.Context, paneID string) bool {
+	raw, err := s.herdrCall(ctx, "agent.get", map[string]any{"target": paneID})
+	if err != nil {
+		return false
+	}
+	var response struct {
+		Agent struct {
+			Agent string `json:"agent"`
+		} `json:"agent"`
+	}
+	return json.Unmarshal(raw, &response) == nil && response.Agent.Agent != ""
+}
+
+func (s *Service) paneAgentAuthority(ctx context.Context, paneID, expectedKind string) (string, uint64, bool) {
+	source := ""
+	seq := uint64(0)
+	hasSession := false
+	raw, err := s.herdrCall(ctx, "agent.get", map[string]any{"target": paneID})
+	if err == nil {
+		var response struct {
+			Agent struct {
+				Agent          string `json:"agent"`
+				StateChangeSeq uint64 `json:"state_change_seq"`
+			} `json:"agent"`
+		}
+		if json.Unmarshal(raw, &response) == nil {
+			if expectedKind == "" {
+				expectedKind = response.Agent.Agent
+			}
+			seq = response.Agent.StateChangeSeq
+		}
+	}
+	if snapshot, err := s.Herdr.Snapshot(ctx); err == nil {
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID != paneID || len(pane.AgentSession) == 0 || string(pane.AgentSession) == "null" {
+				continue
+			}
+			var session struct {
+				Source string `json:"source"`
+				Agent  string `json:"agent"`
+			}
+			if json.Unmarshal(pane.AgentSession, &session) == nil && (session.Agent == "" || session.Agent == expectedKind) {
+				source = session.Source
+				hasSession = source != ""
+			}
+		}
+	}
+	return source, seq, hasSession
+}
+
+func (s *Service) clearStoppedPaneAgentAuthority(ctx context.Context, paneID, expectedKind string) error {
+	source, seq, hasSession := s.paneAgentAuthority(ctx, paneID, expectedKind)
+	params := map[string]any{"pane_id": paneID}
+	if source != "" {
+		params["source"] = source
+	}
+	if hasSession && seq != 0 {
+		params["seq"] = seq
+	}
+	_, err := s.herdrCall(ctx, "pane.clear_agent_authority", params)
 	return err
 }
 

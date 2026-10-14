@@ -1952,7 +1952,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	if pane.Agent != "" {
 		if err := track("agent.stop", func() error {
-			return s.stopPaneAgent(ctx, pane.PaneID)
+			return s.stopPaneAgent(ctx, pane.PaneID, pane.Agent)
 		}); err != nil {
 			return failure(err)
 		}
