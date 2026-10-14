@@ -55,8 +55,8 @@ func TestReconcileObservationWritesReturnRetryableBusyUnderConcurrentWriter(t *t
 	if elapsed := time.Since(started); elapsed >= ReconcileBudget {
 		t.Fatalf("reconcile waited %s, want a result within its %s budget", elapsed, ReconcileBudget)
 	}
-	if got := strings.Count(err.Error(), "update Task t"); got != len(tasks) {
-		t.Fatalf("failed observation updates = %d, want all %d Tasks: %v", got, len(tasks), err)
+	if got := strings.Count(err.Error(), "reconcile Task t"); got != len(tasks) {
+		t.Fatalf("failed Task attributions = %d, want all %d Tasks: %v", got, len(tasks), err)
 	}
 }
 
