@@ -268,7 +268,7 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 	mergeOne := fixture.mergeOnLocalOrigin(t, first, "t1")
 	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", mergeOne, first.GatedSHA)
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	showAfterActiveTeardown(t, fixture, "t1")
 	first = fixture.mustTask(t, "t1")
 	if first.State != store.StateTornDown || first.LandedRef != mergeOne {
 		t.Fatalf("merged PR did not land and auto-teardown: %#v, merge=%s", first, mergeOne)
@@ -300,16 +300,20 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 		t.Fatalf("second PR did not open: %s", output)
 	}
 	second := fixture.mustTask(t, "t2")
+	// The offline observer must be the only process that can record this merge.
+	// Otherwise the live Lookout can advance landed to torn-down before the read.
+	stopBackgroundLookout(t, fixture)
 	mergeTwo := fixture.mergeOnLocalOrigin(t, second, "t2")
 	fixture.writeGraphQL(t, "pr2", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", mergeTwo, second.GatedSHA)
 	time.Sleep(5 * time.Millisecond)
 	offlineEnv := setEnv(fixture.leadEnv, "HERDR_SOCKET_PATH", filepath.Join(fixture.root, "offline-herdr.sock"))
 	runPosse(t, fixture.binary, fixture.repo, offlineEnv, "show", "t2")
+	fixture.waitTaskState(t, "t2", store.StateLanded)
 	second = fixture.mustTask(t, "t2")
 	if second.State != store.StateLanded || second.LandedRef != mergeTwo {
 		t.Fatalf("merge observed without Herdr did not leave the Task landed: %#v, merge=%s", second, mergeTwo)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
+	showAfterActiveTeardown(t, fixture, "t2")
 	second = fixture.mustTask(t, "t2")
 	if second.State != store.StateTornDown || second.LandedRef != mergeTwo {
 		t.Fatalf("external PR merge was not observed and torn down: %#v, merge=%s", second, mergeTwo)
@@ -509,7 +513,7 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 		t.Fatal("follow-up did not move the Task branch tip")
 	}
 	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	showAfterActiveTeardown(t, fixture, "t1")
 	current := fixture.mustTask(t, "t1")
 	if verified, err := fixture.db.WasVerifiedPRHead(context.Background(), current.ID, current.PRURL, movedTip); err != nil || verified {
 		t.Fatalf("moved local tip was recorded as verified PR head: %v %v", verified, err)
@@ -616,7 +620,11 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	}
 	for _, command := range [][]string{{"show", "t1"}, {"show", "t1"}, {"roster"}} {
 		time.Sleep(5 * time.Millisecond)
-		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, command...)
+		if command[0] == "show" {
+			showAfterActiveTeardown(t, fixture, "t1")
+		} else {
+			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, command...)
+		}
 		landed := fixture.mustTask(t, "t1")
 		if landed.State != store.StateTornDown || landed.LandedRef != merge {
 			t.Fatalf("%v missed valid merge or safe teardown: %#v", command, landed)
@@ -892,7 +900,7 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 				gitTest(t, f.env, landing.WorktreePath, "commit", "-m", "unmerged follow-up")
 			}
 			f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
-			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+			showAfterActiveTeardown(t, f, "t1")
 			if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
 				notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
 				t.Fatalf("merged Task did not release its Rider: %#v notices=%#v", task, notices)
@@ -951,7 +959,7 @@ func TestMergedPRWithIgnoredArtifactStillLands(t *testing.T) {
 	}
 	merge := f.mergeOnLocalOrigin(t, landing, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
-	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	showAfterActiveTeardown(t, f, "t1")
 	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
 		t.Fatalf("ignored artifact blocked normal landing: %#v", task)
 	}
@@ -980,7 +988,7 @@ func TestMergedPRAutoTearsDownEvenWhenAutoUnsaddleIsNever(t *testing.T) {
 	landing := f.mustTask(t, "t1")
 	merge := f.mergeOnLocalOrigin(t, landing, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
-	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	showAfterActiveTeardown(t, f, "t1")
 	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown {
 		t.Fatalf("merged PR did not tear down despite auto_unsaddle=never: %#v", task)
 	}

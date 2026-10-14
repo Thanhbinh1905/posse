@@ -17,6 +17,14 @@ type Approval struct {
 	BranchSha string
 }
 
+type CompletedRiderBusy struct {
+	TaskID          int64
+	TransitionID    int64
+	PaneID          string
+	ServerStartedAt string
+	BusySince       int64
+}
+
 type ConfigApproval struct {
 	ID        int64
 	ProjectID int64

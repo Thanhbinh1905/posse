@@ -1269,7 +1269,7 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 		}
 		ready := checks.State == "SUCCESS" && current.Review != "CHANGES_REQUESTED" && current.Review != "REVIEW_REQUIRED" && current.Mergeable == "MERGEABLE"
 		previousReady := hasPrevious && previous.State == "OPEN" && previous.HeadSHA == current.HeadSHA && previousChecks.State == "SUCCESS" && previous.Review != "CHANGES_REQUESTED" && previous.Review != "REVIEW_REQUIRED" && previous.Mergeable == "MERGEABLE"
-		if ready && !previousReady {
+		if ready && !previousReady && (task.State == store.StateDone || task.State == store.StateLanding) {
 			addNotice("land_ready", task.Title+": pull request checks and reviews are ready to merge", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	}

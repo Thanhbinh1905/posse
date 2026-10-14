@@ -47,7 +47,7 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 	merge := f.mergeOnLocalOrigin(t, landing, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
 	for i := 0; i < 2; i++ {
-		runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+		showAfterActiveTeardown(t, f, "t1")
 	}
 	task := f.mustTask(t, "t1")
 	if task.State != store.StateTornDown || task.LandedRef != merge {
@@ -123,6 +123,7 @@ func TestMergeInterruptsFollowUpAndReleasesRider(t *testing.T) {
 	if err == nil || !strings.Contains(string(output), "pr_merged") {
 		t.Fatalf("send did not refresh the merged PR: %s %v", output, err)
 	}
+	f.waitTaskState(t, "t1", store.StateTornDown)
 	task := f.mustTask(t, "t1")
 	if task.State != store.StateTornDown || task.LandedRef != merge {
 		t.Fatalf("merge left Rider open: state=%s ref=%s", task.State, task.LandedRef)

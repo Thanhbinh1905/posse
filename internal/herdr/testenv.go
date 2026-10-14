@@ -2,6 +2,7 @@ package herdr
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -172,6 +173,7 @@ func inside(root, path string) bool {
 
 type ServerProcess struct {
 	command  *exec.Cmd
+	testRoot string
 	waitOnce sync.Once
 	waitErr  error
 }
@@ -191,9 +193,23 @@ func (p *ServerProcess) PID() int {
 	return p.command.Process.Pid
 }
 
+func (p *ServerProcess) TestRoot() string {
+	if p == nil {
+		return ""
+	}
+	return p.testRoot
+}
+
 func (p *ServerProcess) Kill() error {
 	if p == nil || p.command == nil || p.command.Process == nil {
 		return nil
+	}
+	if p.command.Cancel != nil {
+		err := p.command.Cancel()
+		if errors.Is(err, os.ErrProcessDone) {
+			return nil
+		}
+		return err
 	}
 	return p.command.Process.Kill()
 }

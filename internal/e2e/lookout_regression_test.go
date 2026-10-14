@@ -273,15 +273,7 @@ func TestConcurrentLookoutTeardownRaisesNoFalseReason(t *testing.T) {
 	landing := f.mustTask(t, "t1")
 	merge := f.mergeOnLocalOrigin(t, landing, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		command := exec.Command(f.binary, "show", "t1")
-		command.Dir, command.Env = f.repo, f.leadEnv
-		_, _ = command.CombinedOutput()
-		if f.mustTask(t, "t1").State == store.StateTornDown {
-			break
-		}
-	}
+	showAfterActiveTeardown(t, f, "t1")
 	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
 	if err != nil {
 		t.Fatal(err)

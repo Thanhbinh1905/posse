@@ -124,7 +124,9 @@ while IFS= read -r line; do :; done
 	os.WriteFile(filepath.Join(repo, "temp_test.go"), []byte("package probe\nimport (\"os\";\"testing\")\nfunc TestTemp(t *testing.T){p,err:=os.MkdirTemp(\"\",\"t178-test-process-\");if err!=nil{t.Fatal(err)};os.WriteFile(p+\"/data\",[]byte(\"test process temp\"),0600)}\n"), 0600)
 	gitTest(t, env, repo, "add", ".")
 	gitTest(t, env, repo, "commit", "-m", "initial")
-	client := herdr.NewWithEnv("herdr", env)
+	// Validate the server against the fixture parent. The nested global-tmp
+	// analogue is for CLI processes, not the isolated server's root check.
+	client := herdr.NewWithEnv("herdr", setEnv(env, "TMPDIR", filepath.Dir(root)))
 	startServer(t, client)
 	if _, err := client.Run(context.Background(), "integration", "install", "claude"); err != nil {
 		t.Fatal(err)
