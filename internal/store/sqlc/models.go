@@ -304,6 +304,7 @@ type Task struct {
 	ShortName            string
 	AgentSessionKind     string
 	TargetBranch         string
+	PrTitle              string
 }
 
 type TaskLaunchIdentity struct {
