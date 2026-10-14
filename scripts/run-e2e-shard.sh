@@ -155,6 +155,7 @@ assignments='
 4 TestPrunePreservesBranchAdvancedAfterFinalCheck
 4 TestPruneReclaimsMappedCacheStorage
 4 TestRiderMappingIsStoppedBeforeRelease
+4 TestShowWaitsForDeferredTeardown
 4 TestPrunePreservesBranchCheckedOutAfterFinalCheck
 4 TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall
 4 TestT229SignalSnapshotFailure
