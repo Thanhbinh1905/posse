@@ -28,7 +28,8 @@ type acknowledgedNoticeFixture struct {
 
 func newAcknowledgedNoticeFixture(t *testing.T) *acknowledgedNoticeFixture {
 	t.Helper()
-	root := newFixtureRoot(t, fixturePrefix("notice-ack-recovery-"))
+	// Leave room for herdr-client.sock under the Rider's longer scratch path.
+	root := newFixtureRoot(t, fixturePrefix("notice-ack-"))
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
