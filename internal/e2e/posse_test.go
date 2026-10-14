@@ -1919,7 +1919,21 @@ func stopServer(t *testing.T, client *herdr.Client, process *herdr.ServerProcess
 		_ = process.Kill()
 		select {
 		case <-done:
-		case <-time.After(30 * time.Second):
+		case <-time.After(5 * time.Second):
+			t.Errorf("isolated Herdr launcher %d did not exit after process-group kill", process.PID())
+		}
+	}
+	if root := process.TestRoot(); root != "" {
+		servers, err := fixtureHerdrServerProcesses(root)
+		if err != nil {
+			t.Errorf("inspect isolated Herdr fixture %s after stop: %v", root, err)
+			return
+		}
+		if len(servers) > 0 {
+			t.Errorf("isolated Herdr server survived its stop request: %+v", servers)
+			if err := stopFixtureHerdrServerProcesses(root, 3*time.Second); err != nil {
+				t.Errorf("stop surviving isolated Herdr server for %s: %v", root, err)
+			}
 		}
 	}
 }
@@ -1940,7 +1954,12 @@ func killServer(t *testing.T, process *herdr.ServerProcess) {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
-		t.Fatal("isolated Herdr server did not exit after SIGKILL")
+		t.Fatal("isolated Herdr server did not exit after process-group kill")
+	}
+	if root := process.TestRoot(); root != "" {
+		if err := stopFixtureHerdrServerProcesses(root, 3*time.Second); err != nil {
+			t.Fatalf("stop isolated Herdr daemon for %s: %v", root, err)
+		}
 	}
 }
 
