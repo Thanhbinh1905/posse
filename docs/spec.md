@@ -335,8 +335,8 @@ spawning ─► working ─┬─► done ─► landing ─► landed ─► to
                      ├─► blocked ─► working          (Herdr: approval dialog)
                      ├─► stalled ─► working          (progress resumes, a Signal, or relaunch)
                      └─► failed
-   done ─► working                                   (Lead sends a fix after a failed Gate or needs_rebase)
-   landing ─► working                                (Lead sends a follow-up to a landing Ship Task)
+   done ─► working                                   (Lead sends a fix, or watcher observes resumed Rider work)
+   landing ─► working                                (Lead sends a follow-up, or watcher observes resumed Rider work)
    spawning, working, needs-decision, blocked, stalled, failed, lost ─► landed (forge reports the PR merged)
    spawning, working, needs-decision, blocked, stalled ─► lost   (Worker gone, not resumable)
 ```
@@ -352,6 +352,7 @@ spawning ─► working ─┬─► done ─► landing ─► landed ─► to
 | done → working | lead | `posse send` starts durable submission to a `done` Ship Task; clears `gated_sha` |
 | done → landing | cli | `posse land` started (gate passed, PR opened or ready to merge) |
 | landing → working | lead | `posse send` starts durable submission to a landing Ship Task; clears `gated_sha` and keeps its branch and PR |
+| done / landing → working | watcher | Ship Rider reports `working` across consecutive observations at least five seconds apart; records busy evidence, clears Task and unlanded Member gates, keeps branch and PR, raises `rider_resumed` |
 | any non-landed PR Task → landed | cli | forge reports the Task's verified PR head merged; records the merge commit without passing through `done` |
 | done → reported | cli | scout/review: `report.md` copied in |
 | spawning (with a pane), working, needs-decision, blocked, stalled → lost | cli | reconcile: pane gone and no resumable session |
@@ -386,6 +387,8 @@ For each live Task:
 3. **Pane present but the agent exited**: if `agent_session` is known and Herdr native resume is enabled, leave it to Herdr (resume happens on client attach) and mark nothing; after 2 minutes without an agent **and** no resumable session (no `agent_session`, or native resume disabled), mark `lost`.
 4. **No pane and no label match**: mark `lost`. The worktree and branch are never touched.
 
+For a `done` or `landing` Ship Task, consecutive Herdr `working` observations at least five seconds apart reopen it as `working`. The watcher persists the first busy observation, keyed by completion transition, pane and server generation. A non-working status, absent agent or missing pane resets that evidence; a new completion transition or Rider identity starts a new grace period. This ignores transient status flicker and the tail of the turn that signalled done. Posse instruction delivery already reopens the Task before submission, so it produces no duplicate watcher transition. The reopen, gate invalidation and `rider_resumed` Lead Notice commit atomically. Land refuses until a fresh Rider done Signal. A forge-reported merge remains authoritative under ADR 0011.
+
 Herdr idle is never evidence of completion. Only a Worker Signal moves a Task to `done`.
 
 The Lead is reconciled the same way through `lead_pane_id` and `lead_label`. A snapshot from a different Herdr server generation cannot update pane identities or stalls. Launch-capable Project commands and plugin events check the live server: a changed generation runs bounded recovery inline before reconciliation. A delayed snapshot from the old server is discarded and retried. `lead`, `show`, `ack` and `lookout` observe state without relaunching Riders, retrying launch Briefs or waiting for an active recovery claim; a pending generation leaves pane identities untouched.
@@ -403,9 +406,9 @@ It exits 0 even on internal errors (logged to the `events` row) so Herdr never r
 
 ## 9. Notices and waking the Lead
 
-Notice kinds: `task_done`, `needs_decision`, `task_failed`, `worker_blocked`, `worker_exited`, `task_lost`, `stalled`, `gate_failed`, `message_delivery_uncertain`, `notice_delivery_uncertain`, `queued_message_undeliverable` (terminal Task transition stranded queued messages), `model_stream_error` (bounded automatic recovery exhausted or was withheld), `model_refused` (provider refusal, never retried), `land_ready` (a `local` Task is ready to merge, or a PR is ready to merge), the PR Notices of section 14 (`pr_opened`, `pr_checks_failed`, `pr_changes_requested`, `pr_conflict`, `pr_merged`, `pr_closed`, `pr_watch_failing`), and `root_behind` when a new upstream head cannot be synced safely, plus coalesced `root_fetch_failing` after repeated origin-fetch failures.
+Notice kinds: `task_done`, `rider_resumed` (a completed Ship Rider resumed work and must signal done again), `needs_decision`, `task_failed`, `worker_blocked`, `worker_exited`, `task_lost`, `stalled`, `gate_failed`, `message_delivery_uncertain`, `notice_delivery_uncertain`, `queued_message_undeliverable` (terminal Task transition stranded queued messages), `model_stream_error` (bounded automatic recovery exhausted or was withheld), `model_refused` (provider refusal, never retried), `land_ready` (a `local` Task is ready to merge, or a PR is ready to merge), the PR Notices of section 14 (`pr_opened`, `pr_checks_failed`, `pr_changes_requested`, `pr_conflict`, `pr_merged`, `pr_closed`, `pr_watch_failing`), and `root_behind` when a new upstream head cannot be synced safely, plus coalesced `root_fetch_failing` after repeated origin-fetch failures.
 
-Not Notices: `working`/`idle` flips, `working` Signals, Herdr `done` without a Signal.
+Not Notices: ordinary `working`/`idle` flips, `working` Signals, Herdr `done` without a Signal. Resumed work on a completed Ship Task is the `rider_resumed` exception.
 
 A Decision is a question only the User answers. Posse raises one from `land_ready` under `autonomy.land=ask`, review findings under `autonomy.review=ask`, and failed/lost Tasks. `posse ask <task> "<question>" --option <choice> --option <choice>` raises a Rider question. `posse decisions` lists pending questions; `--all` includes answered and obsolete ones. `posse decide <id> <option> --user-approved "<User's words>"` records an answer once and raises a `decision_answered` Notice. `posse apply <id>` carries out answered `recovery`, `review`, `leftover` and `pr_closed` Decisions: recovery relaunches or tears down with recorded discard approval; review queues the User's chosen response for the reviewed Ship Task or the no-mistakes Rider (ignore takes no Rider action); discard removes the Leftover ref or tears down a closed Task with its recorded User quote; open-task prints the command to start a new Ship Task with `posse ride --brief <file> --name <title-slug> --from-leftover <id>`; the new Task replays only the diff from the merged head to the saved snapshot onto its selected base branch, without replaying squash-merged commits; reopen-relaunch reopens the PR and relaunches its Rider. The User's shell needs no approval flag: the typed option is its quote. When a Task Lands, relaunches or tears down before a Decision is answered, the pending Decision becomes obsolete with a reason, never an answer. Notice evaluation advances a per-Project cursor so unrelated and already evaluated Notices are not rescanned.
 
@@ -581,7 +584,7 @@ A kind without a prepare step that still stops at a dialog surfaces as `blocked`
 |---|---|---|
 | PR reported by the Worker (or created by legacy `posse land`) | `pr_opened` | stays `landing` |
 | required checks fail on the current head | `pr_checks_failed`, with failing check names and log URLs | stays `landing`; the Lead may `posse send` a fix (Task → `working`) |
-| all required checks pass and reviews allow merging | `land_ready` | stays `landing` |
+| all required checks pass and reviews allow merging, and Task is `done` or `landing` | `land_ready` | state unchanged |
 | review requests changes | `pr_changes_requested`, with the review summary | stays `landing` |
 | merge conflict with the frozen target branch | `pr_conflict` | stays `landing`; the Lead tells the Worker to merge `origin/<target>` into its branch, resolve conflicts, and report done again; never rebase a pushed PR branch |
 | merged (by posse, by the User on the forge, or by anyone) | `pr_merged` | any non-landed state → `landed`; `landed_ref` is the merge commit; the Rider is interrupted during Teardown |
