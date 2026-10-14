@@ -31,6 +31,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		"Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).",
 		"Send a message, optionally queueing it or interrupting and redirecting a busy Rider.",
 		"Withdraw a queued Rider message before delivery begins.",
+		"Record a Rider's Signal; done is refused while queued instructions remain undelivered.",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("posse --help omitted summary %q: %s", want, help)
