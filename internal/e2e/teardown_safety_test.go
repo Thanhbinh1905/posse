@@ -25,14 +25,19 @@ import (
 
 type teardownCloseGuardAdapter struct {
 	*herdr.Client
-	closed string
+	closed    string
+	afterInfo func()
 }
 
 func (adapter *teardownCloseGuardAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	if method == "workspace.close" || method == "tab.close" || method == "pane.close" {
 		adapter.closed = method
 	}
-	return adapter.Client.Call(ctx, method, params)
+	raw, err := adapter.Client.Call(ctx, method, params)
+	if err == nil && method == "pane.process_info" && adapter.afterInfo != nil {
+		adapter.afterInfo()
+	}
+	return raw, err
 }
 
 func markTaskReported(t *testing.T, f *riderTabsFixture, task store.Task) {
@@ -51,8 +56,8 @@ func markTaskReported(t *testing.T, f *riderTabsFixture, task store.Task) {
 	}
 }
 
-// TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary verifies that an
-// exited Rider's remaining shell pane blocks discard without a close RPC.
+// TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary verifies that a
+// replacement launched between Rider shutdown and the close guard survives.
 func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 	f := newRiderTabsFixture(t)
 	ctx := context.Background()
@@ -62,8 +67,36 @@ func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 	if err := os.WriteFile(work, []byte("preserve\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.exitRider(t, "t1")
 	adapter := &teardownCloseGuardAdapter{Client: f.client}
+	replaced := false
+	replacementPID := 0
+	closeReads := 0
+	adapter.afterInfo = func() {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		intent, err := db.IntentByTask(ctx, task.ID)
+		_ = db.Close()
+		if replaced || err != nil || intent.Step != "in_progress:panes.close" {
+			return
+		}
+		closeReads++
+		if closeReads != 3 {
+			return
+		}
+		replaced = true
+		if _, err := f.client.Call(ctx, "pane.clear_agent_authority", map[string]any{"pane_id": task.PaneID}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.client.Run(ctx, "agent", "start", "close-replacement", "--kind", "claude", "--pane", task.PaneID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.client.Run(ctx, "agent", "rename", task.PaneID, task.AgentName); err != nil {
+			t.Fatal(err)
+		}
+		replacementPID = foregroundPID(t, f, task.PaneID)
+	}
 	for _, entry := range f.leadEnv {
 		key, value, ok := strings.Cut(entry, "=")
 		if ok {
@@ -75,6 +108,9 @@ func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 	var output bytes.Buffer
 	cli.Out, cli.ErrOut = &output, &output
 	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
+	if !replaced {
+		t.Fatalf("replacement did not reach the pane-close boundary: code=%d output=%s", code, output.String())
+	}
 	if adapter.closed != "" {
 		t.Fatalf("Teardown issued an unconditional %s RPC: %s", adapter.closed, output.String())
 	}
@@ -85,6 +121,9 @@ func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 			paneAlive = true
 		}
 	}
+	if _, _, err := store.ProcessIdentityForPID(replacementPID); err != nil || foregroundPID(t, f, task.PaneID) != replacementPID {
+		t.Fatalf("same-named close-boundary replacement was stopped: pid=%d err=%v", replacementPID, err)
+	}
 	contents, fileErr := os.ReadFile(work)
 	branchOut, branchErr := exec.Command("git", "-C", f.repo, "show-ref", "--verify", "refs/heads/"+task.Branch).CombinedOutput()
 	taskAfter := f.task(t, "t1")
@@ -94,7 +133,7 @@ func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 	}
 	mounts, mountErr := db.Mounts(ctx, f.projectID)
 	_ = db.Close()
-	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") || !strings.Contains(output.String(), "remains open") || !paneAlive || fileErr != nil || string(contents) != "preserve\n" || branchErr != nil || taskAfter.State != store.StateFailed || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
+	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") || !strings.Contains(output.String(), "Replacement foreground process") || !paneAlive || fileErr != nil || string(contents) != "preserve\n" || branchErr != nil || taskAfter.State != store.StateFailed || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
 		t.Fatalf("discard did not preserve the open pane and Mount: pane=%v file=%q fileErr=%v branch=%s Task=%s Mounts=%#v output=%s", paneAlive, contents, fileErr, branchOut, taskAfter.State, mounts, output.String())
 	}
 }

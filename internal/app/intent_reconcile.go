@@ -73,10 +73,7 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 			if task.State == store.StateTornDown {
 				err = db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 			} else {
-				var payload struct {
-					Discard   bool   `json:"discard"`
-					UserQuote string `json:"user_quote"`
-				}
+				var payload discardIntentPayload
 				if decodeErr := json.Unmarshal([]byte(intent.PayloadJSON), &payload); decodeErr != nil {
 					err = decodeErr
 				} else if payload.Discard {
@@ -91,7 +88,8 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 						}
 						if err == nil && strings.TrimSpace(quote) == "" {
 							err = fmt.Errorf("discard recovery has no recorded User approval quote")
-						} else if err == nil {
+						} else if err == nil && payload.Rider == nil {
+							// Legacy or pre-binding crashes have no retained stop authority.
 							err = s.requireNoLiveTaskAgent(ctx, project, task)
 						}
 						if err == nil {

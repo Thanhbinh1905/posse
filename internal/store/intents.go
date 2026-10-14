@@ -82,6 +82,22 @@ func (db *DB) UpdateIntentStep(ctx context.Context, intentID int64, processID in
 	return nil
 }
 
+// UpdateIntentPayload records retained cancellation identities before signals.
+func (db *DB) UpdateIntentPayload(ctx context.Context, intentID int64, processID int, payload string) error {
+	result, err := db.ExecContext(ctx, `UPDATE intents SET payload_json=?,updated_at=? WHERE id=? AND process_id=?`, payload, time.Now().UnixMilli(), intentID, processID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrIntentOwned
+	}
+	return nil
+}
+
 func (db *DB) ClaimIntent(ctx context.Context, intentID int64, oldProcessID, newProcessID int, step string) (bool, error) {
 	bootID, startTime, _ := ProcessIdentityForPID(newProcessID)
 	result, err := db.ExecContext(ctx, `UPDATE intents SET process_id=?,process_boot_id=?,process_start_time=?,step=?,updated_at=? WHERE id=? AND process_id=?`, newProcessID, bootID, startTime, step, time.Now().UnixMilli(), intentID, oldProcessID)

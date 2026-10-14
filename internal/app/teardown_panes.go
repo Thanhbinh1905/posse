@@ -155,10 +155,10 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 }
 
 // requireNoLiveTaskAgent refuses approved discard while a Task-owned pane has
-// a foreground process. Live Rider shutdown remains unsupported until A01 and
-// A02 bind process signaling and lifecycle cleanup to the same instance.
+// a foreground process. Interrupted discard recovery requires Rider exit;
+// a fresh approved unsaddle retains exact-instance shutdown authority.
 func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Project, task store.Task) error {
-	const identityHelp = "Live-Rider stop requires A01 #133 and A02 #134. Retry when Herdr can verify the Task agent has exited"
+	const identityHelp = "Inspect the Rider with `posse peek`, then retry `posse unsaddle <task> --discard --user-approved \"<User's words>\"` to cancel its verified instance"
 	if s.Herdr == nil {
 		return axi.Failure("discard_agent_identity_unavailable", "cannot verify whether the Task has a live agent", true, identityHelp)
 	}
@@ -191,7 +191,7 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 		foreground := info.ProcessInfo.ForegroundProcessGroup
 		if foreground > 1 && foreground != info.ProcessInfo.ShellPID {
 			if pane.Agent != "" {
-				return axi.Failure("discard_live_agent", "refusing to discard a Task while its Rider agent is still running", false, "Posse will not stop or signal a live Rider until A01 #133 and A02 #134 land. Wait for the Rider to exit, then retry the approved discard")
+				return axi.Failure("discard_live_agent", "refusing to discard a Task while its Rider agent is still running", false, "Interrupted discard recovery will not retarget a live Rider. Inspect it, then retry approved unsaddle to retain its exact process instance")
 			}
 			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task pane's non-shell foreground process has exited", true, pane.PaneID, identityHelp)
 		}

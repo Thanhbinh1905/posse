@@ -204,7 +204,15 @@ func TestIsolatedHerdrAcceptsDefaultTaskScratchTMPDIR(t *testing.T) {
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}
-	client := herdr.NewWithEnv("herdr", isolatedE2EEnv(t, root))
+	env := isolatedE2EEnv(t, root)
+	childTMPDIR := filepath.Join(root, "child-tmp")
+	if err := os.Mkdir(childTMPDIR, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := herdr.ValidateIsolatedEnvironment(setEnv(env, "TMPDIR", childTMPDIR)); err != nil {
+		t.Fatalf("child TMPDIR override invalidated the Task scratch fixture: %v", err)
+	}
+	client := herdr.NewWithEnv("herdr", env)
 	startServer(t, client)
 	status, err := client.Status(t.Context())
 	if err != nil || !status.Running {
