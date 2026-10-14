@@ -231,7 +231,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		_, recordErr := db.RecordRootBehind(ctx, project.ID, target.Name, now.UnixMilli(), upstreamHead, result.CommitsBehind, result.Reason)
 		return result, recordErr
 	}
-	rootStatus, statusErr := gitOutput(ctx, target.Root, "status", "--porcelain", "--untracked-files=all")
+	rootStatus, statusErr := gitStatusOutput(ctx, target.Root, "--porcelain", "--untracked-files=all")
 	if statusErr != nil {
 		result.Status = "root_behind"
 		result.Reason = "could not verify that the root checkout is clean"

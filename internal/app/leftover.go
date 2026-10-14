@@ -38,7 +38,7 @@ func snapshotUnmergedMemberWork(ctx context.Context, db *store.DB, project store
 	if task.WorktreePath == "" {
 		return nil
 	}
-	status, err := gitOutput(ctx, task.WorktreePath, "status", "--porcelain", "--untracked-files=all")
+	status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain", "--untracked-files=all")
 	if err != nil {
 		return err
 	}

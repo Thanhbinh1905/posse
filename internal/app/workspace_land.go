@@ -175,7 +175,7 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 			if err := verifyFastForward(ctx, member.project, member.task); err != nil {
 				return prefixFailure(repo.Repo, err)
 			}
-		} else if status, err := gitOutput(ctx, repo.WorktreePath, "status", "--porcelain"); err != nil {
+		} else if status, err := gitStatusOutput(ctx, repo.WorktreePath, "--porcelain"); err != nil {
 			return memberFailure(repo.Repo, err)
 		} else if status != "" {
 			return axi.Failure("land_refused", repo.Repo+": Task worktree is not clean", false, "Commit or discard the remaining changes, then signal done again")

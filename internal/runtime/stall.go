@@ -182,12 +182,18 @@ func (SystemProgress) WorktreeFingerprint(ctx context.Context, path string) (str
 }
 
 func repositoryFingerprint(ctx context.Context, path string) (string, error) {
-	head, err := execgroup.CommandContext(ctx, "git", "-C", path, "rev-parse", "HEAD").CombinedOutput()
+	head, err := execgroup.CommandContext(ctx, "git", "--no-optional-locks", "-C", path, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("git rev-parse HEAD: %w: %s", err, strings.TrimSpace(string(head)))
 	}
-	status, err := execgroup.CommandContext(ctx, "git", "-C", path, "status", "--porcelain").CombinedOutput()
+	status, err := execgroup.CommandContext(ctx, "git", "--no-optional-locks", "-C", path, "status", "--porcelain").CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("git status: %w: %s", err, strings.TrimSpace(string(status)))
 	}
 	return strings.TrimSpace(string(head)) + "\n" + string(status), nil

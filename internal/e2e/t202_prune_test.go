@@ -54,7 +54,18 @@ func TestPruneRechecksScratchAfterConcurrentRide(t *testing.T) {
 	}
 	marker := filepath.Join(f.root, "prune-loaded-tasks")
 	resume := marker + ".continue"
-	shim := "#!/bin/sh\nif [ \"$1\" = -C ] && [ \"$2\" = " + shellQuote(barrierMount) + " ] && [ \"$3\" = status ]; then printf ready > " + shellQuote(marker) + "; while [ ! -f " + shellQuote(resume) + " ]; do sleep 0.02; done; fi\nexec " + shellQuote(realGit) + " \"$@\"\n"
+	shim := "#!/bin/sh\n" +
+		"target=" + shellQuote(barrierMount) + "\n" +
+		"marker=" + shellQuote(marker) + "\n" +
+		"resume=" + shellQuote(resume) + "\n" +
+		"target_match=0\nexpect_path=0\nstatus=0\n" +
+		"for arg do\n" +
+		"  if [ \"$expect_path\" -eq 1 ]; then [ \"$arg\" = \"$target\" ] && target_match=1; expect_path=0; continue; fi\n" +
+		"  if [ \"$arg\" = -C ]; then expect_path=1; continue; fi\n" +
+		"  if [ \"$arg\" = status ]; then status=1; fi\n" +
+		"done\n" +
+		"if [ \"$target_match\" -eq 1 ] && [ \"$status\" -eq 1 ]; then printf ready > \"$marker\"; while [ ! -f \"$resume\" ]; do sleep 0.02; done; fi\n" +
+		"exec " + shellQuote(realGit) + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o700); err != nil {
 		t.Fatal(err)
 	}
