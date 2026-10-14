@@ -123,6 +123,15 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		// server stops. Wait for fixture processes to exit before removing
 		// their database, or a late backup write can race RemoveAll.
 		if runtime.GOOS == "linux" {
+			servers, err := fixtureHerdrServerProcesses(root)
+			if err != nil {
+				t.Errorf("inspect isolated Herdr servers for %s: %v", root, err)
+			} else if len(servers) > 0 {
+				t.Errorf("isolated Herdr servers survived fixture cleanup: %+v", servers)
+				if err := stopFixtureHerdrServerProcesses(root, 3*time.Second); err != nil {
+					t.Errorf("stop isolated Herdr servers for %s: %v", root, err)
+				}
+			}
 			deadline := time.Now().Add(10 * time.Second)
 			for {
 				active, err := fixtureProcessAlive(root)
@@ -346,7 +355,11 @@ func fixtureProcessAlive(root string) (bool, error) {
 		if !process.IsDir() || strings.Trim(process.Name(), "0123456789") != "" {
 			continue
 		}
-		environ, err := os.ReadFile(filepath.Join("/proc", process.Name(), "environ"))
+		processPath := filepath.Join("/proc", process.Name())
+		if state := e2eProcessState(processPath); state == 'Z' || state == 'X' {
+			continue
+		}
+		environ, err := os.ReadFile(filepath.Join(processPath, "environ"))
 		if err != nil { // Exited or not owned by this user.
 			continue
 		}

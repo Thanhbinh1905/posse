@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -338,20 +337,23 @@ func (c *Client) environment() []string {
 	return os.Environ()
 }
 
+// StartIsolatedServer keeps launcher descendants in a process group and
+// retains the validated root so tests can also stop a daemonized server.
 func (c *Client) StartIsolatedServer() (*ServerProcess, error) {
-	if _, err := ValidateIsolatedEnvironment(c.environment()); err != nil {
+	root, err := ValidateIsolatedEnvironment(c.environment())
+	if err != nil {
 		return nil, err
 	}
 	binary := c.Binary
 	if binary == "" {
 		binary = "herdr"
 	}
-	command := exec.Command(binary, "server")
+	command := execgroup.Command(binary, "server")
 	command.Env = append([]string(nil), c.environment()...)
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
-	return &ServerProcess{command: command}, nil
+	return &ServerProcess{command: command, testRoot: root}, nil
 }
 
 func (c *Client) StopIsolatedServer(ctx context.Context) error {
