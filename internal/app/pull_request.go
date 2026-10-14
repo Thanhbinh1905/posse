@@ -693,7 +693,11 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 		"## Risk And Rollback\n\n" + risk,
 		"## Documentation\n\n" + documentationChecklist,
 	}, "\n\n") + "\n"
-	return brief.Title, body, nil
+	title := task.PRTitle
+	if title == "" {
+		title = brief.Title
+	}
+	return title, body, nil
 }
 
 func verificationChecklist(value string) string {

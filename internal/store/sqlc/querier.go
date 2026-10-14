@@ -67,6 +67,7 @@ type Querier interface {
 	ResetTaskProgress(ctx context.Context, arg ResetTaskProgressParams) error
 	SetProjectLead(ctx context.Context, arg SetProjectLeadParams) error
 	SetTaskGatedSHA(ctx context.Context, arg SetTaskGatedSHAParams) error
+	SetTaskPRTitle(ctx context.Context, arg SetTaskPRTitleParams) (sql.Result, error)
 	StallTasks(ctx context.Context, projectID int64) ([]Task, error)
 	Task(ctx context.Context, arg TaskParams) (Task, error)
 	TaskByID(ctx context.Context, arg TaskByIDParams) (Task, error)

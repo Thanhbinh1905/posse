@@ -996,18 +996,18 @@ func TestConfigSetRefusesNoMistakesModeWhenCLIReportsUninitialized(t *testing.T)
 	}
 }
 
-func TestLeadInstructionsExplainPRNoticeActions(t *testing.T) {
+func TestLeadInstructionsExplainPRAndCheckoutNoticeActions(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
 	code, output, errOutput := fixture.run("lead")
 	if code != 0 {
 		t.Fatalf("lead instructions exit=%d output=%s error=%s", code, output, errOutput)
 	}
-	for _, expected := range []string{"pr_opened", "pr_checks_failed", "pr_changes_requested", "pr_conflict", "land_ready", "pr_merged", "pr_closed", "pr_watch_failing", "root_behind", "Autonomy"} {
+	for _, expected := range []string{"pr_opened", "pr_checks_failed", "pr_changes_requested", "pr_conflict", "land_ready", "pr_merged", "pr_closed", "pr_watch_failing", "root_behind", "root_fetch_failing", "Autonomy"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("Lead instructions omit PR handling for %q: %s", expected, output)
 		}
 	}
-	for _, expected := range []string{"landing Ship Task also accepts a follow-up `posse send` before those Notices", "returns it to working until the next `posse land`", "merge `origin/<target>` into the Task branch", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists"} {
+	for _, expected := range []string{"landing Ship Task also accepts a follow-up `posse send` before those Notices", "returns it to working until the next `posse land`", "merge `origin/<target>` into the Task branch", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists", "report the affected repositories when the failure persists"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("Lead instructions omit recovery guidance %q: %s", expected, output)
 		}

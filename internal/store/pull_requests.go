@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -252,6 +253,136 @@ func (db *DB) RecordPRPoll(ctx context.Context, projectID int64, at int64, failu
 func (db *DB) RecordCheckoutAttempt(ctx context.Context, projectID int64, at int64) error {
 	_, err := db.ExecContext(ctx, `INSERT INTO project_watch_state(project_id, checkout_checked_at) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET checkout_checked_at=excluded.checkout_checked_at`, projectID, at)
 	return err
+}
+
+const repoFetchFailureNoticeAfter = 3
+
+type repoFetchFailure struct {
+	Repo                string `json:"repo"`
+	ConsecutiveFailures int    `json:"consecutive_failures"`
+	Error               string `json:"error"`
+}
+
+// RecordRepoFetchFailure increments one repository's fetch-failure streak and
+// coalesces persistent failures into one Project-level Notice.
+func (db *DB) RecordRepoFetchFailure(ctx context.Context, projectID int64, repo string, at int64, failure string) (int, error) {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO repo_fetch_failures(project_id, repo) VALUES (?, ?)`, projectID, repo); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE repo_fetch_failures SET consecutive_failures=consecutive_failures+1,last_error=?,updated_at=? WHERE project_id=? AND repo=?`, failure, at, projectID, repo); err != nil {
+		return 0, err
+	}
+	var failures int
+	if err := tx.QueryRowContext(ctx, `SELECT consecutive_failures FROM repo_fetch_failures WHERE project_id=? AND repo=?`, projectID, repo).Scan(&failures); err != nil {
+		return 0, err
+	}
+	changed, err := refreshRepoFetchFailureNoticeTx(ctx, tx, projectID, at, failures == repoFetchFailureNoticeAfter)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if changed {
+		if err := db.PersistProject(ctx, projectID); err != nil {
+			return 0, err
+		}
+	}
+	return failures, nil
+}
+
+// RecordRepoFetchSuccess resets one repository's failure streak. The active
+// Project Notice is acknowledged once no repository remains above the threshold.
+func (db *DB) RecordRepoFetchSuccess(ctx context.Context, projectID int64, repo string, at int64) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE repo_fetch_failures SET consecutive_failures=0,last_error='',updated_at=? WHERE project_id=? AND repo=?`, at, projectID, repo); err != nil {
+		return err
+	}
+	changed, err := refreshRepoFetchFailureNoticeTx(ctx, tx, projectID, at, false)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if changed {
+		return db.PersistProject(ctx, projectID)
+	}
+	return nil
+}
+
+func refreshRepoFetchFailureNoticeTx(ctx context.Context, tx *writeTx, projectID int64, at int64, create bool) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT repo,consecutive_failures,last_error FROM repo_fetch_failures WHERE project_id=? AND consecutive_failures>=? ORDER BY repo`, projectID, repoFetchFailureNoticeAfter)
+	if err != nil {
+		return false, err
+	}
+	var failures []repoFetchFailure
+	for rows.Next() {
+		var failure repoFetchFailure
+		if err := rows.Scan(&failure.Repo, &failure.ConsecutiveFailures, &failure.Error); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		failures = append(failures, failure)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	if len(failures) == 0 {
+		result, err := tx.ExecContext(ctx, `UPDATE notices SET acked_at=COALESCE(acked_at,?) WHERE project_id=? AND kind='root_fetch_failing' AND acked_at IS NULL`, at, projectID)
+		if err != nil {
+			return false, err
+		}
+		changed, err := result.RowsAffected()
+		return changed > 0, err
+	}
+
+	data, err := json.Marshal(map[string]any{"consecutive_failures": repoFetchFailureNoticeAfter, "repositories": failures})
+	if err != nil {
+		return false, err
+	}
+	var names []string
+	for _, failure := range failures {
+		name := failure.Repo
+		if name == "" {
+			name = "Project"
+		}
+		names = append(names, name)
+	}
+	summary := "Origin fetch has failed for three consecutive attempts in " + strings.Join(names, ", ")
+	var existingID int64
+	var existingSummary, existingData string
+	err = tx.QueryRowContext(ctx, `SELECT id,summary,data_json FROM notices WHERE project_id=? AND kind='root_fetch_failing' AND acked_at IS NULL ORDER BY id DESC LIMIT 1`, projectID).Scan(&existingID, &existingSummary, &existingData)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		if !create {
+			return false, nil
+		}
+		if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "root_fetch_failing", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if existingSummary == summary && existingData == string(data) {
+		return false, nil
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE notices SET summary=?,data_json=? WHERE id=?`, summary, string(data), existingID)
+	return err == nil, err
 }
 
 // RecordRootBehind raises one root_behind Notice per new upstream head of a

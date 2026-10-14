@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // IsolatedTestEnvironment strips every inherited HERDR_* value and redirects all
@@ -198,5 +199,5 @@ func TestRootName() string {
 	if prefix == "" {
 		prefix = "posse-e2e-"
 	}
-	return prefix
+	return prefix + strconv.FormatInt(time.Now().UnixNano(), 36)
 }

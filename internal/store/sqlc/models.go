@@ -249,6 +249,14 @@ type PublishPrePushHead struct {
 	RecordedAt int64
 }
 
+type RepoFetchFailure struct {
+	ProjectID           int64
+	Repo                string
+	ConsecutiveFailures int64
+	LastError           string
+	UpdatedAt           int64
+}
+
 type RepoWatchState struct {
 	ProjectID         int64
 	Repo              string
@@ -304,6 +312,7 @@ type Task struct {
 	ShortName            string
 	AgentSessionKind     string
 	TargetBranch         string
+	PrTitle              string
 }
 
 type TaskLaunchIdentity struct {

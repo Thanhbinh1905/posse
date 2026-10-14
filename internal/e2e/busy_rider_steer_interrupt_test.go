@@ -236,6 +236,18 @@ func TestExpiredUncertainSubmissionDoesNotBlockFreshDeliveryE2E(t *testing.T) {
 	}
 	backgroundEnv := setEnv(fixture.leadEnv, "HERDR_PLUGIN_EVENT_JSON", `{"event":"pane.focused","data":{"pane_id":"`+task.PaneID+`"}}`)
 	backgroundOutput := runPosse(t, fixture.binary, fixture.repo, backgroundEnv, "_ingest")
+	if !waitForCondition(5*time.Second, func() bool {
+		message, err := fixture.db.MessageByID(ctx, backgroundID)
+		if err != nil || message.Status != "delivered" {
+			return false
+		}
+		input, err := os.ReadFile(filepath.Join(fixture.root, "fake-agent-input.log"))
+		return err == nil && strings.Contains(string(input), "Fresh background instruction")
+	}) {
+		background, _ := fixture.db.MessageByID(ctx, backgroundID)
+		input, _ := os.ReadFile(filepath.Join(fixture.root, "fake-agent-input.log"))
+		t.Fatalf("background instruction did not settle before interrupt: message=%#v output=%s input=%s", background, backgroundOutput, input)
+	}
 	interruptCommand := exec.Command(fixture.binary, "send", "t1", "--interrupt", "Fresh stop and redirect")
 	interruptCommand.Dir, interruptCommand.Env = fixture.repo, fixture.leadEnv
 	interruptOutput, interruptErr := interruptCommand.CombinedOutput()

@@ -137,17 +137,30 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 		cancel()
 		notices = append(notices, taskNotices...)
 		if err != nil && !isStateRace(err) {
-			failures = append(failures, err)
+			failures = append(failures, fmt.Errorf("reconcile Task %s: %w", taskID(task.Seq), err))
 		}
 	}
 	return notices, errors.Join(failures...)
 }
 
 func reconcileError(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("%w: reconciliation work deferred: %v", store.ErrBusy, err)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
-	return err
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		mapped := make([]error, len(causes))
+		for index, cause := range causes {
+			mapped[index] = reconcileError(cause)
+		}
+		return errors.Join(mapped...)
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		cause := wrapped.Unwrap()
+		prefix := strings.TrimSuffix(err.Error(), cause.Error())
+		return fmt.Errorf("%s%w", prefix, reconcileError(cause))
+	}
+	return fmt.Errorf("%w: reconciliation work deferred: %v", store.ErrBusy, err)
 }
 
 // Leave enough time for one SQLite lock wait and its cleanup. Work that does
@@ -174,7 +187,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		if err == nil {
 			return nil
 		}
-		return fmt.Errorf("update Task %s observation: %w", taskID(task.Seq), err)
+		return fmt.Errorf("update observation: %w", err)
 	}
 	pane, found := findPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 	if !found {
