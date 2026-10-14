@@ -523,7 +523,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 	queries := db.queries.WithTx(tx.Tx)
 	result, err := queries.InsertTask(ctx, dbgen.InsertTaskParams{
 		ProjectID: projectID, Seq: int64(task.Seq), Type: task.Type, ReviewsTaskID: nullableID(task.ReviewsTaskID),
-		Title: task.Title, ShortName: task.ShortName, State: string(task.State), Profile: task.Profile, DispatchRule: task.DispatchRule,
+		Title: task.Title, PrTitle: task.PRTitle, ShortName: task.ShortName, State: string(task.State), Profile: task.Profile, DispatchRule: task.DispatchRule,
 		LandingMode: task.LandingMode, AutonomyReview: task.AutonomyReview, AutonomyLand: task.AutonomyLand,
 		Branch: task.Branch, BaseRef: task.BaseRef, TargetBranch: task.TargetBranch, WorktreePath: task.WorktreePath,
 		HerdrWorkspaceID: task.HerdrWorkspaceID, PaneID: task.PaneID, PaneLabel: task.PaneLabel,
@@ -581,6 +581,7 @@ type Task struct {
 	Type                 string `toml:"type"`
 	ReviewsTaskID        int64  `toml:"reviews_task_id"`
 	Title                string `toml:"title"`
+	PRTitle              string `toml:"pr_title,omitempty"`
 	ShortName            string `toml:"short_name"`
 	State                State  `toml:"state"`
 	Profile              string `toml:"profile"`
@@ -1178,6 +1179,21 @@ func (db *DB) ChangeTaskProfile(ctx context.Context, taskID int64, oldProfile, n
 func (db *DB) UpdateTaskLanding(ctx context.Context, taskID int64, prURL, landedRef string) error {
 	if err := db.queries.UpdateTaskLanding(ctx, dbgen.UpdateTaskLandingParams{PrUrl: prURL, LandedRef: landedRef, UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
 		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
+func (db *DB) SetTaskPRTitle(ctx context.Context, taskID int64, title string) error {
+	result, err := db.queries.SetTaskPRTitle(ctx, dbgen.SetTaskPRTitleParams{PrTitle: title, UpdatedAt: time.Now().UnixMilli(), ID: taskID})
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrNotFound
 	}
 	return db.PersistTask(ctx, taskID)
 }
@@ -2066,7 +2082,7 @@ func taskFromDB(row dbgen.Task) Task {
 		mountID = row.MountID.Int64
 	}
 	return Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, ReviewsTaskID: reviewsTaskID,
-		Title: row.Title, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule,
+		Title: row.Title, PRTitle: row.PrTitle, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule,
 		LandingMode: row.LandingMode, AutonomyReview: row.AutonomyReview, AutonomyLand: row.AutonomyLand,
 		Branch: row.Branch, BaseRef: row.BaseRef, TargetBranch: row.TargetBranch, WorktreePath: row.WorktreePath, MountID: mountID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
