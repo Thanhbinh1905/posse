@@ -185,6 +185,48 @@ func TestShowIncludesSignalsAndTransitionsOnlyWithFull(t *testing.T) {
 	}
 }
 
+func TestShowMarksUndeliverableAndWithdrawnMessagesAsHistory(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRelaunchFixture(t, store.StateDone)
+	for index, status := range []string{"undeliverable", "withdrawn"} {
+		if _, err := fixture.db.ExecContext(ctx, `INSERT INTO messages(task_id,body,created_at,status) VALUES(?,?,?,?)`, fixture.task.ID, status+" instruction", fixture.task.CreatedAt+int64(index)+1, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(filepath.Join(filepath.Dir(fixture.home), "repo"))
+	var output bytes.Buffer
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"--json", "show", "t1"}); code != 0 {
+		t.Fatalf("show failed: code=%d output=%s", code, output.String())
+	}
+	var result struct {
+		Messages []struct {
+			Status      string `json:"status"`
+			History     *bool  `json:"history"`
+			BlocksSends *bool  `json:"blocks_sends"`
+		} `json:"undelivered_messages"`
+		Help []string `json:"help"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatalf("decode show output: %v: %s", err, output.String())
+	}
+	if len(result.Messages) != 2 {
+		t.Fatalf("show returned %d message rows, want 2: %s", len(result.Messages), output.String())
+	}
+	for _, message := range result.Messages {
+		if message.Status != "undeliverable" && message.Status != "withdrawn" {
+			t.Errorf("unexpected message status %q", message.Status)
+		}
+		if message.History == nil || !*message.History || message.BlocksSends == nil || *message.BlocksSends {
+			t.Errorf("%s message is not marked as non-blocking history: %#v", message.Status, message)
+		}
+	}
+	if !strings.Contains(strings.Join(result.Help, " "), "do not block new sends when this Task accepts instructions") {
+		t.Errorf("show did not explain that message history does not block new sends: %#v", result.Help)
+	}
+}
+
 func TestPeekReadsPaneIdAfterLabelReconciliation(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

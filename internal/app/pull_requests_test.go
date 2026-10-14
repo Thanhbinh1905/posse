@@ -1007,7 +1007,7 @@ func TestLeadInstructionsExplainPRAndCheckoutNoticeActions(t *testing.T) {
 			t.Errorf("Lead instructions omit PR handling for %q: %s", expected, output)
 		}
 	}
-	for _, expected := range []string{"landing Ship Task also accepts a follow-up `posse send` before those Notices", "returns it to working until the next `posse land`", "merge `origin/<target>` into the Task branch", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists", "report the affected repositories when the failure persists"} {
+	for _, expected := range []string{"Done and landing Ship Tasks accept follow-up instructions through `posse send <task> <message>`", "delivery returns them to working", "landing Task can receive it before those Notices", "After the Rider's next done Signal, run `posse land` again", "merge `origin/<target>` into the Task branch", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists", "report the affected repositories when the failure persists"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("Lead instructions omit recovery guidance %q: %s", expected, output)
 		}

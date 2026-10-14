@@ -606,6 +606,20 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	return relaunchFixture{db: db, fake: fake, service: service, home: home, project: project, cfg: cfg, task: task}
 }
 
+func TestRelaunchDoneShipSuggestsSend(t *testing.T) {
+	fixture := newRelaunchFixture(t, store.StateDone)
+	t.Chdir(filepath.Join(filepath.Dir(fixture.home), "repo"))
+	var output bytes.Buffer
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"relaunch", "t1"}); code != 1 || !strings.Contains(output.String(), "relaunch_refused") || !strings.Contains(output.String(), "posse send t1 <message>") {
+		t.Fatalf("done Ship relaunch did not refuse with a send step: code=%d output=%s", code, output.String())
+	}
+	if len(fixture.fake.Calls) != 0 {
+		t.Fatalf("done Ship relaunch contacted Herdr before refusing: %#v", fixture.fake.Calls)
+	}
+}
+
 func TestCodexRiderSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
 	const (
 		globalRule  = "Fixture safety rule: never delete user data without explicit consent."
