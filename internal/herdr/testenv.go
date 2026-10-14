@@ -86,10 +86,10 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 	}
 	scratchRoot := filepath.Clean(env["POSSE_E2E_TMP_ROOT"])
 	insideScratch := safeTaskScratchRoot(scratchRoot) && inside(scratchRoot, rootAbs)
-	parent := filepath.Dir(rootAbs)
+	resolvedRoot, resolveErr := filepath.EvalSymlinks(rootAbs)
+	parent := filepath.Dir(resolvedRoot)
 	configuredTemp := filepath.IsAbs(tmpDir) && tmpDirErr == nil && filepath.Clean(tmpDirAbs) != string(filepath.Separator) && parent == filepath.Clean(tmpDirAbs)
 	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || parent == filepath.Clean(os.TempDir()) || configuredTemp
-	resolvedRoot, resolveErr := filepath.EvalSymlinks(rootAbs)
 	insideTemp := false
 	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
 		relative, err := filepath.Rel(tempRoot, resolvedRoot)

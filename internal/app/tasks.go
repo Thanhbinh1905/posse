@@ -931,7 +931,7 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
 	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Mount. Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches; never create per-Task copies.", scratchPath)
 	signalFiles := fmt.Sprintf("Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`%s`); paths outside those locations are refused.", scratchPath)
-	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, signalFiles, brief.DoneWhen, signal, launchPath)
+	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nA `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered. Let the turn end so Posse can deliver them, apply them, then retry the Signal.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, signalFiles, brief.DoneWhen, signal, launchPath)
 }
 
 // workspaceProtocol tells a workspace Worker how its Mount mirrors the workspace.
@@ -1103,6 +1103,18 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file>", false, fmt.Sprintf("Store the report in the Rider's worktree (%s) or this Task's scratch directory (%s)", task.WorktreePath, scratchPath))
 		}
 	}
+	if verb == "done" {
+		pending, err := db.HasPendingTaskInstructions(ctx.Context, task.ID)
+		if err != nil {
+			if store.IsBusy(err) {
+				return axi.Failure("store_busy", "the store was busy and this Signal was not recorded", true, "Run `posse holler` again with the same Signal")
+			}
+			return err
+		}
+		if pending {
+			return queuedInstructionsPendingFailure(task)
+		}
+	}
 	if verb == "needs-decision" && parsed.Flags["findings"] != "" {
 		if _, err := copySignalFile(home, project, task, parsed.Flags["findings"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
@@ -1121,6 +1133,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]
 	state, err := db.RecordWorkerSignal(ctx.Context, task, verb, note, data, noticeKind)
 	if err != nil {
+		if errors.Is(err, store.ErrQueuedInstructionsPending) {
+			return queuedInstructionsPendingFailure(task)
+		}
 		if store.IsBusy(err) {
 			return axi.Failure("store_busy", "the store was busy and this Signal was not recorded", true, "Run `posse holler` again with the same Signal")
 		}
@@ -1156,6 +1171,16 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project snapshot deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 	}
 	return ctx.Print(signalResult)
+}
+
+func queuedInstructionsPendingFailure(task store.Task) error {
+	taskID := taskIDString(task.Seq)
+	return axi.Failure(
+		"queued_instructions_pending",
+		fmt.Sprintf("Task %s has queued instructions that have not been delivered; the done Signal was not recorded", taskID),
+		false,
+		"Let this turn end so Posse can deliver the queued instructions; apply them, then retry `posse holler done`",
+	)
 }
 
 func (s *Service) brief(ctx *axi.Context, args []string) error {

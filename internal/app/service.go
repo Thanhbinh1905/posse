@@ -113,7 +113,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Leftover or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--profile <name>]", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
 		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p] [--from-leftover <decision>]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
-		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Rider's Signal.", Handler: s.signal},
+		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Rider's Signal; done is refused while queued instructions remain undelivered.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Ship Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Rider's next publish will use.", Handler: s.retitle},
 		{Name: "brief", Summary: "Reprint this Rider's launch Brief.", Handler: s.brief},
