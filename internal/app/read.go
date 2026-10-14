@@ -561,14 +561,23 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		rows := make([]any, 0, len(undeliveredMessages))
 		hasQueuedMessages := false
 		hasUndeliverableMessages := false
+		hasHistoricalMessages := false
 		for _, message := range undeliveredMessages {
-			rows = append(rows, map[string]any{"id": message.ID, "status": message.Status, "instruction": message.Body})
+			row := map[string]any{"id": message.ID, "status": message.Status, "instruction": message.Body}
 			switch message.Status {
 			case "queued":
 				hasQueuedMessages = true
 			case "undeliverable":
 				hasUndeliverableMessages = true
+				hasHistoricalMessages = true
+			case "withdrawn":
+				hasHistoricalMessages = true
 			}
+			if message.Status == "undeliverable" || message.Status == "withdrawn" {
+				row["history"] = true
+				row["blocks_sends"] = false
+			}
+			rows = append(rows, row)
 		}
 		view["undelivered_messages"] = rows
 		switch task.State {
@@ -583,6 +592,9 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			if hasQueuedMessages {
 				help = append(help, "Queued instructions will be delivered when the Rider is ready and unfocused")
 			}
+		}
+		if hasHistoricalMessages {
+			help = append(help, "Undeliverable and withdrawn messages are history, not pending deliveries; they do not block new sends when this Task accepts instructions")
 		}
 	}
 	if task.Type == "ship" && task.State == store.StateDone {
