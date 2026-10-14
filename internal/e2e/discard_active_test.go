@@ -237,6 +237,10 @@ func TestApprovedDiscardStopsWorkingRider(t *testing.T) {
 	}
 }
 
+func TestApprovedDiscardStopsReopenedDoneRider(t *testing.T) {
+	testApprovedDiscardStopsRider(t, store.StateDone)
+}
+
 func testApprovedDiscardStopsRider(t *testing.T, state store.State) {
 	f := newRiderTabsFixture(t)
 	agent := `#!/bin/sh
@@ -245,17 +249,68 @@ trap ': > "$POSSE_TEST_ROOT/rider-terminated"; posse holler failed "Rider stoppe
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 IFS= read -r prompt || exit 0
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-while :; do IFS= read -r line || :; done
+while :; do
+  IFS= read -r line || :
+  if [ "$line" = 'Resume cancelled Task' ]; then
+    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+  fi
+done
 `
 	if err := os.WriteFile(filepath.Join(f.root, "bin", "claude"), []byte(agent), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	task := f.ride(t, "t1", "Cancel working Rider", "cancel-working-rider")
 	pid := foregroundPID(t, f, task.PaneID)
+	riderEnv := setEnv(f.env, "HERDR_ENV", "1")
+	riderEnv = setEnv(riderEnv, "HERDR_PANE_ID", task.PaneID)
 	if state == store.StateNeedsDecision {
-		env := setEnv(f.env, "HERDR_ENV", "1")
-		env = setEnv(env, "HERDR_PANE_ID", task.PaneID)
-		runPosse(t, f.binary, task.WorktreePath, env, "holler", "needs-decision", "Should this Task be cancelled?")
+		runPosse(t, f.binary, task.WorktreePath, riderEnv, "holler", "needs-decision", "Should this Task be cancelled?")
+	}
+	if state == store.StateDone {
+		if err := os.WriteFile(filepath.Join(task.WorktreePath, "completed-change.txt"), []byte("completed Rider work\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, f.env, task.WorktreePath, "add", "completed-change.txt")
+		gitTest(t, f.env, task.WorktreePath, "commit", "-m", "complete Rider change")
+		if _, err := f.client.Run(t.Context(), "pane", "report-agent", task.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, f.binary, task.WorktreePath, riderEnv, "holler", "done", "Rider work is complete")
+		if completed := f.task(t, "t1"); completed.State != store.StateDone {
+			t.Fatalf("Rider completion left Task in %s", completed.State)
+		}
+		// Direct User input, not posse send or a working Signal, must reopen
+		// this Ship Task before the Lead cancels that same Rider instance.
+		if _, err := f.client.Run(t.Context(), "pane", "run", task.PaneID, "Resume cancelled Task"); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForCondition(12*time.Second, func() bool {
+			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+			return f.task(t, "t1").State == store.StateWorking
+		}) {
+			t.Fatalf("resumed done Rider left Task in %s", f.task(t, "t1").State)
+		}
+		reopened := f.task(t, "t1")
+		if reopened.Launches != task.Launches || reopened.AgentName != task.AgentName || reopened.PaneID != task.PaneID || reopened.Branch != task.Branch || reopened.PRURL != task.PRURL || foregroundPID(t, f, task.PaneID) != pid {
+			t.Fatalf("watcher reopening changed the Rider instance or custody: before=%#v after=%#v", task, reopened)
+		}
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var transitions, notices int
+		if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM transitions WHERE task_id=? AND from_state='done' AND to_state='working' AND source='watcher'`, task.ID).Scan(&transitions); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='rider_resumed'`, task.ID).Scan(&notices); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		_ = db.Close()
+		if transitions != 1 || notices != 1 {
+			t.Fatalf("done Rider reopening recorded %d transitions and %d Notices, want one of each", transitions, notices)
+		}
 	}
 	for _, args := range [][]string{{"unsaddle", "t1"}, {"unsaddle", "t1", "--discard"}, {"unsaddle", "t1", "--discard", "--user-approved", " "}} {
 		command := exec.Command(f.binary, args...)
@@ -265,8 +320,6 @@ while :; do IFS= read -r line || :; done
 		}
 		f.assertAlive(t, f.snapshot(t), task.PaneID)
 	}
-	riderEnv := setEnv(f.env, "HERDR_ENV", "1")
-	riderEnv = setEnv(riderEnv, "HERDR_PANE_ID", task.PaneID)
 	riderCommand := exec.Command(f.binary, "unsaddle", "t1", "--discard", "--user-approved", "destroy t3 now")
 	riderCommand.Dir, riderCommand.Env = task.WorktreePath, riderEnv
 	if output, err := riderCommand.CombinedOutput(); err == nil || !strings.Contains(string(output), "worker_forbidden") {
