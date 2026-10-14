@@ -1836,7 +1836,11 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string, automatic bool) (relaunchResult, error) {
 	failure := func(err error) (relaunchResult, error) { return relaunchResult{}, err }
 	if !recoverableTaskState(task.State) {
-		return failure(axi.Failure("relaunch_refused", "Task in state "+string(task.State)+" cannot be relaunched", false))
+		var help []string
+		if task.State == store.StateDone && task.Type == "ship" {
+			help = append(help, "Send a follow-up with `posse send "+taskIDString(task.Seq)+" <message>`")
+		}
+		return failure(axi.Failure("relaunch_refused", "Task in state "+string(task.State)+" cannot be relaunched", false, help...))
 	}
 	if task.Profile == "" {
 		return failure(axi.Failure("config_invalid", "Task has no Profile", false))
