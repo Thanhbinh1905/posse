@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -134,12 +135,59 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	if err := fixture.db.RollbackMessageClaim(context.Background(), claimed.ID, "e2e-claimed"); err != nil {
 		t.Fatal(err)
 	}
-	steerableID, err := fixture.db.QueueMessage(context.Background(), task.ID, "Older steerable queue item", false)
+	// A live poll-only Lookout can legitimately deliver a steerable row
+	// before the interrupt reserves it. Hold this row for idle until the
+	// reservation exists, then make it steerable while the fake abort is
+	// gated. This tests reservation ordering without racing another sender.
+	steerableID, err := fixture.db.QueueMessage(context.Background(), task.ID, "Older steerable queue item", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	interrupt := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "--interrupt", "Stop and redirect this turn")
+	abortGate := filepath.Join(fixture.root, "hold-fake-abort")
+	if err := os.WriteFile(abortGate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	interruptCtx, cancelInterrupt := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelInterrupt()
+	command := exec.CommandContext(interruptCtx, fixture.binary, "send", "t1", "--interrupt", "Stop and redirect this turn")
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	var interruptOutput bytes.Buffer
+	command.Stdout, command.Stderr = &interruptOutput, &interruptOutput
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	finished := false
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	defer func() {
+		_ = os.Remove(abortGate)
+		cancelInterrupt()
+		if !finished {
+			<-done
+		}
+	}()
+	if !waitForCondition(5*time.Second, func() bool {
+		message, err := fixture.db.MessageByID(context.Background(), steerableID)
+		return err == nil && message.Status == "claimed"
+	}) {
+		t.Fatal("interrupt did not reserve the queued instructions")
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE messages SET wait_for_idle=0 WHERE id=? AND status='claimed'`, steerableID); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := fixture.db.MessageByID(context.Background(), steerableID)
+	if err != nil || reserved.Status != "claimed" || reserved.WaitForIdle {
+		t.Fatalf("steerable instruction escaped the interrupt reservation: %#v %v", reserved, err)
+	}
+	if err := os.Remove(abortGate); err != nil {
+		t.Fatal(err)
+	}
+	err = <-done
+	finished = true
+	interrupt := interruptOutput.String()
+	if err != nil {
+		t.Fatalf("interrupt failed: %v %s", err, interrupt)
+	}
 	if !strings.Contains(interrupt, "state: delivered") || !strings.Contains(interrupt, "reason: delivered_after_interrupt") {
 		t.Fatalf("send --interrupt did not verify and deliver the redirect: %s", interrupt)
 	}
@@ -148,8 +196,8 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		t.Fatalf("interrupt reordered or duplicated a queued message: %#v, %v", remaining, err)
 	}
 	steerable, err := fixture.db.MessageByID(context.Background(), steerableID)
-	if err != nil || steerable.Status != "queued" {
-		t.Fatalf("interrupt pre-delivered an older steerable message: %#v, %v", steerable, err)
+	if err != nil || steerable.WaitForIdle {
+		t.Fatalf("interrupt changed the older instruction's steering policy: %#v, %v", steerable, err)
 	}
 	if !waitForCondition(5*time.Second, func() bool {
 		contents, err := os.ReadFile(inputLog)
@@ -166,10 +214,15 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, notDelivered := range []string{"Wait until the current turn ends", "Keep this queued", "Older steerable queue item"} {
+	for _, notDelivered := range []string{"Wait until the current turn ends", "Keep this queued"} {
 		if strings.Contains(string(contents), notDelivered) {
 			t.Errorf("queued instruction was delivered out of order: %s", contents)
 		}
+	}
+	// Normal background steering may resume after the reservation is released,
+	// but it must follow the redirect and must not repeat the instruction.
+	if older := strings.Index(string(contents), "Older steerable queue item"); older >= 0 && older < strings.Index(string(contents), "Stop and redirect this turn") || strings.Count(string(contents), "Older steerable queue item") > 1 {
+		t.Errorf("older steering preceded or duplicated the redirect: %s", contents)
 	}
 }
 
@@ -511,6 +564,8 @@ try:
                 continue
             append(key_log, kind + ":escape")
             if kind != "claude":
+                while os.path.exists(os.path.join(root, "hold-fake-abort")):
+                    time.sleep(0.01)
                 busy = False
                 report("idle")
                 time.sleep(0.4)

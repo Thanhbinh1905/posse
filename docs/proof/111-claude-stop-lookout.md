@@ -39,6 +39,8 @@ The real-harness replacement test shortens Posse's wait to 700ms but leaves Clau
 - Focused real-Claude and CLI E2E passed, including the native background-deadline reproduction.
 - Full Gate, unit suite and E2E results are recorded in the PR verification section.
 
+The first full unit run found four launch/instruction expectations still describing the old background path; these now assert the added Stop plugin and `posse ack` guidance. A monolithic E2E invocation exhausted its 30-minute aggregate budget with `TestLegacyRiderTabsAfterWorktreeUpgrade` only 32 seconds into its own run, so full verification uses the repository's four bounded shards. That run also exposed a Pi fixture race: a live Lookout legitimately claimed an eligible instruction before the interrupt command could reserve it. The fixture now gates the abort, makes the older instruction steerable only after reservation, and checks redirect-before-steering order while permitting normal delivery after release. Five isolated repetitions passed; no production interrupt behavior changed.
+
 The harness contract is documented in [Claude Code's command-hook fields and background-hook lifecycle](https://code.claude.com/docs/en/hooks#command-hook-fields): `asyncRewake` wakes Claude on exit 2, its timeout remains enforced, and session teardown owns the process. Synchronous Stop continuation limits are avoided by asynchronous wakes.
 
 ## Risk and rollback
