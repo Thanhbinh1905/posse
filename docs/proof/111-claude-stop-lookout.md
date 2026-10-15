@@ -9,7 +9,7 @@ status: stopped
 summary: Background command "Observe Lookout at the background ceiling" was stopped after reaching its background time limit
 ```
 
-The measured ceiling is the configured **1000ms background deadline**, not a claim that the default is one second. No harness code or clock is replaced. The local response stream removes external model latency and credentials from the reproduction. The test closes its harness input and terminates its owned process group during cleanup.
+The exercised limit is the configured **1000ms background deadline**, not a claim that the default is one second. No harness code or clock is replaced. The local response stream removes external model latency and credentials from the reproduction. The test closes its harness input and terminates its owned process group during cleanup.
 
 Run:
 
@@ -35,9 +35,13 @@ The real-harness replacement test shortens Posse's wait to 700ms but leaves Clau
 
 ## Verification
 
-- Focused unit tests and configuration tests passed.
-- Focused real-Claude and CLI E2E passed, including the native background-deadline reproduction.
-- Full Gate, unit suite and E2E results are recorded in the PR verification section.
+- Formatting, `go vet -tags=e2e,perf ./...`, Staticcheck 2026.2.1, `go generate ./...` with a clean diff, and shard assignment self-check passed.
+- `GOMAXPROCS=2 go test -count=1 -timeout=20m ./...` passed all packages.
+- Focused race-enabled unit/config tests passed. Race-enabled real-Claude and CLI E2E passed, including the native background-deadline reproduction.
+- `GOMAXPROCS=2 GOFLAGS=-v scripts/run-e2e-shard.sh <1|2|3|4>` passed all four manifests in 590.038s, 449.540s, 482.097s and 624.311s. The 171 assignments produced 170 passes and one expected subprocess-helper skip in the parent run; no Claude test was skipped.
+- The foreground steering, unsend and crash-retry fixtures passed five race-enabled repetitions in 217.418s.
+
+Exact commands and results are also recorded in the PR verification section.
 
 The first full unit run found four stale launch/instruction expectations; these now assert the Stop plugin and `posse ack` guidance. Full E2E exposed three existing fixture-isolation races: the independent poller could claim an instruction before `send --interrupt`, deliver it before `unsend`, or repair a deliberately crashed discard intent before its explicit retry. Those foreground-only phases now use the existing fixture-owned Lookout stop and recovery-pause helper. Production delivery, interruption and intent recovery are unchanged.
 
