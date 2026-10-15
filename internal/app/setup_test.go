@@ -562,7 +562,12 @@ func TestSetupBinaryPathSafetyAndInstalledPreference(t *testing.T) {
 	if !isUnsafeSetupBinaryPath(filepath.Join("/tmp", "posse-fixture", ".local", "bin", "posse")) {
 		t.Fatal("path under /tmp was not treated as unsafe")
 	}
-	installedHome, err := os.MkdirTemp("/var/tmp", "posse-installed-home-")
+	// Prefer a configured non-/tmp Task scratch over global temporary storage.
+	parent := os.TempDir()
+	if parent == "/tmp" || strings.HasPrefix(parent, "/tmp/") {
+		parent = "/var/tmp"
+	}
+	installedHome, err := os.MkdirTemp(parent, "posse-installed-home-")
 	if err != nil {
 		t.Fatal(err)
 	}
