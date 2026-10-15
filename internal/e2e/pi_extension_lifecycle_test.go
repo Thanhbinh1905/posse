@@ -96,12 +96,12 @@ func TestPiExtensionSessionReplacementOwnsOneLookoutGeneration(t *testing.T) {
 			return false
 		}
 		var state piLifecycleState
-		return json.Unmarshal(data, &state) == nil && state.Session == "fork-session" && state.ActiveLookouts == 1
+		return json.Unmarshal(data, &state) == nil && state.Session == "fork-session" && state.Stage == "ready-first-notice" && state.ActiveLookouts == 1
 	}) {
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		<-done
 		data, _ := os.ReadFile(ready)
-		t.Fatalf("Pi extension did not re-arm one lookout after session replacements: state=%s output=%s", data, output.String())
+		t.Fatalf("Pi harness did not signal readiness for the first Notice batch: state=%s output=%s", data, output.String())
 	}
 
 	routineID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "pr_opened", Summary: "safe routine Notice"})

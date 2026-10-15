@@ -190,10 +190,10 @@ async function startSession(reason, id) {
   return instance;
 }
 
-async function waitFor(predicate, timeoutMs = 5000) {
+async function waitFor(predicate, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("timed out waiting for Pi session lifecycle");
+    if (Date.now() >= deadline) throw new Error("timed out waiting for Pi session lifecycle readiness");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -225,7 +225,6 @@ for (const [reason, session] of [
   delayNextKill = true;
   await instance.handlers.get("session_shutdown")({ type: "session_shutdown", reason });
   instance = await startSession(reason, session);
-  await new Promise((resolve) => setTimeout(resolve, 80));
   if (!releaseDelayedKill) throw new Error(`session ${reason} did not stop its previous lookout`);
   const release = releaseDelayedKill;
   releaseDelayedKill = undefined;
@@ -233,6 +232,7 @@ for (const [reason, session] of [
   await waitFor(() => activeLookouts === 1 && destinations.at(-1) === `pi:${session}`);
 }
 
+await updateState(`pi:${currentSession}`, "ready-first-notice");
 const lifecycleStarts = lookoutStarts;
 const message = await nextNotice();
 if (message.display !== false) throw new Error("lowkey Notice was visible in the transcript");
