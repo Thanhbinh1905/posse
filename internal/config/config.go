@@ -81,7 +81,7 @@ type Kind struct {
 // means NoticeDeliveryPrompt.
 const (
 	NoticeDeliveryPrompt         = "prompt"          // type a prompt when the pane is idle and unfocused
-	NoticeDeliveryLookout        = "lookout"         // the Lead keeps a background `posse lookout`
+	NoticeDeliveryLookout        = "lookout"         // Claude owns a bounded Stop hook; other kinds use a background Lookout
 	NoticeDeliveryCodexQueue     = "codex-queue"     // posse queues the prompt with `codex queue`
 	NoticeDeliveryPiExtension    = "pi-extension"    // a posse pi extension runs `posse lookout`
 	NoticeDeliveryOpenCodePlugin = "opencode-plugin" // a Lead-only plugin queues lookout batches through the session API
@@ -526,7 +526,7 @@ func (c Config) Validate(projectFile bool) error {
 		if kind.NoticeDelivery != "" && !oneOf(kind.NoticeDelivery, NoticeDeliveries...) {
 			return &InvalidError{File: file, Key: "kinds." + name + ".notice_delivery", Reason: "must be one of " + strings.Join(NoticeDeliveries, ", ")}
 		}
-		if kind.NoticeDelivery == NoticeDeliveryLookout && !kind.BackgroundCommands {
+		if name != "claude" && kind.NoticeDelivery == NoticeDeliveryLookout && !kind.BackgroundCommands {
 			return &InvalidError{File: file, Key: "kinds." + name + ".notice_delivery", Reason: "lookout requires background_commands = true"}
 		}
 	}

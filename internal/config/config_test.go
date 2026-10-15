@@ -163,6 +163,14 @@ func TestLookoutDeliveryRequiresBackgroundCommands(t *testing.T) {
 	}
 }
 
+func TestClaudeStopDeliveryDoesNotRequireBackgroundCommands(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, filepath.Join(home, "config.toml"), "[kinds.claude]\nbackground_commands = false\n")
+	if _, err := Load(home, ""); err != nil {
+		t.Fatalf("Claude Stop hook incorrectly requires Bash background support: %v", err)
+	}
+}
+
 func TestPartialKindTableKeepsBuiltInLeadDelivery(t *testing.T) {
 	home := t.TempDir()
 	writeConfig(t, filepath.Join(home, "config.toml"), "[kinds.pi]\nmodel_args = [\"--model\", \"{model}\"]\n")

@@ -23,6 +23,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "_finalize-lead" {
 		os.Exit(service.RunLeadFinalizer(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_claude-stop" {
+		os.Exit(service.RunClaudeStop(os.Stdin, os.Stderr, os.Args[2:]))
+	}
 	service.Version = version
 	cli := service.CLI()
 	cli.Name = "posse"

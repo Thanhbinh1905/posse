@@ -817,17 +817,17 @@ func TestIdentityTextLabelsSetFieldsOnly(t *testing.T) {
 
 func TestNoticeRulesForbidPollingForEveryDelivery(t *testing.T) {
 	for delivery, wake := range map[string]string{
-		config.NoticeDeliveryLookout:        "After (re)starting it, end your turn and let it wake you.",
+		config.NoticeDeliveryLookout:        "End your turn and let the Stop hook wake you.",
 		config.NoticeDeliveryCodexQueue:     "End your turn and let that message wake you.",
 		config.NoticeDeliveryPiExtension:    "End your turn and let that message wake you.",
 		config.NoticeDeliveryOpenCodePlugin: "End your turn and let that message wake you.",
 		config.NoticeDeliveryPrompt:         "End your turn and let that prompt wake you.",
 	} {
-		rule := noticeRule(delivery)
+		rule := noticeRule(delivery, "claude")
 		if !strings.Contains(rule, noPollRule) || !strings.Contains(rule, wake) {
 			t.Errorf("%s Notice rule = %q", delivery, rule)
 		}
-		if delivery == config.NoticeDeliveryLookout && !strings.Contains(rule, "If it returns with `state=stopped` and `reason=update`, restart `posse lookout` on your next wake.") {
+		if delivery == config.NoticeDeliveryLookout && !strings.Contains(rule, "A stopped hook does not restart itself; the next normal Stop owns the next wait.") {
 			t.Errorf("Claude Lead lookout restart rule = %q", rule)
 		}
 	}
