@@ -259,4 +259,5 @@ listed=$(go test -tags=e2e -list '^Test' ./internal/e2e)
 validate_assignments "$listed" "$assignments"
 pattern=$(printf '%s\n' "$assignments" | awk -v shard="$shard" '$1 == shard { if (count++) printf "|"; printf "%s", $2 } END { print "" }')
 printf 'Running E2E shard %s/4\n' "$shard"
-go test -tags=e2e -count=1 -timeout=10m ./internal/e2e -run "^(${pattern})$"
+# Recovery-heavy shards take up to eleven minutes locally; allow bounded runner variance.
+go test -tags=e2e -count=1 -timeout=15m ./internal/e2e -run "^(${pattern})$"
