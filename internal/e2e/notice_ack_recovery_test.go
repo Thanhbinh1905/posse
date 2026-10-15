@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,6 +194,215 @@ func TestAcknowledgedPrintedNoticeRecoversAfterCrashAndRebuild(t *testing.T) {
 			}
 			if len(next.Notices) != 1 || next.Notices[0].ID != newerID || next.Delivery.BatchID == first.Delivery.BatchID {
 				t.Fatalf("later Notice was lost or merged into the old batch: %+v", next)
+			}
+		})
+	}
+}
+
+func TestOpenCodeQueuesNoticeBatchDuringBusyTurn(t *testing.T) {
+	f := newAcknowledgedNoticeFixture(t)
+	leadFile := filepath.Join(f.root, "lead.md")
+	if err := os.WriteFile(leadFile, []byte("Fixture Lead"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releasePrompt := filepath.Join(f.root, "release-prompt")
+	reloadPlugin := filepath.Join(f.root, "reload-plugin")
+	resumedPlugin := filepath.Join(f.root, "resumed-plugin.json")
+	statusFile := filepath.Join(f.root, "adapter-status.json")
+	env := setEnv(f.env, "OPENCODE_BUSY_SOURCE", moduleRoot(t))
+	env = setEnv(env, "OPENCODE_BUSY_BIN", f.binary)
+	env = setEnv(env, "OPENCODE_BUSY_LEAD_FILE", leadFile)
+	env = setEnv(env, "OPENCODE_BUSY_RELEASE", releasePrompt)
+	env = setEnv(env, "OPENCODE_BUSY_RELOAD", reloadPlugin)
+	env = setEnv(env, "OPENCODE_BUSY_RESUMED", resumedPlugin)
+	env = setEnv(env, "OPENCODE_BUSY_STATUS", statusFile)
+	command := exec.Command("node", filepath.Join(moduleRoot(t), "internal/e2e/testdata/opencode_notice_busy_batch.mjs"))
+	command.Dir, command.Env = f.repo, env
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = command.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+			_ = command.Process.Kill()
+			<-done
+		}
+	})
+
+	waitUntil := func(description string, condition func() (bool, error)) {
+		t.Helper()
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			ready, err := condition()
+			if err != nil {
+				t.Fatalf("%s: %v", description, err)
+			}
+			if ready {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", description)
+	}
+	waitUntil("the first OpenCode prompt to remain busy", func() (bool, error) {
+		contents, err := os.ReadFile(statusFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return strings.Contains(string(contents), `"promptCalls":1`) && strings.Contains(string(contents), `"busy":true`), nil
+	})
+	secondNoticeID, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "needs_decision", Summary: "Observed while OpenCode is busy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil("the second receipt to be printed before the first prompt completes", func() (bool, error) {
+		var state string
+		err := f.db.QueryRowContext(context.Background(), `SELECT COALESCE((SELECT r.state FROM notice_delivery_receipts r, json_each(r.notice_ids_json) n WHERE r.project_id=? AND CAST(n.value AS INTEGER)=? ORDER BY r.created_at DESC LIMIT 1), '')`, f.project.ID, secondNoticeID).Scan(&state)
+		return state == "printed", err
+	})
+	thirdNoticeID, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "Keep this batch outside the bounded queue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		var receiptState, claimToken string
+		if err := f.db.QueryRowContext(context.Background(), `SELECT COALESCE((SELECT r.state FROM notice_delivery_receipts r, json_each(r.notice_ids_json) n WHERE r.project_id=? AND CAST(n.value AS INTEGER)=? ORDER BY r.created_at DESC LIMIT 1), ''), (SELECT claim_token FROM notices WHERE id=?)`, f.project.ID, thirdNoticeID, thirdNoticeID).Scan(&receiptState, &claimToken); err != nil {
+			t.Fatal(err)
+		}
+		if receiptState != "" || claimToken != "" {
+			t.Fatalf("third Notice exceeded the bounded in-memory queue: receipt=%q claim=%q", receiptState, claimToken)
+		}
+	}
+	contents, err := os.ReadFile(statusFile)
+	if err != nil || !strings.Contains(string(contents), `"promptCalls":1`) || !strings.Contains(string(contents), `"busy":true`) {
+		t.Fatalf("later Notice was not collected during the still-busy turn: status=%s err=%v", contents, err)
+	}
+	if err := os.WriteFile(reloadPlugin, []byte("reload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil("the replacement plugin to retire the old plugin's processes", func() (bool, error) {
+		contents, err := os.ReadFile(resumedPlugin)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return strings.Contains(string(contents), `"retiredChildren":true`), nil
+	})
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE notice_delivery_receipts SET lease_until=0 WHERE project_id=? AND destination=? AND state IN ('claimed','printed')`, f.project.ID, "opencode:busy-session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(releasePrompt, []byte("continue"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+		if waitErr != nil {
+			t.Fatalf("OpenCode busy-batch adapter: %v stdout=%s stderr=%s", waitErr, stdout.String(), stderr.String())
+		}
+	case <-time.After(15 * time.Second):
+		_ = command.Process.Kill()
+		<-done
+		t.Fatalf("OpenCode busy-batch adapter did not finish: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	var result struct {
+		PromptCalls        int      `json:"promptCalls"`
+		SettlementCodes    []int    `json:"settlementCodes"`
+		SettlementAttempts []string `json:"settlementAttempts"`
+		WatchFailures      []int    `json:"watchFailures"`
+		RetiredChildren    bool     `json:"retiredChildren"`
+		ShutdownHadLookout bool     `json:"shutdownHadLookout"`
+		AllChildrenRetired bool     `json:"allChildrenRetired"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode busy-batch adapter output %q: %v", stdout.String(), err)
+	}
+	if result.PromptCalls != 3 || len(result.SettlementCodes) < 3 || len(result.SettlementAttempts) != 3 || len(result.WatchFailures) != 0 || !result.RetiredChildren || !result.ShutdownHadLookout || !result.AllChildrenRetired {
+		t.Fatalf("OpenCode busy-batch result = %+v stderr=%s", result, stderr.String())
+	}
+	for _, outcome := range result.SettlementAttempts {
+		if outcome != "accepted" {
+			t.Fatalf("OpenCode busy-batch receipt outcome = %q, want accepted; result=%+v", outcome, result)
+		}
+	}
+	for _, id := range []int64{f.noticeID, secondNoticeID, thirdNoticeID} {
+		notices, err := f.db.NoticesByIDs(context.Background(), f.project.ID, []int64{id})
+		if err != nil || len(notices) != 1 || notices[0].DeliveredAt == 0 {
+			t.Fatalf("OpenCode did not accept Notice %d: notices=%+v err=%v", id, notices, err)
+		}
+	}
+}
+
+func TestOpenCodePromptOutcomesFollowReceiptEvidence(t *testing.T) {
+	f := newAcknowledgedNoticeFixture(t)
+	leadFile := filepath.Join(f.root, "lead.md")
+	if err := os.WriteFile(leadFile, []byte("Fixture Lead"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		mode         string
+		wantState    string
+		wantPrompts  int
+		wantOutcomes []string
+	}{
+		{mode: "rejected", wantState: "accepted", wantPrompts: 2, wantOutcomes: []string{"rejected", "accepted"}},
+		{mode: "accepted-error", wantState: "accepted", wantPrompts: 1, wantOutcomes: []string{"accepted"}},
+		{mode: "ambiguous", wantState: "uncertain", wantPrompts: 1, wantOutcomes: []string{"uncertain"}},
+	} {
+		t.Run(testCase.mode, func(t *testing.T) {
+			noticeID, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "OpenCode outcome " + testCase.mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := setEnv(f.env, "OPENCODE_OUTCOME_SOURCE", moduleRoot(t))
+			env = setEnv(env, "OPENCODE_OUTCOME_BIN", f.binary)
+			env = setEnv(env, "OPENCODE_OUTCOME_LEAD_FILE", leadFile)
+			env = setEnv(env, "OPENCODE_OUTCOME_MODE", testCase.mode)
+			command := exec.Command("node", filepath.Join(moduleRoot(t), "internal/e2e/testdata/opencode_notice_prompt_outcomes.mjs"))
+			command.Dir, command.Env = f.repo, env
+			var stdout, stderr bytes.Buffer
+			command.Stdout, command.Stderr = &stdout, &stderr
+			if err := command.Run(); err != nil {
+				t.Fatalf("OpenCode %s adapter: %v stdout=%s stderr=%s", testCase.mode, err, stdout.String(), stderr.String())
+			}
+			var result struct {
+				PromptCalls int `json:"promptCalls"`
+				Settlements []struct {
+					Outcome string `json:"outcome"`
+					Code    int    `json:"code"`
+				} `json:"settlements"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("decode %s adapter output %q: %v", testCase.mode, stdout.String(), err)
+			}
+			if result.PromptCalls != testCase.wantPrompts {
+				t.Fatalf("%s prompt calls = %d, want %d; result=%s stderr=%s", testCase.mode, result.PromptCalls, testCase.wantPrompts, stdout.String(), stderr.String())
+			}
+			var outcomes []string
+			for _, settlement := range result.Settlements {
+				if settlement.Code == 0 {
+					outcomes = append(outcomes, settlement.Outcome)
+				}
+			}
+			if strings.Join(outcomes, ",") != strings.Join(testCase.wantOutcomes, ",") {
+				t.Fatalf("%s receipt outcomes = %v, want %v; stderr=%s", testCase.mode, outcomes, testCase.wantOutcomes, stderr.String())
+			}
+			var state string
+			if err := f.db.QueryRowContext(context.Background(), `SELECT r.state FROM notice_delivery_receipts r, json_each(r.notice_ids_json) n WHERE r.project_id=? AND CAST(n.value AS INTEGER)=?`, f.project.ID, noticeID).Scan(&state); err != nil || state != testCase.wantState {
+				t.Fatalf("%s receipt state = %q, %v; want %q", testCase.mode, state, err, testCase.wantState)
 			}
 		})
 	}

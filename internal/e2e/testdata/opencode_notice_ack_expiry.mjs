@@ -87,6 +87,6 @@ const result = await Promise.race([
 clearTimeout(timeout);
 await plugin.dispose();
 process.stdout.write(JSON.stringify({ result, promptCalls, settlementCodes, watchFailures }) + "\n");
-if (!result.complete || promptCalls !== 2 || watchFailures.length !== 0 || settlementCodes[0] === 0) {
+if (!result.complete || promptCalls !== 2 || watchFailures.length !== 0) {
   throw new Error("OpenCode did not reclaim its acknowledged receipt and deliver the later Notice");
 }

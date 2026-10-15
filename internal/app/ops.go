@@ -338,7 +338,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		var retryDelivery *store.NoticeDelivery
 		var notices []store.Notice
 		if parsed.Bool("handoff") {
-			existing, found, err := db.NoticeDeliveryForDestination(ctx.Context, project.ID, parsed.Flags["destination"])
+			existing, found, err := db.NoticeDeliveryForDestination(ctx.Context, project.ID, parsed.Flags["destination"], currentTime())
 			if err != nil {
 				return err
 			}

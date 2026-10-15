@@ -12,17 +12,38 @@ export const PosseLead = async ({ client, directory }) => {
   let session;
   let idle = false;
   let pending;
-  let child;
+  let watcher;
   let timer;
   let stopped = false;
   let sending = false;
+  let prompting = false;
   let blocked = false;
   let backoff = 1_000;
+  const children = new Map();
 
   const schedule = (delay) => {
+    if (stopped) return;
     clearTimeout(timer);
     timer = setTimeout(watch, delay);
     timer.unref?.();
+  };
+
+  const spawnOwned = (args, options) => {
+    const current = spawn(posse, args, options);
+    let retire;
+    const closed = new Promise((resolve) => {
+      let retired = false;
+      retire = () => {
+        if (retired) return;
+        retired = true;
+        children.delete(current);
+        resolve();
+      };
+    });
+    children.set(current, { closed, retire });
+    current.once("error", retire);
+    current.once("close", retire);
+    return current;
   };
 
   const sessionHasReceipt = async (delivery, sessionID = session) => {
@@ -41,19 +62,26 @@ export const PosseLead = async ({ client, directory }) => {
   };
 
   const settleReceipt = (delivery, outcome) => new Promise((resolve) => {
+    if (stopped) return resolve(false);
     const args = ["lookout", "--json", "--receipt", delivery.delivery_id,
       "--receipt-outcome", outcome];
     if (delivery.owner_token) args.push("--receipt-token", delivery.owner_token);
-    const current = spawn(posse, args, { stdio: ["ignore", "ignore", "ignore"] });
-    child = current;
-    current.on("error", () => {});
-    current.on("close", (code) => {
-      if (child === current) child = undefined;
-      resolve(code === 0);
-    });
+    let current;
+    try {
+      current = spawnOwned(args, { stdio: ["ignore", "ignore", "ignore"] });
+    } catch {
+      return resolve(false);
+    }
+    current.once("error", () => resolve(false));
+    current.once("close", (code) => resolve(code === 0));
+    if (stopped) {
+      current.kill();
+      resolve(false);
+    }
   });
 
   const surfaceUncertainty = (warning) => {
+    if (stopped) return;
     blocked = true;
     console.error("Posse OpenCode Notice delivery uncertainty:", warning);
     client.tui?.showToast?.({ message: warning, variant: "warning" });
@@ -65,16 +93,22 @@ export const PosseLead = async ({ client, directory }) => {
   };
 
   const watch = () => {
-    if (stopped || blocked || child || pending || !session) return;
+    if (stopped || blocked || watcher || pending || !session || (sending && !prompting)) return;
     const args = ["lookout", "--json", "--quiet-routine", "--handoff", "--destination", `opencode:${session}`];
-    const current = spawn(posse, args, { stdio: ["ignore", "pipe", "ignore"] });
-    child = current;
+    let current;
+    try {
+      current = spawnOwned(args, { stdio: ["ignore", "pipe", "ignore"] });
+    } catch (error) {
+      console.error("Posse OpenCode Notice: could not start lookout", error);
+      retry();
+      return;
+    }
+    watcher = current;
     let output = "";
     current.stdout.on("data", (chunk) => { output += chunk; });
     current.on("error", () => {});
-    current.on("close", async (code) => {
-      if (child !== current) return;
-      child = undefined;
+    current.on("close", (code) => {
+      if (watcher === current) watcher = undefined;
       if (stopped) return;
       if (code !== 0) {
         retry();
@@ -95,15 +129,21 @@ export const PosseLead = async ({ client, directory }) => {
         const separator = destination.indexOf(":");
         const priorSession = separator < 0 ? "" : destination.slice(separator + 1);
         if (destination.startsWith("opencode:") && priorSession && priorSession !== session) {
-          const priorReceipt = await sessionHasReceipt(delivery, priorSession);
-          if (priorReceipt !== undefined) {
-            const outcome = priorReceipt ? "accepted" : "rejected";
-            if (await settleReceipt(delivery, outcome)) {
-              backoff = 1_000;
-              schedule(0);
-              return;
+          void (async () => {
+            const priorReceipt = await sessionHasReceipt(delivery, priorSession);
+            if (stopped) return;
+            if (priorReceipt !== undefined) {
+              const outcome = priorReceipt ? "accepted" : "rejected";
+              if (await settleReceipt(delivery, outcome)) {
+                if (stopped) return;
+                backoff = 1_000;
+                schedule(0);
+                return;
+              }
             }
-          }
+            surfaceUncertainty(result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect this session before retrying.");
+          })();
+          return;
         }
         surfaceUncertainty(result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect this session before retrying.");
         return;
@@ -122,82 +162,141 @@ export const PosseLead = async ({ client, directory }) => {
         retry();
         return;
       }
+      if (pending) {
+        // The receipt is durable, but accepting another in-memory batch would
+        // exceed the one-batch coalescing bound. Release it for a later read.
+        void settleReceipt(delivery, "rejected").then((released) => {
+          if (!stopped && !released) surfaceUncertainty(`OpenCode could not release excess Notice batch ${delivery.batch_id}.`);
+        });
+        return;
+      }
       pending = { delivery, notices, wake: result.wake, lowkey: result.lowkey, session };
       flush();
     });
   };
 
-  // session.prompt waits for the result and reports errors, unlike promptAsync
-  // which accepts a request even if its background turn later fails. Only send
-  // after session.idle so an active model turn is never interrupted. Neither
-  // path writes to the TUI composer.
-  const flush = () => {
-    if (!pending || !session || !idle || sending || stopped) return;
+  const rejectPending = async () => {
+    if (!pending) return true;
     const batch = pending;
-    if (batch.session !== session) {
-      pending = undefined;
-      void settleReceipt(batch.delivery, "uncertain").then(() => surfaceUncertainty(
-        `OpenCode changed sessions before Notice batch ${batch.delivery.batch_id} could be confirmed.`));
-      return;
-    }
+    pending = undefined;
+    return settleReceipt(batch.delivery, "rejected");
+  };
+
+  const flush = () => {
+    if (!pending || !session || !idle || sending || stopped || blocked) return;
+    const batch = pending;
+    pending = undefined;
     sending = true;
     void (async () => {
+      let nextWatch = false;
       try {
-        const priorReceipt = await sessionHasReceipt(batch.delivery);
+        if (batch.session !== session) {
+          const released = await settleReceipt(batch.delivery, "rejected");
+          if (stopped) return;
+          if (released) {
+            nextWatch = true;
+            retry();
+          } else {
+            surfaceUncertainty(`OpenCode could not release Notice batch ${batch.delivery.batch_id} after the session changed.`);
+          }
+          return;
+        }
+
+        const priorReceipt = await sessionHasReceipt(batch.delivery, batch.session);
+        if (stopped) return;
         if (priorReceipt === undefined) {
           const recorded = await settleReceipt(batch.delivery, "uncertain");
-          pending = undefined;
+          if (stopped) return;
           if (recorded) surfaceUncertainty(`OpenCode could not inspect its session history for Notice batch ${batch.delivery.batch_id}.`);
           else retry();
           return;
         }
         if (priorReceipt) {
-          // Reconciliation consumes only a persisted receipt; it does not
-          // start a model turn or change the session's idle state.
           const accepted = await settleReceipt(batch.delivery, "accepted");
-          pending = undefined;
+          if (stopped) return;
           if (accepted) {
             backoff = 1_000;
-            schedule(0);
+            nextWatch = true;
           } else retry();
+          return;
+        }
+        if (batch.session !== session) {
+          const released = await settleReceipt(batch.delivery, "rejected");
+          if (stopped) return;
+          if (released) {
+            nextWatch = true;
+            retry();
+          } else {
+            surfaceUncertainty(`OpenCode could not release Notice batch ${batch.delivery.batch_id} after the session changed.`);
+          }
+          return;
+        }
+        if (!idle) {
+          pending = batch;
           return;
         }
 
         const marker = `Posse delivery receipt: ${batch.delivery.delivery_id}\nPosse batch receipt: ${batch.delivery.batch_id}`;
         let promptError;
+        prompting = true;
         try {
-          if (!idle) return;
           idle = false;
-          const response = await client.session.prompt({
-            path: { id: session }, query: { directory },
+          const prompt = client.session.prompt({
+            path: { id: batch.session }, query: { directory },
             body: { parts: [{ type: "text", text: `${batch.wake}\n\n${marker}` }] },
           });
+          // Collect at most one additional receipt-backed batch while this
+          // session.prompt turn is running. Delivery still waits for session.idle.
+          schedule(0);
+          const response = await prompt;
           if (response.error) promptError = new Error(JSON.stringify(response.error));
         } catch (error) {
           promptError = error;
+        } finally {
+          prompting = false;
         }
 
-        const receipt = await sessionHasReceipt(batch.delivery);
-        let outcome;
-        if (receipt === true) outcome = "accepted";
-        else if (receipt === false && promptError) outcome = "rejected";
-        else outcome = "uncertain";
+        if (stopped) return;
+        const receipt = await sessionHasReceipt(batch.delivery, batch.session);
+        if (stopped) return;
+        const outcome = receipt === true ? "accepted" : receipt === false && promptError ? "rejected" : "uncertain";
         if (promptError) console.error("Posse OpenCode Notice: session delivery failed", promptError);
         const recorded = await settleReceipt(batch.delivery, outcome);
-        pending = undefined;
+        if (stopped) return;
         if (!recorded) {
+          if (outcome !== "accepted" && !(await rejectPending()) && !stopped) {
+            surfaceUncertainty(`OpenCode could not release its queued Notice batch while receipt ${batch.delivery.batch_id} remained unsettled.`);
+            return;
+          }
           retry();
           return;
         }
         if (outcome === "uncertain") {
+          if (!(await rejectPending()) && !stopped) {
+            surfaceUncertainty(`OpenCode could not release its queued Notice batch after batch ${batch.delivery.batch_id} became uncertain.`);
+            return;
+          }
           surfaceUncertainty(`OpenCode could not determine whether Notice batch ${batch.delivery.batch_id} reached this session.`);
           return;
         }
-        if (outcome === "accepted") backoff = 1_000;
-        schedule(outcome === "accepted" ? 0 : backoff);
-        if (outcome === "rejected") backoff = Math.min(backoff * 2, maxBackoff);
+        if (outcome === "rejected") {
+          if (!(await rejectPending()) && !stopped) {
+            surfaceUncertainty(`OpenCode could not release its queued Notice batch after batch ${batch.delivery.batch_id} was rejected.`);
+            return;
+          }
+          // A definite prompt rejection leaves the session idle and the exact
+          // batch is reclaimed from Posse before another prompt is attempted.
+          if (session === batch.session) idle = true;
+          retry();
+          return;
+        }
+        backoff = 1_000;
+        nextWatch = true;
       } finally {
         sending = false;
+        if (stopped) return;
+        if (idle && pending) flush();
+        else if (nextWatch && !pending) schedule(0);
       }
     })();
   };
@@ -209,6 +308,7 @@ export const PosseLead = async ({ client, directory }) => {
       output.system.push(instructions);
     },
     event: async ({ event }) => {
+      if (stopped) return;
       const id = event.properties?.sessionID;
       if (!id) return;
       if (event.type === "session.idle") {
@@ -220,12 +320,17 @@ export const PosseLead = async ({ client, directory }) => {
       } else if (event.type === "session.status" && event.properties.status?.type === "busy") {
         session = id;
         idle = false;
+        schedule(0);
       }
     },
     dispose: async () => {
       stopped = true;
       clearTimeout(timer);
-      child?.kill();
+      const owned = [...children.entries()];
+      for (const [child] of owned) child.kill();
+      await Promise.all(owned.map(([, state]) => state.closed));
+      pending = undefined;
+      watcher = undefined;
     },
   };
 };
