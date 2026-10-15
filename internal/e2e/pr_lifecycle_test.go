@@ -475,6 +475,90 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 	}
 }
 
+func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	projectConfig := filepath.Join(fixture.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("[autonomy]\nland = \"auto\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	firstBrief := filepath.Join(fixture.root, "migration-first.md")
+	secondBrief := filepath.Join(fixture.root, "migration-second.md")
+	for path, title := range map[string]string{firstBrief: "PR lifecycle change", secondBrief: "External merge change"} {
+		brief := "---\ntype: ship\ntitle: " + title + "\ndone_when: committed change exists\n---\nCreate a migration.\n"
+		if err := os.WriteFile(path, []byte(brief), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := fixture.rideAndComplete(t, firstBrief, "t1")
+	second := fixture.rideAndComplete(t, secondBrief, "t2")
+	if first.AutonomyLand != "auto" || second.AutonomyLand != "auto" {
+		t.Fatalf("Tasks did not inherit automatic Land autonomy: %q, %q", first.AutonomyLand, second.AutonomyLand)
+	}
+
+	addVersion40 := func(task store.Task, name string) {
+		t.Helper()
+		relative := filepath.Join("internal", "store", "migrations", name)
+		path := filepath.Join(task.WorktreePath, relative)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		versionName := strings.TrimPrefix(strings.TrimSuffix(name, ".sql"), "00040_")
+		migration := []byte("-- migration version 40\nCREATE TABLE migration_" + versionName + " (id INTEGER PRIMARY KEY);\n")
+		if err := os.WriteFile(path, migration, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, fixture.env, task.WorktreePath, "add", relative)
+		gitTest(t, fixture.env, task.WorktreePath, "commit", "-m", "add "+name)
+		gitTest(t, fixture.env, task.WorktreePath, "push", "origin", task.Branch)
+	}
+	addVersion40(first, "00040_first.sql")
+	addVersion40(second, "00040_second.sql")
+
+	for _, id := range []string{"t1", "t2"} {
+		if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", id); !strings.Contains(output, "landing") {
+			t.Fatalf("%s PR did not open: %s", id, output)
+		}
+	}
+	first, second = fixture.mustTask(t, "t1"), fixture.mustTask(t, "t2")
+	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", first.GatedSHA)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	fixture.writeGraphQL(t, "pr2", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", second.GatedSHA)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
+
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge"); !strings.Contains(output, "landing") {
+		t.Fatalf("first PR did not merge: %s", output)
+	}
+	fixture.mergeOnLocalOrigin(t, first, "t1")
+	if err := os.Remove(fixture.ghMerge); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command(fixture.binary, "land", "t2", "--merge")
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	output, err := command.CombinedOutput()
+	if err == nil {
+		merge := fixture.mergeOnLocalOrigin(t, second, "t2")
+		checkout := filepath.Join(fixture.root, "external-merge-t2")
+		files := strings.Fields(gitTest(t, fixture.env, checkout, "ls-tree", "-r", "--name-only", merge, "internal/store/migrations"))
+		t.Fatalf("stale PR merged at %s and introduced duplicate migration versions: %v; command output: %s", merge, files, output)
+	}
+	if !strings.Contains(string(output), `"pr_branch_behind"`) {
+		t.Fatalf("stale PR failed for the wrong reason: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(fixture.ghMerge); !os.IsNotExist(err) {
+		t.Fatalf("stale PR reached the forge merge command: %v", err)
+	}
+	targetFiles := strings.Fields(gitTest(t, fixture.env, fixture.remote, "ls-tree", "-r", "--name-only", "refs/heads/main", "internal/store/migrations"))
+	if len(targetFiles) != 1 || targetFiles[0] != "internal/store/migrations/00040_first.sql" {
+		t.Fatalf("target branch contains duplicate or unexpected migration versions: %v", targetFiles)
+	}
+}
+
 func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
