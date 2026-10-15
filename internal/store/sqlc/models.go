@@ -321,6 +321,7 @@ type Task struct {
 	AgentSessionKind     string
 	TargetBranch         string
 	PrTitle              string
+	PlanJson             string
 }
 
 type TaskLaunchIdentity struct {
@@ -329,6 +330,13 @@ type TaskLaunchIdentity struct {
 	ProfileName     string
 	ConfiguredModel string
 	ModelKnown      int64
+	PlanRevision    int64
+}
+
+type TaskPlanRevision struct {
+	TaskID   int64
+	Revision int64
+	PlanJson string
 }
 
 type TaskRecovery struct {

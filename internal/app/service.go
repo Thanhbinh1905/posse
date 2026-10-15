@@ -117,6 +117,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Ship Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Rider's next publish will use.", Handler: s.retitle},
 		{Name: "brief", Summary: "Reprint this Rider's launch Brief.", Handler: s.brief},
+		{Name: "status", Summary: "Read only this Rider's recorded status and admitted plan without maintenance.", Handler: s.status},
 		{Name: "send", Usage: "$ send <task> <message> [--queue] | send <task> --interrupt <message>", Summary: "Send a message, optionally queueing it or interrupting and redirecting a busy Rider.", Handler: s.send},
 		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Rider message before delivery begins.", Handler: s.unsend},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},

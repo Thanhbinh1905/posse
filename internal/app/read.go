@@ -461,6 +461,17 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile}
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return admittedPlanFailure(err)
+	}
+	view["admission"] = "legacy"
+	if plan != nil {
+		view["admission"], view["plan_revision"] = "admitted", plan.Revision
+		if parsed.Bool("full") {
+			view["plan"] = plan
+		}
+	}
 	if task.Type == "review" {
 		reviewerLaunches, err := db.TaskLaunchIdentities(ctx.Context, task.ID)
 		if err != nil {

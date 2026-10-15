@@ -510,6 +510,10 @@ func oneOfState(value State, candidates ...State) bool {
 }
 
 func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64, error) {
+	planJSON, err := bindTaskPlan(task, task.Seq)
+	if err != nil {
+		return 0, err
+	}
 	now := time.Now().UnixMilli()
 	if task.State == "" {
 		task.State = StateSpawning
@@ -531,7 +535,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		HerdrWorkspaceID: task.HerdrWorkspaceID, PaneID: task.PaneID, PaneLabel: task.PaneLabel,
 		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, LandedRef: task.LandedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
-		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now,
+		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now, PlanJson: planJSON,
 	})
 	if err != nil {
 		return 0, err
@@ -539,6 +543,11 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, err
+	}
+	if planJSON != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, id, planJSON); err != nil {
+			return 0, err
+		}
 	}
 	if err := queries.InsertTransition(ctx, dbgen.InsertTransitionParams{TaskID: id, FromState: "", ToState: string(StateSpawning), Source: "cli", Note: "Task created", At: now}); err != nil {
 		return 0, err
@@ -571,6 +580,7 @@ func oneOfSource(source string) bool {
 type TaskLaunchIdentity struct {
 	TaskID          int64  `toml:"task_id" json:"task_id"`
 	LaunchNumber    int    `toml:"launch_number" json:"launch_number"`
+	PlanRevision    int    `toml:"plan_revision,omitempty" json:"plan_revision"`
 	Profile         string `toml:"profile" json:"profile"`
 	ConfiguredModel string `toml:"configured_model" json:"configured_model"`
 	ModelKnown      bool   `toml:"model_known" json:"model_known"`
@@ -588,6 +598,7 @@ type Task struct {
 	State                State  `toml:"state"`
 	Profile              string `toml:"profile"`
 	DispatchRule         string `toml:"dispatch_rule"`
+	PlanJSON             string `toml:"plan_json,omitempty"`
 	LandingMode          string `toml:"landing_mode"`
 	AutonomyReview       string `toml:"autonomy_review"`
 	AutonomyLand         string `toml:"autonomy_land"`
@@ -682,13 +693,22 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 		}
 		seq++
 	}
-	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at)
-VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?) RETURNING id`,
-		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, task.Profile, task.DispatchRule,
-		task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
-		projectName, seq, now, now).Scan(&id)
+	planJSON, err := bindTaskPlan(task, seq)
 	if err != nil {
 		return 0, 0, err
+	}
+	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at,plan_json)
+VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?) RETURNING id`,
+		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, task.Profile, task.DispatchRule,
+		task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
+		projectName, seq, now, now, planJSON).Scan(&id)
+	if err != nil {
+		return 0, 0, err
+	}
+	if planJSON != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, id, planJSON); err != nil {
+			return 0, 0, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES (?, '', 'spawning', 'cli', 'Task created', ?)`, id, now); err != nil {
 		return 0, 0, err
@@ -968,7 +988,7 @@ func (db *DB) NextTaskLaunchWithIdentity(ctx context.Context, taskID int64, prof
 	if modelKnown && strings.TrimSpace(configuredModel) == "" {
 		modelKnown = false
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known) VALUES(?,?,?,?,?)`, taskID, launches, profile, configuredModel, modelKnown); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision) SELECT id,?,?,?,?,CASE WHEN plan_json='' THEN 0 ELSE json_extract(plan_json,'$.revision') END FROM tasks WHERE id=?`, launches, profile, configuredModel, modelKnown, taskID); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -981,7 +1001,7 @@ func (db *DB) NextTaskLaunchWithIdentity(ctx context.Context, taskID int64, prof
 // for each launch. Missing rows remain visible through the caller's comparison
 // of these rows with Task.Launches; they are not reconstructed from current config.
 func (db *DB) TaskLaunchIdentities(ctx context.Context, taskID int64) ([]TaskLaunchIdentity, error) {
-	rows, err := db.QueryContext(ctx, `SELECT task_id,launch_number,profile_name,configured_model,model_known FROM task_launch_identities WHERE task_id=? ORDER BY launch_number`, taskID)
+	rows, err := db.QueryContext(ctx, `SELECT task_id,launch_number,profile_name,configured_model,model_known,plan_revision FROM task_launch_identities WHERE task_id=? ORDER BY launch_number`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -990,7 +1010,7 @@ func (db *DB) TaskLaunchIdentities(ctx context.Context, taskID int64) ([]TaskLau
 	for rows.Next() {
 		var identity TaskLaunchIdentity
 		var modelKnown int
-		if err := rows.Scan(&identity.TaskID, &identity.LaunchNumber, &identity.Profile, &identity.ConfiguredModel, &modelKnown); err != nil {
+		if err := rows.Scan(&identity.TaskID, &identity.LaunchNumber, &identity.Profile, &identity.ConfiguredModel, &modelKnown, &identity.PlanRevision); err != nil {
 			return nil, err
 		}
 		identity.ModelKnown = modelKnown == 1
@@ -2105,7 +2125,7 @@ func taskFromDB(row dbgen.Task) Task {
 		mountID = row.MountID.Int64
 	}
 	return Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, ReviewsTaskID: reviewsTaskID,
-		Title: row.Title, PRTitle: row.PrTitle, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule,
+		Title: row.Title, PRTitle: row.PrTitle, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule, PlanJSON: row.PlanJson,
 		LandingMode: row.LandingMode, AutonomyReview: row.AutonomyReview, AutonomyLand: row.AutonomyLand,
 		Branch: row.Branch, BaseRef: row.BaseRef, TargetBranch: row.TargetBranch, WorktreePath: row.WorktreePath, MountID: mountID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
