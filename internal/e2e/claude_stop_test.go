@@ -98,6 +98,27 @@ func TestClaudeStopOverlapDeadlineAndGracefulStop(t *testing.T) {
 	if err == nil || !strings.Contains(string(output), "pending after graceful stop") || !strings.Contains(string(output), "Posse batch receipt:") {
 		t.Fatalf("restart lost pending Notice %d: %v %s", id, err, output)
 	}
+	// A missing persisted receipt is held, not replayed. Once the warning
+	// itself is recorded, another Stop must not create a hot wake loop.
+	warning, err := newHook("600").CombinedOutput()
+	if err == nil || !strings.Contains(string(warning), "Posse uncertain receipt:") {
+		t.Fatalf("missing receipt was not held: %v %s", err, warning)
+	}
+	entry, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"content": string(warning)}})
+	if err := os.WriteFile(transcript, append(entry, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := newHook("600").CombinedOutput(); err != nil || len(output) != 0 {
+		t.Fatalf("unresolved receipt caused another wake: %v %s", err, output)
+	}
+	var receipt string
+	if err := f.db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts WHERE project_id=?`, f.project.ID).Scan(&receipt); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, f.binary, f.repo, f.leadEnv, "lookout", "--receipt", receipt, "--receipt-outcome", "accepted")
+	if output, err := newHook("600").CombinedOutput(); err == nil || !strings.Contains(string(output), "Posse Notice wait renewed") {
+		t.Fatalf("explicit resolution did not rearm the next Stop: %v %s", err, output)
+	}
 	var after string
 	if err := f.db.QueryRowContext(ctx, `SELECT pr_poll_claim_token FROM project_watch_state WHERE project_id=?`, f.project.ID).Scan(&after); err != nil || after != pollToken {
 		t.Fatalf("Stop restart stole or released an active PR poll: %q, want %q: %v", after, pollToken, err)

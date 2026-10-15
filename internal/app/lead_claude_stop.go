@@ -136,7 +136,24 @@ func (s *Service) claudeStop(ctx context.Context, input io.Reader, output io.Wri
 	}
 	message := "Posse Notice wait renewed. No Notice arrived. End this turn without tools or a User update; the next Stop hook owns the next bounded wait."
 	if response.State == "uncertain" {
-		message = response.Warning
+		marker := "Posse uncertain receipt: " + response.Delivery.ID
+		present, transcriptErr := claudeTranscriptHasReceipt(bounded, event.TranscriptPath, marker)
+		if present {
+			return nil // Already surfaced: wait for explicit receipt resolution, not another model turn.
+		}
+		if transcriptErr != nil {
+			// Without a readable transcript we cannot know whether the warning
+			// was already shown. Bound repeated warnings to one wait interval.
+			timer := time.NewTimer(wait)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-bounded.Done():
+			case <-timer.C:
+			}
+		}
+		message = marker + "\n" + response.Warning + "\nThe wait pauses after this reminder is recorded. Resolve the receipt explicitly, then end the turn to start the next Stop-owned wait."
 	} else if response.Delivery.ID != "" {
 		message = claudeReceiptMarker(response.Delivery.ID) + "\n" + response.Wake
 	}
