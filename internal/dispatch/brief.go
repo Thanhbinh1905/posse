@@ -230,8 +230,10 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 			return Brief{}, &BriefError{Field: "report_kind", Reason: "must be spec or tickets"}
 		}
 	}
-	if brief.Review != "" && !oneOf(brief.Review, "always", "on_risk", "never") {
-		return Brief{}, &BriefError{Field: "review", Reason: "must be always, on_risk or never"}
+	if brief.Review != "" && !(allowHistoricalMultiIssue && config.LegacyReview(brief.Review)) {
+		if err := config.ValidateReview(brief.Review); err != nil {
+			return Brief{}, &BriefError{Field: "review", Reason: err.Error()}
+		}
 	}
 	if brief.Type == "review" {
 		if !regexp.MustCompile(`^t[1-9][0-9]*$`).MatchString(brief.ReviewOf) {
@@ -495,10 +497,16 @@ func ResolveDelivery(brief Brief, mode string, autonomy config.Autonomy, userCho
 }
 
 func ResolveReview(requested, current string, userChoice bool) (string, error) {
+	if err := config.ValidateReview(current); err != nil {
+		return "", &BriefError{Field: "review", Reason: err.Error()}
+	}
 	if requested == "" {
 		return current, nil
 	}
-	rank := map[string]int{"never": 0, "on_risk": 1, "always": 2}
+	if err := config.ValidateReview(requested); err != nil {
+		return "", &BriefError{Field: "review", Reason: err.Error()}
+	}
+	rank := map[string]int{"none": 0, "local": 1, "no-mistakes": 2}
 	if !userChoice && rank[requested] < rank[current] {
 		return "", &BriefError{Field: "review", Reason: "cannot loosen the Project review policy without a scoped User choice"}
 	}

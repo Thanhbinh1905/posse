@@ -237,7 +237,7 @@ func TestWorkspaceScopedCleanupPreservesDirtyUnselectedMember(t *testing.T) {
 			Name: "backend", Path: "backend", Base: members[0].BaseRef, Target: "main", Delivery: "local",
 		}}},
 		Launch: taskplan.Launch{ProfileName: "test", Profile: config.Profile{Kind: "pi"}},
-		Review: "on_risk", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review: "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
 		Paths: taskplan.Paths{Scratch: filepath.Join(f.home, "scratch", "stack", "{task}"), Output: filepath.Join(f.home, "projects", "stack", "tasks", "{task}")},
 	})
 	if err != nil {

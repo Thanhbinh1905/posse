@@ -18,9 +18,10 @@ import (
 
 func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 	f := reviewIdentityFixture(t)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.landing_mode", "pr")
 	brief := filepath.Join(f.root, "choice.md")
-	text := "---\ntype: ship\ntitle: Scoped choice\ndone_when: checked\nlanding_mode: local\nreview: never\n---\nKeep the scope small.\n"
+	text := "---\ntype: ship\ntitle: Scoped choice\ndone_when: checked\nlanding_mode: local\nreview: none\n---\nKeep the scope small.\n"
 	if err := os.WriteFile(brief, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 	}
 	task := f.mustTask(t, "t1")
 	plan, err := task.AdmittedPlan()
-	if err != nil || plan == nil || plan.Delivery != "local" || plan.Review != "never" || !strings.Contains(task.PlanJSON, quote) {
+	if err != nil || plan == nil || plan.Delivery != "local" || plan.Review != "none" || !strings.Contains(task.PlanJSON, quote) {
 		t.Fatalf("choice/provenance lost: %s %v", task.PlanJSON, err)
 	}
 	if task.AutonomyLand != "ask" || task.AutonomyReview != "ask" {
@@ -49,6 +50,7 @@ func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 
 func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 	f := reviewIdentityFixture(t)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.landing_mode", "pr")
 	client := herdr.NewWithEnv("herdr", f.env)
 	before, err := client.Snapshot(context.Background())
@@ -61,11 +63,11 @@ func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 		approval     []string
 	}{
 		{"lighter delivery", "landing_mode: local\n", nil},
-		{"lighter review", "review: never\n", nil},
+		{"lighter review", "review: none\n", nil},
 		{"blank quote", "landing_mode: local\n", []string{"--user-approved", " "}},
 		{"unscoped quote", "", []string{"--user-approved", "Unscoped consent"}},
 		{"merge escalation", "landing_mode: local\nautonomy: { land: auto }\n", []string{"--user-approved", "Use local delivery"}},
-		{"decision escalation", "review: never\nautonomy: { review: lead }\n", []string{"--user-approved", "Skip review"}},
+		{"decision escalation", "review: none\nautonomy: { review: lead }\n", []string{"--user-approved", "Skip review"}},
 		{"executable escalation", "gate: [evil]\n", []string{"--user-approved", "Skip review"}},
 		{"discard escalation", "discard: true\n", []string{"--user-approved", "Skip review"}},
 		{"repo Members", "repos: [api]\n", nil},
