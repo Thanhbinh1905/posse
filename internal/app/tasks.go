@@ -171,6 +171,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	baseRef := project.DefaultBranch
 	var reviewsTaskID int64
 	var reviewedTask *store.Task
+	var reviewTargets []store.ReviewTarget
 	var reviewIdentityDetails map[string]any
 	var reviewLaunchIdentity store.TaskLaunchIdentity
 	var authorLaunchIdentities []store.TaskLaunchIdentity
@@ -185,6 +186,13 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 		if reviewed.Branch == "" {
 			return axi.Failure("brief_invalid", "the reviewed Task has no branch to inspect", false)
+		}
+		if err := reviewableShip(reviewed); err != nil {
+			return err
+		}
+		reviewTargets, err = shipCandidateTargets(ctx.Context, db, project, reviewed)
+		if err != nil {
+			return axi.Failure("review_target_unresolved", "cannot pin the reviewed Ship revision: "+err.Error(), false)
 		}
 		reviewsTaskID = reviewed.ID
 		baseRef = reviewed.Branch
@@ -320,7 +328,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 	}
 	name := parsed.Flags["name"]
-	if err := taskBranchAvailable(ctx.Context, db, project, name); err != nil {
+	if err := taskBranchAvailable(ctx.Context, db, project, name, members); err != nil {
 		return err
 	}
 	if project.HerdrWorkspaceID == "" {
@@ -330,7 +338,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, LandingMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
-		BaseRef: baseRef, TargetBranch: targetBranch,
+		BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets,
 	}
 	plan, err := resolveTaskPlan(home, project, cfg, task, resolution, parsed.Flags["brief"], briefData, members)
 	if err != nil {
@@ -382,7 +390,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	err = s.runIntentStep(ctx.Context, db, intent, "mount.acquire", func() error {
 		var acquireErr error
 		if project.IsWorkspace() {
-			mount, acquireErr = s.acquireWorkspaceMount(ctx.Context, db, project, task, members, home, cfg.Remuda.Clean, cfg.Remuda.Setup)
+			mount, acquireErr = s.acquireWorkspaceMount(ctx.Context, db, project, task, members, home, cfg.Remuda.Clean, cfg.Remuda.Setup, plan.Execution.RootContext)
 		} else {
 			mount, acquireErr = acquireMount(ctx.Context, db, project, task, home, cfg.Remuda.Clean, cfg.Remuda.Setup)
 		}
@@ -480,7 +488,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	launchContents := workerProtocol(project, task, brief, launchPath, scratchPath) + workspaceProtocol(project, members) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(project, task, brief, launchPath, scratchPath, plan.Execution.RootContext) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "rider", planPreferences(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -739,17 +747,13 @@ func branchRefTaken(name, repository, ref string) error {
 	return branchNameTaken(name, "in repository "+repository+" at ref "+ref)
 }
 
-// Check every repository before inserting the Task, including members a
-// workspace Brief did not request. A later checkout -b still guards races.
-func taskBranchAvailable(ctx context.Context, db *store.DB, project store.Project, name string) error {
+// Check the repository or selected workspace Members before inserting the Task.
+// A later checkout -b still guards races; unrelated Members cannot block admission.
+func taskBranchAvailable(ctx context.Context, db *store.DB, project store.Project, name string, selected []taskMember) error {
 	targets := []repoTarget{{Name: project.Name, Root: project.Root}}
 	if project.IsWorkspace() {
-		targets = nil
-		members, err := workspaceMountTargets(ctx, db, project)
-		if err != nil {
-			return err
-		}
-		for _, member := range members {
+		targets = make([]repoTarget, 0, len(selected))
+		for _, member := range selected {
 			targets = append(targets, member.repoTarget)
 		}
 	}
@@ -914,7 +918,7 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 	return s.finishTaskIntent(ctx, db, id)
 }
 
-func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief, launchPath, scratchPath string) string {
+func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief, launchPath, scratchPath, rootContext string) string {
 	landing := task.LandingMode
 	work := "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Never git push or open a PR."
 	if landing == "pr" && task.Type == "ship" && !project.IsWorkspace() {
@@ -935,7 +939,14 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 		}
 	} else {
 		signal += " --report <file-in-worktree-or-task-scratch>"
-		work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base or an unrequested Member's Mount-acquisition commit, beside report.md at those paths. For workspace Tasks it also saves new or edited shared-root files, including tracked and non-ignored untracked files in nested Git repositories, against the Mount-acquisition snapshot rather than the live Project; unchanged Project copies are not saved. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Mount. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence or unchanged shared-root files the Report needs. `posse show <task>` lists saved attachments."
+		if project.IsWorkspace() && rootContext != "legacy" && rootContext != "" {
+			work += " Put `report.md` in this Task's scratch directory. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside it at their worktree-relative paths. `.git` metadata is excluded. Shared-root files are not writable; use repeatable `--attach <file-or-directory>` for ignored Member evidence or unchanged files in an explicitly selected read-only root context. If a required Member baseline or Git listing cannot be read, Teardown refuses and keeps the Mount. `posse show <task>` lists saved attachments."
+		} else {
+			work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside report.md at those paths. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Mount. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence. `posse show <task>` lists saved attachments."
+			if project.IsWorkspace() {
+				work += " Legacy workspace Tasks also save edited shared-root files and unrequested Member commits against their Mount-acquisition snapshot."
+			}
+		}
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
 	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Mount. Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches; never create per-Task copies.", scratchPath)
@@ -943,15 +954,23 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nA `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered. Let the turn end so Posse can deliver them, apply them, then retry the Signal.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, signalFiles, brief.DoneWhen, signal, launchPath)
 }
 
-// workspaceProtocol tells a workspace Worker how its Mount mirrors the workspace.
-func workspaceProtocol(project store.Project, members []taskMember) string {
+// workspaceProtocol tells a workspace Worker which workspace context is in its Mount.
+func workspaceProtocol(project store.Project, members []taskMember, rootContext string) string {
 	if !project.IsWorkspace() {
 		return ""
 	}
 	var text strings.Builder
-	text.WriteString("\n\n## Workspace\n\nThis Mount mirrors the workspace root of Project " + project.Name + ". Its shared files (such as CLAUDE.md and docs/) are a fresh copy made for this Task. Scout/Review Teardown saves each selected Member's changes against its Task base and each unrequested Member's commits against the Mount-acquisition snapshot. It also saves new or edited shared-root files against that snapshot, including tracked and non-ignored untracked files in nested Git repositories. Later edits to the live Project do not change the shared-root baseline; unchanged Project copies and `.git` metadata are not saved. If a required baseline or Git enumeration fails, Teardown keeps the Mount. Other Task types discard shared-root edits.\n")
+	text.WriteString("\n\n## Workspace\n\n")
+	switch rootContext {
+	case "read-only":
+		text.WriteString("This Mount contains only the selected Member repositories listed below. Do not access other Member repositories through the live Project path. The shared-root context was explicitly selected as a bounded, read-only copy. Do not modify it; changes are rejected at completion.\n")
+	case "none":
+		text.WriteString("This Mount contains only the selected Member repositories listed below. Do not access other Member repositories through the live Project path. Shared-root files are not selected and are not copied into this Mount.\n")
+	default:
+		text.WriteString("This is a legacy workspace Mount. It may contain unselected Member worktrees; do not modify those or access Members through the live Project path. It has a writable copy of shared-root files. Scout/Review Teardown saves shared-root edits and unselected Member commits against the Mount-acquisition snapshot; other Task types discard shared-root edits.\n")
+	}
 	if len(members) == 0 {
-		text.WriteString("\nNo member repository is checked out for this Task. Read member code at " + project.Root + "/<member>, and never write there.\n")
+		text.WriteString("\nNo Member repository is checked out for this Task. It cannot edit any Member.\n")
 		return text.String()
 	}
 	text.WriteString("\nMember repositories checked out on the Task branch:\n")
@@ -962,7 +981,12 @@ func workspaceProtocol(project store.Project, members []taskMember) string {
 		}
 		fmt.Fprintf(&text, "- `%s/` (starts from %s; Lands through %s onto %s)\n", member.Path, member.BaseRef, member.LandingMode, targetBranch)
 	}
-	text.WriteString("\nCommit inside each member you change, on the checked-out branch. Leave every other folder unchanged. Other members, if present, are detached reference checkouts; read the rest at " + project.Root + "/<member>.\n")
+	text.WriteString("\nCommit inside each selected Member you change, on the checked-out branch. Leave other folders unchanged.\n")
+	if rootContext == "legacy" || rootContext == "" {
+		text.WriteString("Legacy Mounts may retain unselected Member worktrees; do not edit them.\n")
+	} else {
+		text.WriteString("No unselected Member checkout is available in this Mount.\n")
+	}
 	return text.String()
 }
 
@@ -988,7 +1012,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			filtered = append(filtered, args[i])
 		}
 	}
-	parsed, err := parseArgs("holler", filtered, map[string]flagSpec{"report": {}, "findings": {}, "pr": {}})
+	parsed, err := parseArgs("holler", filtered, map[string]flagSpec{"report": {}, "findings": {}, "pr": {}, "verdict": {}})
 	if err != nil {
 		return err
 	}
@@ -1019,6 +1043,15 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if task.State != store.StateWorking && task.State != store.StateStalled {
 		return axi.Failure("signal_state_invalid", fmt.Sprintf("Task %s is %s and cannot accept a %s Signal", taskIDString(task.Seq), task.State, verb), false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
 	}
+	verdictFlag, verdictGiven := parsed.Flags["verdict"]
+	if verdictGiven {
+		if verb != "done" || task.Type != "review" {
+			return axi.Failure("signal_invalid", "--verdict is only valid on a Review Task done Signal", false)
+		}
+		if !store.ValidReviewVerdict(verdictFlag) {
+			return axi.Failure("signal_invalid", "--verdict must be pass, changes_requested or inconclusive", false)
+		}
+	}
 	if len(attachments) > 0 && (verb != "done" || task.Type == "ship") {
 		return axi.Failure("signal_invalid", "--attach is only valid on a Scout or Review done Signal", false)
 	}
@@ -1026,11 +1059,13 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		return axi.Failure("signal_invalid", "--pr is only valid on a PR or no-mistakes Ship Task done Signal", false)
 	}
 	data := map[string]string{}
+	rootContext := "legacy"
 	if plan, err := task.AdmittedPlan(); err != nil {
 		return admittedPlanFailure(err)
 	} else if plan != nil {
 		data["plan_revision"] = strconv.Itoa(plan.Revision)
 		data["plan_sha256"] = plan.SHA256()
+		rootContext = plan.Execution.RootContext
 	}
 	if parsed.Flags["pr"] != "" {
 		data["pr_url"] = parsed.Flags["pr"]
@@ -1042,6 +1077,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		data["findings"] = parsed.Flags["findings"]
 	}
 	if verb == "done" {
+		if project.IsWorkspace() {
+			if err := validateWorkspaceRootContext(ctx.Context, db, home, project, task, rootContext); err != nil {
+				return axi.Failure("signal_invalid", err.Error(), false, "Keep the shared workspace root unchanged; place Reports in Task scratch and edit only selected Members")
+			}
+		}
 		if task.Type == "ship" && project.IsWorkspace() {
 			if err := validateWorkspaceShipSignal(ctx.Context, db, task); err != nil {
 				return axi.Failure("signal_invalid", err.Error(), false, "Commit the change in each member you changed and leave every member worktree clean before signalling done")
@@ -1146,8 +1186,29 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 	}
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]
-	state, err := db.RecordWorkerSignal(ctx.Context, task, verb, note, data, noticeKind)
+	var verdict *store.ReviewVerdictInput
+	if verdictGiven {
+		targets, err := db.ReviewTargets(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if len(targets) == 0 {
+			return axi.Failure("review_target_unbound", "this Review Task has no bound Ship revision, so it cannot record a verdict", false, "Dispatch a new Review Task for a completed Ship Task")
+		}
+		if err := verifyReviewerSawTargets(ctx.Context, db, project, task, targets); err != nil {
+			return axi.Failure("review_target_missing", err.Error(), false)
+		}
+		digest, err := fileSHA256(filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md"))
+		if err != nil {
+			return err
+		}
+		verdict = &store.ReviewVerdictInput{Verdict: verdictFlag, ReportSHA256: digest}
+	}
+	state, err := db.RecordWorkerSignalWithVerdict(ctx.Context, task, verb, note, data, noticeKind, verdict)
 	if err != nil {
+		if errors.Is(err, store.ErrReviewTargetUnbound) {
+			return axi.Failure("review_target_unbound", "this Review Task has no bound Ship revision, so it cannot record a verdict", false)
+		}
 		if errors.Is(err, store.ErrQueuedInstructionsPending) {
 			return queuedInstructionsPendingFailure(task)
 		}

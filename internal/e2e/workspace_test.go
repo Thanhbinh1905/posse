@@ -53,14 +53,46 @@ case "$PWD/" in
     launch=${prompt#Read }
     launch=${launch% and follow it.}
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-    for member in $(sed -n 's/^- ` + "`" + `\([^/]*\)\/` + "`" + `.*/\1/p' "$launch"); do
-      (cd "$member" && printf 'change\n' > worker-change.txt && git add worker-change.txt && git commit -qm "worker change in $member") >> "$POSSE_E2E_WORKER_LOG" 2>&1
-    done
-    # posse moves the Task to working only after it confirms the prompt arrived.
-    tries=0
-    until posse holler done "Changed every listed member" >> "$POSSE_E2E_WORKER_LOG" 2>&1; do
-      tries=$((tries + 1)); [ "$tries" -lt 100 ] || break; sleep 0.2
-    done
+    mode=$(cat "$POSSE_TEST_ROOT/worker-mode" 2>/dev/null || true)
+    rm -f "$POSSE_TEST_ROOT/worker-mode"
+    case "$mode" in
+      mixed-scout)
+        if [ -e backend/.git ] && [ -e e2e-tool/.git ] && [ ! -e worker/.git ] && [ -r CLAUDE.md ] && [ ! -w CLAUDE.md ]; then
+          printf 'mixed scope and read-only root verified\n' >> "$POSSE_E2E_WORKER_LOG"
+        else
+          printf 'mixed scope or read-only root mismatch\n' >> "$POSSE_E2E_WORKER_LOG"
+        fi
+        printf 'mixed workspace report\n' > "$TMPDIR/report.md"
+        tries=0
+        until posse holler done "Mixed-member Scout report ready" --report "$TMPDIR/report.md" >> "$POSSE_E2E_WORKER_LOG" 2>&1; do
+          tries=$((tries + 1)); [ "$tries" -lt 100 ] || break; sleep 0.2
+        done
+        ;;
+      root-only)
+        member_worktree=false
+        for member in */; do [ ! -e "$member/.git" ] || member_worktree=true; done
+        if [ "$member_worktree" = false ] && [ -r CLAUDE.md ] && [ ! -w CLAUDE.md ]; then
+          printf 'root-only Scout has no editable Members\n' >> "$POSSE_E2E_WORKER_LOG"
+        else
+          printf 'root-only Scout scope mismatch\n' >> "$POSSE_E2E_WORKER_LOG"
+        fi
+        printf 'root-only workspace report\n' > "$TMPDIR/report.md"
+        tries=0
+        until posse holler done "Root-only Scout report ready" --report "$TMPDIR/report.md" >> "$POSSE_E2E_WORKER_LOG" 2>&1; do
+          tries=$((tries + 1)); [ "$tries" -lt 100 ] || break; sleep 0.2
+        done
+        ;;
+      *)
+        for member in $(sed -n 's/^- ` + "`" + `\([^/]*\)\/` + "`" + `.*/\1/p' "$launch"); do
+          (cd "$member" && printf 'change\n' > worker-change.txt && git add worker-change.txt && git commit -qm "worker change in $member") >> "$POSSE_E2E_WORKER_LOG" 2>&1
+        done
+        # posse moves the Task to working only after it confirms the prompt arrived.
+        tries=0
+        until posse holler done "Changed every listed member" >> "$POSSE_E2E_WORKER_LOG" 2>&1; do
+          tries=$((tries + 1)); [ "$tries" -lt 100 ] || break; sleep 0.2
+        done
+        ;;
+    esac
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     while IFS= read -r line; do :; done
     ;;
@@ -209,6 +241,9 @@ esac
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Span backend and worker\ndone_when: both members have a commit\nrepos: [backend, worker]\n---\nChange both members.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "worker-mode"), []byte("ship\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if output := runPosse(t, posseBinary, filepath.Join(workspace, "worker"), leadEnv, "ride", "--name", "span-backend-worker", "--brief", brief); !strings.Contains(output, "task: t1") {
 		t.Fatalf("ride: %s", output)
 	}
@@ -235,12 +270,13 @@ esac
 			t.Fatalf("Workspace admission changed Member contract: %#v", member)
 		}
 	}
-	for _, path := range []string{"CLAUDE.md", "docs/overview.md", "backend/worker-change.txt", "worker/worker-change.txt"} {
+	legacyMount := task.WorktreePath
+	for _, path := range []string{"backend/worker-change.txt", "worker/worker-change.txt"} {
 		if _, err := os.Stat(filepath.Join(task.WorktreePath, path)); err != nil {
 			t.Fatalf("Mount lacks %s: %v", path, err)
 		}
 	}
-	for _, absent := range []string{"e2e-tool", ".worktrees/backend-spike"} {
+	for _, absent := range []string{"CLAUDE.md", "docs/overview.md", "e2e-tool", ".worktrees/backend-spike"} {
 		if _, err := os.Stat(filepath.Join(task.WorktreePath, absent)); !os.IsNotExist(err) {
 			t.Fatalf("Mount must not contain %s: %v", absent, err)
 		}
@@ -263,5 +299,86 @@ esac
 	task, err = db.Task(context.Background(), project.ID, "t1")
 	if err != nil || task.State != store.StateTornDown {
 		t.Fatalf("Task after Land = %s, %v", task.State, err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyMount, "worker", ".git")); err != nil {
+		t.Fatalf("legacy Mount did not retain its previous Member checkout: %v", err)
+	}
+
+	projectConfig := filepath.Join(root, "posse", "projects", "stack", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("[repositories.backend]\nlanding_mode = \"pr\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, env, filepath.Join(workspace, "worker"), "branch", "posse/inspect-mixed-scope")
+	mixedBrief := filepath.Join(root, "mixed-scout.md")
+	if err := os.WriteFile(mixedBrief, []byte("---\ntype: scout\ntitle: Inspect mixed scope\ndone_when: report is saved\nrepos: [backend, e2e-tool]\nroot_context: read-only\n---\nInspect only the selected Members.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "worker-mode"), []byte("mixed-scout\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output := runPosse(t, posseBinary, workspace, leadEnv, "ride", "--name", "inspect-mixed-scope", "--brief", mixedBrief); !strings.Contains(output, "task: t2") {
+		t.Fatalf("ride mixed-member Scout: %s", output)
+	}
+	var mixedTask store.Task
+	if !waitForCondition(60*time.Second, func() bool {
+		mixedTask, err = db.Task(context.Background(), project.ID, "t2")
+		return err == nil && mixedTask.State == store.StateReported
+	}) {
+		log, _ := os.ReadFile(workerLog)
+		t.Fatalf("mixed-member Scout did not finish: state=%s log=%s", mixedTask.State, log)
+	}
+	mixedPlan, err := mixedTask.AdmittedPlan()
+	if err != nil || mixedPlan == nil || mixedPlan.Execution.RootContext != "read-only" || len(mixedPlan.Execution.Members) != 2 {
+		t.Fatalf("mixed-member plan = %#v, %v", mixedPlan, err)
+	}
+	mixedModes := map[string]string{}
+	for _, member := range mixedPlan.Execution.Members {
+		mixedModes[member.Name] = member.Delivery
+	}
+	if mixedModes["backend"] != "pr" || mixedModes["e2e-tool"] != "local" {
+		t.Fatalf("mixed Member delivery modes = %#v", mixedModes)
+	}
+	if mixedTask.WorktreePath != legacyMount {
+		t.Fatalf("legacy Mount was not reused: got %s, want %s", mixedTask.WorktreePath, legacyMount)
+	}
+	if _, err := os.Stat(filepath.Join(mixedTask.WorktreePath, "worker")); !os.IsNotExist(err) {
+		t.Fatalf("unselected legacy Member was not drained: %v", err)
+	}
+
+	rootBrief := filepath.Join(root, "root-scout.md")
+	if err := os.WriteFile(rootBrief, []byte("---\ntype: scout\ntitle: Inspect root context\ndone_when: report is saved\nroot_context: read-only\n---\nInspect shared-root context without Member checkouts.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "worker-mode"), []byte("root-only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output := runPosse(t, posseBinary, workspace, leadEnv, "ride", "--name", "inspect-root-context", "--brief", rootBrief); !strings.Contains(output, "task: t3") {
+		t.Fatalf("ride root-only Scout: %s", output)
+	}
+	var rootTask store.Task
+	if !waitForCondition(60*time.Second, func() bool {
+		rootTask, err = db.Task(context.Background(), project.ID, "t3")
+		return err == nil && rootTask.State == store.StateReported
+	}) {
+		log, _ := os.ReadFile(workerLog)
+		t.Fatalf("root-only Scout did not finish: state=%s log=%s", rootTask.State, log)
+	}
+	rootPlan, err := rootTask.AdmittedPlan()
+	if err != nil || rootPlan == nil || rootPlan.Execution.RootContext != "read-only" || len(rootPlan.Execution.Members) != 0 {
+		t.Fatalf("root-only workspace plan = %#v, %v", rootPlan, err)
+	}
+	for _, member := range []string{"backend", "worker", "e2e-tool"} {
+		if _, err := os.Stat(filepath.Join(rootTask.WorktreePath, member, ".git")); !os.IsNotExist(err) {
+			t.Fatalf("root-only Scout received Member %s: %v", member, err)
+		}
+	}
+	log, _ := os.ReadFile(workerLog)
+	for _, proof := range []string{"mixed scope and read-only root verified", "root-only Scout has no editable Members"} {
+		if !strings.Contains(string(log), proof) {
+			t.Fatalf("E2E Rider did not verify %q: %s", proof, log)
+		}
 	}
 }

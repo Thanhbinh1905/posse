@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -45,12 +46,12 @@ func workspaceRootBaselinePath(home string, project store.Project, task store.Ta
 	return filepath.Join(home, "projects", project.Name, ".workspace-root-baselines", taskIDString(task.Seq)+".json")
 }
 
-func writeWorkspaceRootBaseline(ctx context.Context, home string, project store.Project, task store.Task, mountRoot string, targets []taskMember) error {
+func writeWorkspaceRootBaseline(ctx context.Context, home string, project store.Project, task store.Task, mountRoot string, targets []taskMember, rootContext string) error {
 	members, err := workspaceMemberPaths(targets)
 	if err != nil {
 		return err
 	}
-	files, err := workspaceRootFileStates(mountRoot, members)
+	files, err := workspaceRootFileStatesMode(mountRoot, members, rootContext != "legacy")
 	if err != nil {
 		return err
 	}
@@ -293,6 +294,9 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 // Mount relative to the copy captured before the Rider started. Files inside
 // nested repositories come from Git's tracked and non-ignored file listing.
 func workspaceRootReportAttachments(ctx context.Context, mountRoot string, members map[string]bool, baseline workspaceRootBaseline) (map[string]reportAttachmentSource, error) {
+	if err := validateWorkspaceMountRoot(mountRoot); err != nil {
+		return nil, err
+	}
 	mountRoot, err := filepath.EvalSymlinks(mountRoot)
 	if err != nil {
 		return nil, err
@@ -406,6 +410,10 @@ func workspaceRootReportAttachments(ctx context.Context, mountRoot string, membe
 }
 
 func workspaceRootFileStates(root string, members map[string]bool) (map[string]workspaceRootFingerprint, error) {
+	return workspaceRootFileStatesMode(root, members, false)
+}
+
+func workspaceRootFileStatesMode(root string, members map[string]bool, includeControlFiles bool) (map[string]workspaceRootFingerprint, error) {
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, err
@@ -420,12 +428,29 @@ func workspaceRootFileStates(root string, members map[string]bool) (map[string]w
 			return err
 		}
 		if entry.IsDir() {
-			if members[relative] || entry.Name() == ".git" {
+			if members[relative] {
 				return filepath.SkipDir
+			}
+			if entry.Name() == ".git" {
+				if includeControlFiles {
+					fingerprint, err := fingerprintWorkspaceRootFile(path)
+					if err != nil {
+						return err
+					}
+					files[relative] = fingerprint
+				}
+				return filepath.SkipDir
+			}
+			if includeControlFiles {
+				fingerprint, err := fingerprintWorkspaceRootFile(path)
+				if err != nil {
+					return err
+				}
+				files[relative] = fingerprint
 			}
 			return nil
 		}
-		if isGitMetadataPath(relative) || isWorkspaceControlPath(relative) {
+		if isGitMetadataPath(relative) || !includeControlFiles && isWorkspaceControlPath(relative) {
 			return nil
 		}
 		if !safeWorkspaceRootPath(relative) {
@@ -439,6 +464,66 @@ func workspaceRootFileStates(root string, members map[string]bool) (map[string]w
 		return nil
 	})
 	return files, err
+}
+
+func validateWorkspaceRootContext(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, rootContext string) error {
+	if err := validateWorkspaceMountRoot(task.WorktreePath); err != nil {
+		return err
+	}
+	if rootContext == "legacy" || rootContext == "" {
+		return nil
+	}
+	baseline, err := readWorkspaceRootBaseline(home, project, task)
+	if err != nil {
+		return err
+	}
+	targets, err := workspaceMountTargets(ctx, db, project)
+	if err != nil {
+		return err
+	}
+	members, err := workspaceMemberPaths(targets)
+	if err != nil {
+		return err
+	}
+	actual, err := workspaceRootFileStatesMode(task.WorktreePath, members, true)
+	if err != nil {
+		return err
+	}
+	if !maps.Equal(actual, baseline.Files) {
+		return fmt.Errorf("shared workspace-root files changed; this Task's root context is read-only")
+	}
+	if rootContext == "read-only" {
+		return verifyWorkspaceRootReadOnly(task.WorktreePath, members)
+	}
+	return nil
+}
+
+func verifyWorkspaceRootReadOnly(root string, members map[string]bool) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil || relative == "." {
+			return err
+		}
+		if entry.IsDir() && (members[relative] || entry.Name() == ".git") {
+			return filepath.SkipDir
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("read-only workspace root context contains symlink %s", relative)
+		}
+		if entry.IsDir() || entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if info.Mode().Perm()&0o222 != 0 {
+				return fmt.Errorf("read-only workspace root context permissions changed: %s", relative)
+			}
+		}
+		return nil
+	})
 }
 
 func fingerprintWorkspaceRootFile(path string) (workspaceRootFingerprint, error) {

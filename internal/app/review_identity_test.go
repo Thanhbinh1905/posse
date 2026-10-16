@@ -385,4 +385,8 @@ func seedReviewAuthor(t *testing.T, fixture rideFixture) {
 	if _, err := db.NextTaskLaunchWithIdentity(ctx, authorID, "author", "model-a", true); err != nil {
 		t.Fatal(err)
 	}
+	// Review admission pins a completed Ship revision.
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='done' WHERE id=?`, authorID); err != nil {
+		t.Fatal(err)
+	}
 }
