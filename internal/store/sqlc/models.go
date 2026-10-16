@@ -274,6 +274,25 @@ type RepoWatchState struct {
 	CheckoutReason    string
 }
 
+type ReviewTarget struct {
+	TaskID     int64
+	Repository string
+	CommitSha  string
+}
+
+type ReviewVerdict struct {
+	TaskID          int64
+	SignalID        int64
+	Verdict         string
+	ReportSha256    string
+	TargetsJson     string
+	LaunchNumber    int64
+	ProfileName     string
+	ConfiguredModel string
+	ModelKnown      int64
+	CreatedAt       int64
+}
+
 type Signal struct {
 	ID       int64
 	TaskID   int64

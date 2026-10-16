@@ -36,6 +36,9 @@ type TaskSnapshot struct {
 	TaskRepos     []TaskRepo         `toml:"task_repos,omitempty"`
 	TargetChanges []TaskTargetChange `toml:"target_changes,omitempty"`
 	PlanRevisions []string           `toml:"plan_revisions,omitempty"`
+	// ReviewTargets and ReviewVerdict are set for a Review Task only.
+	ReviewTargets []ReviewTarget `toml:"review_targets,omitempty"`
+	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
 }
 
 type projectSnapshot struct {
@@ -287,6 +290,16 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		plans = plans[:admitted.Revision]
 	}
 	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities, PRBodyMarkers: markers, TargetChanges: targetChanges, PlanRevisions: plans}
+	if task.Type == "review" {
+		if snapshot.ReviewTargets, err = db.ReviewTargets(ctx, taskID); err != nil {
+			return err
+		}
+		if verdict, err := db.ReviewVerdict(ctx, taskID); err == nil {
+			snapshot.ReviewVerdict = &verdict
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	}
 	if project.IsWorkspace() {
 		if snapshot.Members, err = db.ProjectRepos(ctx, projectID); err != nil {
 			return err
@@ -762,7 +775,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -859,6 +872,21 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			modelKnown := identity.ModelKnown && strings.TrimSpace(identity.ConfiguredModel) != ""
 			if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision) VALUES(?,?,?,?,?,?)`, task.ID, identity.LaunchNumber, identity.Profile, identity.ConfiguredModel, modelKnown, identity.PlanRevision); err != nil {
 				return err
+			}
+		}
+		for _, target := range snapshot.ReviewTargets {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_targets(task_id,repository,commit_sha) VALUES(?,?,?)`, task.ID, target.Repository, target.Commit); err != nil {
+				return fmt.Errorf("rebuild t%d review target: %w", task.Seq, err)
+			}
+		}
+		if verdict := snapshot.ReviewVerdict; verdict != nil {
+			encodedTargets, err := json.Marshal(verdict.Targets)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_verdicts(task_id,signal_id,verdict,report_sha256,targets_json,launch_number,profile_name,configured_model,model_known,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+				task.ID, verdict.SignalID, verdict.Verdict, verdict.ReportSHA256, string(encodedTargets), verdict.Reviewer.LaunchNumber, verdict.Reviewer.Profile, verdict.Reviewer.ConfiguredModel, verdict.Reviewer.ModelKnown, verdict.CreatedAt); err != nil {
+				return fmt.Errorf("rebuild t%d review verdict: %w", task.Seq, err)
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, "", task.State, "cli", "Rebuilt from atomic Task snapshot", task.UpdatedAt); err != nil {
