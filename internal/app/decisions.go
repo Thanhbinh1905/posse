@@ -171,8 +171,8 @@ func decisionOutput(ctx context.Context, db *store.DB, projectID int64, d store.
 
 func (s *Service) requireLeadOrUser(ctx context.Context, db *store.DB, project store.Project) error {
 	role := s.configCallerRole(ctx, db)
-	if role == "worker" {
-		return axi.Failure("user_only", "a Rider cannot answer a Decision", false)
+	if role == "worker" || role == "agent" {
+		return axi.Failure("user_only", "a Rider or unbound agent cannot answer a Decision", false)
 	}
 	if role == "lead" {
 		return s.requireLead(ctx, db, project)

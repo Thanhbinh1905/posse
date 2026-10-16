@@ -19,7 +19,7 @@ import (
 func TestMain(m *testing.M) {
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
-		if ok && strings.HasPrefix(key, "HERDR_") {
+		if ok && (strings.HasPrefix(key, "HERDR_") || agentEnvironmentKey(key)) {
 			_ = os.Unsetenv(key)
 		}
 	}

@@ -60,9 +60,9 @@ func TestRealPiInterruptStopsBusyTurnE2E(t *testing.T) {
 	if _, err := client.Run(context.Background(), "integration", "install", "pi"); err != nil {
 		t.Fatalf("install Pi integration in isolated Herdr: %v", err)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.kind", "pi")
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.kind", "pi")
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.model", "test")
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.args", `["--provider", "t265-local", "--no-skills", "--no-prompt-templates"]`)
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.args", `["--provider", "t265-local", "--no-skills", "--no-prompt-templates"]`)
 	brief := filepath.Join(fixture.root, "real-pi-interrupt.md")
 	briefText := "---\ntype: ship\ntitle: Real Pi interrupt\ndone_when: aborted turn observed\n---\nKeep working until the Lead interrupts this turn.\n"
 	if err := os.WriteFile(brief, []byte(briefText), 0o600); err != nil {

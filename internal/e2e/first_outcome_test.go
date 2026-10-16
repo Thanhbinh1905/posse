@@ -69,7 +69,8 @@ done
 	if err := os.MkdirAll(repo, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.name", "Test"}, {"config", "user.email", "test@example.test"}, {"commit", "--allow-empty", "-m", "Initial"}} {
+	origin := filepath.Join(root, "origin.git")
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.name", "Test"}, {"config", "user.email", "test@example.test"}, {"commit", "--allow-empty", "-m", "Initial"}, {"init", "--bare", origin}, {"remote", "add", "origin", origin}, {"push", "-u", "origin", "main"}} {
 		if out, err := gitCommand(env, repo, args...); err != nil {
 			t.Fatalf("git: %v %s", err, out)
 		}

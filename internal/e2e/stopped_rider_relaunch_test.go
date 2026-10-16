@@ -22,7 +22,7 @@ func TestStoppedRiderPaneCanBeRelaunched(t *testing.T) {
 			fixture := newPRLifecycleFixture(t)
 			defer fixture.db.Close()
 
-			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.kind", kind)
+			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.kind", kind)
 			agent := "#!/bin/sh\n" +
 				"herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state idle >/dev/null 2>&1\n" +
 				"while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state working >/dev/null 2>&1; done\n"

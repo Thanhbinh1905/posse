@@ -117,7 +117,8 @@ esac
 	if _, err := f.client.Run(context.Background(), "pane", "run", caller.RootPane.PaneID, "posse up --name shop --yes"); err != nil {
 		t.Fatalf("run replacement posse up in isolated Herdr pane: %v", err)
 	}
-	if !waitForCondition(5*time.Second, func() bool {
+	// Allow the Lead finalizer's 30-second budget plus observation overhead.
+	if !waitForCondition(35*time.Second, func() bool {
 		snapshot, err := f.client.Snapshot(context.Background())
 		if err != nil {
 			return false
@@ -125,7 +126,8 @@ esac
 		_, found := findLeadInSnapshot(snapshot)
 		return found
 	}) {
-		t.Fatal("replacement Lead did not start in the User's workspace")
+		pane, readErr := f.client.Run(context.Background(), "pane", "read", caller.RootPane.PaneID, "--source", "recent-unwrapped", "--lines", "80")
+		t.Fatalf("replacement Lead did not start in the User's workspace: output=%s read_err=%v", pane, readErr)
 	}
 	if contents, err := os.ReadFile(startLog); err != nil || strings.Count(string(contents), "lead\n") != 1 {
 		t.Fatalf("Lead starts=%q err=%v, want exactly one replacement Lead", contents, err)

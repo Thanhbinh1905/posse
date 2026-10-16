@@ -112,7 +112,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Leftover or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--profile <name>]", Summary: "Preview Dispatch Rule and Profile selection.", Handler: s.dispatch},
-		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p] [--from-leftover <decision>]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
+		{Name: "ride", Usage: "$ ride --brief <file> --name <short> [--profile p] [--from-leftover <decision>] [--user-approved <quote>]", Summary: "Start a Rider from a Brief with a short name.", Handler: s.spawn},
 		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Rider's Signal; done is refused while queued instructions remain undelivered.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Ship Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Rider's next publish will use.", Handler: s.retitle},
@@ -520,9 +520,9 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 }
 
 func (s *Service) requireLead(ctx context.Context, db *store.DB, project store.Project) error {
-	if s.herdrContext != nil && s.herdrContext() {
-		paneID := os.Getenv("HERDR_PANE_ID")
-		if paneID == "" || paneID != project.LeadPaneID {
+	actor := s.configCaller(ctx, db)
+	if actor.role == "agent" || s.herdrContext != nil && s.herdrContext() {
+		if actor.role != "lead" || actor.projectID != project.ID {
 			return axi.Failure("lead_only", "this command must run from the Project Lead pane", false, "Use `posse holler` from a Rider pane")
 		}
 	}

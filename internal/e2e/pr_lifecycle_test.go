@@ -240,7 +240,7 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 
 	first := fixture.rideAndComplete(t, brief, "t1")
-	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA != "" || first.Branch != "posse/pr-lifecycle-change" || first.PaneLabel != "posse:shop:t1" || first.AgentName != "posse-shop-t1-1" || first.TargetBranch != "staging" || first.BaseRef != "refs/remotes/origin/staging" {
+	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA != "" || first.Branch != "posse/pr-lifecycle-change" || first.PaneLabel != "posse:shop:t1" || first.AgentName != "posse-shop-t1-1" || first.TargetBranch != "staging" || first.BaseRef != strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/remotes/origin/staging")) {
 		t.Fatalf("Worker did not publish its PR before the Lead's Gate: %#v", first)
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "show-ref", "--hash", "refs/heads/posse/pr-lifecycle-change")); got != strings.TrimSpace(gitTest(t, fixture.env, first.WorktreePath, "rev-parse", "HEAD")) {

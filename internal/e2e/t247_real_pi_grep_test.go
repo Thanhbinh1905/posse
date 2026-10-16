@@ -64,9 +64,9 @@ func t247RealPiGrep(t *testing.T, message string) {
 	if _, err := client.Run(context.Background(), "integration", "install", "pi"); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, base.binary, base.repo, base.leadEnv, "config", "set", "profiles.deep.kind", "pi")
+	runPosse(t, base.binary, base.repo, base.env, "config", "set", "profiles.deep.kind", "pi")
 	runPosse(t, base.binary, base.repo, base.leadEnv, "config", "set", "profiles.deep.model", "test")
-	runPosse(t, base.binary, base.repo, base.leadEnv, "config", "set", "profiles.deep.args", `["--provider", "t242-local", "--no-skills", "--no-prompt-templates"]`)
+	runPosse(t, base.binary, base.repo, base.env, "config", "set", "profiles.deep.args", `["--provider", "t242-local", "--no-skills", "--no-prompt-templates"]`)
 	brief := filepath.Join(base.root, "real-model-error.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Real Pi stream error\ndone_when: error handled\n---\nSay hello.\n"), 0600); err != nil {
 		t.Fatal(err)

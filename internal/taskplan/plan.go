@@ -44,19 +44,54 @@ type Grant struct {
 	Source string `json:"source"`
 }
 
+type Preference struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Source string `json:"source"`
+}
+
+// UserChoice records consent for this selected Brief, not authentication or an
+// effect grant. Fields contains only explicitly selected workflow preferences.
+type UserChoice struct {
+	Quote       string   `json:"quote"`
+	Actor       string   `json:"actor"`
+	Source      string   `json:"source"`
+	BriefSHA256 string   `json:"brief_sha256"`
+	Fields      []string `json:"fields"`
+}
+
+func preferenceFields(brief dispatch.Brief) []string {
+	var fields []string
+	if brief.LandingMode != "" {
+		fields = append(fields, "delivery")
+	}
+	if brief.Review != "" {
+		fields = append(fields, "review")
+	}
+	if brief.Base != "" || len(brief.BaseByRepo) > 0 {
+		fields = append(fields, "base")
+	}
+	if brief.Target != "" || len(brief.TargetByRepo) > 0 {
+		fields = append(fields, "target")
+	}
+	return fields
+}
+
 type Member struct {
-	Name     string   `json:"name"`
-	Path     string   `json:"path"`
-	Base     string   `json:"base"`
-	Target   string   `json:"target"`
-	Delivery string   `json:"delivery"`
-	Gate     []string `json:"gate"`
+	Name       string   `json:"name"`
+	Path       string   `json:"path"`
+	Base       string   `json:"base"`
+	BaseCommit string   `json:"base_commit,omitempty"`
+	Target     string   `json:"target"`
+	Delivery   string   `json:"delivery"`
+	Gate       []string `json:"gate"`
 }
 
 type Execution struct {
 	Mode        string   `json:"mode"`
 	Scope       string   `json:"scope"`
 	Base        string   `json:"base"`
+	BaseCommit  string   `json:"base_commit,omitempty"`
 	Target      string   `json:"target"`
 	RootContext string   `json:"root_context,omitempty"`
 	Members     []Member `json:"members,omitempty"`
@@ -89,6 +124,8 @@ type Plan struct {
 	ReviewOf       int64         `json:"review_of,omitempty"`
 	Delivery       string        `json:"delivery"`
 	Grants         []Grant       `json:"grants"`
+	Preferences    []Preference  `json:"preferences,omitempty"`
+	UserChoice     *UserChoice   `json:"user_choice,omitempty"`
 	Inputs         []Input       `json:"inputs"`
 	Paths          Paths         `json:"paths"`
 	Launch         Launch        `json:"launch"`
@@ -107,6 +144,7 @@ type Request struct {
 	Delivery      string
 	Autonomy      config.Autonomy
 	ConfigSources []string
+	UserChoice    *UserChoice
 	Paths         Paths
 	Gate          []string
 	MergeMethod   string
@@ -117,6 +155,15 @@ type Request struct {
 // types, executors or execution modes. Callers resolve repository facts first.
 func Resolve(r Request) (Plan, error) {
 	brief, err := dispatch.ParseBriefText(string(r.Brief.Bytes))
+	if err != nil {
+		return Plan{}, err
+	}
+	userChoice := r.UserChoice != nil
+	delivery, autonomy, err := dispatch.ResolveDelivery(brief, r.Delivery, r.Autonomy, userChoice)
+	if err != nil {
+		return Plan{}, err
+	}
+	review, err := dispatch.ResolveReview(brief.Review, r.Review, userChoice)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -139,10 +186,24 @@ func Resolve(r Request) (Plan, error) {
 		}
 	}
 	p := Plan{Version: Version, Revision: 1, Type: brief.Type, Outcome: outcome, Executor: "rider",
-		Execution: r.Execution, Review: r.Review, ReviewOf: r.ReviewOf, Delivery: r.Delivery,
-		Grants: []Grant{{Name: "autonomy.review", Value: r.Autonomy.Review, Source: reviewSource}, {Name: "autonomy.land", Value: r.Autonomy.Land, Source: landSource}},
+		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
+		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.land", Value: autonomy.Land, Source: landSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
 		Gate: r.Gate, MergeMethod: r.MergeMethod, Remuda: r.Remuda}
+	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
+	for i, explicit := range []bool{brief.LandingMode != "", brief.Review != ""} {
+		if explicit {
+			p.Preferences[i].Source = "brief: " + r.Brief.Source
+		}
+		if explicit && userChoice {
+			p.Preferences[i].Source = "User choice: " + r.UserChoice.Source
+		}
+	}
+	if userChoice {
+		choice := *r.UserChoice
+		choice.BriefSHA256, choice.Fields = r.Brief.SHA256, preferenceFields(brief)
+		p.UserChoice = &choice
+	}
 	if p.Execution.Mode == "" {
 		p.Execution.Mode = "mount"
 	}
@@ -220,10 +281,23 @@ func (p Plan) Validate() error {
 	if p.Execution.Scope == "workspace" && p.Type == "ship" && len(p.Execution.Members) == 0 {
 		return invalid("workspace Ship requires Members")
 	}
+	validCommit := func(value string) bool {
+		if value == "" {
+			return true
+		}
+		_, err := hex.DecodeString(value)
+		return err == nil && (len(value) == 40 || len(value) == 64)
+	}
+	if !validCommit(p.Execution.BaseCommit) {
+		return invalid("invalid pinned base commit")
+	}
 	seenNames, seenPaths := map[string]bool{}, map[string]bool{}
 	for _, member := range p.Execution.Members {
 		if member.Name == "" || seenNames[member.Name] || member.Path == "" || !filepath.IsLocal(member.Path) || member.Path == "." || seenPaths[member.Path] {
 			return invalid("invalid or duplicate Member")
+		}
+		if !validCommit(member.BaseCommit) {
+			return invalid("invalid pinned Member base commit")
 		}
 		if member.Delivery != "local" && member.Delivery != "pr" {
 			return invalid("unsupported Member delivery")
@@ -248,6 +322,17 @@ func (p Plan) Validate() error {
 	}
 	if brief.Type != p.Type {
 		return invalid("selected Brief has another Task type")
+	}
+	if p.UserChoice != nil {
+		choice := p.UserChoice
+		if strings.TrimSpace(choice.Quote) == "" || choice.Actor != "lead" && choice.Actor != "user" || choice.Source != "ride --user-approved" || choice.BriefSHA256 != p.Inputs[0].SHA256 || len(choice.Fields) == 0 || strings.Join(choice.Fields, ",") != strings.Join(preferenceFields(brief), ",") {
+			return invalid("invalid scoped User choice provenance")
+		}
+	}
+	if len(p.Preferences) > 0 {
+		if len(p.Preferences) != 2 || p.Preferences[0].Name != "delivery" || p.Preferences[0].Value != p.Delivery || p.Preferences[1].Name != "review" || p.Preferences[1].Value != p.Review || p.Preferences[0].Source == "" || p.Preferences[1].Source == "" {
+			return invalid("invalid preference values or provenance")
+		}
 	}
 	if brief.RootContext != "" && (p.Execution.Scope != "workspace" || p.Execution.RootContext != brief.RootContext) {
 		return invalid("selected Brief root context does not match workspace execution")
