@@ -210,6 +210,9 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 				return fmt.Errorf("list Report attachments in %s: %w", repository.path, err)
 			}
 			for _, name := range nulPaths(output) {
+				if repository.relative == "" && name == reportBundleManifestName {
+					return fmt.Errorf("%s is reserved for the Posse Report bundle", reportBundleManifestName)
+				}
 				if name == "" || filepath.IsAbs(name) || name == ".git" || strings.HasPrefix(name, ".git"+string(os.PathSeparator)) || filepath.Clean(name) != name || name == ".." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) {
 					return fmt.Errorf("unsafe Report attachment path %q", name)
 				}
@@ -337,7 +340,7 @@ func workspaceRootReportAttachments(ctx context.Context, mountRoot string, membe
 		nestedRepositories[repository.relative] = struct{}{}
 	}
 	addIfChanged := func(relative, root, name string) error {
-		if !safeWorkspaceRootPath(relative) || isGitMetadataPath(relative) || isWorkspaceControlPath(relative) {
+		if !safeWorkspaceRootPath(relative) || isGitMetadataPath(relative) || isWorkspaceControlPath(relative) || relative == reportBundleManifestName {
 			return fmt.Errorf("unsafe workspace-root Report attachment path %q", relative)
 		}
 		current, err := fingerprintWorkspaceRootFile(filepath.Join(root, name))
@@ -532,7 +535,7 @@ func saveExplicitAttachment(task store.Task, home string, project store.Project,
 			return nil
 		}
 		name, err := filepath.Rel(root, source)
-		if err != nil || name == "report.md" || name == "brief.md" || name == "launch.md" || name == "relaunch.md" || name == "findings.toon" {
+		if err != nil || name == "report.md" || name == "brief.md" || name == "launch.md" || name == "relaunch.md" || name == "findings.toon" || name == reportBundleManifestName {
 			return fmt.Errorf("invalid attachment %q", source)
 		}
 		target := filepath.Join(destination, name)
@@ -558,7 +561,7 @@ func reportAttachments(home string, project store.Project, task store.Task) ([]s
 		if err != nil {
 			return err
 		}
-		if relative != "brief.md" && relative != "launch.md" && relative != "relaunch.md" && relative != "report.md" && relative != "findings.toon" {
+		if relative != "brief.md" && relative != "launch.md" && relative != "relaunch.md" && relative != "report.md" && relative != "findings.toon" && relative != "task.toml" && relative != reportBundleManifestName {
 			paths = append(paths, filepath.ToSlash(relative))
 		}
 		return nil

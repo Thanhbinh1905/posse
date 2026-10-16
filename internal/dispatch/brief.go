@@ -20,6 +20,7 @@ type Brief struct {
 	Target         string
 	TargetByRepo   map[string]string
 	ReviewOf       string
+	ReportKind     string
 	AutonomyReview string
 	AutonomyLand   string
 	// Repos names the workspace members the Task works on; empty for a repo Project.
@@ -99,7 +100,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "base", "target", "review_of", "autonomy", "repos", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "base", "target", "review_of", "report_kind", "autonomy", "repos", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -113,6 +114,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		DoneWhen:    unquote(values["done_when"]),
 		LandingMode: unquote(values["landing_mode"]),
 		ReviewOf:    unquote(values["review_of"]),
+		ReportKind:  unquote(values["report_kind"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
 	}
 	if raw, found := values["base"]; found {
@@ -212,6 +214,14 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	}
 	if brief.LandingMode != "" && !oneOf(brief.LandingMode, "local", "pr", "no-mistakes") {
 		return Brief{}, &BriefError{Field: "landing_mode", Reason: "must be local, pr or no-mistakes"}
+	}
+	if brief.ReportKind != "" {
+		if brief.Type != "scout" {
+			return Brief{}, &BriefError{Field: "report_kind", Reason: "is valid only for a Scout Task"}
+		}
+		if !oneOf(brief.ReportKind, "spec", "tickets") {
+			return Brief{}, &BriefError{Field: "report_kind", Reason: "must be spec or tickets"}
+		}
 	}
 	if brief.Type == "review" {
 		if !regexp.MustCompile(`^t[1-9][0-9]*$`).MatchString(brief.ReviewOf) {

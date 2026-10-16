@@ -51,8 +51,20 @@ A Scout Task that examines a Ship Task's change adversarially before it Lands.
 _Avoid_: Code review, audit
 
 **Report**:
-The standalone written findings a Scout Task leaves behind.
+The standalone written findings a Scout Task leaves behind, preserved with its attachments as an immutable, digested Report Bundle after Teardown.
 _Avoid_: Summary, output
+
+**Report Bundle**:
+A Scout's Report and saved attachments, sealed by a manifest whose digest identifies their exact bytes.
+_Avoid_: Archive (unless it is a compressed file)
+
+**Publication-bound Report**:
+A Scout Report marked `report_kind: spec` or `report_kind: tickets`; acceptance requires a current independent Report-review pass and explicit User approval of its exact digest.
+_Avoid_: Accepted Report (before User approval)
+
+**Report Acceptance**:
+The durable record that the User accepted one exact publication-bound Report digest, including whether a Lead recorded the User's quoted approval.
+_Avoid_: Signal, acknowledgement, Autonomy
 
 **Signal**:
 A Worker's own declaration of where its Task stands, such as done, needs-decision or failed.

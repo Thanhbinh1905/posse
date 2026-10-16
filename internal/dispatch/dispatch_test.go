@@ -102,6 +102,28 @@ func TestBriefRejectsInvalidOrRepeatedIssueReferences(t *testing.T) {
 	}
 }
 
+func TestBriefParsesPublicationBoundReportKind(t *testing.T) {
+	for _, kind := range []string{"spec", "tickets"} {
+		source := "---\ntype: scout\ntitle: Planning Report\ndone_when: findings are complete\nreport_kind: " + kind + "\n---\n"
+		brief, err := ParseBriefText(source)
+		if err != nil || brief.ReportKind != kind {
+			t.Fatalf("report_kind %q parsed as %#v, err=%v", kind, brief, err)
+		}
+	}
+}
+
+func TestBriefRejectsInvalidReportKindPlacement(t *testing.T) {
+	for _, source := range []string{
+		"---\ntype: ship\ntitle: Change\ndone_when: done\nreport_kind: spec\n---\n",
+		"---\ntype: review\ntitle: Review\ndone_when: done\nreport_kind: tickets\nreview_of: t1\n---\n",
+		"---\ntype: scout\ntitle: Scout\ndone_when: done\nreport_kind: draft\n---\n",
+	} {
+		if _, err := ParseBriefText(source); err == nil {
+			t.Fatalf("accepted invalid report_kind Brief:\\n%s", source)
+		}
+	}
+}
+
 func TestBriefRejectsRemovedNameField(t *testing.T) {
 	_, err := ParseBriefText("---\ntype: ship\ntitle: Fix flaky login test\nname: worker-tree\ndone_when: tests pass\n---\n")
 	briefErr, ok := err.(*BriefError)

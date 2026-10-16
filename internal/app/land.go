@@ -685,13 +685,27 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "Leftover snapshot", err)
 		}
 	}
-	if mountHeld && task.State == store.StateReported && !discardable {
+	if task.State == store.StateReported && !discardable && (mountHeld || task.Type == "scout") {
 		if err := s.runIntentStep(ctx, db, intent, "report.attachments", func() error {
 			home, err := s.homePath()
 			if err != nil {
 				return err
 			}
-			return preserveReportAttachments(ctx, db, home, project, task)
+			if mountHeld {
+				if err := preserveReportAttachments(ctx, db, home, project, task); err != nil {
+					return err
+				}
+			}
+			if task.Type == "scout" {
+				if !mountHeld && task.ReportDigest == "" {
+					if task.WorktreePath != "" {
+						return fmt.Errorf("scout Mount is not held and no Report bundle has been finalized")
+					}
+					return nil // Legacy Tasks without a recorded Mount cannot be resealed safely.
+				}
+				return finalizeReportBundle(ctx, db, home, project, task)
+			}
+			return nil
 		}); err != nil {
 			_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: "leftover:unrecoverable:" + strconv.FormatInt(task.ID, 10), Question: "Report attachments could not be preserved. Repair the Mount and retry Teardown, or approve discarding the unsaved attachments?", Options: []string{"repair", "discard"}})
 			if decisionErr != nil {

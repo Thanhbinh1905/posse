@@ -472,6 +472,26 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			view["plan"] = plan
 		}
 	}
+	if task.Type == "scout" {
+		view["report_digest"] = task.ReportDigest
+		if task.ReportKind != "" {
+			view["report_kind"] = task.ReportKind
+		}
+		reviews, err := db.ReportReviewsForTask(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if len(reviews) > 0 {
+			view["report_reviews"] = reviews
+		}
+		acceptance, err := db.ReportAcceptanceForTask(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if acceptance != nil {
+			view["report_acceptance"] = acceptance
+		}
+	}
 	if task.Type == "review" {
 		reviewerLaunches, err := db.TaskLaunchIdentities(ctx.Context, task.ID)
 		if err != nil {

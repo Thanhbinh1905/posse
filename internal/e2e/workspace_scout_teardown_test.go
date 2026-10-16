@@ -174,9 +174,11 @@ esac
 	if err != nil || !project.IsWorkspace() {
 		t.Fatalf("workspace Project = %#v, %v", project, err)
 	}
+	runPosse(t, binary, workspace, leadEnv, "config", "set", "profiles.deep.model", "model-author")
 
 	parentTest := t
 	var firstMountID int64
+	var firstReportDigest string
 	for _, test := range []struct {
 		taskID, title, name string
 		members             []string
@@ -201,7 +203,11 @@ esac
 				}
 			}
 			brief := filepath.Join(root, test.taskID+".md")
-			if err := os.WriteFile(brief, []byte("---\ntype: scout\ntitle: "+test.title+"\ndone_when: report and member evidence are preserved\nrepos: ["+strings.Join(test.members, ", ")+"]\n---\nInspect the listed member repositories and attach their evidence.\n"), 0o600); err != nil {
+			reportKind := ""
+			if test.taskID == "t1" {
+				reportKind = "report_kind: spec\n"
+			}
+			if err := os.WriteFile(brief, []byte("---\ntype: scout\ntitle: "+test.title+"\ndone_when: report and member evidence are preserved\n"+reportKind+"repos: ["+strings.Join(test.members, ", ")+"]\n---\nInspect the listed member repositories and attach their evidence.\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", test.name)
@@ -502,6 +508,14 @@ esac
 					t.Errorf("saved root artifact %s = %q, want %q: %v", artifact, contents, want, err)
 				}
 			}
+			if test.taskID == "t1" {
+				sealedTask, err := db.Task(context.Background(), project.ID, "t1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				firstReportDigest = sealedTask.ReportDigest
+				assertE2EReportBundle(t, savedDir, sealedTask)
+			}
 			if test.missingBaseline {
 				if _, err := os.Stat(filepath.Join(savedDir, "new-root-evidence.txt")); !os.IsNotExist(err) {
 					t.Errorf("approved discard preserved an attachment the User chose to discard: %v", err)
@@ -656,6 +670,56 @@ esac
 	}) {
 		return
 	}
+
+	if firstReportDigest == "" {
+		t.Fatal("publication-bound Scout Report has no sealed digest")
+	}
+	unreviewed := exec.Command(binary, "accept", "t1")
+	unreviewed.Dir, unreviewed.Env = workspace, env
+	output, err := unreviewed.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "report_review_required") {
+		t.Fatalf("publication-bound Report accepted without independent review: err=%v output=%s", err, output)
+	}
+	reportTask, err := db.Task(context.Background(), project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewerID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 9, Type: "review", ReviewsTaskID: reportTask.ID, Title: "Independent Report review", Profile: "report-reviewer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunchWithIdentity(context.Background(), reviewerID, "report-reviewer", "model-review", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateReported, "cli"}} {
+		if err := db.Transition(context.Background(), reviewerID, transition.from, transition.to, transition.source, "independent review completed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.RecordReportReview(context.Background(), reportTask.ID, reviewerID, firstReportDigest, "pass"); err != nil {
+		t.Fatalf("record independent Report review: %v", err)
+	}
+	accept := exec.Command(binary, "accept", "t1", "--user-approved", "User explicitly accepts this exact spec")
+	accept.Dir, accept.Env = workspace, leadEnv
+	output, err = accept.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "provenance: lead-quote") || !strings.Contains(string(output), "User explicitly accepts this exact spec") {
+		t.Fatalf("Lead acceptance with quoted User approval: err=%v output=%s", err, output)
+	}
+	if _, err := db.RebuildFromSnapshots(context.Background(), filepath.Join(root, "posse")); err != nil {
+		t.Fatalf("rebuild Report and acceptance from snapshots: %v", err)
+	}
+	rebuiltReport, err := db.Task(context.Background(), project.ID, "t1")
+	if err != nil || rebuiltReport.ReportDigest != firstReportDigest || rebuiltReport.ReportKind != "spec" {
+		t.Fatalf("rebuilt Report Task = %#v, err=%v", rebuiltReport, err)
+	}
+	rebuiltAcceptance, err := db.ReportAcceptanceForTask(context.Background(), reportTask.ID)
+	if err != nil || rebuiltAcceptance == nil || rebuiltAcceptance.ReportDigest != firstReportDigest || rebuiltAcceptance.UserQuote != "User explicitly accepts this exact spec" {
+		t.Fatalf("rebuilt Report acceptance = %#v, err=%v", rebuiltAcceptance, err)
+	}
+	assertE2EReportBundle(t, filepath.Join(root, "posse", "projects", "stack", "tasks", "t1"), rebuiltReport)
 
 	mounts, err := db.Mounts(context.Background(), project.ID)
 	if err != nil {

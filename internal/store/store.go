@@ -536,6 +536,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, LandedRef: task.LandedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
 		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now, PlanJson: planJSON,
+		ReportKind: task.ReportKind,
 	})
 	if err != nil {
 		return 0, err
@@ -625,6 +626,9 @@ type Task struct {
 	LastProgressAt       int64  `toml:"last_progress_at"`
 	CreatedAt            int64  `toml:"created_at"`
 	UpdatedAt            int64  `toml:"updated_at"`
+	ReportKind           string `toml:"report_kind,omitempty"`
+	ReportDigest         string `toml:"report_digest,omitempty"`
+	ReportManifestJSON   string `toml:"report_manifest_json,omitempty"`
 }
 
 type Mount struct {
@@ -697,11 +701,11 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if err != nil {
 		return 0, 0, err
 	}
-	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at,plan_json)
-VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?) RETURNING id`,
+	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at,plan_json,report_kind)
+VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?) RETURNING id`,
 		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, task.Profile, task.DispatchRule,
 		task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
-		projectName, seq, now, now, planJSON).Scan(&id)
+		projectName, seq, now, now, planJSON, task.ReportKind).Scan(&id)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -2131,7 +2135,8 @@ func taskFromDB(row dbgen.Task) Task {
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
 		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
 		PRURL: row.PrUrl, LandedRef: row.LandedRef, LastOutputHash: row.LastOutputHash,
-		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson}
 }
 
 func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {

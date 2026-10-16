@@ -83,6 +83,9 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
 	}
+	if brief.ReportKind != "" {
+		result = append(result, axi.Field{Key: "report_kind", Value: brief.ReportKind})
+	}
 	if len(issueReferences(brief))+len(brief.Refs) > 0 {
 		warnings := s.checkBriefIssues(ctx.Context, cfg, brief, targets)
 		if len(warnings) > 0 {
@@ -327,7 +330,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return axi.Failure("lead_missing", "Project has no Herdr workspace recorded", false, "Run `posse up` to restart the Lead")
 	}
 	task := store.Task{
-		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning,
+		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning, ReportKind: brief.ReportKind,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, LandingMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
 		BaseRef: baseRef, TargetBranch: targetBranch,
@@ -936,6 +939,9 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 	} else {
 		signal += " --report <file-in-worktree-or-task-scratch>"
 		work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base or an unrequested Member's Mount-acquisition commit, beside report.md at those paths. For workspace Tasks it also saves new or edited shared-root files, including tracked and non-ignored untracked files in nested Git repositories, against the Mount-acquisition snapshot rather than the live Project; unchanged Project copies are not saved. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Mount. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence or unchanged shared-root files the Report needs. `posse show <task>` lists saved attachments."
+		if task.ReportKind != "" {
+			work += " This publication-bound Report must remain complete and reproducible. Posse seals the Report and every saved attachment into an immutable digest at Teardown. The Lead cannot treat a done Signal, Notice acknowledgement or `autonomy.review` as User acceptance. Only the User accepts this exact digest after a current independent Report review; a Lead must pass the User's exact approval words to `posse accept`."
+		}
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
 	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Mount. Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches; never create per-Task copies.", scratchPath)
