@@ -293,6 +293,19 @@ type ResourceLease struct {
 	AcquiredAt     int64
 }
 
+type ReviewReceipt struct {
+	TaskID          int64
+	Repository      string
+	RunID           string
+	HeadSha         string
+	ReviewStatus    string
+	ReviewerProfile string
+	ReviewerModel   string
+	ReportSha256    string
+	ReceiptSha256   string
+	ObservedAt      int64
+}
+
 type ReviewTarget struct {
 	TaskID     int64
 	Repository string

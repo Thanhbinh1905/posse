@@ -119,6 +119,8 @@ func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "no-mistakes")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
+	// The fake matches the installed upstream: it has no receipt query.
+	installFakeNoMistakes(t, f)
 	if code, out := rideReviewIdentityTask(t, f, "Pipeline receipt", "author", ""); code != 0 {
 		t.Fatalf("ride: %d %s", code, out)
 	}
@@ -128,7 +130,7 @@ func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
 	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
 	for _, args := range [][]string{{"land", "t1"}, {"land", "t1", "--merge"}} {
 		code, out := runReviewIdentityCLI(t, f, args...)
-		if code != 1 || !strings.Contains(out, "review_receipt_missing") {
+		if code != 1 || !strings.Contains(out, "review_receipt_unsupported") {
 			t.Fatalf("missing receipt admitted: %d %s", code, out)
 		}
 	}
