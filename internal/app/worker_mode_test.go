@@ -128,7 +128,7 @@ func TestWorkerMayExperimentAgainstATemporaryHome(t *testing.T) {
 }
 
 func TestWorkerProtocolRequiresIsolatedExperiments(t *testing.T) {
-	protocol := workerProtocol(store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "ship", LandingMode: "local"}, dispatch.Brief{DoneWhen: "done"}, "/tmp/launch.md", "/tmp/posse/scratch/shop/t3")
+	protocol := workerProtocol(store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "ship", LandingMode: "local"}, dispatch.Brief{DoneWhen: "done"}, "/tmp/launch.md", "/tmp/posse/scratch/shop/t3", "none")
 	for _, want := range []string{"# Rider protocol", "isolated Herdr server", "POSSE_HOME under a temp dir", "never touch panes, tabs or workspaces you did not create", "A `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered", "Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`/tmp/posse/scratch/shop/t3`)"} {
 		if !strings.Contains(protocol, want) {
 			t.Fatalf("Worker protocol lacks %q:\n%s", want, protocol)

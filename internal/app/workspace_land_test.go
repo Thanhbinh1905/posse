@@ -73,7 +73,7 @@ func newWorkspaceLandFixture(t *testing.T, config string, repos []string, change
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.acquireWorkspaceMount(ctx, db, fixture.project, task, members, fixture.home, "warm", nil); err != nil {
+	if _, err := fixture.service.acquireWorkspaceMount(ctx, db, fixture.project, task, members, fixture.home, "warm", nil, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	if fixture.task, err = db.TaskByID(ctx, fixture.project.ID, taskID); err != nil {

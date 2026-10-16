@@ -199,6 +199,19 @@ func TestResolveExplicitAndDefaultProfiles(t *testing.T) {
 	}
 }
 
+func TestBriefRootContextMustBeExplicitAndReadOnly(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: scout\ntitle: Read workspace context\ndone_when: report is saved\nroot_context: read-only\n---\n")
+	if err != nil || brief.RootContext != "read-only" {
+		t.Fatalf("read-only root context = %#v, %v", brief, err)
+	}
+	for _, value := range []string{"write", "true", "read-write"} {
+		source := "---\ntype: scout\ntitle: Read workspace context\ndone_when: report is saved\nroot_context: " + value + "\n---\n"
+		if _, err := ParseBriefText(source); err == nil {
+			t.Errorf("accepted root_context %q", value)
+		}
+	}
+}
+
 func TestBriefParsingAndTightening(t *testing.T) {
 	brief, err := ParseBriefText(`---
 type: ship

@@ -39,6 +39,8 @@ case "$PWD/" in
   "$POSSE_E2E_REMUDA/"*)
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+    until [ -e "$POSSE_TEST_ROOT/scout-ready" ]; do sleep 0.05; done
+    rm -f "$POSSE_TEST_ROOT/scout-ready"
     mode=$(cat "$POSSE_TEST_ROOT/scout-mode" 2>/dev/null || true)
     rm -f "$POSSE_TEST_ROOT/scout-mode"
     printf 'Report for %s\n' "$PWD" > report.md
@@ -211,6 +213,13 @@ esac
 				t.Fatal(err)
 			}
 			runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", test.name)
+			current, err := db.Task(context.Background(), project.ID, test.taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := prepareLegacyWorkspaceScout(t, db, project, workspace, env, root, current, test.unrequestedMember); err != nil {
+				t.Fatal(err)
+			}
 			if !waitForCondition(60*time.Second, func() bool {
 				task, err := db.Task(context.Background(), project.ID, test.taskID)
 				return err == nil && task.State == store.StateReported
@@ -554,6 +563,13 @@ esac
 			t.Fatal(err)
 		}
 		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "scratch-failure")
+		current, err := db.Task(context.Background(), project.ID, "t7")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := prepareLegacyWorkspaceScout(t, db, project, workspace, env, root, current, false); err != nil {
+			t.Fatal(err)
+		}
 		if !waitForCondition(60*time.Second, func() bool {
 			current, err := db.Task(context.Background(), project.ID, "t7")
 			return err == nil && current.State == store.StateReported
@@ -590,6 +606,13 @@ esac
 			t.Fatal(err)
 		}
 		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "scratch-successor")
+		current, err = db.Task(context.Background(), project.ID, "t8")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := prepareLegacyWorkspaceScout(t, db, project, workspace, env, root, current, false); err != nil {
+			t.Fatal(err)
+		}
 		if !waitForCondition(60*time.Second, func() bool {
 			current, err := db.Task(context.Background(), project.ID, "t8")
 			return err == nil && current.State == store.StateReported

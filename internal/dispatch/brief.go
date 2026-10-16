@@ -24,8 +24,9 @@ type Brief struct {
 	AutonomyReview string
 	AutonomyLand   string
 	// Repos names the workspace members the Task works on; empty for a repo Project.
-	Repos  []string
-	Ticket *IssueRef
+	Repos       []string
+	RootContext string
+	Ticket      *IssueRef
 	// Issues preserves the legacy `issues:` field, including historical multi-issue Briefs.
 	Issues []IssueRef
 	Refs   []IssueRef
@@ -100,7 +101,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "base", "target", "review_of", "report_kind", "autonomy", "repos", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -115,6 +116,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		LandingMode: unquote(values["landing_mode"]),
 		ReviewOf:    unquote(values["review_of"]),
 		ReportKind:  unquote(values["report_kind"]),
+		RootContext: unquote(values["root_context"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
 	}
 	if raw, found := values["base"]; found {
@@ -137,6 +139,9 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 			return Brief{}, err
 		}
 		brief.Repos = repos
+	}
+	if brief.RootContext != "" && brief.RootContext != "read-only" {
+		return Brief{}, &BriefError{Field: "root_context", Reason: "must be read-only when selected"}
 	}
 	if raw, found := values["issues"]; found {
 		issues, err := parseIssueRefs(raw, "issues")

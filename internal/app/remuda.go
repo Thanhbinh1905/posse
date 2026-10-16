@@ -726,7 +726,7 @@ func releaseMount(ctx context.Context, db *store.DB, project store.Project, task
 	}
 	var resetErr error
 	if project.IsWorkspace() {
-		resetErr = releaseWorkspaceMount(ctx, db, project, mount, clean)
+		resetErr = releaseWorkspaceMount(ctx, db, project, mount, clean, removeGitWorktree)
 	} else {
 		// Teardown is local and must not wait on origin. The next Mount
 		// acquisition fetches before starting new work.
