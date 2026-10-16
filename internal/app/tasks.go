@@ -93,7 +93,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) spawn(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-leftover": {}})
+	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-leftover": {}, "user-approved": {}})
 	if err != nil {
 		return err
 	}
@@ -154,14 +154,31 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return profileError(err)
 	}
+	var choice *taskplan.UserChoice
+	if quote, supplied := parsed.Flags["user-approved"]; supplied {
+		if strings.TrimSpace(quote) == "" {
+			return axi.Failure("user_only", "a scoped User choice requires a non-blank quote", false)
+		}
+		role := s.configCallerRole(ctx.Context, db)
+		if role != "lead" && role != "user" {
+			return axi.Failure("user_only", "only the User or registered Lead may record a Task preference choice", false)
+		}
+		choice = &taskplan.UserChoice{Quote: quote, Actor: role, Source: "ride --user-approved"}
+	}
+	if _, err := dispatch.ResolveReview(brief.Review, cfg.Defaults.Review, choice != nil); err != nil {
+		return briefError(err)
+	}
 	tightening := brief
 	if project.IsWorkspace() {
 		// Workspace members tighten one by one in planTaskMembers.
 		tightening.LandingMode = ""
 	}
-	mode, autonomy, err := dispatch.ValidateTightening(tightening, cfg.Defaults.LandingMode, cfg.Autonomy)
+	mode, autonomy, err := dispatch.ResolveDelivery(tightening, cfg.Defaults.LandingMode, cfg.Autonomy, choice != nil)
 	if err != nil {
 		return briefError(err)
+	}
+	if !project.IsWorkspace() && brief.Type == "ship" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
+		return axi.Failure("brief_invalid", "a repository without origin can only Land locally", false)
 	}
 	if mode == "no-mistakes" && !project.IsWorkspace() {
 		if err := ensureNoMistakesInitialized(ctx.Context, project.Root); err != nil {
@@ -206,7 +223,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		reviewLaunchIdentity.LaunchNumber = 1
 		reviewIdentityDetails = reviewIdentityResult(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity)
 	}
-	members, workspaceMode, err := s.planTaskMembers(ctx.Context, db, project, cfg, brief, reviewedTask)
+	members, workspaceMode, err := s.planTaskMembersWithChoice(ctx.Context, db, project, cfg, brief, reviewedTask, choice != nil)
 	if err != nil {
 		return err
 	}
@@ -332,7 +349,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
 		BaseRef: baseRef, TargetBranch: targetBranch,
 	}
-	plan, err := resolveTaskPlan(home, project, cfg, task, resolution, parsed.Flags["brief"], briefData, members)
+	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, parsed.Flags["brief"], briefData, members, choice)
 	if err != nil {
 		return admittedPlanFailure(err)
 	}

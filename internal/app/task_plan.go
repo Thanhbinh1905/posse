@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -33,7 +34,7 @@ func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) 
 		ConfiguredModel: identity.ConfiguredModel, ModelKnown: identity.ModelKnown}, nil
 }
 
-func resolveTaskPlan(home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember) (taskplan.Plan, error) {
+func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice) (taskplan.Plan, error) {
 	launch, err := frozenLaunch(resolution, cfg.Kinds)
 	if err != nil {
 		return taskplan.Plan{}, err
@@ -45,8 +46,25 @@ func resolveTaskPlan(home string, project store.Project, cfg config.Config, task
 	if execution.Scope == "" {
 		execution.Scope = "repo"
 	}
+	brief, err := dispatch.ParseBriefText(string(briefData))
+	if err != nil {
+		return taskplan.Plan{}, err
+	}
+	if brief.Base != "" && !project.IsWorkspace() {
+		execution.BaseCommit, err = selectedBaseCommit(ctx, project.Root, task.BaseRef)
+		if err != nil {
+			return taskplan.Plan{}, err
+		}
+	}
 	for _, member := range members {
-		execution.Members = append(execution.Members, taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.LandingMode, Gate: memberGates(cfg, member.Name)})
+		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.LandingMode, Gate: memberGates(cfg, member.Name)}
+		if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, member.Name, ""); explicit {
+			selected.BaseCommit, err = selectedBaseCommit(ctx, member.Root, member.BaseRef)
+			if err != nil {
+				return taskplan.Plan{}, err
+			}
+		}
+		execution.Members = append(execution.Members, selected)
 	}
 	preferences, err := preferenceSources(home, project, "rider")
 	if err != nil {
@@ -76,9 +94,13 @@ func resolveTaskPlan(home string, project store.Project, cfg config.Config, task
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
+	delivery := cfg.Defaults.LandingMode
+	if project.IsWorkspace() {
+		delivery = task.LandingMode
+	}
 	return taskplan.Resolve(taskplan.Request{Brief: taskplan.Select("brief", source, briefData), Inputs: inputs, Execution: execution, Launch: launch,
-		Review: cfg.Defaults.Review, ReviewOf: task.ReviewsTaskID, Delivery: task.LandingMode,
-		Autonomy: config.Autonomy{Review: task.AutonomyReview, Land: task.AutonomyLand}, ConfigSources: cfg.Files,
+		Review: cfg.Defaults.Review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
+		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice,
 		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		Gate:  cfg.Defaults.Gate, MergeMethod: cfg.Defaults.MergeMethod, Remuda: config.Remuda{Clean: cfg.Remuda.Clean, Setup: cfg.Remuda.Setup}})
 }

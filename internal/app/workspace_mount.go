@@ -36,6 +36,10 @@ type taskMember struct {
 // planTaskMembers resolves a Brief's `repos:` against the Project and returns the
 // members to check out, each with its Landing Mode after the Brief's tightening.
 func (s *Service) planTaskMembers(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, brief dispatch.Brief, reviewed *store.Task) ([]taskMember, string, error) {
+	return s.planTaskMembersWithChoice(ctx, db, project, cfg, brief, reviewed, false)
+}
+
+func (s *Service) planTaskMembersWithChoice(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, brief dispatch.Brief, reviewed *store.Task, userChoice bool) ([]taskMember, string, error) {
 	if !project.IsWorkspace() {
 		if len(brief.Repos) > 0 {
 			return nil, "", axi.Failure("brief_invalid", "repos: is valid only in a workspace Project", false, "Remove `repos:` from the Brief")
@@ -94,7 +98,7 @@ func (s *Service) planTaskMembers(ctx context.Context, db *store.DB, project sto
 		remote := originHost(ctx, member.Root)
 		member.LandingMode = memberLandingMode(cfg, repo.Name, remote)
 		if brief.LandingMode != "" {
-			if landingRank[brief.LandingMode] < landingRank[member.LandingMode] {
+			if !userChoice && landingRank[brief.LandingMode] < landingRank[member.LandingMode] {
 				return nil, "", axi.Failure("brief_invalid", fmt.Sprintf("landing_mode %s would loosen member %s from %s", brief.LandingMode, name, member.LandingMode), false, "Remove landing_mode or tighten it")
 			}
 			member.LandingMode = brief.LandingMode
@@ -106,6 +110,12 @@ func (s *Service) planTaskMembers(ctx context.Context, db *store.DB, project sto
 			return nil, "", axi.Failure("brief_invalid", "member "+name+" has no origin and can only Land locally", false, "Remove landing_mode: pr from the Brief")
 		}
 		member.BaseRef = memberBaseRef(member.repoTarget, remote != "")
+		members = append(members, member)
+	}
+	// Validate every Member's compatibility before resolving any branch.
+	for i := range members {
+		member := &members[i]
+		repo := byName[member.Name]
 		if brief.Type == "ship" {
 			baseBranch, baseSelected := branchSelection(brief.Base, brief.BaseByRepo, repo.Name, "")
 			if baseSelected {
@@ -128,7 +138,6 @@ func (s *Service) planTaskMembers(ctx context.Context, db *store.DB, project sto
 		if landingRank[member.LandingMode] > landingRank[taskMode] {
 			taskMode = member.LandingMode
 		}
-		members = append(members, member)
 	}
 	return members, taskMode, nil
 }
@@ -173,7 +182,11 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 		rows := make([]store.TaskRepo, 0, len(members))
 		for _, member := range members {
 			worktree := filepath.Join(mount.Path, member.Path)
-			if _, err := gitOutput(ctx, worktree, "checkout", "-b", task.Branch, member.BaseRef); err != nil {
+			base, err := taskCheckoutBase(ctx, member.Root, task, member.Name, member.BaseRef)
+			if err != nil {
+				return mount, err
+			}
+			if _, err := gitOutput(ctx, worktree, "checkout", "-b", task.Branch, base); err != nil {
 				ref := "refs/heads/" + task.Branch
 				found, refErr := gitOutput(ctx, worktree, "for-each-ref", "--format=%(refname)", ref)
 				if refErr == nil && found != "" {

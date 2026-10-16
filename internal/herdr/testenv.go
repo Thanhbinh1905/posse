@@ -19,7 +19,7 @@ func IsolatedTestEnvironment(root string) []string {
 	values := make([]string, 0, len(os.Environ())+8)
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
-		if found && strings.HasPrefix(key, "HERDR_") {
+		if found && (strings.HasPrefix(key, "HERDR_") || key == "CLAUDECODE" || key == "CLAUDE_AGENT_ID" || key == "CODEX_CI" || key == "CODEX_THREAD_ID" || key == "PI_CODING_AGENT" || key == "PI_SESSION_ID" || key == "OPENCODE_SESSION_ID") {
 			continue
 		}
 		if found && (key == "HOME" || key == "POSSE_HOME" || key == "CLAUDE_CONFIG_DIR" || key == "CODEX_HOME" || key == "PI_CODING_AGENT_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_TEST_HERDR" || key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_NOSYSTEM" || key == "LANG" || key == "LC_ALL" || key == "TERM" || key == "SHELL") {

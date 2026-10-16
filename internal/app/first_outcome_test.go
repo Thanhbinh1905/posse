@@ -461,6 +461,8 @@ func TestFirstOutcomeDispatchOmitsProfileArguments(t *testing.T) {
 
 func TestFirstOutcomeImplicitRideRelaunchAndRecovery(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
+	// This fixture has no origin, so Ship delivery must be local.
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.landing_mode", "local", "--project", "shop")
 	f.fake.BeforeCall = func(method string) {
 		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
 			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})

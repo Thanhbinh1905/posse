@@ -54,7 +54,11 @@ func (s *Service) configShow(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return configError(err)
 		}
-		return ctx.Print(axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "effective", Value: cfg}, {Key: "help", Value: []any{"Run `posse config schema` to inspect every key"}}})
+		sources, err := cfg.EffectiveSources()
+		if err != nil {
+			return configError(err)
+		}
+		return ctx.Print(axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "effective", Value: cfg}, {Key: "sources", Value: sources}, {Key: "help", Value: []any{"Run `posse config schema` to inspect every key"}}})
 	}
 	path := config.ConfigPath(home, projectName)
 	values, _, err := config.ReadFile(path)
@@ -193,7 +197,8 @@ func (s *Service) configApprovalProject(ctx context.Context, db *store.DB, key, 
 	if !config.IsUserOnly(key) {
 		return 0, nil
 	}
-	role := s.configCallerRole(ctx, db)
+	actor := s.configCaller(ctx, db)
+	role := actor.role
 	if role == "user" {
 		return 0, nil
 	}
@@ -207,11 +212,7 @@ func (s *Service) configApprovalProject(ctx context.Context, db *store.DB, key, 
 		}
 		return project.ID, nil
 	}
-	project, err := db.ProjectByLeadPane(ctx, os.Getenv("HERDR_PANE_ID"))
-	if err != nil {
-		return 0, err
-	}
-	return project.ID, nil
+	return actor.projectID, nil
 }
 
 func (s *Service) validateConfigForEdit(home, projectName string) error {
@@ -227,20 +228,7 @@ func (s *Service) requireConfigCaller(ctx context.Context, db *store.DB) error {
 }
 
 func (s *Service) configCallerRole(ctx context.Context, db *store.DB) string {
-	if paneID := os.Getenv("HERDR_PANE_ID"); paneID != "" {
-		if _, err := db.TaskByPane(ctx, paneID); err == nil {
-			return "worker"
-		}
-		if _, err := db.ProjectByLeadPane(ctx, paneID); err == nil {
-			return "lead"
-		}
-	}
-	if dir, err := currentDir(); err == nil {
-		if _, err := taskForPath(ctx, db, dir); err == nil {
-			return "worker"
-		}
-	}
-	return "user"
+	return s.configCaller(ctx, db).role
 }
 
 func configSnapshot(path string) ([]byte, os.FileMode, bool, error) {

@@ -432,7 +432,11 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 			}
 			continue
 		}
-		if _, err := gitOutput(ctx, mount.Path, "checkout", "-b", task.Branch, task.BaseRef); err != nil {
+		base, err := taskCheckoutBase(ctx, project.Root, task, "", task.BaseRef)
+		if err != nil {
+			return mount, err
+		}
+		if _, err := gitOutput(ctx, mount.Path, "checkout", "-b", task.Branch, base); err != nil {
 			return mount, err
 		}
 		if err := db.UpdateTaskMountPath(ctx, task.ID, mount.ID, mount.Path); err != nil {

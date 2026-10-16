@@ -15,6 +15,7 @@ type Brief struct {
 	Title          string
 	DoneWhen       string
 	LandingMode    string
+	Review         string
 	Base           string
 	BaseByRepo     map[string]string
 	Target         string
@@ -99,7 +100,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "base", "target", "review_of", "autonomy", "repos", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review", "base", "target", "review_of", "autonomy", "repos", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -112,6 +113,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		Title:       unquote(values["title"]),
 		DoneWhen:    unquote(values["done_when"]),
 		LandingMode: unquote(values["landing_mode"]),
+		Review:      unquote(values["review"]),
 		ReviewOf:    unquote(values["review_of"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
 	}
@@ -212,6 +214,9 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	}
 	if brief.LandingMode != "" && !oneOf(brief.LandingMode, "local", "pr", "no-mistakes") {
 		return Brief{}, &BriefError{Field: "landing_mode", Reason: "must be local, pr or no-mistakes"}
+	}
+	if brief.Review != "" && !oneOf(brief.Review, "always", "on_risk", "never") {
+		return Brief{}, &BriefError{Field: "review", Reason: "must be always, on_risk or never"}
 	}
 	if brief.Type == "review" {
 		if !regexp.MustCompile(`^t[1-9][0-9]*$`).MatchString(brief.ReviewOf) {
@@ -440,9 +445,15 @@ func setAutonomy(result *briefAutonomy, key, value string) error {
 }
 
 func ValidateTightening(brief Brief, mode string, autonomy config.Autonomy) (string, config.Autonomy, error) {
+	return ResolveDelivery(brief, mode, autonomy, false)
+}
+
+// ResolveDelivery separates workflow preferences from grants. Consent permits
+// lighter delivery, never additional review-decision or merge authority.
+func ResolveDelivery(brief Brief, mode string, autonomy config.Autonomy, userChoice bool) (string, config.Autonomy, error) {
 	resultMode := mode
 	if brief.LandingMode != "" {
-		if landingRank(brief.LandingMode) < landingRank(mode) {
+		if !userChoice && landingRank(brief.LandingMode) < landingRank(mode) {
 			return "", config.Autonomy{}, &BriefError{Field: "landing_mode", Reason: "cannot loosen the Project Landing Mode"}
 		}
 		resultMode = brief.LandingMode
@@ -466,6 +477,17 @@ func ValidateTightening(brief Brief, mode string, autonomy config.Autonomy) (str
 		autonomy.Land = brief.AutonomyLand
 	}
 	return resultMode, autonomy, nil
+}
+
+func ResolveReview(requested, current string, userChoice bool) (string, error) {
+	if requested == "" {
+		return current, nil
+	}
+	rank := map[string]int{"never": 0, "on_risk": 1, "always": 2}
+	if !userChoice && rank[requested] < rank[current] {
+		return "", &BriefError{Field: "review", Reason: "cannot loosen the Project review policy without a scoped User choice"}
+	}
+	return requested, nil
 }
 
 func landingRank(value string) int {

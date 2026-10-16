@@ -10,7 +10,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestSelectedBranchRefFetchesAndValidatesOriginBranch(t *testing.T) {
+func TestSelectedBranchRefValidatesOriginBranchWithoutEffects(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "repo")
 	initRepo(t, root)
 	remote := filepath.Join(t.TempDir(), "origin.git")
@@ -28,8 +28,8 @@ func TestSelectedBranchRefFetchesAndValidatesOriginBranch(t *testing.T) {
 	if err != nil || ref != "refs/remotes/origin/staging" {
 		t.Fatalf("selected branch ref = %q, %v", ref, err)
 	}
-	if got := strings.TrimSpace(gitTest(t, root, "rev-parse", "--verify", ref)); got == "" {
-		t.Fatal("origin branch was not fetched into its remote-tracking ref")
+	if _, err := gitOutput(context.Background(), root, "rev-parse", "--verify", ref); err == nil {
+		t.Fatal("branch validation created a remote-tracking ref before admission")
 	}
 	if _, err := selectedBranchRef(context.Background(), root, "missing", "target"); err == nil || !strings.Contains(err.Error(), "does not exist on origin") {
 		t.Fatalf("missing origin branch error = %v", err)

@@ -40,9 +40,13 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		return axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse down` in a registered Project folder; `posse` lists them")
 	}
 	// A Lead pane whose agent has exited is the User's shell again.
-	callerPaneID := os.Getenv("HERDR_PANE_ID")
-	switch s.configCallerRole(ctx.Context, db) {
-	case "worker":
+	actor := s.configCaller(ctx.Context, db)
+	callerPaneID := actor.paneID
+	if callerPaneID == "" {
+		callerPaneID = os.Getenv("HERDR_PANE_ID")
+	}
+	switch actor.role {
+	case "worker", "agent":
 		return axi.Failure("user_only", "posse down can only be run by the User", false)
 	case "lead":
 		if s.recordedLeadIsLive(ctx.Context, callerPaneID) {
