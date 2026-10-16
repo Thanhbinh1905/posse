@@ -1,4 +1,4 @@
-# 21. Compatible dispatch choices and resource counts
+# 22. Compatible dispatch choices and resource counts
 
 New Rider dispatch may disable an agent kind with `kinds.<kind>.disabled = true`. This is a selection guard, not deletion: it does not block an existing Lead, invalidate stored Profiles, or change the frozen launch used by an admitted Task. Dispatch fails closed when an explicit Profile, configured rule/default or implicit Lead choice resolves to a disabled kind. It never substitutes another kind.
 

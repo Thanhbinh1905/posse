@@ -478,7 +478,7 @@ Configured but unmatched rules still require a Profile. A selected Profile whose
 
 The Task records the Profile and the rule used. Kind inheritance stores `implicit:<kind>` as the Profile reference and `implicit: lead kind` as the rule. Lead Profile inheritance stores the named Profile when configured and uses `implicit: lead profile` as the rule. These markers let historical readers and frozen relaunches retain their original launch even after the kind is disabled. This writes no config; explicit Profiles and Dispatch Rules retain precedence. `posse dispatch` and `posse ride` show the configured model and effort plus `model_known`, derived only when the launch arguments unambiguously select the configured model. An empty or ambiguous model remains unknown; Posse does not guess provider identity.
 
-`posse dispatch --brief <file> [--profile <name>]` prints the same resolution without spawning; if Profile selection is ambiguous, `profile_required` includes the slug and candidate Profiles in help. [ADR 0021](adr/0021-compatible-dispatch-and-capacity.md) records the compatibility and visibility decisions.
+`posse dispatch --brief <file> [--profile <name>]` prints the same resolution without spawning; if Profile selection is ambiguous, `profile_required` includes the slug and candidate Profiles in help. [ADR 0022](adr/0022-compatible-dispatch-and-capacity.md) records the compatibility and visibility decisions.
 
 ## 12. Remuda
 
