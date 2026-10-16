@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -46,9 +47,13 @@ func (s *Service) configCaller(ctx context.Context, db *store.DB) caller {
 		agent = agent || process.agent
 	}
 	var lead caller
+	var unboundPane string
 	for _, pane := range panes {
 		if pane == "" {
 			continue
+		}
+		if unboundPane == "" {
+			unboundPane = pane
 		}
 		if task, err := db.TaskByPane(ctx, pane); err == nil {
 			return caller{role: "worker", projectID: task.ProjectID}
@@ -65,7 +70,24 @@ func (s *Service) configCaller(ctx context.Context, db *store.DB) caller {
 	if lead.role != "" {
 		return lead
 	}
-	if agent || panes[0] != "" {
+	if agent {
+		return caller{role: "agent"}
+	}
+	if unboundPane != "" {
+		// A pane without a Posse binding is not proof of a User. A fresh
+		// Herdr observation can distinguish its plain shell from an agent;
+		// missing or unavailable evidence stays unbound.
+		if s.Herdr != nil {
+			probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			if snapshot, err := s.Herdr.Snapshot(probe); err == nil {
+				for _, pane := range snapshot.Panes {
+					if pane.PaneID == unboundPane && pane.Agent == "" && (pane.AgentStatus == "" || pane.AgentStatus == "unknown") {
+						return caller{role: "user"}
+					}
+				}
+			}
+		}
 		return caller{role: "agent"}
 	}
 	return caller{role: "user"}

@@ -81,6 +81,20 @@ func TestCallerRecognizesRegisteredNativeChildrenAndUnboundAgents(t *testing.T) 
 	if code != 1 || !strings.Contains(output, "user_only") {
 		t.Fatalf("unbound pane was treated as a User: %s", output)
 	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue.Panes = []herdr.Pane{{PaneID: "foreign:p1", Agent: "custom", AgentStatus: "idle"}}
+	service.Herdr = fake
+	// The immediate child has no markers, but its native parent still names
+	// an unbound pane. Fallback must not turn it into the User.
+	t.Setenv("HERDR_PANE_ID", "")
+	procRoot = fakeProc(t, repo, []string{"HERDR_PANE_ID=foreign:p1"})
+	if role := service.configCallerRole(ctx, db); role != "agent" {
+		t.Fatalf("unbound native child role=%s", role)
+	}
+	fake.SnapshotValue.Panes[0].Agent, fake.SnapshotValue.Panes[0].AgentStatus = "", "unknown"
+	if role := service.configCallerRole(ctx, db); role != "user" {
+		t.Fatalf("observed plain User shell role=%s", role)
+	}
 }
 
 func TestPermissionTemplateConsentCoversSetAndUnsetBeforeWriting(t *testing.T) {

@@ -255,6 +255,21 @@ func TestPermissionTemplatesRequireConsentThroughCLI(t *testing.T) {
 	if output, err := unbound.CombinedOutput(); err == nil || !strings.Contains(string(output), "user_only") {
 		t.Fatalf("unbound agent treated as human: %v %s", err, output)
 	}
+	client := herdr.NewWithEnv("herdr", f.env)
+	shell, err := createWorkspace(client, f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellEnv := setEnv(f.env, "HERDR_PANE_ID", shell.RootPane.PaneID)
+	runPosse(t, f.binary, f.repo, shellEnv, "config", "set", "kinds.claude.prepare", "claude-trust", "--project", "shop")
+	if _, err := client.Run(context.Background(), "pane", "report-agent", shell.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	native := exec.Command(f.binary, "config", "set", "kinds.claude.prepare", "claude-trust", "--project", "shop", "--user-approved", "claimed consent")
+	native.Env, native.Dir = shellEnv, f.repo
+	if output, err := native.CombinedOutput(); err == nil || !strings.Contains(string(output), "user_only") {
+		t.Fatalf("unbound native agent treated as human: %v %s", err, output)
+	}
 	if code, output := rideReviewIdentityTask(t, f, "Native actor", "author", ""); code != 0 {
 		t.Fatalf("native Rider: %d %s", code, output)
 	}
