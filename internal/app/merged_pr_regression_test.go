@@ -304,7 +304,9 @@ func TestWorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
 	t.Setenv("POSSE_TEST_GH_VIEW", state)
 	worker := filepath.Join(f.workspace, "worker")
 	gitTest(t, worker, "remote", "set-url", "origin", "https://github.com/acme/worker.git")
-	gitTest(t, worker, "config", "remote.origin.pushurl", filepath.Join(f.root, "remotes", "worker.git"))
+	remote := filepath.Join(f.root, "remotes", "worker.git")
+	gitTest(t, worker, "config", "remote.origin.pushurl", remote)
+	gitTest(t, worker, "config", "url.file://"+remote+".insteadOf", "https://github.com/acme/worker.git")
 	head := strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD"))
 	writeView := func(prState, mergeCommit string) {
 		view := map[string]any{"url": "https://github.com/acme/worker/pull/7", "state": prState, "headRefOid": head, "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "statusCheckRollup": []any{}}
