@@ -1089,9 +1089,11 @@ func (e *shellEnv) socket() (string, bool) {
 			}
 		}
 	}
+	// The guard models the external Herdr CLI, which does not read Posse's
+	// test-only socket override; Client.Run materializes it as HERDR_SOCKET_PATH.
 	env := []string{}
 	for name, value := range e.values {
-		if e.exported[name] {
+		if e.exported[name] && name != "POSSE_TEST_HERDR" && name != "POSSE_TEST_HERDR_SOCKET_PATH" {
 			env = append(env, name+"="+value)
 		}
 	}

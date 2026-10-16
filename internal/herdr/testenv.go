@@ -23,12 +23,12 @@ func IsolatedTestEnvironment(root string) []string {
 		if found && (strings.HasPrefix(key, "HERDR_") || key == "CLAUDECODE" || key == "CLAUDE_AGENT_ID" || key == "CODEX_CI" || key == "CODEX_THREAD_ID" || key == "PI_CODING_AGENT" || key == "PI_SESSION_ID" || key == "OPENCODE_SESSION_ID") {
 			continue
 		}
-		if found && (key == "HOME" || key == "POSSE_HOME" || key == "CLAUDE_CONFIG_DIR" || key == "CODEX_HOME" || key == "PI_CODING_AGENT_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_TEST_HERDR" || key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_NOSYSTEM" || key == "LANG" || key == "LC_ALL" || key == "TERM" || key == "SHELL") {
+		if found && (key == "HOME" || key == "POSSE_HOME" || key == "CLAUDE_CONFIG_DIR" || key == "CODEX_HOME" || key == "PI_CODING_AGENT_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_TEST_HERDR" || key == "POSSE_TEST_HERDR_SOCKET_PATH" || key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_NOSYSTEM" || key == "LANG" || key == "LC_ALL" || key == "TERM" || key == "SHELL") {
 			continue
 		}
 		values = append(values, entry)
 	}
-	return append(values,
+	env := append(values,
 		"HOME="+filepath.Join(root, "home"),
 		"XDG_CONFIG_HOME="+filepath.Join(root, "xdg"),
 		"POSSE_HOME="+filepath.Join(root, "posse"),
@@ -38,7 +38,6 @@ func IsolatedTestEnvironment(root string) []string {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"POSSE_TEST_HERDR=1",
-		"POSSE_TEST_HERDR_SOCKET_PATH="+IsolatedTestSocketPath(root),
 		"LANG=C.UTF-8",
 		"LC_ALL=C.UTF-8",
 		"TERM=xterm-256color",
@@ -46,6 +45,14 @@ func IsolatedTestEnvironment(root string) []string {
 		// (or no SHELL), its pseudo-terminal captures no sidebar frames.
 		"SHELL=/bin/bash",
 	)
+	defaultSocketPath := filepath.Join(root, "xdg", "herdr", "herdr.sock")
+	if absolute, err := filepath.Abs(defaultSocketPath); err == nil {
+		defaultSocketPath = absolute
+	}
+	if socket := IsolatedTestSocketPath(root); socket != filepath.Clean(defaultSocketPath) {
+		env = append(env, "POSSE_TEST_HERDR_SOCKET_PATH="+socket)
+	}
+	return env
 }
 
 //go:embed isolated_update_config.toml
@@ -76,7 +83,7 @@ func IsolatedTestSocketPath(root string) string {
 	}
 	root = filepath.Clean(root)
 	defaultPath := filepath.Join(root, "xdg", "herdr", "herdr.sock")
-	if len(defaultPath) < 90 {
+	if len(defaultPath) < 100 {
 		return defaultPath
 	}
 	digest := sha256.Sum256([]byte(root))
