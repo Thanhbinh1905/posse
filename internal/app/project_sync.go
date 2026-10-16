@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"golang.org/x/sys/unix"
 )
@@ -131,13 +133,13 @@ func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project st
 	return results, db.RecordCheckoutAttempt(ctx, project.ID, now.UnixMilli())
 }
 
-func (s *Service) syncRepository(ctx context.Context, db *store.DB, project store.Project, target repoTarget, now time.Time) (projectSyncResult, error) {
+func (s *Service) syncRepository(ctx context.Context, db *store.DB, project store.Project, target repoTarget, now time.Time) (result projectSyncResult, returnErr error) {
 	key := repositorySyncKey(project, target)
 	if !s.beginMaintenance(key) {
 		return projectSyncResult{Status: "skipped", Reason: "repository sync already running"}, nil
 	}
 	defer s.endMaintenance(key)
-	result := projectSyncResult{Status: "current"}
+	result = projectSyncResult{Status: "current"}
 	branchLabel := "default branch"
 	if target.DefaultBranch != project.DefaultBranch {
 		branchLabel = "target branch " + target.DefaultBranch
@@ -157,7 +159,61 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	}
 	defer lock.Close()
 	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
-	if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
+	manager := execution.NewManager(db)
+	if err := manager.EnsureMountLeases(ctx); err != nil {
+		return result, resourceLeaseError(err)
+	}
+	canonicalRoot, err := execution.CanonicalPath(target.Root)
+	if err != nil {
+		return result, err
+	}
+	commonDir, err := execution.RepositoryCommonDir(ctx, target.Root)
+	if err != nil {
+		return result, err
+	}
+	owner := "Posse sync " + project.Name
+	pathSource := fmt.Sprintf("sync:%d:path:%s", project.ID, canonicalRoot)
+	localRef := "refs/heads/" + target.DefaultBranch
+	remoteRef := "refs/remotes/origin/" + target.DefaultBranch
+	localSource := fmt.Sprintf("sync:%d:git:%s:%s", project.ID, commonDir, localRef)
+	remoteSource := fmt.Sprintf("sync:%d:git:%s:%s", project.ID, commonDir, remoteRef)
+	for _, item := range []struct{ source, resourceType, ref string }{
+		{pathSource, store.ResourcePath, ""},
+		{localSource, store.ResourceGitRef, localRef},
+		{remoteSource, store.ResourceGitRef, remoteRef},
+	} {
+		if err := reconcileStaleSyncLease(ctx, db, target.Root, owner, item.source, item.resourceType, item.ref); err != nil {
+			if reason, ok := resourceConflictReason(err); ok {
+				return projectSyncResult{Status: "skipped", Reason: reason}, nil
+			}
+			return result, err
+		}
+	}
+	leases := make([]store.ResourceLease, 0, 3)
+	defer func() {
+		if err := releaseResourceLeases(context.Background(), manager, leases); err != nil {
+			returnErr = errors.Join(returnErr, err)
+		}
+	}()
+	pathLease, err := manager.AcquirePath(ctx, target.Root, store.ResourceLeaseRequest{OwnerProjectID: project.ID, Owner: owner, SourceKey: pathSource})
+	if err != nil {
+		if reason, ok := resourceConflictReason(err); ok {
+			return projectSyncResult{Status: "skipped", Reason: reason}, nil
+		}
+		return result, err
+	}
+	leases = append(leases, pathLease)
+	for _, item := range []struct{ source, ref string }{{localSource, localRef}, {remoteSource, remoteRef}} {
+		lease, err := manager.AcquireGitRef(ctx, target.Root, item.ref, store.ResourceLeaseRequest{OwnerProjectID: project.ID, Owner: owner, SourceKey: item.source})
+		if err != nil {
+			if reason, ok := resourceConflictReason(err); ok {
+				return projectSyncResult{Status: "skipped", Reason: reason}, nil
+			}
+			return result, err
+		}
+		leases = append(leases, lease)
+	}
+	if _, err := gitFetch(ctx, target.Root, "--no-tags", "origin", "+"+target.DefaultBranch+":"+remoteRef); err != nil {
 		// A failed fetch says nothing about whether origin is ahead. Let local
 		// contention retry without adding to the persistent failure streak.
 		if store.IsBusy(err) || ctx.Err() != nil {
@@ -174,10 +230,10 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	if err := db.RecordRepoFetchSuccess(ctx, project.ID, target.Name, now.UnixMilli()); err != nil {
 		return result, err
 	}
-	upstreamRef := "refs/remotes/origin/" + target.DefaultBranch
+	upstreamRef := remoteRef
 	upstreamHead, err := gitOutput(ctx, target.Root, "rev-parse", upstreamRef)
 	if err != nil {
-		if _, fetchErr := gitFetch(ctx, target.Root, "origin", target.DefaultBranch+":"+upstreamRef); fetchErr != nil {
+		if _, fetchErr := gitFetch(ctx, target.Root, "--no-tags", "origin", "+"+target.DefaultBranch+":"+upstreamRef); fetchErr != nil {
 			if store.IsBusy(fetchErr) || ctx.Err() != nil {
 				return result, fetchErr
 			}
@@ -309,7 +365,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		return result, nil
 	}
 	if !defaultCheckedOut && localAhead == 0 {
-		if _, err := gitFetch(ctx, target.Root, "origin", target.DefaultBranch+":refs/heads/"+target.DefaultBranch); err == nil {
+		if _, err := gitFetch(ctx, target.Root, "--no-tags", "origin", target.DefaultBranch+":refs/heads/"+target.DefaultBranch); err == nil {
 			result.Status = "updated"
 			if err := db.ClearRootBehind(ctx, project.ID, target.Name, now.UnixMilli()); err != nil {
 				return result, err
@@ -486,4 +542,33 @@ func syncReason(result projectSyncResult) string {
 		return truncate(result.Err.Error(), 240)
 	}
 	return result.Reason
+}
+
+// reconcileStaleSyncLease is called only after this process acquired the
+// repository sync flock. It re-reads Git state before releasing the previous
+// sync's durable claim, so an expired process is never silently stolen.
+func reconcileStaleSyncLease(ctx context.Context, db *store.DB, repository, owner, source, resourceType, ref string) error {
+	lease, err := db.ResourceLeaseBySource(ctx, source)
+	if store.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if lease.Owner != owner {
+		return &store.ResourceLeaseConflict{Lease: lease}
+	}
+	if resourceType == store.ResourcePath {
+		if _, err := gitOutput(ctx, repository, "rev-parse", "--verify", "HEAD"); err != nil {
+			return fmt.Errorf("reconcile interrupted sync checkout custody: %w", err)
+		}
+		if _, err := gitStatusOutput(ctx, repository, "--porcelain"); err != nil {
+			return fmt.Errorf("reconcile interrupted sync worktree custody: %w", err)
+		}
+	} else {
+		if _, err := gitOutput(ctx, repository, "for-each-ref", "--format=%(refname)", ref); err != nil {
+			return fmt.Errorf("reconcile interrupted sync ref custody for %s: %w", ref, err)
+		}
+	}
+	return db.ReconcileResourceLease(ctx, lease.ID, lease.CustodyToken, "reacquired the repository sync flock and re-read the Git checkout/ref")
 }

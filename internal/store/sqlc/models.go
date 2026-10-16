@@ -294,6 +294,25 @@ type ReportReview struct {
 	RecordedAt     int64
 }
 
+type ResourceLease struct {
+	ID             int64
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	OwnerTaskID    sql.NullInt64
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	MountID        sql.NullInt64
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
 type ReviewTarget struct {
 	TaskID     int64
 	Repository string

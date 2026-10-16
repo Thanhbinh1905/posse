@@ -18,7 +18,8 @@ const (
 	noticeDeliveryMigrationVersion        = 34
 	legacyNoticeDeliveryMigrationChecksum = "b2cede33cbe9a5103353f2ed9d1347d0de660d07f3bd13a7d43b4b2c2620705d"
 	legacyReportBundleMigrationVersion    = 45
-	reportBundleMigrationVersion          = 46
+	publishedReportBundleMigrationVersion = 46
+	reportBundleMigrationVersion          = 47
 	legacyReportBundleMigrationChecksum   = "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
 )
 
@@ -229,8 +230,9 @@ func (db *DB) normalizeLegacyProjectUUIDMigration(ctx context.Context) error {
 	return tx.Commit()
 }
 
-// normalizeLegacyReportBundleMigration moves the published Report migration
-// from version 45 to 46 so main can use version 45 for Review verdicts.
+// normalizeLegacyReportBundleMigration moves a published Report migration from
+// version 45 or 46 to version 47. Main now uses 45 for Review verdicts and 46
+// for resource leases.
 func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 	var hasGoose int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='goose_db_version')`).Scan(&hasGoose); err != nil {
@@ -239,14 +241,7 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 	if hasGoose == 0 {
 		return nil
 	}
-	var legacyApplied int
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, legacyReportBundleMigrationVersion).Scan(&legacyApplied); err != nil {
-		return err
-	}
-	if legacyApplied == 0 {
-		return nil
-	}
-	var reportKind, reportDigest, reportManifest, reportReviews, reportAcceptances, reviewTargets, reviewVerdicts int
+	var reportKind, reportDigest, reportManifest, reportReviews, reportAcceptances, reviewTargets, reviewVerdicts, resourceLeases int
 	for _, check := range []struct {
 		query string
 		value *int
@@ -258,38 +253,52 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='report_acceptances')`, &reportAcceptances},
 		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_targets')`, &reviewTargets},
 		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_verdicts')`, &reviewVerdicts},
+		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='resource_leases')`, &resourceLeases},
 	} {
 		if err := db.QueryRowContext(ctx, check.query).Scan(check.value); err != nil {
 			return err
 		}
 	}
-	if reportKind == 0 || reportDigest == 0 || reportManifest == 0 || reportReviews == 0 || reportAcceptances == 0 || reviewTargets != 0 || reviewVerdicts != 0 {
+	if reportKind == 0 || reportDigest == 0 || reportManifest == 0 || reportReviews == 0 || reportAcceptances == 0 {
 		return nil
 	}
 	var hasChecksums int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='posse_migration_checksums')`).Scan(&hasChecksums); err != nil {
 		return err
 	}
+	var sourceVersion int64
 	checksumPresent := false
-	if hasChecksums != 0 {
-		var recorded sql.NullString
-		err := db.QueryRowContext(ctx, `SELECT sha256 FROM posse_migration_checksums WHERE version=?`, legacyReportBundleMigrationVersion).Scan(&recorded)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	for _, candidate := range []int64{legacyReportBundleMigrationVersion, publishedReportBundleMigrationVersion} {
+		var applied int
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, candidate).Scan(&applied); err != nil {
 			return err
 		}
-		if recorded.Valid {
-			if recorded.String != legacyReportBundleMigrationChecksum {
-				return nil
+		if applied == 0 || candidate == legacyReportBundleMigrationVersion && (reviewTargets != 0 || reviewVerdicts != 0) {
+			continue
+		}
+		candidateChecksumPresent := false
+		if hasChecksums != 0 {
+			var recorded sql.NullString
+			err := db.QueryRowContext(ctx, `SELECT sha256 FROM posse_migration_checksums WHERE version=?`, candidate).Scan(&recorded)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
 			}
-			checksumPresent = true
+			if recorded.Valid {
+				if recorded.String != legacyReportBundleMigrationChecksum {
+					continue
+				}
+				candidateChecksumPresent = true
+			}
 		}
-		var alreadyChecked int
-		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM posse_migration_checksums WHERE version=?)`, reportBundleMigrationVersion).Scan(&alreadyChecked); err != nil {
-			return err
+		if candidate == publishedReportBundleMigrationVersion && resourceLeases != 0 && !candidateChecksumPresent {
+			continue
 		}
-		if alreadyChecked != 0 {
-			return nil
-		}
+		sourceVersion = candidate
+		checksumPresent = candidateChecksumPresent
+		break
+	}
+	if sourceVersion == 0 {
+		return nil
 	}
 	sources, err := embeddedMigrations()
 	if err != nil {
@@ -306,14 +315,22 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 		return fmt.Errorf("report bundle migration version %d is missing or differs from its published version", reportBundleMigrationVersion)
 	}
 	var alreadyMoved int
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, reportBundleMigrationVersion).Scan(&alreadyMoved); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=?)`, reportBundleMigrationVersion).Scan(&alreadyMoved); err != nil {
 		return err
 	}
 	if alreadyMoved != 0 {
 		return nil
 	}
+	if hasChecksums != 0 {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM posse_migration_checksums WHERE version=?)`, reportBundleMigrationVersion).Scan(&alreadyMoved); err != nil {
+			return err
+		}
+		if alreadyMoved != 0 {
+			return nil
+		}
+	}
 	if MigrationGate != nil {
-		if err := MigrationGate(db.Path, []int64{45}, os.Getenv(ForceMigrationEnv) == "1"); err != nil {
+		if err := MigrationGate(db.Path, []int64{sourceVersion}, os.Getenv(ForceMigrationEnv) == "1"); err != nil {
 			return err
 		}
 	}
@@ -325,7 +342,7 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS posse_migration_checksums (version INTEGER PRIMARY KEY, sha256 TEXT NOT NULL)`); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE goose_db_version SET version_id=? WHERE version_id=? AND is_applied=1`, reportBundleMigrationVersion, legacyReportBundleMigrationVersion)
+	result, err := tx.ExecContext(ctx, `UPDATE goose_db_version SET version_id=? WHERE version_id=? AND is_applied=1`, reportBundleMigrationVersion, sourceVersion)
 	if err != nil {
 		return err
 	}
@@ -337,7 +354,7 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 		return fmt.Errorf("normalize legacy Report bundle migration: updated %d applied Goose rows, want 1", changed)
 	}
 	if checksumPresent {
-		if _, err := tx.ExecContext(ctx, `UPDATE posse_migration_checksums SET version=?,sha256=? WHERE version=?`, reportBundleMigrationVersion, currentChecksum, legacyReportBundleMigrationVersion); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE posse_migration_checksums SET version=?,sha256=? WHERE version=?`, reportBundleMigrationVersion, currentChecksum, sourceVersion); err != nil {
 			return err
 		}
 	} else if _, err := tx.ExecContext(ctx, `INSERT INTO posse_migration_checksums(version,sha256) VALUES(?,?)`, reportBundleMigrationVersion, currentChecksum); err != nil {

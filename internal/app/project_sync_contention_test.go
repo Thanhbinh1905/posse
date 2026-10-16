@@ -121,6 +121,82 @@ func TestRepositorySyncSkipsAnOverlappingSameTarget(t *testing.T) {
 	}
 }
 
+func TestRemudaDisplaysResourceScopeAndOwner(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	other, err := fixture.db.CreateProject(context.Background(), "other", fixture.root, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
+		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: other.ID,
+		Owner: "local root writer", SourceKey: "test-local-root-writer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fixture.db.ReleaseResourceLease(context.Background(), lease.ID, lease.CustodyToken) }()
+	code, output, errOutput := fixture.run("remuda")
+	if code != 0 || !strings.Contains(output, fixture.repo) || !strings.Contains(output, "local root writer") {
+		t.Fatalf("Remuda resource status = %d, %s, %s; want scope and owner", code, output, errOutput)
+	}
+}
+
+func TestRemudaReconcilesAnExplicitlyApprovedDeadResourceOwner(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	lease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
+		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: fixture.project.ID,
+		Owner: "interrupted root writer", SourceKey: "interrupted-root-writer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE resource_leases SET owner_pid=99999999,owner_boot_id='old-boot',owner_start_time='old-start' WHERE id=?`, lease.ID); err != nil {
+		t.Fatal(err)
+	}
+	code, output, errOutput := fixture.run("remuda", "reconcile-resource", fmt.Sprint(lease.ID), "--user-approved", "verified the editor stopped and inspected the root")
+	if code != 0 || !strings.Contains(output, "reconciled_resource_lease") {
+		t.Fatalf("approved dead-owner reconciliation = %d, %s, %s", code, output, errOutput)
+	}
+	if _, err := fixture.db.ResourceLeaseByID(context.Background(), lease.ID); !store.IsNotFound(err) {
+		t.Fatalf("reconciled lease still exists: err=%v", err)
+	}
+}
+
+func TestRemudaRefusesReconcileWhileResourceOwnerIsAlive(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	lease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
+		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: fixture.project.ID,
+		Owner: "live root writer", SourceKey: "live-root-writer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, output, errOutput := fixture.run("remuda", "reconcile-resource", fmt.Sprint(lease.ID), "--user-approved", "inspected the root")
+	if code == 0 || !strings.Contains(output+errOutput, "resource_owner_live") {
+		t.Fatalf("live-owner reconciliation = %d, %s, %s; want refusal", code, output, errOutput)
+	}
+	if _, err := fixture.db.ResourceLeaseByID(context.Background(), lease.ID); err != nil {
+		t.Fatalf("live owner's lease was removed: %v", err)
+	}
+}
+
+func TestRepositorySyncSkipsWhenLocalRootWriterOwnsThePath(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	lease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
+		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: fixture.project.ID,
+		Owner: "local root writer", SourceKey: "test-local-root-writer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fixture.db.ReleaseResourceLease(context.Background(), lease.ID, lease.CustodyToken) }()
+	target := repoTarget{Root: fixture.repo, DefaultBranch: fixture.project.DefaultBranch}
+	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now())
+	if err != nil || result.Status != "skipped" || !strings.Contains(result.Reason, "local root writer") {
+		t.Fatalf("sync with an overlapping root writer = %+v, %v; want a named lease refusal", result, err)
+	}
+}
+
 func TestRepositorySyncSkipsAnInterprocessOverlap(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
 	owner, err := acquireRepositorySyncLock(context.Background(), fixture.repo)

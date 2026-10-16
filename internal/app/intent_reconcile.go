@@ -223,17 +223,23 @@ func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project s
 }
 
 func (s *Service) recoverLandIntent(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent) error {
-	if task.State == store.StateTornDown || task.State == store.StateLanded {
+	finish := func(evidence string) error {
+		if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, evidence); err != nil {
+			return err
+		}
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+	}
+	if task.State == store.StateTornDown || task.State == store.StateLanded {
+		return finish("verified Task is already terminal")
 	}
 	if task.State == store.StateDone {
-		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+		return finish("verified Task is done and no local merge is pending")
 	}
 	if task.State != store.StateLanding {
-		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+		return finish("verified Task is not in local landing state")
 	}
 	if task.LandingMode == "pr" || task.LandingMode == "no-mistakes" {
-		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+		return finish("verified remote landing has no local Git ref effect")
 	}
 	merged := false
 	if task.GatedSHA != "" {
@@ -248,7 +254,7 @@ func (s *Service) recoverLandIntent(ctx context.Context, db *store.DB, project s
 		if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
 			return err
 		}
-		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+		return finish("re-read target ref and confirmed the interrupted local merge did not land")
 	}
 	landedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, task))
 	if err != nil {
@@ -262,7 +268,7 @@ func (s *Service) recoverLandIntent(ctx context.Context, db *store.DB, project s
 	}
 	task.State = store.StateLanded
 	task.LandedRef = landedRef
-	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {
+	if err := finish("re-read target ref and recorded the interrupted local merge as landed"); err != nil {
 		return err
 	}
 	if shouldAutoUnsaddleLanded(cfg) {

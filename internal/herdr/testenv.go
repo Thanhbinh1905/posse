@@ -1,6 +1,7 @@
 package herdr
 
 import (
+	"crypto/sha256"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -37,6 +38,7 @@ func IsolatedTestEnvironment(root string) []string {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"POSSE_TEST_HERDR=1",
+		"POSSE_TEST_HERDR_SOCKET_PATH="+IsolatedTestSocketPath(root),
 		"LANG=C.UTF-8",
 		"LC_ALL=C.UTF-8",
 		"TERM=xterm-256color",
@@ -64,6 +66,25 @@ func WriteIsolatedConfigWithShell(root, shell string) (string, error) {
 		return "", err
 	}
 	return configPath, nil
+}
+
+// IsolatedTestSocketPath keeps fixture sockets below a conservative Unix
+// domain socket path limit, using a fixture-specific sibling when needed.
+func IsolatedTestSocketPath(root string) string {
+	if absolute, err := filepath.Abs(root); err == nil {
+		root = absolute
+	}
+	root = filepath.Clean(root)
+	defaultPath := filepath.Join(root, "xdg", "herdr", "herdr.sock")
+	if len(defaultPath) < 90 {
+		return defaultPath
+	}
+	digest := sha256.Sum256([]byte(root))
+	return filepath.Join(filepath.Dir(root), fmt.Sprintf("h%x", digest[:8]), "herdr.sock")
+}
+
+func IsolatedTestSocketDir(root string) string {
+	return filepath.Dir(IsolatedTestSocketPath(root))
 }
 
 func ValidateIsolatedEnvironment(values []string) (string, error) {
@@ -110,6 +131,33 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 	for key := range env {
 		if strings.HasPrefix(key, "HERDR_") {
 			return "", &Error{Code: "unsafe_test_environment", Message: fmt.Sprintf("isolated Herdr environment retained %s", key)}
+		}
+	}
+	if socket := env["POSSE_TEST_HERDR_SOCKET_PATH"]; socket != "" {
+		if socket != IsolatedTestSocketPath(root) || len(socket) >= 108 {
+			return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr socket path is not the expected short fixture socket"}
+		}
+		socketDir := filepath.Dir(socket)
+		if socketDir == filepath.Join(root, "xdg", "herdr") {
+			socketDirResolved, err := filepath.EvalSymlinks(socketDir)
+			if err != nil || socketDirResolved != filepath.Join(resolvedRoot, "xdg", "herdr") {
+				return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr socket must stay inside its fixture", Cause: err}
+			}
+		} else {
+			socketParent, err := filepath.EvalSymlinks(filepath.Dir(socketDir))
+			if err != nil || socketParent != filepath.Dir(resolvedRoot) {
+				return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr socket directory must stay beside its fixture", Cause: err}
+			}
+			if info, err := os.Lstat(socketDir); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0) {
+				return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr socket directory is not a private directory"}
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return "", &Error{Code: "unsafe_test_environment", Message: "could not inspect isolated Herdr socket directory", Cause: err}
+			}
+		}
+		if info, err := os.Lstat(socket); err == nil && (info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0) {
+			return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr socket path is occupied by a non-socket"}
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", &Error{Code: "unsafe_test_environment", Message: "could not inspect isolated Herdr socket path", Cause: err}
 		}
 	}
 	if !inside(root, env["HOME"]) || !inside(root, env["XDG_CONFIG_HOME"]) || !inside(root, env["POSSE_HOME"]) || !inside(root, env["CLAUDE_CONFIG_DIR"]) || !inside(root, env["CODEX_HOME"]) || !inside(root, env["PI_CODING_AGENT_DIR"]) {

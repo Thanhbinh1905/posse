@@ -88,6 +88,38 @@ func TestClientMapsHerdrErrors(t *testing.T) {
 	}
 }
 
+func TestIsolatedSocketPathStaysShortForLongTaskScratchFixture(t *testing.T) {
+	parent := os.TempDir()
+	t.Setenv("TMPDIR", parent)
+	root := filepath.Join(parent, TestRootName()+strings.Repeat("r", 80))
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	if _, err := WriteIsolatedConfig(root); err != nil {
+		t.Fatal(err)
+	}
+	env := IsolatedTestEnvironment(root)
+	socket := environmentMap(env)["POSSE_TEST_HERDR_SOCKET_PATH"]
+	if defaultPath := filepath.Join(root, "xdg", "herdr", "herdr.sock"); len(defaultPath) < 108 {
+		t.Fatalf("fixture did not reproduce the Unix socket path limit: %d bytes", len(defaultPath))
+	}
+	if len(socket) >= 108 || filepath.Dir(filepath.Dir(socket)) != parent {
+		t.Fatalf("isolated socket path = %q (%d bytes), want a short directory beside %q", socket, len(socket), parent)
+	}
+	if _, err := ValidateIsolatedEnvironment(env); err != nil {
+		t.Fatalf("validate isolated environment with a short socket path: %v", err)
+	}
+	client := NewWithEnv("herdr", env)
+	if got := client.socketPath(); got != socket {
+		t.Fatalf("client socket path = %q, want %q", got, socket)
+	}
+	commandEnv := environmentMap(client.commandEnvironment())
+	if commandEnv["HERDR_SOCKET_PATH"] != socket {
+		t.Fatalf("Herdr command socket path = %q, want %q", commandEnv["HERDR_SOCKET_PATH"], socket)
+	}
+}
+
 func TestProtocolCompatibilityIsCheckedAgainstStatus(t *testing.T) {
 	fake := NewFake()
 	fake.Server = Status{Running: true, Protocol: MinimumProtocol - 1, Compatible: false}
@@ -141,6 +173,10 @@ func TestIsolatedTestEnvironmentRedirectsAllWritableState(t *testing.T) {
 	unsafe := append(append([]string(nil), env...), "HERDR_SOCKET_PATH=/home/user/live.sock")
 	if _, err := ValidateIsolatedEnvironment(unsafe); err == nil {
 		t.Fatal("accepted inherited live socket override")
+	}
+	unsafe = append(append([]string(nil), env...), "POSSE_TEST_HERDR_SOCKET_PATH=/home/user/live.sock")
+	if _, err := ValidateIsolatedEnvironment(unsafe); err == nil {
+		t.Fatal("accepted an isolated socket override outside the fixture")
 	}
 }
 
