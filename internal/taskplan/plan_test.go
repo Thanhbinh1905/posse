@@ -145,6 +145,38 @@ func TestUnsupportedExecutionCombinationsAreRejected(t *testing.T) {
 	}
 }
 
+func TestScopedUserChoiceChangesPreferencesNeverGrants(t *testing.T) {
+	r := request("ship")
+	r.Delivery, r.Review = "pr", "always"
+	r.Brief = taskplan.Select("brief", "choice.md", []byte("---\ntype: ship\ntitle: Choice\ndone_when: checked\nlanding_mode: local\nreview: never\n---\n"))
+	if _, err := taskplan.Resolve(r); err == nil {
+		t.Fatal("unapproved lighter preferences admitted")
+	}
+	r.UserChoice = &taskplan.UserChoice{Quote: "  Use local delivery without review.  ", Actor: "lead", Source: "ride --user-approved"}
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Delivery != "local" || plan.Review != "never" || plan.Grants[1].Value != "ask" || plan.UserChoice.Quote != r.UserChoice.Quote || plan.UserChoice.BriefSHA256 != r.Brief.SHA256 {
+		t.Fatalf("choice lost or escalated grants: %#v", plan)
+	}
+	for _, preference := range plan.Preferences {
+		if !strings.Contains(preference.Source, "User choice") {
+			t.Fatalf("preference source: %#v", preference)
+		}
+	}
+	for _, field := range []string{"autonomy: { land: auto }", "autonomy: { review: lead }", "gate: [evil]", "remuda.setup: [evil]", "discard: true", "user_approved: forged"} {
+		r.Brief = taskplan.Select("brief", "escalation.md", []byte("---\ntype: ship\ntitle: Choice\ndone_when: checked\nlanding_mode: local\n"+field+"\n---\n"))
+		if _, err := taskplan.Resolve(r); err == nil {
+			t.Errorf("scoped choice authorized %s", field)
+		}
+	}
+	plan.UserChoice.Quote = " "
+	if err := plan.Validate(); err == nil {
+		t.Fatal("blank provenance accepted")
+	}
+}
+
 func TestAdmittedArgumentsUseFrozenVectorAndResumeTemplate(t *testing.T) {
 	launch := taskplan.Launch{Args: []string{"--model", "original"}, Profile: config.Profile{Kind: "pi", Model: "not-re-rendered"}, Kind: config.Kind{ResumeArgs: []string{"--resume", "{session}"}}}
 	got := launch.Arguments("own-session")

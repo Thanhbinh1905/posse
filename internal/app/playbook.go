@@ -384,11 +384,7 @@ func (s *Service) preferenceApprovalProject(ctx context.Context, db *store.DB, p
 		if projectName != "" {
 			return project.ID, nil
 		}
-		leadProject, err := db.ProjectByLeadPane(ctx, os.Getenv("HERDR_PANE_ID"))
-		if err != nil {
-			return 0, err
-		}
-		return leadProject.ID, nil
+		return s.configCaller(ctx, db).projectID, nil
 	default:
 		return 0, axi.Failure("user_only", "only the User can write preferences", false)
 	}

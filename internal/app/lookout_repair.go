@@ -13,11 +13,12 @@ import (
 )
 
 func (s *Service) repairLookout(ctx *axi.Context, db *store.DB, home string, project store.Project) error {
-	switch s.configCallerRole(ctx.Context, db) {
-	case "worker":
+	actor := s.configCaller(ctx.Context, db)
+	switch actor.role {
+	case "worker", "agent":
 		return axi.Failure("user_only", "only the User can repair a Project Lookout", false)
 	case "lead":
-		if s.recordedLeadIsLive(ctx.Context, os.Getenv("HERDR_PANE_ID")) {
+		if s.recordedLeadIsLive(ctx.Context, actor.paneID) {
 			return axi.Failure("user_only", "only the User can repair a Project Lookout", false, "Run `posse lookout --repair` from the Project folder outside the live Lead pane")
 		}
 	}

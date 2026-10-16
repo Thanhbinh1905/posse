@@ -79,13 +79,9 @@ func selectedBranchRef(ctx context.Context, root, branch, field string) (string,
 		if !found {
 			return "", axi.Failure("brief_invalid", fmt.Sprintf("%s branch %q does not exist on origin", field, branch), false, "Push the branch to origin or choose an existing branch")
 		}
-		remoteRef := "refs/remotes/origin/" + branch
-		if _, err := gitOutput(ctx, root, "rev-parse", "--verify", remoteRef+"^{commit}"); err != nil {
-			if _, fetchErr := gitFetch(ctx, root, "origin", ref+":"+remoteRef); fetchErr != nil {
-				return "", axi.Failure("brief_invalid", "could not fetch "+field+" branch "+branch+" from origin", true, fetchErr.Error())
-			}
-		}
-		return remoteRef, nil
+		// Admission is read-only. Mount acquisition fetches a selected base
+		// only after all choices have been admitted.
+		return "refs/remotes/origin/" + branch, nil
 	}
 	localRef := "refs/heads/" + branch
 	if _, err := gitOutput(ctx, root, "rev-parse", "--verify", localRef+"^{commit}"); err != nil {

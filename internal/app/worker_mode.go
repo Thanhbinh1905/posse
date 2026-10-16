@@ -87,8 +87,12 @@ func (s *Service) workerCaller(ctx context.Context, home string) bool {
 		return false
 	}
 	defer db.Close()
-	if s.herdrContext != nil && s.herdrContext() {
-		if paneID := os.Getenv("HERDR_PANE_ID"); paneID != "" {
+	panes := []string{os.Getenv("HERDR_PANE_ID")}
+	for _, process := range ancestors {
+		panes = append(panes, process.env["HERDR_PANE_ID"])
+	}
+	for _, paneID := range panes {
+		if paneID != "" {
 			if _, err := db.TaskByPane(ctx, paneID); err == nil {
 				return true
 			}
@@ -143,9 +147,10 @@ func insideAny(path string, roots []string) bool {
 var procRoot = "/proc"
 
 type ancestorProcess struct {
-	pid int
-	cwd string
-	env map[string]string
+	pid   int
+	cwd   string
+	env   map[string]string
+	agent bool
 }
 
 // processAncestors returns the parent chain of pid, nearest first, with each
@@ -165,9 +170,21 @@ func processAncestors(root string, pid int) []ancestorProcess {
 		}
 		if environ, err := os.ReadFile(filepath.Join(directory, "environ")); err == nil {
 			for _, entry := range strings.Split(string(environ), "\x00") {
-				if name, value, ok := strings.Cut(entry, "="); ok && (name == workerHomeEnv || name == "HERDR_PANE_ID") {
+				if name, value, ok := strings.Cut(entry, "="); ok && (name == workerHomeEnv || name == "HERDR_PANE_ID" || name == "HOME" || agentEnvironmentKey(name)) {
 					process.env[name] = value
 				}
+			}
+		}
+		if executable, err := os.Readlink(filepath.Join(directory, "exe")); err == nil {
+			process.agent = knownAgentProcess(executable)
+		}
+		if cmdline, err := os.ReadFile(filepath.Join(directory, "cmdline")); err == nil {
+			argv := strings.Split(string(cmdline), "\x00")
+			for i, arg := range argv {
+				if i > 1 {
+					break
+				}
+				process.agent = process.agent || knownAgentProcess(arg)
 			}
 		}
 		ancestors = append(ancestors, process)

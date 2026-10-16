@@ -31,7 +31,7 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	if err := os.WriteFile(fakeAgent, []byte(fakeBusyHarness), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.kind", "pi"); !strings.Contains(output, "pi") {
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.kind", "pi"); !strings.Contains(output, "pi") {
 		t.Fatalf("configure isolated Pi Profile: %s", output)
 	}
 	brief := filepath.Join(fixture.root, "busy-pi.md")
@@ -190,7 +190,7 @@ func TestExpiredUncertainSubmissionDoesNotBlockFreshDeliveryE2E(t *testing.T) {
 	if err := os.WriteFile(fakeAgent, []byte(fakeBusyHarness), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.kind", "pi")
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.kind", "pi")
 	brief := filepath.Join(fixture.root, "uncertain.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Expired uncertain delivery\ndone_when: fresh messages are accepted\n---\nWait for a follow-up.\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -288,7 +288,7 @@ func TestUnsendDoesNotDeliverQueuedMessageE2E(t *testing.T) {
 	if err := os.WriteFile(fakeAgent, []byte(fakeBusyHarness), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.kind", "pi"); !strings.Contains(output, "pi") {
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.kind", "pi"); !strings.Contains(output, "pi") {
 		t.Fatalf("configure isolated Pi Profile: %s", output)
 	}
 	brief := filepath.Join(fixture.root, "unsend.md")
@@ -345,10 +345,14 @@ func TestBuiltInInterruptKeysVerifyStoppedRiderForEachKindE2E(t *testing.T) {
 		if err := os.WriteFile(fakeAgent, []byte(fakeBusyHarness), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.kind", kind)
+		runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.kind", kind)
 		seq := i + 1
 		label := "posse:shop:t" + strconv.Itoa(seq)
-		rider, err := createTab(client, fixture.project.HerdrWorkspaceID, fixture.repo, label)
+		riderRoot := filepath.Join(fixture.root, "rider-"+kind)
+		if output, err := gitCommand(fixture.env, fixture.repo, "worktree", "add", "-b", "posse/interrupt-"+kind, riderRoot, "main"); err != nil {
+			t.Fatalf("create isolated %s Rider worktree: %v %s", kind, err, output)
+		}
+		rider, err := createTab(client, fixture.project.HerdrWorkspaceID, riderRoot, label)
 		if err != nil {
 			t.Fatalf("create isolated %s Rider pane: %v", kind, err)
 		}
@@ -358,7 +362,7 @@ func TestBuiltInInterruptKeysVerifyStoppedRiderForEachKindE2E(t *testing.T) {
 		taskID, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{
 			Seq: seq, Type: "ship", Title: "Interrupt " + kind, ShortName: "interrupt-" + kind,
 			Profile: "deep", DispatchRule: "dispatch.default", LandingMode: "pr",
-			Branch: "posse/interrupt-" + kind, BaseRef: "main", WorktreePath: fixture.repo,
+			Branch: "posse/interrupt-" + kind, BaseRef: "main", WorktreePath: riderRoot,
 			HerdrWorkspaceID: fixture.project.HerdrWorkspaceID, PaneID: rider.RootPane.PaneID, PaneLabel: label,
 		})
 		if err != nil {

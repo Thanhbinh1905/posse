@@ -96,7 +96,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) spawn(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-leftover": {}})
+	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-leftover": {}, "user-approved": {}})
 	if err != nil {
 		return err
 	}
@@ -157,14 +157,31 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return profileError(err)
 	}
+	var choice *taskplan.UserChoice
+	if quote, supplied := parsed.Flags["user-approved"]; supplied {
+		if strings.TrimSpace(quote) == "" {
+			return axi.Failure("user_only", "a scoped User choice requires a non-blank quote", false)
+		}
+		role := s.configCallerRole(ctx.Context, db)
+		if role != "lead" && role != "user" {
+			return axi.Failure("user_only", "only the User or registered Lead may record a Task preference choice", false)
+		}
+		choice = &taskplan.UserChoice{Quote: quote, Actor: role, Source: "ride --user-approved"}
+	}
+	if _, err := dispatch.ResolveReview(brief.Review, cfg.Defaults.Review, choice != nil); err != nil {
+		return briefError(err)
+	}
 	tightening := brief
 	if project.IsWorkspace() {
 		// Workspace members tighten one by one in planTaskMembers.
 		tightening.LandingMode = ""
 	}
-	mode, autonomy, err := dispatch.ValidateTightening(tightening, cfg.Defaults.LandingMode, cfg.Autonomy)
+	mode, autonomy, err := dispatch.ResolveDelivery(tightening, cfg.Defaults.LandingMode, cfg.Autonomy, choice != nil)
 	if err != nil {
 		return briefError(err)
+	}
+	if !project.IsWorkspace() && brief.Type == "ship" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
+		return axi.Failure("brief_invalid", "a repository without origin can only Land locally", false)
 	}
 	if mode == "no-mistakes" && !project.IsWorkspace() {
 		if err := ensureNoMistakesInitialized(ctx.Context, project.Root); err != nil {
@@ -217,7 +234,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		reviewLaunchIdentity.LaunchNumber = 1
 		reviewIdentityDetails = reviewIdentityResult(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity)
 	}
-	members, workspaceMode, err := s.planTaskMembers(ctx.Context, db, project, cfg, brief, reviewedTask)
+	members, workspaceMode, err := s.planTaskMembersWithChoice(ctx.Context, db, project, cfg, brief, reviewedTask, choice != nil)
 	if err != nil {
 		return err
 	}
@@ -343,9 +360,14 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
 		BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets,
 	}
-	plan, err := resolveTaskPlan(home, project, cfg, task, resolution, parsed.Flags["brief"], briefData, members)
+	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, parsed.Flags["brief"], briefData, members, choice)
 	if err != nil {
 		return admittedPlanFailure(err)
+	}
+	if plan.Execution.BaseCommit != "" {
+		// All later diff, proof and teardown checks use the admitted commit,
+		// not a mutable feature/release branch. The plan retains its name.
+		task.BaseRef = plan.Execution.BaseCommit
 	}
 	task.PlanJSON, err = plan.Encode()
 	if err != nil {
@@ -353,7 +375,10 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	}
 	// Admission must finish before preparation can recover other Riders or
 	// allocate this Task's scratch, Mount, branch or pane.
-	if _, err := s.prepareProjectForTask(ctx.Context, db, project); err != nil {
+	if err := retryBusy(ctx.Context, admissionPreparationAttempts, admissionPreparationDelay, func() error {
+		_, err := s.prepareProjectForTask(ctx.Context, db, project)
+		return err
+	}); err != nil {
 		return err
 	}
 	crashIntentAt("ride", "before", "task.create")
@@ -2566,4 +2591,32 @@ func defaultValue(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+const (
+	admissionPreparationAttempts = 4
+	admissionPreparationDelay    = 150 * time.Millisecond
+)
+
+// retryBusy repeats an idempotent step that failed only on transient store
+// contention, such as the poll-only Lookout writing the same observation. Any
+// other failure, or an expired context, is returned at once.
+func retryBusy(ctx context.Context, attempts int, delay time.Duration, step func() error) error {
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err = step(); err == nil || !store.IsOnlyBusy(err) {
+			return err
+		}
+		if attempt == attempts-1 {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+	}
+	return err
 }
