@@ -210,6 +210,8 @@ func lookoutRows(processes []lookoutProcess, includeRestart bool) []axi.Object {
 			restart := "The Lead restarts its background lookout on its next wake"
 			if process.PollOnly {
 				restart = "The Lookout tab owner restarts this process on its next tick"
+			} else if process.StopHook {
+				restart = "The next Claude Stop hook owns the next bounded Notice wait"
 			} else if process.QuietRoutine {
 				restart = "The Lead extension restarts this process automatically"
 			}

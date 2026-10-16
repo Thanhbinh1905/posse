@@ -95,6 +95,14 @@ func TestApprovedWorkingDiscardResumesAfterCrash(t *testing.T) {
 			t.Run(step+"/"+phase, func(t *testing.T) {
 				f := newRiderTabsFixture(t)
 				task := f.ride(t, "t1", "Cancel crash recovery", "cancel-crash-recovery")
+				// Exercise explicit retry without a poller concurrently repairing
+				// the same deliberately interrupted intent.
+				db, err := store.Open(f.home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				stopFixtureBackgroundLookout(t, f.root, f.env, db, f.projectID)
 				command := exec.Command(f.binary, "unsaddle", "t1", "--discard", "--user-approved", "destroy t3 now")
 				command.Dir = f.repo
 				command.Env = setEnv(f.leadEnv, "POSSE_INTENT_CRASH_AT", "unsaddle:"+phase+":"+step)

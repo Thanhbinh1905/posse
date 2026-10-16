@@ -33,6 +33,7 @@ type lookoutProcess struct {
 	Kind         string
 	PollOnly     bool
 	QuietRoutine bool
+	StopHook     bool
 	ForceKilled  bool
 }
 
@@ -223,7 +224,7 @@ func splitProcessArgs(raw string) []string {
 }
 
 func lookoutFromArgs(pid int, args []string, environment map[string]string, home string) (lookoutProcess, bool) {
-	if len(args) < 2 || args[1] != "lookout" || !sameLookoutHome(processHome(environment), home) {
+	if len(args) < 2 || (args[1] != "lookout" && args[1] != "_claude-stop") || !sameLookoutHome(processHome(environment), home) {
 		return lookoutProcess{}, false
 	}
 	process := lookoutProcess{
@@ -231,6 +232,7 @@ func lookoutFromArgs(pid int, args []string, environment map[string]string, home
 		PaneID:     environment["HERDR_PANE_ID"],
 		WorkingDir: environment["PWD"],
 		Kind:       "lead",
+		StopHook:   args[1] == "_claude-stop",
 	}
 	for _, arg := range args[2:] {
 		switch arg {

@@ -50,6 +50,9 @@ func TestLookoutProcessListingRecognizesLeadWatchersRenamedBinariesAndDefaultHom
 	if _, found := lookoutFromArgs(26, []string{"/tmp/renamed-posse", "lookout", "--poll-only"}, map[string]string{"POSSE_HOME": "/tmp/shop"}, "/tmp/shop"); !found {
 		t.Fatal("missed the renamed binary's CLI argument pattern")
 	}
+	if hook, found := lookoutFromArgs(27, []string{"/usr/local/bin/posse", "_claude-stop"}, map[string]string{"POSSE_HOME": "/tmp/shop", "HERDR_PANE_ID": "w1:p1"}, "/tmp/shop"); !found || hook.Kind != "lead" || hook.PollOnly {
+		t.Fatalf("Claude Stop hook is not discoverable for fallback, down and update: %#v %v", hook, found)
+	}
 	if got := processHome(map[string]string{"HOME": "/home/user"}); got != "/home/user/.posse" {
 		t.Fatalf("default process home = %q", got)
 	}
