@@ -85,7 +85,7 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.service.acquireWorkspaceMount(ctx, f.db, f.project, goodTask, members, f.home, "warm", nil); err != nil {
+	if _, err := f.service.acquireWorkspaceMount(ctx, f.db, f.project, goodTask, members, f.home, "warm", nil, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	goodTask, err = f.db.TaskByID(ctx, f.project.ID, goodID)

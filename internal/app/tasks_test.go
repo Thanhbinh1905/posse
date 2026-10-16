@@ -18,6 +18,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -936,7 +937,7 @@ func TestTaskBranchAvailabilityIgnoresRedirectWarning(t *testing.T) {
 	if err != nil || stdout != "" {
 		t.Fatalf("git output includes redirect warning: stdout=%q err=%v", stdout, err)
 	}
-	if err := taskBranchAvailable(ctx, db, project, "fresh-name"); err != nil {
+	if err := taskBranchAvailable(ctx, db, project, "fresh-name", nil); err != nil {
 		t.Fatalf("fresh branch rejected because of redirect warning: %v", err)
 	}
 }
@@ -961,7 +962,7 @@ func TestTaskBranchAvailabilityReportsUnreachableOriginAsCheckFailure(t *testing
 		t.Fatal(err)
 	}
 
-	err = taskBranchAvailable(ctx, db, project, "fresh-name")
+	err = taskBranchAvailable(ctx, db, project, "fresh-name", nil)
 	var failure *axi.Error
 	if !errors.As(err, &failure) || failure.Code != "branch_check_failed" || !strings.Contains(failure.Message, "shop") || !strings.Contains(failure.Message, "refs/heads/posse/fresh-name") {
 		t.Fatalf("unreachable origin result = %#v; want branch_check_failed for repository and ref", err)
@@ -989,35 +990,32 @@ func TestTaskBranchAvailabilityAllowsWorkspaceMemberWithoutOrigin(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := taskBranchAvailable(ctx, db, project, "fresh-name"); err != nil {
-		t.Fatalf("fresh branch rejected for workspace with a member lacking origin: %v", err)
+	selected := []taskMember{{repoTarget: repoTarget{Name: "e2e-tool", Root: filepath.Join(workspace, "e2e-tool"), DefaultBranch: "main"}, Path: "e2e-tool"}}
+	if err := taskBranchAvailable(ctx, db, project, "fresh-name", selected); err != nil {
+		t.Fatalf("fresh branch rejected for workspace member without origin: %v", err)
 	}
 }
 
-func TestWorkspaceRideChecksEveryMemberBeforeCreatingTask(t *testing.T) {
+func TestWorkspaceRideChecksOnlySelectedMembers(t *testing.T) {
 	for _, testCase := range []struct {
-		name  string
-		brief string
+		name      string
+		brief     dispatch.Brief
+		wantError bool
 	}{
-		{name: "requested member", brief: "---\ntype: ship\ntitle: Existing branch\ndone_when: branch is checked\nrepos: [worker]\n---\nUse the existing branch check.\n"},
-		{name: "empty scout", brief: "---\ntype: scout\ntitle: Existing branch\ndone_when: branch is checked\n---\nUse the existing branch check.\n"},
+		{name: "unrequested collision", brief: dispatch.Brief{Type: "ship", Repos: []string{"worker"}}},
+		{name: "scout without editable members", brief: dispatch.Brief{Type: "scout"}},
+		{name: "selected collision", brief: dispatch.Brief{Type: "ship", Repos: []string{"backend"}}, wantError: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			f := newWorkspaceLandFixture(t, localWorkspaceConfig+"\n[profiles.pi]\nkind = \"pi\"\n\n[dispatch.default]\nuse = \"pi\"\n", []string{"worker"}, []string{"worker"})
+			f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
 			gitTest(t, filepath.Join(f.workspace, "backend"), "branch", "posse/existing-branch")
-			brief := filepath.Join(f.root, "brief.md")
-			if err := os.WriteFile(brief, []byte(testCase.brief), 0o600); err != nil {
+			members, _, err := f.service.planTaskMembers(context.Background(), f.db, f.project, f.config(), testCase.brief, nil)
+			if err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("HERDR_ENV", "1")
-			t.Setenv("HERDR_PANE_ID", "w1:p1")
-			t.Setenv("HERDR_WORKSPACE_ID", "w1")
-			if code := f.run("ride", "--brief", brief, "--name", "existing-branch"); code != 1 || !strings.Contains(f.out.String(), "branch_exists") || !strings.Contains(f.out.String(), "backend") {
-				t.Fatalf("ride accepted a branch used by an unrequested member: code=%d output=%s", code, f.out.String())
-			}
-			tasks, err := f.db.Tasks(context.Background(), f.project.ID, true)
-			if err != nil || len(tasks) != 1 {
-				t.Fatalf("branch collision created a Task: tasks=%#v err=%v", tasks, err)
+			err = taskBranchAvailable(context.Background(), f.db, f.project, "existing-branch", members)
+			if (err != nil) != testCase.wantError {
+				t.Fatalf("selected scope branch check err=%v, want error %v", err, testCase.wantError)
 			}
 		})
 	}
@@ -1074,7 +1072,7 @@ func TestTaskBranchAvailabilityChecksLocalAndOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitTest(t, repo, "branch", "posse/used-name")
-	if err := taskBranchAvailable(ctx, db, project, "used-name"); err == nil || !strings.Contains(err.Error(), "shop") || !strings.Contains(err.Error(), "refs/heads/posse/used-name") {
+	if err := taskBranchAvailable(ctx, db, project, "used-name", nil); err == nil || !strings.Contains(err.Error(), "shop") || !strings.Contains(err.Error(), "refs/heads/posse/used-name") {
 		t.Fatalf("local branch collision = %v", err)
 	}
 	remote := filepath.Join(root, "origin.git")
@@ -1082,7 +1080,7 @@ func TestTaskBranchAvailabilityChecksLocalAndOrigin(t *testing.T) {
 	gitTest(t, repo, "remote", "add", "origin", remote)
 	gitTest(t, repo, "push", "origin", "refs/heads/main:refs/heads/posse/remote-name")
 	gitTest(t, repo, "update-ref", "-d", "refs/remotes/origin/posse/remote-name")
-	if err := taskBranchAvailable(ctx, db, project, "remote-name"); err == nil || !strings.Contains(err.Error(), "shop origin") || !strings.Contains(err.Error(), "refs/heads/posse/remote-name") {
+	if err := taskBranchAvailable(ctx, db, project, "remote-name", nil); err == nil || !strings.Contains(err.Error(), "shop origin") || !strings.Contains(err.Error(), "refs/heads/posse/remote-name") {
 		t.Fatalf("origin branch collision = %v", err)
 	}
 }

@@ -2,6 +2,8 @@
 
 A Project used to be exactly one Git repository, so `posse up` refused a plain folder that holds a stack of repositories (`not_in_git_repository`), and every other entry point refused an unregistered folder with `project_unknown`. A Project is now either a repository (kind `repo`) or a workspace: a folder that is not inside a repository, whose direct child repositories are its members. One Lead works from the workspace root and sees every member; one Task may change several members and Lands only when every changed member has Landed.
 
+Current Task acquisition and shared-root context semantics are defined by [ADR 0020](0020-selected-workspace-member-scope.md). The all-Member Mount and implicit shared-root behavior below apply only to legacy Tasks.
+
 ## Decisions
 
 - **Detection, then one confirmation.** `posse up` in an unregistered folder detects its shape, prints what it found (name, kind, and per member the default branch, `origin` host and Landing Mode) and asks one `[Y/n]` in the terminal before it saves anything. Without a terminal it refuses with `confirmation_required`; `--yes` registers without asking. `posse project add` registers the same way without the question, because the command is itself the request. `posse project scan` re-detects members and refreshes their saved repository facts; a member that disappears is kept as `missing`, since Tasks may still reference it.
