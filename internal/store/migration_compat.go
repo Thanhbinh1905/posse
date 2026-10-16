@@ -11,16 +11,17 @@ import (
 // legacyProjectUUIDMigrationChecksum identifies the project UUID migration
 // that briefly shipped as version 32 before main used that version.
 const (
-	legacyProjectUUIDMigrationVersion     = 32
-	projectUUIDMigrationVersion           = 33
-	legacyProjectUUIDMigrationChecksum    = "e6708eea3f1d552952f3566064aa362d32c6ab8333122e549c2153c0036047c1"
-	legacyNoticeDeliveryMigrationVersion  = 32
-	noticeDeliveryMigrationVersion        = 34
-	legacyNoticeDeliveryMigrationChecksum = "b2cede33cbe9a5103353f2ed9d1347d0de660d07f3bd13a7d43b4b2c2620705d"
-	legacyReportBundleMigrationVersion    = 45
-	publishedReportBundleMigrationVersion = 46
-	reportBundleMigrationVersion          = 47
-	legacyReportBundleMigrationChecksum   = "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
+	legacyProjectUUIDMigrationVersion           = 32
+	projectUUIDMigrationVersion                 = 33
+	legacyProjectUUIDMigrationChecksum          = "e6708eea3f1d552952f3566064aa362d32c6ab8333122e549c2153c0036047c1"
+	legacyNoticeDeliveryMigrationVersion        = 32
+	noticeDeliveryMigrationVersion              = 34
+	legacyNoticeDeliveryMigrationChecksum       = "b2cede33cbe9a5103353f2ed9d1347d0de660d07f3bd13a7d43b4b2c2620705d"
+	legacyReportBundleMigrationVersion          = 45
+	publishedReportBundleMigrationVersion       = 46
+	latestPublishedReportBundleMigrationVersion = 47
+	reportBundleMigrationVersion                = 48
+	legacyReportBundleMigrationChecksum         = "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
 )
 
 // normalizeLegacyNoticeDeliveryMigration moves the receipt migration from
@@ -231,8 +232,8 @@ func (db *DB) normalizeLegacyProjectUUIDMigration(ctx context.Context) error {
 }
 
 // normalizeLegacyReportBundleMigration moves a published Report migration from
-// version 45 or 46 to version 47. Main now uses 45 for Review verdicts and 46
-// for resource leases.
+// versions 45, 46, or 47 to version 48. Main uses 45 for Review verdicts, 46
+// for resource leases, and 47 for review receipts.
 func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 	var hasGoose int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='goose_db_version')`).Scan(&hasGoose); err != nil {
@@ -241,7 +242,7 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 	if hasGoose == 0 {
 		return nil
 	}
-	var reportKind, reportDigest, reportManifest, reportReviews, reportAcceptances, reviewTargets, reviewVerdicts, resourceLeases int
+	var reportKind, reportDigest, reportManifest, reportReviews, reportAcceptances, reviewTargets, reviewVerdicts, resourceLeases, reviewReceipts int
 	for _, check := range []struct {
 		query string
 		value *int
@@ -254,6 +255,7 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_targets')`, &reviewTargets},
 		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_verdicts')`, &reviewVerdicts},
 		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='resource_leases')`, &resourceLeases},
+		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_receipts')`, &reviewReceipts},
 	} {
 		if err := db.QueryRowContext(ctx, check.query).Scan(check.value); err != nil {
 			return err
@@ -268,7 +270,7 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 	}
 	var sourceVersion int64
 	checksumPresent := false
-	for _, candidate := range []int64{legacyReportBundleMigrationVersion, publishedReportBundleMigrationVersion} {
+	for _, candidate := range []int64{legacyReportBundleMigrationVersion, publishedReportBundleMigrationVersion, latestPublishedReportBundleMigrationVersion} {
 		var applied int
 		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, candidate).Scan(&applied); err != nil {
 			return err
@@ -291,6 +293,9 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 			}
 		}
 		if candidate == publishedReportBundleMigrationVersion && resourceLeases != 0 && !candidateChecksumPresent {
+			continue
+		}
+		if candidate == latestPublishedReportBundleMigrationVersion && (reviewReceipts != 0 || !candidateChecksumPresent) {
 			continue
 		}
 		sourceVersion = candidate

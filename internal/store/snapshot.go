@@ -41,6 +41,8 @@ type TaskSnapshot struct {
 	// ReviewTargets and ReviewVerdict are set for a Review Task only.
 	ReviewTargets []ReviewTarget `toml:"review_targets,omitempty"`
 	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
+	// ReviewReceipts are the no-mistakes receipts that qualified a Ship Task.
+	ReviewReceipts []ReviewReceipt `toml:"review_receipts,omitempty"`
 }
 
 type projectSnapshot struct {
@@ -333,6 +335,9 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		} else if !errors.Is(err, ErrNotFound) {
 			return err
 		}
+	}
+	if snapshot.ReviewReceipts, err = db.ReviewReceipts(ctx, taskID); err != nil {
+		return err
 	}
 	if project.IsWorkspace() {
 		if snapshot.Members, err = db.ProjectRepos(ctx, projectID); err != nil {
@@ -823,7 +828,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -941,6 +946,12 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_verdicts(task_id,signal_id,verdict,report_sha256,targets_json,launch_number,profile_name,configured_model,model_known,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 				task.ID, verdict.SignalID, verdict.Verdict, verdict.ReportSHA256, string(encodedTargets), verdict.Reviewer.LaunchNumber, verdict.Reviewer.Profile, verdict.Reviewer.ConfiguredModel, verdict.Reviewer.ModelKnown, verdict.CreatedAt); err != nil {
 				return fmt.Errorf("rebuild t%d review verdict: %w", task.Seq, err)
+			}
+		}
+		for _, receipt := range snapshot.ReviewReceipts {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_receipts(task_id,repository,run_id,head_sha,review_status,reviewer_profile,reviewer_model,report_sha256,receipt_sha256,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+				task.ID, receipt.Repository, receipt.RunID, receipt.HeadSHA, receipt.ReviewStatus, receipt.ReviewerProfile, receipt.ReviewerModel, receipt.ReportSHA256, receipt.ReceiptSHA256, receipt.ObservedAt); err != nil {
+				return fmt.Errorf("rebuild t%d review receipt: %w", task.Seq, err)
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, "", task.State, "cli", "Rebuilt from atomic Task snapshot", task.UpdatedAt); err != nil {

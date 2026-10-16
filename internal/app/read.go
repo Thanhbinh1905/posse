@@ -526,6 +526,19 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			return err
 		}
 	}
+	if task.Type == "ship" {
+		receipts, err := db.ReviewReceipts(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if len(receipts) > 0 {
+			views := make([]map[string]any, 0, len(receipts))
+			for _, receipt := range receipts {
+				views = append(views, map[string]any{"repository": receipt.Repository, "run_id": receipt.RunID, "head_sha": receipt.HeadSHA, "review_status": receipt.ReviewStatus, "reviewer_profile": receipt.ReviewerProfile, "reviewer_model": receipt.ReviewerModel, "report_sha256": receipt.ReportSHA256, "receipt_sha256": receipt.ReceiptSHA256})
+			}
+			view["review_receipts"] = views
+		}
+	}
 	recovery, err := db.TaskRecovery(ctx.Context, task.ID)
 	if err != nil {
 		return err

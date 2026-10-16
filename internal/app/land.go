@@ -64,14 +64,15 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "ship" {
 		return axi.Failure("land_refused", "only Ship Tasks can be Landed", false)
 	}
+	if !project.IsWorkspace() && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {
+		// Pull request evidence binds to the gated forge head, not the Mount tip.
+		return s.landPullRequest(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
+	}
 	if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
 		return err
 	}
 	if project.IsWorkspace() {
 		return s.landWorkspace(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
-	}
-	if task.LandingMode == "pr" || task.LandingMode == "no-mistakes" {
-		return s.landPullRequest(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
 	}
 	var intent store.Intent
 	hasIntent := false

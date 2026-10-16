@@ -52,13 +52,14 @@ func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 		t.Run(tc.policy, func(t *testing.T) {
 			f := newReviewVerdictFixture(t)
 			freezeReviewPolicy(t, f, tc.policy, tc.version)
+			stubNoMistakesReceipt(t, func(string) (string, error) { return "", errors.New("exit status 1: unknown flag: --head") })
 			cfg := config.Config{Defaults: config.Defaults{Review: "none"}}
 			err := requireSelectedReview(context.Background(), f.db, f.project, cfg, f.task)
 			if (err != nil) != tc.blocked {
 				t.Fatalf("policy %s: %v", tc.policy, err)
 			}
 			var refusal *axi.Error
-			if tc.policy == "no-mistakes" && (!errors.As(err, &refusal) || refusal.Code != "review_receipt_missing") {
+			if tc.policy == "no-mistakes" && (!errors.As(err, &refusal) || refusal.Code != "review_receipt_unsupported") {
 				t.Fatal(err)
 			}
 			if (reviewEvidenceStatus(f.task) == "legacy-evidence") != (tc.version == 1) {

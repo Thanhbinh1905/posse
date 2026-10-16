@@ -136,6 +136,10 @@ func currentReviewPass(ctx context.Context, db *store.DB, project store.Project,
 		// A candidate that cannot be resolved has no current pass.
 		return store.ReviewVerdict{}, false, nil
 	}
+	return reviewPassFor(ctx, db, ship, candidate)
+}
+
+func reviewPassFor(ctx context.Context, db *store.DB, ship store.Task, candidate []store.ReviewTarget) (store.ReviewVerdict, bool, error) {
 	qualifies, err := reviewVerdictQualifies(ctx, db, ship)
 	if err != nil {
 		return store.ReviewVerdict{}, false, err
@@ -143,13 +147,26 @@ func currentReviewPass(ctx context.Context, db *store.DB, project store.Project,
 	return db.CurrentReviewPass(ctx, ship.ID, candidate, qualifies)
 }
 
-// requireReviewPass requires a D01 pass of the exact current candidate.
-func requireReviewPass(ctx context.Context, db *store.DB, project store.Project, ship store.Task) error {
-	if _, ok, err := currentReviewPass(ctx, db, project, ship); err != nil {
+// requireReviewPass requires a D01 pass of the exact candidate: commit when
+// given, otherwise the current Task branch tips.
+func requireReviewPass(ctx context.Context, db *store.DB, project store.Project, ship store.Task, commit string) error {
+	var ok bool
+	var err error
+	if commit == "" {
+		_, ok, err = currentReviewPass(ctx, db, project, ship)
+	} else {
+		_, ok, err = reviewPassFor(ctx, db, ship, []store.ReviewTarget{{Repository: project.Name, Commit: commit}})
+	}
+	if err != nil {
 		return err
-	} else if !ok {
+	}
+	if !ok {
 		id := taskIDString(ship.Seq)
-		return axi.Failure("review_required", "Task "+id+" has no passing Review of its current revision", false, "Dispatch a Review Task for "+id+" with `review_of: "+id+"` and wait for a `pass` verdict; only an explicit User choice may select lighter review")
+		revision := "its current revision"
+		if commit != "" {
+			revision = "candidate " + shortSHA(commit)
+		}
+		return axi.Failure("review_required", "Task "+id+" has no passing Review of "+revision, false, "Dispatch a Review Task for "+id+" with `review_of: "+id+"` and wait for a `pass` verdict; only an explicit User choice may select lighter review")
 	}
 	return nil
 }
@@ -157,67 +174,93 @@ func requireReviewPass(ctx context.Context, db *store.DB, project store.Project,
 // requireSelectedReview keeps evidence separate from disposition and merge
 // grants. Version-1 plans retain their frozen pre-policy behavior, visibly legacy.
 func requireSelectedReview(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) error {
+	return requireSelectedReviewAt(ctx, db, project, cfg, task, "")
+}
+
+// requireSelectedReviewAt binds the selected evidence to commit, the exact
+// pull request head a Posse merge will land. An empty commit uses the Task
+// branch tip, which is the candidate of local integration.
+func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit string) error {
+	policies, err := selectedReviewPolicies(ctx, db, project, cfg, task)
+	if err != nil {
+		return err
+	}
+	local, receipt := false, false
+	for _, selected := range policies {
+		switch selected {
+		case "none":
+		case "local", "always":
+			local = true
+		case "no-mistakes":
+			receipt = true
+		default:
+			return axi.Failure("review_policy_invalid", "unsupported selected review policy "+selected, false)
+		}
+	}
+	if receipt {
+		if project.IsWorkspace() {
+			return axi.Failure("review_receipt_unsupported", "Task "+taskIDString(task.Seq)+" selects no-mistakes review for a workspace Member; no-mistakes cannot produce Member receipts", false, "Select local or none review for workspace Members")
+		}
+		if err := requireNoMistakesReceipt(ctx, db, project, task, commit); err != nil {
+			return err
+		}
+	}
+	if local {
+		return requireReviewPass(ctx, db, project, task, commit)
+	}
+	return nil
+}
+
+// selectedReviewPolicies lists the admitted policy of the Task, or of each
+// changed workspace Member. A version-1 plan keeps its frozen legacy value:
+// only `always` required a pass, so the other legacy values select none.
+func selectedReviewPolicies(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) ([]string, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil {
-		return admittedPlanFailure(err)
+		return nil, admittedPlanFailure(err)
 	}
 	policy := cfg.Defaults.Review
 	if plan != nil {
 		policy = plan.Review
 		if plan.Version == 1 {
 			if policy == "always" {
-				return requireReviewPass(ctx, db, project, task)
+				return []string{"always"}, nil
 			}
-			return nil // Frozen legacy behavior, not an inferred evidence guarantee.
+			return nil, nil // Frozen legacy behavior, not an inferred evidence guarantee.
 		}
 	}
-	policies := []string{policy}
-	if project.IsWorkspace() {
-		repos, err := db.TaskRepos(ctx, task.ID)
-		if err != nil {
-			return err
+	if !project.IsWorkspace() {
+		return []string{policy}, nil
+	}
+	repos, err := db.TaskRepos(ctx, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	var policies []string
+	for _, repo := range repos {
+		if repo.State == store.TaskRepoLanded {
+			continue
 		}
-		policies = nil
-		for _, repo := range repos {
-			if repo.State == store.TaskRepoLanded {
-				continue
-			}
-			ahead, err := commitsAhead(ctx, repo.WorktreePath, repo.BaseRef, "refs/heads/"+task.Branch)
-			if err != nil {
-				return memberFailure(repo.Repo, err)
-			}
-			if ahead == 0 {
-				continue
-			}
-			selected := cfg.MemberReview(repo.Repo)
-			if plan != nil {
-				selected = ""
-				for _, member := range plan.Execution.Members {
-					if member.Name == repo.Repo {
-						selected = member.Review
-						break
-					}
+		ahead, err := commitsAhead(ctx, repo.WorktreePath, repo.BaseRef, "refs/heads/"+task.Branch)
+		if err != nil {
+			return nil, memberFailure(repo.Repo, err)
+		}
+		if ahead == 0 {
+			continue
+		}
+		selected := cfg.MemberReview(repo.Repo)
+		if plan != nil {
+			selected = ""
+			for _, member := range plan.Execution.Members {
+				if member.Name == repo.Repo {
+					selected = member.Review
+					break
 				}
 			}
-			policies = append(policies, selected)
 		}
+		policies = append(policies, selected)
 	}
-	local := false
-	for _, selected := range policies {
-		switch selected {
-		case "none":
-		case "local":
-			local = true
-		case "no-mistakes":
-			return axi.Failure("review_receipt_missing", "Task "+taskIDString(task.Seq)+" requires a no-mistakes pipeline receipt; the receipt adapter is not available yet (D03)", false, "Wait for pipeline-owned receipt support; a local Review, forge approval or CI result cannot substitute")
-		default:
-			return axi.Failure("review_policy_invalid", "unsupported selected review policy "+selected, false)
-		}
-	}
-	if local {
-		return requireReviewPass(ctx, db, project, task)
-	}
-	return nil
+	return policies, nil
 }
 
 func reviewEvidenceStatus(task store.Task) string {
