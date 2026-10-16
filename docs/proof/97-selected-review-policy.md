@@ -32,8 +32,9 @@ Unit tests cover failed/inconclusive verdicts, evidence invalidation by Gate act
 Commands used:
 
 ```sh
-go test ./...
+go test -timeout=20m ./...
 go test -tags=e2e ./internal/e2e -run '^Test(SelectedReviewPolicy.*|ReviewPolicyLegacyConfigMigration|TaskPreferencesRequireScopedUserChoice|TaskPreferenceRefusalsHaveNoTaskEffects|AuthorizedFeatureBranchChoiceKeepsDefaultAndSurvivesRestart|WorkspacePreferenceCompatibilityPrecedesBranchEffects|ReviewRejects.*|ReviewResumeTemplateRejectsSecondSessionSelector|AuthorRelaunchResumeModelOverrideIsRecordedUnknown|Admitted.*)$' -count=1
+go test -tags=e2e ./internal/e2e -run '^TestRiderAdmittedStatusDoesNotRecoverOrExposeSibling$' -count=1
 go test -race ./internal/config ./internal/dispatch ./internal/taskplan ./internal/app -run 'Test(Review.*|ExplicitLegacyReview.*|LegacyReviewPlans.*|MemberReviewSelection.*|SelectedReviewPolicy.*|LocalReviewRechecked.*|WorkspaceSelectedReview.*)$' -count=1
 go vet -tags=e2e,perf ./...
 go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 -tags=e2e,perf ./...
@@ -41,11 +42,23 @@ go generate ./... && git diff --exit-code
 scripts/run-e2e-shard.sh --self-test
 ```
 
+All listed checks passed, including formatting and the generated-code clean-diff check. Log summaries:
+
+```text
+full unit suite: internal/app 638.323s; all packages pass
+Review E2E: internal/e2e 199.913s
+Rider read-only status E2E: internal/e2e 6.162s
+race-enabled policy tests: internal/app 108.105s; config/dispatch/taskplan pass
+E2E shard assignment self-check passed.
+```
+
 The local-review E2E flow also passed twice consecutively. New E2E tests are assigned to the CI shards.
 
 ## Test diagnostics
 
 An early E2E attempt reopened the completed Ship as `working`. The identity fixture left its fake pane permanently working after reading the launch prompt. This was not a confirmed Posse completion bug: reconciliation correctly treated the still-working pane as resumed work. The policy E2E helper now reports that fake turn idle after its done Signal. The shared review-admission helper also restores only an author it temporarily moved from working to done, rather than reopening a genuinely completed Ship.
+
+Two full `go test ./...` runs exceeded Go's default 10-minute package timeout. They stopped at different existing workspace tests, each only one second into that test, with snapshot `fsync` in the stack. No review assertion failed. The full suite passed with `-timeout=20m`, matching the timeout already configured in CI; this changes the test bound, not the tested behavior.
 
 ## Risk and rollback
 
