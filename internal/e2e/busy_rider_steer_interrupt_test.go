@@ -348,7 +348,11 @@ func TestBuiltInInterruptKeysVerifyStoppedRiderForEachKindE2E(t *testing.T) {
 		runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.kind", kind)
 		seq := i + 1
 		label := "posse:shop:t" + strconv.Itoa(seq)
-		rider, err := createTab(client, fixture.project.HerdrWorkspaceID, fixture.repo, label)
+		riderRoot := filepath.Join(fixture.root, "rider-"+kind)
+		if output, err := gitCommand(fixture.env, fixture.repo, "worktree", "add", "-b", "posse/interrupt-"+kind, riderRoot, "main"); err != nil {
+			t.Fatalf("create isolated %s Rider worktree: %v %s", kind, err, output)
+		}
+		rider, err := createTab(client, fixture.project.HerdrWorkspaceID, riderRoot, label)
 		if err != nil {
 			t.Fatalf("create isolated %s Rider pane: %v", kind, err)
 		}
@@ -358,7 +362,7 @@ func TestBuiltInInterruptKeysVerifyStoppedRiderForEachKindE2E(t *testing.T) {
 		taskID, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{
 			Seq: seq, Type: "ship", Title: "Interrupt " + kind, ShortName: "interrupt-" + kind,
 			Profile: "deep", DispatchRule: "dispatch.default", LandingMode: "pr",
-			Branch: "posse/interrupt-" + kind, BaseRef: "main", WorktreePath: fixture.repo,
+			Branch: "posse/interrupt-" + kind, BaseRef: "main", WorktreePath: riderRoot,
 			HerdrWorkspaceID: fixture.project.HerdrWorkspaceID, PaneID: rider.RootPane.PaneID, PaneLabel: label,
 		})
 		if err != nil {
