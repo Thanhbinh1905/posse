@@ -38,6 +38,7 @@ var keySpecs = []KeySpec{
 	{Key: "lowkey.lead", Type: TypeBoolean, Default: false, Meaning: "Lowkey mode for the Lead: only report decisions and outcomes to the User. A display preference, not an autonomy grant."},
 	{Key: "lead.profiles.<kind>", Type: TypeString, Meaning: "Profile used by the Lead for this agent kind."},
 	{Key: "defaults.max_workers", Type: TypeInteger, Default: 4, Meaning: "Maximum concurrent Riders for a Project."},
+	{Key: "defaults.dispatch_inheritance", Type: TypeString, Allowed: []string{"kind", "lead_profile"}, Default: "kind", Meaning: "Profile inherited when no Dispatch Rule matches: the Lead's agent kind only, or its resolved Profile."},
 	{Key: "defaults.stall_after", Type: TypeDuration, Default: "20m", Meaning: "Time without output or worktree progress before a Rider is stalled."},
 	{Key: "defaults.idle_after", Type: TypeDuration, Default: "3m", Meaning: "Time a Rider may be idle without a Signal before a Notice is created."},
 	{Key: "defaults.auto_unsaddle", Type: TypeString, Allowed: []string{"finished", "landed", "never"}, Default: "finished", Meaning: "Whether completed Tasks are automatically Teardown after landing or Notice acknowledgement."},
@@ -59,6 +60,7 @@ var keySpecs = []KeySpec{
 	{Key: "remuda.setup", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in a Mount after it is acquired.", UserOnly: true},
 	{Key: "remuda.keep_idle", Type: TypeInteger, Default: 4, Meaning: "Idle Mounts kept for each Project."},
 	{Key: "retention.task_artifacts", Type: TypeDuration, Default: "2160h", Meaning: "How long Teardown keeps Reports, saved Task attachments and approved discard-tip bundles; `posse remuda prune` removes expired artifacts."},
+	{Key: "kinds.<kind>.disabled", Type: TypeBoolean, Default: false, Meaning: "Disable this kind for new Rider dispatch without removing its historical or frozen launch settings."},
 	{Key: "kinds.<kind>.auto_approve_args", Type: TypeStringArray, Default: []string{}, Meaning: "Arguments that enable automatic approvals for this agent kind; Leads also get them by default when lead_auto_approve is true.", UserOnly: true},
 	{Key: "kinds.<kind>.lead_auto_approve", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": true, "opencode": true}, Meaning: "Whether Leads of this kind also get auto_approve_args; set false to keep the harness's approval prompts. User-only. Pi has no permission system.", UserOnly: true},
 	{Key: "kinds.<kind>.model_args", Type: TypeStringArray, Default: []string{}, Meaning: "Argument template for a Profile model; supports {model}.", UserOnly: true},
@@ -145,7 +147,12 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 			}
 		}
 	}
-	if key == "defaults.max_workers" || key == "remuda.keep_idle" || key == "defaults.recovery_attempts" {
+	if key == "remuda.keep_idle" {
+		if number, ok := integerValue(value); ok && number < 0 {
+			return fmt.Errorf("%s cannot be negative", key)
+		}
+	}
+	if key == "defaults.max_workers" || key == "defaults.recovery_attempts" {
 		if number, ok := integerValue(value); ok && number < 1 {
 			return fmt.Errorf("%s must be positive", key)
 		}

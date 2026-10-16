@@ -273,6 +273,53 @@ func TestLoadRejectsUnknownAndInvalidKeys(t *testing.T) {
 	}
 }
 
+func TestDispatchInheritanceAndDisabledKindDefaults(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.DispatchInheritance != "kind" {
+		t.Fatalf("default dispatch inheritance = %q, want compatibility kind inheritance", cfg.Defaults.DispatchInheritance)
+	}
+	for _, kind := range []string{"claude", "codex", "pi", "opencode"} {
+		if cfg.Kinds[kind].Disabled {
+			t.Errorf("built-in kind %s is disabled by default", kind)
+		}
+	}
+	writeConfig(t, filepath.Join(home, "config.toml"), "[defaults]\ndispatch_inheritance = 'lead_profile'\n[kinds.claude]\ndisabled = true\n")
+	cfg, err = Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.DispatchInheritance != "lead_profile" || !cfg.Kinds["claude"].Disabled {
+		t.Fatalf("explicit dispatch choices were not loaded: defaults=%#v kind=%#v", cfg.Defaults, cfg.Kinds["claude"])
+	}
+}
+
+func TestKeepIdleAllowsZeroButRejectsNegativeAndBudgetsStayPositive(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, filepath.Join(home, "config.toml"), "[remuda]\nkeep_idle = 0\n")
+	cfg, err := Load(home, "")
+	if err != nil || cfg.Remuda.KeepIdle != 0 {
+		t.Fatalf("keep_idle=0 config = %#v, %v", cfg.Remuda, err)
+	}
+	for _, testCase := range []struct {
+		key   string
+		value int
+	}{
+		{key: "remuda.keep_idle", value: -1},
+		{key: "defaults.max_workers", value: 0},
+		{key: "defaults.recovery_attempts", value: 0},
+	} {
+		t.Run(testCase.key, func(t *testing.T) {
+			if err := ValidateSetting(testCase.key, testCase.value, false); err == nil {
+				t.Fatalf("accepted %s=%d", testCase.key, testCase.value)
+			}
+		})
+	}
+}
+
 func TestDispatchDefaultOnly(t *testing.T) {
 	home := t.TempDir()
 	writeConfig(t, filepath.Join(home, "config.toml"), "[profiles.fast]\nkind='codex'\n[dispatch.default]\nuse='fast'\n")
