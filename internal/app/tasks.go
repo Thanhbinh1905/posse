@@ -21,6 +21,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/sessionref"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func (s *Service) dispatch(ctx *axi.Context, args []string) error {
@@ -114,9 +115,9 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProjectForTask(ctx.Context, db, project)
+	cfg, err := config.Load(home, project.Name)
 	if err != nil {
-		return err
+		return configError(err)
 	}
 	briefData, err := os.ReadFile(parsed.Flags["brief"])
 	if err != nil {
@@ -331,6 +332,19 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
 		BaseRef: baseRef, TargetBranch: targetBranch,
 	}
+	plan, err := resolveTaskPlan(home, project, cfg, task, resolution, parsed.Flags["brief"], briefData, members)
+	if err != nil {
+		return admittedPlanFailure(err)
+	}
+	task.PlanJSON, err = plan.Encode()
+	if err != nil {
+		return admittedPlanFailure(err)
+	}
+	// Admission must finish before preparation can recover other Riders or
+	// allocate this Task's scratch, Mount, branch or pane.
+	if _, err := s.prepareProjectForTask(ctx.Context, db, project); err != nil {
+		return err
+	}
 	crashIntentAt("ride", "before", "task.create")
 	taskID, sequence, intent, err := createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
 	if errors.Is(err, store.ErrTaskBranchExists) {
@@ -420,7 +434,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			return axi.Failure("prepare_failed", prepareErr.Error(), false, "Inspect the Rider worktree and config before retrying")
 		}
 	}
-	argsForAgent := workerAgentArgs(resolution.Resolved, cfg.Kinds[resolution.Resolved.Kind], "")
+	argsForAgent := plan.Launch.Arguments("")
 	launchIdentity := configuredLaunchIdentity(resolution.Profile, resolution.Resolved, cfg.Kinds[resolution.Resolved.Kind], argsForAgent)
 	launch := 0
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.sequence", func() error {
@@ -449,12 +463,12 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	kindConfig := cfg.Kinds[kind]
 	taskHome := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(sequence))
 	if kind == "claude" || kind == "codex" || kind == "pi" {
-		skills, skillErr := freezePosseLaunchSkills(home, project.Name, project.Root)
+		skills, skillErr := freezePosseLaunchSkillInputs(home, project.Name, project.Root, plan.Inputs)
 		if skillErr != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
 		}
-		argsForAgent, skillErr = appendPosseSkillLaunchArgs(kind, argsForAgent, skills)
+		argsForAgent, skillErr = appendAdmittedSkillArgs(kind, argsForAgent, skills, &plan)
 		if skillErr != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
@@ -467,12 +481,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return err
 	}
 	launchContents := workerProtocol(project, task, brief, launchPath, scratchPath) + workspaceProtocol(project, members) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
-	preferences, err := preferenceSources(home, project, "rider")
-	if err != nil {
-		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
-		return err
-	}
-	launchContents = appendPreferenceInstructions(launchContents, "rider", preferences)
+	launchContents = appendPreferenceInstructions(launchContents, "rider", planPreferences(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
@@ -1017,6 +1026,12 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		return axi.Failure("signal_invalid", "--pr is only valid on a PR or no-mistakes Ship Task done Signal", false)
 	}
 	data := map[string]string{}
+	if plan, err := task.AdmittedPlan(); err != nil {
+		return admittedPlanFailure(err)
+	} else if plan != nil {
+		data["plan_revision"] = strconv.Itoa(plan.Revision)
+		data["plan_sha256"] = plan.SHA256()
+	}
 	if parsed.Flags["pr"] != "" {
 		data["pr_url"] = parsed.Flags["pr"]
 	}
@@ -1830,13 +1845,16 @@ func (s *Service) relaunch(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := config.Load(home, project.Name)
-	if err != nil {
-		return configError(err)
-	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
+	}
+	var cfg config.Config
+	if task.PlanJSON == "" || parsed.Flags["profile"] != "" {
+		cfg, err = config.Load(home, project.Name)
+		if err != nil {
+			return configError(err)
+		}
 	}
 	result, err := s.relaunchTask(ctx.Context, db, home, project, cfg, task, parsed.Flags["profile"])
 	if err != nil {
@@ -1870,29 +1888,61 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	if task.Profile == "" {
 		return failure(axi.Failure("config_invalid", "Task has no Profile", false))
 	}
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return failure(admittedPlanFailure(err))
+	}
 	profileName := task.Profile
 	profile, ok := dispatch.StoredProfile(cfg, profileName, task.DispatchRule)
+	var kindConfig config.Kind
+	if plan != nil {
+		profileName, profile, kindConfig, ok = plan.Launch.ProfileName, plan.Launch.Profile, plan.Launch.Kind, true
+	}
+	var revision *taskplan.Plan
 	if requestedProfile != "" {
 		resolution, err := dispatch.Resolve(cfg, task.Type, requestedProfile)
 		if err != nil {
 			return failure(profileError(err))
 		}
-		profileName, profile, ok = resolution.Profile, resolution.Resolved, true
+		launch, err := frozenLaunch(resolution, cfg.Kinds)
+		if err != nil {
+			return failure(err)
+		}
+		profileName, profile, kindConfig, ok = launch.ProfileName, launch.Profile, launch.Kind, true
+		if plan != nil {
+			next, err := plan.Reconfigure(launch)
+			if err != nil {
+				return failure(admittedPlanFailure(err))
+			}
+			next, err = selectReconfiguredLaunchInputs(next)
+			if err != nil {
+				return failure(err)
+			}
+			revision = &next
+		}
 	}
 	if !ok {
 		return failure(axi.Failure("config_invalid", "Task Profile "+profileName+" no longer exists", false))
 	}
 	kind := profile.Kind
-	kindConfig, ok := cfg.Kinds[kind]
-	if !ok {
-		return failure(axi.Failure("config_invalid", "Task Profile uses unknown agent kind "+kind, false))
+	if plan == nil && requestedProfile == "" {
+		kindConfig, ok = cfg.Kinds[kind]
+		if !ok {
+			return failure(axi.Failure("config_invalid", "Task Profile uses unknown agent kind "+kind, false))
+		}
 	}
 	kindChanged := kind != taskKind(cfg, task)
+	prepareChanged := kindChanged || plan != nil && kindConfig.Prepare != plan.Launch.Kind.Prepare
 	session := ""
 	if sessionref.NormalizeKind(task.AgentSessionKind) == sessionref.NormalizeKind(kind) {
 		session = agentSessionID(kind, task.AgentSession)
 	}
 	startArgs := workerAgentArgs(profile, kindConfig, session)
+	if revision != nil {
+		startArgs = revision.Launch.Arguments(session)
+	} else if plan != nil {
+		startArgs = plan.Launch.Arguments(session)
+	}
 	launchIdentity := configuredLaunchIdentity(profileName, profile, kindConfig, startArgs)
 	if task.Type == "review" {
 		if task.ReviewsTaskID == 0 {
@@ -1951,6 +2001,16 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	defer func() { _ = db.FinishIntent(ctx, intent.ID, intent.ProcessID) }()
 	track := func(step string, action func() error) error { return s.runIntentStep(ctx, db, intent, step, action) }
+	if revision != nil {
+		if err := track("plan.revise", func() error { return db.ReviseTaskPlan(ctx, task, *revision) }); err != nil {
+			return failure(err)
+		}
+		plan = revision
+		task, err = db.TaskByID(ctx, project.ID, task.ID)
+		if err != nil {
+			return failure(err)
+		}
+	}
 	gitStateReport := ""
 	if err := track("git.inspect", func() error {
 		var inspectErr error
@@ -1986,7 +2046,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			return failure(err)
 		}
 	}
-	if kindChanged {
+	if prepareChanged {
 		if err := track("repository.prepare", func() error {
 			if project.IsWorkspace() && kindConfig.Prepare == "claude-trust" {
 				members, err := s.workspaceMembers(ctx, db, project, task)
@@ -2035,13 +2095,22 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	if kind == "claude" || kind == "codex" || kind == "pi" {
-		skills, skillErr := freezePosseLaunchSkills(home, project.Name, project.Root)
+		var inputs []taskplan.Input
+		if plan != nil {
+			inputs = plan.Inputs
+		}
+		skills, skillErr := freezePosseLaunchSkillInputs(home, project.Name, project.Root, inputs)
 		if skillErr != nil {
 			return failure(skillErr)
 		}
-		startArgs, skillErr = appendPosseSkillLaunchArgs(kind, startArgs, skills)
+		startArgs, skillErr = appendAdmittedSkillArgs(kind, startArgs, skills, plan)
 		if skillErr != nil {
 			return failure(skillErr)
+		}
+	}
+	if plan != nil {
+		if err := track("launch.restore", func() error { return restoreAdmittedLaunchFiles(project, task, plan) }); err != nil {
+			return failure(err)
 		}
 	}
 	if err := track("agent.start", func() error {
@@ -2053,7 +2122,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	if err := s.waitAgentReady(ctx, pane.PaneID); err != nil {
 		return failure(err)
 	}
-	if profileName != task.Profile {
+	if plan == nil && profileName != task.Profile {
 		if err := track("task.profile", func() error {
 			return db.ChangeTaskProfile(ctx, task.ID, task.Profile, profileName)
 		}); err != nil {
@@ -2188,6 +2257,11 @@ func (s *Service) resolveDispatch(ctx context.Context, project store.Project, cf
 }
 
 func taskKind(cfg config.Config, task store.Task) string {
+	if plan, err := task.AdmittedPlan(); err != nil {
+		return ""
+	} else if plan != nil {
+		return plan.Launch.Profile.Kind
+	}
 	if profile, ok := dispatch.StoredProfile(cfg, task.Profile, task.DispatchRule); ok && profile.Kind != "" {
 		return profile.Kind
 	}
@@ -2195,19 +2269,7 @@ func taskKind(cfg config.Config, task store.Task) string {
 }
 
 func workerAgentArgs(profile config.Profile, kind config.Kind, session string) []string {
-	args := make([]string, 0, len(kind.AutoApproveArgs)+len(profile.Args)+len(kind.ModelArgs)+len(kind.EffortArgs)+len(kind.ResumeArgs))
-	args = append(args, kind.AutoApproveArgs...)
-	if profile.Model != "" {
-		args = append(args, renderArgs(kind.ModelArgs, "{model}", profile.Model)...)
-	}
-	if profile.Effort != "" {
-		args = append(args, renderArgs(kind.EffortArgs, "{effort}", profile.Effort)...)
-	}
-	args = append(args, profile.Args...)
-	if session != "" && len(kind.ResumeArgs) > 0 {
-		args = append(args, renderArgs(kind.ResumeArgs, "{session}", session)...)
-	}
-	return args
+	return taskplan.Arguments(profile, kind, session)
 }
 
 func agentSessionID(agent, session string) string {

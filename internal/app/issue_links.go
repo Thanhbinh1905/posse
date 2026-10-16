@@ -169,9 +169,18 @@ func taskIssueReferences(home string, project store.Project, task store.Task) ([
 
 func readTaskBrief(home string, project store.Project, task store.Task) (dispatch.Brief, error) {
 	path := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "brief.md")
-	contents, err := os.ReadFile(path)
+	plan, err := task.AdmittedPlan()
 	if err != nil {
-		return dispatch.Brief{}, err
+		return dispatch.Brief{}, admittedPlanFailure(err)
+	}
+	var contents []byte
+	if plan != nil {
+		contents = plan.Inputs[0].Bytes
+	} else {
+		contents, err = os.ReadFile(path)
+		if err != nil {
+			return dispatch.Brief{}, err
+		}
 	}
 	brief, err := dispatch.ParseHistoricalBriefText(string(contents))
 	if err != nil {

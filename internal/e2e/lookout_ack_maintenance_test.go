@@ -434,9 +434,8 @@ func TestLookoutAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 	}
 }
 
-// The fixture starts a real poll-only Lookout. Its independent reconcile would
-// also time out on the synthetic active Teardown and race this test's Notice
-// delivery. Keep this test focused on the Lead's explicit acknowledgement path.
+// Stop the fixture's independent poll-only Lookout when a test needs to isolate
+// one command from competing message delivery or Teardown maintenance.
 func stopBackgroundLookout(t *testing.T, f *prLifecycleFixture) {
 	t.Helper()
 	stopFixtureBackgroundLookout(t, f.root, f.env, f.db, f.project.ID)

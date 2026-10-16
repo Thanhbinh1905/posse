@@ -311,7 +311,8 @@ func TestUnsendDoesNotDeliverQueuedMessageE2E(t *testing.T) {
 	}) {
 		t.Fatal("isolated Pi Rider did not become ready for the unsend reproduction")
 	}
-	// Only unsend should observe this idle Rider after the row is queued.
+	// The poll-only Lookout is a valid competing delivery owner. Stop it so
+	// this regression measures unsend's own preparation, not that race.
 	stopBackgroundLookout(t, fixture)
 	if _, err := client.Run(context.Background(), "pane", "report-agent", task.PaneID, "--source", "posse.e2e", "--agent", "pi", "--state", "idle"); err != nil {
 		t.Fatalf("mark Pi idle for the unsend reproduction: %v", err)

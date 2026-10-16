@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
-	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -694,14 +692,13 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 	if err != nil {
 		return "", "", err
 	}
-	briefPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "brief.md")
-	contents, err := osReadFile(briefPath)
+	brief, err := readTaskBrief(home, project, task)
 	if err != nil {
+		var failure *axi.Error
+		if errors.As(err, &failure) {
+			return "", "", failure
+		}
 		return "", "", axi.Failure("brief_missing", "could not read the Task Brief for the pull request body", false, err.Error())
-	}
-	brief, err := dispatch.ParseHistoricalBriefText(string(contents))
-	if err != nil {
-		return "", "", axi.Failure("brief_invalid", "could not parse the Task Brief for the pull request body", false, err.Error())
 	}
 	changes, err := gitOutput(ctx, task.WorktreePath, "log", "--reverse", "--format=- %s", task.BaseRef+"..HEAD")
 	if err != nil {
@@ -766,8 +763,6 @@ func verificationChecklist(value string) string {
 
 const documentationChecklist = `- [ ] Documentation updated for this change
 - [ ] CLAUDE.md/AGENTS.md updated if needed`
-
-var osReadFile = func(path string) ([]byte, error) { return os.ReadFile(path) }
 
 func pullRequestURLFromOutput(output string) (string, error) {
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {

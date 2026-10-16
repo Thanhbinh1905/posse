@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -49,16 +50,31 @@ func TestMain(m *testing.M) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		cleanupSetupFailure(err)
 	}
-	home := filepath.Join(runRoot, "posse")
-	codexHome := filepath.Join(runRoot, "codex")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		cleanupSetupFailure(err)
+	// Capture shared Go caches before redirecting HOME; subprocess builds must
+	// not create disposable module/build caches under the test home.
+	if os.Getenv("GOCACHE") == "" || os.Getenv("GOMODCACHE") == "" {
+		output, err := exec.Command("go", "env", "-json", "GOCACHE", "GOMODCACHE").Output()
+		if err != nil {
+			cleanupSetupFailure(err)
+		}
+		var caches map[string]string
+		if err := json.Unmarshal(output, &caches); err != nil {
+			cleanupSetupFailure(err)
+		}
+		for name, value := range caches {
+			_ = os.Setenv(name, value)
+		}
 	}
-	if err := os.MkdirAll(codexHome, 0o700); err != nil {
-		cleanupSetupFailure(err)
+	for name, directory := range map[string]string{
+		"HOME": "home", "POSSE_HOME": "posse", "XDG_CONFIG_HOME": "xdg",
+		"CLAUDE_CONFIG_DIR": "claude", "CODEX_HOME": "codex", "PI_CODING_AGENT_DIR": "pi",
+	} {
+		path := filepath.Join(runRoot, directory)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			cleanupSetupFailure(err)
+		}
+		_ = os.Setenv(name, path)
 	}
-	_ = os.Setenv("POSSE_HOME", home)
-	_ = os.Setenv("CODEX_HOME", codexHome)
 	code := m.Run()
 	// Crash-helper subprocesses may bypass their own TestMain cleanup. Reap
 	// those abandoned per-run homes before this test process exits.

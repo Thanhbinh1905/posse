@@ -13,6 +13,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 type posseLaunchSkills struct {
@@ -25,6 +26,10 @@ type posseLaunchSkills struct {
 // snapshot under POSSE_HOME. Harnesses receive only this exact snapshot, never
 // the User's global skill directories or a Project/workspace path.
 func freezePosseLaunchSkills(home, project, projectRoot string) (posseLaunchSkills, error) {
+	return freezePosseLaunchSkillInputs(home, project, projectRoot, nil)
+}
+
+func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []taskplan.Input) (posseLaunchSkills, error) {
 	type skillFile struct {
 		name string
 		data []byte
@@ -32,9 +37,23 @@ func freezePosseLaunchSkills(home, project, projectRoot string) (posseLaunchSkil
 	files := make([]skillFile, 0, 2)
 	var digestInput bytes.Buffer
 	for _, name := range []string{"posse", "posse-setup"} {
-		data, err := setupassets.Skill(name)
-		if err != nil {
-			return posseLaunchSkills{}, err
+		var data []byte
+		if selected == nil {
+			var err error
+			data, err = setupassets.Skill(name)
+			if err != nil {
+				return posseLaunchSkills{}, err
+			}
+		} else {
+			for _, input := range selected {
+				if input.Role == "skill" && input.Source == name {
+					data = input.Bytes
+					break
+				}
+			}
+			if data == nil {
+				return posseLaunchSkills{}, fmt.Errorf("admitted plan has no selected skill %s", name)
+			}
 		}
 		files = append(files, skillFile{name: name, data: data})
 		fmt.Fprintf(&digestInput, "%s\x00%d\x00", name, len(data))
@@ -193,6 +212,10 @@ func mergeCodexDeveloperInstructions(args []string, injected string) ([]string, 
 	if err != nil {
 		return nil, err
 	}
+	return mergeCodexDeveloperInstructionsWithBase(args, injected, instructions)
+}
+
+func mergeCodexDeveloperInstructionsWithBase(args []string, injected, instructions string) ([]string, error) {
 	var instructionParts []string
 	if instructions != "" {
 		instructionParts = append(instructionParts, instructions)

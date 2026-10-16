@@ -29,7 +29,30 @@ func TestHistoricalMultiIssuePublishKeepsClosingLinks(t *testing.T) {
 	if err := os.WriteFile(briefPath, []byte(initial), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", briefPath, "--name", "pr-lifecycle-change")
+	fixture.runRideWithStoreBusyRetry(t, briefPath, "pr-lifecycle-change")
+	// This fixture represents an old Task, not a newly admitted contract.
+	stopBackgroundLookout(t, fixture)
+	task := fixture.mustTask(t, "t1")
+	tx, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`UPDATE tasks SET plan_json='' WHERE id=?`,
+		`DELETE FROM task_plan_revisions WHERE task_id=?`,
+		`UPDATE task_launch_identities SET plan_revision=0 WHERE task_id=?`,
+	} {
+		if _, err := tx.ExecContext(context.Background(), statement, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.PersistTask(context.Background(), task.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	stored := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
 	historical := strings.Replace(initial, "done_when: committed change exists\n", "done_when: committed change exists\nissues: [12, 16]\nrefs: [18]\n", 1)
@@ -91,10 +114,7 @@ func TestPublishRefreshesReusedPRMetadata(t *testing.T) {
 	if err := os.WriteFile(fixture.ghBody, []byte("Maintainer note before.\n\n"+legacyBody+"\n\n## Maintainer notes\n\nKeep this paragraph.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	updatedBrief := strings.Replace(initialBrief, "title: PR lifecycle change", "title: Updated PR title", 1)
-	if err := os.WriteFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md"), []byte(updatedBrief), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "retitle", "t1", "feat: Updated PR title")
 	second := []string{"Second summary", "--verify", "go test ./... -> second pass", "--proof", "second proof", "--risk", "Risk: second\nRollback: second rollback"}
 	beforeConflict := readTestFile(t, fixture.ghBody)
 	conflict := exec.Command(fixture.binary, append([]string{"publish"}, second...)...)
@@ -139,8 +159,8 @@ func TestPublishRefreshesReusedPRMetadata(t *testing.T) {
 			t.Errorf("re-published managed section retained stale %q: %s", stale, managed)
 		}
 	}
-	if title := readTestFile(t, fixture.ghTitle); title != "Updated PR title" {
-		t.Errorf("re-published PR title=%q want %q", title, "Updated PR title")
+	if title := readTestFile(t, fixture.ghTitle); title != "feat: Updated PR title" {
+		t.Errorf("re-published PR title=%q want %q", title, "feat: Updated PR title")
 	}
 	calls := readTestFile(t, fixture.ghLog)
 	if strings.Count(calls, "pr create") != 1 || strings.Count(calls, "pr edit") != 1 {

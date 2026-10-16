@@ -224,6 +224,31 @@ func TestRideCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
 	if code != 86 {
 		t.Fatalf("ride did not exit at the task-create crash point: code=%d output=%s", code, output)
 	}
+	var admittedJSON string
+	if err := fixture.openDB(t, func(db *store.DB) error {
+		task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+		if err != nil {
+			return err
+		}
+		plan, err := task.AdmittedPlan()
+		if err != nil {
+			return err
+		}
+		if plan == nil || plan.Revision != 1 || plan.Launch.ConfiguredModel != "sonnet" {
+			return fmt.Errorf("crash lost admitted plan: %#v", plan)
+		}
+		admittedJSON = task.PlanJSON
+		mounts, err := db.Mounts(context.Background(), fixture.project.ID)
+		if err != nil {
+			return err
+		}
+		if len(mounts) != 0 {
+			return fmt.Errorf("task-create crash allocated Mounts: %#v", mounts)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	code, output = fixture.run(t, "", "roster")
 	if code != 0 {
 		t.Fatalf("roster failed while recovering the interrupted ride: code=%d output=%s", code, output)
@@ -242,6 +267,9 @@ func TestRideCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
 		}
 		if task.State != store.StateFailed {
 			return fmt.Errorf("ride recovery left Task in %s, want failed", task.State)
+		}
+		if task.PlanJSON != admittedJSON {
+			return fmt.Errorf("crash recovery changed the admitted plan")
 		}
 		return nil
 	}); err != nil {
