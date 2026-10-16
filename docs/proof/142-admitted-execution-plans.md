@@ -33,6 +33,18 @@ A second real-CLI regression edited the copied Brief after admission. Before fix
 - Admission/revision/refusal/status/Codex tests passed with the race detector. The complete store and runtime race suites passed in 314.374 and 162.848 seconds.
 - `go test -race -p=1 -count=1 -timeout=45m -json ./internal/app`: passed in 1127.235 seconds, with 930 test/subtest passes and no failures. Together with the other package results above, every unit package passed with the race detector. No credentialed live-agent runs were enabled.
 
+## Main synchronization
+
+Merge commit `c339170` incorporates `origin/main` through `da79d74` (PRs #263, #264, #266 and #268), without rebasing the published branch. The three textual conflicts were duplicate scratch-isolation and unsend-fixture fixes; both intents are preserved. The automatically merged PR helper also needed the `os` import used by main's current-target merge lock. Admission, read-only status and frozen PR inputs remain unchanged.
+
+Post-merge verification:
+
+- The Project Gate passed: formatting, vet with `e2e,perf`, staticcheck 2026.2.1, generation with no diff, and `go test ./...`. App tests took 595.346 seconds; store tests took 87.077 seconds.
+- Targeted E2E passed in 189.249 seconds, with 21 test/subtest passes. Coverage includes admission, revision/rebuild, own-only status, selected Brief publication, legacy publication, PR title refresh, unsend isolation, launch skills, current-target merge refusal, PR landing, held-Project Lookout repair, Claude Stop ownership, Pi session replacement and Workspace admission/landing.
+- Targeted admission, snapshot, Claude Stop, Lookout repair and merge-boundary race tests passed (app 39.077 seconds; store 17.210 seconds). The complete `internal/taskplan` race suite also passed.
+- Performance budgets, shellcheck and shard-assignment self-check passed. Sampled command wall p95 remained below 58 ms.
+- Read-only inspection still found the same 18 disclosed Claude trust references; no live trust-store cleanup was attempted.
+
 ## Test-suite findings
 
 The original full E2E attempt exposed an existing unsend fixture race. It also reproduces on the unchanged base revision `ffc11ed`: the real poll-only Lookout can legitimately claim a queued message before `unsend` starts. A temporary caller trace identified `lookout --poll-only`, not `unsend`, as the delivery owner. The fixture now uses the existing helper to stop its own background Lookout before queuing; all original assertions remain. The isolated regression passed 10 consecutive runs. Temporary tracing was removed.
