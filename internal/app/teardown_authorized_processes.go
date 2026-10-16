@@ -13,7 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func releaseMountWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, clean string, approvedDiscard bool, authorization *mountProcessAuthorization) ([]string, error) {
+func (s *Service) releaseMountWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, clean string, approvedDiscard bool, authorization *mountProcessAuthorization) ([]string, error) {
 	mounts, err := db.Mounts(ctx, project.ID)
 	if err != nil {
 		return nil, err
@@ -48,7 +48,7 @@ func releaseMountWithAuthorization(ctx context.Context, db *store.DB, project st
 	}
 	var resetErr error
 	if project.IsWorkspace() {
-		resetErr = releaseWorkspaceMount(ctx, db, project, mount, clean)
+		resetErr = releaseWorkspaceMount(ctx, db, project, mount, clean, s.removeMount)
 	} else {
 		// Teardown is local and must not wait on origin. The next Mount
 		// acquisition fetches before starting new work.

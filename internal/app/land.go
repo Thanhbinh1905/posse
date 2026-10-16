@@ -64,6 +64,17 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "ship" {
 		return axi.Failure("land_refused", "only Ship Tasks can be Landed", false)
 	}
+	reviewPolicy := cfg.Defaults.Review
+	if plan, planErr := task.AdmittedPlan(); planErr != nil {
+		return admittedPlanFailure(planErr)
+	} else if plan != nil {
+		reviewPolicy = plan.Review
+	}
+	if reviewPolicy == "always" {
+		if err := requireReviewPass(ctx.Context, db, project, task); err != nil {
+			return err
+		}
+	}
 	if project.IsWorkspace() {
 		return s.landWorkspace(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
 	}
@@ -729,7 +740,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			}
 		}
 		var releaseErr error
-		killed, releaseErr = releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, discardable, processAuthorization)
+		killed, releaseErr = s.releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, discardable, processAuthorization)
 		return releaseErr
 	})
 	if err != nil {

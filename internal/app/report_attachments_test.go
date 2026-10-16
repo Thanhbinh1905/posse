@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
-	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -146,7 +145,7 @@ func TestWorkspaceRootBaselineUsesMountContentsAtAcquireAndRemainsHidden(t *test
 	gitTest(t, backend, "add", "member.txt")
 	gitTest(t, backend, "commit", "-m", "member baseline")
 	memberBaseline := strings.TrimSpace(gitTest(t, backend, "rev-parse", "HEAD"))
-	if err := writeWorkspaceRootBaseline(context.Background(), home, project, task, task.WorktreePath, []taskMember{{repoTarget: repoTarget{Name: "backend"}, Path: "backend"}}); err != nil {
+	if err := writeWorkspaceRootBaseline(context.Background(), home, project, task, task.WorktreePath, []taskMember{{repoTarget: repoTarget{Name: "backend"}, Path: "backend"}}, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	for _, root := range []string{project.Root, task.WorktreePath} {
@@ -188,19 +187,22 @@ func TestWorkspaceRootBaselineUsesMountContentsAtAcquireAndRemainsHidden(t *test
 	}
 }
 
-func TestWorkspaceScoutProtocolDescribesRootAttachments(t *testing.T) {
+func TestWorkspaceProtocolMakesRootContextExplicit(t *testing.T) {
 	project := store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}
-	task := store.Task{Seq: 1, Type: "scout"}
-	protocol := workerProtocol(project, task, dispatch.Brief{}, "/tmp/launch.md", "/tmp/posse/scratch/stack/t1") + workspaceProtocol(project, nil)
-	for _, phrase := range []string{
-		"new or edited shared-root files",
-		"Mount-acquisition snapshot",
-		"each unrequested Member's commits",
-		"Later edits to the live Project do not change the shared-root baseline",
-		"Teardown keeps the Mount",
+	for _, test := range []struct {
+		rootContext string
+		want        string
+	}{
+		{"none", "Shared-root files are not selected and are not copied"},
+		{"read-only", "explicitly selected as a bounded, read-only copy"},
+		{"legacy", "writable copy of shared-root files"},
 	} {
-		if !strings.Contains(protocol, phrase) {
-			t.Errorf("workspace Scout protocol omits %q:\n%s", phrase, protocol)
+		protocol := workspaceProtocol(project, nil, test.rootContext)
+		if !strings.Contains(protocol, test.want) {
+			t.Errorf("root context %q protocol omits %q:\n%s", test.rootContext, test.want, protocol)
+		}
+		if strings.Contains(protocol, project.Root+"/<member>") {
+			t.Errorf("workspace protocol exposes unselected Member source paths:\n%s", protocol)
 		}
 	}
 }

@@ -77,7 +77,7 @@ func TestWorkspaceTaskStartsFromAnotherPublishedTaskBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.acquireWorkspaceMount(ctx, db, project, task, members, home, "warm", nil); err != nil {
+	if _, err := service.acquireWorkspaceMount(ctx, db, project, task, members, home, "warm", nil, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	task, err = db.TaskByID(ctx, project.ID, taskID)

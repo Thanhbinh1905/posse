@@ -58,6 +58,33 @@ func TestLegacyBriefsResolveWithoutChangingInputsOrLaunchSettings(t *testing.T) 
 	}
 }
 
+func TestWorkspaceRootContextIsFrozenAndDefaultsToNone(t *testing.T) {
+	r := request("scout")
+	r.Brief = taskplan.Select("brief", "brief.md", []byte("---\ntype: scout\ntitle: Inspect workspace\ndone_when: report is saved\nroot_context: read-only\n---\n"))
+	r.Execution.Scope = "workspace"
+	plan, err := taskplan.Resolve(r)
+	if err != nil || plan.Execution.RootContext != taskplan.RootContextReadOnly {
+		t.Fatalf("selected root context = %#v, %v", plan.Execution, err)
+	}
+
+	r.Brief = taskplan.Select("brief", "brief.md", []byte("---\ntype: scout\ntitle: Inspect workspace\ndone_when: report is saved\n---\n"))
+	plan, err = taskplan.Resolve(r)
+	if err != nil || plan.Execution.RootContext != taskplan.RootContextNone {
+		t.Fatalf("implicit root context = %#v, %v", plan.Execution, err)
+	}
+
+	legacy := plan
+	legacy.Execution.RootContext = ""
+	encoded, err := legacy.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := taskplan.Decode(encoded)
+	if err != nil || decoded.Execution.RootContext != "" {
+		t.Fatalf("legacy workspace plan lost its implicit context: %#v, %v", decoded.Execution, err)
+	}
+}
+
 func TestBindingTouchesOnlyTheDeclaredTaskComponent(t *testing.T) {
 	r := request("ship")
 	r.Paths.Scratch = "/managed/{task}/scratch/shop/{task}"

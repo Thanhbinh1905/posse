@@ -16,6 +16,11 @@ import (
 
 const Version = 1
 
+const (
+	RootContextNone     = "none"
+	RootContextReadOnly = "read-only"
+)
+
 // Input contains only bytes consumed by the contract, not an entire forge thread
 // or configuration file. Bytes are base64 encoded by JSON, preserving CRLF and
 // non-UTF-8 input without normalization.
@@ -83,12 +88,13 @@ type Member struct {
 }
 
 type Execution struct {
-	Mode       string   `json:"mode"`
-	Scope      string   `json:"scope"`
-	Base       string   `json:"base"`
-	BaseCommit string   `json:"base_commit,omitempty"`
-	Target     string   `json:"target"`
-	Members    []Member `json:"members,omitempty"`
+	Mode        string   `json:"mode"`
+	Scope       string   `json:"scope"`
+	Base        string   `json:"base"`
+	BaseCommit  string   `json:"base_commit,omitempty"`
+	Target      string   `json:"target"`
+	RootContext string   `json:"root_context,omitempty"`
+	Members     []Member `json:"members,omitempty"`
 }
 
 type Launch struct {
@@ -172,6 +178,12 @@ func Resolve(r Request) (Plan, error) {
 	}
 	if brief.AutonomyLand != "" {
 		landSource = "brief: " + r.Brief.Source
+	}
+	if r.Execution.Scope == "workspace" && r.Execution.RootContext == "" {
+		r.Execution.RootContext = brief.RootContext
+		if r.Execution.RootContext == "" {
+			r.Execution.RootContext = RootContextNone
+		}
 	}
 	p := Plan{Version: Version, Revision: 1, Type: brief.Type, Outcome: outcome, Executor: "rider",
 		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
@@ -260,6 +272,12 @@ func (p Plan) Validate() error {
 	if p.Execution.Scope == "repo" && len(p.Execution.Members) != 0 {
 		return invalid("repository execution cannot select Members")
 	}
+	if p.Execution.Scope == "repo" && p.Execution.RootContext != "" && p.Execution.RootContext != RootContextNone {
+		return invalid("repository execution cannot select workspace root context")
+	}
+	if p.Execution.Scope == "workspace" && p.Execution.RootContext != "" && p.Execution.RootContext != RootContextNone && p.Execution.RootContext != RootContextReadOnly {
+		return invalid("unsupported workspace root context")
+	}
 	if p.Execution.Scope == "workspace" && p.Type == "ship" && len(p.Execution.Members) == 0 {
 		return invalid("workspace Ship requires Members")
 	}
@@ -315,6 +333,12 @@ func (p Plan) Validate() error {
 		if len(p.Preferences) != 2 || p.Preferences[0].Name != "delivery" || p.Preferences[0].Value != p.Delivery || p.Preferences[1].Name != "review" || p.Preferences[1].Value != p.Review || p.Preferences[0].Source == "" || p.Preferences[1].Source == "" {
 			return invalid("invalid preference values or provenance")
 		}
+	}
+	if brief.RootContext != "" && (p.Execution.Scope != "workspace" || p.Execution.RootContext != brief.RootContext) {
+		return invalid("selected Brief root context does not match workspace execution")
+	}
+	if p.Execution.Scope == "workspace" && p.Execution.RootContext != "" && p.Execution.RootContext != RootContextNone && brief.RootContext != p.Execution.RootContext {
+		return invalid("workspace root context is not selected in the Brief")
 	}
 	grants := map[string]string{}
 	for _, grant := range p.Grants {

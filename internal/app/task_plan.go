@@ -35,20 +35,20 @@ func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) 
 }
 
 func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice) (taskplan.Plan, error) {
+	brief, err := dispatch.ParseBriefText(string(briefData))
+	if err != nil {
+		return taskplan.Plan{}, err
+	}
 	launch, err := frozenLaunch(resolution, cfg.Kinds)
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
-	execution := taskplan.Execution{Mode: "mount", Scope: project.Kind, Base: task.BaseRef, Target: task.TargetBranch}
+	execution := taskplan.Execution{Mode: "mount", Scope: project.Kind, Base: task.BaseRef, Target: task.TargetBranch, RootContext: brief.RootContext}
 	if !project.IsWorkspace() && execution.Target == "" {
 		execution.Target = project.DefaultBranch
 	}
 	if execution.Scope == "" {
 		execution.Scope = "repo"
-	}
-	brief, err := dispatch.ParseBriefText(string(briefData))
-	if err != nil {
-		return taskplan.Plan{}, err
 	}
 	if brief.Base != "" && !project.IsWorkspace() {
 		execution.BaseCommit, err = selectedBaseCommit(ctx, project.Root, task.BaseRef)
@@ -130,7 +130,7 @@ func restoreAdmittedLaunchFiles(project store.Project, task store.Task, plan *ta
 	for _, member := range plan.Execution.Members {
 		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, LandingMode: member.Delivery})
 	}
-	contents := workerProtocol(project, task, brief, launchPath, plan.Paths.Scratch) + workspaceProtocol(project, members) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
+	contents := workerProtocol(project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "rider", planPreferences(plan))
 	return writeFile(launchPath, []byte(contents))
 }
