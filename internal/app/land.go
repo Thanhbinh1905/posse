@@ -64,16 +64,8 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "ship" {
 		return axi.Failure("land_refused", "only Ship Tasks can be Landed", false)
 	}
-	reviewPolicy := cfg.Defaults.Review
-	if plan, planErr := task.AdmittedPlan(); planErr != nil {
-		return admittedPlanFailure(planErr)
-	} else if plan != nil {
-		reviewPolicy = plan.Review
-	}
-	if reviewPolicy == "always" {
-		if err := requireReviewPass(ctx.Context, db, project, task); err != nil {
-			return err
-		}
+	if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+		return err
 	}
 	if project.IsWorkspace() {
 		return s.landWorkspace(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
@@ -160,6 +152,9 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 			_ = s.deliverNotices(ctx.Context, db, project)
 			return axi.Failure("gate_failed", err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
 		}
+		if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+			return err
+		}
 		if err := runLandStep("task.landing", func() error {
 			return db.Transition(ctx.Context, task.ID, store.StateDone, store.StateLanding, "cli", "Gate passed and local fast-forward is ready")
 		}); err != nil {
@@ -216,7 +211,20 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 	}
-	if err := runLandStep("merge", func() error { return mergeLocal(ctx.Context, project, task) }); err != nil {
+	if err := runLandStep("merge", func() error {
+		pathScope, err := localMergePathScope(ctx.Context, project, task)
+		if err != nil {
+			return err
+		}
+		targetRef := "refs/heads/" + taskTargetBranch(project, task)
+		return withIntentGitResources(ctx.Context, db, project, task, intent.ID, project.Root, []string{targetRef}, pathScope,
+			func() error {
+				if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+					return err
+				}
+				return mergeLocal(ctx.Context, project, task)
+			})
+	}); err != nil {
 		return err
 	}
 	landedRef, err := gitOutput(ctx.Context, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, task))
@@ -293,6 +301,9 @@ func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Pro
 	}
 	if current.State == store.StateLanding {
 		if current.LandingMode == "pr" || current.LandingMode == "no-mistakes" {
+			if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, "verified no local merge effect is pending"); err != nil {
+				return err
+			}
 			return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 		}
 		merged := false
@@ -319,6 +330,9 @@ func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Pro
 				return err
 			}
 		}
+	}
+	if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, "re-read the target ref and settled the interrupted local Land"); err != nil {
+		return err
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 }

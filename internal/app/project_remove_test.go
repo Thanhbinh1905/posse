@@ -269,6 +269,9 @@ func seedProjectReference(t *testing.T, db *store.DB, table string, foreignKeys 
 		}
 		values[column.name] = seedValue(column)
 	}
+	if table == "resource_leases" {
+		values["resource_type"] = store.ResourcePath
+	}
 	if table == "task_target_changes" {
 		values["status"] = "pending"
 		values["from_branch"] = "posse/lower"

@@ -50,7 +50,8 @@ var keySpecs = []KeySpec{
 	{Key: "repositories.<repository>.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override the forge for a member repository."},
 	{Key: "defaults.merge_method", Type: TypeString, Allowed: []string{"squash", "merge", "rebase"}, Default: "squash", Meaning: "Merge method used for pull requests."},
 	{Key: "defaults.pr_poll", Type: TypeDuration, Default: "2m", Meaning: "Minimum interval between pull request and Project checkout polls."},
-	{Key: "defaults.review", Type: TypeString, Allowed: []string{"always", "on_risk", "never"}, Default: "on_risk", Meaning: "When a completed Ship Task requires review."},
+	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Default: "none", Meaning: "Independent-review evidence required to Land a Ship Task; does not grant merge authority.", UserOnly: true},
+	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
 	{Key: "defaults.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in the Mount before a Ship Task may Land.", UserOnly: true},
 	{Key: "repositories.<repo>.landing_mode", Type: TypeString, Allowed: []string{"local", "pr"}, Meaning: "How this member repository of a workspace Project Lands; defaults to local without an origin, else the Project landing_mode."},
 	{Key: "repositories.<repo>.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for this workspace Member; overrides defaults.target_branch and the Member's default branch."},
@@ -78,7 +79,7 @@ var keySpecs = []KeySpec{
 	{Key: "dispatch", Type: TypeTableArray, Default: []any{}, Meaning: "Ordered dispatch rules that select a Profile."},
 	{Key: "dispatch.default.use", Type: TypeString, Default: "", Meaning: "Fallback Profile used when no dispatch rule matches."},
 	{Key: "autonomy.yolo", Type: TypeBoolean, Default: false, Meaning: "Shorthand granting the Lead review and landing autonomy.", UserOnly: true},
-	{Key: "autonomy.review", Type: TypeString, Allowed: []string{"ask", "lead"}, Default: "ask", Meaning: "Whether the Lead may decide review findings without asking the User.", UserOnly: true},
+	{Key: "autonomy.review", Type: TypeString, Allowed: []string{"ask", "lead"}, Default: "ask", Meaning: "Disposition of review findings: whether the Lead may decide without asking the User; never substitutes for review evidence.", UserOnly: true},
 	{Key: "autonomy.land", Type: TypeString, Allowed: []string{"ask", "auto"}, Default: "ask", Meaning: "Whether the Lead may Land changes without asking the User.", UserOnly: true},
 }
 
@@ -135,6 +136,11 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 		return fmt.Errorf("%s must be %s", key, spec.Type)
 	}
 	if text, ok := value.(string); ok {
+		if key == "defaults.review" || strings.HasPrefix(key, "repositories.") && strings.HasSuffix(key, ".review") {
+			if err := ValidateReview(text); err != nil {
+				return err
+			}
+		}
 		if len(spec.Allowed) > 0 && !oneOf(text, spec.Allowed...) {
 			return fmt.Errorf("%s must be one of %s", key, strings.Join(spec.Allowed, ", "))
 		}
