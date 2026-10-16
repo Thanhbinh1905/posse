@@ -233,7 +233,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	stopSignals := make(chan os.Signal, 1)
 	signal.Notify(stopSignals, syscall.SIGTERM)
 	defer signal.Stop(stopSignals)
-	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}})
+	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}, "repair": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,10 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		}
 		timeout = time.Duration(milliseconds) * time.Millisecond
 	}
-	db, _, err := s.openDB()
+	if parsed.Bool("repair") && (parsed.Flags["timeout"] != "" || parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Flags["destination"] != "" || parsed.Flags["receipt"] != "" || parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" || parsed.Bool("handoff") || parsed.Bool("quiet-routine") || parsed.Bool("poll-only")) {
+		return axi.Usage("--repair cannot be combined with Lookout wait or delivery options")
+	}
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -256,6 +259,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	project, err := s.projectForCWD(ctx.Context, db)
 	if err != nil {
 		return err
+	}
+	if parsed.Bool("repair") {
+		return s.repairLookout(ctx, db, home, project)
 	}
 	if parsed.Bool("poll-only") {
 		if parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Flags["destination"] != "" || parsed.Flags["receipt"] != "" || parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" || parsed.Bool("quiet-routine") || parsed.Bool("handoff") {
