@@ -314,7 +314,7 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 				return err
 			}
 		case store.TaskRepoLanding:
-			if err := s.mergeMemberPullRequest(ctx, db, cfg, task, intent, member); err != nil {
+			if err := s.mergeMemberPullRequest(ctx, db, project, cfg, task, intent, member); err != nil {
 				return err
 			}
 		}
@@ -322,7 +322,7 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 	return nil
 }
 
-func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, cfg config.Config, task store.Task, intent store.Intent, member memberLanding) error {
+func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, member memberLanding) error {
 	repo := member.repo
 	if repo.GatedSHA == "" || repo.PRURL == "" {
 		return axi.Failure("land_refused", repo.Repo+": no recorded pull request or gated commit", false)
@@ -370,6 +370,10 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, cfg 
 	}
 	defer mergeLock.Close()
 	if err := verifyPRTargetIsUpToDate(ctx, member.target.Root, taskTargetBranch(member.project, member.task), repo.GatedSHA, task.Seq); err != nil {
+		return prefixFailure(repo.Repo, err)
+	}
+	// Recheck the selected evidence immediately before each Member merge effect.
+	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
 		return prefixFailure(repo.Repo, err)
 	}
 	method := defaultValue(cfg.Defaults.MergeMethod, "squash")

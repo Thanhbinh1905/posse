@@ -133,7 +133,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 			if task.PRURL == "" {
 				return axi.Failure("land_refused", "no-mistakes delivery has no pull request URL", false, "Signal completion with `posse holler done <summary> --pr <url>`")
 			}
-			if err := s.enterNoMistakesLanding(ctx, db, project, task); err != nil {
+			if err := s.enterNoMistakesLanding(ctx, db, project, cfg, task); err != nil {
 				return err
 			}
 			current, err := db.TaskByID(ctx, project.ID, task.ID)
@@ -216,6 +216,9 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return err
 				}
 				return axi.Failure("branch_moved", "Task branch moved while the Gate was running", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
+			}
+			if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
+				return err
 			}
 			forge, err := forgeForRepository(ctx, project.Root, cfg, "")
 			if err != nil {
@@ -502,7 +505,7 @@ func pullRequestHeadLagTimeout(actual, expected string) error {
 	return axi.Failure("pr_head_lag_timeout", fmt.Sprintf("forge has not caught up to pushed Task head %s; the request still reports previous head %s", expected, actual), true, "Re-run `posse publish` after the forge updates its request head")
 }
 
-func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) error {
 	if err := validatePullRequestOrigin(ctx, project.Root, task.PRURL); err != nil {
 		return err
 	}
@@ -511,6 +514,9 @@ func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, proj
 	}
 	gatedSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 	if err != nil {
+		return err
+	}
+	if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
 		return err
 	}
 	if err := db.SetTaskGatedSHA(ctx, task.ID, gatedSHA); err != nil {
@@ -572,14 +578,8 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		}
 		return axi.Failure("branch_moved", "pull request head moved after the Gate passed", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
 	}
-	observation, observationErr := db.LatestPRObservation(ctx, task.ID)
-	if observationErr != nil && !store.IsNotFound(observationErr) {
-		return observationErr
-	}
-	var observationChecks checkSnapshot
-	checksErr := json.Unmarshal([]byte(observation.Checks), &observationChecks)
-	if observationErr != nil || checksErr != nil || observation.PRURL != task.PRURL || observation.HeadSHA != task.GatedSHA || observationChecks.State != "SUCCESS" || observation.Review == "CHANGES_REQUESTED" || observation.Review == "REVIEW_REQUIRED" || observation.Mergeable != "MERGEABLE" {
-		return axi.Failure("checks_not_green", "pull request does not have a green observation for the gated head", false, "Wait for `land_ready` before retrying `posse land "+taskIDString(task.Seq)+" --merge`")
+	if err := requireGreenObservation(ctx, db, task); err != nil {
+		return err
 	}
 	mergeLock, err := acquirePRMergeLock(ctx, project.Root)
 	if err != nil {
@@ -587,6 +587,15 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 	}
 	defer mergeLock.Close()
 	if err := verifyPRTargetIsUpToDate(ctx, project.Root, taskTargetBranch(project, task), task.GatedSHA, task.Seq); err != nil {
+		return err
+	}
+	// Recheck under the merge lock: the forge head is pinned by the merge
+	// command, so the newest observation and the selected evidence must name
+	// that same gated head immediately before the effect.
+	if err := requireGreenObservation(ctx, db, task); err != nil {
+		return err
+	}
+	if err := requireSelectedReviewAt(ctx, db, project, cfg, task, task.GatedSHA); err != nil {
 		return err
 	}
 	if userQuote != "" {
@@ -617,6 +626,22 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		return axi.Failure("pr_merge_failed", "GitHub did not merge the pull request", true, err.Error())
 	}
 	return ctxPrintLand(out, task, "Run `posse` or `posse lookout` to observe the merge")
+}
+
+// requireGreenObservation accepts only the newest observation of the recorded
+// pull request, taken at the gated head. Green checks for any other head,
+// including an older one, never qualify.
+func requireGreenObservation(ctx context.Context, db *store.DB, task store.Task) error {
+	observation, err := db.LatestPRObservation(ctx, task.ID)
+	if err != nil && !store.IsNotFound(err) {
+		return err
+	}
+	var checks checkSnapshot
+	checksErr := json.Unmarshal([]byte(observation.Checks), &checks)
+	if err != nil || checksErr != nil || observation.PRURL != task.PRURL || observation.HeadSHA != task.GatedSHA || checks.State != "SUCCESS" || observation.Review == "CHANGES_REQUESTED" || observation.Review == "REVIEW_REQUIRED" || observation.Mergeable != "MERGEABLE" {
+		return axi.Failure("checks_not_green", "pull request does not have a green observation for the gated head", false, "Wait for `land_ready` before retrying `posse land "+taskIDString(task.Seq)+" --merge`")
+	}
+	return nil
 }
 
 func acquirePRMergeLock(ctx context.Context, root string) (*os.File, error) {
@@ -1045,6 +1070,11 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	}
 	for _, observed := range observations {
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
+		if observed.current.State == "MERGED" && (!observed.hasBefore || observed.previous.State != "MERGED") {
+			if notice, violated := reviewPolicyViolation(ctx, db, project, cfg, observed.task, observed.current); violated {
+				effect.Notices = append(effect.Notices, notice)
+			}
+		}
 		if observed.current.State == "MERGED" && observed.hasBefore && observed.previous.PRURL == observed.current.PRURL && observed.previous.State == "MERGED" {
 			var exists bool
 			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='pr_merged' AND data_json=?)`, observed.task.ID, marshalJSON(map[string]any{"url": observed.current.PRURL, "head_sha": observed.current.HeadSHA, "merge_commit": observed.current.MergeCommit})).Scan(&exists); err != nil {
@@ -1088,6 +1118,27 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		return err
 	}
 	return nil
+}
+
+// reviewPolicyViolation evaluates the selected evidence for the head the forge
+// merged. A merge Posse did not guard still Lands (ADR 0011), but it never gains
+// a fabricated pass: the missing evidence is reported as a policy violation.
+func reviewPolicyViolation(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merged store.PRObservation) (store.Notice, bool) {
+	err := requireSelectedReviewAt(ctx, db, project, cfg, task, merged.HeadSHA)
+	if err == nil {
+		return store.Notice{}, false
+	}
+	code, message := "review_evidence_unverified", err.Error()
+	var failure *axi.Error
+	if errors.As(err, &failure) {
+		code, message = failure.Code, failure.Message
+	}
+	return store.Notice{
+		ProjectID: project.ID, TaskID: task.ID, Kind: "review_policy_violation",
+		Summary:   task.Title + ": pull request merged at " + shortSHA(merged.HeadSHA) + " without the selected review evidence: " + truncate(message, 240),
+		DataJSON:  marshalJSON(map[string]any{"url": merged.PRURL, "head_sha": merged.HeadSHA, "merge_commit": merged.MergeCommit, "evidence_error": code, "detail": message}),
+		CreatedAt: merged.ObservedAt,
+	}, true
 }
 
 // gh may exit nonzero for a single GraphQL error while still printing usable
