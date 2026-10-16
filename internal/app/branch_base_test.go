@@ -21,7 +21,7 @@ func TestAdmittedExplicitBaseDoesNotFollowLaterBranchMoves(t *testing.T) {
 	}
 	task, _ := f.onlyTask(t)
 	plan, err := task.AdmittedPlan()
-	if err != nil || plan == nil || plan.Execution.BaseCommit != initial {
+	if err != nil || plan == nil || plan.Execution.BaseCommit != initial || task.BaseRef != initial {
 		t.Fatalf("base not pinned: %#v %v", plan, err)
 	}
 	if err := os.WriteFile(filepath.Join(f.repo, "later.txt"), []byte("later base\n"), 0o600); err != nil {
@@ -29,7 +29,15 @@ func TestAdmittedExplicitBaseDoesNotFollowLaterBranchMoves(t *testing.T) {
 	}
 	gitTest(t, f.repo, "add", "later.txt")
 	gitTest(t, f.repo, "commit", "-m", "later base")
-	gitTest(t, f.repo, "branch", "-f", "release/next", "main")
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "task.txt"), []byte("Task change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, task.WorktreePath, "add", "task.txt")
+	gitTest(t, task.WorktreePath, "commit", "-m", "Task change")
+	gitTest(t, f.repo, "branch", "-f", "release/next", task.Branch)
+	if err := validateShipSignal(context.Background(), task); err != nil {
+		t.Fatalf("moved base changed completion proof: %v", err)
+	}
 	base, err := taskCheckoutBase(context.Background(), f.repo, task, "", task.BaseRef)
 	if err != nil || base != initial {
 		t.Fatalf("base followed moved branch: %s %v", base, err)

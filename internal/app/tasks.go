@@ -353,6 +353,11 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
+	if plan.Execution.BaseCommit != "" {
+		// All later diff, proof and teardown checks use the admitted commit,
+		// not a mutable feature/release branch. The plan retains its name.
+		task.BaseRef = plan.Execution.BaseCommit
+	}
 	task.PlanJSON, err = plan.Encode()
 	if err != nil {
 		return admittedPlanFailure(err)

@@ -194,7 +194,7 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 				}
 				return mount, axi.Failure("branch_check_failed", "could not create "+ref+" in repository "+member.Name, true, err.Error())
 			}
-			rows = append(rows, store.TaskRepo{Repo: member.Name, WorktreePath: worktree, BaseRef: member.BaseRef, TargetBranch: member.TargetBranch, LandingMode: member.LandingMode})
+			rows = append(rows, store.TaskRepo{Repo: member.Name, WorktreePath: worktree, BaseRef: base, TargetBranch: member.TargetBranch, LandingMode: member.LandingMode})
 		}
 		if err := db.CreateTaskRepos(ctx, task.ID, rows); err != nil {
 			return mount, err
