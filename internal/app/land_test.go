@@ -17,6 +17,29 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestLocalLandRefusesOverlappingRootWriterBeforeChangingTargetRef(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateDone)
+	before := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/main"))
+	lease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
+		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: fixture.project.ID,
+		Owner: "local root writer", SourceKey: "test-local-root-writer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fixture.db.ReleaseResourceLease(context.Background(), lease.ID, lease.CustodyToken) }()
+
+	code, output, errOutput := fixture.run("land", "t1", "--merge", "--user-approved", "User approved this merge")
+	combined := output + errOutput
+	if code == 0 || !strings.Contains(combined, "resource_conflict") || !strings.Contains(combined, "local root writer") {
+		t.Fatalf("local Land with an overlapping root writer = %d, %s, %s; want named conflict", code, output, errOutput)
+	}
+	after := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/main"))
+	if after != before {
+		t.Fatalf("target ref moved despite resource conflict: before=%s after=%s", before, after)
+	}
+}
+
 func TestLocalLandingRequiresApprovalAndTeardownAudits(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")

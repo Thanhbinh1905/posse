@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -15,6 +16,9 @@ import (
 // Missing checkouts are reported once rather than recreated over lost work.
 func ensureHeldMountLocks(ctx context.Context, db *store.DB, project store.Project) error {
 	return withMountStateLock(ctx, db, func() error {
+		if err := execution.NewManager(db).EnsureMountLeases(ctx); err != nil {
+			return resourceLeaseError(err)
+		}
 		mounts, err := db.Mounts(ctx, project.ID)
 		if err != nil {
 			return err
