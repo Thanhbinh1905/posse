@@ -21,6 +21,7 @@ type Brief struct {
 	Target         string
 	TargetByRepo   map[string]string
 	ReviewOf       string
+	ReportKind     string
 	AutonomyReview string
 	AutonomyLand   string
 	// Repos names the workspace members the Task works on; empty for a repo Project.
@@ -101,7 +102,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review", "base", "target", "review_of", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -116,6 +117,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		LandingMode: unquote(values["landing_mode"]),
 		Review:      unquote(values["review"]),
 		ReviewOf:    unquote(values["review_of"]),
+		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
 	}
@@ -219,6 +221,14 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	}
 	if brief.LandingMode != "" && !oneOf(brief.LandingMode, "local", "pr", "no-mistakes") {
 		return Brief{}, &BriefError{Field: "landing_mode", Reason: "must be local, pr or no-mistakes"}
+	}
+	if brief.ReportKind != "" {
+		if brief.Type != "scout" {
+			return Brief{}, &BriefError{Field: "report_kind", Reason: "is valid only for a Scout Task"}
+		}
+		if !oneOf(brief.ReportKind, "spec", "tickets") {
+			return Brief{}, &BriefError{Field: "report_kind", Reason: "must be spec or tickets"}
+		}
 	}
 	if brief.Review != "" && !(allowHistoricalMultiIssue && config.LegacyReview(brief.Review)) {
 		if err := config.ValidateReview(brief.Review); err != nil {

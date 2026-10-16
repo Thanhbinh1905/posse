@@ -274,6 +274,26 @@ type RepoWatchState struct {
 	CheckoutReason    string
 }
 
+type ReportAcceptance struct {
+	ReportTaskID int64
+	ReportDigest string
+	AcceptedBy   string
+	RecordedBy   string
+	Provenance   string
+	UserQuote    string
+	AcceptedAt   int64
+}
+
+type ReportReview struct {
+	ID             int64
+	ReportTaskID   int64
+	ReviewTaskID   int64
+	ReportDigest   string
+	Verdict        string
+	ReviewerLaunch int64
+	RecordedAt     int64
+}
+
 type ResourceLease struct {
 	ID             int64
 	ResourceType   string
@@ -373,6 +393,9 @@ type Task struct {
 	TargetBranch         string
 	PrTitle              string
 	PlanJson             string
+	ReportKind           string
+	ReportDigest         string
+	ReportManifestJson   string
 }
 
 type TaskLaunchIdentity struct {
