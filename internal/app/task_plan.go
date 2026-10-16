@@ -100,7 +100,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	}
 	return taskplan.Resolve(taskplan.Request{Brief: taskplan.Select("brief", source, briefData), Inputs: inputs, Execution: execution, Launch: launch,
 		Review: cfg.Defaults.Review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
-		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice,
+		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
 		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		Gate:  cfg.Defaults.Gate, MergeMethod: cfg.Defaults.MergeMethod, Remuda: config.Remuda{Clean: cfg.Remuda.Clean, Setup: cfg.Remuda.Setup}})
 }
@@ -130,7 +130,7 @@ func restoreAdmittedLaunchFiles(project store.Project, task store.Task, plan *ta
 	for _, member := range plan.Execution.Members {
 		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, LandingMode: member.Delivery})
 	}
-	contents := workerProtocol(project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
+	contents := workerProtocol(project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext, plan.ProseLanguage) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "rider", planPreferences(plan))
 	return writeFile(launchPath, []byte(contents))
 }

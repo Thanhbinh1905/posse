@@ -198,7 +198,7 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 				ref := "refs/heads/" + task.Branch
 				found, refErr := gitOutput(ctx, worktree, "for-each-ref", "--format=%(refname)", ref)
 				if refErr == nil && found != "" {
-					return mount, branchRefTaken(task.ShortName, member.Name, found)
+					return mount, branchTaken(task.Branch, "in repository "+member.Name+" at ref "+found)
 				}
 				return mount, axi.Failure("branch_check_failed", "could not create "+ref+" in repository "+member.Name, true, err.Error())
 			}

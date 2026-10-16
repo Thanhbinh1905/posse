@@ -345,7 +345,7 @@ func TestWorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
 		t.Fatalf("state=%s", f.state())
 	}
 	tool := filepath.Join(f.workspace, "e2e-tool")
-	content := gitTest(t, tool, "show", "refs/heads/posse/span-members-leftover:follow-up-edit.txt")
+	content := gitTest(t, tool, "show", "refs/heads/"+f.task.Branch+"-leftover:follow-up-edit.txt")
 	if content != "Rider work\n" {
 		t.Fatalf("uncommitted Member Leftover was not saved: %q", content)
 	}

@@ -14,6 +14,7 @@ log_path = root / 't199-forge-calls.jsonl'
 with log_path.open('a') as stream:
     stream.write(json.dumps({'forge': 'gitlab' if is_gitlab else 'github', 'args': args}) + '\n')
 state = json.loads(state_path.read_text()) if state_path.exists() else None
+task_branch = 'posse/t1'
 
 
 def flag(name, default=''):
@@ -21,14 +22,14 @@ def flag(name, default=''):
 
 
 def head():
-    return subprocess.check_output(['git', '--git-dir=' + os.environ['POSSE_TEST_REMOTE'], 'rev-parse', 'refs/heads/posse/pr-lifecycle-change'], text=True).strip()
+    return subprocess.check_output(['git', '--git-dir=' + os.environ['POSSE_TEST_REMOTE'], 'rev-parse', 'refs/heads/' + task_branch], text=True).strip()
 
 
 def metadata():
     sha = head()
     if is_gitlab:
-        return dict(state, state='opened', sha=sha, source_branch='posse/pr-lifecycle-change', target_branch='main', source_project_id=7, target_project_id=7)
-    return dict(state, state='OPEN', headRefOid=sha, headRefName='posse/pr-lifecycle-change', baseRefName='main', headRepository={'nameWithOwner': 'acme/shop'})
+        return dict(state, state='opened', sha=sha, source_branch=task_branch, target_branch='main', source_project_id=7, target_project_id=7)
+    return dict(state, state='OPEN', headRefOid=sha, headRefName=task_branch, baseRefName='main', headRepository={'nameWithOwner': 'acme/shop'})
 
 
 def emit(value):
@@ -55,7 +56,7 @@ elif (not is_gitlab and args[:2] == ['pr', 'list']) or (is_gitlab and any('merge
     elif is_gitlab:
         emit([metadata()])
     else:
-        emit([dict(url=state['url'], headRefName='posse/pr-lifecycle-change', headRefOid=head())])
+        emit([dict(url=state['url'], headRefName=task_branch, headRefOid=head())])
 elif args[:2] in (['pr', 'create'], ['mr', 'create']):
     state = {'title': flag('--title')}
     if is_gitlab:

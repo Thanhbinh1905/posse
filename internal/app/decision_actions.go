@@ -144,7 +144,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "leftover_discarded"}})
 		}
 		branch := strings.TrimPrefix(decision.Origin, "leftover:")
-		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "leftover", Value: branch}, {Key: "help", Value: []any{"Write a Ship Brief for the follow-up and run `posse ride --brief <file> --name <title-slug> --from-leftover " + strconv.FormatInt(id, 10) + "`"}}})
+		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "leftover", Value: branch}, {Key: "help", Value: []any{"Write a Ship Brief for the follow-up and run `posse ride --brief <file> [--name <display-name>] --from-leftover " + strconv.FormatInt(id, 10) + "`"}}})
 	case "pr_closed":
 		if decision.Answer == "discard" {
 			if task.State == store.StateTornDown {

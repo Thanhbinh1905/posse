@@ -48,7 +48,7 @@ case "$1 $2" in
  "pr list") if [ -n "${POSSE_TEST_GH_OPEN_PRS:-}" ]; then cat "$POSSE_TEST_GH_OPEN_PRS"; else printf '[]\n'; fi ;;
  "pr create") printf 'https://github.com/acme/worker/pull/7\n' ;;
  "pr edit") printf 'Edited\n' ;;
- "pr view") printf '{"url":"https://github.com/acme/worker/pull/7","state":"OPEN","headRefOid":"%s","headRefName":"posse/span-members","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "$(git -C "$POSSE_TEST_WORKTREE" rev-parse HEAD)" "${POSSE_TEST_GH_BASE_BRANCH:-main}" "${POSSE_TEST_GH_SOURCE:-acme/worker}" ;;
+ "pr view") printf '{"url":"https://github.com/acme/worker/pull/7","state":"OPEN","headRefOid":"%s","headRefName":"posse/t1","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "$(git -C "$POSSE_TEST_WORKTREE" rev-parse HEAD)" "${POSSE_TEST_GH_BASE_BRANCH:-main}" "${POSSE_TEST_GH_SOURCE:-acme/worker}" ;;
  *) exit 90 ;;
 esac
 `
@@ -73,7 +73,7 @@ esac
 	if f.repos()["worker"].PRURL != url || f.repos()["worker"].TargetBranch != "staging" {
 		t.Fatalf("PR or frozen target not recorded for the member: %#v", f.repos())
 	}
-	openPRs := `[{"url":"` + url + `","headRefName":"posse/span-members","headRefOid":"` + strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD")) + `","baseRefName":"staging"}]`
+	openPRs := `[{"url":"` + url + `","headRefName":"posse/t1","headRefOid":"` + strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD")) + `","baseRefName":"staging"}]`
 	openPRPath := filepath.Join(f.root, "open-prs.json")
 	if err := os.WriteFile(openPRPath, []byte(openPRs), 0o600); err != nil {
 		t.Fatal(err)

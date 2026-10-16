@@ -289,7 +289,7 @@ func homeHelp(tasks []store.Task, notices []store.Notice) []any {
 			help = append(help, "Run `posse show "+show+"` to inspect this Task")
 		}
 	} else {
-		help = append(help, "Run `posse ride --brief <file> --name <short>` to delegate a Task")
+		help = append(help, "Run `posse ride --brief <file> [--name <short>]` to delegate a Task")
 	}
 	if land != "" {
 		help = append(help, "Run `posse land "+land+"` to Land this completed Ship Task")
@@ -415,14 +415,14 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			if task.Branch != "posse/"+taskIDString(task.Seq) {
+			if task.Branch != store.TaskBranchName(task.Seq) {
 				row.Branch = task.Branch
 			}
 		}
 		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
-		return ctx.Print(axi.Object{{Key: "tasks", Value: []any{}}, {Key: "state", Value: "0 open Tasks"}, {Key: "help", Value: []any{"Run `posse ride --brief <file> --name <short>` to delegate a Task"}}})
+		return ctx.Print(axi.Object{{Key: "tasks", Value: []any{}}, {Key: "state", Value: "0 open Tasks"}, {Key: "help", Value: []any{"Run `posse ride --brief <file> [--name <short>]` to delegate a Task"}}})
 	}
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: rows}, {Key: "help", Value: []any{"Run `posse show " + taskCLIName(tasks[0]) + "` to inspect a Task"}}})
 }
@@ -665,10 +665,10 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		if task.Type == "ship" && !project.IsWorkspace() {
 			view["target_branch"] = taskTargetBranch(project, task)
 		}
-		if task.Branch != "posse/"+taskIDString(task.Seq) {
+		if task.Branch != store.TaskBranchName(task.Seq) {
 			view["branch"] = task.Branch
 		}
-		if task.BaseRef != "posse/"+taskIDString(task.Seq) {
+		if task.BaseRef != store.TaskBranchName(task.Seq) {
 			view["base_ref"] = task.BaseRef
 		}
 		view["worktree_path"] = task.WorktreePath

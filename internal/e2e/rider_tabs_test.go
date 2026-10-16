@@ -88,6 +88,76 @@ func TestRosterRecoversRestartWithoutStartupHook(t *testing.T) {
 	}
 }
 
+func TestTaskNamesBranchesAndLegacyRecoveryRemainIndependent(t *testing.T) {
+	f := newRiderTabsFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.ProjectByID(ctx, f.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Legacy localized title", ShortName: "legacy-display", Branch: "posse/legacy-display"})
+	if err == nil {
+		err = db.Transition(ctx, legacyID, store.StateSpawning, store.StateFailed, "cli", "historical Task fixture")
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyShow := runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1", "--full")
+	for _, expected := range []string{"legacy-display", "posse/legacy-display"} {
+		if !strings.Contains(legacyShow, expected) {
+			t.Fatalf("show omitted historical Task value %q: %s", expected, legacyShow)
+		}
+	}
+	runPosse(t, f.binary, f.repo, f.env, "recover", "--rebuild")
+	legacy := f.task(t, "t1")
+	if legacy.ShortName != "legacy-display" || legacy.Branch != "posse/legacy-display" {
+		t.Fatalf("rebuild rewrote historical Task identity: %#v", legacy)
+	}
+	legacyShow = runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1", "--full")
+	for _, expected := range []string{"legacy-display", "posse/legacy-display"} {
+		if !strings.Contains(legacyShow, expected) {
+			t.Fatalf("recovered show omitted historical Task value %q: %s", expected, legacyShow)
+		}
+	}
+
+	brief := filepath.Join(f.root, "localized-brief.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: 東京の修正\ndone_when: the test tears it down\n---\nWait.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dispatch := runPosse(t, f.binary, f.repo, f.leadEnv, "dispatch", "--brief", brief)
+	if !strings.Contains(dispatch, "name: task") {
+		t.Fatalf("dispatch did not generate a safe name for a localized title: %s", dispatch)
+	}
+	ride := runPosse(t, f.binary, f.repo, f.leadEnv, "ride", "--brief", brief)
+	for _, expected := range []string{"task: t2", "name: task", "branch: posse/t2"} {
+		if !strings.Contains(ride, expected) {
+			t.Fatalf("ride output omitted %q: %s", expected, ride)
+		}
+	}
+	f.waitState(t, "t2", store.StateWorking)
+	current := f.task(t, "t2")
+	if current.ShortName != "task" || current.Branch != "posse/t2" || strings.TrimSpace(gitTest(t, f.env, current.WorktreePath, "branch", "--show-current")) != current.Branch {
+		t.Fatalf("localized title did not keep its generated display name separate from the Task branch: %#v", current)
+	}
+	currentShow := runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t2")
+	if !strings.Contains(currentShow, "name: task") {
+		t.Fatalf("show omitted generated Task Name: %s", currentShow)
+	}
+	runPosse(t, f.binary, f.repo, f.env, "recover", "--rebuild")
+	legacy, current = f.task(t, "t1"), f.task(t, "t2")
+	if legacy.ShortName != "legacy-display" || legacy.Branch != "posse/legacy-display" || current.ShortName != "task" || current.Branch != "posse/t2" {
+		t.Fatalf("recovery changed Task names or branches: legacy=%#v current=%#v", legacy, current)
+	}
+	f.exitRider(t, "t2")
+}
+
 // TestFocusedRiderLaunch focuses the new Rider child before prompt delivery,
 // then verifies the Lead can safely complete delivery after unfocusing it.
 func TestFocusedRiderLaunch(t *testing.T) {

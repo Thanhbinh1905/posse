@@ -498,7 +498,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveredLaunch, err := os.ReadFile(launchRead)
-	if err != nil || !bytes.Equal(generatedLaunch, deliveredLaunch) || !strings.Contains(string(deliveredLaunch), "Write in English in a neutral voice.") || !strings.Contains(string(deliveredLaunch), "posse holler done") || !strings.Contains(string(deliveredLaunch), "as background commands and never poll them") || !strings.Contains(string(deliveredLaunch), "Do not wait for PR CI") || !strings.Contains(string(deliveredLaunch), "never touch panes, tabs or workspaces you did not create") || !strings.Contains(string(deliveredLaunch), "User rider marker") || strings.Index(string(deliveredLaunch), "Project rider marker") <= strings.Index(string(deliveredLaunch), "User rider marker") || strings.Contains(string(deliveredLaunch), "User lead marker") {
+	if err != nil || !bytes.Equal(generatedLaunch, deliveredLaunch) || !strings.Contains(string(deliveredLaunch), "Write Briefs, `posse send` instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence in English in a neutral voice.") || !strings.Contains(string(deliveredLaunch), "posse holler done") || !strings.Contains(string(deliveredLaunch), "as background commands and never poll them") || !strings.Contains(string(deliveredLaunch), "Do not wait for PR CI") || !strings.Contains(string(deliveredLaunch), "never touch panes, tabs or workspaces you did not create") || !strings.Contains(string(deliveredLaunch), "User rider marker") || strings.Index(string(deliveredLaunch), "Project rider marker") <= strings.Index(string(deliveredLaunch), "User rider marker") || strings.Contains(string(deliveredLaunch), "User lead marker") {
 		t.Fatalf("Worker did not receive the generated launch.md contract: err=%v generated=%q delivered=%q", err, generatedLaunch, deliveredLaunch)
 	}
 	workerArgs, err := os.ReadFile(workerArgsLog)
@@ -1744,7 +1744,7 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 	if workspace.Label != task.ShortName || workspace.Worktree.CheckoutPath != task.WorktreePath || !workspace.Worktree.IsLinkedWorktree ||
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
-		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.ShortName ||
+		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_name"] != task.ShortName || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.Branch ||
 		tab.Label == task.ShortName {
 		t.Fatalf("isolated Worker sidebar/cwd mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
 	}

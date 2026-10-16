@@ -131,6 +131,7 @@ type Plan struct {
 	Launch         Launch        `json:"launch"`
 	Gate           []string      `json:"gate"`
 	MergeMethod    string        `json:"merge_method"`
+	ProseLanguage  string        `json:"prose_language,omitempty"`
 	Remuda         config.Remuda `json:"remuda"`
 }
 
@@ -148,6 +149,7 @@ type Request struct {
 	Paths         Paths
 	Gate          []string
 	MergeMethod   string
+	ProseLanguage string
 	Remuda        config.Remuda
 }
 
@@ -189,7 +191,7 @@ func Resolve(r Request) (Plan, error) {
 		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.land", Value: autonomy.Land, Source: landSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
-		Gate: r.Gate, MergeMethod: r.MergeMethod, Remuda: r.Remuda}
+		Gate: r.Gate, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Remuda: r.Remuda}
 	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
 	for i, explicit := range []bool{brief.LandingMode != "", brief.Review != ""} {
 		if explicit {
@@ -210,14 +212,15 @@ func Resolve(r Request) (Plan, error) {
 	// Snapshot interpreted configuration fields consumed by the contract, not
 	// entire TOML files, other Profiles or unrelated forge content.
 	settings, err := json.Marshal(struct {
-		Execution   Execution     `json:"execution"`
-		Review      string        `json:"review"`
-		Delivery    string        `json:"delivery"`
-		Grants      []Grant       `json:"grants"`
-		Gate        []string      `json:"gate"`
-		MergeMethod string        `json:"merge_method"`
-		Remuda      config.Remuda `json:"remuda"`
-	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.MergeMethod, p.Remuda})
+		Execution     Execution     `json:"execution"`
+		Review        string        `json:"review"`
+		Delivery      string        `json:"delivery"`
+		Grants        []Grant       `json:"grants"`
+		Gate          []string      `json:"gate"`
+		MergeMethod   string        `json:"merge_method"`
+		ProseLanguage string        `json:"prose_language"`
+		Remuda        config.Remuda `json:"remuda"`
+	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.MergeMethod, p.ProseLanguage, p.Remuda})
 	if err != nil {
 		return Plan{}, err
 	}

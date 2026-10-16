@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -34,6 +35,27 @@ func TestLeadDisplayMetadataShowsHarness(t *testing.T) {
 				t.Fatalf("Lead harness metadata = %#v, want %s", metadata, tt.want)
 			}
 		})
+	}
+}
+
+func TestArtifactProseDefaultsToNeutralEnglish(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := config.Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := artifactProseLanguage(cfg); got != "English" {
+		t.Fatalf("default artifact prose language = %q", got)
+	}
+	instruction := artifactProseInstruction(artifactProseLanguage(cfg))
+	composed, err := composeLeadInstructions(home, store.Project{Name: "shop"}, cfg, "claude", nil)
+	if err != nil || !strings.Contains(composed.Text, instruction) {
+		t.Fatalf("Lead instructions did not propagate default English prose: %v\n%s", err, composed.Text)
+	}
+	for _, expected := range []string{"in English in a neutral voice", "Preserve User quotations exactly", "Task IDs", "branch refs", "Keep the Lead persona out of artifacts"} {
+		if !strings.Contains(instruction, expected) {
+			t.Errorf("artifact instruction omitted %q: %s", expected, instruction)
+		}
 	}
 }
 
@@ -83,9 +105,9 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	renders := make([]rendered, 0, 2)
 	configs := []string{
 		"[identity.lead]\nname = \"Marshal\"\npersona = \"nautical historian\"\nlanguage = \"vi\"\naddress_user = \"anh\"\n\n[identity.worker]\ndisplay_prefix = \"rider\"\n",
-		"[identity.lead]\nname = \"Archivist\"\npersona = \"formal botanist\"\nlanguage = \"fr\"\naddress_user = \"madame\"\n\n[identity.worker]\ndisplay_prefix = \"acorn\"\n",
+		"[identity.lead]\nname = \"Archivist\"\npersona = \"formal botanist\"\nlanguage = \"vi\"\naddress_user = \"madame\"\n\n[identity.worker]\ndisplay_prefix = \"acorn\"\n",
 	}
-	brief := dispatch.Brief{Type: "ship", Title: task.Title, DoneWhen: "the output is stable", Body: "Make the output stable."}
+	brief := dispatch.Brief{Type: "ship", Title: task.Title, DoneWhen: "the output is stable", Body: "Make the output stable.\n\nUser intent: \"Keep this exact.\""}
 	launchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(sequence), "launch.md")
 	t.Chdir(repo)
 	for _, text := range configs {
@@ -96,13 +118,20 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		contents := workerProtocol(project, task, brief, launchPath, filepath.Join(home, "scratch", project.Name, taskIDString(sequence)), "legacy") + "\n\n" + brief.Body + "\n"
+		composed, err := composeLeadInstructions(home, project, cfg, "claude", nil)
+		if err != nil || !strings.Contains(composed.Text, artifactProseInstruction("vi")) {
+			t.Fatalf("Lead instructions did not propagate configured prose language: %v\n%s", err, composed.Text)
+		}
+		contents := workerProtocol(project, task, brief, launchPath, filepath.Join(home, "scratch", project.Name, taskIDString(sequence)), "legacy", artifactProseLanguage(cfg)) + "\n\n" + brief.Body + "\n"
 		if err := writeFile(launchPath, []byte(contents)); err != nil {
 			t.Fatal(err)
 		}
 		launch, err := os.ReadFile(launchPath)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if !strings.Contains(string(launch), artifactProseInstruction("vi")) || !strings.Contains(string(launch), `"Keep this exact."`) || strings.Contains(string(launch), cfg.Identity.Lead.Persona) {
+			t.Fatalf("Worker artifact did not preserve configured prose, exact User quote and persona boundary: %s", launch)
 		}
 		notices, err := db.Notices(ctx, project.ID, true)
 		if err != nil || len(notices) != 1 {
