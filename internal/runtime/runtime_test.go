@@ -715,7 +715,7 @@ func (p *fakeProgress) ReadPane(context.Context, herdr.Adapter, string, int) (st
 	return p.output, nil
 }
 
-func (p *fakeProgress) WorktreeFingerprint(context.Context, string) (string, error) {
+func (p *fakeProgress) WorktreeFingerprint(context.Context, string, bool) (string, error) {
 	if p.onWorktree != nil {
 		if err := p.onWorktree(); err != nil {
 			return "", err

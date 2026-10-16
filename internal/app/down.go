@@ -8,6 +8,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 // down stops the Project's Lead and Lookout. The Project stays registered,
@@ -29,8 +30,20 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, taskErr := taskForPath(ctx.Context, db, dir); taskErr == nil {
-		return axi.Failure("user_only", "posse down cannot run inside a Rider Mount", false, "Run `posse down` in the Project folder")
+	actor := s.configCaller(ctx.Context, db)
+	if actor.role == "worker" || actor.role == "agent" {
+		return axi.Failure("user_only", "posse down cannot run from a Rider or agent context", false, "Run `posse down` from a User shell in the Project folder")
+	}
+	if task, taskErr := taskForPath(ctx.Context, db, dir); taskErr == nil {
+		plan, planErr := task.AdmittedPlan()
+		if planErr != nil {
+			return admittedPlanFailure(planErr)
+		}
+		if plan == nil || plan.Execution.Mode != "in-place" {
+			return axi.Failure("user_only", "posse down cannot run inside a Rider Mount", false, "Run `posse down` in the Project folder")
+		}
+	} else if !store.IsNotFound(taskErr) {
+		return taskErr
 	}
 	project, registered, err := registeredProjectFor(ctx.Context, db, dir)
 	if err != nil {
@@ -40,7 +53,6 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		return axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse down` in a registered Project folder; `posse` lists them")
 	}
 	// A Lead pane whose agent has exited is the User's shell again.
-	actor := s.configCaller(ctx.Context, db)
 	callerPaneID := actor.paneID
 	if callerPaneID == "" {
 		callerPaneID = os.Getenv("HERDR_PANE_ID")

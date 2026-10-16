@@ -123,16 +123,16 @@ func (s *Service) commands() *axi.Command {
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},
 		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Rider.", Handler: s.keys},
 		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Send the configured abort keys and verify the Rider stopped its busy turn.", Handler: s.interrupt},
-		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Rider in the same Mount, optionally with another Profile.", Handler: s.relaunch},
+		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Rider in the same execution root, optionally with another Profile.", Handler: s.relaunch},
 		{Name: "land", Summary: "Land a completed Ship Task; PR merges require the gated head to include the target branch.", Handler: s.land},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
-		{Name: "unsaddle", Summary: "Teardown a finished Task or cancel and discard unlanded work with User approval, verified Rider shutdown and recorded PR closure.", Handler: s.teardown},
+		{Name: "unsaddle", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Mount work with User approval and verified Rider shutdown.", Handler: s.teardown},
 		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the poll-only Lookout.", Handler: s.wait},
 		{Name: "remuda", Summary: "List a Project's Remuda or prune safe, Posse-owned leftovers.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
 		{Name: "project", Summary: "Inspect or change a Project's settings.", Subcommands: []*axi.Command{
-			{Name: "add", Usage: "$ project add [--name <n>]", Summary: "Register this repository or workspace folder without starting its Lead.", Handler: s.projectAdd},
+			{Name: "add", Usage: "$ project add [--directory] [--name <n>]", Summary: "Register a repository or workspace, or explicitly register a local directory Project, without starting its Lead.", Handler: s.projectAdd},
 			{Name: "scan", Usage: "$ project scan [<name>]", Summary: "Re-detect a workspace Project's member repositories.", Handler: s.projectScan},
 			{Name: "show", Summary: "Show a Project's effective config.", Handler: s.projectShow},
 			{Name: "move", Summary: "Update a moved Project's root path.", Handler: s.projectMove},
@@ -203,7 +203,7 @@ func (s *Service) projectForCWD(ctx context.Context, db *store.DB) (store.Projec
 			return db.ProjectByID(ctx, task.ProjectID)
 		}
 	}
-	return store.Project{}, axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse up` here to register it and start its Lead, or `posse project add` to register it only")
+	return store.Project{}, axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse up` here to register it and start its Lead, `posse project add` for a repository or Workspace, or `posse project add --directory` for a local directory Project")
 }
 
 func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) (store.Project, error) {
@@ -279,6 +279,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return result, err
 	}
 	if !result.GenerationMismatch {
+		if err := captureLostInPlaceEvidence(ctx, db, project); err != nil {
+			return result, err
+		}
 		if userStart || !recoveryHeld(project, cfg) {
 			pendingGroupRecovery, err := pendingGroupRecoveryDue(ctx, db, project.ID)
 			if err != nil {
@@ -298,6 +301,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 				}
 				if result.GenerationMismatch {
 					return result, fmt.Errorf("project %s Herdr generation changed during recovery; retry reconcile", project.Name)
+				}
+				if err := captureLostInPlaceEvidence(ctx, db, project); err != nil {
+					return result, err
 				}
 			}
 		}
@@ -335,6 +341,11 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	}
 	if err != nil {
 		return result, err
+	}
+	if !result.GenerationMismatch {
+		if err := captureLostInPlaceEvidence(ctx, db, project); err != nil {
+			return result, err
+		}
 	}
 	return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 }
@@ -458,6 +469,11 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 					return cfg, herdrError(runErr)
 				}
 			} else {
+				if !result.GenerationMismatch {
+					if err := captureLostInPlaceEvidence(ctx, db, project); err != nil {
+						return cfg, err
+					}
+				}
 				herdrReady = true
 				allowNetworkRecovery = allowNetworkRecovery || allowRunningLeadNetworkRecovery && leadAgentStarted(project, result.Snapshot)
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {

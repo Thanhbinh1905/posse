@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,10 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 	}
 	if now.IsZero() {
 		now = time.Now()
+	}
+	project, err := db.ProjectByID(ctx, projectID)
+	if err != nil {
+		return nil, err
 	}
 	tasks, err := db.StallTasks(ctx, projectID)
 	if err != nil {
@@ -64,7 +69,7 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 			failures = append(failures, fmt.Errorf("read Rider pane %s: %w", taskID(task.Seq), err))
 			continue
 		}
-		worktree, err := progress.WorktreeFingerprint(ctx, task.WorktreePath)
+		worktree, err := progress.WorktreeFingerprint(ctx, task.WorktreePath, project.IsDirectory())
 		if err != nil {
 			failures = append(failures, fmt.Errorf("read Rider worktree %s: %w", taskID(task.Seq), err))
 			continue
@@ -150,11 +155,21 @@ func (SystemProgress) ReadPane(ctx context.Context, adapter herdr.Adapter, paneI
 	return "", fmt.Errorf("pane.read result did not include text")
 }
 
-// WorktreeFingerprint summarizes HEAD and status of a Mount. A workspace Mount
-// is a plain folder, so its fingerprint covers every member worktree inside it.
-func (SystemProgress) WorktreeFingerprint(ctx context.Context, path string) (string, error) {
+// WorktreeFingerprint uses Git state for Mounts and file contents for explicit
+// directory Projects, which may have no Git metadata or no commits yet.
+func (SystemProgress) WorktreeFingerprint(ctx context.Context, path string, directoryProject bool) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("worktree path is empty")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("worktree path is not a directory")
+	}
+	if directoryProject {
+		return directoryFingerprint(ctx, path)
 	}
 	if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
 		return repositoryFingerprint(ctx, path)
@@ -163,22 +178,91 @@ func (SystemProgress) WorktreeFingerprint(ctx context.Context, path string) (str
 	if err != nil {
 		return "", err
 	}
-	var fingerprint strings.Builder
+	var fingerprints strings.Builder
 	for _, entry := range entries {
 		member := filepath.Join(path, entry.Name())
-		if _, err := os.Stat(filepath.Join(member, ".git")); !entry.IsDir() || err != nil {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(member, ".git")); err != nil {
 			continue
 		}
 		part, err := repositoryFingerprint(ctx, member)
 		if err != nil {
 			return "", err
 		}
-		fingerprint.WriteString(entry.Name() + "\n" + part)
+		fingerprints.WriteString(entry.Name() + "\n" + part)
 	}
-	if fingerprint.Len() == 0 {
+	if fingerprints.Len() == 0 {
 		return "", fmt.Errorf("%s holds no worktree", path)
 	}
-	return fingerprint.String(), nil
+	return fingerprints.String(), nil
+}
+
+func directoryFingerprint(ctx context.Context, root string) (string, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("directory Project root is not a directory")
+	}
+	hash := sha256.New()
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		if entry.Name() == ".git" {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(relative)
+		fmt.Fprintf(hash, "%d:%s:%o:", len(name), name, info.Mode())
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(hash, "%d:", len(target))
+			io.WriteString(hash, target)
+		} else if info.Mode().IsRegular() {
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			fileHash := sha256.New()
+			count, copyErr := io.Copy(fileHash, file)
+			closeErr := file.Close()
+			if copyErr != nil || closeErr != nil {
+				return errors.Join(copyErr, closeErr)
+			}
+			fmt.Fprintf(hash, "%d:", count)
+			hash.Write(fileHash.Sum(nil))
+		} else {
+			io.WriteString(hash, "0:")
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func repositoryFingerprint(ctx context.Context, path string) (string, error) {

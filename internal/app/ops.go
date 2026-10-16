@@ -773,8 +773,11 @@ func (s *Service) projectShow(ctx *axi.Context, args []string) error {
 		}
 		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "repos", Value: repos}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set repositories.<repo>.landing_mode pr --project " + project.Name + "` to change one member's Landing Mode", "Run `posse config set repositories.<repo>.target_branch <branch> --project " + project.Name + "` to set one member's PR/MR target", "Run `posse project scan` after adding or removing a member repository"}}})
 	}
+	if project.IsDirectory() {
+		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "execution_mode", Value: "in-place"}, {Key: "landing_mode", Value: "local"}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Write a Brief with `execution: in-place` and selected `paths:`, then run `posse ride --user-approved \"<User's words>\"`", "Directory Projects do not branch, commit, publish, or Land"}}})
+	}
 	targetBranch, _ := configTargetBranch(cfg, "", project.DefaultBranch)
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "root", Value: project.Root}, {Key: "default_branch", Value: project.DefaultBranch}, {Key: "target_branch", Value: targetBranch}, {Key: "status", Value: project.Status}, {Key: "landing_mode", Value: cfg.Defaults.LandingMode}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set defaults.landing_mode \"local\" --project " + project.Name + "` to update Project settings", "Run `posse config set defaults.target_branch <branch> --project " + project.Name + "` to change the PR/MR target"}}})
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "root", Value: project.Root}, {Key: "default_branch", Value: project.DefaultBranch}, {Key: "target_branch", Value: targetBranch}, {Key: "status", Value: project.Status}, {Key: "landing_mode", Value: projectLandingMode(project, cfg)}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set defaults.landing_mode \"local\" --project " + project.Name + "` to update Project settings", "Run `posse config set defaults.target_branch <branch> --project " + project.Name + "` to change the PR/MR target"}}})
 }
 
 func (s *Service) projectMove(ctx *axi.Context, args []string) error {
@@ -866,7 +869,10 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 			fmt.Fprintf(&out, "- Error: %s\n\n", err)
 			continue
 		}
-		fmt.Fprintf(&out, "- Path: `%s`\n- Landing Mode: %s\n- Autonomy: review=%s land=%s\n- Lead: %s\n", project.Root, cfg.Defaults.LandingMode, defaultValue(cfg.Autonomy.Review, "ask"), defaultValue(cfg.Autonomy.Land, "ask"), s.leadStatus(ctx, project))
+		fmt.Fprintf(&out, "- Path: `%s`\n- Kind: %s\n- Landing Mode: %s\n- Autonomy: review=%s land=%s\n- Lead: %s\n", project.Root, project.Kind, projectLandingMode(project, cfg), defaultValue(cfg.Autonomy.Review, "ask"), defaultValue(cfg.Autonomy.Land, "ask"), s.leadStatus(ctx, project))
+		if project.IsDirectory() {
+			out.WriteString("- Execution: in-place when explicitly selected per Task\n")
+		}
 		if len(tasks) == 0 {
 			out.WriteString("- Open Tasks: none\n")
 		} else {

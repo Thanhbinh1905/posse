@@ -74,6 +74,12 @@ func preferenceFields(brief dispatch.Brief) []string {
 	if brief.Target != "" || len(brief.TargetByRepo) > 0 {
 		fields = append(fields, "target")
 	}
+	if brief.Execution != "" {
+		fields = append(fields, "execution")
+	}
+	if len(brief.Paths) > 0 {
+		fields = append(fields, "paths")
+	}
 	return fields
 }
 
@@ -95,6 +101,7 @@ type Execution struct {
 	Target      string   `json:"target"`
 	RootContext string   `json:"root_context,omitempty"`
 	Members     []Member `json:"members,omitempty"`
+	Paths       []string `json:"paths,omitempty"`
 }
 
 type Launch struct {
@@ -179,6 +186,10 @@ func Resolve(r Request) (Plan, error) {
 	if brief.AutonomyLand != "" {
 		landSource = "brief: " + r.Brief.Source
 	}
+	if brief.Execution != "" {
+		r.Execution.Mode = brief.Execution
+	}
+	r.Execution.Paths = append([]string(nil), brief.Paths...)
 	if r.Execution.Scope == "workspace" && r.Execution.RootContext == "" {
 		r.Execution.RootContext = brief.RootContext
 		if r.Execution.RootContext == "" {
@@ -241,10 +252,10 @@ func (p Plan) Validate() error {
 	if p.Revision == 1 && p.PreviousSHA256 != "" || p.Revision > 1 && len(p.PreviousSHA256) != 64 {
 		return invalid("invalid previous revision digest")
 	}
-	if p.Executor != "rider" || p.Execution.Mode != "mount" {
+	if p.Executor != "rider" || p.Execution.Mode != "mount" && p.Execution.Mode != "in-place" {
 		return invalid("unsupported executor or execution mode")
 	}
-	if p.Execution.Scope != "repo" && p.Execution.Scope != "workspace" {
+	if p.Execution.Scope != "repo" && p.Execution.Scope != "workspace" && p.Execution.Scope != "directory" {
 		return invalid("unsupported scope")
 	}
 	if p.Type != "ship" && p.Type != "scout" && p.Type != "review" {
@@ -269,6 +280,19 @@ func (p Plan) Validate() error {
 	if p.Execution.Scope == "workspace" && p.Delivery == "no-mistakes" {
 		return invalid("no-mistakes delivery is unsupported for Workspaces")
 	}
+	if p.Execution.Mode == "in-place" {
+		if p.Execution.Scope != "directory" || len(p.Execution.Paths) == 0 || p.Delivery != "local" {
+			return invalid("in-place execution requires a local directory scope and selected paths")
+		}
+		if p.Execution.Base != "" || p.Execution.BaseCommit != "" || p.Execution.Target != "" || p.Execution.RootContext != "" || len(p.Execution.Members) != 0 || p.Type == "review" {
+			return invalid("in-place execution cannot select Git branches, workspace context, Members or Review revisions")
+		}
+		if p.Review != "never" {
+			return invalid("in-place execution cannot request Review")
+		}
+	} else if p.Execution.Scope == "directory" || len(p.Execution.Paths) != 0 {
+		return invalid("directory scope and paths require in-place execution")
+	}
 	if p.Execution.Scope == "repo" && len(p.Execution.Members) != 0 {
 		return invalid("repository execution cannot select Members")
 	}
@@ -280,6 +304,25 @@ func (p Plan) Validate() error {
 	}
 	if p.Execution.Scope == "workspace" && p.Type == "ship" && len(p.Execution.Members) == 0 {
 		return invalid("workspace Ship requires Members")
+	}
+	if p.Execution.Mode == "in-place" {
+		seen := map[string]bool{}
+		for _, path := range p.Execution.Paths {
+			if path == "" || !filepath.IsLocal(path) || filepath.Clean(path) != path || seen[path] {
+				return invalid("invalid or duplicate in-place path scope")
+			}
+			for previous := range seen {
+				if path == "." || previous == "." || strings.HasPrefix(path, previous+string(filepath.Separator)) || strings.HasPrefix(previous, path+string(filepath.Separator)) {
+					return invalid("overlapping in-place path scopes")
+				}
+			}
+			for _, component := range strings.Split(filepath.ToSlash(path), "/") {
+				if component == ".git" {
+					return invalid("in-place paths cannot include Git metadata")
+				}
+			}
+			seen[path] = true
+		}
 	}
 	validCommit := func(value string) bool {
 		if value == "" {
@@ -322,6 +365,24 @@ func (p Plan) Validate() error {
 	}
 	if brief.Type != p.Type {
 		return invalid("selected Brief has another Task type")
+	}
+	if brief.Execution != "" && brief.Execution != p.Execution.Mode || strings.Join(brief.Paths, "\x00") != strings.Join(p.Execution.Paths, "\x00") {
+		return invalid("selected Brief execution scope does not match the admitted plan")
+	}
+	if p.Execution.Mode == "in-place" && brief.Execution != "in-place" {
+		return invalid("in-place execution must be explicitly selected in the Brief")
+	}
+	if p.Execution.Mode == "in-place" && brief.Review != "" && brief.Review != "never" {
+		return invalid("in-place execution cannot request Review")
+	}
+	if p.Execution.Mode == "in-place" && (p.UserChoice == nil || p.UserChoice.Source != "ride --user-approved") {
+		return invalid("in-place execution requires recorded User consent")
+	}
+	if p.Execution.Mode == "in-place" && (brief.Ticket != nil || len(brief.Issues) > 0 || len(brief.Refs) > 0 || p.Delivery != "local") {
+		return invalid("in-place execution cannot use forge issue links or non-local delivery")
+	}
+	if p.Execution.Mode == "in-place" && (brief.Base != "" || brief.Target != "" || len(brief.BaseByRepo) > 0 || len(brief.TargetByRepo) > 0 || len(brief.Repos) > 0 || brief.RootContext != "") {
+		return invalid("in-place execution cannot select Git branches, workspace Members or root context")
 	}
 	if p.UserChoice != nil {
 		choice := p.UserChoice

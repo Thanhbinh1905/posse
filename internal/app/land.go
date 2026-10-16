@@ -38,6 +38,13 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	plan, planErr := task.AdmittedPlan()
+	if planErr != nil {
+		return admittedPlanFailure(planErr)
+	}
+	if plan != nil && plan.Execution.Mode == "in-place" {
+		return axi.Failure("land_refused", "in-place Tasks never use Land", false, "Inspect the recorded source changes with `posse show "+taskIDString(task.Seq)+"`")
+	}
 	if task.Type != "ship" {
 		return axi.Failure("land_refused", "only Ship Tasks can be Landed", false)
 	}
@@ -438,10 +445,21 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if task.State == store.StateTornDown {
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "already_torn_down", Value: true}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released Mounts"}}})
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "already_torn_down", Value: true}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released resources"}}})
 	}
+	plan, planErr := task.AdmittedPlan()
+	if planErr != nil {
+		return admittedPlanFailure(planErr)
+	}
+	inPlace := plan != nil && plan.Execution.Mode == "in-place"
 	quote := parsed.Flags["user-approved"]
+	if inPlace && !parsed.Bool("discard") && (task.State == store.StateFailed || task.State == store.StateLost) && strings.TrimSpace(quote) == "" {
+		return axi.Failure("decision_required", "failed or lost in-place work requires a User choice to relaunch or preserve", false, "Answer the recovery Decision with `preserve`, or pass `--user-approved \"<User's words>\"` to preserve and stop it")
+	}
 	if parsed.Bool("discard") {
+		if inPlace {
+			return axi.Failure("teardown_refused", "in-place source changes cannot be discarded or rolled back", false, "Run `posse unsaddle <task>` to stop the Rider and preserve its output")
+		}
 		if strings.TrimSpace(quote) == "" {
 			return axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
 		}
@@ -458,21 +476,25 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released Mounts"}}})
 	}
-	if store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateLanded {
+	if !inPlace && store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateLanded {
 		return axi.Failure("teardown_refused", "unlanded work requires --discard and User approval", false, "Pass `--discard --user-approved \"<User's words>\"`")
 	}
-	if task.State != store.StateLanded && task.State != store.StateReported {
+	if !inPlace && task.State != store.StateLanded && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
 	cfg, err := s.prepareProject(ctx.Context, db, project)
 	if err != nil {
 		return err
 	}
-	result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, false, "")
+	preserveQuote := ""
+	if inPlace && (task.State == store.StateFailed || task.State == store.StateLost) {
+		preserveQuote = quote
+	}
+	result, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, false, preserveQuote)
 	if err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released Mounts"}}})
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse remuda` to inspect released resources"}}})
 }
 
 func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string) (unsaddleResult, error) {
@@ -505,6 +527,14 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, discardIdentityRefused("Task Rider changed before approved discard acquired its intent")
 	}
 	task = current
+	plan, planErr := task.AdmittedPlan()
+	if planErr != nil {
+		return result, admittedPlanFailure(planErr)
+	}
+	inPlace := plan != nil && plan.Execution.Mode == "in-place"
+	if discardable && inPlace {
+		return result, axi.Failure("teardown_refused", "in-place source changes cannot be discarded or rolled back", false)
+	}
 	if discardable && !store.IsApprovedDiscardSourceState(task.State) {
 		return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
 	}
@@ -601,6 +631,18 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	if !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
+			if inPlace && task.AgentName != "" && s.Herdr != nil {
+				snapshot, err := s.snapshot(ctx)
+				if err != nil {
+					return err
+				}
+				pane, found := findTaskPane(snapshot.Panes, task)
+				if found && pane.Agent != "" {
+					if err := s.stopPaneAgent(ctx, pane.PaneID, pane.Agent); err != nil {
+						return err
+					}
+				}
+			}
 			if mountHeld {
 				mountStopped, stopErr := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
 				if stopErr != nil {
@@ -741,6 +783,27 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}); err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task scratch removal", err)
 	}
+	if inPlace {
+		if err := s.runIntentStep(ctx, db, intent, "in_place.output", func() error {
+			baselinePath := inPlaceBaselinePath(*plan)
+			if _, statErr := os.Stat(baselinePath); os.IsNotExist(statErr) && task.Launches == 0 {
+				return nil
+			} else if statErr != nil {
+				return statErr
+			}
+			output, outputErr := captureInPlaceOutput(ctx, *plan, task.WorktreePath)
+			if outputErr != nil {
+				var failure *axi.Error
+				if !errors.As(outputErr, &failure) || failure.Code != "in_place_scope_violation" {
+					return outputErr
+				}
+				return recordInPlaceScopeNotice(ctx, db, project, task, output)
+			}
+			return nil
+		}); err != nil {
+			return result, s.unsaddleIncomplete(ctx, db, project, task, "in-place output capture", err)
+		}
+	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "mount.release", func() error {
 		latestPanes, paneErr := s.verifyTaskPanesClosed(ctx, project, task, panePlan)
@@ -752,6 +815,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
 				return err
 			}
+		}
+		if inPlace {
+			return releaseInPlaceLeases(ctx, db, project, task)
 		}
 		var releaseErr error
 		killed, releaseErr = s.releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, discardable, processAuthorization)
@@ -858,7 +924,14 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		if discardable {
 			return db.TransitionAfterApproval(ctx, task.ID, task.State, store.StateTornDown, "user", "Task Mount discarded with User approval", "discard")
 		}
-		return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", "Task Mount released after completion")
+		if inPlace && strings.TrimSpace(quote) != "" && (task.State == store.StateFailed || task.State == store.StateLost) {
+			return db.TransitionInPlacePreserved(ctx, task, task.State, "in-place source preserved after User chose to stop recovery", quote)
+		}
+		note := "Task Mount released after completion"
+		if inPlace {
+			note = "in-place Task stopped after preserving source and releasing path leases"
+		}
+		return db.Transition(ctx, task.ID, task.State, store.StateTornDown, "cli", note)
 	})
 	if err != nil {
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "Task state update", err)

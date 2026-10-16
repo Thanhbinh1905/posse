@@ -47,8 +47,17 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			if err != nil {
 				return err
 			}
-			request.Question = "Relaunch or discard " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? " + reason
-			request.Options = []string{"relaunch", "discard"}
+			plan, err := task.AdmittedPlan()
+			if err != nil {
+				return admittedPlanFailure(err)
+			}
+			if plan != nil && plan.Execution.Mode == "in-place" {
+				request.Question = "Relaunch or preserve and stop " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? " + reason
+				request.Options = []string{"relaunch", "preserve"}
+			} else {
+				request.Question = "Relaunch or discard " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? " + reason
+				request.Options = []string{"relaunch", "discard"}
+			}
 		case notice.Kind == "task_done" && task.Type == "review" && task.ReviewsTaskID != 0 && task.AutonomyReview != "lead":
 			request.Kind = "review"
 			request.Question = "How should the Review Task findings for " + task.Title + " be handled? " + notice.Summary

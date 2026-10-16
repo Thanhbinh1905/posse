@@ -58,6 +58,22 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "working"}})
 		}
+		if decision.Answer == "preserve" {
+			plan, err := task.AdmittedPlan()
+			if err != nil {
+				return admittedPlanFailure(err)
+			}
+			if plan == nil || plan.Execution.Mode != "in-place" {
+				return axi.Failure("decision_refused", "preserve is available only for in-place recovery", false)
+			}
+			if task.State == store.StateTornDown {
+				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+			}
+			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, false, decision.UserQuote); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}, {Key: "source_preserved", Value: true}})
+		}
 		if decision.Answer == "discard" {
 			if task.State == store.StateTornDown {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})

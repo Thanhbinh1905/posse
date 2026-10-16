@@ -146,6 +146,7 @@ assignments='
 3 TestFixtureRootRemovesReadOnlyGoModuleDirectories
 4 TestReviewRejectsAttachedSessionSelectors
 4 TestPosseSpawnNoticeLandTeardownAndRecovery
+4 TestPosseInPlaceDirectoryProjects
 4 TestRealCLIIntentCrashMatrix
 4 TestGroupCloseDuringRelaunchRestoresLeadAndRider
 4 TestLookoutRestartsAfterProcessExit

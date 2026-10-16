@@ -145,6 +145,86 @@ func TestUnsupportedExecutionCombinationsAreRejected(t *testing.T) {
 	}
 }
 
+func TestInPlaceExecutionRequiresConsentLocalDeliveryAndNonOverlappingScopes(t *testing.T) {
+	makeRequest := func() taskplan.Request {
+		r := request("ship")
+		r.Review = "never"
+		r.Execution = taskplan.Execution{Mode: "mount", Scope: "directory"}
+		r.Brief = taskplan.Select("brief", "local.md", []byte("---\ntype: ship\ntitle: Update docs\ndone_when: checks pass\nexecution: in-place\npaths: [src, docs/guide.md]\n---\n"))
+		r.UserChoice = &taskplan.UserChoice{Quote: "I approve edits to src and docs/guide.md", Actor: "lead", Source: "ride --user-approved"}
+		return r
+	}
+	r := makeRequest()
+	plan, err := taskplan.Resolve(r)
+	if err != nil || plan.Execution.Mode != "in-place" || plan.Execution.Scope != "directory" || strings.Join(plan.Execution.Paths, ",") != "src,docs/guide.md" || strings.Join(plan.UserChoice.Fields, ",") != "execution,paths" {
+		t.Fatalf("in-place plan = %#v, %v", plan, err)
+	}
+	for _, change := range []struct {
+		name string
+		edit func(*taskplan.Request)
+	}{
+		{"missing consent", func(r *taskplan.Request) { r.UserChoice = nil }},
+		{"pull request", func(r *taskplan.Request) { r.Delivery = "pr" }},
+		{"no mistakes", func(r *taskplan.Request) { r.Delivery = "no-mistakes" }},
+		{"Review policy", func(r *taskplan.Request) { r.Review = "always" }},
+		{"requested Review", func(r *taskplan.Request) {
+			r.Brief = taskplan.Select("brief", "review-policy.md", []byte(`---
+type: ship
+title: Update docs
+done_when: checks pass
+execution: in-place
+paths: [src]
+review: always
+---
+`))
+		}},
+		{"Git base", func(r *taskplan.Request) {
+			r.UserChoice.Fields = []string{"base", "execution", "paths"}
+			r.Brief = taskplan.Select("brief", "base.md", []byte(`---
+type: ship
+title: Update docs
+done_when: checks pass
+execution: in-place
+paths: [src]
+base: main
+---
+`))
+		}},
+		{"review revision", func(r *taskplan.Request) {
+			r.ReviewOf = 3
+			r.Brief = taskplan.Select("brief", "review.md", []byte(`---
+type: review
+title: Review docs
+done_when: report is saved
+review_of: t3
+execution: in-place
+paths: [src]
+---
+`))
+		}},
+		{"ticket closure", func(r *taskplan.Request) {
+			r.Brief = taskplan.Select("brief", "ticket.md", []byte("---\ntype: ship\ntitle: Close ticket\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nticket: 12\n---\n"))
+		}},
+		{"issue references", func(r *taskplan.Request) {
+			r.Brief = taskplan.Select("brief", "refs.md", []byte("---\ntype: ship\ntitle: Add issue reference\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nrefs: [18]\n---\n"))
+		}},
+		{"overlap", func(r *taskplan.Request) {
+			r.Brief = taskplan.Select("brief", "overlap.md", []byte("---\ntype: ship\ntitle: Update docs\ndone_when: checks pass\nexecution: in-place\npaths: [src, src/nested]\n---\n"))
+		}},
+		{"git metadata", func(r *taskplan.Request) {
+			r.Brief = taskplan.Select("brief", "git.md", []byte("---\ntype: ship\ntitle: Update docs\ndone_when: checks pass\nexecution: in-place\npaths: [.git/config]\n---\n"))
+		}},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			candidate := makeRequest()
+			change.edit(&candidate)
+			if _, err := taskplan.Resolve(candidate); err == nil {
+				t.Fatal("unsupported in-place plan was admitted")
+			}
+		})
+	}
+}
+
 func TestScopedUserChoiceChangesPreferencesNeverGrants(t *testing.T) {
 	r := request("ship")
 	r.Delivery, r.Review = "pr", "always"

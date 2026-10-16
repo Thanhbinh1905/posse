@@ -62,13 +62,19 @@ func (s *Service) configCaller(ctx context.Context, db *store.DB) caller {
 			lead = caller{role: "lead", projectID: project.ID, paneID: pane}
 		}
 	}
-	if dir, err := currentDir(); err == nil {
-		if task, err := taskForPath(ctx, db, dir); err == nil {
-			return caller{role: "worker", projectID: task.ProjectID}
-		}
-	}
 	if lead.role != "" {
 		return lead
+	}
+	if dir, err := currentDir(); err == nil {
+		if task, err := taskForPath(ctx, db, dir); err == nil {
+			plan, planErr := task.AdmittedPlan()
+			if planErr != nil {
+				return caller{role: "agent", projectID: task.ProjectID}
+			}
+			if plan == nil || plan.Execution.Mode != "in-place" {
+				return caller{role: "worker", projectID: task.ProjectID}
+			}
+		}
 	}
 	if agent {
 		return caller{role: "agent"}

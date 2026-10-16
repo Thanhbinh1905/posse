@@ -25,7 +25,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		t.Fatalf("posse --help exposed an internal command: %s", help)
 	}
 	for _, want := range []string{
-		"Restart the Rider in the same Mount, optionally with another Profile.",
+		"Restart the Rider in the same execution root, optionally with another Profile.",
 		"Start a Rider from a Brief with a short name.",
 		"List a Project's Remuda or prune safe, Posse-owned leftovers.",
 		"Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).",
