@@ -12,6 +12,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -119,6 +120,9 @@ func (s *Service) recover(ctx *axi.Context, args []string) error {
 		count, err := db.RebuildFromSnapshots(ctx.Context, home)
 		if err != nil {
 			return axi.Failure("rebuild_failed", "could not rebuild the database from Task snapshots", false, err.Error())
+		}
+		if err := execution.NewManager(db).EnsureMountLeases(ctx.Context); err != nil {
+			return axi.Failure("rebuild_failed", "database was rebuilt, but Mount resource custody could not be reconciled", false, err.Error())
 		}
 		result := axi.Object{{Key: "rebuilt_tasks", Value: count}, {Key: "source", Value: filepath.Join(home, "projects")}}
 		if len(orphanedSidecars) > 0 {

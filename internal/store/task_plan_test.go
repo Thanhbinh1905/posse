@@ -21,7 +21,7 @@ func admittedStorePlan(t *testing.T, home string) taskplan.Plan {
 		Brief:     taskplan.Select("brief", "selected brief", []byte("---\ntype: ship\ntitle: Frozen contract\ndone_when: checked\n---\nKeep the intent.\n")),
 		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
 		Launch:    taskplan.Launch{ProfileName: "deep", Profile: config.Profile{Kind: "pi"}, Args: []string{}},
-		Review:    "on_risk", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
 		Paths: taskplan.Paths{Scratch: filepath.Join(home, "scratch", "shop", "{task}"), Output: filepath.Join(home, "projects", "shop", "tasks", "{task}")},
 	})
 	if err != nil {

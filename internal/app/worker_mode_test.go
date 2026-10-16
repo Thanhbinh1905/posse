@@ -77,6 +77,7 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 		{"setup", "--check"},
 		{"config", "set", "defaults.max_workers", "6"},
 		{"unsaddle", "t1"},
+		{"accept", "t1"},
 		{"roster"},
 		{},
 	}

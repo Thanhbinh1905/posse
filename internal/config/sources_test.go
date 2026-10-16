@@ -14,10 +14,10 @@ func TestEffectiveSourcesFollowAliasesOverridesAndDerivedGrants(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(project), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(global, []byte("[defaults]\nreview='always'\nlanding_mode='local'\n[profiles.claude]\nkind='claude'\n[[dispatch]]\ntype='ship'\nuse='claude'\n"), 0o600); err != nil {
+	if err := os.WriteFile(global, []byte("[defaults]\nreview='local'\nlanding_mode='local'\n[profiles.claude]\nkind='claude'\n[[dispatch]]\ntype='ship'\nuse='claude'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(project, []byte("review='never'\n[autonomy]\nyolo=true\n[[dispatch]]\ntype='scout'\nuse='claude'\n"), 0o600); err != nil {
+	if err := os.WriteFile(project, []byte("review='none'\n[autonomy]\nyolo=true\n[[dispatch]]\ntype='scout'\nuse='claude'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(home, "shop")
@@ -37,7 +37,7 @@ func TestEffectiveSourcesFollowAliasesOverridesAndDerivedGrants(t *testing.T) {
 			t.Errorf("%s sources=%v want %v", key, sources[key], want)
 		}
 	}
-	if cfg.Defaults.Review != "never" || cfg.Autonomy.Land != "auto" {
+	if cfg.Defaults.Review != "none" || cfg.Autonomy.Land != "auto" {
 		t.Fatalf("effective settings disagree: %#v", cfg)
 	}
 }

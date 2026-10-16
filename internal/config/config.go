@@ -112,6 +112,7 @@ type Autonomy struct {
 
 // Repository is the per-member policy of a workspace Project.
 type Repository struct {
+	Review       string   `toml:"review" json:"review"`
 	LandingMode  string   `toml:"landing_mode" json:"landing_mode"`
 	TargetBranch string   `toml:"target_branch" json:"target_branch"`
 	Gate         []string `toml:"gate" json:"gate"`
@@ -374,7 +375,7 @@ func defaultMap() map[string]any {
 		"lowkey":    map[string]any{"lead": false},
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_unsaddle": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "landing_mode": "pr",
-			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "on_risk", "gate": []string{},
+			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "none", "gate": []string{},
 		},
 		"kinds": map[string]any{
 			"claude":   map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryLookout, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},
@@ -459,6 +460,11 @@ func (c Config) Validate(projectFile bool) error {
 		return &InvalidError{File: file, Key: "defaults.forge", Reason: "must be auto, github or gitlab"}
 	}
 	for name, repo := range c.Repositories {
+		if repo.Review != "" {
+			if err := ValidateReview(repo.Review); err != nil {
+				return &InvalidError{File: file, Key: "repositories." + name + ".review", Reason: err.Error()}
+			}
+		}
 		if !oneOf(repo.Forge, "", "auto", "github", "gitlab") {
 			return &InvalidError{File: file, Key: "repositories." + name + ".forge", Reason: "must be auto, github or gitlab"}
 		}
@@ -466,8 +472,8 @@ func (c Config) Validate(projectFile bool) error {
 	if !oneOf(c.Defaults.MergeMethod, "squash", "merge", "rebase") {
 		return &InvalidError{File: file, Key: "defaults.merge_method", Reason: "must be squash, merge or rebase"}
 	}
-	if !oneOf(c.Defaults.Review, "always", "on_risk", "never") {
-		return &InvalidError{File: file, Key: "defaults.review", Reason: "must be always, on_risk or never"}
+	if err := ValidateReview(c.Defaults.Review); err != nil {
+		return &InvalidError{File: file, Key: "defaults.review", Reason: err.Error()}
 	}
 	if !oneOf(c.Remuda.Clean, "warm", "pristine") {
 		return &InvalidError{File: file, Key: "remuda.clean", Reason: "must be warm or pristine"}

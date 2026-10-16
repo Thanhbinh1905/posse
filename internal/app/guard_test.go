@@ -224,6 +224,19 @@ func TestGuardEnvUnsetsAndCleanEnvironmentReachSameSocket(t *testing.T) {
 	}
 }
 
+func TestGuardShellSocketIgnoresPosseTestOnlyOverride(t *testing.T) {
+	env := []string{
+		"HOME=/home/u",
+		"XDG_CONFIG_HOME=/tmp/worker/xdg",
+		"POSSE_TEST_HERDR=1",
+		"POSSE_TEST_HERDR_SOCKET_PATH=/tmp/worker/h123/herdr.sock",
+	}
+	command := "env -u HERDR_SOCKET_PATH XDG_CONFIG_HOME=/tmp/isolated/xdg POSSE_HOME=/tmp/isolated/posse herdr workspace rename w1 harmless"
+	if blocked, reason := guardHerdrCommand(command, env); blocked {
+		t.Fatalf("isolated Herdr command was blocked: %#v", reason)
+	}
+}
+
 func TestGuardConservativeAcrossBranchesAndRuntimeFiles(t *testing.T) {
 	for _, command := range []string{
 		"if false; then export HERDR_SOCKET_PATH=/tmp/iso.sock; fi; herdr workspace close w1 --group",

@@ -274,6 +274,58 @@ type RepoWatchState struct {
 	CheckoutReason    string
 }
 
+type ReportAcceptance struct {
+	ReportTaskID int64
+	ReportDigest string
+	AcceptedBy   string
+	RecordedBy   string
+	Provenance   string
+	UserQuote    string
+	AcceptedAt   int64
+}
+
+type ReportReview struct {
+	ID             int64
+	ReportTaskID   int64
+	ReviewTaskID   int64
+	ReportDigest   string
+	Verdict        string
+	ReviewerLaunch int64
+	RecordedAt     int64
+}
+
+type ResourceLease struct {
+	ID             int64
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	OwnerTaskID    sql.NullInt64
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	MountID        sql.NullInt64
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
+type ReviewReceipt struct {
+	TaskID          int64
+	Repository      string
+	RunID           string
+	HeadSha         string
+	ReviewStatus    string
+	ReviewerProfile string
+	ReviewerModel   string
+	ReportSha256    string
+	ReceiptSha256   string
+	ObservedAt      int64
+}
+
 type ReviewTarget struct {
 	TaskID     int64
 	Repository string
@@ -341,6 +393,9 @@ type Task struct {
 	TargetBranch         string
 	PrTitle              string
 	PlanJson             string
+	ReportKind           string
+	ReportDigest         string
+	ReportManifestJson   string
 }
 
 type TaskLaunchIdentity struct {

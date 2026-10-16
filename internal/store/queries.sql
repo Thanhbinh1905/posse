@@ -2,6 +2,67 @@
 INSERT INTO approvals(task_id, action, user_quote, at)
 VALUES (?, ?, ?, ?);
 
+-- name: ResourceLeasesByScope :many
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases WHERE resource_type = ? AND scope_root = ? ORDER BY id;
+
+-- name: ResourceLeaseBySource :one
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases WHERE source_key = ?;
+
+-- name: ResourceLeasesByProject :many
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases WHERE owner_project_id = ? ORDER BY id;
+
+-- name: AllResourceLeases :many
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases ORDER BY id;
+
+-- name: ResourceLeasesByIntent :many
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases WHERE intent_id = ? ORDER BY id;
+
+-- name: CountResourceLeasesByIntent :one
+SELECT COUNT(*) FROM resource_leases WHERE intent_id = ?;
+
+-- name: InsertResourceLease :execresult
+INSERT INTO resource_leases(resource_type, scope_root, scope_path, owner_project_id,
+    owner_task_id, owner, source_key, custody_token, intent_id, mount_id,
+    owner_pid, owner_boot_id, owner_start_time, custody, acquired_at)
+VALUES (?, ?, ?, ?, NULLIF(?, 0), ?, ?, ?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?);
+
+-- name: DeleteResourceLease :execresult
+DELETE FROM resource_leases WHERE id = ? AND custody_token = ?;
+
+-- name: DeleteResourceLeasesByIntent :exec
+DELETE FROM resource_leases WHERE intent_id = ?;
+
+-- name: DeleteResourceLeaseByMount :exec
+DELETE FROM resource_leases WHERE mount_id = ?;
+
+-- name: MarkResourceLeaseForRecovery :execresult
+UPDATE resource_leases SET custody = 'recovery' WHERE id = ? AND custody_token = ? AND custody = 'held';
+
+-- name: MountResourceOwners :many
+SELECT m.id, m.project_id, p.name, m.n, m.path, m.state,
+       COALESCE(m.task_id, 0), COALESCE(t.seq, 0)
+FROM mounts m JOIN projects p ON p.id = m.project_id
+LEFT JOIN tasks t ON t.id = m.task_id
+WHERE m.state != 'idle' ORDER BY m.project_id, m.n;
+
+-- name: ResourceMountLeases :many
+SELECT id, mount_id FROM resource_leases WHERE mount_id IS NOT NULL ORDER BY id;
+
 -- name: PRBodyMarkerByTaskRepo :one
 SELECT pr_url, marker_token FROM pr_body_markers WHERE task_id = ? AND repo = ?;
 
@@ -44,8 +105,8 @@ INSERT INTO tasks(
     landing_mode, autonomy_review, autonomy_land, branch, base_ref, target_branch, worktree_path,
     herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, agent_session_kind, pr_url,
     landed_ref, last_output_hash, last_worktree_hash, last_progress_at,
-    agent_absent_since, idle_since, created_at, updated_at, plan_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    agent_absent_since, idle_since, created_at, updated_at, plan_json, report_kind
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertProject :execresult
 INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)

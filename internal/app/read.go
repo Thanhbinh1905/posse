@@ -466,11 +466,32 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
+	view["review_evidence"] = reviewEvidenceStatus(task)
 	view["admission"] = "legacy"
 	if plan != nil {
 		view["admission"], view["plan_revision"] = "admitted", plan.Revision
 		if parsed.Bool("full") {
 			view["plan"] = plan
+		}
+	}
+	if task.Type == "scout" {
+		view["report_digest"] = task.ReportDigest
+		if task.ReportKind != "" {
+			view["report_kind"] = task.ReportKind
+		}
+		reviews, err := db.ReportReviewsForTask(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if len(reviews) > 0 {
+			view["report_reviews"] = reviews
+		}
+		acceptance, err := db.ReportAcceptanceForTask(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if acceptance != nil {
+			view["report_acceptance"] = acceptance
 		}
 	}
 	if task.Type == "review" {
@@ -503,6 +524,19 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			view["review_verdict"] = reviewVerdictView(verdict, current)
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return err
+		}
+	}
+	if task.Type == "ship" {
+		receipts, err := db.ReviewReceipts(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if len(receipts) > 0 {
+			views := make([]map[string]any, 0, len(receipts))
+			for _, receipt := range receipts {
+				views = append(views, map[string]any{"repository": receipt.Repository, "run_id": receipt.RunID, "head_sha": receipt.HeadSHA, "review_status": receipt.ReviewStatus, "reviewer_profile": receipt.ReviewerProfile, "reviewer_model": receipt.ReviewerModel, "report_sha256": receipt.ReportSHA256, "receipt_sha256": receipt.ReceiptSHA256})
+			}
+			view["review_receipts"] = views
 		}
 	}
 	recovery, err := db.TaskRecovery(ctx.Context, task.ID)

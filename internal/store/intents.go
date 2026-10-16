@@ -9,9 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	dbgen "github.com/thanhbinh1905/posse/internal/store/sqlc"
 )
 
 var ErrIntentOwned = errors.New("Task already has an active intent")
+var ErrResourceLeaseHeld = errors.New("resource leases still require custody reconciliation")
 
 type Intent struct {
 	ID               int64
@@ -132,7 +135,19 @@ func ProcessIdentityForPID(pid int) (string, string, error) {
 }
 
 func (db *DB) FinishIntent(ctx context.Context, intentID int64, processID int) error {
-	result, err := db.ExecContext(ctx, `DELETE FROM intents WHERE id=? AND process_id=?`, intentID, processID)
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	leases, err := dbgen.New(tx).CountResourceLeasesByIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if leases > 0 {
+		return ErrResourceLeaseHeld
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM intents WHERE id=? AND process_id=?`, intentID, processID)
 	if err != nil {
 		return err
 	}
@@ -143,7 +158,7 @@ func (db *DB) FinishIntent(ctx context.Context, intentID int64, processID int) e
 	if changed != 1 {
 		return ErrIntentOwned
 	}
-	return nil
+	return tx.Commit()
 }
 
 func isUniqueConstraint(err error) bool {

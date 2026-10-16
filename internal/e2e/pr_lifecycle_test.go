@@ -1822,6 +1822,7 @@ esac
 	callerEnv = setEnv(callerEnv, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	callerEnv = setEnv(callerEnv, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
 	callerEnv = setEnv(callerEnv, "HERDR_TAB_ID", workspace.RootPane.TabID)
+	callerEnv = setEnv(callerEnv, "HERDR_SOCKET_PATH", herdr.SocketPath(env))
 	if liveLead {
 		// Run up inside the shell so its finalizer execs the fake Lead in
 		// the actual pane. A detached CLI leaves no foreground agent to prompt.

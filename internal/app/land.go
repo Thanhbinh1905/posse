@@ -64,22 +64,15 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "ship" {
 		return axi.Failure("land_refused", "only Ship Tasks can be Landed", false)
 	}
-	reviewPolicy := cfg.Defaults.Review
-	if plan, planErr := task.AdmittedPlan(); planErr != nil {
-		return admittedPlanFailure(planErr)
-	} else if plan != nil {
-		reviewPolicy = plan.Review
+	if !project.IsWorkspace() && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {
+		// Pull request evidence binds to the gated forge head, not the Mount tip.
+		return s.landPullRequest(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
 	}
-	if reviewPolicy == "always" {
-		if err := requireReviewPass(ctx.Context, db, project, task); err != nil {
-			return err
-		}
+	if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+		return err
 	}
 	if project.IsWorkspace() {
 		return s.landWorkspace(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
-	}
-	if task.LandingMode == "pr" || task.LandingMode == "no-mistakes" {
-		return s.landPullRequest(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
 	}
 	var intent store.Intent
 	hasIntent := false
@@ -160,6 +153,9 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 			_ = s.deliverNotices(ctx.Context, db, project)
 			return axi.Failure("gate_failed", err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
 		}
+		if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+			return err
+		}
 		if err := runLandStep("task.landing", func() error {
 			return db.Transition(ctx.Context, task.ID, store.StateDone, store.StateLanding, "cli", "Gate passed and local fast-forward is ready")
 		}); err != nil {
@@ -216,7 +212,20 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 	}
-	if err := runLandStep("merge", func() error { return mergeLocal(ctx.Context, project, task) }); err != nil {
+	if err := runLandStep("merge", func() error {
+		pathScope, err := localMergePathScope(ctx.Context, project, task)
+		if err != nil {
+			return err
+		}
+		targetRef := "refs/heads/" + taskTargetBranch(project, task)
+		return withIntentGitResources(ctx.Context, db, project, task, intent.ID, project.Root, []string{targetRef}, pathScope,
+			func() error {
+				if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+					return err
+				}
+				return mergeLocal(ctx.Context, project, task)
+			})
+	}); err != nil {
 		return err
 	}
 	landedRef, err := gitOutput(ctx.Context, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, task))
@@ -293,6 +302,9 @@ func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Pro
 	}
 	if current.State == store.StateLanding {
 		if current.LandingMode == "pr" || current.LandingMode == "no-mistakes" {
+			if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, "verified no local merge effect is pending"); err != nil {
+				return err
+			}
 			return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 		}
 		merged := false
@@ -319,6 +331,9 @@ func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Pro
 				return err
 			}
 		}
+	}
+	if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, "re-read the target ref and settled the interrupted local Land"); err != nil {
+		return err
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 }
@@ -696,13 +711,27 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			return result, s.unsaddleIncomplete(ctx, db, project, task, "Leftover snapshot", err)
 		}
 	}
-	if mountHeld && task.State == store.StateReported && !discardable {
+	if task.State == store.StateReported && !discardable && (mountHeld || task.Type == "scout") {
 		if err := s.runIntentStep(ctx, db, intent, "report.attachments", func() error {
 			home, err := s.homePath()
 			if err != nil {
 				return err
 			}
-			return preserveReportAttachments(ctx, db, home, project, task)
+			if mountHeld {
+				if err := preserveReportAttachments(ctx, db, home, project, task); err != nil {
+					return err
+				}
+			}
+			if task.Type == "scout" {
+				if !mountHeld && task.ReportDigest == "" {
+					if task.WorktreePath != "" {
+						return fmt.Errorf("scout Mount is not held and no Report bundle has been finalized")
+					}
+					return nil // Legacy Tasks without a recorded Mount cannot be resealed safely.
+				}
+				return finalizeReportBundle(ctx, db, home, project, task)
+			}
+			return nil
 		}); err != nil {
 			_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "leftover", Origin: "leftover:unrecoverable:" + strconv.FormatInt(task.ID, 10), Question: "Report attachments could not be preserved. Repair the Mount and retry Teardown, or approve discarding the unsaved attachments?", Options: []string{"repair", "discard"}})
 			if decisionErr != nil {
