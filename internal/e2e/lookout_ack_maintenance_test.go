@@ -242,6 +242,11 @@ func newRetryableForgeLookoutFixture(t *testing.T) (*prLifecycleFixture, int64, 
 	t.Helper()
 	f := newPRLifecycleFixture(t)
 	stopBackgroundLookout(t, f)
+	return seedRetryableForgeLookoutFixture(t, f)
+}
+
+func seedRetryableForgeLookoutFixture(t *testing.T, f *prLifecycleFixture) (*prLifecycleFixture, int64, string) {
+	t.Helper()
 	ctx := context.Background()
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nforge = \"auto\"\npr_poll = \"1ms\"\nauto_unsaddle = \"never\"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -452,7 +457,8 @@ func stopFixtureBackgroundLookout(t *testing.T, root string, env []string, db *s
 		t.Fatalf("initial Lookout tabs = %d, want 1", len(panes))
 	}
 	for _, pid := range lookoutPIDs(root) {
-		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
+		// SIGTERM lets active maintenance release its poll leases before exit.
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 			t.Fatalf("stop background Lookout: %v", err)
 		}
 	}
