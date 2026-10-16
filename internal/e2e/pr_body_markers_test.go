@@ -38,7 +38,7 @@ func t205PRBodyMarkerCases(t *testing.T) {
 			if initialBlock == "" {
 				t.Fatalf("first body has no block for stored token %q: %s", initialMarker.Token, initialBody)
 			}
-			f.changeTitle(t, "Second title")
+			f.changeTitle(t, "feat: Second title")
 
 			// Reproduce the reported P1 directly: a markerless legacy body has
 			// literal legacy delimiters inside human release-note prose. Refresh
@@ -76,7 +76,7 @@ func t205PRBodyMarkerCases(t *testing.T) {
 			if !strings.Contains(trusted, "second summary") || strings.Contains(trusted, "first summary") {
 				t.Fatalf("stored-token span was not refreshed: %s", trusted)
 			}
-			if f.state(t)["title"] != "Second title" {
+			if f.state(t)["title"] != "feat: Second title" {
 				t.Fatalf("title did not refresh: %s", f.state(t)["title"])
 			}
 
@@ -304,11 +304,7 @@ func (f *t205PRFixture) publishOK(t *testing.T, args ...string) {
 
 func (f *t205PRFixture) changeTitle(t *testing.T, title string) {
 	t.Helper()
-	path := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "brief.md")
-	brief := readTestFile(t, path)
-	if err := os.WriteFile(path, []byte(strings.Replace(brief, "title: PR lifecycle change", "title: "+title, 1)), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	runPosse(t, f.binary, f.repo, f.leadEnv, "retitle", "t1", title)
 }
 
 func (f *t205PRFixture) statePath() string {

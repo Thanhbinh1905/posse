@@ -448,6 +448,9 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`DROP TABLE task_plan_revisions`,
+		`ALTER TABLE tasks DROP COLUMN plan_json`,
+		`ALTER TABLE task_launch_identities DROP COLUMN plan_revision`,
 		`DROP TABLE task_target_changes`,
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
@@ -537,6 +540,9 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE task_plan_revisions`,
+		`ALTER TABLE tasks DROP COLUMN plan_json`,
+		`ALTER TABLE task_launch_identities DROP COLUMN plan_revision`,
 		`DROP TABLE task_target_changes`,
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
@@ -694,6 +700,9 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE task_plan_revisions`,
+		`ALTER TABLE tasks DROP COLUMN plan_json`,
+		`ALTER TABLE task_launch_identities DROP COLUMN plan_revision`,
 		`DROP TABLE task_target_changes`,
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_reason`,
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_status`,

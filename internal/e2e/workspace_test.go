@@ -220,6 +220,21 @@ esac
 		log, _ := os.ReadFile(workerLog)
 		t.Fatalf("Worker did not finish: state=%s log=%s", task.State, log)
 	}
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil || plan.Execution.Scope != "workspace" || plan.Execution.Mode != "mount" || len(plan.Execution.Members) != 2 {
+		t.Fatalf("Workspace admission lost scope: %#v %v", plan, err)
+	}
+	defaultBranches := map[string]string{}
+	for _, member := range members {
+		defaultBranches[member.Name] = member.DefaultBranch
+	}
+	for index, name := range []string{"backend", "worker"} {
+		member := plan.Execution.Members[index]
+		branch := defaultBranches[name]
+		if branch == "" || member.Name != name || member.Path != name || member.Base != "refs/remotes/origin/"+branch || member.Target != branch || member.Delivery != "local" {
+			t.Fatalf("Workspace admission changed Member contract: %#v", member)
+		}
+	}
 	for _, path := range []string{"CLAUDE.md", "docs/overview.md", "backend/worker-change.txt", "worker/worker-change.txt"} {
 		if _, err := os.Stat(filepath.Join(task.WorktreePath, path)); err != nil {
 			t.Fatalf("Mount lacks %s: %v", path, err)

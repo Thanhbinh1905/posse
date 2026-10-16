@@ -19,6 +19,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
 	dbgen "github.com/thanhbinh1905/posse/internal/store/sqlc"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 type TaskSnapshot struct {
@@ -34,6 +35,7 @@ type TaskSnapshot struct {
 	Members       []ProjectRepo      `toml:"members,omitempty"`
 	TaskRepos     []TaskRepo         `toml:"task_repos,omitempty"`
 	TargetChanges []TaskTargetChange `toml:"target_changes,omitempty"`
+	PlanRevisions []string           `toml:"plan_revisions,omitempty"`
 }
 
 type projectSnapshot struct {
@@ -208,9 +210,41 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if err != nil {
 		return err
 	}
+	if task.PlanJSON != "" {
+		// Serialize admitted snapshots across processes. A writer that began
+		// before a revision must not overwrite that revision's recovery file.
+		path := db.TaskSnapshotPath(project.Name, task.Seq)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		lock, err := acquireStoreFileLock(ctx, path+".lock", "Task snapshot")
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		task, err = db.TaskByID(ctx, projectID, taskID)
+		if err != nil {
+			return err
+		}
+	}
+	admitted, err := task.AdmittedPlan()
+	if err != nil {
+		return err
+	}
 	identities, err := db.TaskLaunchIdentities(ctx, taskID)
 	if err != nil {
 		return err
+	}
+	// A launch or revision may commit while this snapshot is being captured.
+	// Include only history belonging to the Task row captured above.
+	if admitted != nil {
+		captured := identities[:0]
+		for _, identity := range identities {
+			if identity.LaunchNumber <= task.Launches && identity.PlanRevision <= admitted.Revision {
+				captured = append(captured, identity)
+			}
+		}
+		identities = captured
 	}
 	markers, err := db.PRBodyMarkersForTask(ctx, taskID)
 	if err != nil {
@@ -242,7 +276,17 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		return readErr
 	}
 	sort.Slice(markers, func(i, j int) bool { return markers[i].Repo < markers[j].Repo })
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities, PRBodyMarkers: markers, TargetChanges: targetChanges}
+	plans, err := db.TaskPlanRevisions(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if admitted != nil {
+		if len(plans) < admitted.Revision {
+			return fmt.Errorf("missing plan revision history for Task %d", taskID)
+		}
+		plans = plans[:admitted.Revision]
+	}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities, PRBodyMarkers: markers, TargetChanges: targetChanges, PlanRevisions: plans}
 	if project.IsWorkspace() {
 		if snapshot.Members, err = db.ProjectRepos(ctx, projectID); err != nil {
 			return err
@@ -718,7 +762,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -753,9 +797,32 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if task.ReviewsTaskID != 0 {
 			reviewed = task.ReviewsTaskID
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,launches,gated_sha,created_at,updated_at,mount_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.LandedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.MountID)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.LandedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.MountID), task.PlanJSON); err != nil {
 			return err
+		}
+		var previous *taskplan.Plan
+		for index, data := range snapshot.PlanRevisions {
+			plan, err := taskplan.Decode(data)
+			if err != nil {
+				return fmt.Errorf("rebuild t%d plan: %w", task.Seq, err)
+			}
+			if plan.Revision != index+1 || index == 0 && plan.PreviousSHA256 != "" || previous != nil && plan.PreviousSHA256 != previous.SHA256() {
+				return fmt.Errorf("invalid execution plan revision history for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,?,?)`, task.ID, plan.Revision, data); err != nil {
+				return err
+			}
+			previous = &plan
+		}
+		if task.PlanJSON != "" || previous != nil {
+			plan, err := task.AdmittedPlan()
+			if err != nil {
+				return err
+			}
+			if plan == nil || previous == nil || plan.SHA256() != previous.SHA256() {
+				return fmt.Errorf("execution plan history does not match t%d", task.Seq)
+			}
 		}
 		for _, marker := range snapshot.PRBodyMarkers {
 			if marker.TaskID != 0 && marker.TaskID != task.ID {
@@ -790,7 +857,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				return fmt.Errorf("invalid launch number %d in snapshot for t%d", identity.LaunchNumber, task.Seq)
 			}
 			modelKnown := identity.ModelKnown && strings.TrimSpace(identity.ConfiguredModel) != ""
-			if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known) VALUES(?,?,?,?,?)`, task.ID, identity.LaunchNumber, identity.Profile, identity.ConfiguredModel, modelKnown); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision) VALUES(?,?,?,?,?,?)`, task.ID, identity.LaunchNumber, identity.Profile, identity.ConfiguredModel, modelKnown, identity.PlanRevision); err != nil {
 				return err
 			}
 		}

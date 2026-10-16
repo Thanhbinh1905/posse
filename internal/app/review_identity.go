@@ -180,6 +180,7 @@ func identityViews(identities []store.TaskLaunchIdentity) []any {
 func identityView(identity store.TaskLaunchIdentity) map[string]any {
 	return map[string]any{
 		"launch_number":    identity.LaunchNumber,
+		"plan_revision":    identity.PlanRevision,
 		"profile":          identity.Profile,
 		"configured_model": identity.ConfiguredModel,
 		"model_known":      identity.ModelKnown,

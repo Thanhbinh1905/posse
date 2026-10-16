@@ -157,7 +157,7 @@ func TestReviewResumeTemplateRejectsSecondSessionSelector(t *testing.T) {
 	}
 	resumeArgs, _ := json.Marshal([]string{"--resume", "{session}", "-r" + authorSession})
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.claude.resume_args", string(resumeArgs))
-	code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2")
+	code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
 	requireReviewIdentityRefusal(t, code, output)
 }
 
@@ -191,7 +191,7 @@ func TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown(t *testing.T) {
 	}
 	resumeArgs, _ := json.Marshal([]string{"--resume", "{session}", "--model", "model-b"})
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.claude.resume_args", string(resumeArgs))
-	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t1"); code != 0 {
+	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t1", "--profile", "author"); code != 0 {
 		t.Fatalf("author relaunch: code=%d %s", code, output)
 	}
 	identities, err := fixture.db.TaskLaunchIdentities(context.Background(), author.ID)
@@ -317,7 +317,7 @@ func TestReviewRejectsCodexProfileSelectorAtSpawnAndRelaunch(t *testing.T) {
 	}
 
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.model", `"model-b"`)
-	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t1"); code != 0 {
+	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t1", "--profile", "author"); code != 0 {
 		t.Fatalf("author relaunch: code=%d %s", code, output)
 	}
 	author := fixture.mustTask(t, "t1")

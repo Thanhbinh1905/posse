@@ -18,6 +18,7 @@ const workerHomeEnv = "POSSE_WORKER_HOME"
 // home.
 var workerCommands = map[string]bool{
 	"brief":         true,
+	"status":        true,
 	"holler":        true,
 	"publish":       true,
 	"_context":      true,
@@ -59,7 +60,7 @@ func (s *Service) refuseWorker(ctx context.Context, command string) error {
 		name += " " + command
 	}
 	return axi.Failure("worker_forbidden",
-		"`"+name+"` cannot run from a Rider against the posse home "+home+"; Riders may run only `posse brief`, `posse holler`, `posse publish` and `posse config show|schema` there",
+		"`"+name+"` cannot run from a Rider against the posse home "+home+"; Riders may run only `posse brief`, `posse status`, `posse holler`, `posse publish` and `posse config show|schema` there",
 		false,
 		"Experiment with posse under a temporary POSSE_HOME and an isolated Herdr server",
 		"Report what the Lead should do with `posse holler needs-decision`")
