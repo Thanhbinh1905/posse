@@ -14,6 +14,7 @@ type Querier interface {
 	AckNotice(ctx context.Context, arg AckNoticeParams) (sql.Result, error)
 	AcquireIdleMount(ctx context.Context, arg AcquireIdleMountParams) (sql.Result, error)
 	ActiveWorkerCount(ctx context.Context, projectID int64) (int64, error)
+	AllResourceLeases(ctx context.Context) ([]AllResourceLeasesRow, error)
 	AllTasks(ctx context.Context, projectID int64) ([]Task, error)
 	AllocateLeadLaunch(ctx context.Context, id int64) (int64, error)
 	AllocateTaskLaunch(ctx context.Context, arg AllocateTaskLaunchParams) (int64, error)
@@ -26,13 +27,18 @@ type Querier interface {
 	ClearTaskGatedSHA(ctx context.Context, arg ClearTaskGatedSHAParams) error
 	ClearWorkspaceToken(ctx context.Context, projectID int64) error
 	CountApproval(ctx context.Context, arg CountApprovalParams) (int64, error)
+	CountResourceLeasesByIntent(ctx context.Context, intentID int64) (int64, error)
 	DeleteMount(ctx context.Context, arg DeleteMountParams) (sql.Result, error)
+	DeleteResourceLease(ctx context.Context, arg DeleteResourceLeaseParams) (sql.Result, error)
+	DeleteResourceLeaseByMount(ctx context.Context, mountID sql.NullInt64) error
+	DeleteResourceLeasesByIntent(ctx context.Context, intentID int64) error
 	InsertApproval(ctx context.Context, arg InsertApprovalParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	InsertLeadStartClaim(ctx context.Context, arg InsertLeadStartClaimParams) (sql.Result, error)
 	InsertMount(ctx context.Context, arg InsertMountParams) (sql.Result, error)
 	InsertNotice(ctx context.Context, arg InsertNoticeParams) (sql.Result, error)
 	InsertProject(ctx context.Context, arg InsertProjectParams) (sql.Result, error)
+	InsertResourceLease(ctx context.Context, arg InsertResourceLeaseParams) (sql.Result, error)
 	InsertSignal(ctx context.Context, arg InsertSignalParams) (sql.Result, error)
 	InsertTask(ctx context.Context, arg InsertTaskParams) (sql.Result, error)
 	InsertTransition(ctx context.Context, arg InsertTransitionParams) error
@@ -42,7 +48,9 @@ type Querier interface {
 	MarkMessageDelivered(ctx context.Context, arg MarkMessageDeliveredParams) error
 	MarkNoticeDelivered(ctx context.Context, arg MarkNoticeDeliveredParams) error
 	MarkProjectDown(ctx context.Context, arg MarkProjectDownParams) error
+	MarkResourceLeaseForRecovery(ctx context.Context, arg MarkResourceLeaseForRecoveryParams) (sql.Result, error)
 	MountByTask(ctx context.Context, taskID sql.NullInt64) (Mount, error)
+	MountResourceOwners(ctx context.Context) ([]MountResourceOwnersRow, error)
 	Mounts(ctx context.Context, projectID int64) ([]Mount, error)
 	MoveProject(ctx context.Context, arg MoveProjectParams) error
 	NextMountNumber(ctx context.Context, projectID int64) (int64, error)
@@ -65,6 +73,11 @@ type Querier interface {
 	ReleaseMount(ctx context.Context, arg ReleaseMountParams) error
 	ResetProgress(ctx context.Context, arg ResetProgressParams) error
 	ResetTaskProgress(ctx context.Context, arg ResetTaskProgressParams) error
+	ResourceLeaseBySource(ctx context.Context, sourceKey string) (ResourceLeaseBySourceRow, error)
+	ResourceLeasesByIntent(ctx context.Context, intentID int64) ([]ResourceLeasesByIntentRow, error)
+	ResourceLeasesByProject(ctx context.Context, ownerProjectID int64) ([]ResourceLeasesByProjectRow, error)
+	ResourceLeasesByScope(ctx context.Context, arg ResourceLeasesByScopeParams) ([]ResourceLeasesByScopeRow, error)
+	ResourceMountLeases(ctx context.Context) ([]ResourceMountLeasesRow, error)
 	SetProjectLead(ctx context.Context, arg SetProjectLeadParams) error
 	SetTaskGatedSHA(ctx context.Context, arg SetTaskGatedSHAParams) error
 	SetTaskPRTitle(ctx context.Context, arg SetTaskPRTitleParams) (sql.Result, error)

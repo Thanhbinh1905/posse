@@ -15,6 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
+	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -153,9 +154,24 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 		return store.Mount{}, err
 	}
 	for attempts := 0; attempts < 64; attempts++ {
-		mount, err := db.AcquireMount(ctx, project.ID, task.ID, base)
+		var mount store.Mount
+		err := withMountStateLock(ctx, db, func() error {
+			manager := execution.NewManager(db)
+			if err := manager.EnsureMountLeases(ctx); err != nil {
+				return resourceLeaseError(err)
+			}
+			var err error
+			mount, err = db.AcquireMount(ctx, project.ID, task.ID, base)
+			if err != nil {
+				return err
+			}
+			if err := manager.EnsureMountLeases(ctx); err != nil {
+				return errors.Join(resourceLeaseError(err), abandonUnpreparedMount(ctx, db, project, task, mount))
+			}
+			return nil
+		})
 		if err != nil {
-			return store.Mount{}, err
+			return mount, err
 		}
 		if err := os.MkdirAll(mount.Path, 0o700); err != nil {
 			return mount, err

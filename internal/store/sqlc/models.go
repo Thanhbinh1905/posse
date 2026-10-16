@@ -274,6 +274,25 @@ type RepoWatchState struct {
 	CheckoutReason    string
 }
 
+type ResourceLease struct {
+	ID             int64
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	OwnerTaskID    sql.NullInt64
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	MountID        sql.NullInt64
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
 type Signal struct {
 	ID       int64
 	TaskID   int64

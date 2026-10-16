@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -20,8 +21,11 @@ func (s *Service) remuda(ctx *axi.Context, args []string) error {
 	if len(args) == 0 {
 		return s.listMounts(ctx)
 	}
+	if args[0] == "reconcile-resource" {
+		return s.reconcileResourceLease(ctx, args[1:])
+	}
 	if args[0] != "prune" {
-		return axi.Usage("remuda accepts only the prune subcommand", "Run `posse remuda` to list Mounts")
+		return axi.Usage("remuda accepts only the prune or reconcile-resource subcommand", "Run `posse remuda` to list Mounts")
 	}
 	parsed, err := parseArgs("remuda prune", args[1:], map[string]flagSpec{"yes": {boolean: true}})
 	if err != nil {
@@ -316,6 +320,63 @@ func pruneCandidates(ctx context.Context, mounts []store.Mount, keepIdle int, cl
 	return remove
 }
 
+func (s *Service) reconcileResourceLease(ctx *axi.Context, args []string) error {
+	parsed, err := parseArgs("remuda reconcile-resource", args, map[string]flagSpec{"user-approved": {}})
+	if err != nil {
+		return err
+	}
+	if len(parsed.Positionals) != 1 || strings.TrimSpace(parsed.Flags["user-approved"]) == "" {
+		return axi.Usage("remuda reconcile-resource requires a lease ID and --user-approved <explanation>", "Review `posse remuda` first; reconcile only after the recorded owner has stopped and its filesystem or Git effect has been inspected")
+	}
+	id, err := strconv.ParseInt(parsed.Positionals[0], 10, 64)
+	if err != nil || id < 1 {
+		return axi.Usage("resource lease ID must be a positive integer")
+	}
+	db, _, err := s.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	project, err := s.projectForCWD(ctx.Context, db)
+	if err != nil {
+		return err
+	}
+	if err := s.requireLead(ctx.Context, db, project); err != nil {
+		return err
+	}
+	lease, err := db.ResourceLeaseByID(ctx.Context, id)
+	if store.IsNotFound(err) {
+		return axi.Failure("resource_lease_missing", fmt.Sprintf("resource lease %d no longer exists", id), false)
+	}
+	if err != nil {
+		return err
+	}
+	if lease.MountID != 0 {
+		return axi.Failure("mount_lease_managed", "Mount resource leases are reconciled by Mount recovery and cannot be released manually", false)
+	}
+	if lease.IntentID != 0 {
+		var intentExists bool
+		if err := db.QueryRowContext(ctx.Context, `SELECT EXISTS(SELECT 1 FROM intents WHERE id=?)`, lease.IntentID).Scan(&intentExists); err != nil {
+			return err
+		}
+		if intentExists {
+			return axi.Failure("resource_intent_active", "the resource lease belongs to an active intent; recover that operation before reconciling it", true)
+		}
+	}
+	if lease.OwnerPID > 0 && lease.OwnerBootID != "" && lease.OwnerStartTime != "" {
+		bootID, startTime, identityErr := store.ProcessIdentityForPID(lease.OwnerPID)
+		if identityErr == nil && bootID == lease.OwnerBootID && startTime == lease.OwnerStartTime {
+			return axi.Failure("resource_owner_live", "the recorded resource owner process is still running", true,
+				fmt.Sprintf("lease %d is %s scope %s owned by %s (pid %d)", lease.ID, lease.ResourceType, lease.Scope(), lease.Owner, lease.OwnerPID))
+		}
+	}
+	quote := strings.TrimSpace(parsed.Flags["user-approved"])
+	if err := db.ReconcileResourceLease(ctx.Context, lease.ID, lease.CustodyToken, "User-approved custody reconciliation: "+quote); err != nil {
+		return err
+	}
+	return ctx.Print(axi.Object{{Key: "reconciled_resource_lease", Value: lease.ID}, {Key: "scope", Value: lease.Scope()}, {Key: "owner", Value: lease.Owner}})
+}
+
 func (s *Service) listMounts(ctx *axi.Context) error {
 	db, _, err := s.openDB()
 	if err != nil {
@@ -333,6 +394,9 @@ func (s *Service) listMounts(ctx *axi.Context) error {
 	if err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}
+	if err := execution.NewManager(db).EnsureMountLeases(ctx.Context); err != nil {
+		return resourceLeaseError(err)
+	}
 	mounts, err := db.Mounts(ctx.Context, project.ID)
 	if err != nil {
 		return err
@@ -347,7 +411,15 @@ func (s *Service) listMounts(ctx *axi.Context) error {
 		}
 		rows = append(rows, map[string]any{"mount": fmt.Sprintf("mount-%d", mount.Number), "state": mount.State, "task": task, "path": mount.Path})
 	}
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "mounts", Value: rows}, {Key: "help", Value: []any{"Run `posse remuda prune` to review idle Mounts beyond keep_idle"}}})
+	leases, err := db.AllResourceLeases(ctx.Context)
+	if err != nil {
+		return err
+	}
+	leaseRows := make([]any, 0, len(leases))
+	for _, lease := range leases {
+		leaseRows = append(leaseRows, map[string]any{"id": lease.ID, "type": lease.ResourceType, "scope": lease.Scope(), "owner": lease.Owner, "custody": lease.Custody})
+	}
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "mounts", Value: rows}, {Key: "resources", Value: leaseRows}, {Key: "help", Value: []any{"Run `posse remuda prune` to review idle Mounts beyond keep_idle", "Inspect a resource lease before `posse remuda reconcile-resource <id> --user-approved <explanation>`"}}})
 }
 
 func acquireMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, home string, cleanMode string, setup []string) (store.Mount, error) {
@@ -398,6 +470,9 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 			if prelocked.ID != 0 && prelocked.ID != mount.ID {
 				return fmt.Errorf("prelocked mount %d differs from claimed mount %d: %w", prelocked.ID, mount.ID, store.ErrStateRace)
 			}
+			if err := execution.NewManager(db).EnsureMountLeases(ctx); err != nil {
+				return errors.Join(resourceLeaseError(err), abandonUnpreparedMount(ctx, db, project, task, mount))
+			}
 			return nil
 		})
 		if err != nil {
@@ -446,6 +521,22 @@ func acquireMount(ctx context.Context, db *store.DB, project store.Project, task
 		return mount, nil
 	}
 	return store.Mount{}, fmt.Errorf("no clean Mount could be acquired")
+}
+
+func abandonUnpreparedMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, mount store.Mount) error {
+	if !project.IsWorkspace() {
+		if _, err := os.Stat(filepath.Join(mount.Path, ".git")); err == nil {
+			if err := unlockRegisteredMount(ctx, project.Root, mount.Path, task.Seq); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if err := db.BeginMountRelease(ctx, mount.ID, task.ID); err != nil {
+		return err
+	}
+	return finishReleasingMountLocked(ctx, db, project, mount, task)
 }
 
 var errMountDefaultRefUnavailable = errors.New("no safe local default ref is available to reset the Mount")
