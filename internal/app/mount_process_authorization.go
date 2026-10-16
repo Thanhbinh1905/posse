@@ -153,6 +153,11 @@ func (authorization *mountProcessAuthorization) retainProcessGroup(pgid int, han
 func (authorization *mountProcessAuthorization) verifyIfAlive(pid int) (bool, error) {
 	handle := authorization.handle(pid)
 	if handle == nil {
+		// Enumeration can outlive a child that exited before handle retention.
+		// Proving exit is safe; observing a live PID grants no cleanup authority.
+		if alive, err := unretainedMountProcessAlive(pid); err != nil || !alive {
+			return false, err
+		}
 		return false, fmt.Errorf("unverified process %d appeared in the Mount; preserving its work", pid)
 	}
 	return verifyMountProcessHandleIfAlive(pid, handle)
