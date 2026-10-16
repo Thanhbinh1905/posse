@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -110,8 +111,21 @@ func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 		t.Fatal("refusal changed target")
 	}
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["true"]`)
-	if code, out = runReviewIdentityCLI(t, f, "land", "t1", "--merge", "--user-approved", "Land this checked Task"); code != 0 {
+	if code, out = runReviewIdentityCLIWithResourceConflictRetry(t, f, "land", "t1", "--merge", "--user-approved", "Land this checked Task"); code != 0 {
 		t.Fatalf("none refused: %d %s", code, out)
+	}
+}
+
+func runReviewIdentityCLIWithResourceConflictRetry(t *testing.T, f *prLifecycleFixture, args ...string) (int, string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		code, output := runReviewIdentityCLI(t, f, args...)
+		if code == 0 || !strings.Contains(output, `"resource_conflict"`) || !time.Now().Before(deadline) {
+			return code, output
+		}
+		// Project sync owns the same root-path lease; retry its safe transient conflict.
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
