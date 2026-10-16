@@ -50,6 +50,10 @@ _Avoid_: Research task, investigation
 A Scout Task that examines a Ship Task's change adversarially before it Lands.
 _Avoid_: Code review, audit
 
+**Review Verdict**:
+The typed outcome (`pass`, `changes_requested` or `inconclusive`) of a Review Task, bound by Posse to the exact Ship revision it examined. Only a current `pass` satisfies local review.
+_Avoid_: Approval, review result
+
 **Report**:
 The standalone written findings a Scout Task leaves behind.
 _Avoid_: Summary, output

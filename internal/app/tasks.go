@@ -171,6 +171,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	baseRef := project.DefaultBranch
 	var reviewsTaskID int64
 	var reviewedTask *store.Task
+	var reviewTargets []store.ReviewTarget
 	var reviewIdentityDetails map[string]any
 	var reviewLaunchIdentity store.TaskLaunchIdentity
 	var authorLaunchIdentities []store.TaskLaunchIdentity
@@ -185,6 +186,13 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 		if reviewed.Branch == "" {
 			return axi.Failure("brief_invalid", "the reviewed Task has no branch to inspect", false)
+		}
+		if err := reviewableShip(reviewed); err != nil {
+			return err
+		}
+		reviewTargets, err = shipCandidateTargets(ctx.Context, db, project, reviewed)
+		if err != nil {
+			return axi.Failure("review_target_unresolved", "cannot pin the reviewed Ship revision: "+err.Error(), false)
 		}
 		reviewsTaskID = reviewed.ID
 		baseRef = reviewed.Branch
@@ -330,7 +338,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, LandingMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
-		BaseRef: baseRef, TargetBranch: targetBranch,
+		BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets,
 	}
 	plan, err := resolveTaskPlan(home, project, cfg, task, resolution, parsed.Flags["brief"], briefData, members)
 	if err != nil {
@@ -988,7 +996,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			filtered = append(filtered, args[i])
 		}
 	}
-	parsed, err := parseArgs("holler", filtered, map[string]flagSpec{"report": {}, "findings": {}, "pr": {}})
+	parsed, err := parseArgs("holler", filtered, map[string]flagSpec{"report": {}, "findings": {}, "pr": {}, "verdict": {}})
 	if err != nil {
 		return err
 	}
@@ -1018,6 +1026,15 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	if task.State != store.StateWorking && task.State != store.StateStalled {
 		return axi.Failure("signal_state_invalid", fmt.Sprintf("Task %s is %s and cannot accept a %s Signal", taskIDString(task.Seq), task.State, verb), false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
+	}
+	verdictFlag, verdictGiven := parsed.Flags["verdict"]
+	if verdictGiven {
+		if verb != "done" || task.Type != "review" {
+			return axi.Failure("signal_invalid", "--verdict is only valid on a Review Task done Signal", false)
+		}
+		if !store.ValidReviewVerdict(verdictFlag) {
+			return axi.Failure("signal_invalid", "--verdict must be pass, changes_requested or inconclusive", false)
+		}
 	}
 	if len(attachments) > 0 && (verb != "done" || task.Type == "ship") {
 		return axi.Failure("signal_invalid", "--attach is only valid on a Scout or Review done Signal", false)
@@ -1146,8 +1163,29 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 	}
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]
-	state, err := db.RecordWorkerSignal(ctx.Context, task, verb, note, data, noticeKind)
+	var verdict *store.ReviewVerdictInput
+	if verdictGiven {
+		targets, err := db.ReviewTargets(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if len(targets) == 0 {
+			return axi.Failure("review_target_unbound", "this Review Task has no bound Ship revision, so it cannot record a verdict", false, "Dispatch a new Review Task for a completed Ship Task")
+		}
+		if err := verifyReviewerSawTargets(ctx.Context, db, project, task, targets); err != nil {
+			return axi.Failure("review_target_missing", err.Error(), false)
+		}
+		digest, err := fileSHA256(filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md"))
+		if err != nil {
+			return err
+		}
+		verdict = &store.ReviewVerdictInput{Verdict: verdictFlag, ReportSHA256: digest}
+	}
+	state, err := db.RecordWorkerSignalWithVerdict(ctx.Context, task, verb, note, data, noticeKind, verdict)
 	if err != nil {
+		if errors.Is(err, store.ErrReviewTargetUnbound) {
+			return axi.Failure("review_target_unbound", "this Review Task has no bound Ship revision, so it cannot record a verdict", false)
+		}
 		if errors.Is(err, store.ErrQueuedInstructionsPending) {
 			return queuedInstructionsPendingFailure(task)
 		}

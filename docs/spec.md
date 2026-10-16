@@ -286,6 +286,15 @@ task_launch_identities(
   PRIMARY KEY(task_id, launch_number))
   -- one immutable configured launch identity per Task launch; missing rows mean unknown history
 
+review_targets(task_id INTEGER, repository TEXT, commit_sha TEXT, PRIMARY KEY(task_id, repository))
+  -- the Ship revision a Review Task is bound to at admission; insert-only
+review_verdicts(
+  task_id INTEGER PRIMARY KEY, signal_id INTEGER, verdict TEXT,    -- pass | changes_requested | inconclusive
+  report_sha256 TEXT, targets_json TEXT,                           -- copy of the bound review_targets
+  launch_number INTEGER, profile_name TEXT, configured_model TEXT, model_known BOOLEAN,
+  created_at INTEGER)
+  -- one immutable verdict per Review Task, written in the transaction of its done Signal
+
 mounts(
   id INTEGER PRIMARY KEY, project_id INTEGER, n INTEGER, path TEXT UNIQUE,
   state TEXT,                        -- idle | held | releasing | broken
@@ -531,6 +540,12 @@ Selected inputs retain their exact bytes and SHA-256 digests: the Brief, existin
 
 **Local Review identity.** A local Review Task is a fresh Task and starts a new agent session, not the Ship Task's session. Before launch, Posse compares the Review Profile name and configured model value with every recorded launch of the reviewed Ship Task. Both must differ from every author launch. An absent/unconfigured model, an additional model-setting argument, an argument Posse cannot classify for that harness, a missing author launch record, or a same-Profile/model match refuses the Review launch with the compared identities and reason. Posse parses the argument vector for the launch being recorded, including rendered resume arguments; a model-setting override or unclassified argument records the model as unknown. Profile changes on a Ship Task retain earlier launch records. `posse show <review>` reports the comparison; `posse show <task> --full` lists its Launch Identity Records. Posse does not infer provider identity from harness names.
 
+**Review verdicts** ([ADR 0020](adr/0020-review-verdicts-bind-completed-revisions.md)). A Review Task is admitted only for a Ship Task that is `done` or `landing`; otherwise `review_target_incomplete`. Admission resolves the Ship branch tip to a full commit SHA, per repository for a Project (named by the Project) or per changed Member for a workspace, and stores it in `review_targets` in the same transaction that creates the Task. Targets are insert-only. A Reviewer cannot choose a branch or SHA, and a Review Task created before this record existed has no target and cannot record a verdict (`review_target_unbound`).
+
+A Review Rider reports `posse holler done "<summary>" --report <file> --verdict pass|changes_requested|inconclusive`. `--verdict` is refused on every other Signal and Task type. A missing `--verdict` still reports the Report but records no verdict; an unknown value is refused before anything is recorded. Posse refuses the Signal when the Reviewer's worktree does not contain every bound commit. In the Signal transaction it writes the verdict with the SHA-256 of the copied `report.md`, a copy of the bound targets and the Reviewer's current Launch Identity Record, all read from Posse's records. A Task accepts one done Signal, and `review_verdicts` holds one row per Task, so a duplicate completion cannot add or replace a verdict. Rebuild from Task snapshots restores targets and verdicts.
+
+A verdict qualifies the Ship Task only while its targets equal the Ship branch tips resolved now, so a changed candidate has no current pass and an old pass is never rebound to new commits. Only `pass` satisfies local review; a missing verdict, `changes_requested`, `inconclusive` or a pass whose Reviewer launch no longer differs from every author launch does not. With `defaults.review = "always"`, `posse land` refuses with `review_required` until a current qualifying pass exists. `posse show <review>` reports the verdict, targets, Report digest, Reviewer launch and whether it is current. Scout Report review is not part of this record.
+
 A Review launch refuses session selectors in Profile arguments and any launch argument Posse cannot classify. On relaunch, only one explicit `{session}` selector in the kind's resume arguments may select the Review Task's own recorded session; extra selectors, model overrides and unclassified arguments are refused. This does not detect an agent switching sessions after launch.
 
 A Launch Identity Record proves only the Profile and model value configured for that launch. It does not attest runtime model identity, detect an in-session switch, or prove that differently named configurations use distinct underlying models. No provider attestation or sandbox is added.
@@ -553,6 +568,7 @@ A kind without a prepare step that still stops at a dialog surfaces as `blocked`
   - `posse holler done "<summary>"` (ship; `posse` checks the branch has commits ahead of base and the worktree is clean), with `--pr <url>` in repository `pr` and `no-mistakes` modes. For workspace Ship Tasks, Posse checks every changed PR member's recorded URL. Each PR's source repository, Task branch, target branch, open state, remote head and local commit must match.
   - `posse holler done "<summary>" --report <file-in-worktree-or-task-scratch>` for scout and review. Non-ignored untracked and edited Member files, plus committed changes beyond each selected Member's Task base or an unrequested Member's Mount-acquisition commit, are preserved beside `report.md` at their worktree-relative paths during Teardown. Workspace Scouts and Reviews also preserve new or edited shared-root files against a per-Task snapshot of the Mount before launch, including tracked and non-ignored untracked files in nested Git repositories. Later changes to the live Project do not alter that baseline; unchanged Project copies and `.git` metadata are not attached. If a required baseline or Git enumeration fails, a repair-or-discard Decision blocks Teardown and keeps the Mount. Repeatable `--attach <file-or-directory>` includes ignored Member evidence or unchanged shared-root files at Signal time. The Report should reference saved paths; `posse show <task>` lists attachments.
   - A `done` Signal is refused while queued, claimed or interrupting Lead instructions remain undelivered. Let the turn end so Posse can deliver them, apply them, then retry `posse holler done`.
+  - `posse holler done "<summary>" --report <file> --verdict pass|changes_requested|inconclusive` for review only; Posse binds the verdict to the Review Task's recorded Ship revision and Reviewer launch.
   - `posse holler failed "<why>"`.
 - Answers and new instructions arrive as normal prompts.
 - Waiting: for kinds with `background_commands`, run long commands (full test suites, e2e, builds) as background commands and never poll them; do other work or end the turn. For every kind: do not wait for PR CI after `posse holler done`, because posse watches the PR and the Lead sends fix instructions.
@@ -785,7 +801,7 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse lookout --receipt <id> --receipt-outcome accepted\|rejected` | Lead after inspecting an uncertain session | explicitly resolve an ambiguous receipt; acceptance marks the exact batch delivered and rejection retries it |
 | `posse lookout --poll-only` | dedicated Lookout tab | reconcile PRs and Teardown; never claim Notices |
 | `posse ack <id...\|all>` | Lead | close Notices |
-| `posse holler <verb> <note> [...]` | Worker | records a Signal; `done` is refused while queued instructions remain undelivered (section 13) |
+| `posse holler <verb> <note> [...]` | Worker | records a Signal (`--verdict` on a Review done Signal); `done` is refused while queued instructions remain undelivered (section 13) |
 | `posse publish [--repo <member>] [--refresh] "<summary>" [--verify "<command> -> <result>"]... [--proof "<markdown>"]... [--risk "<markdown>"]...` | PR-mode Ship Worker | push own Task branch in a repository or selected workspace member and open or refresh its PR (sections 14, 24) |
 | `posse brief` | Worker | reprint own `launch.md` |
 | `posse status` | Worker | read own recorded state and admitted plan without maintenance |
