@@ -105,7 +105,7 @@ func TestRiderStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &view); err != nil {
 		t.Fatal(err)
 	}
-	if view.Task != "t1" || view.Admission != "admitted" || view.Plan.Version != 1 || strings.Contains(output.String(), "private sibling") || strings.Contains(output.String(), "private-profile") {
+	if view.Task != "t1" || view.Admission != "admitted" || view.Plan.Version != taskplan.Version || strings.Contains(output.String(), "private sibling") || strings.Contains(output.String(), "private-profile") {
 		t.Fatalf("status exposed wrong Task: %s", output)
 	}
 	output.Reset()

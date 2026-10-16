@@ -466,6 +466,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
+	view["review_evidence"] = reviewEvidenceStatus(task)
 	view["admission"] = "legacy"
 	if plan != nil {
 		view["admission"], view["plan_revision"] = "admitted", plan.Revision
