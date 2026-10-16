@@ -729,7 +729,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			}
 		}
 		var releaseErr error
-		killed, releaseErr = releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, discardable, processAuthorization)
+		killed, releaseErr = s.releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, discardable, processAuthorization)
 		return releaseErr
 	})
 	if err != nil {

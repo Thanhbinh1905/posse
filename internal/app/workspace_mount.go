@@ -20,7 +20,10 @@ import (
 
 // sharedFilesLimit caps the shared workspace files copied into each Mount, so a
 // large artifact at the workspace root fails loudly instead of filling the disk.
-const sharedFilesLimit = 64 << 20
+const (
+	sharedFilesLimit   = 64 << 20
+	sharedEntriesLimit = 10000
+)
 
 var landingRank = map[string]int{"local": 0, "pr": 1, "no-mistakes": 2}
 
@@ -37,6 +40,9 @@ type taskMember struct {
 // members to check out, each with its Landing Mode after the Brief's tightening.
 func (s *Service) planTaskMembers(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, brief dispatch.Brief, reviewed *store.Task) ([]taskMember, string, error) {
 	if !project.IsWorkspace() {
+		if brief.RootContext != "" {
+			return nil, "", axi.Failure("brief_invalid", "root_context: is valid only in a workspace Project", false, "Remove `root_context:` from the Brief")
+		}
 		if len(brief.Repos) > 0 {
 			return nil, "", axi.Failure("brief_invalid", "repos: is valid only in a workspace Project", false, "Remove `repos:` from the Brief")
 		}
@@ -140,10 +146,9 @@ func memberBaseRef(target repoTarget, hasOrigin bool) string {
 	return "refs/heads/" + target.DefaultBranch
 }
 
-// acquireWorkspaceMount prepares a workspace Mount: a folder that mirrors the
-// workspace root with a fresh copy of the shared files and one warm worktree per
-// member. Member worktrees are created on first use and kept between Tasks.
-func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, members []taskMember, home string, cleanMode string, setup []string) (store.Mount, error) {
+// acquireWorkspaceMount prepares a workspace Mount with only selected Member
+// worktrees and the shared-root context admitted in the Task plan.
+func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, project store.Project, task store.Task, members []taskMember, home string, cleanMode string, setup []string, rootContext string) (store.Mount, error) {
 	base := filepath.Join(home, "remuda", project.Name)
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return store.Mount{}, err
@@ -151,6 +156,9 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 	targets, err := workspaceMountTargets(ctx, db, project)
 	if err != nil {
 		return store.Mount{}, err
+	}
+	if rootContext == "" {
+		rootContext = "legacy"
 	}
 	for attempts := 0; attempts < 64; attempts++ {
 		mount, err := db.AcquireMount(ctx, project.ID, task.ID, base)
@@ -160,12 +168,12 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 		if err := os.MkdirAll(mount.Path, 0o700); err != nil {
 			return mount, err
 		}
-		if err := s.prepareWorkspaceMount(ctx, project, targets, members, mount.Path, cleanMode); err != nil {
+		if err := s.prepareWorkspaceMount(ctx, project, targets, members, mount.Path, cleanMode, rootContext); err != nil {
 			if breakErr := breakMount(ctx, db, project, task, mount, err.Error()); breakErr != nil {
 				return mount, errors.Join(err, breakErr)
 			}
 			var failure *axi.Error
-			if errors.As(err, &failure) && failure.Code == "mount_shared_too_large" {
+			if errors.As(err, &failure) && (failure.Code == "mount_shared_too_large" || failure.Code == "mount_root_context_unsafe") {
 				return mount, err
 			}
 			continue
@@ -194,7 +202,16 @@ func (s *Service) acquireWorkspaceMount(ctx context.Context, db *store.DB, proje
 				return mount, axi.Failure("mount_setup_failed", fmt.Sprintf("setup %q failed: %s", command, truncate(strings.TrimSpace(output), 1200)), false, "Fix the Remuda setup command, then retry the Task")
 			}
 		}
-		if err := writeWorkspaceRootBaseline(ctx, home, project, task, mount.Path, targets); err != nil {
+		if rootContext == "read-only" {
+			reserved := map[string]bool{}
+			for _, target := range targets {
+				reserved[target.Path] = true
+			}
+			if err := makeWorkspaceSharedFilesReadOnly(mount.Path, reserved); err != nil {
+				return mount, err
+			}
+		}
+		if err := writeWorkspaceRootBaseline(ctx, home, project, task, mount.Path, targets, rootContext); err != nil {
 			return mount, fmt.Errorf("capture workspace root at Mount acquisition: %w", err)
 		}
 		return mount, nil
@@ -211,49 +228,161 @@ func workspaceMountTargets(ctx context.Context, db *store.DB, project store.Proj
 	}
 	targets := make([]taskMember, 0, len(repos))
 	for _, repo := range repos {
+		if !safeWorkspaceRootPath(repo.Path) {
+			return nil, fmt.Errorf("unsafe workspace Member path %q", repo.Path)
+		}
 		targets = append(targets, taskMember{repoTarget: repoTarget{Name: repo.Name, Root: filepath.Join(project.Root, repo.Path), DefaultBranch: repo.DefaultBranch}, Path: repo.Path})
 	}
 	return targets, nil
 }
 
-func (s *Service) prepareWorkspaceMount(ctx context.Context, project store.Project, targets, members []taskMember, path, cleanMode string) error {
-	requested := map[string]bool{}
-	for _, member := range members {
-		requested[member.Name] = true
+func (s *Service) prepareWorkspaceMount(ctx context.Context, project store.Project, targets, members []taskMember, path, cleanMode, rootContext string) error {
+	if err := validateWorkspaceMountRoot(path); err != nil {
+		return err
 	}
 	reserved := map[string]bool{}
+	requested := map[string]bool{}
 	for _, target := range targets {
 		reserved[target.Path] = true
+	}
+	for _, member := range members {
+		requested[member.Name] = true
 	}
 	if err := removeSharedCopies(path, reserved); err != nil {
 		return err
 	}
-	if err := copySharedFiles(project.Root, path, reserved); err != nil {
+	switch rootContext {
+	case "legacy":
+		if err := copySharedFiles(project.Root, path, reserved); err != nil {
+			return err
+		}
+	case "read-only":
+		if err := copySharedFilesReadOnly(project.Root, path, reserved); err != nil {
+			return err
+		}
+	}
+	if err := s.drainUnrequestedWorkspaceWorktrees(ctx, targets, requested, path); err != nil {
 		return err
 	}
-	for _, target := range targets {
-		worktree := filepath.Join(path, target.Path)
-		_, statErr := os.Stat(filepath.Join(worktree, ".git"))
-		present := statErr == nil
-		if !present && !requested[target.Name] {
-			continue
+	for _, member := range members {
+		if err := validateWorkspaceMountMemberPath(path, member.Path); err != nil {
+			return fmt.Errorf("unsafe selected Member %s Mount path: %w", member.Name, err)
 		}
-		if _, err := os.Stat(target.Root); err != nil {
-			if requested[target.Name] {
-				return fmt.Errorf("%s: member checkout is missing at %s", target.Name, target.Root)
-			}
-			continue
+		worktree := filepath.Join(path, member.Path)
+		if _, err := os.Stat(member.Root); err != nil {
+			return fmt.Errorf("%s: member checkout is missing at %s", member.Name, member.Root)
+		}
+		present, err := workspaceMountWorktreePresent(worktree)
+		if err != nil {
+			return fmt.Errorf("inspect Member %s worktree: %w", member.Name, err)
 		}
 		if !present {
-			if err := addMemberWorktree(ctx, target.repoTarget, worktree); err != nil {
-				return fmt.Errorf("%s: %w", target.Name, err)
+			if err := addMemberWorktree(ctx, member.repoTarget, worktree); err != nil {
+				return fmt.Errorf("%s: %w", member.Name, err)
 			}
 		}
-		if err := resetWorktree(ctx, worktree, target.repoTarget, cleanMode, requested[target.Name]); err != nil {
-			return fmt.Errorf("%s: %w", target.Name, err)
+		if err := resetWorktree(ctx, worktree, member.repoTarget, cleanMode, true); err != nil {
+			return fmt.Errorf("%s: %w", member.Name, err)
 		}
 	}
 	return nil
+}
+
+func (s *Service) drainUnrequestedWorkspaceWorktrees(ctx context.Context, targets []taskMember, requested map[string]bool, mountPath string) error {
+	for _, target := range targets {
+		if requested[target.Name] {
+			continue
+		}
+		if err := validateWorkspaceMountMemberPath(mountPath, target.Path); err != nil {
+			return fmt.Errorf("unsafe legacy Member %s Mount path: %w", target.Name, err)
+		}
+		worktree := filepath.Join(mountPath, target.Path)
+		present, err := workspaceMountWorktreePresent(worktree)
+		if err != nil {
+			return fmt.Errorf("inspect legacy Member %s worktree: %w", target.Name, err)
+		}
+		if !present {
+			continue
+		}
+		if _, err := os.Stat(target.Root); err != nil {
+			return fmt.Errorf("cannot safely drain legacy Member %s worktree: repository is unavailable: %w", target.Name, err)
+		}
+		if !mountWorktreeClean(ctx, worktree) {
+			return fmt.Errorf("cannot safely drain legacy Member %s worktree because it is not clean", target.Name)
+		}
+		branch, err := gitOutput(ctx, worktree, "branch", "--show-current")
+		if err != nil {
+			return fmt.Errorf("inspect legacy Member %s worktree: %w", target.Name, err)
+		}
+		if branch != "" {
+			return fmt.Errorf("cannot safely drain legacy Member %s worktree because it is on branch %s", target.Name, branch)
+		}
+		if err := s.removeMount(ctx, target.Root, worktree); err != nil {
+			return fmt.Errorf("drain legacy Member %s worktree: %w", target.Name, err)
+		}
+	}
+	return nil
+}
+
+func validateWorkspaceMountRoot(mountPath string) error {
+	info, err := os.Lstat(mountPath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("mount root is not a real directory")
+	}
+	return nil
+}
+
+func validateWorkspaceMountMemberPath(mountPath, memberPath string) error {
+	if !safeWorkspaceRootPath(memberPath) {
+		return fmt.Errorf("unsafe relative path %q", memberPath)
+	}
+	if err := validateWorkspaceMountRoot(mountPath); err != nil {
+		return err
+	}
+	current := mountPath
+	parts := strings.Split(memberPath, string(os.PathSeparator))
+	for index, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("mount path component %q is a symlink", current)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("mount path component %q is not a directory", current)
+		}
+		if index == len(parts)-1 {
+			return nil
+		}
+	}
+	return nil
+}
+
+func workspaceMountWorktreePresent(path string) (bool, error) {
+	info, err := os.Lstat(filepath.Join(path, ".git"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf(".git entry is a symlink")
+	}
+	return true, nil
+}
+
+func removeGitWorktree(ctx context.Context, root, path string) error {
+	_, err := gitOutput(ctx, root, "worktree", "remove", path)
+	return err
 }
 
 func addMemberWorktree(ctx context.Context, target repoTarget, worktree string) error {
@@ -267,25 +396,71 @@ func addMemberWorktree(ctx context.Context, target repoTarget, worktree string) 
 	return err
 }
 
-// releaseWorkspaceMount resets every member worktree in the Mount and removes the
-// shared file copies, so nothing of the Task survives into the next one.
-func releaseWorkspaceMount(ctx context.Context, db *store.DB, project store.Project, mount store.Mount, clean string) error {
+// releaseWorkspaceMount preserves pre-scope cleanup for legacy plans. New scoped
+// Tasks reset selected Members and remove clean legacy extras without resetting them.
+func releaseWorkspaceMount(ctx context.Context, db *store.DB, project store.Project, mount store.Mount, clean string, removeMount func(context.Context, string, string) error) error {
+	if err := validateWorkspaceMountRoot(mount.Path); err != nil {
+		return err
+	}
 	targets, err := workspaceMountTargets(ctx, db, project)
 	if err != nil {
 		return err
 	}
+	task, err := db.TaskByID(ctx, project.ID, mount.TaskID)
+	if err != nil {
+		return err
+	}
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return err
+	}
+	legacyScope := plan == nil || plan.Execution.RootContext == ""
+	taskRepos, err := db.TaskRepos(ctx, mount.TaskID)
+	if err != nil {
+		return err
+	}
+	selected := make(map[string]bool, len(taskRepos))
+	for _, repo := range taskRepos {
+		selected[repo.Repo] = true
+	}
 	reserved := map[string]bool{}
 	for _, target := range targets {
 		reserved[target.Path] = true
+		if err := validateWorkspaceMountMemberPath(mount.Path, target.Path); err != nil {
+			return fmt.Errorf("unsafe Member %s Mount path: %w", target.Name, err)
+		}
 		worktree := filepath.Join(mount.Path, target.Path)
-		if _, err := os.Stat(filepath.Join(worktree, ".git")); err != nil {
+		present, err := workspaceMountWorktreePresent(worktree)
+		if err != nil {
+			return fmt.Errorf("inspect Member %s worktree: %w", target.Name, err)
+		}
+		if !present {
+			continue
+		}
+		if selected[target.Name] || legacyScope {
+			if _, err := os.Stat(target.Root); err != nil {
+				continue
+			}
+			if err := resetWorktree(ctx, worktree, target.repoTarget, clean, false); err != nil {
+				return fmt.Errorf("%s: %w", target.Name, err)
+			}
 			continue
 		}
 		if _, err := os.Stat(target.Root); err != nil {
-			continue
+			return fmt.Errorf("cannot safely drain legacy Member %s worktree: repository is unavailable: %w", target.Name, err)
 		}
-		if err := resetWorktree(ctx, worktree, target.repoTarget, clean, false); err != nil {
-			return fmt.Errorf("%s: %w", target.Name, err)
+		if !mountWorktreeClean(ctx, worktree) {
+			return fmt.Errorf("cannot safely drain legacy Member %s worktree because it is not clean", target.Name)
+		}
+		branch, err := gitOutput(ctx, worktree, "branch", "--show-current")
+		if err != nil {
+			return fmt.Errorf("inspect legacy Member %s worktree: %w", target.Name, err)
+		}
+		if branch != "" {
+			return fmt.Errorf("cannot safely drain legacy Member %s worktree because it is on branch %s", target.Name, branch)
+		}
+		if err := removeMount(ctx, target.Root, worktree); err != nil {
+			return fmt.Errorf("drain legacy Member %s worktree: %w", target.Name, err)
 		}
 	}
 	return removeSharedCopies(mount.Path, reserved)
@@ -340,7 +515,11 @@ func removeSharedCopies(mountPath string, reserved map[string]bool) error {
 				continue
 			}
 		}
-		if err := os.RemoveAll(filepath.Join(mountPath, entry.Name())); err != nil {
+		path := filepath.Join(mountPath, entry.Name())
+		if err := makeMountTreeWritable(path); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
 	}
@@ -352,6 +531,14 @@ func removeSharedCopies(mountPath string, reserved map[string]bool) error {
 // of extra checkouts). A copy, unlike a link, keeps a Worker's edits away from the
 // User's real files and cannot dangle when the Mount moves between Tasks.
 func copySharedFiles(root, mountPath string, reserved map[string]bool) error {
+	return copySharedFilesWithMode(root, mountPath, reserved, false)
+}
+
+func copySharedFilesReadOnly(root, mountPath string, reserved map[string]bool) error {
+	return copySharedFilesWithMode(root, mountPath, reserved, true)
+}
+
+func copySharedFilesWithMode(root, mountPath string, reserved map[string]bool, readOnly bool) error {
 	type entry struct {
 		rel  string
 		size int64
@@ -374,6 +561,15 @@ func copySharedFiles(root, mountPath string, reserved map[string]bool) error {
 			if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
 				return filepath.SkipDir
 			}
+		}
+		if readOnly && d.Type()&fs.ModeSymlink != 0 {
+			return axi.Failure("mount_root_context_unsafe", fmt.Sprintf("read-only workspace root context contains symlink %s", rel), false, "Remove the symlink or omit root_context from the Brief")
+		}
+		if readOnly && !d.IsDir() && !d.Type().IsRegular() {
+			return axi.Failure("mount_root_context_unsafe", fmt.Sprintf("read-only workspace root context contains unsupported file type %s", rel), false, "Remove the special file or omit root_context from the Brief")
+		}
+		if readOnly && len(entries) >= sharedEntriesLimit {
+			return axi.Failure("mount_shared_too_large", fmt.Sprintf("the shared workspace context contains more than %d entries", sharedEntriesLimit), false, "Reduce the selected shared-root context")
 		}
 		var size int64
 		if d.Type().IsRegular() {
@@ -400,6 +596,66 @@ func copySharedFiles(root, mountPath string, reserved map[string]bool) error {
 	}
 	for _, item := range entries {
 		if err := copyEntry(filepath.Join(root, item.rel), filepath.Join(mountPath, item.rel), item.dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func makeWorkspaceSharedFilesReadOnly(mountPath string, reserved map[string]bool) error {
+	var paths []string
+	var total int64
+	err := filepath.WalkDir(mountPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(mountPath, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		if entry.IsDir() && (reserved[rel] || entry.Name() == ".git") {
+			return filepath.SkipDir
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("unexpected symlink in copied read-only context: %s", rel)
+		}
+		if !entry.IsDir() && !entry.Type().IsRegular() {
+			return fmt.Errorf("unsupported file type in copied read-only context: %s", rel)
+		}
+		if entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			total += info.Size()
+			if total > sharedFilesLimit {
+				return axi.Failure("mount_shared_too_large", fmt.Sprintf("the read-only workspace context exceeds %d MiB after setup", sharedFilesLimit>>20), false, "Reduce shared-root context or setup output")
+			}
+		}
+		if entry.IsDir() || entry.Type().IsRegular() {
+			if len(paths) >= sharedEntriesLimit {
+				return axi.Failure("mount_shared_too_large", fmt.Sprintf("the read-only workspace context exceeds %d entries after setup", sharedEntriesLimit), false, "Reduce shared-root context or setup output")
+			}
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for index := len(paths) - 1; index >= 0; index-- {
+		path := paths[index]
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		mode := info.Mode().Perm() &^ 0o222
+		if info.IsDir() {
+			mode |= 0o555
+		} else {
+			mode |= 0o444
+		}
+		if err := os.Chmod(path, mode); err != nil {
 			return err
 		}
 	}
