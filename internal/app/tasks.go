@@ -165,7 +165,8 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 		choice = &taskplan.UserChoice{Quote: quote, Actor: role, Source: "ride --user-approved"}
 	}
-	if _, err := dispatch.ResolveReview(brief.Review, cfg.Defaults.Review, choice != nil); err != nil {
+	// Workspace review tightening is checked per Member during plan resolution.
+	if _, err := dispatch.ResolveReview(brief.Review, cfg.Defaults.Review, choice != nil || project.IsWorkspace()); err != nil {
 		return briefError(err)
 	}
 	tightening := brief

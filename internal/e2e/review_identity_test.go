@@ -63,19 +63,24 @@ func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, pr
 	if reviewOf != "" {
 		text += "review_of: " + reviewOf + "\n"
 		// Review admission pins a completed Ship revision.
-		if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE seq=? AND type='ship' AND state='working'`, strings.TrimPrefix(reviewOf, "t")); err != nil {
+		result, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE seq=? AND type='ship' AND state='working'`, strings.TrimPrefix(reviewOf, "t"))
+		if err != nil {
 			t.Fatal(err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if changed != 0 {
+			// Restore only the working author temporarily completed by this helper.
+			defer func() {
+				_, _ = fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE seq=? AND type='ship' AND state='done'`, strings.TrimPrefix(reviewOf, "t"))
+			}()
 		}
 	}
 	text += "---\nInspect the candidate.\n"
 	if err := os.WriteFile(brief, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
-	}
-	if reviewOf != "" {
-		// Restore the author to working so tests can keep relaunching it.
-		defer func() {
-			_, _ = fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE seq=? AND type='ship' AND state='done'`, strings.TrimPrefix(reviewOf, "t"))
-		}()
 	}
 	return runReviewIdentityCLI(t, fixture, "ride", "--brief", brief, "--name", name, "--profile", profile)
 }

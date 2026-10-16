@@ -254,6 +254,9 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 	if changed == 0 {
 		return axi.Failure("land_refused", "no member of "+taskIDString(task.Seq)+" has commits to Land", false, "Send the Rider an instruction with `posse send`")
 	}
+	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+		return err
+	}
 	note := "Every changed member is gated or has an open pull request"
 	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", note); err != nil {
 		return err
@@ -269,6 +272,9 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 // mergeWorkspaceMembers merges each member that is ready: a local fast-forward to
 // exactly the gated commit, or the forge merge of a pull request pinned to it.
 func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, members []memberLanding) error {
+	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+		return err
+	}
 	for _, member := range members {
 		repo := member.repo
 		switch repo.State {
@@ -283,7 +289,12 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 				}
 				return axi.Failure("branch_moved", repo.Repo+": Task branch moved after the Gate passed", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
 			}
-			if err := s.runIntentStep(ctx, db, intent, "merge:"+repo.Repo, func() error { return mergeLocal(ctx, member.project, member.task) }); err != nil {
+			if err := s.runIntentStep(ctx, db, intent, "merge:"+repo.Repo, func() error {
+				if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+					return err
+				}
+				return mergeLocal(ctx, member.project, member.task)
+			}); err != nil {
 				return prefixFailure(repo.Repo, err)
 			}
 			landedRef, err := gitOutput(ctx, member.target.Root, "rev-parse", "refs/heads/"+taskTargetBranch(member.project, member.task))

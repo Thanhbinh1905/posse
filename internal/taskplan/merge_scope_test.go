@@ -9,8 +9,8 @@ import (
 
 func TestWorkspaceScopePreservesScopedPreferencesAndPinnedBase(t *testing.T) {
 	r := request("ship")
-	r.Delivery, r.Review = "pr", "always"
-	r.Brief = taskplan.Select("brief", "scoped-workspace.md", []byte("---\ntype: ship\ntitle: Scoped workspace\ndone_when: checked\nrepos: [api]\nroot_context: read-only\nlanding_mode: local\nreview: never\nbase: release/next\ntarget: release/next\n---\n"))
+	r.Delivery, r.Review = "pr", "local"
+	r.Brief = taskplan.Select("brief", "scoped-workspace.md", []byte("---\ntype: ship\ntitle: Scoped workspace\ndone_when: checked\nrepos: [api]\nroot_context: read-only\nlanding_mode: local\nreview: none\nbase: release/next\ntarget: release/next\n---\n"))
 	commit := strings.Repeat("a", 40)
 	r.Execution = taskplan.Execution{Scope: "workspace", Members: []taskplan.Member{{
 		Name: "api", Path: "api", Base: "refs/remotes/origin/release/next", BaseCommit: commit, Target: "release/next", Delivery: "local",
@@ -34,7 +34,7 @@ func TestWorkspaceScopePreservesScopedPreferencesAndPinnedBase(t *testing.T) {
 	if plan.Execution.RootContext != taskplan.RootContextReadOnly || len(plan.Execution.Members) != 1 || plan.Execution.Members[0].BaseCommit != commit || plan.Execution.Members[0].Target != "release/next" {
 		t.Fatalf("workspace context or pinned member selection lost: %#v", plan.Execution)
 	}
-	if plan.Delivery != "local" || plan.Review != "never" || plan.UserChoice == nil || plan.UserChoice.Quote != r.UserChoice.Quote || plan.UserChoice.BriefSHA256 != r.Brief.SHA256 || strings.Join(plan.UserChoice.Fields, ",") != "delivery,review,base,target" {
+	if plan.Delivery != "local" || plan.Review != "none" || plan.UserChoice == nil || plan.UserChoice.Quote != r.UserChoice.Quote || plan.UserChoice.BriefSHA256 != r.Brief.SHA256 || strings.Join(plan.UserChoice.Fields, ",") != "delivery,review,base,target" {
 		t.Fatalf("scoped preference provenance lost: %#v", plan)
 	}
 	for _, grant := range plan.Grants {
