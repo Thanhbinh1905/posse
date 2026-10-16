@@ -212,6 +212,9 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	if err := db.normalizeLegacyProjectUUIDMigration(ctx); err != nil {
 		return err
 	}
+	if err := db.normalizeLegacyReportBundleMigration(ctx); err != nil {
+		return err
+	}
 	sources, err := embeddedMigrations()
 	if err != nil {
 		return err
@@ -550,6 +553,14 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 			return 0, err
 		}
 	}
+	if len(task.ReviewTargets) != 0 {
+		if task.Type != "review" {
+			return 0, ErrReviewVerdictType
+		}
+		if err := insertReviewTargets(ctx, tx, id, task.ReviewTargets); err != nil {
+			return 0, err
+		}
+	}
 	if err := queries.InsertTransition(ctx, dbgen.InsertTransitionParams{TaskID: id, FromState: "", ToState: string(StateSpawning), Source: "cli", Note: "Task created", At: now}); err != nil {
 		return 0, err
 	}
@@ -588,47 +599,50 @@ type TaskLaunchIdentity struct {
 }
 
 type Task struct {
-	ID                   int64  `toml:"id"`
-	ProjectID            int64  `toml:"project_id"`
-	Seq                  int    `toml:"seq"`
-	Type                 string `toml:"type"`
-	ReviewsTaskID        int64  `toml:"reviews_task_id"`
-	Title                string `toml:"title"`
-	PRTitle              string `toml:"pr_title,omitempty"`
-	ShortName            string `toml:"short_name"`
-	State                State  `toml:"state"`
-	Profile              string `toml:"profile"`
-	DispatchRule         string `toml:"dispatch_rule"`
-	PlanJSON             string `toml:"plan_json,omitempty"`
-	LandingMode          string `toml:"landing_mode"`
-	AutonomyReview       string `toml:"autonomy_review"`
-	AutonomyLand         string `toml:"autonomy_land"`
-	Branch               string `toml:"branch"`
-	BaseRef              string `toml:"base_ref"`
-	TargetBranch         string `toml:"target_branch"`
-	WorktreePath         string `toml:"worktree_path"`
-	MountID              int64  `toml:"mount_id"`
-	Launches             int    `toml:"launches"`
-	GatedSHA             string `toml:"gated_sha"`
-	HerdrWorkspaceID     string `toml:"herdr_workspace_id"`
-	PaneID               string `toml:"pane_id"`
-	PaneLabel            string `toml:"pane_label"`
-	AgentName            string `toml:"agent_name"`
-	AgentSession         string `toml:"agent_session"`
-	AgentSessionKind     string `toml:"agent_session_kind"`
-	AgentAbsentSince     int64  `toml:"agent_absent_since"`
-	IdleSince            int64  `toml:"idle_since"`
-	AgentServerStartedAt string `toml:"agent_server_started_at"`
-	PRURL                string `toml:"pr_url"`
-	LandedRef            string `toml:"landed_ref"`
-	LastOutputHash       string `toml:"last_output_hash"`
-	LastWorktreeHash     string `toml:"last_worktree_hash"`
-	LastProgressAt       int64  `toml:"last_progress_at"`
-	CreatedAt            int64  `toml:"created_at"`
-	UpdatedAt            int64  `toml:"updated_at"`
-	ReportKind           string `toml:"report_kind,omitempty"`
-	ReportDigest         string `toml:"report_digest,omitempty"`
-	ReportManifestJSON   string `toml:"report_manifest_json,omitempty"`
+	ID             int64  `toml:"id"`
+	ProjectID      int64  `toml:"project_id"`
+	Seq            int    `toml:"seq"`
+	Type           string `toml:"type"`
+	ReviewsTaskID  int64  `toml:"reviews_task_id"`
+	Title          string `toml:"title"`
+	PRTitle        string `toml:"pr_title,omitempty"`
+	ShortName      string `toml:"short_name"`
+	State          State  `toml:"state"`
+	Profile        string `toml:"profile"`
+	DispatchRule   string `toml:"dispatch_rule"`
+	PlanJSON       string `toml:"plan_json,omitempty"`
+	LandingMode    string `toml:"landing_mode"`
+	AutonomyReview string `toml:"autonomy_review"`
+	AutonomyLand   string `toml:"autonomy_land"`
+	Branch         string `toml:"branch"`
+	BaseRef        string `toml:"base_ref"`
+	TargetBranch   string `toml:"target_branch"`
+	WorktreePath   string `toml:"worktree_path"`
+	MountID        int64  `toml:"mount_id"`
+	Launches       int    `toml:"launches"`
+	// ReviewTargets is read only when a Review Task is created; the store keeps
+	// the bound commits in review_targets.
+	ReviewTargets        []ReviewTarget `toml:"-"`
+	GatedSHA             string         `toml:"gated_sha"`
+	HerdrWorkspaceID     string         `toml:"herdr_workspace_id"`
+	PaneID               string         `toml:"pane_id"`
+	PaneLabel            string         `toml:"pane_label"`
+	AgentName            string         `toml:"agent_name"`
+	AgentSession         string         `toml:"agent_session"`
+	AgentSessionKind     string         `toml:"agent_session_kind"`
+	AgentAbsentSince     int64          `toml:"agent_absent_since"`
+	IdleSince            int64          `toml:"idle_since"`
+	AgentServerStartedAt string         `toml:"agent_server_started_at"`
+	PRURL                string         `toml:"pr_url"`
+	LandedRef            string         `toml:"landed_ref"`
+	LastOutputHash       string         `toml:"last_output_hash"`
+	LastWorktreeHash     string         `toml:"last_worktree_hash"`
+	LastProgressAt       int64          `toml:"last_progress_at"`
+	CreatedAt            int64          `toml:"created_at"`
+	UpdatedAt            int64          `toml:"updated_at"`
+	ReportKind           string         `toml:"report_kind,omitempty"`
+	ReportDigest         string         `toml:"report_digest,omitempty"`
+	ReportManifestJSON   string         `toml:"report_manifest_json,omitempty"`
 }
 
 type Mount struct {
@@ -711,6 +725,14 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 	}
 	if planJSON != "" {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, id, planJSON); err != nil {
+			return 0, 0, err
+		}
+	}
+	if len(task.ReviewTargets) != 0 {
+		if task.Type != "review" {
+			return 0, 0, ErrReviewVerdictType
+		}
+		if err := insertReviewTargets(ctx, tx, id, task.ReviewTargets); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -1241,6 +1263,15 @@ func (db *DB) AddSignal(ctx context.Context, taskID int64, verb, note string, da
 }
 
 func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note string, data any, noticeKind string) (State, error) {
+	return db.RecordWorkerSignalWithVerdict(ctx, task, verb, note, data, noticeKind, nil)
+}
+
+// RecordWorkerSignalWithVerdict records a Signal and, for a Review Task's done
+// Signal, its verdict in one transaction.
+func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput) (State, error) {
+	if verdict != nil && verb != "done" {
+		return "", fmt.Errorf("a review verdict is valid only on a done Signal")
+	}
 	encoded, err := json.Marshal(data)
 	if err != nil {
 		return "", err
@@ -1274,8 +1305,18 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 			return "", ErrQueuedInstructionsPending
 		}
 	}
-	if _, err := queries.InsertSignal(ctx, dbgen.InsertSignalParams{TaskID: task.ID, Verb: verb, Note: note, DataJson: string(encoded), At: time.Now().UnixMilli()}); err != nil {
+	signal, err := queries.InsertSignal(ctx, dbgen.InsertSignalParams{TaskID: task.ID, Verb: verb, Note: note, DataJson: string(encoded), At: time.Now().UnixMilli()})
+	if err != nil {
 		return "", err
+	}
+	if verdict != nil {
+		signalID, err := signal.LastInsertId()
+		if err != nil {
+			return "", err
+		}
+		if err := recordReviewVerdictTx(ctx, tx, task.ID, signalID, *verdict); err != nil {
+			return "", err
+		}
 	}
 	next := StateWorking
 	switch verb {

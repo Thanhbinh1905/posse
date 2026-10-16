@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -511,6 +512,17 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			}
 			authorHistoryKnown := author.Launches > 0 && launchHistoryComplete(author, authorLaunches)
 			view["review_identity"] = reviewIdentityHistoryResult(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown)
+		}
+		if verdict, err := db.ReviewVerdict(ctx.Context, task.ID); err == nil {
+			current := false
+			if author, authorErr := db.TaskByID(ctx.Context, project.ID, task.ReviewsTaskID); authorErr == nil {
+				if pass, ok, passErr := currentReviewPass(ctx.Context, db, project, author); passErr == nil && ok && pass.TaskID == verdict.TaskID {
+					current = true
+				}
+			}
+			view["review_verdict"] = reviewVerdictView(verdict, current)
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
 		}
 	}
 	recovery, err := db.TaskRecovery(ctx.Context, task.ID)
