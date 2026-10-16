@@ -19,6 +19,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// An adapter can own its active batch and one coalesced successor, but no more.
+const maxActiveNoticeDeliveriesPerDestination = 2
+
 type NoticeDelivery struct {
 	DeliveryID  string  `toml:"delivery_id" json:"delivery_id"`
 	BatchID     string  `toml:"batch_id" json:"batch_id"`
@@ -110,13 +113,6 @@ func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []in
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return NoticeDelivery{}, false, err
 	}
-	var competing int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notice_delivery_receipts WHERE project_id=? AND destination=? AND delivery_id<>? AND state IN ('claimed','printed'))`, projectID, destination, deliveryID).Scan(&competing); err != nil {
-		return NoticeDelivery{}, false, err
-	}
-	if competing != 0 {
-		return NoticeDelivery{}, false, nil
-	}
 	if found {
 		if err := json.Unmarshal([]byte(rawIDs), &delivery.NoticeIDs); err != nil {
 			return NoticeDelivery{}, false, fmt.Errorf("decode Notice delivery IDs: %w", err)
@@ -126,6 +122,12 @@ func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []in
 		}
 		if delivery.State == "accepted" || delivery.State == "uncertain" {
 			return delivery, false, nil
+		}
+		if delivery.State == "rejected" {
+			available, err := noticeDeliveryCapacityAvailable(ctx, tx, projectID, destination)
+			if err != nil || !available {
+				return delivery, false, err
+			}
 		}
 		if delivery.OwnerToken != token && delivery.LeaseUntil > now {
 			return delivery, false, nil
@@ -144,6 +146,10 @@ func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []in
 		delivery.Generation, delivery.State, delivery.OwnerToken = generation, state, token
 		delivery.ClaimedAt, delivery.LeaseUntil, delivery.UpdatedAt = now, now+leaseMillis, now
 	} else {
+		available, err := noticeDeliveryCapacityAvailable(ctx, tx, projectID, destination)
+		if err != nil || !available {
+			return NoticeDelivery{}, false, err
+		}
 		if err := claimDeliveryNotices(ctx, tx, projectID, ids, "", token, now, false); err != nil {
 			return NoticeDelivery{}, false, err
 		}
@@ -161,6 +167,16 @@ func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []in
 		return delivery, false, err
 	}
 	return delivery, true, nil
+}
+
+func noticeDeliveryCapacityAvailable(ctx context.Context, tx interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, projectID int64, destination string) (bool, error) {
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM notice_delivery_receipts WHERE project_id=? AND destination=? AND state IN ('claimed','printed')`, projectID, destination).Scan(&active); err != nil {
+		return false, err
+	}
+	return active < maxActiveNoticeDeliveriesPerDestination, nil
 }
 
 // claimDeliveryNotices keeps ordinary new claims unacknowledged. Only an
@@ -252,6 +268,21 @@ func (db *DB) NoticeDeliveryForDestination(ctx context.Context, projectID int64,
 	err := db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts
 		WHERE project_id=? AND destination=? AND state IN ('claimed','printed','rejected','uncertain')
 		ORDER BY updated_at DESC,delivery_id LIMIT 1`, projectID, destination).Scan(&deliveryID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NoticeDelivery{}, false, nil
+	}
+	if err != nil {
+		return NoticeDelivery{}, false, err
+	}
+	delivery, err := db.NoticeDelivery(ctx, deliveryID)
+	return delivery, true, err
+}
+
+func (db *DB) NoticeDeliveryForDestinationRetry(ctx context.Context, projectID int64, destination string, now int64) (NoticeDelivery, bool, error) {
+	var deliveryID string
+	err := db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts
+		WHERE project_id=? AND destination=? AND (state IN ('rejected','uncertain') OR state IN ('claimed','printed') AND lease_until<=?)
+		ORDER BY CASE WHEN state='uncertain' THEN 0 WHEN state IN ('claimed','printed') THEN 1 ELSE 2 END,created_at,delivery_id LIMIT 1`, projectID, destination, now).Scan(&deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NoticeDelivery{}, false, nil
 	}

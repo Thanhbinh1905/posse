@@ -332,7 +332,7 @@ func TestNoticeDeliveryResolutionIsProjectScoped(t *testing.T) {
 	}
 }
 
-func TestConcurrentNoticeDeliveryClaimsHaveOneOwner(t *testing.T) {
+func TestConcurrentNoticeDeliveryClaimsAreBoundedPerDestination(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
 	if err != nil {
@@ -374,8 +374,82 @@ func TestConcurrentNoticeDeliveryClaimsHaveOneOwner(t *testing.T) {
 	if first.err != nil || second.err != nil {
 		t.Fatalf("concurrent claim errors: first=%v second=%v", first.err, second.err)
 	}
-	if first.claimed == second.claimed {
-		t.Fatalf("concurrent destination claims = %#v, %#v; want exactly one owner", first, second)
+	if !first.claimed || !second.claimed {
+		t.Fatalf("concurrent destination claims = %#v, %#v; want both batches within the two-batch bound", first, second)
+	}
+	thirdID, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "test", Summary: "third batch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{thirdID}, "pi:session", "herdr:g1", "owner-c", 1000, 500)
+	if err != nil || claimed {
+		t.Fatalf("third destination claim = %#v, %v, %v; want bounded refusal", third, claimed, err)
+	}
+	var active int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notice_delivery_receipts WHERE project_id=? AND destination=? AND state IN ('claimed','printed')`, project.ID, "pi:session").Scan(&active); err != nil || active != maxActiveNoticeDeliveriesPerDestination {
+		t.Fatalf("active destination batches = %d, %v; want %d", active, err, maxActiveNoticeDeliveriesPerDestination)
+	}
+}
+
+func TestDestinationRetriesOldestExpiredBatchWithoutBlockingNewClaims(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", "/missing/shop", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for _, summary := range []string{"first", "second", "third"} {
+		id, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "test", Summary: summary})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	first, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{ids[0]}, "opencode:session", "generation", "owner-first", 1000, 100)
+	if err != nil || !claimed {
+		t.Fatalf("first destination claim = %+v, %v, %v", first, claimed, err)
+	}
+	if err := db.MarkNoticeDeliveryPrinted(ctx, first.DeliveryID, first.OwnerToken, 1001); err != nil {
+		t.Fatal(err)
+	}
+	second, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{ids[1]}, "opencode:session", "generation", "owner-second", 1010, 100)
+	if err != nil || !claimed {
+		t.Fatalf("second destination claim = %+v, %v, %v", second, claimed, err)
+	}
+	if err := db.MarkNoticeDeliveryPrinted(ctx, second.DeliveryID, second.OwnerToken, 1011); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{ids[2]}, "opencode:session", "generation", "owner-third", 1020, 100); err != nil || claimed {
+		t.Fatalf("third claim exceeded destination bound: claimed=%t err=%v", claimed, err)
+	}
+	if _, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1099); err != nil || found {
+		t.Fatalf("unexpired destination receipt found=%t err=%v", found, err)
+	}
+	firstRetry, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1100)
+	if err != nil || !found || firstRetry.DeliveryID != first.DeliveryID {
+		t.Fatalf("oldest expired destination receipt = %+v found=%t err=%v", firstRetry, found, err)
+	}
+	firstRetry, claimed, err = db.ClaimNoticeDelivery(ctx, project.ID, []int64{ids[0]}, "opencode:session", "generation", "owner-first-retry", 1100, 100)
+	if err != nil || !claimed {
+		t.Fatalf("reclaim oldest expired receipt = %+v, %v, %v", firstRetry, claimed, err)
+	}
+	if err := db.ResolveNoticeDelivery(ctx, project.ID, first.DeliveryID, firstRetry.OwnerToken, "accepted", 1101); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{ids[2]}, "opencode:session", "generation", "owner-third", 1102, 100); err != nil || !claimed {
+		t.Fatalf("claim after capacity freed: claimed=%t err=%v", claimed, err)
+	}
+	if _, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1109); err != nil || found {
+		t.Fatalf("next receipt returned before expiry: found=%t err=%v", found, err)
+	}
+	secondRetry, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1110)
+	if err != nil || !found || secondRetry.DeliveryID != second.DeliveryID {
+		t.Fatalf("next expired destination receipt = %+v found=%t err=%v", secondRetry, found, err)
 	}
 }
 
