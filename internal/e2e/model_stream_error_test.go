@@ -155,7 +155,7 @@ func newPiModelErrorFixture(t *testing.T, modelError string, repeatOnContinue bo
 	if _, err := client.Run(context.Background(), "integration", "install", "pi"); err != nil {
 		t.Fatalf("install Pi integration in isolated Herdr: %v", err)
 	}
-	if output := runPosse(t, base.binary, base.repo, base.leadEnv, "config", "set", "profiles.deep.kind", "pi"); !strings.Contains(output, "pi") {
+	if output := runPosse(t, base.binary, base.repo, base.env, "config", "set", "profiles.deep.kind", "pi"); !strings.Contains(output, "pi") {
 		t.Fatalf("select Pi for the Rider harness: %s", output)
 	}
 	if !strings.Contains(modelError, "\n") && !strings.HasPrefix(strings.TrimSpace(modelError), "Error:") {
