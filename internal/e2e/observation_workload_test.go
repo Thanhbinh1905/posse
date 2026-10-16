@@ -245,3 +245,80 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	}
 	t.Logf("observation workload (API and CPU cost; no model usage):\n%s", report)
 }
+
+// With no poll-only Lookout running and producers run one at a time, every
+// counter is exact: each producer makes one forge call, so the counts below
+// are the same on every machine.
+func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	ctx := context.Background()
+	stopBackgroundLookout(t, f)
+
+	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
+		Seq: 1, Type: "ship", Title: "Observed change", LandingMode: "pr", Branch: "posse/t1",
+		PRURL: "https://github.com/acme/shop/pull/17",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	workload := &observationWorkload{}
+	produce := func(times int) {
+		for i := 0; i < times; i++ {
+			before := forgeCalls(t, f)
+			command := exec.Command(f.binary, "roster")
+			command.Dir, command.Env = f.repo, f.leadEnv
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("producer: %v\n%s", err, output)
+			}
+			if delta := forgeCalls(t, f) - before; delta != 1 {
+				t.Fatalf("producer made %d forge calls, want exactly one", delta)
+			}
+			workload.PollerArms++
+			workload.PollerCPU += command.ProcessState.UserTime() + command.ProcessState.SystemTime()
+		}
+	}
+
+	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", strings.Repeat("1", 40))
+	produce(3)
+	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", strings.Repeat("2", 40))
+	produce(2)
+
+	if calls := forgeCalls(t, f); calls != 5 {
+		t.Fatalf("forge calls = %d, want 5", calls)
+	}
+	if got := len(observationNotices(t, f, "pr_checks_failed")); got != 2 {
+		t.Fatalf("checks Notices = %d, want one per head (2)", got)
+	}
+	handoff := exec.Command(f.binary, "lookout", "--json", "--quiet-routine", "--handoff", "--destination", "fake:deterministic", "--timeout", "5000")
+	handoff.Dir, handoff.Env = f.repo, f.leadEnv
+	output, err := handoff.Output()
+	if err != nil {
+		t.Fatalf("handoff: %v\n%s", err, output)
+	}
+	workload.HandoffArms++
+	var wake noticeHandoffPayload
+	if err := json.Unmarshal(output, &wake); err != nil {
+		t.Fatal(err)
+	}
+	carried := map[int64]bool{}
+	for _, id := range wake.Delivery.NoticeIDs {
+		carried[id] = true
+	}
+	for _, notice := range observationNotices(t, f, "pr_checks_failed") {
+		if !carried[notice.ID] {
+			t.Fatalf("wake carried %v, missing checks Notice %d", wake.Delivery.NoticeIDs, notice.ID)
+		}
+	}
+	workload.ActionableWakes++
+	workload.ForgeCalls = forgeCalls(t, f) // the handoff Lookout's own polls are API cost too
+	if workload.PollerArms != 5 || workload.HandoffArms != 1 || workload.ActionableWakes != 1 || workload.ModelTurns != 0 || workload.PollerCPU <= 0 {
+		t.Fatalf("counters = %#v", workload)
+	}
+	if prompts, _ := os.ReadFile(filepath.Join(f.root, "lead-prompts.log")); len(prompts) != 0 {
+		t.Fatalf("a model turn was needed: %q", prompts)
+	}
+}

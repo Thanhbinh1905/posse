@@ -342,7 +342,10 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	}
 	// Admission must finish before preparation can recover other Riders or
 	// allocate this Task's scratch, Mount, branch or pane.
-	if _, err := s.prepareProjectForTask(ctx.Context, db, project); err != nil {
+	if err := retryBusy(ctx.Context, admissionPreparationAttempts, admissionPreparationDelay, func() error {
+		_, err := s.prepareProjectForTask(ctx.Context, db, project)
+		return err
+	}); err != nil {
 		return err
 	}
 	crashIntentAt("ride", "before", "task.create")
@@ -2499,4 +2502,32 @@ func defaultValue(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+const (
+	admissionPreparationAttempts = 4
+	admissionPreparationDelay    = 150 * time.Millisecond
+)
+
+// retryBusy repeats an idempotent step that failed only on transient store
+// contention, such as the poll-only Lookout writing the same observation. Any
+// other failure, or an expired context, is returned at once.
+func retryBusy(ctx context.Context, attempts int, delay time.Duration, step func() error) error {
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err = step(); err == nil || !store.IsOnlyBusy(err) {
+			return err
+		}
+		if attempt == attempts-1 {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+	}
+	return err
 }
