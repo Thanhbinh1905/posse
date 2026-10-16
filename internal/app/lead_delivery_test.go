@@ -409,7 +409,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 
 	claude := launch("claude")
 	plugin := filepath.Join(home, "projects", "shop", "lead-claude-lowkey")
-	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0]}) || claude.TypedPrompt != "" ||
+	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lookout")}) || claude.TypedPrompt != "" ||
 		claude.Env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] != "1" || claude.Env["POSSE_LOWKEY_CONFIG"] != config.ConfigPath(home, "shop") ||
 		claude.Env["POSSE_LOWKEY_GLOBAL_CONFIG"] != config.ConfigPath(home, "") || claude.Env["POSSE_LOWKEY_NOTICES_DIR"] != claudeNoticeDirectory(home, "shop") {
 		t.Fatalf("claude launch = %#v", claude)
@@ -817,17 +817,17 @@ func TestIdentityTextLabelsSetFieldsOnly(t *testing.T) {
 
 func TestNoticeRulesForbidPollingForEveryDelivery(t *testing.T) {
 	for delivery, wake := range map[string]string{
-		config.NoticeDeliveryLookout:        "After (re)starting it, end your turn and let it wake you.",
+		config.NoticeDeliveryLookout:        "End your turn and let the Stop hook wake you.",
 		config.NoticeDeliveryCodexQueue:     "End your turn and let that message wake you.",
 		config.NoticeDeliveryPiExtension:    "End your turn and let that message wake you.",
 		config.NoticeDeliveryOpenCodePlugin: "End your turn and let that message wake you.",
 		config.NoticeDeliveryPrompt:         "End your turn and let that prompt wake you.",
 	} {
-		rule := noticeRule(delivery)
+		rule := noticeRule(delivery, "claude")
 		if !strings.Contains(rule, noPollRule) || !strings.Contains(rule, wake) {
 			t.Errorf("%s Notice rule = %q", delivery, rule)
 		}
-		if delivery == config.NoticeDeliveryLookout && !strings.Contains(rule, "If it returns with `state=stopped` and `reason=update`, restart `posse lookout` on your next wake.") {
+		if delivery == config.NoticeDeliveryLookout && !strings.Contains(rule, "A stopped hook does not restart itself; the next normal Stop owns the next wait.") {
 			t.Errorf("Claude Lead lookout restart rule = %q", rule)
 		}
 	}

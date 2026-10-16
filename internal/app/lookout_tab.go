@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -169,18 +170,47 @@ func (s *Service) ensureLookoutTab(ctx context.Context, db *store.DB, project st
 		return err
 	}
 	command := "POSSE_HOME=" + shellQuote(home) + " " + shellQuote(binary) + " lookout --poll-only"
+	state, err := db.LookoutRecovery(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	var runningPane *herdr.Pane
+	for index := range snapshot.Panes {
+		pane := &snapshot.Panes[index]
+		if pane.Label != label || pane.WorkspaceID != project.HerdrWorkspaceID {
+			continue
+		}
+		if pane.PaneID != os.Getenv("HERDR_PANE_ID") && !lookoutProcessRunning(pane.PaneID, home) {
+			continue
+		}
+		if runningPane == nil || pane.PaneID == state.PaneID {
+			runningPane = pane
+		}
+	}
+	if runningPane != nil {
+		for _, pane := range snapshot.Panes {
+			if pane.Label == label && pane.PaneID != runningPane.PaneID {
+				if err := s.closeLookoutPane(ctx, pane, snapshot); err != nil {
+					return err
+				}
+			}
+		}
+		return markLookoutRunning(ctx, db, project.ID, runningPane.PaneID)
+	}
+
 	failedStart := false
+	resetRecovery := false
 	for _, pane := range snapshot.Panes {
 		if pane.Label != label {
 			continue
 		}
-		if pane.WorkspaceID == project.HerdrWorkspaceID && (pane.PaneID == os.Getenv("HERDR_PANE_ID") || lookoutProcessRunning(pane.PaneID, home)) {
-			return markLookoutRunning(ctx, db, project.ID, pane.PaneID)
-		}
 		if pane.WorkspaceID == project.HerdrWorkspaceID {
 			if replaceUnstarted {
-				if err := resetLookoutRecovery(ctx, db, project.ID); err != nil {
-					return err
+				if !resetRecovery {
+					if err := resetLookoutRecovery(ctx, db, project.ID); err != nil {
+						return err
+					}
+					resetRecovery = true
 				}
 			} else {
 				delayed, err := delayLookoutReplacement(ctx, db, project.ID, pane.PaneID, time.Now())
@@ -193,21 +223,7 @@ func (s *Service) ensureLookoutTab(ctx context.Context, db *store.DB, project st
 				failedStart = true
 			}
 		}
-		// A label is not proof that the shell is idle. Close its dedicated
-		// tab before starting a replacement; never type into a live pane.
-		// A replacement Lead may use another workspace. Close only the old
-		// dedicated Lookout tab, never a tab containing foreign panes.
-		whole := pane.TabID != ""
-		for _, other := range snapshot.Panes {
-			if other.TabID == pane.TabID && other.PaneID != pane.PaneID {
-				whole = false
-			}
-		}
-		method, params := "pane.close", map[string]any{"pane_id": pane.PaneID}
-		if whole {
-			method, params = "tab.close", map[string]any{"tab_id": pane.TabID}
-		}
-		if _, err := s.herdrCall(ctx, method, params); err != nil && !missingPaneError(err) {
+		if err := s.closeLookoutPane(ctx, pane, snapshot); err != nil {
 			return err
 		}
 	}
@@ -254,6 +270,24 @@ func (s *Service) ensureLookoutTab(ctx context.Context, db *store.DB, project st
 	return markLookoutCreated(ctx, db, project.ID, opened.RootPane.PaneID, failedStart)
 }
 
+// closeLookoutPane closes only the dedicated Lookout tab, never foreign panes in a shared tab.
+func (s *Service) closeLookoutPane(ctx context.Context, pane herdr.Pane, snapshot herdr.Snapshot) error {
+	whole := pane.TabID != ""
+	for _, other := range snapshot.Panes {
+		if other.TabID == pane.TabID && other.PaneID != pane.PaneID {
+			whole = false
+		}
+	}
+	method, params := "pane.close", map[string]any{"pane_id": pane.PaneID}
+	if whole {
+		method, params = "tab.close", map[string]any{"tab_id": pane.TabID}
+	}
+	if _, err := s.herdrCall(ctx, method, params); err != nil && !missingPaneError(err) {
+		return err
+	}
+	return nil
+}
+
 func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal) error {
 	snapshot, err := s.snapshot(ctx.Context)
 	if err != nil {
@@ -287,7 +321,7 @@ func (s *Service) watchPullRequestsInLookoutTab(ctx *axi.Context, db *store.DB, 
 		if fresh.HerdrWorkspaceID != project.HerdrWorkspaceID {
 			return nil
 		}
-		if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
+		if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) {
 			recordLookoutFailure(ctx, db, project.ID, &lastFailure, "reconcile", err)
 		}
 		if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {

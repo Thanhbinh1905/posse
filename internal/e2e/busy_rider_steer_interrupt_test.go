@@ -112,6 +112,9 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		t.Fatalf("fake Pi did not receive both steering messages while busy: %s", contents)
 	}
 
+	// The remaining assertions concern foreground command ordering, not the
+	// independent Lookout's valid attempts to deliver queued instructions.
+	stopBackgroundLookout(t, fixture)
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsend", strconv.FormatInt(pending.ID, 10)); !strings.Contains(output, "state: withdrawn") {
 		t.Fatalf("unsend did not withdraw the wait-for-idle message: %s", output)
 	}
@@ -308,6 +311,8 @@ func TestUnsendDoesNotDeliverQueuedMessageE2E(t *testing.T) {
 	}) {
 		t.Fatal("isolated Pi Rider did not become ready for the unsend reproduction")
 	}
+	// Only unsend should observe this idle Rider after the row is queued.
+	stopBackgroundLookout(t, fixture)
 	if _, err := client.Run(context.Background(), "pane", "report-agent", task.PaneID, "--source", "posse.e2e", "--agent", "pi", "--state", "idle"); err != nil {
 		t.Fatalf("mark Pi idle for the unsend reproduction: %v", err)
 	}

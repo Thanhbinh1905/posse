@@ -263,7 +263,22 @@ func (db *DB) NoticesByIDs(ctx context.Context, projectID int64, ids []int64) ([
 	return notices, nil
 }
 
-func (db *DB) NoticeDeliveryForDestination(ctx context.Context, projectID int64, destination string, now int64) (NoticeDelivery, bool, error) {
+func (db *DB) NoticeDeliveryForDestination(ctx context.Context, projectID int64, destination string) (NoticeDelivery, bool, error) {
+	var deliveryID string
+	err := db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts
+		WHERE project_id=? AND destination=? AND state IN ('claimed','printed','rejected','uncertain')
+		ORDER BY updated_at DESC,delivery_id LIMIT 1`, projectID, destination).Scan(&deliveryID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NoticeDelivery{}, false, nil
+	}
+	if err != nil {
+		return NoticeDelivery{}, false, err
+	}
+	delivery, err := db.NoticeDelivery(ctx, deliveryID)
+	return delivery, true, err
+}
+
+func (db *DB) NoticeDeliveryForDestinationRetry(ctx context.Context, projectID int64, destination string, now int64) (NoticeDelivery, bool, error) {
 	var deliveryID string
 	err := db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts
 		WHERE project_id=? AND destination=? AND (state IN ('rejected','uncertain') OR state IN ('claimed','printed') AND lease_until<=?)

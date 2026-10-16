@@ -55,10 +55,13 @@ func reportingRule(lowkey bool) string {
 
 // noticeRule tells the Lead how its Notices arrive for the given delivery mode
 // and how to wait for them.
-func noticeRule(delivery string) string {
+func noticeRule(delivery, kind string) string {
 	switch delivery {
 	case config.NoticeDeliveryLookout:
-		return "Keep exactly one `posse lookout` running as a background command that re-invokes you when it returns. If it returns with `state=stopped` and `reason=update`, restart `posse lookout` on your next wake. Otherwise, read the Notices in its result, then use one background `posse lookout --ack <ids>` call to acknowledge handled Notices and restart the watch; do not type into a focused pane. Read the current lowkey state and reporting rule in each lookout result. " + noPollRule + " After (re)starting it, end your turn and let it wake you."
+		if kind != "claude" {
+			return "Keep exactly one `posse lookout` running as a background command that re-invokes you when it returns. Handle Notices, acknowledge handled IDs with `posse ack <ids>`, then restart the background watch. " + noPollRule + " After (re)starting it, end your turn and let it wake you."
+		}
+		return "The Claude Stop hook owns one bounded Notice wait through the harness's asyncRewake lifecycle. Do not run `posse lookout` as a background command or start a relay. Handle Notice reminders and acknowledge handled IDs with `posse ack <ids>`. The hook renews after four minutes without a Notice; end a quiet renewal turn without tools or a User update. A stopped hook does not restart itself; the next normal Stop owns the next wait. Read the current lowkey state and reporting rule in each Notice. " + noPollRule + " End your turn and let the Stop hook wake you."
 	case config.NoticeDeliveryCodexQueue:
 		return "posse queues each batch of Notices into this conversation as a Posse Notice message, also while your pane is focused or the User is typing. Read the current lowkey state and reporting rule in each message. Do not run `posse lookout`. " + noPollRule + " End your turn and let that message wake you."
 	case config.NoticeDeliveryPiExtension:
@@ -159,6 +162,13 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 			return leadLaunch{}, err
 		}
 		launch.Args = append(launch.Args, "--plugin-dir", plugin, "--plugin-dir", skills.ClaudePluginDir)
+		if noticeDelivery(kindConfig) == config.NoticeDeliveryLookout {
+			stopPlugin, err := s.writeLeadClaudeStop(home, project)
+			if err != nil {
+				return leadLaunch{}, err
+			}
+			launch.Args = append(launch.Args, "--plugin-dir", stopPlugin)
+		}
 		launch.Env = map[string]string{
 			"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
 			"POSSE_LOWKEY_CONFIG":               config.ConfigPath(home, project.Name),

@@ -439,29 +439,34 @@ func TestLookoutAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 // delivery. Keep this test focused on the Lead's explicit acknowledgement path.
 func stopBackgroundLookout(t *testing.T, f *prLifecycleFixture) {
 	t.Helper()
-	client := herdr.NewWithEnv("herdr", f.env)
-	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
-		t.Fatalf("initial Lookout did not start: %v", lookoutPIDs(f.root))
+	stopFixtureBackgroundLookout(t, f.root, f.env, f.db, f.project.ID)
+}
+
+func stopFixtureBackgroundLookout(t *testing.T, root string, env []string, db *store.DB, projectID int64) {
+	t.Helper()
+	client := herdr.NewWithEnv("herdr", env)
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(root)) == 1 }) {
+		t.Fatalf("initial Lookout did not start: %v", lookoutPIDs(root))
 	}
 	panes := lookoutPanes(t, client)
 	if len(panes) != 1 {
 		t.Fatalf("initial Lookout tabs = %d, want 1", len(panes))
 	}
-	for _, pid := range lookoutPIDs(f.root) {
+	for _, pid := range lookoutPIDs(root) {
 		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
 			t.Fatalf("stop background Lookout: %v", err)
 		}
 	}
-	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 0 }) {
-		t.Fatalf("background Lookout did not stop: %v", lookoutPIDs(f.root))
+	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(root)) == 0 }) {
+		t.Fatalf("background Lookout did not stop: %v", lookoutPIDs(root))
 	}
-	state, err := f.db.LookoutRecovery(context.Background(), f.project.ID)
+	state, err := db.LookoutRecovery(context.Background(), projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The foreground Lookout would otherwise restart the poll-only process.
+	// Foreground observation must not restart the independent poll-only process.
 	state.RetryAt = time.Now().Add(time.Hour).UnixMilli()
-	if err := f.db.SetLookoutRecovery(context.Background(), f.project.ID, state); err != nil {
+	if err := db.SetLookoutRecovery(context.Background(), projectID, state); err != nil {
 		t.Fatal(err)
 	}
 }
