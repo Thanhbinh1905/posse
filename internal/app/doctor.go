@@ -67,6 +67,8 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	}
 	checks := []doctorCheck{}
 	var registeredProjects []store.Project
+	lookoutStates := make(map[int64]store.LookoutRecovery)
+	lookoutStateErrors := make(map[int64]error)
 	addCheck := func(name, status, detail, action string) {
 		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail, Action: action})
 	}
@@ -95,6 +97,14 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("database", "fail", projectsErr.Error(), "Inspect the Posse database")
 		} else {
 			registeredProjects = projects
+			for _, project := range projects {
+				state, stateErr := db.LookoutRecovery(ctx.Context, project.ID)
+				if stateErr != nil {
+					lookoutStateErrors[project.ID] = stateErr
+				} else {
+					lookoutStates[project.ID] = state
+				}
+			}
 			addCheck("database", "ok", "database opened", "")
 			hosts := map[string]bool{}
 			for _, project := range projects {
@@ -176,6 +186,11 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	var manifests []byte
 	if s.Herdr == nil {
 		addCheck("Herdr", "warn", "adapter is not configured", "Configure Herdr and run `posse setup`")
+		for _, project := range registeredProjects {
+			if !project.IsDown() {
+				addCheck("Project Lookout "+project.Name, "warn", "watcher state unavailable: Herdr adapter is not configured", "Configure Herdr, then rerun `posse doctor`")
+			}
+		}
 	} else {
 		herdrStatus, statusErr := s.Herdr.Status(ctx.Context)
 		if statusErr != nil {
@@ -186,7 +201,14 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("Herdr", "warn", "server is stopped or incompatible", "Start a compatible Herdr server")
 		}
 
-		if snapshot, snapErr := s.snapshot(ctx.Context); snapErr == nil {
+		snapshot, snapErr := s.snapshot(ctx.Context)
+		if snapErr != nil {
+			for _, project := range registeredProjects {
+				if !project.IsDown() {
+					addCheck("Project Lookout "+project.Name, "warn", "watcher state unavailable: "+snapErr.Error(), "Restore Herdr, then rerun `posse doctor`")
+				}
+			}
+		} else {
 			for _, project := range registeredProjects {
 				if project.IsWorkspace() {
 					continue
@@ -209,6 +231,17 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 						addCheck("Herdr group "+project.Name, "warn", "another primary workspace "+workspace.WorkspaceID+" shares the Lead's repository; its group close also closes the Lead and Riders", "Do not use workspace close --group on another primary; Posse recovers the group if it happens")
 					}
 				}
+			}
+			processes, processErr := systemLookoutProcesses(home)
+			for _, project := range registeredProjects {
+				if project.IsDown() {
+					continue
+				}
+				if stateErr := lookoutStateErrors[project.ID]; stateErr != nil {
+					addCheck("Project Lookout "+project.Name, "warn", "runtime state unavailable: "+stateErr.Error(), "Inspect the Posse database, then rerun `posse doctor`")
+					continue
+				}
+				checks = append(checks, projectLookoutCheck(project, lookoutStates[project.ID], snapshot, processes, processErr))
 			}
 		}
 		pluginData, pluginErr := s.herdrCall(ctx.Context, "plugin.list", map[string]any{})

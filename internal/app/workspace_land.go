@@ -345,6 +345,14 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, cfg 
 		}
 		return axi.Failure("branch_moved", repo.Repo+": pull request head moved after the Gate passed", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
 	}
+	mergeLock, err := acquirePRMergeLock(ctx, member.target.Root)
+	if err != nil {
+		return prefixFailure(repo.Repo, err)
+	}
+	defer mergeLock.Close()
+	if err := verifyPRTargetIsUpToDate(ctx, member.target.Root, taskTargetBranch(member.project, member.task), repo.GatedSHA, task.Seq); err != nil {
+		return prefixFailure(repo.Repo, err)
+	}
 	method := defaultValue(cfg.Defaults.MergeMethod, "squash")
 	if forge.Kind == "gitlab" {
 		args := []string{"mr", "merge", fmt.Sprint(number), "--repo", "https://" + forge.Host + "/" + forge.Path, "--sha", repo.GatedSHA, "--yes", "--auto-merge=false"}

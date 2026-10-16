@@ -112,6 +112,9 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		t.Fatalf("fake Pi did not receive both steering messages while busy: %s", contents)
 	}
 
+	// The remaining assertions concern foreground command ordering, not the
+	// independent Lookout's valid attempts to deliver queued instructions.
+	stopBackgroundLookout(t, fixture)
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsend", strconv.FormatInt(pending.ID, 10)); !strings.Contains(output, "state: withdrawn") {
 		t.Fatalf("unsend did not withdraw the wait-for-idle message: %s", output)
 	}

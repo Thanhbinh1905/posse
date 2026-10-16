@@ -62,6 +62,33 @@ export default function (pi) {
 	let lowkeyActive = false;
 	let agentRunActive = false;
 	let slabShown = false;
+	const runtimeKey = Symbol.for("posse:pi-notice-runtime:v1");
+	const runtime = globalThis[runtimeKey] ??= {
+		owner: undefined,
+		generation: 0,
+		running: false,
+		blocked: false,
+		child: undefined,
+		timer: undefined,
+		backoffMs: 1_000,
+		failures: 0,
+		healthNotified: false,
+		pendingAcceptance: new Map(),
+		sessionManager: undefined,
+		destination: undefined,
+		kick: undefined,
+	};
+	const owner = {};
+	runtime.owner = owner;
+	runtime.generation++;
+	runtime.running = false;
+	runtime.sessionManager = undefined;
+	runtime.destination = undefined;
+	runtime.kick = undefined;
+	clearTimeout(runtime.timer);
+	runtime.timer = undefined;
+	try { runtime.child?.process.kill(); } catch {}
+	const maxRetryAttempts = 5;
 	const slabWidgetKey = "posse-lowkey-slab";
 	const slabFrames = ["░░▒▓", "░▒▓█", "▒▓█▓", "▓█▓▒", "█▓▒░", "▓▒░░"];
 	const slabIntervalMs = 225;
@@ -117,11 +144,12 @@ export default function (pi) {
 			resolve(match[1] === "on");
 		});
 	});
-	const refreshLowkey = async () => {
+	const isCurrent = (generation) => runtime.owner === owner && runtime.generation === generation && runtime.running;
+	const refreshLowkey = async (generation) => {
 		const revision = choiceRevision;
 		try {
 			const active = await runLowkey(["status"]);
-			if (running && revision === choiceRevision) applyLowkey(active);
+			if (isCurrent(generation) && revision === choiceRevision) applyLowkey(active);
 		} catch (error) {
 			console.error(`Posse lowkey: cannot read current setting. ${error}`);
 		}
@@ -159,34 +187,45 @@ export default function (pi) {
 		try { body = JSON.parse(quotedBody); } catch {}
 		return new Text(theme.fg("accent", header) + "\n" + String(body).split("\n").map((line) => "│ " + line).join("\n"), outputPad, 0);
 	});
-	let running = false;
-	let blocked = false;
-	let child;
-	let timer;
-	let backoffMs = 1_000;
-	let pendingNotification = false;
-	const pendingAcceptance = new Map();
-	let sessionManager;
-	let destination;
-
 	const notifyFailure = () => {
+		if (runtime.healthNotified) return;
+		runtime.healthNotified = true;
 		try {
 			pi.sendMessage({
 				customType: "posse-notices",
-				content: '[posse | Posse -> Lead project | delivery-error]\nbody: "Notice delivery failed. Run `posse` to inspect open Notices."',
+				content: '[posse | Posse -> Lead project | delivery-error]\nbody: "Notice delivery failed after bounded retries. Run `posse` to inspect open Notices."',
 				display: true,
 				details: { origin: "posse", from: "Posse", to: "Lead", task: "project", type: "delivery-error" },
 			}, { triggerTurn: true, deliverAs: "followUp" });
-			pendingNotification = false;
 		} catch {
-			pendingNotification = true;
+			ui?.notify("Notice delivery failed after bounded retries. Run `posse` to inspect open Notices.", "warning");
+		}
+	};
+
+	const notifyUncertainty = (warning, delivery) => {
+		if (runtime.blocked) return;
+		runtime.blocked = true;
+		const content = `[posse | Posse -> Lead project | delivery-uncertain]\nbody: ${JSON.stringify(warning)}`;
+		const details = { origin: "posse", from: "Posse", to: "Lead", task: "project", type: "delivery-uncertain" };
+		if (delivery?.delivery_id) details.delivery_id = delivery.delivery_id;
+		if (delivery?.batch_id) details.batch_id = delivery.batch_id;
+		if (Array.isArray(delivery?.notice_ids)) details.ids = delivery.notice_ids;
+		try {
+			pi.sendMessage({
+				customType: "posse-notices",
+				content,
+				display: true,
+				details,
+			}, { triggerTurn: true, deliverAs: "followUp" });
+		} catch {
+			ui?.notify(warning, "warning");
 		}
 	};
 
 	const sessionHasReceipt = (delivery) => {
-		if (typeof sessionManager?.getEntries !== "function") return undefined;
+		if (typeof runtime.sessionManager?.getEntries !== "function") return undefined;
 		try {
-			return sessionManager.getEntries().some((entry) =>
+			return runtime.sessionManager.getEntries().some((entry) =>
 				entry.type === "custom_message" && entry.customType === "posse-notices" &&
 				(entry.details?.delivery_id === delivery.delivery_id || entry.details?.batch_id === delivery.batch_id));
 		} catch {
@@ -194,105 +233,125 @@ export default function (pi) {
 		}
 	};
 
-	const settleReceipt = (delivery, outcome) => new Promise((resolve) => {
-		const args = ["lookout", "--json", "--receipt", delivery.delivery_id,
-			"--receipt-outcome", outcome];
-		if (delivery.owner_token) args.push("--receipt-token", delivery.owner_token);
-		const current = spawn(posse, args, { stdio: ["ignore", "ignore", "ignore"] });
-		child = current;
-		current.on("error", () => {});
-		current.on("close", (code) => {
-			if (child === current) child = undefined;
-			resolve(code === 0);
-		});
-	});
-
-	const reconcilePendingAcceptance = async () => {
-		if (!running || agentRunActive || child || pendingAcceptance.size === 0) return;
-		for (const [deliveryID, delivery] of pendingAcceptance) {
-			const persisted = sessionHasReceipt(delivery);
-			if (persisted === true) {
-				if (!await settleReceipt(delivery, "accepted")) {
-					retry();
-					return;
-				}
-				pendingAcceptance.delete(deliveryID);
-				backoffMs = 1_000;
-				continue;
-			}
-			if (persisted === undefined) {
-				if (!await settleReceipt(delivery, "uncertain")) {
-					retry();
-					return;
-				}
-				pendingAcceptance.delete(deliveryID);
-				notifyUncertainty(`Pi could not inspect its session receipt for Notice batch ${delivery.batch_id}. Inspect the Lead session before retrying.`);
-				return;
-			}
-			if (!await settleReceipt(delivery, "uncertain")) {
-				retry();
-				return;
-			}
-			pendingAcceptance.delete(deliveryID);
-			notifyUncertainty(`Pi did not persist queued Notice batch ${delivery.batch_id} before its run settled. Inspect the Lead session before retrying.`);
-			return;
-		}
-		if (pendingAcceptance.size === 0) schedule(0);
-	};
-
-	const notifyUncertainty = (warning) => {
-		blocked = true;
-		const content = `[posse | Posse -> Lead project | delivery-uncertain]\nbody: ${JSON.stringify(warning)}`;
-		try {
-			pi.sendMessage({
-				customType: "posse-notices",
-				content,
-				display: true,
-				details: { origin: "posse", from: "Posse", to: "Lead", task: "project", type: "delivery-uncertain" },
-			}, { triggerTurn: true, deliverAs: "followUp" });
-		} catch {
-			ui?.notify(warning, "warning");
-		}
-	};
-
-	const schedule = (delayMs) => {
-		clearTimeout(timer);
-		timer = setTimeout(watch, delayMs);
+	const schedule = (delayMs, generation) => {
+		if (!isCurrent(generation)) return;
+		clearTimeout(runtime.timer);
+		const timer = setTimeout(() => {
+			if (runtime.timer !== timer) return;
+			runtime.timer = undefined;
+			if (isCurrent(generation)) watch(generation);
+		}, delayMs);
+		runtime.timer = timer;
 		timer.unref?.();
 	};
 
-	const retry = () => {
-		schedule(backoffMs);
-		backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
+	runtime.kick = () => schedule(0, runtime.generation);
+
+	const retry = (generation) => {
+		if (!isCurrent(generation)) return;
+		runtime.failures++;
+		if (runtime.failures >= maxRetryAttempts) {
+			runtime.blocked = true;
+			notifyFailure();
+			return;
+		}
+		const delay = runtime.backoffMs;
+		runtime.backoffMs = Math.min(runtime.backoffMs * 2, maxBackoffMs);
+		schedule(delay, generation);
 	};
 
-	const watch = () => {
-		if (!running || blocked || child || !destination) return;
-		if (pendingNotification) notifyFailure();
+	const resetHealth = () => {
+		runtime.failures = 0;
+		runtime.backoffMs = 1_000;
+		runtime.healthNotified = false;
+	};
+
+	const startChild = (args, stdio, generation, onClose) => {
+		if (!isCurrent(generation) || runtime.child) return undefined;
+		let process;
+		try {
+			process = spawn(posse, args, { stdio });
+		} catch {
+			return undefined;
+		}
+		const record = { process, generation, owner };
+		runtime.child = record;
+		process.on("error", (error) => { record.error = error; });
+		process.on("close", (code) => {
+			if (runtime.child === record) runtime.child = undefined;
+			if (!isCurrent(generation)) {
+				runtime.kick?.();
+				void onClose(code, record.error, false);
+				return;
+			}
+			void onClose(code, record.error, true);
+		});
+		return record;
+	};
+
+	const settleReceipt = (delivery, outcome, generation) => new Promise((resolve) => {
+		if (!isCurrent(generation)) {
+			resolve(false);
+			return;
+		}
+		const args = ["lookout", "--json", "--receipt", delivery.delivery_id,
+			"--receipt-outcome", outcome];
+		if (delivery.owner_token) args.push("--receipt-token", delivery.owner_token);
+		const record = startChild(args, ["ignore", "ignore", "ignore"], generation, (code) => resolve(code === 0));
+		if (!record) resolve(false);
+	});
+
+	const reconcilePendingAcceptance = async (generation) => {
+		if (!isCurrent(generation) || agentRunActive || runtime.child) return;
+		const currentDeliveries = [...runtime.pendingAcceptance].filter(([, pending]) => pending.destination === runtime.destination);
+		for (const [deliveryID, pending] of currentDeliveries) {
+			if (!isCurrent(generation)) return;
+			const { delivery } = pending;
+			const persisted = sessionHasReceipt(delivery);
+			if (persisted === true) {
+				if (!await settleReceipt(delivery, "accepted", generation)) {
+					retry(generation);
+					return;
+				}
+				if (!isCurrent(generation)) return;
+				runtime.pendingAcceptance.delete(deliveryID);
+				resetHealth();
+				continue;
+			}
+			const recorded = await settleReceipt(delivery, "uncertain", generation);
+			if (!isCurrent(generation)) return;
+			if (!recorded) {
+				retry(generation);
+				return;
+			}
+			const ids = delivery.notice_ids?.join(",") ?? "unknown";
+			const warning = persisted === undefined
+				? `Pi could not inspect its session receipt for batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${ids}. Inspect the Lead session before retrying.`
+				: `Pi did not persist queued batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${ids} before its run settled. Inspect the Lead session before retrying.`;
+			notifyUncertainty(warning, delivery);
+			return;
+		}
+		schedule(0, generation);
+	};
+
+	const watch = (generation) => {
+		if (!isCurrent(generation) || runtime.blocked || runtime.child || !runtime.destination) return;
 		let output = "";
 		const watchRevision = choiceRevision;
+		const destination = runtime.destination;
 		const args = ["lookout", "--json", "--quiet-routine", "--handoff", "--destination", destination];
-		const current = spawn(posse, args, { stdio: ["ignore", "pipe", "ignore"] });
-		child = current;
-		current.stdout.on("data", (chunk) => {
-			output += chunk;
-		});
-		current.on("error", () => {});
-		current.on("close", async (code) => {
-			if (child !== current) return;
-			child = undefined;
-			if (!running) return;
+		const record = startChild(args, ["ignore", "pipe", "ignore"], generation, async (code) => {
+			if (!isCurrent(generation)) return;
 			if (code !== 0) {
-				retry();
+				retry(generation);
 				return;
 			}
 			let result;
 			try {
 				result = JSON.parse(output);
 			} catch {
-				// A printed receipt remains durable, so the next query can recover it.
-				notifyFailure();
-				retry();
+				// The printed receipt remains durable, so a later query can recover it.
+				retry(generation);
 				return;
 			}
 			const lowkey = result.lowkey;
@@ -303,56 +362,60 @@ export default function (pi) {
 			if (result.state === "uncertain") {
 				const delivery = result.delivery;
 				if (delivery?.delivery_id && sessionHasReceipt(delivery) === true) {
-					if (await settleReceipt(delivery, "accepted")) {
-						pendingAcceptance.delete(delivery.delivery_id);
-						backoffMs = 1_000;
-						schedule(0);
+					if (await settleReceipt(delivery, "accepted", generation)) {
+						if (!isCurrent(generation)) return;
+						runtime.pendingAcceptance.delete(delivery.delivery_id);
+						resetHealth();
+						schedule(0, generation);
 					} else {
-						retry();
+						retry(generation);
 					}
 					return;
 				}
-				if (delivery?.delivery_id) pendingAcceptance.delete(delivery.delivery_id);
-				notifyUncertainty(result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect the Lead session before retrying.");
+				const warning = result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect the Lead session before retrying the recorded Notice IDs.";
+				notifyUncertainty(warning, delivery);
 				return;
 			}
 			const notices = result.notices ?? [];
 			if (notices.length === 0) {
-				schedule(0);
+				resetHealth();
+				schedule(0, generation);
 				return;
 			}
 			const delivery = result.delivery;
-			if (!delivery?.delivery_id || !delivery?.batch_id || !delivery?.owner_token) {
-				notifyFailure();
-				retry();
+			if (!delivery?.delivery_id || !delivery?.batch_id || !delivery?.owner_token ||
+				!notices.every((notice) => Number.isSafeInteger(notice.id) && notice.id > 0)) {
+				retry(generation);
 				return;
 			}
 			const previouslyAccepted = sessionHasReceipt(delivery);
 			if (previouslyAccepted === undefined) {
-				const recorded = await settleReceipt(delivery, "uncertain");
-				if (!recorded) retry();
-				notifyUncertainty(`Pi could not inspect its session receipt for Notice batch ${delivery.batch_id}. Inspect the Lead session before retrying.`);
+				const recorded = await settleReceipt(delivery, "uncertain", generation);
+				if (!isCurrent(generation)) return;
+				if (!recorded) retry(generation);
+				notifyUncertainty(`Pi could not inspect its session receipt for Notice batch ${delivery.batch_id}. Inspect the Lead session before retrying the recorded Notice IDs.`, delivery);
 				return;
 			}
 			if (previouslyAccepted) {
-				if (await settleReceipt(delivery, "accepted")) {
-					pendingAcceptance.delete(delivery.delivery_id);
-					backoffMs = 1_000;
-					schedule(0);
+				if (await settleReceipt(delivery, "accepted", generation)) {
+					if (!isCurrent(generation)) return;
+					runtime.pendingAcceptance.delete(delivery.delivery_id);
+					resetHealth();
+					schedule(0, generation);
 				} else {
-					retry();
+					retry(generation);
 				}
 				return;
 			}
 			const wake = result.wake;
 			const ids = notices.map((notice) => notice.id);
 			if (typeof wake !== "string" || !wake.startsWith("[posse | Posse -> Lead ")) {
-				await settleReceipt(delivery, "rejected");
-				retry();
+				await settleReceipt(delivery, "rejected", generation);
+				if (isCurrent(generation)) retry(generation);
 				return;
 			}
 			const tasks = [...new Set(notices.map((notice) => /^t[1-9][0-9]*$/.test(notice.task) ? notice.task : "project"))];
-			pendingAcceptance.set(delivery.delivery_id, delivery);
+			runtime.pendingAcceptance.set(delivery.delivery_id, { delivery, destination, generation });
 			try {
 				pi.sendMessage({
 					customType: "posse-notices",
@@ -361,29 +424,36 @@ export default function (pi) {
 					details: { origin: "posse", from: "Posse", to: "Lead", tasks, type: "notice", ids, notices, delivery_id: delivery.delivery_id, batch_id: delivery.batch_id },
 				}, { triggerTurn: true, deliverAs: "followUp" });
 			} catch {
-				pendingAcceptance.delete(delivery.delivery_id);
+				if (!isCurrent(generation)) return;
 				const foundAfterFailure = sessionHasReceipt(delivery);
 				if (foundAfterFailure === true) {
-					if (await settleReceipt(delivery, "accepted")) schedule(0);
-					else retry();
+					if (await settleReceipt(delivery, "accepted", generation)) {
+						if (!isCurrent(generation)) return;
+						runtime.pendingAcceptance.delete(delivery.delivery_id);
+						resetHealth();
+						schedule(0, generation);
+					} else retry(generation);
 				} else if (foundAfterFailure === false) {
-					await settleReceipt(delivery, "rejected");
-					retry();
-				} else if (await settleReceipt(delivery, "uncertain")) {
-					notifyUncertainty(`Pi could not verify whether Notice batch ${delivery.batch_id} reached the session.`);
-				} else {
-					retry();
-				}
+					const rejected = await settleReceipt(delivery, "rejected", generation);
+					if (!isCurrent(generation)) return;
+					if (rejected) runtime.pendingAcceptance.delete(delivery.delivery_id);
+					retry(generation);
+				} else if (await settleReceipt(delivery, "uncertain", generation)) {
+					if (!isCurrent(generation)) return;
+					notifyUncertainty(`Pi could not verify whether batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${delivery.notice_ids.join(",")} reached the session. Inspect the session before retrying.`, delivery);
+				} else retry(generation);
 				return;
 			}
-			// sendMessage resolves when a busy-session follow-up is queued, not
-			// when Pi persists it. Keep the durable receipt printed until the
-			// agent_settled boundary can confirm the session entry.
-			if (sessionHasReceipt(delivery) === true) void reconcilePendingAcceptance();
+			if (!isCurrent(generation)) return;
+			// A busy-session follow-up is accepted only after its stable ID is persisted.
+			if (sessionHasReceipt(delivery) === true) void reconcilePendingAcceptance(generation);
 		});
+		if (!record) retry(generation);
+		else record.process.stdout?.on("data", (chunk) => { output += chunk; });
 	};
 
 	pi.on("agent_start", (_event, ctx) => {
+		if (!isCurrent(runtime.generation)) return;
 		if (layout) layout.toolSeen = false;
 		agentRunActive = true;
 		ui = ctx.ui;
@@ -391,38 +461,49 @@ export default function (pi) {
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
+		const generation = runtime.generation;
+		if (!isCurrent(generation)) return;
 		agentRunActive = false;
 		ui = ctx.ui;
 		applySlabPresentation(true);
-		if (pendingAcceptance.size > 0) {
-			setTimeout(() => {
-				if (!running || agentRunActive || typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
-				void reconcilePendingAcceptance();
+		if (runtime.pendingAcceptance.size > 0) {
+			const timer = setTimeout(() => {
+				if (!isCurrent(generation) || agentRunActive || typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+				void reconcilePendingAcceptance(generation);
 			}, 0);
+			timer.unref?.();
 		}
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
-		ui = ctx.ui;
-		sessionManager = ctx.sessionManager;
-		destination = `pi:${ctx.sessionManager.getSessionId()}`;
-		blocked = false;
+	pi.on("session_start", async (event, ctx) => {
+		const generation = ++runtime.generation;
+		runtime.sessionManager = ctx.sessionManager;
+		runtime.destination = `pi:${ctx.sessionManager.getSessionId()}`;
+		runtime.blocked = false;
+		runtime.running = true;
+		runtime.failures = 0;
+		runtime.backoffMs = 1_000;
+		runtime.healthNotified = false;
 		agentRunActive = false;
+		ui = ctx.ui;
 		applySlabPresentation(true);
-		running = true;
-		await refreshLowkey();
-		schedule(0);
+		runtime.kick = () => schedule(0, runtime.generation);
+		await refreshLowkey(generation);
+		if (isCurrent(generation)) schedule(0, generation);
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (event) => {
+		if (runtime.owner !== owner) return;
+		runtime.generation++;
+		runtime.running = false;
+		runtime.kick = undefined;
 		agentRunActive = false;
 		applySlabPresentation(true);
-		running = false;
 		ui = undefined;
-		sessionManager = undefined;
-		destination = undefined;
-		clearTimeout(timer);
-		child?.kill();
-		child = undefined;
+		runtime.sessionManager = undefined;
+		runtime.destination = undefined;
+		clearTimeout(runtime.timer);
+		runtime.timer = undefined;
+		try { runtime.child?.process.kill(); } catch {}
 	});
 }

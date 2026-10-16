@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -580,6 +581,14 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 	if observationErr != nil || checksErr != nil || observation.PRURL != task.PRURL || observation.HeadSHA != task.GatedSHA || observationChecks.State != "SUCCESS" || observation.Review == "CHANGES_REQUESTED" || observation.Review == "REVIEW_REQUIRED" || observation.Mergeable != "MERGEABLE" {
 		return axi.Failure("checks_not_green", "pull request does not have a green observation for the gated head", false, "Wait for `land_ready` before retrying `posse land "+taskIDString(task.Seq)+" --merge`")
 	}
+	mergeLock, err := acquirePRMergeLock(ctx, project.Root)
+	if err != nil {
+		return err
+	}
+	defer mergeLock.Close()
+	if err := verifyPRTargetIsUpToDate(ctx, project.Root, taskTargetBranch(project, task), task.GatedSHA, task.Seq); err != nil {
+		return err
+	}
 	if userQuote != "" {
 		if err := db.RecordApproval(ctx, task.ID, "merge", userQuote); err != nil {
 			return err
@@ -608,6 +617,39 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		return axi.Failure("pr_merge_failed", "GitHub did not merge the pull request", true, err.Error())
 	}
 	return ctxPrintLand(out, task, "Run `posse` or `posse lookout` to observe the merge")
+}
+
+func acquirePRMergeLock(ctx context.Context, root string) (*os.File, error) {
+	lock, err := acquireRepositorySyncLock(ctx, root)
+	if err != nil && store.IsBusy(err) {
+		return nil, axi.Failure("pr_merge_busy", "another repository sync or pull request merge is in progress", true, err.Error())
+	}
+	return lock, err
+}
+
+func verifyPRTargetIsUpToDate(ctx context.Context, root, targetBranch, gatedSHA string, taskSeq int) error {
+	targetRef := "refs/remotes/origin/" + targetBranch
+	refspec := "+refs/heads/" + targetBranch + ":" + targetRef
+	output, err := gitFetch(ctx, root, "origin", refspec)
+	if err != nil {
+		details := strings.TrimSpace(output)
+		if details == "" {
+			details = err.Error()
+		}
+		return axi.Failure("target_branch_unavailable", "could not refresh PR target branch "+targetBranch, true, details)
+	}
+	if _, err := gitOutput(ctx, root, "rev-parse", "--verify", targetRef+"^{commit}"); err != nil {
+		return axi.Failure("target_branch_unavailable", "could not inspect PR target branch "+targetBranch, true, err.Error())
+	}
+	if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", targetRef, gatedSHA); err != nil {
+		return axi.Failure(
+			"pr_branch_behind",
+			"pull request branch is behind the latest target branch "+targetBranch,
+			false,
+			"Merge origin/"+targetBranch+" into the Task branch, resolve conflicts, run the Gate again, and report done before retrying `posse land "+taskIDString(taskSeq)+" --merge`; do not rebase a pushed branch",
+		)
+	}
+	return nil
 }
 
 func runOutputStep(ctx context.Context, db *store.DB, intent store.Intent, step, cwd, name string, args ...string) (string, error) {

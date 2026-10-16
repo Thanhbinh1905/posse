@@ -66,8 +66,8 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
-	// Installed-binary fixtures need a path outside /tmp, not necessarily
-	// /var/tmp. Honor a non-/tmp Task scratch instead of writing globally.
+	// Installed-binary fixtures need a path outside /tmp, but must still
+	// honor a Rider's non-/tmp scratch directory when one is supplied.
 	if temporary := os.TempDir(); parent == "/var/tmp" && temporary != "/tmp" && !strings.HasPrefix(temporary, "/tmp/") {
 		parent = temporary
 	}
