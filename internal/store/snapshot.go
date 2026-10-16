@@ -49,11 +49,12 @@ type projectSnapshot struct {
 }
 
 type projectStateSnapshot struct {
-	CapturedAt           int64              `toml:"captured_at"`
-	Mounts               []mountSnapshot    `toml:"mounts,omitempty"`
-	Decisions            []decisionSnapshot `toml:"decisions,omitempty"`
-	Notices              []noticeSnapshot   `toml:"notices,omitempty"`
-	DecisionNoticeCursor int64              `toml:"decision_notice_cursor"`
+	CapturedAt           int64                   `toml:"captured_at"`
+	Mounts               []mountSnapshot         `toml:"mounts,omitempty"`
+	ResourceLeases       []resourceLeaseSnapshot `toml:"resource_leases,omitempty"`
+	Decisions            []decisionSnapshot      `toml:"decisions,omitempty"`
+	Notices              []noticeSnapshot        `toml:"notices,omitempty"`
+	DecisionNoticeCursor int64                   `toml:"decision_notice_cursor"`
 }
 
 type mountSnapshot struct {
@@ -65,6 +66,29 @@ type mountSnapshot struct {
 	TaskID     int64  `toml:"task_id"`
 	AcquiredAt int64  `toml:"acquired_at"`
 	ReleasedAt int64  `toml:"released_at"`
+}
+
+type resourceLeaseSnapshot struct {
+	ID             int64  `toml:"id"`
+	ResourceType   string `toml:"resource_type"`
+	ScopeRoot      string `toml:"scope_root"`
+	ScopePath      string `toml:"scope_path"`
+	OwnerProjectID int64  `toml:"owner_project_id"`
+	OwnerTaskID    int64  `toml:"owner_task_id"`
+	Owner          string `toml:"owner"`
+	SourceKey      string `toml:"source_key"`
+	CustodyToken   string `toml:"custody_token"`
+	IntentID       int64  `toml:"intent_id"`
+	MountID        int64  `toml:"mount_id"`
+	OwnerPID       int    `toml:"owner_pid"`
+	OwnerBootID    string `toml:"owner_boot_id"`
+	OwnerStartTime string `toml:"owner_start_time"`
+	Custody        string `toml:"custody"`
+	AcquiredAt     int64  `toml:"acquired_at"`
+}
+
+func resourceLeaseSnapshotFromLease(lease ResourceLease) resourceLeaseSnapshot {
+	return resourceLeaseSnapshot(lease)
 }
 
 type decisionSnapshot struct {
@@ -350,6 +374,13 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 	state := projectStateSnapshot{CapturedAt: time.Now().UnixNano()}
 	for _, mount := range mounts {
 		state.Mounts = append(state.Mounts, mountSnapshot(mount))
+	}
+	leases, err := db.ResourceLeases(ctx, projectID)
+	if err != nil {
+		return projectStateSnapshot{}, err
+	}
+	for _, lease := range leases {
+		state.ResourceLeases = append(state.ResourceLeases, resourceLeaseSnapshotFromLease(lease))
 	}
 	rows, err := db.QueryContext(ctx, decisionSelect+` WHERE project_id=? ORDER BY id`, projectID)
 	if err != nil {
@@ -775,7 +806,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "signals", "transitions", "intents", "mounts", "project_runtime", "lead_start_claims", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "signals", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -902,6 +933,15 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		for _, mount := range state.Mounts {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO mounts(id,project_id,n,path,state,task_id,acquired_at,released_at) VALUES(?,?,?,?,?,?,?,?)`,
 				mount.ID, mount.ProjectID, mount.Number, mount.Path, mount.State, nullableID(mount.TaskID), mount.AcquiredAt, mount.ReleasedAt); err != nil {
+				return err
+			}
+		}
+		for _, lease := range state.ResourceLeases {
+			if lease.ID < 1 || lease.OwnerProjectID != projectID || lease.CustodyToken == "" {
+				return fmt.Errorf("invalid resource lease in Project %d snapshot", projectID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO resource_leases(id,resource_type,scope_root,scope_path,owner_project_id,owner_task_id,owner,source_key,custody_token,intent_id,mount_id,owner_pid,owner_boot_id,owner_start_time,custody,acquired_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				lease.ID, lease.ResourceType, lease.ScopeRoot, lease.ScopePath, lease.OwnerProjectID, nullableID(lease.OwnerTaskID), lease.Owner, lease.SourceKey, lease.CustodyToken, lease.IntentID, nullableID(lease.MountID), lease.OwnerPID, lease.OwnerBootID, lease.OwnerStartTime, lease.Custody, lease.AcquiredAt); err != nil {
 				return err
 			}
 		}

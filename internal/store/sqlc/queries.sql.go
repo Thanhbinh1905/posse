@@ -78,6 +78,72 @@ func (q *Queries) ActiveWorkerCount(ctx context.Context, projectID int64) (int64
 	return count, err
 }
 
+const allResourceLeases = `-- name: AllResourceLeases :many
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases ORDER BY id
+`
+
+type AllResourceLeasesRow struct {
+	ID             int64
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	OwnerTaskID    int64
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	MountID        int64
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
+func (q *Queries) AllResourceLeases(ctx context.Context) ([]AllResourceLeasesRow, error) {
+	rows, err := q.db.QueryContext(ctx, allResourceLeases)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AllResourceLeasesRow{}
+	for rows.Next() {
+		var i AllResourceLeasesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ResourceType,
+			&i.ScopeRoot,
+			&i.ScopePath,
+			&i.OwnerProjectID,
+			&i.OwnerTaskID,
+			&i.Owner,
+			&i.SourceKey,
+			&i.CustodyToken,
+			&i.IntentID,
+			&i.MountID,
+			&i.OwnerPid,
+			&i.OwnerBootID,
+			&i.OwnerStartTime,
+			&i.Custody,
+			&i.AcquiredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const allTasks = `-- name: AllTasks :many
 SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, plan_json FROM tasks WHERE project_id = ? ORDER BY seq
 `
@@ -288,6 +354,17 @@ func (q *Queries) CountApproval(ctx context.Context, arg CountApprovalParams) (i
 	return count, err
 }
 
+const countResourceLeasesByIntent = `-- name: CountResourceLeasesByIntent :one
+SELECT COUNT(*) FROM resource_leases WHERE intent_id = ?
+`
+
+func (q *Queries) CountResourceLeasesByIntent(ctx context.Context, intentID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countResourceLeasesByIntent, intentID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteMount = `-- name: DeleteMount :execresult
 DELETE FROM mounts WHERE id = ? AND project_id = ? AND state IN ('idle', 'broken')
 `
@@ -299,6 +376,37 @@ type DeleteMountParams struct {
 
 func (q *Queries) DeleteMount(ctx context.Context, arg DeleteMountParams) (sql.Result, error) {
 	return q.db.ExecContext(ctx, deleteMount, arg.ID, arg.ProjectID)
+}
+
+const deleteResourceLease = `-- name: DeleteResourceLease :execresult
+DELETE FROM resource_leases WHERE id = ? AND custody_token = ?
+`
+
+type DeleteResourceLeaseParams struct {
+	ID           int64
+	CustodyToken string
+}
+
+func (q *Queries) DeleteResourceLease(ctx context.Context, arg DeleteResourceLeaseParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, deleteResourceLease, arg.ID, arg.CustodyToken)
+}
+
+const deleteResourceLeaseByMount = `-- name: DeleteResourceLeaseByMount :exec
+DELETE FROM resource_leases WHERE mount_id = ?
+`
+
+func (q *Queries) DeleteResourceLeaseByMount(ctx context.Context, mountID sql.NullInt64) error {
+	_, err := q.db.ExecContext(ctx, deleteResourceLeaseByMount, mountID)
+	return err
+}
+
+const deleteResourceLeasesByIntent = `-- name: DeleteResourceLeasesByIntent :exec
+DELETE FROM resource_leases WHERE intent_id = ?
+`
+
+func (q *Queries) DeleteResourceLeasesByIntent(ctx context.Context, intentID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteResourceLeasesByIntent, intentID)
+	return err
 }
 
 const insertApproval = `-- name: InsertApproval :exec
@@ -430,6 +538,51 @@ func (q *Queries) InsertProject(ctx context.Context, arg InsertProjectParams) (s
 		arg.CreatedAt,
 		arg.LastActivityAt,
 		arg.ProjectUuid,
+	)
+}
+
+const insertResourceLease = `-- name: InsertResourceLease :execresult
+INSERT INTO resource_leases(resource_type, scope_root, scope_path, owner_project_id,
+    owner_task_id, owner, source_key, custody_token, intent_id, mount_id,
+    owner_pid, owner_boot_id, owner_start_time, custody, acquired_at)
+VALUES (?, ?, ?, ?, NULLIF(?, 0), ?, ?, ?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?)
+`
+
+type InsertResourceLeaseParams struct {
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	NULLIF         interface{}
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	NULLIF_2       interface{}
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
+func (q *Queries) InsertResourceLease(ctx context.Context, arg InsertResourceLeaseParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertResourceLease,
+		arg.ResourceType,
+		arg.ScopeRoot,
+		arg.ScopePath,
+		arg.OwnerProjectID,
+		arg.NULLIF,
+		arg.Owner,
+		arg.SourceKey,
+		arg.CustodyToken,
+		arg.IntentID,
+		arg.NULLIF_2,
+		arg.OwnerPid,
+		arg.OwnerBootID,
+		arg.OwnerStartTime,
+		arg.Custody,
+		arg.AcquiredAt,
 	)
 }
 
@@ -698,6 +851,19 @@ func (q *Queries) MarkProjectDown(ctx context.Context, arg MarkProjectDownParams
 	return err
 }
 
+const markResourceLeaseForRecovery = `-- name: MarkResourceLeaseForRecovery :execresult
+UPDATE resource_leases SET custody = 'recovery' WHERE id = ? AND custody_token = ? AND custody = 'held'
+`
+
+type MarkResourceLeaseForRecoveryParams struct {
+	ID           int64
+	CustodyToken string
+}
+
+func (q *Queries) MarkResourceLeaseForRecovery(ctx context.Context, arg MarkResourceLeaseForRecoveryParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, markResourceLeaseForRecovery, arg.ID, arg.CustodyToken)
+}
+
 const mountByTask = `-- name: MountByTask :one
 SELECT id, project_id, n, path, state, task_id, acquired_at, released_at FROM mounts WHERE task_id = ?
 `
@@ -716,6 +882,57 @@ func (q *Queries) MountByTask(ctx context.Context, taskID sql.NullInt64) (Mount,
 		&i.ReleasedAt,
 	)
 	return i, err
+}
+
+const mountResourceOwners = `-- name: MountResourceOwners :many
+SELECT m.id, m.project_id, p.name, m.n, m.path, m.state,
+       COALESCE(m.task_id, 0), COALESCE(t.seq, 0)
+FROM mounts m JOIN projects p ON p.id = m.project_id
+LEFT JOIN tasks t ON t.id = m.task_id
+WHERE m.state != 'idle' ORDER BY m.project_id, m.n
+`
+
+type MountResourceOwnersRow struct {
+	ID        int64
+	ProjectID int64
+	Name      string
+	N         int64
+	Path      string
+	State     string
+	TaskID    int64
+	Seq       int64
+}
+
+func (q *Queries) MountResourceOwners(ctx context.Context) ([]MountResourceOwnersRow, error) {
+	rows, err := q.db.QueryContext(ctx, mountResourceOwners)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MountResourceOwnersRow{}
+	for rows.Next() {
+		var i MountResourceOwnersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Name,
+			&i.N,
+			&i.Path,
+			&i.State,
+			&i.TaskID,
+			&i.Seq,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const mounts = `-- name: Mounts :many
@@ -1237,6 +1454,291 @@ type ResetTaskProgressParams struct {
 func (q *Queries) ResetTaskProgress(ctx context.Context, arg ResetTaskProgressParams) error {
 	_, err := q.db.ExecContext(ctx, resetTaskProgress, arg.UpdatedAt, arg.ID)
 	return err
+}
+
+const resourceLeaseBySource = `-- name: ResourceLeaseBySource :one
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases WHERE source_key = ?
+`
+
+type ResourceLeaseBySourceRow struct {
+	ID             int64
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	OwnerTaskID    int64
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	MountID        int64
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
+func (q *Queries) ResourceLeaseBySource(ctx context.Context, sourceKey string) (ResourceLeaseBySourceRow, error) {
+	row := q.db.QueryRowContext(ctx, resourceLeaseBySource, sourceKey)
+	var i ResourceLeaseBySourceRow
+	err := row.Scan(
+		&i.ID,
+		&i.ResourceType,
+		&i.ScopeRoot,
+		&i.ScopePath,
+		&i.OwnerProjectID,
+		&i.OwnerTaskID,
+		&i.Owner,
+		&i.SourceKey,
+		&i.CustodyToken,
+		&i.IntentID,
+		&i.MountID,
+		&i.OwnerPid,
+		&i.OwnerBootID,
+		&i.OwnerStartTime,
+		&i.Custody,
+		&i.AcquiredAt,
+	)
+	return i, err
+}
+
+const resourceLeasesByIntent = `-- name: ResourceLeasesByIntent :many
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases WHERE intent_id = ? ORDER BY id
+`
+
+type ResourceLeasesByIntentRow struct {
+	ID             int64
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	OwnerTaskID    int64
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	MountID        int64
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
+func (q *Queries) ResourceLeasesByIntent(ctx context.Context, intentID int64) ([]ResourceLeasesByIntentRow, error) {
+	rows, err := q.db.QueryContext(ctx, resourceLeasesByIntent, intentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ResourceLeasesByIntentRow{}
+	for rows.Next() {
+		var i ResourceLeasesByIntentRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ResourceType,
+			&i.ScopeRoot,
+			&i.ScopePath,
+			&i.OwnerProjectID,
+			&i.OwnerTaskID,
+			&i.Owner,
+			&i.SourceKey,
+			&i.CustodyToken,
+			&i.IntentID,
+			&i.MountID,
+			&i.OwnerPid,
+			&i.OwnerBootID,
+			&i.OwnerStartTime,
+			&i.Custody,
+			&i.AcquiredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resourceLeasesByProject = `-- name: ResourceLeasesByProject :many
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases WHERE owner_project_id = ? ORDER BY id
+`
+
+type ResourceLeasesByProjectRow struct {
+	ID             int64
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	OwnerTaskID    int64
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	MountID        int64
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
+func (q *Queries) ResourceLeasesByProject(ctx context.Context, ownerProjectID int64) ([]ResourceLeasesByProjectRow, error) {
+	rows, err := q.db.QueryContext(ctx, resourceLeasesByProject, ownerProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ResourceLeasesByProjectRow{}
+	for rows.Next() {
+		var i ResourceLeasesByProjectRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ResourceType,
+			&i.ScopeRoot,
+			&i.ScopePath,
+			&i.OwnerProjectID,
+			&i.OwnerTaskID,
+			&i.Owner,
+			&i.SourceKey,
+			&i.CustodyToken,
+			&i.IntentID,
+			&i.MountID,
+			&i.OwnerPid,
+			&i.OwnerBootID,
+			&i.OwnerStartTime,
+			&i.Custody,
+			&i.AcquiredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resourceLeasesByScope = `-- name: ResourceLeasesByScope :many
+SELECT id, resource_type, scope_root, scope_path, owner_project_id,
+       COALESCE(owner_task_id, 0), owner, source_key, custody_token, intent_id,
+       COALESCE(mount_id, 0), owner_pid, owner_boot_id, owner_start_time, custody, acquired_at
+FROM resource_leases WHERE resource_type = ? AND scope_root = ? ORDER BY id
+`
+
+type ResourceLeasesByScopeParams struct {
+	ResourceType string
+	ScopeRoot    string
+}
+
+type ResourceLeasesByScopeRow struct {
+	ID             int64
+	ResourceType   string
+	ScopeRoot      string
+	ScopePath      string
+	OwnerProjectID int64
+	OwnerTaskID    int64
+	Owner          string
+	SourceKey      string
+	CustodyToken   string
+	IntentID       int64
+	MountID        int64
+	OwnerPid       int64
+	OwnerBootID    string
+	OwnerStartTime string
+	Custody        string
+	AcquiredAt     int64
+}
+
+func (q *Queries) ResourceLeasesByScope(ctx context.Context, arg ResourceLeasesByScopeParams) ([]ResourceLeasesByScopeRow, error) {
+	rows, err := q.db.QueryContext(ctx, resourceLeasesByScope, arg.ResourceType, arg.ScopeRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ResourceLeasesByScopeRow{}
+	for rows.Next() {
+		var i ResourceLeasesByScopeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ResourceType,
+			&i.ScopeRoot,
+			&i.ScopePath,
+			&i.OwnerProjectID,
+			&i.OwnerTaskID,
+			&i.Owner,
+			&i.SourceKey,
+			&i.CustodyToken,
+			&i.IntentID,
+			&i.MountID,
+			&i.OwnerPid,
+			&i.OwnerBootID,
+			&i.OwnerStartTime,
+			&i.Custody,
+			&i.AcquiredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resourceMountLeases = `-- name: ResourceMountLeases :many
+SELECT id, mount_id FROM resource_leases WHERE mount_id IS NOT NULL ORDER BY id
+`
+
+type ResourceMountLeasesRow struct {
+	ID      int64
+	MountID sql.NullInt64
+}
+
+func (q *Queries) ResourceMountLeases(ctx context.Context) ([]ResourceMountLeasesRow, error) {
+	rows, err := q.db.QueryContext(ctx, resourceMountLeases)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ResourceMountLeasesRow{}
+	for rows.Next() {
+		var i ResourceMountLeasesRow
+		if err := rows.Scan(&i.ID, &i.MountID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setProjectLead = `-- name: SetProjectLead :exec

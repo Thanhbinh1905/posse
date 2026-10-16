@@ -34,7 +34,11 @@ func TestPostSignalMixedContentionAndPersistentFailureIsVisible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, f.project.ID); err != nil {
+		t.Fatal(err)
+	}
 	defer tx.Rollback()
+	contentionStarted := time.Now()
 	if err := os.WriteFile(gate, []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -49,9 +53,12 @@ func TestPostSignalMixedContentionAndPersistentFailureIsVisible(t *testing.T) {
 	if err := <-released; err != nil {
 		t.Fatal(err)
 	}
+	if elapsed := time.Since(contentionStarted); elapsed < 900*time.Millisecond {
+		t.Fatalf("Signal maintenance did not wait for the transient writer lock: %s", elapsed)
+	}
 	var stale int64
-	if err := f.db.QueryRowContext(context.Background(), `SELECT updated_at FROM tasks WHERE project_id=? AND seq=2`, f.project.ID).Scan(&stale); err != nil || stale != 2 {
-		t.Fatalf("first unrelated Task did not exercise busy failure: %d %v", stale, err)
+	if err := f.db.QueryRowContext(context.Background(), `SELECT updated_at FROM tasks WHERE project_id=? AND seq=2`, f.project.ID).Scan(&stale); err != nil || stale == 2 {
+		t.Fatalf("first unrelated Task did not complete after transient contention: %d %v", stale, err)
 	}
 	if strings.Contains(output.String(), "SQLITE_BUSY") || strings.Contains(output.String(), "database contention") || !strings.Contains(output.String(), "non-transient review constraint failure") {
 		t.Fatalf("Rider should see persistent maintenance failure without transient contention details: %s", output.String())
@@ -62,8 +69,42 @@ func TestPostSignalMixedContentionAndPersistentFailureIsVisible(t *testing.T) {
 	}
 }
 
-func TestRosterSucceedsWhenObservationOnlyHitsTransientContention(t *testing.T) {
-	f, _, _, _, _ := newPostSignalContentionFixture(t)
+func TestRosterSucceedsDuringTransientObservationContention(t *testing.T) {
+	f, _, _, _, _ := newPostSignalContentionFixtureWithLead(t, false)
+	client := herdr.NewWithEnv("herdr", f.env)
+	snapshot, err := client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RememberProjectServerStartedAt(context.Background(), f.project.ID, snapshot.ServerStartedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET pane_id='stale-' || id WHERE project_id=?`, f.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	realHerdr, err := exec.LookPath("herdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, gate := filepath.Join(f.root, "roster-status"), filepath.Join(f.root, "roster-continue")
+	shim := filepath.Join(f.root, "roster-herdr")
+	script := "#!/bin/sh\nset -eu\nif [ \"$*\" = 'status server --json' ]; then\n  : > " + shellQuote(marker) + "\n  while [ ! -e " + shellQuote(gate) + " ]; do sleep 0.01; done\nfi\nexec " + shellQuote(realHerdr) + " \"$@\"\n"
+	if err := os.WriteFile(shim, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(f.binary, "roster", "--json")
+	command.Dir, command.Env = f.repo, setEnv(f.leadEnv, "HERDR_BIN_PATH", shim)
+	output := &bytes.Buffer{}
+	command.Stdout, command.Stderr = output, output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	t.Cleanup(func() { _ = command.Process.Kill() })
+	if !waitForCondition(10*time.Second, func() bool { _, err := os.Stat(marker); return err == nil }) {
+		t.Fatal("roster did not reach its isolated Herdr status checkpoint")
+	}
 	writer, err := store.OpenAt(filepath.Join(f.home, "posse.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -73,26 +114,40 @@ func TestRosterSucceedsWhenObservationOnlyHitsTransientContention(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, f.project.ID); err != nil {
+		t.Fatal(err)
+	}
 	defer tx.Rollback()
+	lockCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_, lockErr := f.db.ExecContext(lockCtx, `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, f.project.ID)
+	cancel()
+	if !store.IsBusy(lockErr) {
+		t.Fatalf("fixture did not hold a SQLite writer lock: %v", lockErr)
+	}
+	if err := os.WriteFile(gate, []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	released := make(chan error, 1)
 	go func() {
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(store.ObservationWriteBudget + time.Second)
 		released <- tx.Commit()
 	}()
-	command := exec.Command(f.binary, "roster", "--json")
-	command.Dir, command.Env = f.repo, f.leadEnv
-	output, commandErr := command.CombinedOutput()
+	commandErr := <-done
 	if err := <-released; err != nil {
 		t.Fatal(err)
 	}
-	if commandErr != nil || strings.Contains(string(output), "store_busy") || !bytes.Contains(output, []byte(`"tasks"`)) || !bytes.Contains(output, []byte("Some Task observations were deferred")) {
-		t.Fatalf("roster should show its durable Task view and explain deferred observations: error=%v output=%s", commandErr, output)
+	if commandErr != nil || strings.Contains(output.String(), "store_busy") || !strings.Contains(output.String(), `"tasks"`) {
+		t.Fatalf("roster should keep showing its durable Task view during observation contention: error=%v output=%s", commandErr, output.String())
 	}
 }
 
 func newPostSignalContentionFixture(t *testing.T) (*prLifecycleFixture, store.Task, []string, string, string) {
+	return newPostSignalContentionFixtureWithLead(t, true)
+}
+
+func newPostSignalContentionFixtureWithLead(t *testing.T, liveLead bool) (*prLifecycleFixture, store.Task, []string, string, string) {
 	t.Helper()
-	f := newPRLifecycleFixtureWithLead(t, true)
+	f := newPRLifecycleFixtureWithLead(t, liveLead)
 	t.Cleanup(func() { _ = f.db.Close() })
 	for _, pid := range lookoutPIDs(f.root) {
 		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {

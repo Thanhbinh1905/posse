@@ -826,6 +826,9 @@ func (db *DB) FinishMountRelease(ctx context.Context, mountID, taskID int64) err
 	if count != 1 {
 		return ErrStateRace
 	}
+	if err := db.releaseMountLeaseTx(ctx, tx, mountID); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}

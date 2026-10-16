@@ -290,10 +290,18 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 				return axi.Failure("branch_moved", repo.Repo+": Task branch moved after the Gate passed", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
 			}
 			if err := s.runIntentStep(ctx, db, intent, "merge:"+repo.Repo, func() error {
-				if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+				pathScope, err := localMergePathScope(ctx, member.project, member.task)
+				if err != nil {
 					return err
 				}
-				return mergeLocal(ctx, member.project, member.task)
+				targetRef := "refs/heads/" + taskTargetBranch(member.project, member.task)
+				return withIntentGitResources(ctx, db, project, task, intent.ID, member.target.Root, []string{targetRef}, pathScope,
+					func() error {
+						if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+							return err
+						}
+						return mergeLocal(ctx, member.project, member.task)
+					})
 			}); err != nil {
 				return prefixFailure(repo.Repo, err)
 			}
@@ -422,6 +430,9 @@ func (s *Service) recoverWorkspaceLandIntent(ctx context.Context, db *store.DB, 
 		}
 	}
 	if _, err := db.SettleWorkspaceTask(ctx, task.ID); err != nil {
+		return err
+	}
+	if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, "re-read every gated Member target ref and settled the interrupted workspace Land"); err != nil {
 		return err
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)

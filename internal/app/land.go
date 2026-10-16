@@ -212,10 +212,18 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 		}
 	}
 	if err := runLandStep("merge", func() error {
-		if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+		pathScope, err := localMergePathScope(ctx.Context, project, task)
+		if err != nil {
 			return err
 		}
-		return mergeLocal(ctx.Context, project, task)
+		targetRef := "refs/heads/" + taskTargetBranch(project, task)
+		return withIntentGitResources(ctx.Context, db, project, task, intent.ID, project.Root, []string{targetRef}, pathScope,
+			func() error {
+				if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+					return err
+				}
+				return mergeLocal(ctx.Context, project, task)
+			})
 	}); err != nil {
 		return err
 	}
@@ -293,6 +301,9 @@ func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Pro
 	}
 	if current.State == store.StateLanding {
 		if current.LandingMode == "pr" || current.LandingMode == "no-mistakes" {
+			if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, "verified no local merge effect is pending"); err != nil {
+				return err
+			}
 			return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 		}
 		merged := false
@@ -319,6 +330,9 @@ func settleFailedLandIntent(ctx context.Context, db *store.DB, project store.Pro
 				return err
 			}
 		}
+	}
+	if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, "re-read the target ref and settled the interrupted local Land"); err != nil {
+		return err
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 }

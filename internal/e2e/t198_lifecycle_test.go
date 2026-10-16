@@ -6,10 +6,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -257,6 +259,14 @@ while IFS= read -r line; do :; done
 		t.Fatalf("Rider TMPDIR=%q, want Task scratch %q", riderTmp, wanted)
 	}
 	if mode == "scratch-child" {
+		for _, pid := range lookoutPIDs(root) {
+			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+				t.Fatal(err)
+			}
+		}
+		if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(root)) == 0 }) {
+			t.Fatal("fixture Lookout did not stop before creating the unrelated Task")
+		}
 		otherID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 2, Type: "scout", Title: "Other Task"})
 		if err != nil {
 			t.Fatal(err)
