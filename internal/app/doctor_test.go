@@ -40,6 +40,90 @@ func TestDoctorReportsPosseOwnedDiskAndArtifactRetention(t *testing.T) {
 	t.Fatalf("doctor omitted Posse-owned disk usage: %#v", result.Checks)
 }
 
+func TestDoctorShowsDispatchInheritanceAndDisabledKinds(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\ndispatch_inheritance = \"lead_profile\"\n[kinds.pi]\ndisabled = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := testService(home, nil).collectDoctorChecks(&axi.Context{Context: context.Background()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range result.Checks {
+		if check.Name == "config" {
+			if !strings.Contains(check.Detail, "implicit dispatch=lead_profile") || !strings.Contains(check.Detail, "disabled dispatch kinds=pi") {
+				t.Fatalf("config doctor detail = %#v", check)
+			}
+			return
+		}
+	}
+	t.Fatalf("doctor omitted config check: %#v", result.Checks)
+}
+
+func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing.T) {
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", projectRoot, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTask := func(name string) (int64, error) {
+		id, _, err := db.CreateTaskWithSequence(ctx, project.ID, "shop", store.Task{Type: "ship", Title: name, ShortName: name, Branch: "posse/" + name}, func(int) (bool, error) { return false, nil })
+		return id, err
+	}
+	activeID, err := createTask("active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AcquireMount(ctx, project.ID, activeID, filepath.Join(home, "remuda", "shop")); err != nil {
+		t.Fatal(err)
+	}
+	parkedID, err := createTask("parked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, parkedID, store.StateSpawning, store.StateWorking, "cli", "fixture start"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, parkedID, store.StateWorking, store.StateDone, "worker", "fixture done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AcquireMount(ctx, project.ID, parkedID, filepath.Join(home, "remuda", "shop")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := executionResourceSummary(ctx, db, project.ID, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"active_riders=1/4", "native_children=0", "parked_resources=1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("resource summary %q omitted %q", got, want)
+		}
+	}
+	result, err := testService(home, nil).collectDoctorChecks(&axi.Context{Context: ctx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range result.Checks {
+		if check.Name == "execution resources shop" {
+			if !strings.Contains(check.Detail, "active_riders=1/4") || !strings.Contains(check.Detail, "native_children=0") || !strings.Contains(check.Detail, "parked_resources=1") {
+				t.Fatalf("doctor execution resource detail = %#v", check)
+			}
+			return
+		}
+	}
+	t.Fatalf("doctor omitted execution resource counts: %#v", result.Checks)
+}
+
 func TestDoctorRecommendsRemovingProjectsWithStaleRoots(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "posse-home")

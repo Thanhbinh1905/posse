@@ -36,20 +36,21 @@ type Lead struct {
 }
 
 type Defaults struct {
-	MaxWorkers       int      `toml:"max_workers" json:"max_workers"`
-	StallAfter       string   `toml:"stall_after" json:"stall_after"`
-	IdleAfter        string   `toml:"idle_after" json:"idle_after"`
-	AutoUnsaddle     string   `toml:"auto_unsaddle" json:"auto_unsaddle"`
-	AutoRecover      bool     `toml:"auto_recover" json:"auto_recover"`
-	RecoveryAttempts int      `toml:"recovery_attempts" json:"recovery_attempts"`
-	RecoveryBackoff  string   `toml:"recovery_backoff" json:"recovery_backoff"`
-	LandingMode      string   `toml:"landing_mode" json:"landing_mode"`
-	TargetBranch     string   `toml:"target_branch" json:"target_branch"`
-	MergeMethod      string   `toml:"merge_method" json:"merge_method"`
-	Forge            string   `toml:"forge" json:"forge"`
-	PRPoll           string   `toml:"pr_poll" json:"pr_poll"`
-	Review           string   `toml:"review" json:"review"`
-	Gate             []string `toml:"gate" json:"gate"`
+	MaxWorkers          int      `toml:"max_workers" json:"max_workers"`
+	DispatchInheritance string   `toml:"dispatch_inheritance" json:"dispatch_inheritance"`
+	StallAfter          string   `toml:"stall_after" json:"stall_after"`
+	IdleAfter           string   `toml:"idle_after" json:"idle_after"`
+	AutoUnsaddle        string   `toml:"auto_unsaddle" json:"auto_unsaddle"`
+	AutoRecover         bool     `toml:"auto_recover" json:"auto_recover"`
+	RecoveryAttempts    int      `toml:"recovery_attempts" json:"recovery_attempts"`
+	RecoveryBackoff     string   `toml:"recovery_backoff" json:"recovery_backoff"`
+	LandingMode         string   `toml:"landing_mode" json:"landing_mode"`
+	TargetBranch        string   `toml:"target_branch" json:"target_branch"`
+	MergeMethod         string   `toml:"merge_method" json:"merge_method"`
+	Forge               string   `toml:"forge" json:"forge"`
+	PRPoll              string   `toml:"pr_poll" json:"pr_poll"`
+	Review              string   `toml:"review" json:"review"`
+	Gate                []string `toml:"gate" json:"gate"`
 }
 
 type Remuda struct {
@@ -63,6 +64,7 @@ type Retention struct {
 }
 
 type Kind struct {
+	Disabled           bool     `toml:"disabled" json:"disabled"`
 	AutoApproveArgs    []string `toml:"auto_approve_args" json:"auto_approve_args"`
 	LeadAutoApprove    bool     `toml:"lead_auto_approve" json:"lead_auto_approve"`
 	ModelArgs          []string `toml:"model_args" json:"model_args"`
@@ -372,14 +374,14 @@ func defaultMap() map[string]any {
 		"lead":      map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey":    map[string]any{"lead": false},
 		"defaults": map[string]any{
-			"max_workers": 4, "stall_after": "20m", "idle_after": "3m", "auto_unsaddle": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "landing_mode": "pr",
+			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_unsaddle": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "landing_mode": "pr",
 			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "none", "gate": []string{},
 		},
 		"kinds": map[string]any{
-			"claude":   map[string]any{"auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryLookout, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},
-			"codex":    map[string]any{"auto_approve_args": []string{"--dangerously-bypass-approvals-and-sandbox"}, "lead_auto_approve": true, "model_args": []string{"-m", "{model}"}, "effort_args": []string{"-c", "model_reasoning_effort={effort}"}, "resume_args": []string{"resume", "{session}"}, "system_prompt_args": []string{"-c", "developer_instructions={text}"}, "lead_args": []string{"--sandbox", "danger-full-access"}, "prepare": "codex-trust", "notice_delivery": NoticeDeliveryCodexQueue, "steer": true, "interrupt_keys": []string{"esc"}},
-			"pi":       map[string]any{"model_args": []string{"--model", "{model}"}, "effort_args": []string{"--thinking", "{effort}"}, "resume_args": []string{"--session", "{session}"}, "system_prompt_args": []string{"--append-system-prompt", "{file}"}, "notice_delivery": NoticeDeliveryPiExtension, "steer": true, "interrupt_keys": []string{"esc"}},
-			"opencode": map[string]any{"auto_approve_args": []string{"--auto"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "resume_args": []string{"--session", "{session}"}, "notice_delivery": NoticeDeliveryOpenCodePlugin, "interrupt_keys": []string{"esc"}},
+			"claude":   map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryLookout, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},
+			"codex":    map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-bypass-approvals-and-sandbox"}, "lead_auto_approve": true, "model_args": []string{"-m", "{model}"}, "effort_args": []string{"-c", "model_reasoning_effort={effort}"}, "resume_args": []string{"resume", "{session}"}, "system_prompt_args": []string{"-c", "developer_instructions={text}"}, "lead_args": []string{"--sandbox", "danger-full-access"}, "prepare": "codex-trust", "notice_delivery": NoticeDeliveryCodexQueue, "steer": true, "interrupt_keys": []string{"esc"}},
+			"pi":       map[string]any{"disabled": false, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--thinking", "{effort}"}, "resume_args": []string{"--session", "{session}"}, "system_prompt_args": []string{"--append-system-prompt", "{file}"}, "notice_delivery": NoticeDeliveryPiExtension, "steer": true, "interrupt_keys": []string{"esc"}},
+			"opencode": map[string]any{"disabled": false, "auto_approve_args": []string{"--auto"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "resume_args": []string{"--session", "{session}"}, "notice_delivery": NoticeDeliveryOpenCodePlugin, "interrupt_keys": []string{"esc"}},
 		},
 		"profiles":         map[string]any{},
 		"dispatch_default": map[string]any{"use": ""},
@@ -426,6 +428,9 @@ func (c Config) Validate(projectFile bool) error {
 	}
 	if c.Defaults.MaxWorkers < 1 {
 		return &InvalidError{File: file, Key: "defaults.max_workers", Reason: "must be positive"}
+	}
+	if !oneOf(c.Defaults.DispatchInheritance, "kind", "lead_profile") {
+		return &InvalidError{File: file, Key: "defaults.dispatch_inheritance", Reason: "must be kind or lead_profile"}
 	}
 	if c.Defaults.RecoveryAttempts < 1 {
 		return &InvalidError{File: file, Key: "defaults.recovery_attempts", Reason: "must be positive"}

@@ -30,6 +30,7 @@ func TestEffectiveSourcesFollowAliasesOverridesAndDerivedGrants(t *testing.T) {
 	}
 	for key, want := range map[string][]string{
 		"defaults.review": {project}, "defaults.landing_mode": {global}, "defaults.max_workers": {"built-in default"},
+		"defaults.dispatch_inheritance": {"built-in default"}, "kinds.claude.disabled": {"built-in default"},
 		"autonomy.review": {project}, "autonomy.land": {project}, "dispatch": {project, global},
 	} {
 		if !reflect.DeepEqual(sources[key], want) {

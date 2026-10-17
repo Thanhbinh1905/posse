@@ -106,6 +106,7 @@ codex = "lead-codex"
 
 [defaults]
 max_workers = 4
+dispatch_inheritance = "kind" # kind | lead_profile; compatibility default is kind-only
 stall_after = "20m"
 auto_unsaddle = "finished"  # finished (landed, or reported and its Notice acked) | landed | never
 auto_recover = true          # false: only `posse up` restarts the Lead and Riders after a Herdr restart or closed Lead workspace (section 17)
@@ -123,7 +124,7 @@ gate = []                    # local and pr: commands run in the worktree before
 [remuda]
 clean = "warm"               # warm (keep ignored files) | pristine (git clean -fdx)
 setup = []                   # commands run in a Mount after it is acquired, e.g. ["pnpm install --frozen-lockfile"]
-keep_idle = 4                # idle Mounts kept per Project; extras are pruned
+keep_idle = 4                # idle Mounts kept per Project; 0 disables warm Mount retention
 
 [retention]
 task_artifacts = "2160h"     # retain Reports, Task attachments and approved discard-tip bundles for 90 days
@@ -239,12 +240,13 @@ Rules:
 - `autonomy` is valid only in a Project file. In the global file it is a config error.
 - A Brief may tighten Landing Mode (`local` < `pr` < `no-mistakes`), review (`none` < `local` < `no-mistakes`) or Autonomy. A scoped User choice recorded by `posse ride --user-approved "<User's words>"` may lighten only the Brief's explicit delivery/review preferences. It does not grant review-decision, merge, discard or executable authority; Autonomy still only tightens.
 - `posse` validates the effective config on every call and refuses with `config_invalid` naming the file, key and reason.
-- The built-in kind defaults above can be overridden but not removed; an unknown kind with no `[kinds.<kind>]` table runs with no extra args, `steer = false`, and no interrupt key sequence.
+- The built-in kind defaults above can be overridden but not removed; an unknown kind with no `[kinds.<kind>]` table runs with no extra args, `steer = false`, and no interrupt key sequence. `kinds.<kind>.disabled = true` prevents selecting that kind for new Rider dispatch only. It does not remove the kind's launch configuration, block an existing Lead, or affect historical Task readers and frozen relaunches.
+- `defaults.max_workers` and `defaults.recovery_attempts` must stay positive. `remuda.keep_idle = 0` is valid and retains no idle Mounts.
 - The Lead workspace label is `Lead:<project>`. Repository Riders are unfocused, labeled linked worktree child workspaces under the Lead; their tab label stays at Herdr's default. Workspace Project Riders remain plain `<name>` tabs in the Lead workspace. Existing tab-layout Tasks continue to reconcile by pane label and Teardown by tab. Posse never renames a User tab or workspace ([ADR 0012](adr/0012-group-repository-riders-under-lead.md)).
 - A Profile's `model` and `effort` reach the agent only through the kind's `model_args` and `effort_args` templates; a kind without a template for a set value is a `config_invalid` error naming the Profile.
 - `defaults.review`, `repositories.<member>.review`, `gate`, `[remuda] setup`, `[autonomy]`, kind argument templates (`auto_approve_args`, `model_args`, `effort_args`, `resume_args`, `system_prompt_args`, `lead_args`), kind trust preparation (`prepare`), `lead_auto_approve`, and Profile `kind`/`args` are User-only. `posse config set|unset` requires a registered Lead to pass `--user-approved "<User's words>"` with a non-blank quote. The Lead records the quote, key, action, set value and Project ID in `config_approvals` (global changes are attributed to its Project). A Rider cannot write any key, even with the flag. Pane bindings in the current process and its ancestors recognize registered native Rider and Lead children. An unbound pane or recognized agent environment/process is not the User and cannot write protected settings or answer Decisions. A plain User shell needs no quote; an unbound Herdr pane must first be observed without an agent. Missing or unavailable pane evidence does not prove it is a shell.
 - These checks are cooperative same-user safeguards, not authentication. Environment/process hints and a consent quote can be forged by a process with the User's OS permissions; absence of a binding does not prove a human is present. The quote records provenance, not authenticated consent. Isolated test homes do not inherit parent actor hints across their home boundary.
-- `posse config show --effective` includes effective values and per-key `sources`: built-in defaults, global config or Project config. Project scalar aliases resolve to canonical keys, concatenated Dispatch Rules list both contributing files, and derived yolo grants name the yolo source.
+- `posse config show --effective` includes effective values and per-key `sources`: built-in defaults, global config or Project config. Project scalar aliases resolve to canonical keys, concatenated Dispatch Rules list both contributing files, and derived yolo grants name the yolo source. `posse doctor` shows the selected implicit-dispatch policy and disabled kinds, plus separate active Rider, tracked native-child and parked-resource counts per Project. Native children are not supported or tracked yet; the reported tracked count is zero and does not include unregistered harness subprocesses. Parked resources are held Mounts whose Tasks are outside active execution states.
 - Config is written through `posse config set|unset` and `posse lowkey on|off`, which validate against the schema, write atomically and keep comments. `posse config schema` prints every key with its type, allowed values, default, meaning and whether it is `user_only`.
 - Claude, codex and OpenCode Leads get their kind's `auto_approve_args` by default, including after restart. Set `kinds.<kind>.lead_auto_approve = false` to keep that harness's approval prompts; Profile `args` may still add flags. This changes only harness permissions, not Posse autonomy: review and landing decisions remain governed by `[autonomy]`. Pi is unchanged because it has no permission system. A Lead also gets `lead_args`: codex's default `workspace-write` sandbox cannot write the posse home (SQLite in WAL mode needs write access even to read), the Mounts or the agents' trust files, so it also runs with `--sandbox danger-full-access`.
 - `notice_delivery = "lookout"` requires `background_commands = true` for kinds other than Claude. Claude uses a harness-owned Stop hook instead of a Bash background command.
@@ -469,11 +471,15 @@ A Task in `working` is stalled when all hold for `stall_after`:
 4. Otherwise, exactly one matching rule with no `when`: use it.
 5. Otherwise refuse with `profile_required`, listing the matching rules' `when` text and Profiles, so the Lead chooses by judgment.
 6. No rule matches: use `dispatch.default.use` when configured.
-7. With no Dispatch Rules at all and no default, use an implicit Profile of the running Lead's kind, with no model or effort arguments. Configured but unmatched rules still require a Profile.
+7. With no Dispatch Rules at all and no default, inherit according to `defaults.dispatch_inheritance`:
+   - `kind` (default): use the running Lead's kind with no model or effort arguments, preserving current behavior.
+   - `lead_profile`: use the configured `lead.profiles.<kind>` Profile for the running Lead kind, including its model and effort; if none is configured, use that kind without model or effort.
 
-The Task records the Profile and the rule used. Implicit resolutions report `implicit: lead kind` and store `implicit:<kind>` as the Profile reference, so relaunch and recovery retain that kind without a named Profile. This writes no config; explicit Profiles and defaults retain precedence. Model and effort come only from the Profile.
+Configured but unmatched rules still require a Profile. A selected Profile whose kind is disabled fails with `kind_disabled`; Posse never substitutes another kind or downgrades its model.
 
-`posse dispatch --brief <file> [--profile <name>]` prints the same resolution without spawning; if Profile selection is ambiguous, `profile_required` includes the slug and candidate Profiles in help.
+The Task records the Profile and the rule used. Kind inheritance stores `implicit:<kind>` as the Profile reference and `implicit: lead kind` as the rule. Lead Profile inheritance stores the named Profile when configured and uses `implicit: lead profile` as the rule. These markers let historical readers and frozen relaunches retain their original launch even after the kind is disabled. This writes no config; explicit Profiles and Dispatch Rules retain precedence. `posse dispatch` and `posse ride` show the configured model and effort plus `model_known`, derived only when the launch arguments unambiguously select the configured model. An empty or ambiguous model remains unknown; Posse does not guess provider identity.
+
+`posse dispatch --brief <file> [--profile <name>]` prints the same resolution without spawning; if Profile selection is ambiguous, `profile_required` includes the slug and candidate Profiles in help. [ADR 0022](adr/0022-compatible-dispatch-and-capacity.md) records the compatibility and visibility decisions.
 
 ## 12. Remuda
 
