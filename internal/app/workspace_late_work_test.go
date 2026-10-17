@@ -74,7 +74,7 @@ func TestWorkspaceMemberCommittedAfterFirstPollCannotBeSkippedAsUnchanged(t *tes
 	if err := snapshotUnmergedMemberWork(ctx, f.db, memberProject, memberTask, member.Repo); err != nil {
 		t.Fatal(err)
 	}
-	if got := gitTest(t, target.Root, "show", "refs/heads/posse/span-members-leftover:later.txt"); got != "later work\n" {
+	if got := gitTest(t, target.Root, "show", "refs/heads/"+f.task.Branch+"-leftover:later.txt"); got != "later work\n" {
 		t.Fatalf("committed Leftover lost: %q", got)
 	}
 	decisions, err := f.db.Decisions(ctx, f.project.ID, true)

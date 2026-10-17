@@ -26,7 +26,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 	}
 	for _, want := range []string{
 		"Restart the Rider in the same execution root, optionally with another Profile.",
-		"Start a Rider from a Brief with a short name.",
+		"Start a Rider from a Brief with an optional display name.",
 		"List a Project's Remuda or prune safe, Posse-owned leftovers.",
 		"Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).",
 		"Send a message, optionally queueing it or interrupting and redirecting a busy Rider.",

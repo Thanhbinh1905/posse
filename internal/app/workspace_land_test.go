@@ -281,7 +281,7 @@ func TestWorkspaceMountMirrorsSharedFilesAndRequestedMembers(t *testing.T) {
 		}
 	}
 	for _, member := range []string{"backend", "worker"} {
-		if branch := strings.TrimSpace(gitTest(t, filepath.Join(mount, member), "branch", "--show-current")); branch != "posse/span-members" {
+		if branch := strings.TrimSpace(gitTest(t, filepath.Join(mount, member), "branch", "--show-current")); branch != "posse/t1" {
 			t.Fatalf("%s is on %q", member, branch)
 		}
 	}
@@ -459,7 +459,7 @@ func TestWorkspacePullRequestMemberLandsWhenMerged(t *testing.T) {
 	if f.state() != store.StateTornDown {
 		t.Fatalf("workspace PR did not tear down: %s", f.state())
 	}
-	if content := gitTest(t, worker, "show", "refs/heads/posse/span-members-leftover:untracked-follow-up.txt"); content != "Member Leftover\n" {
+	if content := gitTest(t, worker, "show", "refs/heads/"+f.task.Branch+"-leftover:untracked-follow-up.txt"); content != "Member Leftover\n" {
 		t.Fatalf("Member Leftover missing: %q", content)
 	}
 	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
@@ -491,7 +491,7 @@ func TestWorkspaceBriefsNameKnownMembersAndReviewsInheritThem(t *testing.T) {
 		t.Fatalf("pr on a member without origin: %v", err)
 	}
 	members, _, err := f.service.planTaskMembers(ctx, f.db, f.project, cfg, dispatch.Brief{Type: "review"}, &f.task)
-	if err != nil || len(members) != 2 || members[0].BaseRef != "posse/span-members" {
+	if err != nil || len(members) != 2 || members[0].BaseRef != f.task.Branch {
 		t.Fatalf("review members = %#v, %v", members, err)
 	}
 	if _, _, err := f.service.planTaskMembers(ctx, f.db, f.project, cfg, dispatch.Brief{Type: "review", Repos: []string{"e2e-tool"}}, &f.task); err == nil {

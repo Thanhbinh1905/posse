@@ -162,10 +162,10 @@ func TestPRMergeBindsHeadObservationAndLocalVerdict(t *testing.T) {
 
 func TestExternalMergeWithoutEvidenceIsPolicyViolation(t *testing.T) {
 	f := reviewEvidenceFixture(t, "local")
-	ship := publishCandidate(t, f, "External merge change", "author", 18)
+	ship := publishCandidate(t, f, "External merge change", "author", 17)
 	stopBackgroundLookout(t, f)
 	merge := f.mergeOnLocalOrigin(t, ship, "t1")
-	observePR(t, f, ship, 18, "MERGED", "SUCCESS", strings.TrimSpace(gitTest(t, f.env, ship.WorktreePath, "rev-parse", "HEAD")), merge)
+	observePR(t, f, ship, 17, "MERGED", "SUCCESS", strings.TrimSpace(gitTest(t, f.env, ship.WorktreePath, "rev-parse", "HEAD")), merge)
 	waitLanded(t, f, "t1", merge)
 	f.requireNotice(t, "t1", "pr_merged")
 	f.requireNotice(t, "t1", "review_policy_violation")

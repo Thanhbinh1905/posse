@@ -199,7 +199,7 @@ func TestEveryCommandUsesSharedOutputFormat(t *testing.T) {
 	}
 }
 
-func TestDispatchPreviewSlugOnProfileRequired(t *testing.T) {
+func TestDispatchPreviewNameOnProfileRequired(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
@@ -232,10 +232,14 @@ func TestDispatchPreviewSlugOnProfileRequired(t *testing.T) {
 	cli := testService(home, nil).CLI()
 	cli.Out, cli.ErrOut = &output, &output
 	if code := cli.Run([]string{"dispatch", "--brief", brief}); code != 1 || !strings.Contains(output.String(), "fix-unstable-tests") {
-		t.Errorf("dispatch needs Profile and slug: %d %s", code, output.String())
+		t.Errorf("dispatch needs Profile and Task Name: %d %s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"dispatch", "--brief", brief, "--profile", "one"}); code != 0 || !strings.Contains(output.String(), "fix-unstable-tests") {
+	if code := cli.Run([]string{"dispatch", "--brief", brief, "--profile", "one"}); code != 0 || !strings.Contains(output.String(), "fix-unstable-tests") || !strings.Contains(output.String(), "posse ride --brief") {
 		t.Errorf("dispatch override: %d %s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"dispatch", "--brief", brief, "--name", "custom-label", "--profile", "one"}); code != 0 || !strings.Contains(output.String(), "name: custom-label") || !strings.Contains(output.String(), "--name custom-label") {
+		t.Errorf("dispatch custom display name: %d %s", code, output.String())
 	}
 }

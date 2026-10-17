@@ -25,7 +25,7 @@ func TestWorkspaceTaskAcquiresOnlySelectedMemberDespiteUnrelatedProblems(t *test
 	f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
 	ctx := context.Background()
 	workerRoot := filepath.Join(f.workspace, "worker")
-	gitTest(t, workerRoot, "branch", "posse/scoped-single-member")
+	gitTest(t, workerRoot, "branch", "posse/t2")
 	gitTest(t, workerRoot, "remote", "set-url", "origin", "https://unreachable.invalid/worker.git")
 	if err := os.RemoveAll(filepath.Join(f.workspace, "e2e-tool")); err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestWorkspaceTaskAcquiresOnlySelectedMemberDespiteUnrelatedProblems(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := taskBranchAvailable(ctx, f.db, f.project, "scoped-single-member", members); err != nil {
+	if err := taskBranchAvailableForBranch(ctx, f.db, f.project, store.TaskBranchName(2), members); err != nil {
 		t.Fatalf("unrequested collision or unavailable repository blocked branch admission: %v", err)
 	}
 	taskID, _, err := createTaskWithSequence(ctx, f.db, f.project, f.home, store.Task{Type: "scout", Title: "Inspect one member", ShortName: "scoped-single-member", LandingMode: "local"})

@@ -60,7 +60,7 @@ func TestOpenCodeWorkerArgsAndResume(t *testing.T) {
 }
 
 func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testing.T) {
-	task := store.Task{Seq: 12, Title: "Stable output for workers", ShortName: "stable-output", Branch: "posse/stable-output", WorktreePath: "/tmp/remuda/shop/mount-2", PaneID: "w2:p1", PaneLabel: "posse:shop:t12"}
+	task := store.Task{Seq: 12, Title: "Stable output for workers", ShortName: "stable-output", Branch: "posse/t12", WorktreePath: "/tmp/remuda/shop/mount-2", PaneID: "w2:p1", PaneLabel: "posse:shop:t12"}
 	if got := workerTabLabel(task); got != "stable-output" {
 		t.Fatalf("Worker tab label = %q", got)
 	}
@@ -70,6 +70,10 @@ func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testi
 	}
 	if got := taskPaneLabel.FindString(task.PaneLabel); got != task.PaneLabel {
 		t.Fatalf("canonical pane label changed = %q", got)
+	}
+	tokens := metadata["tokens"].(map[string]string)
+	if tokens["posse_name"] != task.ShortName || tokens["posse_branch"] != task.Branch {
+		t.Fatalf("sidebar name/branch tokens = %#v, want %q and %q", tokens, task.ShortName, task.Branch)
 	}
 }
 
@@ -89,7 +93,7 @@ func TestWorkerDisplayMountContextDoesNotTruncateMidPath(t *testing.T) {
 	}
 }
 
-func TestTaskTitleSlugNamesTheWork(t *testing.T) {
+func TestTaskTitlesGenerateDisplayNames(t *testing.T) {
 	for title, want := range map[string]string{
 		"Hide tool calls in the Pi Lead while lowkey is on": "hide-tool-calls",
 		"Span backend and worker":                           "span-backend-worker",
@@ -100,12 +104,12 @@ func TestTaskTitleSlugNamesTheWork(t *testing.T) {
 		"fix(auth)!: repair the flaky login test":           "repair-flaky-login",
 	} {
 		if got := taskTitleSlug(title); got != want {
-			t.Errorf("slug for %q = %q, want %q", title, got, want)
+			t.Errorf("generated Task Name for %q = %q, want %q", title, got, want)
 		}
 	}
 }
 
-func TestRideRequiresAValidWorkerName(t *testing.T) {
+func TestRideRejectsInvalidOptionalDisplayName(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
@@ -130,16 +134,40 @@ func TestRideRequiresAValidWorkerName(t *testing.T) {
 			output := &bytes.Buffer{}
 			cli := testService(home, nil).CLI()
 			cli.Out, cli.ErrOut = output, output
-			if code := cli.Run([]string{"ride", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "fix-unstable-tests") {
+			if code := cli.Run([]string{"ride", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "safe lowercase kebab-case") {
 				t.Fatalf("invalid Rider name exit=%d output=%s", code, output.String())
 			}
 		})
 	}
+	if got := defaultTaskName("Fix unstable tests"); got != "fix-unstable-tests" {
+		t.Fatalf("default Task name = %q", got)
+	}
+	if got := defaultTaskName("東京"); got != "task" {
+		t.Fatalf("unsafe derived Task name = %q, want safe fallback", got)
+	}
+}
+
+func TestRideRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {
+	fixture := newRideFixture(t)
+	gitTest(t, fixture.repo, "branch", "posse/t1")
 	output := &bytes.Buffer{}
-	cli := testService(home, nil).CLI()
+	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = output, output
-	if code := cli.Run([]string{"ride", "--brief", brief}); code != 2 || !strings.Contains(output.String(), "--name <short>") {
-		t.Fatalf("missing Worker name exit=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"ride", "--brief", fixture.brief, "--name", "independent-label"}); code != 1 || !strings.Contains(output.String(), "branch_exists") || !strings.Contains(output.String(), "posse/t1") {
+		t.Fatalf("Task-bound branch collision exit=%d output=%s", code, output.String())
+	}
+	db, err := store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
+	if err != nil || len(tasks) != 0 {
+		t.Fatalf("branch collision allocated a Task: %#v, %v", tasks, err)
+	}
+	mounts, err := db.Mounts(context.Background(), fixture.project.ID)
+	if err != nil || len(mounts) != 0 {
+		t.Fatalf("branch collision acquired a Mount: %#v, %v", mounts, err)
 	}
 }
 
@@ -184,7 +212,7 @@ func TestRideReportsMountSetupFailureAndReleasesMount(t *testing.T) {
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = output, output
 	t.Chdir(repo)
-	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "setup-failure"}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
+	if code := cli.Run([]string{"ride", "--brief", briefPath}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
 		t.Fatalf("ride setup failure code=%d output=%s", code, output.String())
 	}
 	db, err = store.Open(home)
@@ -197,26 +225,19 @@ func TestRideReportsMountSetupFailureAndReleasesMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
-	if err != nil || len(tasks) != 1 || tasks[0].State != store.StateFailed || tasks[0].MountID != 0 || tasks[0].ShortName != "setup-failure" {
+	if err != nil || len(tasks) != 1 || tasks[0].State != store.StateFailed || tasks[0].MountID != 0 || tasks[0].ShortName != "setup-failure" || tasks[0].Branch != "posse/t1" {
 		t.Fatalf("failed setup Task = %#v, %v", tasks, err)
 	}
 	output.Reset()
-	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "opaque"}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "Task title") {
-		t.Fatalf("unrelated name exit=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "opaque"}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
+		t.Fatalf("independent display name exit=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "setup-failure"}); code != 1 || !strings.Contains(output.String(), "branch_exists") || !strings.Contains(output.String(), "setup-failure-retry") {
-		t.Fatalf("reused name exit=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"ride", "--brief", briefPath}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
+		t.Fatalf("repeated title refused: code=%d output=%s", code, output.String())
 	}
-	if tasks, err := db.Tasks(ctx, project.ID, true); err != nil || len(tasks) != 1 {
-		t.Fatalf("collision created a Task: %#v, %v", tasks, err)
-	}
-	output.Reset()
-	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "setup-failure-retry"}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
-		t.Fatalf("retry with unchanged Brief refused: code=%d output=%s", code, output.String())
-	}
-	if tasks, err := db.Tasks(ctx, project.ID, true); err != nil || len(tasks) != 2 || tasks[1].ShortName != "setup-failure-retry" {
-		t.Fatalf("retry did not create distinct Task: %#v, %v", tasks, err)
+	if tasks, err := db.Tasks(ctx, project.ID, true); err != nil || len(tasks) != 3 || tasks[0].ShortName != "setup-failure" || tasks[1].ShortName != "opaque" || tasks[2].ShortName != "setup-failure" || tasks[0].Branch != "posse/t1" || tasks[1].Branch != "posse/t2" || tasks[2].Branch != "posse/t3" {
+		t.Fatalf("repeated titles did not get independent display names and Task branches: %#v, %v", tasks, err)
 	}
 	mounts, err := db.Mounts(ctx, project.ID)
 	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" || mounts[0].TaskID != 0 {
@@ -850,7 +871,7 @@ func TestTaskSequenceDoesNotDependOnLegacyBranch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "base"}, {"checkout", "-b", "posse/t1"}} {
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "base"}, {"checkout", "-b", "posse/legacy-work"}} {
 		if _, err := gitOutput(ctx, repo, args...); err != nil {
 			t.Fatal(err)
 		}
@@ -864,7 +885,7 @@ func TestTaskSequenceDoesNotDependOnLegacyBranch(t *testing.T) {
 	if _, err := gitOutput(ctx, repo, "commit", "-m", "unlanded task work"); err != nil {
 		t.Fatal(err)
 	}
-	wantCommit, err := gitOutput(ctx, repo, "rev-parse", "refs/heads/posse/t1")
+	wantCommit, err := gitOutput(ctx, repo, "rev-parse", "refs/heads/posse/legacy-work")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -890,12 +911,12 @@ func TestTaskSequenceDoesNotDependOnLegacyBranch(t *testing.T) {
 		t.Fatalf("allocated Task sequence = %d, want 1", sequence)
 	}
 	task, err := db.TaskByID(ctx, project.ID, id)
-	if err != nil || task.Seq != 1 || task.Branch != "posse/new-work" {
+	if err != nil || task.Seq != 1 || task.Branch != "posse/t1" {
 		t.Fatalf("new Task = %#v, %v", task, err)
 	}
-	gotCommit, err := gitOutput(ctx, repo, "rev-parse", "refs/heads/posse/t1")
+	gotCommit, err := gitOutput(ctx, repo, "rev-parse", "refs/heads/posse/legacy-work")
 	if err != nil || gotCommit != wantCommit {
-		t.Fatalf("stale posse/t1 moved from %s to %s: %v", wantCommit, gotCommit, err)
+		t.Fatalf("legacy branch moved from %s to %s: %v", wantCommit, gotCommit, err)
 	}
 }
 
@@ -937,7 +958,7 @@ func TestTaskBranchAvailabilityIgnoresRedirectWarning(t *testing.T) {
 	if err != nil || stdout != "" {
 		t.Fatalf("git output includes redirect warning: stdout=%q err=%v", stdout, err)
 	}
-	if err := taskBranchAvailable(ctx, db, project, "fresh-name", nil); err != nil {
+	if err := taskBranchAvailableForRef(ctx, db, project, "posse/fresh-name", []repoTarget{{Name: project.Name, Root: project.Root}}); err != nil {
 		t.Fatalf("fresh branch rejected because of redirect warning: %v", err)
 	}
 }
@@ -962,7 +983,7 @@ func TestTaskBranchAvailabilityReportsUnreachableOriginAsCheckFailure(t *testing
 		t.Fatal(err)
 	}
 
-	err = taskBranchAvailable(ctx, db, project, "fresh-name", nil)
+	err = taskBranchAvailableForRef(ctx, db, project, "posse/fresh-name", []repoTarget{{Name: project.Name, Root: project.Root}})
 	var failure *axi.Error
 	if !errors.As(err, &failure) || failure.Code != "branch_check_failed" || !strings.Contains(failure.Message, "shop") || !strings.Contains(failure.Message, "refs/heads/posse/fresh-name") {
 		t.Fatalf("unreachable origin result = %#v; want branch_check_failed for repository and ref", err)
@@ -991,7 +1012,7 @@ func TestTaskBranchAvailabilityAllowsWorkspaceMemberWithoutOrigin(t *testing.T) 
 		t.Fatal(err)
 	}
 	selected := []taskMember{{repoTarget: repoTarget{Name: "e2e-tool", Root: filepath.Join(workspace, "e2e-tool"), DefaultBranch: "main"}, Path: "e2e-tool"}}
-	if err := taskBranchAvailable(ctx, db, project, "fresh-name", selected); err != nil {
+	if err := taskBranchAvailableForRef(ctx, db, project, "posse/fresh-name", []repoTarget{selected[0].repoTarget}); err != nil {
 		t.Fatalf("fresh branch rejected for workspace member without origin: %v", err)
 	}
 }
@@ -1008,52 +1029,16 @@ func TestWorkspaceRideChecksOnlySelectedMembers(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
-			gitTest(t, filepath.Join(f.workspace, "backend"), "branch", "posse/existing-branch")
+			gitTest(t, filepath.Join(f.workspace, "backend"), "branch", store.TaskBranchName(2))
 			members, _, err := f.service.planTaskMembers(context.Background(), f.db, f.project, f.config(), testCase.brief, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = taskBranchAvailable(context.Background(), f.db, f.project, "existing-branch", members)
+			err = taskBranchAvailableForBranch(context.Background(), f.db, f.project, store.TaskBranchName(2), members)
 			if (err != nil) != testCase.wantError {
 				t.Fatalf("selected scope branch check err=%v, want error %v", err, testCase.wantError)
 			}
 		})
-	}
-}
-
-func TestRetryNameSuggestionAccepts24CharacterSlug(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	repo := filepath.Join(root, "repo")
-	initRepo(t, repo)
-	db, err := store.Open(filepath.Join(root, "posse"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	project, err := db.CreateProject(ctx, "shop", repo, "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	title := "TLS overall architecture"
-	slug := taskTitleSlug(title)
-	retry := retryNameSuggestion(slug)
-	if len(slug) != 24 || len(retry) != 24 || retry != "tls-overall-archit-retry" {
-		t.Fatalf("24-character retry suggestion = %q for slug %q", retry, slug)
-	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Type: "ship", Title: title, ShortName: slug})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateFailed, "cli", "setup failed"); err != nil {
-		t.Fatal(err)
-	}
-	allowed, err := retryNameAllowed(ctx, db, project, title, slug, retry)
-	if err != nil || !allowed {
-		t.Fatalf("suggested retry name allowed=%v err=%v", allowed, err)
-	}
-	if err := validateWorkerName(retry); err != nil {
-		t.Fatalf("suggested retry name is invalid: %v", err)
 	}
 }
 
@@ -1072,7 +1057,7 @@ func TestTaskBranchAvailabilityChecksLocalAndOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitTest(t, repo, "branch", "posse/used-name")
-	if err := taskBranchAvailable(ctx, db, project, "used-name", nil); err == nil || !strings.Contains(err.Error(), "shop") || !strings.Contains(err.Error(), "refs/heads/posse/used-name") {
+	if err := taskBranchAvailableForRef(ctx, db, project, "posse/used-name", []repoTarget{{Name: project.Name, Root: project.Root}}); err == nil || !strings.Contains(err.Error(), "shop") || !strings.Contains(err.Error(), "refs/heads/posse/used-name") {
 		t.Fatalf("local branch collision = %v", err)
 	}
 	remote := filepath.Join(root, "origin.git")
@@ -1080,7 +1065,7 @@ func TestTaskBranchAvailabilityChecksLocalAndOrigin(t *testing.T) {
 	gitTest(t, repo, "remote", "add", "origin", remote)
 	gitTest(t, repo, "push", "origin", "refs/heads/main:refs/heads/posse/remote-name")
 	gitTest(t, repo, "update-ref", "-d", "refs/remotes/origin/posse/remote-name")
-	if err := taskBranchAvailable(ctx, db, project, "remote-name", nil); err == nil || !strings.Contains(err.Error(), "shop origin") || !strings.Contains(err.Error(), "refs/heads/posse/remote-name") {
+	if err := taskBranchAvailableForRef(ctx, db, project, "posse/remote-name", []repoTarget{{Name: project.Name, Root: project.Root}}); err == nil || !strings.Contains(err.Error(), "shop origin") || !strings.Contains(err.Error(), "refs/heads/posse/remote-name") {
 		t.Fatalf("origin branch collision = %v", err)
 	}
 }

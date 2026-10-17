@@ -124,6 +124,10 @@ func TestRiderStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
 
 func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	f := newRideFixture(t)
+	configText := "[identity.lead]\nlanguage = \"vi\"\n\n[defaults]\nlanding_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	original := []byte("---\r\ntype: ship\r\ntitle: Launch probe\r\ndone_when: checked\r\nticket: 12\r\n---\r\nUser words stay exact.\r\n")
 	if err := os.WriteFile(f.brief, original, 0o600); err != nil {
 		t.Fatal(err)
@@ -140,7 +144,7 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	}
 	task, _ := f.onlyTask(t)
 	plan, err := task.AdmittedPlan()
-	if err != nil || plan == nil || !bytes.Equal(plan.Inputs[0].Bytes, original) {
+	if err != nil || plan == nil || !bytes.Equal(plan.Inputs[0].Bytes, original) || plan.ProseLanguage != "vi" {
 		t.Fatalf("selected Brief lost exact bytes: %#v %v", plan, err)
 	}
 	if err := os.WriteFile(filepath.Join(plan.Paths.Output, "brief.md"), []byte(strings.ReplaceAll(string(original), "12", "999")), 0o600); err != nil {
@@ -167,7 +171,7 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 		t.Fatalf("crash restore changed Brief: %q %v", restored, err)
 	}
 	launch, err := os.ReadFile(filepath.Join(plan.Paths.Output, "launch.md"))
-	if err != nil || !strings.Contains(string(launch), "Original preference.") || strings.Contains(string(launch), "Edited preference.") {
+	if err != nil || !strings.Contains(string(launch), "Original preference.") || strings.Contains(string(launch), "Edited preference.") || !strings.Contains(string(launch), "configured language (\"vi\")") {
 		t.Fatalf("crash restore used edited preferences: %s %v", launch, err)
 	}
 }

@@ -12,6 +12,9 @@ import (
 // Herdr's Agents panel follows workspace order, not worktree provenance. Move
 // only identified linked Riders, preserving their order and all other labels.
 func (s *Service) groupRiderWorkspaces(ctx context.Context, snapshot herdr.Snapshot, project store.Project, tasks []store.Task) {
+	if ctx.Err() != nil {
+		return
+	}
 	ids, before := riderWorkspacePlacement(snapshot, project, tasks)
 	if len(ids) == 0 {
 		return
@@ -20,7 +23,7 @@ func (s *Service) groupRiderWorkspaces(ctx context.Context, snapshot herdr.Snaps
 	if before != "" {
 		params["before_workspace_id"] = before
 	}
-	if _, err := s.herdrCall(ctx, "workspace.move_block", params); err != nil {
+	if _, err := s.herdrCall(ctx, "workspace.move_block", params); err != nil && ctx.Err() == nil {
 		log.Printf("posse: could not group Rider workspaces under Lead for Project %s: %v", project.Name, err)
 	}
 }

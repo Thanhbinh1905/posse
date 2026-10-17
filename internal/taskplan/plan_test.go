@@ -18,7 +18,7 @@ func request(taskType string) taskplan.Request {
 	r := taskplan.Request{Brief: taskplan.Select("brief", "brief.md", []byte(text)),
 		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
 		Launch:    taskplan.Launch{ProfileName: "deep", Profile: config.Profile{Kind: "pi", Model: "configured-model", Args: []string{"--name", "rider"}}, Args: []string{"--model", "configured-model"}, ModelKnown: true, ConfiguredModel: "configured-model"},
-		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"}, ProseLanguage: "vi",
 		Paths: taskplan.Paths{Scratch: "/managed/scratch/shop/{task}", Output: "/managed/projects/shop/tasks/{task}"}}
 	if taskType == "review" {
 		r.ReviewOf = 3
@@ -38,7 +38,7 @@ func TestLegacyBriefsResolveWithoutChangingInputsOrLaunchSettings(t *testing.T) 
 			if taskType == "ship" {
 				outcome = "change"
 			}
-			if plan.Version != taskplan.Version || plan.Revision != 1 || plan.Outcome != outcome || plan.Executor != "rider" || plan.Execution.Mode != "mount" || plan.Launch.ConfiguredModel != "configured-model" {
+			if plan.Version != taskplan.Version || plan.Revision != 1 || plan.Outcome != outcome || plan.Executor != "rider" || plan.Execution.Mode != "mount" || plan.Launch.ConfiguredModel != "configured-model" || plan.ProseLanguage != "vi" {
 				t.Fatalf("unexpected legacy resolution: %#v", plan)
 			}
 			encoded, err := plan.Bind("t7").Encode()
@@ -46,7 +46,7 @@ func TestLegacyBriefsResolveWithoutChangingInputsOrLaunchSettings(t *testing.T) 
 				t.Fatal(err)
 			}
 			decoded, err := taskplan.Decode(encoded)
-			if err != nil || !bytes.Equal(decoded.Inputs[0].Bytes, r.Brief.Bytes) || decoded.Paths.Scratch != "/managed/scratch/shop/t7" {
+			if err != nil || !bytes.Equal(decoded.Inputs[0].Bytes, r.Brief.Bytes) || decoded.Paths.Scratch != "/managed/scratch/shop/t7" || decoded.ProseLanguage != "vi" {
 				t.Fatalf("lost selected bytes or bound paths: %#v %v", decoded, err)
 			}
 			r.Brief.Bytes[0] = '!'
