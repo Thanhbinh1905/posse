@@ -15,6 +15,8 @@ type Brief struct {
 	Title          string
 	DoneWhen       string
 	LandingMode    string
+	Execution      string
+	Paths          []string
 	Review         string
 	Base           string
 	BaseByRepo     map[string]string
@@ -102,7 +104,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "review", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "execution", "paths", "review", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -115,11 +117,19 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		Title:       unquote(values["title"]),
 		DoneWhen:    unquote(values["done_when"]),
 		LandingMode: unquote(values["landing_mode"]),
+		Execution:   unquote(values["execution"]),
 		Review:      unquote(values["review"]),
 		ReviewOf:    unquote(values["review_of"]),
 		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
+	}
+	if raw, found := values["paths"]; found {
+		paths, err := parsePaths(raw)
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.Paths = paths
 	}
 	if raw, found := values["base"]; found {
 		branch, byRepo, err := parseBranchSelection(raw, "base")
@@ -218,6 +228,15 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	}
 	if brief.DoneWhen == "" {
 		return Brief{}, &BriefError{Field: "done_when", Reason: "is required"}
+	}
+	if brief.Execution != "" && !oneOf(brief.Execution, "mount", "in-place") {
+		return Brief{}, &BriefError{Field: "execution", Reason: "must be mount or in-place"}
+	}
+	if len(brief.Paths) > 0 && brief.Execution != "in-place" {
+		return Brief{}, &BriefError{Field: "paths", Reason: "is valid only with execution: in-place"}
+	}
+	if brief.Execution == "in-place" && len(brief.Paths) == 0 {
+		return Brief{}, &BriefError{Field: "paths", Reason: "must list at least one directory-relative path for in-place execution"}
 	}
 	if brief.LandingMode != "" && !oneOf(brief.LandingMode, "local", "pr", "no-mistakes") {
 		return Brief{}, &BriefError{Field: "landing_mode", Reason: "must be local, pr or no-mistakes"}
@@ -341,6 +360,33 @@ func parseBranchSelection(raw, field string) (string, map[string]string, error) 
 }
 
 // parseRepos reads `repos: [a, b]` or `repos: a, b`.
+func parsePaths(raw string) ([]string, error) {
+	text := strings.TrimSpace(raw)
+	if strings.HasPrefix(text, "[") {
+		if !strings.HasSuffix(text, "]") {
+			return nil, &BriefError{Field: "paths", Reason: "must be a list such as [src, docs]"}
+		}
+		text = strings.TrimSuffix(strings.TrimPrefix(text, "["), "]")
+	}
+	paths := []string{}
+	seen := map[string]bool{}
+	for _, item := range strings.Split(text, ",") {
+		path := unquote(strings.TrimSpace(item))
+		if path == "" {
+			continue
+		}
+		if seen[path] {
+			return nil, &BriefError{Field: "paths", Reason: path + " is listed twice"}
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		return nil, &BriefError{Field: "paths", Reason: "must list at least one path"}
+	}
+	return paths, nil
+}
+
 func parseRepos(raw string) ([]string, error) {
 	text := strings.TrimSpace(raw)
 	if strings.HasPrefix(text, "[") {

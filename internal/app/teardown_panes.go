@@ -568,7 +568,7 @@ func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Projec
 	}
 	plan.tabs = taskTabs(snapshot, project, task)
 	childID := ""
-	if !project.IsWorkspace() {
+	if !project.IsWorkspace() && !project.IsDirectory() {
 		for _, workspace := range snapshot.Workspaces {
 			if workspace.Worktree.CheckoutPath != "" && workspace.Worktree.CheckoutPath == task.WorktreePath {
 				for _, pane := range snapshot.Panes {

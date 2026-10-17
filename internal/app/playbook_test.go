@@ -486,6 +486,28 @@ func TestRiderCannotWritePreferences(t *testing.T) {
 	}
 }
 
+func TestDirectoryLeadInstructionsRequireConsentedPathScopes(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := config.Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := composeLeadInstructions(home, store.Project{Name: "local", Kind: store.ProjectKindDirectory}, cfg, "pi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"execution: in-place", "non-overlapping relative `paths:`", "--user-approved", "local only", "Never Land or discard an in-place Task", "in-place recovery Decision", "preserves source and stops it", "never Landed"} {
+		if !strings.Contains(result.Text, required) {
+			t.Errorf("Directory Lead instructions omit %q", required)
+		}
+	}
+	for _, forbidden := range []string{"Every code change must be done by a Rider in its Task Mount", "Posse does not support those paths yet", "posse retitle", "posse publish", "`land_ready`", "`pr_opened`"} {
+		if strings.Contains(result.Text, forbidden) {
+			t.Errorf("Directory Lead instructions retain incompatible rule %q", forbidden)
+		}
+	}
+}
+
 func TestPreferenceContentKeepsExistingLeadInstructionLimit(t *testing.T) {
 	home := t.TempDir()
 	writePlaybook(t, home, "playbook/lead.md", strings.Repeat("x", preferenceWarningBytes+100))

@@ -18,6 +18,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 	dbgen "github.com/thanhbinh1905/posse/internal/store/sqlc"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 	"modernc.org/sqlite"
 )
 
@@ -360,6 +361,54 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 	return db.PersistTask(ctx, taskID)
 }
 
+func (db *DB) TransitionInPlacePreserved(ctx context.Context, task Task, expected State, note, quote string) error {
+	quote = strings.TrimSpace(quote)
+	if quote == "" {
+		return fmt.Errorf("preserving failed or lost in-place work requires a recorded User choice")
+	}
+	if !transitions[expected][StateTornDown] {
+		return fmt.Errorf("transition %q -> %q is not allowed", expected, StateTornDown)
+	}
+	if err := validateTransitionSource(expected, StateTornDown, "user"); err != nil {
+		return err
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state, planJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT state, plan_json FROM tasks WHERE id=?`, task.ID).Scan(&state, &planJSON); err != nil {
+		return err
+	}
+	if State(state) != expected {
+		return fmt.Errorf("%w: Task %d is %q, expected %q", ErrStateRace, task.ID, state, expected)
+	}
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return err
+	}
+	storedPlan, err := taskplan.Decode(planJSON)
+	if err != nil {
+		return err
+	}
+	if plan == nil || plan.Execution.Mode != "in-place" || storedPlan.Execution.Mode != "in-place" {
+		return fmt.Errorf("preserving recovery requires an admitted in-place plan")
+	}
+	note = strings.TrimSpace(note)
+	if note != "" {
+		note += "; "
+	}
+	note += "User approval: " + quote
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), task.ID, expected, StateTornDown, "user", note); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, task.ID)
+}
+
 func (db *DB) TransitionWithApproval(ctx context.Context, taskID int64, expected, next State, source, note, action, quote string) error {
 	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
@@ -680,6 +729,11 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 		return 0, 0, fmt.Errorf("Task short name is required")
 	}
 	task.Branch = "posse/" + task.ShortName
+	if plan, err := task.AdmittedPlan(); err != nil {
+		return 0, 0, err
+	} else if plan != nil && plan.Execution.Mode == "in-place" {
+		task.Branch = ""
+	}
 	now := time.Now().UnixMilli()
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -691,12 +745,14 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET last_activity_at=last_activity_at WHERE id=?`, projectID); err != nil {
 		return 0, 0, err
 	}
-	var branchUsed bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id=? AND branch=?)`, projectID, task.Branch).Scan(&branchUsed); err != nil {
-		return 0, 0, err
-	}
-	if branchUsed {
-		return 0, 0, ErrTaskBranchExists
+	if task.Branch != "" {
+		var branchUsed bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id=? AND branch=?)`, projectID, task.Branch).Scan(&branchUsed); err != nil {
+			return 0, 0, err
+		}
+		if branchUsed {
+			return 0, 0, ErrTaskBranchExists
+		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM tasks WHERE project_id=?`, projectID).Scan(&seq); err != nil {
 		return 0, 0, err
@@ -843,7 +899,7 @@ func (db *DB) FinishMountRelease(ctx context.Context, mountID, taskID int64) err
 }
 
 func (db *DB) UpdateTaskMountPath(ctx context.Context, taskID, mountID int64, path string) error {
-	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=?,worktree_path=?,updated_at=? WHERE id=?`, mountID, path, time.Now().UnixMilli(), taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=NULLIF(?,0),worktree_path=?,updated_at=? WHERE id=?`, mountID, path, time.Now().UnixMilli(), taskID); err != nil {
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
@@ -1272,6 +1328,14 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 // RecordWorkerSignalWithVerdict records a Signal and, for a Review Task's done
 // Signal, its verdict in one transaction.
 func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput) (State, error) {
+	inPlace := false
+	if verb == "done" {
+		plan, err := task.AdmittedPlan()
+		if err != nil {
+			return "", err
+		}
+		inPlace = plan != nil && plan.Execution.Mode == "in-place"
+	}
 	if verdict != nil && verb != "done" {
 		return "", fmt.Errorf("a review verdict is valid only on a done Signal")
 	}
@@ -1342,8 +1406,12 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 			return "", err
 		}
 	}
-	if verb == "done" && task.Type != "ship" {
-		if err := transitionTx(ctx, queries, task.ID, StateDone, StateReported, "cli", "Rider Report copied to the Project home"); err != nil {
+	if verb == "done" && (task.Type != "ship" || inPlace) {
+		reason := "Rider Report copied to the Project home"
+		if inPlace {
+			reason = "in-place Task output recorded without a Land step"
+		}
+		if err := transitionTx(ctx, queries, task.ID, StateDone, StateReported, "cli", reason); err != nil {
 			return "", err
 		}
 		current = StateReported
@@ -1354,8 +1422,15 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 		}
 	}
 	if verb == "done" && data != nil {
-		if values, ok := data.(map[string]string); ok && values["pr_url"] != "" {
-			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET pr_url=? WHERE id=?`, values["pr_url"], task.ID); err != nil {
+		prURL := ""
+		switch values := data.(type) {
+		case map[string]string:
+			prURL = values["pr_url"]
+		case map[string]any:
+			prURL, _ = values["pr_url"].(string)
+		}
+		if prURL != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET pr_url=? WHERE id=?`, prURL, task.ID); err != nil {
 				return "", err
 			}
 		}

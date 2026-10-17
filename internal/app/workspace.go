@@ -89,7 +89,7 @@ func detectProject(ctx context.Context, dir string) (detectedProject, error) {
 		return detectedProject{}, err
 	}
 	if len(repos) == 0 {
-		return detectedProject{}, axi.Failure("not_in_git_repository", "this folder is not a Git repository and has no Git repositories directly inside it", false, "Run `posse up` inside a repository, or in a folder whose direct subfolders are repositories")
+		return detectedProject{}, axi.Failure("not_in_git_repository", "this folder is not a Git repository and has no Git repositories directly inside it", false, "Run `posse up` inside a repository, or in a folder whose direct subfolders are repositories; use `posse project add --directory` for a local directory Project")
 	}
 	return detectedProject{Kind: store.ProjectKindWorkspace, Root: dir, Name: projectName(filepath.Base(dir)), Repos: repos}, nil
 }
@@ -173,6 +173,13 @@ func memberLandingMode(cfg config.Config, name, remote string) string {
 	return cfg.Defaults.LandingMode
 }
 
+func projectLandingMode(project store.Project, cfg config.Config) string {
+	if project.IsDirectory() {
+		return "local"
+	}
+	return cfg.Defaults.LandingMode
+}
+
 func savedMemberLandingMode(cfg config.Config, name, remote string) string {
 	if remote == "" {
 		if repository, ok := cfg.Repositories[name]; ok && repository.LandingMode != "" {
@@ -185,6 +192,9 @@ func savedMemberLandingMode(cfg config.Config, name, remote string) string {
 
 // projectTargets lists the repositories of a Project: the Project itself, or its active members.
 func (s *Service) projectTargets(ctx context.Context, db *store.DB, project store.Project) ([]repoTarget, error) {
+	if project.IsDirectory() {
+		return nil, nil
+	}
 	if !project.IsWorkspace() {
 		return []repoTarget{{Root: project.Root, DefaultBranch: project.DefaultBranch}}, nil
 	}
@@ -215,26 +225,17 @@ func (s *Service) projectTarget(ctx context.Context, db *store.DB, project store
 	return repoTarget{}, axi.Failure("repo_unknown", fmt.Sprintf("Project %s has no member repository %q", project.Name, name), false, "Run `posse project show` to list members, or `posse project scan` after adding one")
 }
 
-// registeredProjectFor resolves the Project that owns dir: a repo Project by its
-// Git top level, the nearest workspace Project that contains dir, or the Project
-// of the Task whose Mount contains dir.
+// registeredProjectFor resolves the most specific registered Project that
+// contains dir, or the Project of the Task whose Mount contains dir.
 func registeredProjectFor(ctx context.Context, db *store.DB, dir string) (store.Project, bool, error) {
-	if top, err := gitTop(ctx, dir); err == nil {
-		project, lookupErr := db.ProjectByRoot(ctx, top)
-		if lookupErr == nil {
-			return project, true, nil
-		}
-		if !store.IsNotFound(lookupErr) {
-			return store.Project{}, false, lookupErr
-		}
-	}
 	projects, err := db.Projects(ctx)
 	if err != nil {
 		return store.Project{}, false, err
 	}
+	dir = filepath.Clean(resolvedPath(dir))
 	var best store.Project
 	for _, candidate := range projects {
-		if candidate.IsWorkspace() && pathWithin(candidate.Root, dir) && len(candidate.Root) > len(best.Root) {
+		if pathWithin(candidate.Root, dir) && len(candidate.Root) > len(best.Root) {
 			best = candidate
 		}
 	}
@@ -264,6 +265,15 @@ func taskForPath(ctx context.Context, db *store.DB, dir string) (store.Task, err
 		return store.Task{}, err
 	}
 	for _, project := range projects {
+		if project.IsDirectory() && pathWithin(project.Root, dir) {
+			task, taskErr := db.TaskByWorktree(ctx, project.Root)
+			if taskErr == nil {
+				return task, nil
+			}
+			if !store.IsNotFound(taskErr) {
+				return store.Task{}, taskErr
+			}
+		}
 		mounts, err := db.Mounts(ctx, project.ID)
 		if err != nil {
 			return store.Task{}, err
@@ -329,6 +339,8 @@ func registerDetected(ctx context.Context, db *store.DB, detected detectedProjec
 			repos = append(repos, store.ProjectRepo{Name: repo.Name, Path: repo.Path, DefaultBranch: repo.DefaultBranch, OriginHost: savedOriginHost(repo.Remote)})
 		}
 		project, err = db.CreateWorkspaceProject(ctx, detected.Name, detected.Root, repos)
+	} else if detected.Kind == store.ProjectKindDirectory {
+		project, err = db.CreateDirectoryProject(ctx, detected.Name, detected.Root)
 	} else {
 		project, err = db.CreateProject(ctx, detected.Name, detected.Root, detected.DefaultBranch)
 	}

@@ -148,7 +148,7 @@ done
 	if leadResult.Instructions != string(startupInstructions) {
 		t.Fatalf("startup and posse lead instructions differ:\nstartup:\n%s\nlead:\n%s", startupInstructions, leadResult.Instructions)
 	}
-	for _, want := range []string{"one Ship Brief and dispatch it directly", "Scouts, specifications, tickets and separate review Tasks are optional", "## Runtime obligations", "Never edit the Project repository", "Posse does not support those paths yet", "This is a status update, not another approval step"} {
+	for _, want := range []string{"one Ship Brief and dispatch it directly", "Scouts, specifications, tickets and separate review Tasks are optional", "## Runtime obligations", "Never edit the Project repository", "In-place execution is available only for explicitly registered Directory Projects", "This is a status update, not another approval step"} {
 		if !strings.Contains(leadResult.Instructions, want) {
 			t.Fatalf("composed instructions omit %q: %s", want, leadResult.Instructions)
 		}

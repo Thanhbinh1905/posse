@@ -131,6 +131,25 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return briefError(err)
 	}
+	if project.IsDirectory() {
+		if brief.Execution != "in-place" {
+			return axi.Failure("in_place_required", "directory Projects require execution: in-place in the Brief", false)
+		}
+		if brief.LandingMode != "" && brief.LandingMode != "local" {
+			return axi.Failure("in_place_delivery_unsupported", "in-place Tasks support local delivery only", false, "Remove landing_mode or select landing_mode: local")
+		}
+		if brief.Ticket != nil || len(brief.Issues) > 0 || len(brief.Refs) > 0 {
+			return axi.Failure("in_place_ticket_unsupported", "in-place Tasks cannot use forge issue links or close tickets", false, "Remove ticket/issues/refs and track the work separately")
+		}
+		if brief.Type == "review" || brief.Review != "" {
+			return axi.Failure("in_place_review_unsupported", "directory in-place Tasks cannot request Review or Git branch revisions", false)
+		}
+		if brief.Base != "" || brief.Target != "" || len(brief.BaseByRepo) > 0 || len(brief.TargetByRepo) > 0 || parsed.Flags["from-leftover"] != "" {
+			return axi.Failure("in_place_git_scope_unsupported", "in-place Tasks cannot select Git branches or Leftover revisions", false)
+		}
+	} else if brief.Execution == "in-place" {
+		return axi.Failure("in_place_project_required", "execution: in-place requires a Project registered with `posse project add --directory`", false)
+	}
 	slug := taskTitleSlug(brief.Title)
 	if err := validateWorkerName(slug); err != nil {
 		return axi.Failure("brief_invalid", "Task title cannot produce a descriptive branch slug", false, "Rewrite the title to state the work")
@@ -169,28 +188,41 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 		choice = &taskplan.UserChoice{Quote: quote, Actor: role, Source: "ride --user-approved"}
 	}
+	if project.IsDirectory() && choice == nil {
+		return axi.Failure("in_place_consent_required", "starting an in-place Task requires explicit User consent", false, "Pass `--user-approved \"<User's words approving the directory and paths>\"`")
+	}
 	// Workspace review tightening is checked per Member during plan resolution.
 	if _, err := dispatch.ResolveReview(brief.Review, cfg.Defaults.Review, choice != nil || project.IsWorkspace()); err != nil {
 		return briefError(err)
 	}
 	tightening := brief
+	if project.IsDirectory() {
+		tightening.LandingMode = "local"
+	}
 	if project.IsWorkspace() {
 		// Workspace members tighten one by one in planTaskMembers.
 		tightening.LandingMode = ""
 	}
-	mode, autonomy, err := dispatch.ResolveDelivery(tightening, cfg.Defaults.LandingMode, cfg.Autonomy, choice != nil)
+	deliveryDefault := cfg.Defaults.LandingMode
+	if project.IsDirectory() {
+		deliveryDefault = "local"
+	}
+	mode, autonomy, err := dispatch.ResolveDelivery(tightening, deliveryDefault, cfg.Autonomy, choice != nil)
 	if err != nil {
 		return briefError(err)
 	}
-	if !project.IsWorkspace() && brief.Type == "ship" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
+	if !project.IsWorkspace() && !project.IsDirectory() && brief.Type == "ship" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
 		return axi.Failure("brief_invalid", "a repository without origin can only Land locally", false)
 	}
-	if mode == "no-mistakes" && !project.IsWorkspace() {
+	if mode == "no-mistakes" && !project.IsWorkspace() && !project.IsDirectory() {
 		if err := ensureNoMistakesInitialized(ctx.Context, project.Root); err != nil {
 			return err
 		}
 	}
 	baseRef := project.DefaultBranch
+	if project.IsDirectory() {
+		baseRef = ""
+	}
 	var reviewsTaskID int64
 	var reviewedTask *store.Task
 	var reviewTargets []store.ReviewTarget
@@ -257,7 +289,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 	}
 	targetBranch := ""
-	if !project.IsWorkspace() && brief.Type == "ship" {
+	if !project.IsWorkspace() && !project.IsDirectory() && brief.Type == "ship" {
 		if brief.Base != "" {
 			baseRef, err = selectedBranchRef(ctx.Context, project.Root, brief.Base, "base")
 			if err != nil {
@@ -350,8 +382,10 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 	}
 	name := parsed.Flags["name"]
-	if err := taskBranchAvailable(ctx.Context, db, project, name, members); err != nil {
-		return err
+	if !project.IsDirectory() {
+		if err := taskBranchAvailable(ctx.Context, db, project, name, members); err != nil {
+			return err
+		}
 	}
 	if project.HerdrWorkspaceID == "" {
 		return axi.Failure("lead_missing", "Project has no Herdr workspace recorded", false, "Run `posse up` to restart the Lead")
@@ -419,7 +453,17 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	var mount store.Mount
 	err = s.runIntentStep(ctx.Context, db, intent, "mount.acquire", func() error {
 		var acquireErr error
-		if project.IsWorkspace() {
+		if plan.Execution.Mode == "in-place" {
+			boundPlan, planErr := task.AdmittedPlan()
+			if planErr != nil || boundPlan == nil {
+				if planErr == nil {
+					planErr = fmt.Errorf("in-place Task has no admitted plan")
+				}
+				return planErr
+			}
+			acquireErr = captureInPlaceBaseline(ctx.Context, db, project, task, *boundPlan)
+			mount = store.Mount{Path: project.Root}
+		} else if project.IsWorkspace() {
 			mount, acquireErr = s.acquireWorkspaceMount(ctx.Context, db, project, task, members, home, cfg.Remuda.Clean, cfg.Remuda.Setup, plan.Execution.RootContext)
 		} else {
 			mount, acquireErr = acquireMount(ctx.Context, db, project, task, home, cfg.Remuda.Clean, cfg.Remuda.Setup)
@@ -456,7 +500,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	}
 	s.relabelProjectTabs(ctx.Context, db, project)
 	worktreePath := filepath.Clean(mount.Path)
-	if kindConfig, ok := cfg.Kinds[resolution.Resolved.Kind]; ok {
+	if kindConfig, ok := cfg.Kinds[resolution.Resolved.Kind]; ok && plan.Execution.Mode != "in-place" {
 		prepareErr := s.runIntentStep(ctx.Context, db, intent, "repository.prepare", func() error {
 			if project.IsWorkspace() && kindConfig.Prepare == "claude-trust" {
 				worktrees := map[string]string{}
@@ -927,7 +971,9 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 		home, homeErr := s.homePath()
 		launchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "launch.md")
 		_, launchErr := os.Stat(launchPath)
-		if task.Branch == "" || task.WorktreePath == "" || launchErr != nil || homeErr != nil {
+		plan, planErr := task.AdmittedPlan()
+		inPlace := planErr == nil && plan != nil && plan.Execution.Mode == "in-place"
+		if !inPlace && (task.Branch == "" || task.WorktreePath == "" || launchErr != nil || homeErr != nil) {
 			cfg, _ := config.Load(home, project.Name)
 			if _, releaseErr := releaseMount(ctx, db, project, task, cfg.Remuda.Clean, false); releaseErr != nil {
 				reason += "; Mount release failed: " + releaseErr.Error()
@@ -952,28 +998,39 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief, launchPath, scratchPath, rootContext string) string {
 	landing := task.LandingMode
 	work := "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Never git push or open a PR."
-	if landing == "pr" && task.Type == "ship" && !project.IsWorkspace() {
+	if project.IsDirectory() {
+		work = "Work in place inside this explicitly registered local directory. Preserve all pre-existing edits. Write only under the User-approved `paths:` scopes in the Brief. Do not create or switch branches, commit, push, publish, merge, reset, or roll back source changes. Posse records the before-and-after file digests and changed paths. Complete the approved checks before signaling done."
+	} else if landing == "pr" && task.Type == "ship" && !project.IsWorkspace() {
 		work = "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Run `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only this Task branch and open or reuse its PR, then report its URL. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change the default branch, or merge."
 	} else if project.IsWorkspace() && task.Type == "ship" {
 		work = "Work only inside this Rider's Task Mount. Read anything, write nothing outside it. Commit inside changed member repositories. For each changed PR-mode member, run `posse publish --repo <member> \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only its Task branch and open or reuse its PR. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change default branches, or merge."
 	} else if landing == "no-mistakes" {
 		work = "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Deliver only through `no-mistakes axi run --intent <from Brief>`. Never push directly or open a PR."
 	}
-	if task.Type == "ship" && !project.IsWorkspace() {
+	if task.Type == "ship" && !project.IsWorkspace() && !project.IsDirectory() {
 		work += fmt.Sprintf("\n\nBranch plan: start from `%s`; PR/MR target `%s`.", task.BaseRef, taskTargetBranch(project, task))
 	}
 	signal := "posse holler done \"<summary>\""
 	if task.Type == "ship" {
-		signal += " after committing and ensuring a clean worktree"
+		if project.IsDirectory() {
+			signal += " after completing the approved checks"
+		} else {
+			signal += " after committing and ensuring a clean worktree"
+		}
 		if landing == "no-mistakes" || (landing == "pr" && !project.IsWorkspace()) {
 			signal += " --pr <url>"
 		}
 	} else {
-		signal += " --report <file-in-worktree-or-task-scratch>"
-		if project.IsWorkspace() && rootContext != "legacy" && rootContext != "" {
+		signal += " --report <file-in-task-scratch>"
+		if project.IsDirectory() {
+			work += " Save the Report in this Task's scratch directory. Posse leaves source changes in place and records their changed paths and digest; it never rolls them back."
+		} else if project.IsWorkspace() && rootContext != "legacy" && rootContext != "" {
 			work += " Put `report.md` in this Task's scratch directory. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside it at their worktree-relative paths. `.git` metadata is excluded. Shared-root files are not writable; use repeatable `--attach <file-or-directory>` for ignored Member evidence or unchanged files in an explicitly selected read-only root context. If a required Member baseline or Git listing cannot be read, Teardown refuses and keeps the Mount. `posse show <task>` lists saved attachments."
 		} else {
-			work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside report.md at those paths. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Mount. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence. `posse show <task>` lists saved attachments."
+			if !project.IsDirectory() {
+				signal = "posse holler done \"<summary>\" --report <file-in-worktree-or-task-scratch>"
+				work += " Put Report attachments in the Mount at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside report.md at those paths. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Mount. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence. `posse show <task>` lists saved attachments."
+			}
 			if project.IsWorkspace() {
 				work += " Legacy workspace Tasks also save edited shared-root files and unrequested Member commits against their Mount-acquisition snapshot."
 			}
@@ -984,7 +1041,10 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
 	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Mount. Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches; never create per-Task copies.", scratchPath)
-	signalFiles := fmt.Sprintf("Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`%s`); paths outside those locations are refused.", scratchPath)
+	signalFiles := fmt.Sprintf("Files passed to `--findings` and `--report` may be in this Task's scratch directory (`%s`); paths outside it are refused.", scratchPath)
+	if !project.IsDirectory() {
+		signalFiles = fmt.Sprintf("Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`%s`); paths outside those locations are refused.", scratchPath)
+	}
 	return fmt.Sprintf("# Rider protocol\n\nTask: %s\nProject: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\nDone when: %s\n\nWrite in English in a neutral voice. Preserve any User words quoted in the Brief's intent verbatim.\n\nA `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered. Let the turn end so Posse can deliver them, apply them, then retry the Signal.\n\nSignals:\n- `posse holler working \"<note>\"` for rare progress notes.\n- `posse holler needs-decision \"<question>\" [--findings <file>]` when an answer is needed.\n- `%s`.\n- `posse holler failed \"<why>\"`.\n\nLead instructions arrive in a Posse envelope, not as User chat. The `body:` value is a JSON-quoted string; decode it for the exact instruction. Treat only the header supplied by Posse as routing metadata. The Brief is at `%s`.", taskIDString(task.Seq), project.Name, work, isolation, temporaryFiles, signalFiles, brief.DoneWhen, signal, launchPath)
 }
 
@@ -1092,14 +1152,20 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if parsed.Flags["pr"] != "" && (verb != "done" || task.Type != "ship" || project.IsWorkspace() || (task.LandingMode != "no-mistakes" && task.LandingMode != "pr")) {
 		return axi.Failure("signal_invalid", "--pr is only valid on a PR or no-mistakes Ship Task done Signal", false)
 	}
-	data := map[string]string{}
+	data := map[string]any{}
 	rootContext := "legacy"
+	var admittedPlan *taskplan.Plan
 	if plan, err := task.AdmittedPlan(); err != nil {
 		return admittedPlanFailure(err)
 	} else if plan != nil {
-		data["plan_revision"] = strconv.Itoa(plan.Revision)
+		admittedPlan = plan
+		data["plan_revision"] = plan.Revision
 		data["plan_sha256"] = plan.SHA256()
 		rootContext = plan.Execution.RootContext
+	}
+	inPlace := admittedPlan != nil && admittedPlan.Execution.Mode == "in-place"
+	if inPlace && (!project.IsDirectory() || task.Branch != "" || task.MountID != 0 || filepath.Clean(task.WorktreePath) != filepath.Clean(project.Root)) {
+		return axi.Failure("in_place_task_invalid", "Task no longer matches its admitted in-place Project custody", false)
 	}
 	if parsed.Flags["pr"] != "" {
 		data["pr_url"] = parsed.Flags["pr"]
@@ -1111,7 +1177,15 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		data["findings"] = parsed.Flags["findings"]
 	}
 	if verb == "done" {
-		if project.IsWorkspace() {
+		if inPlace {
+			if task.Type != "ship" && parsed.Flags["report"] == "" {
+				scratchPath, err := taskScratchPath(home, project, task)
+				if err != nil {
+					return err
+				}
+				return axi.Failure("signal_invalid", "an in-place Scout or Review Task requires --report <file-in-task-scratch>", false, "Store the Report in Task scratch: "+scratchPath)
+			}
+		} else if project.IsWorkspace() {
 			if err := validateWorkspaceRootContext(ctx.Context, db, home, project, task, rootContext); err != nil {
 				return axi.Failure("signal_invalid", err.Error(), false, "Keep the shared workspace root unchanged; place Reports in Task scratch and edit only selected Members")
 			}
@@ -1127,7 +1201,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg); err != nil {
 				return err
 			}
-		} else if task.Type == "ship" {
+		} else if task.Type == "ship" && !inPlace {
 			if err := validateShipSignal(ctx.Context, task); err != nil {
 				return axi.Failure("signal_invalid", err.Error(), false, "Commit the change and leave the worktree clean before signalling done")
 			}
@@ -1184,10 +1258,14 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 					}
 				}
 			}
-		} else if parsed.Flags["report"] == "" {
+		}
+		if task.Type != "ship" && parsed.Flags["report"] == "" {
 			scratchPath, err := taskScratchPath(home, project, task)
 			if err != nil {
 				return err
+			}
+			if inPlace {
+				return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file-in-task-scratch>", false, "Store the Report in Task scratch: "+scratchPath)
 			}
 			return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file>", false, fmt.Sprintf("Store the report in the Rider's worktree (%s) or this Task's scratch directory (%s)", task.WorktreePath, scratchPath))
 		}
@@ -1205,11 +1283,17 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 	}
 	if verb == "needs-decision" && parsed.Flags["findings"] != "" {
+		if inPlace && !signalFileInTaskScratch(home, project, task, parsed.Flags["findings"]) {
+			return axi.Failure("signal_invalid", "in-place findings must come from this Task's scratch directory", false)
+		}
 		if _, err := copySignalFile(home, project, task, parsed.Flags["findings"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
 		}
 	}
 	if verb == "done" && task.Type != "ship" {
+		if inPlace && !signalFileInTaskScratch(home, project, task, parsed.Flags["report"]) {
+			return axi.Failure("signal_invalid", "in-place Reports must come from this Task's scratch directory", false)
+		}
 		if _, err := copySignalFile(home, project, task, parsed.Flags["report"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
 		}
@@ -1217,6 +1301,35 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			if err := saveExplicitAttachment(task, home, project, path); err != nil {
 				return axi.Failure("signal_invalid", err.Error(), false)
 			}
+		}
+	}
+	if inPlace && (verb == "done" || verb == "failed") {
+		var checks []inPlaceCheck
+		var checkErr error
+		if verb == "done" {
+			checks, checkErr = runInPlaceChecks(ctx.Context, *admittedPlan, task.WorktreePath)
+		}
+		output, outputErr := captureInPlaceOutput(ctx.Context, *admittedPlan, task.WorktreePath)
+		if outputErr != nil && verb == "done" {
+			var failure *axi.Error
+			if errors.As(outputErr, &failure) && failure.Code == "in_place_scope_violation" {
+				if err := recordInPlaceScopeNotice(ctx.Context, db, project, task, output); err != nil {
+					return err
+				}
+			}
+			return outputErr
+		}
+		data["output_digest"] = output.OutputSHA256
+		data["baseline_digest"] = output.BaselineSHA256
+		data["changed_files"] = output.ChangedFiles
+		if outputErr != nil {
+			data["scope_violation"] = outputErr.Error()
+		}
+		if checkErr != nil {
+			return checkErr
+		}
+		if verb == "done" {
+			data["checks"] = checks
 		}
 	}
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]
@@ -2076,15 +2189,55 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			}
 		}
 	}
-	mount, err := db.MountByTask(ctx, task.ID)
-	if err != nil || mount.State != "held" || mount.TaskID != task.ID {
-		return failure(axi.Failure("relaunch_mount_missing", "Task Mount is not held", false, "Inspect the Task and its Remuda Mount before relaunching"))
-	}
-	if task.State == store.StateFailed && (task.MountID == 0 || task.MountID != mount.ID) {
-		return failure(axi.Failure("relaunch_mount_missing", "failed Task no longer owns its Mount", false))
-	}
-	if task.WorktreePath == "" || task.Branch == "" {
-		return failure(axi.Failure("relaunch_mount_missing", "Task has no recorded Mount or branch", false))
+	inPlace := plan != nil && plan.Execution.Mode == "in-place"
+	if inPlace {
+		if !project.IsDirectory() || task.Branch != "" || task.MountID != 0 || task.WorktreePath != "" && filepath.Clean(task.WorktreePath) != filepath.Clean(project.Root) {
+			return failure(axi.Failure("relaunch_mount_missing", "in-place Task no longer matches its registered directory", false))
+		}
+		baselinePath := inPlaceBaselinePath(*plan)
+		if _, statErr := os.Stat(baselinePath); os.IsNotExist(statErr) && task.Launches == 0 {
+			if err := captureInPlaceBaseline(ctx, db, project, task, *plan); err != nil {
+				return failure(err)
+			}
+			task.WorktreePath = project.Root
+		} else if statErr != nil {
+			return failure(fmt.Errorf("in-place Task baseline is unavailable: %w", statErr))
+		} else {
+			baseline, err := loadInPlaceSnapshot(baselinePath)
+			if err != nil {
+				return failure(err)
+			}
+			if err := validateInPlaceRoot(project.Root, baseline.Root); err != nil {
+				return failure(err)
+			}
+			if err := validateInPlacePlanScopes(project.Root, plan.Execution.Paths, baseline.Scopes); err != nil {
+				return failure(err)
+			}
+			canonicalScopes, err := manifestInPlaceScopes(project.Root, baseline.Scopes)
+			if err != nil {
+				return failure(err)
+			}
+			if err := ensureInPlaceLeasesAt(ctx, db, project, task, canonicalScopes); err != nil {
+				return failure(err)
+			}
+		}
+		if task.WorktreePath == "" {
+			if err := db.UpdateTaskMountPath(ctx, task.ID, 0, project.Root); err != nil {
+				return failure(err)
+			}
+			task.WorktreePath = project.Root
+		}
+	} else {
+		mount, mountErr := db.MountByTask(ctx, task.ID)
+		if mountErr != nil || mount.State != "held" || mount.TaskID != task.ID {
+			return failure(axi.Failure("relaunch_mount_missing", "Task Mount is not held", false, "Inspect the Task and its Remuda Mount before relaunching"))
+		}
+		if task.State == store.StateFailed && (task.MountID == 0 || task.MountID != mount.ID) {
+			return failure(axi.Failure("relaunch_mount_missing", "failed Task no longer owns its Mount", false))
+		}
+		if task.WorktreePath == "" || task.Branch == "" {
+			return failure(axi.Failure("relaunch_mount_missing", "Task has no recorded Mount or branch", false))
+		}
 	}
 	payload := `{}`
 	if automatic {
@@ -2096,6 +2249,11 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	defer func() { _ = db.FinishIntent(ctx, intent.ID, intent.ProcessID) }()
 	track := func(step string, action func() error) error { return s.runIntentStep(ctx, db, intent, step, action) }
+	if inPlace {
+		if err := track("in_place.output.archive", func() error { return archiveInPlaceOutput(*plan, task.Launches) }); err != nil {
+			return failure(err)
+		}
+	}
 	if revision != nil {
 		if err := track("plan.revise", func() error { return db.ReviseTaskPlan(ctx, task, *revision) }); err != nil {
 			return failure(err)
@@ -2107,7 +2265,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 	}
 	gitStateReport := ""
-	if err := track("git.inspect", func() error {
+	if inPlace {
+		gitStateReport = "This Task resumes in place in the registered directory; no branch or Mount is used."
+	} else if err := track("git.inspect", func() error {
 		var inspectErr error
 		gitStateReport, inspectErr = inspectMountGitState(ctx, task.WorktreePath)
 		return inspectErr
@@ -2141,7 +2301,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			return failure(err)
 		}
 	}
-	if prepareChanged {
+	if prepareChanged && !inPlace {
 		if err := track("repository.prepare", func() error {
 			if project.IsWorkspace() && kindConfig.Prepare == "claude-trust" {
 				members, err := s.workspaceMembers(ctx, db, project, task)
@@ -2465,15 +2625,29 @@ func (s *Service) workerTask(ctx context.Context, db *store.DB) (store.Task, err
 		if err == nil {
 			return task, nil
 		}
-		if store.IsBusy(err) {
+		if !store.IsNotFound(err) {
 			return store.Task{}, err
+		}
+		if _, leadErr := db.ProjectByLeadPane(ctx, paneID); leadErr == nil {
+			return store.Task{}, fmt.Errorf("calling pane is a Project Lead, not a Rider")
+		} else if !store.IsNotFound(leadErr) {
+			return store.Task{}, leadErr
 		}
 	}
 	dir, err := currentDir()
 	if err != nil {
 		return store.Task{}, err
 	}
-	return taskForPath(ctx, db, dir)
+	task, err := taskForPath(ctx, db, dir)
+	if err != nil {
+		return store.Task{}, err
+	}
+	if plan, planErr := task.AdmittedPlan(); planErr != nil {
+		return store.Task{}, planErr
+	} else if plan != nil && plan.Execution.Mode == "in-place" {
+		return store.Task{}, fmt.Errorf("in-place Tasks must be identified by their Rider pane")
+	}
+	return task, nil
 }
 
 func validateShipSignal(ctx context.Context, task store.Task) error {

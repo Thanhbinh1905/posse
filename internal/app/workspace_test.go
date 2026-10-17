@@ -87,7 +87,7 @@ func TestDetectProjectInsideMemberSuggestsWorkspace(t *testing.T) {
 	}
 }
 
-func TestDetectProjectRefusesFolderWithoutRepositories(t *testing.T) {
+func TestDetectProjectRefusesUnregisteredPlainDirectory(t *testing.T) {
 	_, err := detectProject(context.Background(), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "no Git repositories directly inside it") {
 		t.Fatalf("err = %v", err)
@@ -196,6 +196,89 @@ func TestUpRegistersWorkspaceAfterOneConfirmation(t *testing.T) {
 	}
 	if len(questions) != 1 {
 		t.Fatalf("registered Project asked again: %q", questions)
+	}
+}
+
+func TestProjectAddRegistersGitAndNonGitDirectories(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		withGit bool
+		flag    bool
+	}{
+		{name: "git directory", withGit: true, flag: true},
+		{name: "plain directory", withGit: false, flag: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			directory := filepath.Join(parent, "local-project")
+			if err := os.MkdirAll(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if test.withGit {
+				initRepo(t, directory)
+			}
+			harness := newUpHarness(t, parent, directory)
+			args := []string{"project", "add", "--name", "local"}
+			if test.flag {
+				args = append(args, "--directory")
+			}
+			if code := harness.run(args...); code != 0 {
+				t.Fatalf("project add: %d\n%s", code, harness.out.String())
+			}
+			project, err := harness.db(t).ProjectByRoot(context.Background(), directory)
+			if err != nil || !project.IsDirectory() || project.DefaultBranch != "" {
+				t.Fatalf("registered directory = %#v, %v", project, err)
+			}
+			if code := harness.run("project", "show"); code != 0 || !strings.Contains(harness.out.String(), "kind: directory") || !strings.Contains(harness.out.String(), "execution_mode: in-place") || !strings.Contains(harness.out.String(), "landing_mode: local") || strings.Contains(harness.out.String(), "target_branch") {
+				t.Fatalf("Directory Project summary is misleading: %d\n%s", code, harness.out.String())
+			}
+			if code := harness.run("up", "--claude"); code != 0 || !strings.Contains(harness.out.String(), "lead: starting") {
+				t.Fatalf("start Lead for Directory Project: %d\n%s", code, harness.out.String())
+			}
+		})
+	}
+}
+
+func TestProjectAddCanRegisterDirectoryInsideRegisteredRepository(t *testing.T) {
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "repository")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	initRepo(t, repo)
+	harness := newUpHarness(t, parent, repo)
+	if code := harness.run("project", "add", "--name", "repository"); code != 0 {
+		t.Fatalf("register repository: %d\n%s", code, harness.out.String())
+	}
+	directory := filepath.Join(repo, "local")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(directory)
+	if code := harness.run("project", "add", "--directory", "--name", "local"); code != 0 {
+		t.Fatalf("register nested directory: %d\n%s", code, harness.out.String())
+	}
+	project, err := harness.db(t).ProjectByRoot(context.Background(), directory)
+	if err != nil || !project.IsDirectory() {
+		t.Fatalf("nested Directory Project = %#v, %v", project, err)
+	}
+	if current, found, err := registeredProjectFor(context.Background(), harness.db(t), directory); err != nil || !found || current.ID != project.ID {
+		t.Fatalf("nested Directory Project resolution = %#v found=%t err=%v", current, found, err)
+	}
+}
+
+func TestProjectAddRequiresDirectoryFlagForPlainFolder(t *testing.T) {
+	parent := t.TempDir()
+	directory := filepath.Join(parent, "local-project")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness := newUpHarness(t, parent, directory)
+	if code := harness.run("project", "add", "--name", "local"); code == 0 || !strings.Contains(harness.out.String(), "not_in_git_repository") {
+		t.Fatalf("project add without --directory = %d\n%s", code, harness.out.String())
+	}
+	if _, err := harness.db(t).ProjectByRoot(context.Background(), directory); !store.IsNotFound(err) {
+		t.Fatalf("plain directory was registered without --directory: %v", err)
 	}
 }
 

@@ -57,6 +57,13 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	plan, planErr := task.AdmittedPlan()
+	if planErr != nil {
+		return admittedPlanFailure(planErr)
+	}
+	if plan != nil && plan.Execution.Mode == "in-place" {
+		return axi.Failure("publish_refused", "in-place Tasks cannot publish or open a PR", false)
+	}
 	cfg, err := s.prepareProject(out.Context, db, project)
 	if err != nil {
 		return err
