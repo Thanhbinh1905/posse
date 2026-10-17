@@ -56,7 +56,7 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 	if !found {
 		return openedTab{}, axi.Failure("lead_missing", "the Lead's Herdr workspace is not open", false, "Run `posse up` to restart the Lead, then retry")
 	}
-	if !project.IsWorkspace() {
+	if !project.IsWorkspace() && !project.IsDirectory() {
 		for _, workspace := range snapshot.Workspaces {
 			if workspace.Worktree.CheckoutPath == path || workspace.Root == path {
 				return openedTab{}, axi.Failure("rider_workspace_occupied", "another Herdr workspace already holds this Mount", false, "Inspect the Mount's open panes before retrying")
@@ -68,7 +68,7 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 		"workspace_id": workspaceID, "cwd": path, "label": workerTabLabel(task), "focus": false,
 		"env": map[string]string{workerHomeEnv: filepath.Clean(home)},
 	}
-	if !project.IsWorkspace() {
+	if !project.IsWorkspace() && !project.IsDirectory() {
 		method = "worktree.open"
 		params = map[string]any{"workspace_id": workspaceID, "path": path, "label": workerTabLabel(task), "focus": false}
 	}
@@ -92,7 +92,7 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 	if err := json.Unmarshal(raw, &result); err != nil || result.RootPane.PaneID == "" {
 		return openedTab{}, axi.Failure("herdr_invalid_response", "Herdr did not return the Rider's pane", true)
 	}
-	if !project.IsWorkspace() {
+	if !project.IsWorkspace() && !project.IsDirectory() {
 		if result.AlreadyOpen {
 			return openedTab{}, axi.Failure("rider_workspace_occupied", "the Mount was opened before Posse could label its pane", false, "Inspect the Mount's open panes before retrying")
 		}
@@ -109,7 +109,7 @@ func (s *Service) openRiderTab(ctx context.Context, home string, project store.P
 	metadata := workerDisplayMetadata(task, "", displayAgent)
 	// Linked repository workspaces already supply the visible Rider name.
 	row := ""
-	if project.IsWorkspace() {
+	if project.IsWorkspace() || project.IsDirectory() {
 		row = workerTabLabel(task)
 		row = riderTabLabel(row, true)
 	}

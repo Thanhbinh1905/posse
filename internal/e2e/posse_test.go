@@ -22,6 +22,184 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestPosseInPlaceDirectoryProjects(t *testing.T) {
+	root := newFixtureRoot(t, herdr.TestRootName())
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	module := moduleRoot(t)
+	binary := filepath.Join(binDir, "posse")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/posse")
+	build.Dir = module
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build posse: %v\n%s", err, output)
+	}
+	claude := filepath.Join(binDir, "claude")
+	fakeAgent := `#!/bin/sh
+set -eu
+herdr pane report-agent "$HERDR_PANE_ID" --source posse.e2e --agent claude --state idle >/dev/null 2>&1
+IFS= read -r prompt || exit 0
+[ "$PWD" = "$POSSE_E2E_DIRECTORY" ] || { echo "unexpected Rider directory: $PWD" >> "$POSSE_E2E_AGENT_LOG"; exit 1; }
+herdr pane report-agent "$HERDR_PANE_ID" --source posse.e2e --agent claude --state working >/dev/null 2>&1
+while [ ! -e "$POSSE_E2E_SIGNAL_GATE" ]; do sleep 0.05; done
+printf 'in-place E2E change\n' > src/created.txt
+posse holler done 'E2E changed the approved directory without a commit' >> "$POSSE_E2E_AGENT_LOG" 2>&1 || { echo 'done signal failed' >> "$POSSE_E2E_AGENT_LOG"; exit 1; }
+herdr pane report-agent "$HERDR_PANE_ID" --source posse.e2e --agent claude --state idle >/dev/null 2>&1 &
+sleep 300 >/dev/null 2>&1 &
+while IFS= read -r line; do :; done
+`
+	if err := os.WriteFile(claude, []byte(fakeAgent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, withGit := range []bool{false, true} {
+		name := "plain"
+		if withGit {
+			name = "git"
+		}
+		t.Run(name, func(t *testing.T) {
+			caseRoot := newFixtureRoot(t, herdr.TestRootName())
+			directory := filepath.Join(caseRoot, "project")
+			if err := os.MkdirAll(filepath.Join(directory, "src"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			env := isolatedE2EEnv(t, caseRoot)
+			env = setEnv(env, "POSSE_TEST_ROOT", caseRoot)
+			env = setEnv(env, "POSSE_E2E_DIRECTORY", directory)
+			env = setEnv(env, "POSSE_E2E_SIGNAL_GATE", filepath.Join(caseRoot, "signal.done"))
+			env = setEnv(env, "POSSE_E2E_AGENT_LOG", filepath.Join(caseRoot, "agent.log"))
+			env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			env = setEnv(env, "GIT_AUTHOR_NAME", "Posse E2E")
+			env = setEnv(env, "GIT_AUTHOR_EMAIL", "posse-e2e@example.test")
+			env = setEnv(env, "GIT_COMMITTER_NAME", "Posse E2E")
+			env = setEnv(env, "GIT_COMMITTER_EMAIL", "posse-e2e@example.test")
+			headBefore := ""
+			if withGit {
+				gitTest(t, env, directory, "init", "-b", "main")
+				gitTest(t, env, directory, "config", "user.name", "Posse E2E")
+				gitTest(t, env, directory, "config", "user.email", "posse-e2e@example.test")
+				if err := os.WriteFile(filepath.Join(directory, "README.md"), []byte("tracked baseline\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				gitTest(t, env, directory, "add", "README.md")
+				gitTest(t, env, directory, "commit", "-m", "initial")
+				headBefore = strings.TrimSpace(gitTest(t, env, directory, "rev-parse", "HEAD"))
+				if err := os.WriteFile(filepath.Join(directory, "README.md"), []byte("pre-existing dirty edit\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			configText := "[defaults]\nlanding_mode = \"pr\"\ngate = [\"test -f src/created.txt\"]\nauto_unsaddle = \"never\"\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n"
+			if err := os.MkdirAll(filepath.Join(caseRoot, "posse"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(caseRoot, "posse", "config.toml"), []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := herdr.WriteIsolatedConfig(caseRoot); err != nil {
+				t.Fatal(err)
+			}
+			client := herdr.NewWithEnv("herdr", env)
+			startServer(t, client)
+			workspace, err := createWorkspace(client, directory)
+			if err != nil {
+				t.Fatalf("create Lead workspace: %v", err)
+			}
+			if output := runPosse(t, binary, directory, env, "project", "add", "--directory", "--name", "local"); !strings.Contains(output, "kind: directory") {
+				t.Fatalf("register local directory: %s", output)
+			}
+			home := filepath.Join(caseRoot, "posse")
+			db, err := store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := db.ProjectByRoot(context.Background(), directory)
+			if err == nil {
+				err = db.SetProjectLead(context.Background(), project.ID, workspace.Workspace.WorkspaceID, workspace.RootPane.PaneID, "posse:local:lead")
+			}
+			if closeErr := db.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			leadEnv := setEnv(setEnv(env, "HERDR_ENV", "1"), "HERDR_PANE_ID", workspace.RootPane.PaneID)
+			leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
+			brief := filepath.Join(caseRoot, "brief.md")
+			briefText := "---\ntype: ship\ntitle: Add local E2E file\ndone_when: approved check passes\nexecution: in-place\npaths: [src]\n---\nCreate the file.\n"
+			if err := os.WriteFile(brief, []byte(briefText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output := runPosse(t, binary, directory, leadEnv, "ride", "--brief", brief, "--name", "add-local-e2e", "--user-approved", "I approve edits under src")
+			if !strings.Contains(output, "state: working") {
+				t.Fatalf("ride did not start: %s", output)
+			}
+			if err := os.WriteFile(filepath.Join(caseRoot, "signal.done"), []byte("go\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if !waitForCondition(30*time.Second, func() bool {
+				current, err := store.Open(home)
+				if err != nil {
+					return false
+				}
+				defer current.Close()
+				tasks, err := current.Tasks(context.Background(), project.ID, true)
+				return err == nil && len(tasks) == 1 && tasks[0].State == store.StateReported
+			}) {
+				log, _ := os.ReadFile(filepath.Join(caseRoot, "agent.log"))
+				t.Fatalf("Rider did not complete: %s", log)
+			}
+			db, err = store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tasks, err := db.Tasks(context.Background(), project.ID, true)
+			if err != nil || len(tasks) != 1 || tasks[0].State != store.StateReported || tasks[0].Branch != "" || tasks[0].MountID != 0 {
+				t.Fatalf("completed in-place Task = %#v, %v", tasks, err)
+			}
+			leases, err := db.ResourceLeases(context.Background(), project.ID)
+			if err != nil || len(leases) != 1 {
+				t.Fatalf("in-place lease was not held through completion: %#v, %v", leases, err)
+			}
+			paneID := tasks[0].PaneID
+			if paneID == "" {
+				t.Fatal("in-place Task has no Rider pane")
+			}
+			if contents, err := os.ReadFile(filepath.Join(directory, "src", "created.txt")); err != nil || string(contents) != "in-place E2E change\n" {
+				t.Fatalf("in-place source change missing: %q, %v", contents, err)
+			}
+			if withGit {
+				headAfter := strings.TrimSpace(gitTest(t, env, directory, "rev-parse", "HEAD"))
+				branch := strings.TrimSpace(gitTest(t, env, directory, "branch", "--show-current"))
+				if headAfter != headBefore || branch != "main" {
+					t.Fatalf("in-place task changed Git history: HEAD %s -> %s, branch %s", headBefore, headAfter, branch)
+				}
+				if contents, err := os.ReadFile(filepath.Join(directory, "README.md")); err != nil || string(contents) != "pre-existing dirty edit\n" {
+					t.Fatalf("pre-existing dirty source changed: %q, %v", contents, err)
+				}
+			}
+			_ = db.Close()
+			if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": paneID}); err != nil {
+				t.Fatalf("close the completed Rider pane before normal Teardown: %v", err)
+			}
+			if output := runPosse(t, binary, directory, leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
+				t.Fatalf("unsaddle did not finish: %s", output)
+			}
+			if contents, err := os.ReadFile(filepath.Join(directory, "src", "created.txt")); err != nil || string(contents) != "in-place E2E change\n" {
+				t.Fatalf("Teardown did not preserve source changes: %q, %v", contents, err)
+			}
+			db, err = store.Open(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			leases, err = db.ResourceLeases(context.Background(), project.ID)
+			if err != nil || len(leases) != 0 {
+				t.Fatalf("Teardown retained in-place lease: %#v, %v", leases, err)
+			}
+		})
+	}
+}
+
 func TestPosseSpawnNoticeLandTeardownAndRecovery(t *testing.T) {
 	root := newFixtureRoot(t, herdr.TestRootName())
 	binDir := filepath.Join(root, "bin")

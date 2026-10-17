@@ -198,8 +198,20 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, taskErr := taskForPath(ctx.Context, db, dir); taskErr == nil {
-		return axi.Failure("lead_only", "posse up cannot run inside a Rider Mount", false, "Run `posse up` in the Project folder")
+	actor := s.configCaller(ctx.Context, db)
+	if actor.role == "worker" {
+		return axi.Failure("lead_only", "posse up cannot run from a Rider pane", false, "Run `posse up` from a User or Lead shell in the Project folder")
+	}
+	if task, taskErr := taskForPath(ctx.Context, db, dir); taskErr == nil {
+		plan, planErr := task.AdmittedPlan()
+		if planErr != nil {
+			return admittedPlanFailure(planErr)
+		}
+		if plan == nil || plan.Execution.Mode != "in-place" {
+			return axi.Failure("lead_only", "posse up cannot run inside a Rider Mount", false, "Run `posse up` in the Project folder")
+		}
+	} else if !store.IsNotFound(taskErr) {
+		return taskErr
 	}
 	project, registered, err := registeredProjectFor(ctx.Context, db, dir)
 	if err != nil {
@@ -249,7 +261,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 		return axi.Failure("agent_kind_unknown", "unknown Lead agent kind "+kind, false, "Choose a configured kind from `posse config show --effective`")
 	}
 	workspace := (registered && project.IsWorkspace()) || (!registered && detected.Kind == store.ProjectKindWorkspace)
-	if cfg.Defaults.LandingMode == "no-mistakes" {
+	if cfg.Defaults.LandingMode == "no-mistakes" && detected.Kind != store.ProjectKindDirectory && !project.IsDirectory() {
 		if workspace {
 			return axi.Failure("config_invalid", "no-mistakes landing is not available for workspace Projects", false, "Set `landing_mode` to local or pr for Project "+name)
 		}

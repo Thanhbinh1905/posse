@@ -564,7 +564,7 @@ func safeWorkspaceRootPath(path string) bool {
 }
 
 func isGitMetadataPath(path string) bool {
-	for _, component := range strings.Split(path, string(os.PathSeparator)) {
+	for _, component := range strings.Split(filepath.ToSlash(path), "/") {
 		if component == ".git" {
 			return true
 		}

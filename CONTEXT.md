@@ -39,7 +39,7 @@ The Git branch that holds a Task's code; it is independent of the Task Name.
 _Avoid_: Task Name, slug
 
 **Ship Task**:
-A Task whose outcome is a change landed into the Project.
+A Task whose outcome is a change to the Project, integrated through a Landing Mode or recorded as an in-place source change.
 _Avoid_: Fix task, build task
 
 **Closing Issue**:
@@ -79,7 +79,7 @@ A Worker's own declaration of where its Task stands, such as done, needs-decisio
 _Avoid_: Status, report, event
 
 **Decision**:
-A question put to the User that only the User may answer, such as whether to Land, relaunch or discard; answered once and recorded.
+A question put to the User that only the User may answer, such as whether to Land, relaunch, discard Mount work or preserve and stop an in-place Task; answered once and recorded.
 _Avoid_: Approval (for the question itself), prompt, needs-decision (that is a Signal to the Lead)
 
 **Brief**:
@@ -115,7 +115,7 @@ A standing grant the User gives a Project that lets the Lead decide review findi
 _Avoid_: Permission, auto mode
 
 **Gate**:
-A check that must pass before a Ship Task may Land.
+A configured check Posse runs before a Ship Task Lands or an in-place Task reports completion.
 _Avoid_: Validation, CI, pipeline
 
 **Stall**:
@@ -123,16 +123,24 @@ A Worker that appears to be working but shows no progress in its output or its w
 _Avoid_: Hang, freeze, wedge
 
 **Teardown**:
-Removing a finished Task's Worker and worktree; allowed only after the Task has Landed or the User explicitly agrees.
+Removing a Task's Worker and releasing its custody after its work is preserved; Mount Tasks require Landing, reporting or approved discard, while in-place Tasks preserve source files and release path leases.
 _Avoid_: Cleanup, discard
 
 **Project**:
-One git repository, or one Workspace of repositories, under management, with its own Tasks, state and policy.
+One Git repository, one Workspace of repositories, or one explicitly registered directory under management, with its own Tasks, state and policy.
 _Avoid_: Repo (in prose), home
 
 **Workspace**:
 A Project whose root is a plain folder and whose Members are the repositories directly inside it; one Task may change several Members.
 _Avoid_: Monorepo, stack, multi-repo
+
+**Directory Project**:
+A folder explicitly registered as a local Project, whether or not it contains Git metadata. Its Tasks require explicit in-place execution, User consent and selected relative paths.
+_Avoid_: Workspace, repository Project
+
+**In-place execution**:
+A consented Task execution mode that works in a Directory Project's registered source root, leases selected paths, runs approved checks and preserves changes without creating a branch or Land.
+_Avoid_: Mount execution, unscoped local work
 
 **Member**:
 One repository of a Workspace, with its own default branch, remote and Landing Mode.

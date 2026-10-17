@@ -44,13 +44,16 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		return taskplan.Plan{}, err
 	}
 	execution := taskplan.Execution{Mode: "mount", Scope: project.Kind, Base: task.BaseRef, Target: task.TargetBranch, RootContext: brief.RootContext}
-	if !project.IsWorkspace() && execution.Target == "" {
+	if project.IsDirectory() {
+		execution.Mode, execution.Scope, execution.Base, execution.Target = "in-place", store.ProjectKindDirectory, "", ""
+	}
+	if !project.IsWorkspace() && !project.IsDirectory() && execution.Target == "" {
 		execution.Target = project.DefaultBranch
 	}
 	if execution.Scope == "" {
 		execution.Scope = "repo"
 	}
-	if brief.Base != "" && !project.IsWorkspace() {
+	if brief.Base != "" && !project.IsWorkspace() && !project.IsDirectory() {
 		execution.BaseCommit, err = selectedBaseCommit(ctx, project.Root, task.BaseRef)
 		if err != nil {
 			return taskplan.Plan{}, err
@@ -98,11 +101,16 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		return taskplan.Plan{}, err
 	}
 	delivery := cfg.Defaults.LandingMode
+	review := cfg.Defaults.Review
+	if project.IsDirectory() {
+		delivery = "local"
+		review = "none"
+	}
 	if project.IsWorkspace() {
 		delivery = task.LandingMode
 	}
 	return taskplan.Resolve(taskplan.Request{Brief: taskplan.Select("brief", source, briefData), Inputs: inputs, Execution: execution, Launch: launch,
-		Review: cfg.Defaults.Review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
+		Review: review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
 		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		Gate:  cfg.Defaults.Gate, MergeMethod: cfg.Defaults.MergeMethod, Remuda: config.Remuda{Clean: cfg.Remuda.Clean, Setup: cfg.Remuda.Setup}})

@@ -91,7 +91,7 @@ func (p taskFailureProgress) ReadPane(context.Context, herdr.Adapter, string, in
 	return "unchanged", nil
 }
 
-func (p taskFailureProgress) WorktreeFingerprint(ctx context.Context, path string) (string, error) {
+func (p taskFailureProgress) WorktreeFingerprint(ctx context.Context, path string, _ bool) (string, error) {
 	if err := p.failures[path]; err != nil {
 		return "", err
 	}

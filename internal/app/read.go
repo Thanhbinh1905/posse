@@ -3,8 +3,12 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -186,7 +190,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	for _, notice := range openNotices {
 		noticeRows = append(noticeRows, noticeSummary{ID: notice.ID, Task: noticeTaskID(ctx.Context, db, project.ID, notice.TaskID), Name: noticeTaskName(ctx.Context, db, project.ID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
 	}
-	help := homeHelp(tasks, openNotices)
+	help := homeHelp(project, tasks, openNotices)
 	result := axi.Object{
 		{Key: "project", Value: summarizeHomeProject(project, cfg, s.leadStatus(ctx.Context, project))},
 	}
@@ -256,13 +260,13 @@ func summarizeHomeProject(project store.Project, cfg config.Config, leadStatus s
 	}
 	return axi.Row{
 		{Key: "name", Value: project.Name},
-		{Key: "mode", Value: cfg.Defaults.LandingMode},
+		{Key: "mode", Value: projectLandingMode(project, cfg)},
 		{Key: "autonomy", Value: "review=" + autonomy.Review + " land=" + autonomy.Land},
 		{Key: "lead", Value: leadStatus},
 	}
 }
 
-func homeHelp(tasks []store.Task, notices []store.Notice) []any {
+func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice) []any {
 	var show, land, recovery string
 	for _, task := range tasks {
 		if show == "" && (task.State == store.StateNeedsDecision || task.State == store.StateBlocked) {
@@ -284,10 +288,16 @@ func homeHelp(tasks []store.Task, notices []store.Notice) []any {
 	help := []any{}
 	if show != "" {
 		if show == recovery {
-			help = append(help, "Run `posse decisions` to ask the User whether to relaunch or discard "+recovery)
+			choice := "discard"
+			if project.IsDirectory() {
+				choice = "preserve and stop"
+			}
+			help = append(help, "Run `posse decisions` to ask the User whether to relaunch or "+choice+" "+recovery)
 		} else {
 			help = append(help, "Run `posse show "+show+"` to inspect this Task")
 		}
+	} else if project.IsDirectory() {
+		help = append(help, "Run `posse ride --brief <file> --name <short> --user-approved \"<User's words>\"` with `execution: in-place` and selected `paths:` to delegate a Task")
 	} else {
 		help = append(help, "Run `posse ride --brief <file> [--name <short>]` to delegate a Task")
 	}
@@ -302,6 +312,8 @@ func homeHelp(tasks []store.Task, notices []store.Notice) []any {
 			ids[index] = strconv.FormatInt(notice.ID, 10)
 		}
 		help = append(help, "Run `posse ack "+strings.Join(ids, ",")+"` after handling these Notices")
+	} else if project.IsDirectory() {
+		help = append(help, "Run `posse remuda` to inspect active path leases")
 	} else {
 		help = append(help, "Run `posse remuda` to inspect released Mounts")
 	}
@@ -331,7 +343,7 @@ func summarizeProject(project store.Project, cfg config.Config, tasks []store.Ta
 	for _, task := range tasks {
 		rows = append(rows, activeTaskSummary{ID: project.Name + "/" + taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State)})
 	}
-	return projectSummary{Name: project.Name, Mode: cfg.Defaults.LandingMode, Autonomy: "review=" + autonomy.Review + " land=" + autonomy.Land, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
+	return projectSummary{Name: project.Name, Mode: projectLandingMode(project, cfg), Autonomy: "review=" + autonomy.Review + " land=" + autonomy.Land, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
 }
 
 func (s *Service) ls(ctx *axi.Context, args []string) error {
@@ -470,6 +482,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	view["admission"] = "legacy"
 	if plan != nil {
 		view["admission"], view["plan_revision"] = "admitted", plan.Revision
+		view["execution_mode"] = plan.Execution.Mode
 		if parsed.Bool("full") {
 			view["plan"] = plan
 		}
@@ -686,6 +699,54 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		view["signals"] = taskSignalRows(task, signals)
 		view["transitions"] = taskTransitionRows(task, transitions)
+		if plan != nil && plan.Execution.Mode == "in-place" {
+			if data, err := os.ReadFile(inPlaceOutputPath(*plan)); err == nil {
+				var output inPlaceOutput
+				if err := json.Unmarshal(data, &output); err != nil {
+					return fmt.Errorf("decode in-place output evidence: %w", err)
+				}
+				view["in_place_output"] = output
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+			archives, err := filepath.Glob(filepath.Join(plan.Paths.Output, "in-place-output-launch-*.json"))
+			if err != nil {
+				return err
+			}
+			sort.Slice(archives, func(i, j int) bool {
+				launchAndSuffix := func(path string) (int, int) {
+					stem := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "in-place-output-launch-"), ".json")
+					launchText, suffixText, hasSuffix := strings.Cut(stem, "-")
+					launch, _ := strconv.Atoi(launchText)
+					suffix := 1
+					if hasSuffix {
+						suffix, _ = strconv.Atoi(suffixText)
+					}
+					return launch, suffix
+				}
+				launchI, suffixI := launchAndSuffix(archives[i])
+				launchJ, suffixJ := launchAndSuffix(archives[j])
+				if launchI != launchJ {
+					return launchI < launchJ
+				}
+				return suffixI < suffixJ
+			})
+			history := make([]any, 0, len(archives))
+			for _, archive := range archives {
+				data, err := os.ReadFile(archive)
+				if err != nil {
+					return err
+				}
+				var output inPlaceOutput
+				if err := json.Unmarshal(data, &output); err != nil {
+					return fmt.Errorf("decode in-place output evidence %s: %w", filepath.Base(archive), err)
+				}
+				history = append(history, map[string]any{"attempt": filepath.Base(archive), "evidence": output})
+			}
+			if len(history) > 0 {
+				view["in_place_output_history"] = history
+			}
+		}
 		view["profile"] = task.Profile
 		view["launches"] = task.Launches
 		launchIdentities, err := db.TaskLaunchIdentities(ctx.Context, task.ID)
@@ -696,13 +757,13 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["launch_identity_history_known"] = launchHistoryComplete(task, launchIdentities)
 		view["dispatch_rule"] = task.DispatchRule
 		view["landing_mode"] = task.LandingMode
-		if task.Type == "ship" && !project.IsWorkspace() {
+		if task.Type == "ship" && !project.IsWorkspace() && !project.IsDirectory() {
 			view["target_branch"] = taskTargetBranch(project, task)
 		}
-		if task.Branch != store.TaskBranchName(task.Seq) {
+		if task.Branch != "" && task.Branch != store.TaskBranchName(task.Seq) {
 			view["branch"] = task.Branch
 		}
-		if task.BaseRef != store.TaskBranchName(task.Seq) {
+		if task.BaseRef != "" && task.BaseRef != store.TaskBranchName(task.Seq) {
 			view["base_ref"] = task.BaseRef
 		}
 		view["worktree_path"] = task.WorktreePath

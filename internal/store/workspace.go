@@ -14,6 +14,7 @@ import (
 const (
 	ProjectKindRepo      = "repo"
 	ProjectKindWorkspace = "workspace"
+	ProjectKindDirectory = "directory"
 )
 
 // Member repository states. A member that disappears from the workspace folder
@@ -81,6 +82,29 @@ type TaskTargetChange struct {
 var ErrTargetBranchChanged = errors.New("Task target branch changed during stacked retarget")
 
 func (p Project) IsWorkspace() bool { return p.Kind == ProjectKindWorkspace }
+func (p Project) IsDirectory() bool { return p.Kind == ProjectKindDirectory }
+
+// CreateDirectoryProject registers an explicit local folder without Git metadata.
+func (db *DB) CreateDirectoryProject(ctx context.Context, name, root string) (Project, error) {
+	uuid, err := newProjectUUID()
+	if err != nil {
+		return Project{}, err
+	}
+	now := time.Now().UnixMilli()
+	result, err := db.ExecContext(ctx, `INSERT INTO projects(name, root, default_branch, kind, status, created_at, last_activity_at, project_uuid) VALUES (?, ?, '', ?, 'active', ?, ?, ?)`, name, root, ProjectKindDirectory, now, now, uuid)
+	if err != nil {
+		return Project{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return Project{}, err
+	}
+	project := Project{ID: id, UUID: uuid, Name: name, Root: root, Kind: ProjectKindDirectory, Status: "active", CreatedAt: now, LastActivityAt: now}
+	if err := db.PersistProject(ctx, id); err != nil {
+		return Project{}, err
+	}
+	return project, nil
+}
 
 // CreateWorkspaceProject registers a workspace Project and its members in one transaction.
 func (db *DB) CreateWorkspaceProject(ctx context.Context, name, root string, repos []ProjectRepo) (Project, error) {

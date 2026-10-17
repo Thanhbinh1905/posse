@@ -154,6 +154,7 @@ assignments='
 4 TestReviewRejectsAttachedSessionSelectors
 4 TestB05ConfigDispatchAndFrozenRelaunch
 4 TestPosseSpawnNoticeLandTeardownAndRecovery
+4 TestPosseInPlaceDirectoryProjects
 4 TestRealCLIIntentCrashMatrix
 4 TestGroupCloseDuringRelaunchRestoresLeadAndRider
 4 TestLookoutRestartsAfterProcessExit
