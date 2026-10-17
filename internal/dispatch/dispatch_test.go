@@ -19,6 +19,66 @@ func TestResolveUsesSingleTypeRule(t *testing.T) {
 	}
 }
 
+func TestImplicitInheritanceDefaultsToKindAndCanUseLeadProfile(t *testing.T) {
+	cfg := config.Config{
+		Lead:     config.Lead{Kind: "claude", Profiles: map[string]string{"claude": "lead"}},
+		Defaults: config.Defaults{DispatchInheritance: "kind"},
+		Kinds:    map[string]config.Kind{"claude": {}},
+		Profiles: map[string]config.Profile{"lead": {Kind: "claude", Model: "model-a", Effort: "high"}},
+	}
+	result, err := Resolve(cfg, "ship", "")
+	if err != nil || result.Profile != "implicit:claude" || result.Rule != ImplicitRule || result.Resolved.Model != "" || result.Resolved.Effort != "" {
+		t.Fatalf("default kind-only inheritance = %#v, %v", result, err)
+	}
+	cfg.Defaults.DispatchInheritance = "lead_profile"
+	result, err = Resolve(cfg, "ship", "")
+	if err != nil || result.Profile != "lead" || result.Rule != ImplicitLeadProfileRule || result.Resolved.Model != "model-a" || result.Resolved.Effort != "high" {
+		t.Fatalf("Lead Profile inheritance = %#v, %v", result, err)
+	}
+}
+
+func TestDisabledKindsRefuseNewDispatchButRemainReadable(t *testing.T) {
+	cfg := config.Config{
+		Lead:     config.Lead{Kind: "claude"},
+		Defaults: config.Defaults{DispatchInheritance: "kind"},
+		Kinds:    map[string]config.Kind{"claude": {Disabled: true}},
+		Profiles: map[string]config.Profile{"worker": {Kind: "claude"}, "other": {Kind: "codex"}},
+	}
+	for _, testCase := range []struct {
+		name           string
+		requested      string
+		defaultProfile string
+		wantCode       string
+	}{
+		{name: "implicit Lead kind", wantCode: "kind_disabled"},
+		{name: "explicit Profile", requested: "worker", wantCode: "kind_disabled"},
+		{name: "configured default", defaultProfile: "worker", wantCode: "kind_disabled"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg.DispatchDefault.Use = testCase.defaultProfile
+			requested := testCase.requested
+			if testCase.name == "implicit Lead kind" {
+				cfg.DispatchDefault.Use = ""
+			}
+			_, err := Resolve(cfg, "ship", requested)
+			profileError, ok := err.(*ProfileError)
+			if !ok || profileError.Code != testCase.wantCode {
+				t.Fatalf("Resolve error = %#v, want %s", err, testCase.wantCode)
+			}
+		})
+	}
+	for _, rule := range []string{ImplicitRule, ImplicitLeadProfileRule} {
+		profile, ok := StoredProfile(cfg, "implicit:claude", rule)
+		if !ok || profile.Kind != "claude" {
+			t.Errorf("disabled historical Profile with rule %q = %#v, %t", rule, profile, ok)
+		}
+	}
+	profile, ok := StoredProfile(cfg, "worker", "--profile worker")
+	if !ok || profile.Kind != "claude" {
+		t.Fatalf("disabled named historical Profile = %#v, %t", profile, ok)
+	}
+}
+
 func TestSpecBriefFixtureParsesWithTrailingComments(t *testing.T) {
 	contents, err := os.ReadFile("testdata/spec-brief.md")
 	if err != nil {

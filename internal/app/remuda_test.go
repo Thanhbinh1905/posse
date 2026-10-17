@@ -205,6 +205,13 @@ func TestPruneCandidatesRemoveOnlyExcessIdleAndCleanBrokenMounts(t *testing.T) {
 	if !reflect.DeepEqual(got, []int{5, 3, 2}) {
 		t.Fatalf("prune candidates = %v, want read-only broken mount 5, clean broken mount 3 and excess idle mount 2", got)
 	}
+	zeroKeepCandidates := pruneCandidates(context.Background(), []store.Mount{
+		{ID: 1, Number: 1, State: "idle", Path: idle1},
+		{ID: 2, Number: 2, State: "idle", Path: idle2},
+	}, 0, mountWorktreeClean)
+	if len(zeroKeepCandidates) != 2 {
+		t.Fatalf("keep_idle=0 prune candidates = %#v, want both idle Mounts", zeroKeepCandidates)
+	}
 	if err := makeMountUntrackedWritable(context.Background(), readOnlyBroken, "pristine"); err != nil {
 		t.Fatal(err)
 	}

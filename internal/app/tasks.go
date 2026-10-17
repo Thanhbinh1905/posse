@@ -93,6 +93,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
 	}
+	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
 	if brief.ReportKind != "" {
 		result = append(result, axi.Field{Key: "report_kind", Value: brief.ReportKind})
 	}
@@ -603,6 +604,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "help", Value: []any{"Run `posse show " + taskIDString(sequence) + "` to inspect the Rider", "Run `posse peek " + taskIDString(sequence) + "` to read Rider output"}},
 	}
+	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
 	if reviewIdentityDetails != nil {
 		result = append(result, axi.Field{Key: "review_identity", Value: reviewIdentityDetails})
 	}
@@ -2370,6 +2372,16 @@ func workerAgentArgs(profile config.Profile, kind config.Kind, session string) [
 	return taskplan.Arguments(profile, kind, session)
 }
 
+func launchIdentityFields(resolution dispatch.Resolution, kinds map[string]config.Kind) []axi.Field {
+	kind := kinds[resolution.Resolved.Kind]
+	identity := configuredLaunchIdentity(resolution.Profile, resolution.Resolved, kind, workerAgentArgs(resolution.Resolved, kind, ""))
+	return []axi.Field{
+		{Key: "model", Value: resolution.Resolved.Model},
+		{Key: "effort", Value: resolution.Resolved.Effort},
+		{Key: "model_known", Value: identity.ModelKnown},
+	}
+}
+
 func agentSessionID(agent, session string) string {
 	return sessionref.Sanitize(agent, session)
 }
@@ -2571,12 +2583,19 @@ func profileError(err error) error {
 	for _, candidate := range profileErr.Candidates {
 		help = append(help, fmt.Sprintf("when=%q profile=%s", candidate.When, candidate.Profile))
 	}
-	if profileErr.Code == "profile_required" && len(profileErr.Candidates) == 0 {
-		help = append(help,
-			"Run `posse config set dispatch.default.use <profile>` to choose a default Profile",
-			"Run `/posse-setup` to configure available Profiles",
-		)
-	} else {
+	switch profileErr.Code {
+	case "profile_required":
+		if len(profileErr.Candidates) == 0 {
+			help = append(help,
+				"Run `posse config set dispatch.default.use <profile>` to choose a default Profile",
+				"Run `/posse-setup` to configure available Profiles",
+			)
+		} else {
+			help = append(help, "Pass `--profile <name>` after the Lead chooses based on the Brief")
+		}
+	case "kind_disabled":
+		help = append(help, "Set `kinds.<kind>.disabled` to false or choose a Profile for another enabled kind")
+	default:
 		help = append(help, "Pass `--profile <name>` after the Lead chooses based on the Brief")
 	}
 	return axi.Failure(profileErr.Code, profileErr.Message, false, help...)

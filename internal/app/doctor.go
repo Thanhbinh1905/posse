@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -86,7 +87,18 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	if configErr != nil {
 		addCheck("config", "fail", configErr.Error(), "Fix the reported configuration key")
 	} else {
-		addCheck("config", "ok", fmt.Sprintf("%d profiles", len(cfg.Profiles)), "")
+		detail := fmt.Sprintf("%d profiles; implicit dispatch=%s", len(cfg.Profiles), cfg.Defaults.DispatchInheritance)
+		var disabledKinds []string
+		for kind, settings := range cfg.Kinds {
+			if settings.Disabled {
+				disabledKinds = append(disabledKinds, kind)
+			}
+		}
+		sort.Strings(disabledKinds)
+		if len(disabledKinds) > 0 {
+			detail += "; disabled dispatch kinds=" + strings.Join(disabledKinds, ",")
+		}
+		addCheck("config", "ok", detail, "")
 	}
 	db, _, dbErr := s.openDB()
 	if dbErr != nil {
@@ -116,6 +128,11 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 				if err != nil {
 					addCheck("forge "+project.Name, "warn", err.Error(), "Fix the Project config")
 					continue
+				}
+				if detail, countErr := executionResourceSummary(ctx.Context, db, project.ID, projectCfg.Defaults.MaxWorkers); countErr != nil {
+					addCheck("execution resources "+project.Name, "warn", countErr.Error(), "Inspect the Project Tasks and Remuda")
+				} else {
+					addCheck("execution resources "+project.Name, "ok", detail, "")
 				}
 				forge, _, err := resolveForgeForRepositoryFresh(ctx.Context, project.Root, projectCfg, "")
 				if err != nil {
@@ -356,6 +373,35 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		}
 	}
 	return doctorResult{Checks: checks, Manifests: manifests}, nil
+}
+
+func executionResourceSummary(ctx context.Context, db *store.DB, projectID int64, maxWorkers int) (string, error) {
+	activeRiders, err := db.ActiveWorkerCount(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	tasks, err := db.Tasks(ctx, projectID, true)
+	if err != nil {
+		return "", err
+	}
+	activeTaskIDs := make(map[int64]bool, len(tasks))
+	for _, task := range tasks {
+		switch task.State {
+		case store.StateSpawning, store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled:
+			activeTaskIDs[task.ID] = true
+		}
+	}
+	mounts, err := db.Mounts(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	parkedResources := 0
+	for _, mount := range mounts {
+		if mount.State == "held" && !activeTaskIDs[mount.TaskID] {
+			parkedResources++
+		}
+	}
+	return fmt.Sprintf("active_riders=%d/%d; native_children=0 tracked (native execution unsupported); parked_resources=%d", activeRiders, maxWorkers, parkedResources), nil
 }
 
 func stringListContains(values []string, wanted string) bool {

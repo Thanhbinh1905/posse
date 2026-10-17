@@ -31,6 +31,7 @@ func signalReviewPolicyTask(t *testing.T, f *prLifecycleFixture, task store.Task
 
 func TestSelectedReviewPolicyLocalLand(t *testing.T) {
 	f := reviewIdentityFixture(t)
+	stopBackgroundLookout(t, f)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	if code, out := rideReviewIdentityTask(t, f, "Selected policy", "author", ""); code != 0 {
@@ -90,6 +91,7 @@ func TestSelectedReviewPolicyLocalLand(t *testing.T) {
 
 func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 	f := reviewIdentityFixture(t)
+	stopBackgroundLookout(t, f)
 	// No explicit review setting: the built-in policy is none.
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["exit 1"]`)
 	if code, out := rideReviewIdentityTask(t, f, "No independent review", "author", ""); code != 0 {
