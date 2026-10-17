@@ -240,10 +240,10 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 
 	first := fixture.rideAndComplete(t, brief, "t1")
-	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA != "" || first.Branch != "posse/pr-lifecycle-change" || first.PaneLabel != "posse:shop:t1" || first.AgentName != "posse-shop-t1-1" || first.TargetBranch != "staging" || first.BaseRef != strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/remotes/origin/staging")) {
+	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA != "" || first.Branch != "posse/t1" || first.PaneLabel != "posse:shop:t1" || first.AgentName != "posse-shop-t1-1" || first.TargetBranch != "staging" || first.BaseRef != strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/remotes/origin/staging")) {
 		t.Fatalf("Worker did not publish its PR before the Lead's Gate: %#v", first)
 	}
-	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "show-ref", "--hash", "refs/heads/posse/pr-lifecycle-change")); got != strings.TrimSpace(gitTest(t, fixture.env, first.WorktreePath, "rev-parse", "HEAD")) {
+	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "show-ref", "--hash", "refs/heads/posse/t1")); got != strings.TrimSpace(gitTest(t, fixture.env, first.WorktreePath, "rev-parse", "HEAD")) {
 		t.Fatalf("Worker did not push its own Task branch: %s", got)
 	}
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
@@ -257,7 +257,7 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA == "" {
 		t.Fatalf("first gated PR was not recorded: %#v", first)
 	}
-	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "show-ref", "--hash", "refs/heads/posse/pr-lifecycle-change")); got != first.GatedSHA {
+	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "show-ref", "--hash", "refs/heads/posse/t1")); got != first.GatedSHA {
 		t.Fatalf("PR push head=%s, gated SHA=%s", got, first.GatedSHA)
 	}
 
@@ -313,7 +313,7 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondPublished := fixture.rideAndComplete(t, secondBrief, "t2")
-	if secondPublished.PRURL != "https://github.com/acme/shop/pull/18" || secondPublished.GatedSHA != "" || secondPublished.Branch != "posse/external-merge-change" {
+	if secondPublished.PRURL != "https://github.com/acme/shop/pull/18" || secondPublished.GatedSHA != "" || secondPublished.Branch != "posse/t2" {
 		t.Fatalf("second Worker did not publish its own PR: %#v", secondPublished)
 	}
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t2"); !strings.Contains(output, "landing") {
@@ -920,8 +920,10 @@ func TestClosedPRDiscardRechecksForgeStateBeforeTeardown(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	ctx := context.Background()
+	gitTest(t, fixture.env, fixture.repo, "branch", "posse/t1")
+	gitTest(t, fixture.env, fixture.repo, "push", "origin", "posse/t1")
 	taskID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
-		Seq: 1, Type: "ship", Title: "Closed PR discard", LandingMode: "pr",
+		Seq: 1, Type: "ship", Title: "Closed PR discard", ShortName: "closed-pr-discard", LandingMode: "pr", Branch: "posse/t1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1016,7 +1018,7 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 			}
 			assertMountUnlocked(t, f.env, f.repo, landing.WorktreePath)
 			f.requireNotice(t, "t1", "pr_merged")
-			if content := gitTest(t, f.env, f.repo, "show", "refs/heads/posse/pr-follow-up-leftover:follow-up-work.txt"); content != "unmerged work\n" {
+			if content := gitTest(t, f.env, f.repo, "show", "refs/heads/posse/t1-leftover:follow-up-work.txt"); content != "unmerged work\n" {
 				t.Fatalf("Leftover did not preserve %s work: %q", mode, content)
 			}
 			decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
@@ -1140,7 +1142,7 @@ func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 	}
 	fixture.waitTaskState(t, "t1", store.StateDone)
 	completed := fixture.mustTask(t, "t1")
-	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/posse/pr-follow-up")))
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/posse/t1")))
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
 		t.Fatalf("follow-up could not be re-gated: %s", output)
 	}
@@ -1721,7 +1723,7 @@ printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 case "$1 $2" in
   "api graphql") cat "$POSSE_TEST_GH_STATE"; if [ -e "$POSSE_TEST_ROOT/gh-exit-nonzero" ]; then exit 1; fi ;;
   "pr list")
-    case " $* " in *' --head posse/pr-lifecycle-change '*) branch=posse/pr-lifecycle-change; number=17 ;; *' --head posse/pr-follow-up '*) branch=posse/pr-follow-up; number=17 ;; *' --head posse/pr-create-recovery '*) branch=posse/pr-create-recovery; number=17 ;; *' --head posse/external-merge-change '*) branch=posse/external-merge-change; number=18 ;; *) exit 90 ;; esac
+    case " $* " in *' --head posse/t1 '*) branch=posse/t1; number=17 ;; *' --head posse/t2 '*) branch=posse/t2; number=18 ;; *) exit 90 ;; esac
     if grep -q "/pull/$number" "$POSSE_TEST_GH_OPEN_PRS"; then
       if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ]; then
         if [ ! -f "$POSSE_TEST_ROOT/gh-list-stale-head-started" ]; then date +%s%3N > "$POSSE_TEST_ROOT/gh-list-stale-head-started"; fi
@@ -1741,7 +1743,7 @@ case "$1 $2" in
       printf '[]\n'
     fi ;;
   "pr create")
-    case " $* " in *' --head posse/pr-lifecycle-change '*) branch=posse/pr-lifecycle-change; number=17 ;; *' --head posse/pr-follow-up '*) branch=posse/pr-follow-up; number=17 ;; *' --head posse/pr-create-recovery '*) branch=posse/pr-create-recovery; number=17 ;; *' --head posse/external-merge-change '*) branch=posse/external-merge-change; number=18 ;; *) exit 90 ;; esac
+    case " $* " in *' --head posse/t1 '*) branch=posse/t1; number=17 ;; *' --head posse/t2 '*) branch=posse/t2; number=18 ;; *) exit 90 ;; esac
     head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
     url="https://github.com/acme/shop/pull/$number"
     while [ "$#" -gt 0 ]; do
@@ -1767,7 +1769,7 @@ case "$1 $2" in
     case "$*" in
       *'--json title,body'*) python3 -c 'import json,sys; print(json.dumps({"title":open(sys.argv[1]).read(),"body":open(sys.argv[2]).read()}))' "$POSSE_TEST_GH_TITLE" "$POSSE_TEST_GH_BODY" ;;
       *)
-        case "$3" in */17) branch=$(git --git-dir="$POSSE_TEST_REMOTE" for-each-ref --format='%(refname:short)' 'refs/heads/posse/pr-*' | head -1) ;; */18) branch=posse/external-merge-change ;; *) exit 90 ;; esac
+        case "$3" in */17) branch=posse/t1 ;; */18) branch=posse/t2 ;; *) exit 90 ;; esac
         head=
         if [ -n "$branch" ]; then head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch"); fi
         state=OPEN

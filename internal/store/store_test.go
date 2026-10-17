@@ -1338,15 +1338,48 @@ func TestTaskSequenceRejectsReusedBranchWithoutCreatingTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	occupied := func(int) (bool, error) { return false, nil }
-	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name"}, occupied); err != nil {
+	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name", Branch: "posse/reused-ref"}, occupied); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name"}, occupied); !errors.Is(err, ErrTaskBranchExists) {
+	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name", Branch: "posse/reused-ref"}, occupied); !errors.Is(err, ErrTaskBranchExists) {
 		t.Fatalf("reused Task branch error = %v", err)
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
-	if err != nil || len(tasks) != 1 || tasks[0].Branch != "posse/same-name" {
+	if err != nil || len(tasks) != 1 || tasks[0].Branch != "posse/reused-ref" {
 		t.Fatalf("Tasks after collision = %#v, %v", tasks, err)
+	}
+}
+
+func TestTaskBranchIsBoundToAllocatedSequence(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	occupied := func(int) (bool, error) { return false, nil }
+	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name", Branch: "posse/t2"}, occupied); !errors.Is(err, ErrTaskBranchSequenceMismatch) {
+		t.Fatalf("branch for another sequence was admitted: %v", err)
+	}
+	firstID, firstSeq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name"}, occupied)
+	if err != nil || firstSeq != 1 {
+		t.Fatalf("first Task branch allocation = %d, %v", firstSeq, err)
+	}
+	secondID, secondSeq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name"}, occupied)
+	if err != nil || secondSeq != 2 {
+		t.Fatalf("second Task branch allocation = %d, %v", secondSeq, err)
+	}
+	first, err := db.TaskByID(ctx, project.ID, firstID)
+	if err != nil || first.Branch != "posse/t1" || first.ShortName != "same-name" {
+		t.Fatalf("first Task identity = %#v, %v", first, err)
+	}
+	second, err := db.TaskByID(ctx, project.ID, secondID)
+	if err != nil || second.Branch != "posse/t2" || second.ShortName != "same-name" {
+		t.Fatalf("second Task identity = %#v, %v", second, err)
 	}
 }
 

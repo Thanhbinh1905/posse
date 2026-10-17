@@ -32,7 +32,7 @@ func TestTaskScratchPruneReclaimsUnheldTerminalTasksOnly(t *testing.T) {
 	}
 	makeTask := func(seq int, state store.State) store.Task {
 		t.Helper()
-		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "ship", Title: "Task", Branch: "posse/t" + strconv.Itoa(seq), BaseRef: "main"})
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "ship", Title: "Task", Branch: store.TaskBranchName(seq), BaseRef: "main"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -424,7 +424,7 @@ func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
 	}
 	makeLandedTask := func(seq int) (store.Task, string) {
 		t.Helper()
-		branch := "posse/t" + strconv.Itoa(seq)
+		branch := store.TaskBranchName(seq)
 		gitTest(t, repo, "switch", "-c", branch)
 		file := "landed-" + strconv.Itoa(seq) + ".txt"
 		if err := os.WriteFile(filepath.Join(repo, file), []byte("landed\n"), 0o600); err != nil {

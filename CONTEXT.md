@@ -31,8 +31,12 @@ The handle `t<n>` that names one Task everywhere the User or the Lead refers to 
 _Avoid_: Internal id, seq
 
 **Task Name**:
-A short slug derived from a Task's title, used for its branch and Herdr workspace or tab label; it is display only and may repeat across Tasks.
+An optional human-facing label, supplied by the Lead or generated from the title; it does not identify the Task or determine its branch, and may repeat.
 _Avoid_: Id, handle, nickname
+
+**Task Branch**:
+The Git branch that holds a Task's code; it is independent of the Task Name.
+_Avoid_: Task Name, slug
 
 **Ship Task**:
 A Task whose outcome is a change to the Project, integrated through a Landing Mode or recorded as an in-place source change.
@@ -155,7 +159,7 @@ A User-written rule that says which Profile a kind of Task should use.
 _Avoid_: Routing rule, policy
 
 **Identity**:
-The User-chosen name, persona and language the Lead uses when talking to the User; it never appears in anything another agent reads.
+The User-chosen Lead name, persona, language and form of address. Name, persona and form of address apply to User messages; language also selects neutral artifact prose. Persona is not evidence, and quoted User intent stays exact.
 _Avoid_: Alias, nickname
 
 **Preferences**:

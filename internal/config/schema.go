@@ -31,9 +31,9 @@ type KeySpec struct {
 var keySpecs = []KeySpec{
 	{Key: "identity.lead.name", Type: TypeString, Default: "Lead", Meaning: "Display name and Lead voice toward the User."},
 	{Key: "identity.lead.persona", Type: TypeString, Default: "", Meaning: "Lead persona used only when speaking to the User."},
-	{Key: "identity.lead.language", Type: TypeString, Default: "en", Meaning: "Language the Lead uses with the User."},
+	{Key: "identity.lead.language", Type: TypeString, Default: "en", Meaning: "Language for Lead messages to the User and neutral prose in Briefs, send instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence."},
 	{Key: "identity.lead.address_user", Type: TypeString, Default: "", Meaning: "How the Lead addresses the User."},
-	{Key: "identity.worker.display_prefix", Type: TypeString, Default: "rider", Meaning: "Retained for compatibility; does not affect Herdr workspace labels."},
+	{Key: "identity.worker.display_prefix", Type: TypeString, Default: "rider", Meaning: "Deprecated; retained for compatibility and has no effect on Herdr labels or Task names."},
 	{Key: "lead.kind", Type: TypeString, Default: "", Meaning: "Default agent kind used by posse up."},
 	{Key: "lowkey.lead", Type: TypeBoolean, Default: false, Meaning: "Lowkey mode for the Lead: only report decisions and outcomes to the User. A display preference, not an autonomy grant."},
 	{Key: "lead.profiles.<kind>", Type: TypeString, Meaning: "Profile used by the Lead for this agent kind."},

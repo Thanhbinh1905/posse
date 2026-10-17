@@ -717,6 +717,25 @@ func (db *DB) CreateTaskWithSequenceAndIntent(ctx context.Context, projectID int
 }
 
 var ErrTaskBranchExists = errors.New("Task branch already used")
+var ErrTaskBranchSequenceMismatch = errors.New("Task branch does not match allocated Task sequence")
+
+// TaskBranchName returns the stable Git branch for a Task sequence.
+func TaskBranchName(sequence int) string {
+	return "posse/t" + strconv.Itoa(sequence)
+}
+
+func taskBranchSequence(branch string) (int, bool) {
+	const prefix = "posse/t"
+	if !strings.HasPrefix(branch, prefix) {
+		return 0, false
+	}
+	digits := strings.TrimPrefix(branch, prefix)
+	if digits == "" || strings.Trim(digits, "0123456789") != "" {
+		return 0, false
+	}
+	sequence, err := strconv.Atoi(digits)
+	return sequence, err == nil && sequence > 0 && strconv.Itoa(sequence) == digits
+}
 
 func (db *DB) TaskBranchExists(ctx context.Context, projectID int64, branch string) (bool, error) {
 	var exists bool
@@ -728,11 +747,11 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if task.ShortName == "" {
 		return 0, 0, fmt.Errorf("Task short name is required")
 	}
-	task.Branch = "posse/" + task.ShortName
+	inPlace := false
 	if plan, err := task.AdmittedPlan(); err != nil {
 		return 0, 0, err
 	} else if plan != nil && plan.Execution.Mode == "in-place" {
-		task.Branch = ""
+		inPlace = true
 	}
 	now := time.Now().UnixMilli()
 	tx, err := db.beginTxWithRetry(ctx)
@@ -744,15 +763,6 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	var seq int
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET last_activity_at=last_activity_at WHERE id=?`, projectID); err != nil {
 		return 0, 0, err
-	}
-	if task.Branch != "" {
-		var branchUsed bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id=? AND branch=?)`, projectID, task.Branch).Scan(&branchUsed); err != nil {
-			return 0, 0, err
-		}
-		if branchUsed {
-			return 0, 0, ErrTaskBranchExists
-		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM tasks WHERE project_id=?`, projectID).Scan(&seq); err != nil {
 		return 0, 0, err
@@ -766,6 +776,21 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 			break
 		}
 		seq++
+	}
+	if task.Branch == "" && !inPlace {
+		task.Branch = TaskBranchName(seq)
+	}
+	if task.Branch != "" {
+		if branchSequence, ok := taskBranchSequence(task.Branch); ok && branchSequence != seq {
+			return 0, 0, ErrTaskBranchSequenceMismatch
+		}
+		var branchUsed bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id=? AND branch=?)`, projectID, task.Branch).Scan(&branchUsed); err != nil {
+			return 0, 0, err
+		}
+		if branchUsed {
+			return 0, 0, ErrTaskBranchExists
+		}
 	}
 	planJSON, err := bindTaskPlan(task, seq)
 	if err != nil {

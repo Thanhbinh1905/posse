@@ -27,6 +27,9 @@ import (
 func TestClaudeStopOverlapDeadlineAndGracefulStop(t *testing.T) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
+	// The test owns the poll claim below, so stop the independent Lookout
+	// before claiming it to avoid racing its startup poll.
+	stopBackgroundLookout(t, f)
 	ctx := context.Background()
 	// Hold a genuine poll claim as another maintenance owner. Stop renewals
 	// must neither overwrite it nor release another process's claim.

@@ -19,31 +19,49 @@ func riderTabLabel(name string, last bool) string {
 // relabelProjectTabs restores sidebar placement, plain tab labels and row
 // metadata. Presentation failures never block the command.
 func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project store.Project) {
-	if s.Herdr == nil {
+	if s.Herdr == nil || ctx.Err() != nil {
 		return
 	}
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
-		log.Printf("posse: could not reconcile tab labels for Project %s: snapshot: %v", project.Name, err)
+		if ctx.Err() == nil {
+			log.Printf("posse: could not reconcile tab labels for Project %s: snapshot: %v", project.Name, err)
+		}
 		return
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {
-		log.Printf("posse: could not reconcile tab labels for Project %s: tasks: %v", project.Name, err)
+		if ctx.Err() == nil {
+			log.Printf("posse: could not reconcile tab labels for Project %s: tasks: %v", project.Name, err)
+		}
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	s.groupRiderWorkspaces(ctx, snapshot, project, tasks)
 	labels, rows := projectTabPresentation(snapshot, project, tasks)
 	for _, tab := range snapshot.Tabs {
+		if ctx.Err() != nil {
+			return
+		}
 		label, owned := labels[tab.TabID]
 		if !owned || tab.Label == label {
 			continue
 		}
 		if _, err := s.herdrCall(ctx, "tab.rename", map[string]any{"tab_id": tab.TabID, "label": label}); err != nil {
-			log.Printf("posse: could not label Herdr tab %s as %q: %v", tab.TabID, label, err)
+			if ctx.Err() == nil {
+				log.Printf("posse: could not label Herdr tab %s as %q: %v", tab.TabID, label, err)
+			}
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 	for _, pane := range snapshot.Panes {
+		if ctx.Err() != nil {
+			return
+		}
 		row, owned := rows[pane.PaneID]
 		if !owned {
 			continue
@@ -57,7 +75,12 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 			metadata = leadDisplayMetadata(project, pane.PaneID, pane.Agent, "")
 		}
 		if _, err := s.herdrCall(ctx, "pane.report_metadata", metadata); err != nil {
-			log.Printf("posse: could not label Herdr Agents row for pane %s: %v", pane.PaneID, err)
+			if ctx.Err() == nil {
+				log.Printf("posse: could not label Herdr Agents row for pane %s: %v", pane.PaneID, err)
+			}
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }
