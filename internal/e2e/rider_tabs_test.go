@@ -662,6 +662,7 @@ func (f *riderTabsFixture) exitRider(t *testing.T, taskID string) {
 		t.Fatal(err)
 	}
 	var lastProcessInfo json.RawMessage
+	var lastPane herdr.Pane
 	if !waitForCondition(5*time.Second, func() bool {
 		raw, err := f.client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
 		if err != nil {
@@ -675,9 +676,23 @@ func (f *riderTabsFixture) exitRider(t *testing.T, taskID string) {
 				ForegroundProcessGroupID int `json:"foreground_process_group_id"`
 			} `json:"process_info"`
 		}
-		return json.Unmarshal(raw, &info) == nil && info.ProcessInfo.ShellPID > 0 && (info.ProcessInfo.ForegroundProcessGroupID <= 1 || info.ProcessInfo.ForegroundProcessGroupID == info.ProcessInfo.ShellPID)
+		if json.Unmarshal(raw, &info) != nil || info.ProcessInfo.ShellPID <= 1 || (info.ProcessInfo.ForegroundProcessGroupID > 1 && info.ProcessInfo.ForegroundProcessGroupID != info.ProcessInfo.ShellPID) {
+			return false
+		}
+		// Herdr clears the active agent identity asynchronously after the shell is foreground again.
+		snapshot, err := f.client.Snapshot(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID == task.PaneID {
+				lastPane = pane
+				return pane.Agent == ""
+			}
+		}
+		return false
 	}) {
-		t.Fatalf("fake Rider for %s did not exit naturally: process_info=%s", taskID, lastProcessInfo)
+		t.Fatalf("fake Rider for %s did not settle naturally: process_info=%s pane=%#v", taskID, lastProcessInfo, lastPane)
 	}
 }
 

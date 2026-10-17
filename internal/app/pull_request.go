@@ -1188,7 +1188,8 @@ func reviewPolicyViolation(ctx context.Context, db *store.DB, project store.Proj
 // gh may exit nonzero for a single GraphQL error while still printing usable
 // data for the other aliases. Keep stderr separate so it cannot corrupt JSON.
 func graphQLCommandOutput(ctx context.Context, root, query string) (string, string, error) {
-	commandCtx, cancel := context.WithTimeout(ctx, externalCommandTimeout)
+	timeout := externalCommandTimeoutValue()
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := execgroup.CommandContext(commandCtx, "gh", "api", "graphql", "-f", "query="+query)
 	command.Dir = root
@@ -1198,7 +1199,7 @@ func graphQLCommandOutput(ctx context.Context, root, query string) (string, stri
 	err := command.Run()
 	if commandCtx.Err() != nil {
 		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
-			err = fmt.Errorf("gh timed out after %s: %w", externalCommandTimeout, context.DeadlineExceeded)
+			err = fmt.Errorf("gh timed out after %s: %w", timeout, context.DeadlineExceeded)
 		} else {
 			err = commandCtx.Err()
 		}

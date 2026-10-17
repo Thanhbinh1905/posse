@@ -31,6 +31,8 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 	}
 	env := isolatedE2EEnv(t, root)
 	env = setEnv(env, "POSSE_TEST_ROOT", root)
+	// Keep the blackholed fetch pending beyond the 30-second maintenance window.
+	env = setEnv(env, "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "60s")
 	env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	env = setEnv(env, "GIT_AUTHOR_NAME", "Posse E2E")
 	env = setEnv(env, "GIT_AUTHOR_EMAIL", "posse-e2e@example.test")
