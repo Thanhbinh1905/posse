@@ -105,8 +105,8 @@ INSERT INTO tasks(
     landing_mode, autonomy_review, autonomy_land, branch, base_ref, target_branch, worktree_path,
     herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, agent_session_kind, pr_url,
     landed_ref, last_output_hash, last_worktree_hash, last_progress_at,
-    agent_absent_since, idle_since, created_at, updated_at, plan_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    agent_absent_since, idle_since, created_at, updated_at, plan_json, report_kind
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertProject :execresult
 INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)

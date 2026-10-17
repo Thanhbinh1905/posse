@@ -296,9 +296,7 @@ func (c *Client) Run(ctx context.Context, args ...string) ([]byte, error) {
 		binary = "herdr"
 	}
 	command := execgroup.CommandContext(ctx, binary, args...)
-	if c.Env != nil {
-		command.Env = append([]string(nil), c.Env...)
-	}
+	command.Env = c.commandEnvironment()
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return nil, normalizeError(fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output))))
@@ -315,6 +313,9 @@ func (c *Client) socketPath() string {
 	env := environmentMap(c.environment())
 	if path := env["HERDR_SOCKET_PATH"]; path != "" {
 		return path
+	}
+	if env["POSSE_TEST_HERDR"] == "1" && env["POSSE_TEST_HERDR_SOCKET_PATH"] != "" {
+		return env["POSSE_TEST_HERDR_SOCKET_PATH"]
 	}
 	configRoot := env["HERDR_CONFIG_PATH"]
 	if configRoot != "" {
@@ -337,6 +338,17 @@ func (c *Client) environment() []string {
 	return os.Environ()
 }
 
+func (c *Client) commandEnvironment() []string {
+	env := append([]string(nil), c.environment()...)
+	values := environmentMap(env)
+	if values["HERDR_SOCKET_PATH"] == "" && values["POSSE_TEST_HERDR"] == "1" {
+		if path := values["POSSE_TEST_HERDR_SOCKET_PATH"]; path != "" {
+			env = append(env, "HERDR_SOCKET_PATH="+path)
+		}
+	}
+	return env
+}
+
 // StartIsolatedServer keeps launcher descendants in a process group and
 // retains the validated root so tests can also stop a daemonized server.
 func (c *Client) StartIsolatedServer() (*ServerProcess, error) {
@@ -344,12 +356,15 @@ func (c *Client) StartIsolatedServer() (*ServerProcess, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Dir(c.socketPath()), 0o700); err != nil {
+		return nil, fmt.Errorf("create isolated Herdr socket directory: %w", err)
+	}
 	binary := c.Binary
 	if binary == "" {
 		binary = "herdr"
 	}
 	command := execgroup.Command(binary, "server")
-	command.Env = append([]string(nil), c.environment()...)
+	command.Env = c.commandEnvironment()
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
