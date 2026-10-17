@@ -15,15 +15,19 @@ import (
 func TestStoppingBackgroundLookoutReleasesActiveForgePoll(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
+	// Stop the startup Lookout before seeding its inputs. Restart it only after
+	// the controlled forge command and active PR record are ready.
+	stopBackgroundLookout(t, f)
 	probeLog := filepath.Join(f.root, "glab-probes.log")
 	glab := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + probeLog + "\"\ncase \"$1 $2\" in\n  'auth status') exec sleep 3 ;;\n  *) exit 1 ;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(f.root, "bin", "glab"), []byte(glab), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	_, noticeID, _ := seedRetryableForgeLookoutFixture(t, f)
+	runPosse(t, f.binary, f.repo, f.env, "lookout", "--repair")
 	// Stop while the real background process owns its five-minute poll
 	// lease, rather than relying on a race with the fixture's first empty poll.
-	if !waitForCondition(5*time.Second, func() bool {
+	if !waitForCondition(10*time.Second, func() bool {
 		_, err := os.Stat(probeLog)
 		return err == nil
 	}) {
