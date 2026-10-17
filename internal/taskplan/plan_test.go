@@ -18,7 +18,7 @@ func request(taskType string) taskplan.Request {
 	r := taskplan.Request{Brief: taskplan.Select("brief", "brief.md", []byte(text)),
 		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
 		Launch:    taskplan.Launch{ProfileName: "deep", Profile: config.Profile{Kind: "pi", Model: "configured-model", Args: []string{"--name", "rider"}}, Args: []string{"--model", "configured-model"}, ModelKnown: true, ConfiguredModel: "configured-model"},
-		Review:    "on_risk", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
 		Paths: taskplan.Paths{Scratch: "/managed/scratch/shop/{task}", Output: "/managed/projects/shop/tasks/{task}"}}
 	if taskType == "review" {
 		r.ReviewOf = 3
@@ -38,7 +38,7 @@ func TestLegacyBriefsResolveWithoutChangingInputsOrLaunchSettings(t *testing.T) 
 			if taskType == "ship" {
 				outcome = "change"
 			}
-			if plan.Version != 1 || plan.Revision != 1 || plan.Outcome != outcome || plan.Executor != "rider" || plan.Execution.Mode != "mount" || plan.Launch.ConfiguredModel != "configured-model" {
+			if plan.Version != taskplan.Version || plan.Revision != 1 || plan.Outcome != outcome || plan.Executor != "rider" || plan.Execution.Mode != "mount" || plan.Launch.ConfiguredModel != "configured-model" {
 				t.Fatalf("unexpected legacy resolution: %#v", plan)
 			}
 			encoded, err := plan.Bind("t7").Encode()
@@ -148,7 +148,7 @@ func TestUnsupportedExecutionCombinationsAreRejected(t *testing.T) {
 func TestInPlaceExecutionRequiresConsentLocalDeliveryAndNonOverlappingScopes(t *testing.T) {
 	makeRequest := func() taskplan.Request {
 		r := request("ship")
-		r.Review = "never"
+		r.Review = "none"
 		r.Execution = taskplan.Execution{Mode: "mount", Scope: "directory"}
 		r.Brief = taskplan.Select("brief", "local.md", []byte("---\ntype: ship\ntitle: Update docs\ndone_when: checks pass\nexecution: in-place\npaths: [src, docs/guide.md]\n---\n"))
 		r.UserChoice = &taskplan.UserChoice{Quote: "I approve edits to src and docs/guide.md", Actor: "lead", Source: "ride --user-approved"}
@@ -159,6 +159,13 @@ func TestInPlaceExecutionRequiresConsentLocalDeliveryAndNonOverlappingScopes(t *
 	if err != nil || plan.Execution.Mode != "in-place" || plan.Execution.Scope != "directory" || strings.Join(plan.Execution.Paths, ",") != "src,docs/guide.md" || strings.Join(plan.UserChoice.Fields, ",") != "execution,paths" {
 		t.Fatalf("in-place plan = %#v, %v", plan, err)
 	}
+	legacy := plan
+	legacy.Version, legacy.Review = 1, "never"
+	legacy.Preferences = append([]taskplan.Preference(nil), plan.Preferences...)
+	legacy.Preferences[1].Value = "never"
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy in-place plan rejected: %v", err)
+	}
 	for _, change := range []struct {
 		name string
 		edit func(*taskplan.Request)
@@ -166,7 +173,7 @@ func TestInPlaceExecutionRequiresConsentLocalDeliveryAndNonOverlappingScopes(t *
 		{"missing consent", func(r *taskplan.Request) { r.UserChoice = nil }},
 		{"pull request", func(r *taskplan.Request) { r.Delivery = "pr" }},
 		{"no mistakes", func(r *taskplan.Request) { r.Delivery = "no-mistakes" }},
-		{"Review policy", func(r *taskplan.Request) { r.Review = "always" }},
+		{"Review policy", func(r *taskplan.Request) { r.Review = "local" }},
 		{"requested Review", func(r *taskplan.Request) {
 			r.Brief = taskplan.Select("brief", "review-policy.md", []byte(`---
 type: ship
@@ -174,7 +181,7 @@ title: Update docs
 done_when: checks pass
 execution: in-place
 paths: [src]
-review: always
+review: local
 ---
 `))
 		}},
@@ -227,8 +234,8 @@ paths: [src]
 
 func TestScopedUserChoiceChangesPreferencesNeverGrants(t *testing.T) {
 	r := request("ship")
-	r.Delivery, r.Review = "pr", "always"
-	r.Brief = taskplan.Select("brief", "choice.md", []byte("---\ntype: ship\ntitle: Choice\ndone_when: checked\nlanding_mode: local\nreview: never\n---\n"))
+	r.Delivery, r.Review = "pr", "local"
+	r.Brief = taskplan.Select("brief", "choice.md", []byte("---\ntype: ship\ntitle: Choice\ndone_when: checked\nlanding_mode: local\nreview: none\n---\n"))
 	if _, err := taskplan.Resolve(r); err == nil {
 		t.Fatal("unapproved lighter preferences admitted")
 	}
@@ -237,7 +244,7 @@ func TestScopedUserChoiceChangesPreferencesNeverGrants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Delivery != "local" || plan.Review != "never" || plan.Grants[1].Value != "ask" || plan.UserChoice.Quote != r.UserChoice.Quote || plan.UserChoice.BriefSHA256 != r.Brief.SHA256 {
+	if plan.Delivery != "local" || plan.Review != "none" || plan.Grants[1].Value != "ask" || plan.UserChoice.Quote != r.UserChoice.Quote || plan.UserChoice.BriefSHA256 != r.Brief.SHA256 {
 		t.Fatalf("choice lost or escalated grants: %#v", plan)
 	}
 	for _, preference := range plan.Preferences {
@@ -266,6 +273,56 @@ func TestAdmittedArgumentsUseFrozenVectorAndResumeTemplate(t *testing.T) {
 	got[0] = "edited"
 	if launch.Args[0] != "--model" {
 		t.Fatal("launch arguments alias caller")
+	}
+}
+
+func TestLegacyReviewPlansKeepFrozenValues(t *testing.T) {
+	for _, policy := range []string{"always", "on_risk", "never"} {
+		r := request("ship")
+		plan, err := taskplan.Resolve(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan.Version, plan.Review = 1, policy
+		plan.Preferences[1].Value = policy
+		plan.Inputs[0] = taskplan.Select("brief", "old.md", []byte("---\ntype: ship\ntitle: Old\ndone_when: checked\nreview: "+policy+"\n---\n"))
+		data, err := plan.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := taskplan.Decode(data)
+		if err != nil || restored.Review != policy || restored.Version != 1 {
+			t.Fatalf("legacy changed: %#v %v", restored, err)
+		}
+		plan.Version = taskplan.Version
+		if err := plan.Validate(); err == nil {
+			t.Fatal("legacy review admitted in a new plan")
+		}
+		r.Review = policy
+		if _, err := taskplan.Resolve(r); err == nil {
+			t.Fatal("legacy review resolved for new Task")
+		}
+	}
+}
+
+func TestMemberReviewSelectionAndScopedConsent(t *testing.T) {
+	r := request("ship")
+	r.Review = "no-mistakes"
+	r.Brief = taskplan.Select("brief", "members.md", []byte("---\ntype: ship\ntitle: Member\ndone_when: checked\nrepos: [api]\nreview: local\n---\n"))
+	r.Execution.Scope = "workspace"
+	r.Execution.Members = []taskplan.Member{{Name: "api", Path: "api", Delivery: "local", Review: "none", ReviewSource: "repositories.api.review"}}
+	plan, err := taskplan.Resolve(r)
+	if err != nil || plan.Execution.Members[0].Review != "local" || plan.Execution.Members[0].ReviewSource != "brief: members.md" {
+		t.Fatalf("member tightening: %#v %v", plan, err)
+	}
+	r.Execution.Members[0].Review = "no-mistakes"
+	if _, err := taskplan.Resolve(r); err == nil {
+		t.Fatal("member policy loosened without consent")
+	}
+	r.UserChoice = &taskplan.UserChoice{Quote: "Use local review for this Task", Actor: "lead", Source: "ride --user-approved"}
+	plan, err = taskplan.Resolve(r)
+	if err != nil || plan.Execution.Members[0].Review != "local" || plan.Execution.Members[0].ReviewSource != "User choice: ride --user-approved" || plan.Grants[1].Value != "ask" {
+		t.Fatalf("member consent: %#v %v", plan, err)
 	}
 }
 

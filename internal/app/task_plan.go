@@ -60,7 +60,10 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		}
 	}
 	for _, member := range members {
-		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.LandingMode, Gate: memberGates(cfg, member.Name)}
+		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.LandingMode, Gate: memberGates(cfg, member.Name), Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
+		if cfg.Repositories[member.Name].Review != "" {
+			selected.ReviewSource = "repositories." + member.Name + ".review"
+		}
 		if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, member.Name, ""); explicit {
 			selected.BaseCommit, err = selectedBaseCommit(ctx, member.Root, member.BaseRef)
 			if err != nil {
@@ -101,7 +104,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	review := cfg.Defaults.Review
 	if project.IsDirectory() {
 		delivery = "local"
-		review = "never"
+		review = "none"
 	}
 	if project.IsWorkspace() {
 		delivery = task.LandingMode
@@ -130,7 +133,7 @@ func restoreAdmittedLaunchFiles(project store.Project, task store.Task, plan *ta
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	brief, err := dispatch.ParseBriefText(string(plan.Inputs[0].Bytes))
+	brief, err := dispatch.ParseHistoricalBriefText(string(plan.Inputs[0].Bytes))
 	if err != nil {
 		return err
 	}
@@ -183,7 +186,7 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 	if plan != nil {
 		admission = "admitted"
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "admission", Value: admission}, {Key: "launches", Value: task.Launches}, {Key: "plan", Value: plan}})
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "admission", Value: admission}, {Key: "launches", Value: task.Launches}, {Key: "review_evidence", Value: reviewEvidenceStatus(task)}, {Key: "plan", Value: plan}})
 }
 
 func admittedPlanFailure(err error) error {

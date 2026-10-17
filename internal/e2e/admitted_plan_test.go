@@ -121,7 +121,7 @@ func TestRiderAdmittedStatusDoesNotRecoverOrExposeSibling(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &view); err != nil {
 		t.Fatal(err)
 	}
-	if view.Task != "t1" || view.Admission != "admitted" || view.Plan.Version != 1 || strings.Contains(output, "sibling-profile") {
+	if view.Task != "t1" || view.Admission != "admitted" || view.Plan.Version != taskplan.Version || strings.Contains(output, "sibling-profile") {
 		t.Fatalf("status exposed sibling or lost admission: %s", output)
 	}
 	command := exec.Command(fixture.binary, "status", "t2")

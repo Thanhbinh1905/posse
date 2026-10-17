@@ -309,7 +309,7 @@ func TestInPlaceRiderCannotStartProjectLead(t *testing.T) {
 		Brief:     taskplan.Select("brief", "brief.md", briefBytes),
 		Execution: taskplan.Execution{Mode: "mount", Scope: "directory"},
 		Launch:    taskplan.Launch{ProfileName: "deep", Profile: config.Profile{Kind: "pi", Model: "model"}, Args: []string{"--model", "model"}, ModelKnown: true, ConfiguredModel: "model"},
-		Review:    "never", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
 		Paths:      taskplan.Paths{Scratch: filepath.Join(harness.home, "scratch", "source", "tasks", "t1"), Output: filepath.Join(harness.home, "projects", "source", "tasks", "t1")},
 		UserChoice: &taskplan.UserChoice{Quote: "I approve edits to src", Actor: "lead", Source: "ride --user-approved"},
 	})
@@ -497,7 +497,7 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 				{"ticket closure", "Close the ticket", "---\ntype: ship\ntitle: Close the ticket\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nticket: 148\n---\n", "in_place_ticket_unsupported"},
 				{"issue references", "Add an issue reference", "---\ntype: ship\ntitle: Add an issue reference\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nrefs: [18]\n---\n", "in_place_ticket_unsupported"},
 				{"Review", "Review a branch", "---\ntype: review\ntitle: Review a branch\ndone_when: report is saved\nreview_of: t1\nexecution: in-place\npaths: [src]\n---\n", "in_place_review_unsupported"},
-				{"Review policy", "Review local edits", "---\ntype: ship\ntitle: Review local edits\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nreview: always\n---\n", "in_place_review_unsupported"},
+				{"Review policy", "Review local edits", "---\ntype: ship\ntitle: Review local edits\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nreview: local\n---\n", "in_place_review_unsupported"},
 				{"Git ref", "Edit from a base ref", "---\ntype: ship\ntitle: Edit from a base ref\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nbase: main\n---\n", "in_place_git_scope_unsupported"},
 				{"no-mistakes", "Run no-mistakes", "---\ntype: ship\ntitle: Run no-mistakes\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nlanding_mode: no-mistakes\n---\n", "in_place_delivery_unsupported"},
 			} {

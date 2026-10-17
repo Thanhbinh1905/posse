@@ -254,6 +254,9 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 	if changed == 0 {
 		return axi.Failure("land_refused", "no member of "+taskIDString(task.Seq)+" has commits to Land", false, "Send the Rider an instruction with `posse send`")
 	}
+	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+		return err
+	}
 	note := "Every changed member is gated or has an open pull request"
 	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", note); err != nil {
 		return err
@@ -269,6 +272,9 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 // mergeWorkspaceMembers merges each member that is ready: a local fast-forward to
 // exactly the gated commit, or the forge merge of a pull request pinned to it.
 func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, members []memberLanding) error {
+	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+		return err
+	}
 	for _, member := range members {
 		repo := member.repo
 		switch repo.State {
@@ -290,7 +296,12 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 				}
 				targetRef := "refs/heads/" + taskTargetBranch(member.project, member.task)
 				return withIntentGitResources(ctx, db, project, task, intent.ID, member.target.Root, []string{targetRef}, pathScope,
-					func() error { return mergeLocal(ctx, member.project, member.task) })
+					func() error {
+						if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+							return err
+						}
+						return mergeLocal(ctx, member.project, member.task)
+					})
 			}); err != nil {
 				return prefixFailure(repo.Repo, err)
 			}
@@ -303,7 +314,7 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 				return err
 			}
 		case store.TaskRepoLanding:
-			if err := s.mergeMemberPullRequest(ctx, db, cfg, task, intent, member); err != nil {
+			if err := s.mergeMemberPullRequest(ctx, db, project, cfg, task, intent, member); err != nil {
 				return err
 			}
 		}
@@ -311,7 +322,7 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 	return nil
 }
 
-func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, cfg config.Config, task store.Task, intent store.Intent, member memberLanding) error {
+func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, member memberLanding) error {
 	repo := member.repo
 	if repo.GatedSHA == "" || repo.PRURL == "" {
 		return axi.Failure("land_refused", repo.Repo+": no recorded pull request or gated commit", false)
@@ -359,6 +370,10 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, cfg 
 	}
 	defer mergeLock.Close()
 	if err := verifyPRTargetIsUpToDate(ctx, member.target.Root, taskTargetBranch(member.project, member.task), repo.GatedSHA, task.Seq); err != nil {
+		return prefixFailure(repo.Repo, err)
+	}
+	// Recheck the selected evidence immediately before each Member merge effect.
+	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
 		return prefixFailure(repo.Repo, err)
 	}
 	method := defaultValue(cfg.Defaults.MergeMethod, "squash")

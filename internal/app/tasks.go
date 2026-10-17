@@ -83,6 +83,9 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + rideCommand + "` to start this Rider"}},
 	}
+	if brief.ReportKind != "" {
+		result = append(result, axi.Field{Key: "report_kind", Value: brief.ReportKind})
+	}
 	if len(issueReferences(brief))+len(brief.Refs) > 0 {
 		warnings := s.checkBriefIssues(ctx.Context, cfg, brief, targets)
 		if len(warnings) > 0 {
@@ -137,7 +140,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		if brief.Ticket != nil || len(brief.Issues) > 0 || len(brief.Refs) > 0 {
 			return axi.Failure("in_place_ticket_unsupported", "in-place Tasks cannot use forge issue links or close tickets", false, "Remove ticket/issues/refs and track the work separately")
 		}
-		if brief.Type == "review" || brief.Review == "always" || brief.Review == "on_risk" {
+		if brief.Type == "review" || brief.Review != "" {
 			return axi.Failure("in_place_review_unsupported", "directory in-place Tasks cannot request Review or Git branch revisions", false)
 		}
 		if brief.Base != "" || brief.Target != "" || len(brief.BaseByRepo) > 0 || len(brief.TargetByRepo) > 0 || parsed.Flags["from-leftover"] != "" {
@@ -187,7 +190,8 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if project.IsDirectory() && choice == nil {
 		return axi.Failure("in_place_consent_required", "starting an in-place Task requires explicit User consent", false, "Pass `--user-approved \"<User's words approving the directory and paths>\"`")
 	}
-	if _, err := dispatch.ResolveReview(brief.Review, cfg.Defaults.Review, choice != nil); err != nil {
+	// Workspace review tightening is checked per Member during plan resolution.
+	if _, err := dispatch.ResolveReview(brief.Review, cfg.Defaults.Review, choice != nil || project.IsWorkspace()); err != nil {
 		return briefError(err)
 	}
 	tightening := brief
@@ -386,7 +390,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return axi.Failure("lead_missing", "Project has no Herdr workspace recorded", false, "Run `posse up` to restart the Lead")
 	}
 	task := store.Task{
-		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning,
+		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning, ReportKind: brief.ReportKind,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, LandingMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
 		BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets,
@@ -1028,6 +1032,9 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 			if project.IsWorkspace() {
 				work += " Legacy workspace Tasks also save edited shared-root files and unrequested Member commits against their Mount-acquisition snapshot."
 			}
+		}
+		if task.ReportKind != "" {
+			work += " This publication-bound Report must remain complete and reproducible. Posse seals the Report and every saved attachment into an immutable digest at Teardown. The Lead cannot treat a done Signal, Notice acknowledgement or `autonomy.review` as User acceptance. Only the User accepts this exact digest after a current independent Report review; a Lead must pass the User's exact approval words to `posse accept`."
 		}
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."

@@ -155,6 +155,16 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 				time.Sleep(50 * time.Millisecond)
 			}
 		}
+		socketPath := herdr.IsolatedTestSocketPath(root)
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove isolated Herdr socket for %s: %v", root, err)
+		}
+		socketDir := herdr.IsolatedTestSocketDir(root)
+		if socketDir != filepath.Join(root, "xdg", "herdr") {
+			if err := os.RemoveAll(socketDir); err != nil {
+				t.Errorf("remove isolated Herdr socket directory for %s: %v", root, err)
+			}
+		}
 		if err := removeFixtureRoot(root); err != nil {
 			t.Errorf("remove E2E fixture %s: %v", root, err)
 		}
