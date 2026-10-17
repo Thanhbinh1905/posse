@@ -175,3 +175,43 @@ func TestRelabelProjectTabsLogsFailuresAndContinues(t *testing.T) {
 		t.Fatalf("rename errors were not logged: %s", output.String())
 	}
 }
+
+type cancelAfterHerdrSnapshot struct {
+	*herdr.Fake
+	cancel context.CancelFunc
+}
+
+func (a cancelAfterHerdrSnapshot) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
+	snapshot, err := a.Fake.Snapshot(ctx)
+	a.cancel()
+	return snapshot, err
+}
+
+func TestRelabelProjectTabsDoesNotLogTaskReadCancellation(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(context.Background(), "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	fake := herdr.NewFake()
+	service := testService(t.TempDir(), fake)
+	service.Herdr = cancelAfterHerdrSnapshot{Fake: fake, cancel: cancel}
+
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	service.relabelProjectTabs(ctx, db, project)
+
+	if output.Len() != 0 {
+		t.Fatalf("canceled task read was logged: %q", output.String())
+	}
+	if fake.CallCount("session.snapshot") != 1 {
+		t.Fatalf("Herdr snapshot calls = %d, want 1", fake.CallCount("session.snapshot"))
+	}
+}
