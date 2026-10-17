@@ -141,6 +141,36 @@ func (f *workspaceLandFixture) state() store.State {
 
 const localWorkspaceConfig = "[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\n"
 
+func TestWorkspacePRLandingQueuesFreshnessBeforeMemberGate(t *testing.T) {
+	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\ngate = [\"touch gate-ran\"]\n", []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	workerRoot := filepath.Join(f.workspace, "worker")
+	advanceTree := filepath.Join(f.root, "worker-target-advance")
+	gitTest(t, workerRoot, "worktree", "add", "-b", "target-advance", advanceTree, "refs/heads/main")
+	if err := os.WriteFile(filepath.Join(advanceTree, "target-only.txt"), []byte("target update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, advanceTree, "add", "target-only.txt")
+	gitTest(t, advanceTree, "commit", "-m", "advance target")
+	targetTip := strings.TrimSpace(gitTest(t, advanceTree, "rev-parse", "HEAD"))
+	gitTest(t, advanceTree, "push", "origin", targetTip+":refs/heads/main")
+
+	if code := f.run("land", "t1"); code == 0 || !strings.Contains(f.out.String(), "pr_branch_behind") || !strings.Contains(f.out.String(), targetTip) {
+		t.Fatalf("workspace Land did not name its missing target tip: exit=%d output=%s", code, f.out.String())
+	}
+	member := f.repos()["worker"]
+	if member.GatedSHA != "" || member.State != store.TaskRepoOpen || f.state() != store.StateDone {
+		t.Fatalf("stale workspace member was gated or landed: member=%#v task=%s", member, f.state())
+	}
+	if _, err := os.Stat(filepath.Join(member.WorktreePath, "gate-ran")); !os.IsNotExist(err) {
+		t.Fatalf("Gate ran before target freshness was established: %v", err)
+	}
+	var instruction string
+	if err := f.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, f.task.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Workspace member worker") || !strings.Contains(instruction, "--repo worker") {
+		t.Fatalf("workspace Rider did not receive a member-specific sync instruction: body=%q err=%v", instruction, err)
+	}
+}
+
 func TestWorkspaceDiscardCaptureBundlesEveryApprovedMemberTip(t *testing.T) {
 	f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"backend", "worker"}, []string{"backend", "worker"})
 	ctx := context.Background()

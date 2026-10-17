@@ -1542,6 +1542,46 @@ WHERE EXISTS (
 	return result.LastInsertId()
 }
 
+// QueueMessageOnceAfter queues a message once for the current completion. A
+// later done Signal permits a retry, while repeated watcher ticks do not spam
+// the Rider with the same outstanding freshness instruction.
+func (db *DB) QueueMessageOnceAfter(ctx context.Context, taskID int64, body string, waitForIdle bool, after int64) (int64, bool, error) {
+	result, err := db.ExecContext(ctx, `INSERT INTO messages(task_id, body, created_at, status, wait_for_idle)
+SELECT ?, ?, ?, 'queued', ?
+WHERE EXISTS (
+    SELECT 1 FROM tasks WHERE id=? AND (
+        state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled')
+        OR type='ship' AND state IN ('done', 'landing')
+    )
+) AND NOT EXISTS (
+    SELECT 1 FROM messages WHERE task_id=? AND body=? AND created_at>? AND status IN ('queued', 'claimed', 'interrupting', 'submitting', 'delivered')
+)`, taskID, body, time.Now().UnixMilli(), waitForIdle, taskID, taskID, body, after)
+	if err != nil {
+		return 0, false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, false, err
+	}
+	if count == 1 {
+		id, err := result.LastInsertId()
+		return id, true, err
+	}
+	var eligible, exists bool
+	if err := db.QueryRowContext(ctx, `SELECT
+EXISTS(SELECT 1 FROM tasks WHERE id=? AND (
+    state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled')
+    OR type='ship' AND state IN ('done', 'landing')
+)),
+EXISTS(SELECT 1 FROM messages WHERE task_id=? AND body=? AND created_at>? AND status IN ('queued', 'claimed', 'interrupting', 'submitting', 'delivered'))`, taskID, taskID, body, after).Scan(&eligible, &exists); err != nil {
+		return 0, false, err
+	}
+	if !eligible && !exists {
+		return 0, false, ErrStateRace
+	}
+	return 0, false, nil
+}
+
 type Message struct {
 	ID          int64
 	TaskID      int64

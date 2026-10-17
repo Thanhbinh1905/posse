@@ -567,8 +567,13 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 		files := strings.Fields(gitTest(t, fixture.env, checkout, "ls-tree", "-r", "--name-only", merge, "internal/store/migrations"))
 		t.Fatalf("stale PR merged at %s and introduced duplicate migration versions: %v; command output: %s", merge, files, output)
 	}
-	if !strings.Contains(string(output), `"pr_branch_behind"`) {
-		t.Fatalf("stale PR failed for the wrong reason: %v\n%s", err, output)
+	targetTip := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/main"))
+	if !strings.Contains(string(output), `"pr_branch_behind"`) || !strings.Contains(string(output), targetTip) {
+		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s", err, output, targetTip)
+	}
+	var instruction string
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, second.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Merge origin/main") {
+		t.Fatalf("Posse did not queue an actionable target-sync instruction: body=%q err=%v", instruction, err)
 	}
 	if _, err := os.Stat(fixture.ghMerge); !os.IsNotExist(err) {
 		t.Fatalf("stale PR reached the forge merge command: %v", err)

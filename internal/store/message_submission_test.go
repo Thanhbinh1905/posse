@@ -71,6 +71,44 @@ func TestMessageSubmissionAndTaskReopenAreAtomic(t *testing.T) {
 	}
 }
 
+func TestQueueMessageOnceAfterCompletionIsIdempotentAndAllowsLaterRetry(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "pr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, StateWorking, StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	body := "Merge the current target"
+	id, queued, err := db.QueueMessageOnceAfter(ctx, taskID, body, true, 0)
+	if err != nil || !queued || id == 0 {
+		t.Fatalf("first queue result=(%d,%t,%v)", id, queued, err)
+	}
+	if id, queued, err := db.QueueMessageOnceAfter(ctx, taskID, body, true, 0); err != nil || queued || id != 0 {
+		t.Fatalf("duplicate queue result=(%d,%t,%v)", id, queued, err)
+	}
+	if id, queued, err := db.QueueMessageOnceAfter(ctx, taskID, body, true, time.Now().Add(time.Second).UnixMilli()); err != nil || !queued || id == 0 {
+		t.Fatalf("new completion queue result=(%d,%t,%v)", id, queued, err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND body=?`, taskID, body).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("queued messages=%d err=%v, want one per completion", count, err)
+	}
+}
+
 func TestMessageClaimIsExclusivePerTask(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())

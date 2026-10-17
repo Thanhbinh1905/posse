@@ -152,10 +152,10 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		return task, head
 	}
 
-	offline, _ := createLandingTask(1, members[0], "https://vpn-t181.invalid/acme/offline/pull/1", false)
+	preLanded, preLandedHead := createLandingTask(3, members[1], "", true)
 	goodURL := "https://github.com/acme/good/pull/2"
 	good, goodHead := createLandingTask(2, members[1], goodURL, true)
-	preLanded, preLandedHead := createLandingTask(3, members[1], "", true)
+	offline, _ := createLandingTask(1, members[0], "https://vpn-t181.invalid/acme/offline/pull/1", false)
 	if err := db.Transition(context.Background(), preLanded.ID, store.StateLanding, store.StateLanded, "cli", "fixture already landed"); err != nil {
 		t.Fatal(err)
 	}
@@ -214,8 +214,6 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		}
 	}()
 	offlineRoot := filepath.Join(workspace, "offline")
-	gitTest(t, env, offlineRoot, "config", "--unset-all", "url.file://"+filepath.Join(root, "offline.git")+".insteadOf")
-	gitTest(t, env, offlineRoot, "config", "url.http://"+blackhole.Addr().String()+"/.insteadOf", "https://vpn-t181.invalid/")
 
 	lookoutPaneID := ""
 	t.Cleanup(func() {
@@ -244,6 +242,8 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		screen, _ := client.Run(context.Background(), "pane", "read", lookoutPaneID, "--lines", "30")
 		t.Fatalf("offline Member forge query did not enter its deliberate stall: gh calls=%s lookout=%s", calls, screen)
 	}
+	gitTest(t, env, offlineRoot, "config", "--unset-all", "url.file://"+filepath.Join(root, "offline.git")+".insteadOf")
+	gitTest(t, env, offlineRoot, "config", "url.http://"+blackhole.Addr().String()+"/.insteadOf", "https://vpn-t181.invalid/")
 	select {
 	case <-fetchStarted:
 	case <-time.After(5 * time.Second):

@@ -15,6 +15,47 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestPRLandingRefusesStaleHeadBeforeGate(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	gateMarker := filepath.Join(fixture.root, "gate-ran")
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"never\"\ngate = [\"touch "+gateMarker+"\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetTip := fixture.advanceTarget(t, false, true)
+	code, output, stderr := fixture.run("land", "t1")
+	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) {
+		t.Fatalf("stale PR did not refuse before its Gate: exit=%d output=%s error=%s", code, output, stderr)
+	}
+	if _, err := os.Stat(gateMarker); !os.IsNotExist(err) {
+		t.Fatalf("Gate ran for a branch that was already behind origin/main: %v", err)
+	}
+	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateDone || task.GatedSHA != "" {
+		t.Fatalf("stale branch acquired final Gate evidence: task=%#v err=%v", task, err)
+	}
+}
+
+func TestNoMistakesLandingRefusesStaleHeadAndSkipsRebaseOnRecovery(t *testing.T) {
+	fixture := newPRLandingFixture(t, "no-mistakes", store.StateDone)
+	prURL := "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskLanding(context.Background(), fixture.task.ID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	targetTip := fixture.advanceTarget(t, false, true)
+	code, output, stderr := fixture.run("land", "t1")
+	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) {
+		t.Fatalf("no-mistakes Land accepted a stale head: exit=%d output=%s error=%s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateDone || task.GatedSHA != "" {
+		t.Fatalf("stale no-mistakes head acquired landing evidence: task=%#v err=%v", task, err)
+	}
+	var instruction string
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, "--skip=rebase") || !strings.Contains(instruction, targetTip) {
+		t.Fatalf("no-mistakes freshness instruction does not preserve merge-based sync: body=%q err=%v", instruction, err)
+	}
+}
+
 func TestPRLandingPushesGatedBranchAndOpensPullRequest(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateDone)
 	fixture.setGraphQLState(t, "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.task.GatedSHA)
@@ -1155,7 +1196,12 @@ set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 if [ "${POSSE_TEST_GH_FAIL:-}" != "" ]; then printf 'fake gh unavailable\n' >&2; exit 1; fi
 case "$1 $2" in
-  "api graphql") cat "$POSSE_TEST_GH_STATE"; if [ -e "$POSSE_TEST_GH_STATE.exit" ]; then printf 'GraphQL request returned errors\n' >&2; exit 1; fi ;;
+  "api graphql")
+    if [ -n "${POSSE_TEST_GH_ADVANCE_SHA:-}" ]; then
+      git -C "$POSSE_TEST_GH_ADVANCE_REPO" push origin "$POSSE_TEST_GH_ADVANCE_SHA:refs/heads/${POSSE_TEST_GH_ADVANCE_BRANCH:-main}" >/dev/null
+    fi
+    cat "$POSSE_TEST_GH_STATE"
+    if [ -e "$POSSE_TEST_GH_STATE.exit" ]; then printf 'GraphQL request returned errors\n' >&2; exit 1; fi ;;
   "pr list") cat "$POSSE_TEST_GH_OPEN_PRS" ;;
   "issue view")
     case "$3" in
@@ -1209,6 +1255,9 @@ esac
 	t.Setenv("POSSE_TEST_GH_BODY", "")
 	t.Setenv("POSSE_TEST_GH_EDIT_BODY", filepath.Join(fixture.root, "gh-edited-body.md"))
 	t.Setenv("POSSE_TEST_GH_FAIL", "")
+	t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", "")
+	t.Setenv("POSSE_TEST_GH_ADVANCE_REPO", fixture.repo)
+	t.Setenv("POSSE_TEST_GH_ADVANCE_BRANCH", "main")
 	fixture.setGHHead(t, fixture.headSHA)
 	if err := os.WriteFile(fixture.ghOpenPRs, []byte("[]\n"), 0o600); err != nil {
 		t.Fatal(err)
