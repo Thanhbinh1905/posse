@@ -63,11 +63,15 @@ func (s *Service) startWorkspacePRPolls(ctx context.Context, db *store.DB, proje
 		}
 		go func(repo, key, token string) {
 			defer s.endMaintenance(key)
+			landedMember := false
 			onLanded := func() {
-				s.startLandedTaskTeardown(ctx, db, project, cfg)
+				landedMember = true
 				s.startLandedMemberSync(ctx, db, project, repo)
 			}
 			pollErr := s.pollWorkspacePullRequestsForRepo(ctx, db, project, cfg, false, onLanded, repo, false, false, token)
+			if landedMember {
+				s.startLandedTaskTeardown(ctx, db, project, cfg)
+			}
 			if pollErr != nil && !store.IsBusy(pollErr) {
 				_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s PR polling: %w", repo, pollErr))
 			}
@@ -159,13 +163,13 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		return configError(err)
 	}
 	if project.IsWorkspace() {
+		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+			return err
+		}
 		if err := s.startWorkspacePRPolls(ctx, db, project, cfg); err != nil {
 			return err
 		}
 		if err := s.startWorkspaceCheckoutSync(ctx, db, project, cfg); err != nil {
-			return err
-		}
-		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
 			return err
 		}
 		_, _ = s.availableUpdate(ctx, db, &project)

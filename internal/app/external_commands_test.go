@@ -13,6 +13,28 @@ import (
 	"time"
 )
 
+func TestExternalCommandTimeoutOverrideRequiresIsolatedHerdr(t *testing.T) {
+	previousTimeout := externalCommandTimeout
+	externalCommandTimeout = 20 * time.Second
+	t.Cleanup(func() { externalCommandTimeout = previousTimeout })
+	t.Setenv("POSSE_TEST_HERDR", "")
+	t.Setenv("POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "60s")
+
+	if got := externalCommandTimeoutValue(); got != externalCommandTimeout {
+		t.Fatalf("timeout outside isolated Herdr = %s, want default %s", got, externalCommandTimeout)
+	}
+
+	t.Setenv("POSSE_TEST_HERDR", "1")
+	if got := externalCommandTimeoutValue(); got != 60*time.Second {
+		t.Fatalf("timeout inside isolated Herdr = %s, want 1m0s", got)
+	}
+
+	t.Setenv("POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "invalid")
+	if got := externalCommandTimeoutValue(); got != externalCommandTimeout {
+		t.Fatalf("timeout with invalid test override = %s, want default %s", got, externalCommandTimeout)
+	}
+}
+
 func TestExternalCommandsDisableInteractivePrompts(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")

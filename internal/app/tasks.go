@@ -1011,7 +1011,7 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 	} else if project.IsWorkspace() && task.Type == "ship" {
 		work = "Work only inside this Rider's Task Mount. Read anything, write nothing outside it. Commit inside changed member repositories. For each changed PR-mode member, run `posse publish --repo <member> \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only its Task branch and open or reuse its PR. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change default branches, or merge."
 	} else if landing == "no-mistakes" {
-		work = "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Deliver only through `no-mistakes axi run --intent <from Brief>`. Never push directly or open a PR."
+		work = "Work only inside this Rider's Task worktree. Read anything, write nothing outside it. Deliver only through `no-mistakes axi run --intent <from Brief>`. If Posse asks you to catch up with the target after publication, merge `origin/<target>` into this branch, resolve conflicts, then rerun the pipeline with `--skip=rebase` so the pushed branch is updated by merge, not rebase. Never push directly, rebase a pushed branch, or open a PR."
 	}
 	if task.Type == "ship" && !project.IsWorkspace() && !project.IsDirectory() {
 		work += fmt.Sprintf("\n\nBranch plan: start from `%s`; PR/MR target `%s`.", task.BaseRef, taskTargetBranch(project, task))

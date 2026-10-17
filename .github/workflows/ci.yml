@@ -83,8 +83,9 @@ jobs:
       - name: Run race-enabled tests
         run: |
           export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-test-"
-          # The app package takes about 14 minutes under two Go CPUs; allow bounded runner variance.
-          go test -race -count=1 -timeout=20m ./...
+          # The race-enabled app suite took about 28 minutes under two Go CPUs in a full local run.
+          # Allow seven minutes of runner variance above that measured duration.
+          go test -race -count=1 -timeout=35m ./...
       - name: Clean test temporary roots
         if: ${{ always() }}
         run: |

@@ -11,7 +11,7 @@ import (
 )
 
 func TestWorkspaceClosedMemberRaisesDecisionWithoutReopeningTask(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
+	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n[repositories.worker]\nforge = \"github\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
 	bin := filepath.Join(f.root, "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -25,8 +25,10 @@ func TestWorkspaceClosedMemberRaisesDecisionWithoutReopeningTask(t *testing.T) {
 	state := filepath.Join(f.root, "gh-view.json")
 	t.Setenv("POSSE_TEST_GH_VIEW", state)
 	worker := filepath.Join(f.workspace, "worker")
+	remote := filepath.Join(f.root, "remotes", "worker.git")
 	gitTest(t, worker, "remote", "set-url", "origin", "https://github.com/acme/worker.git")
-	gitTest(t, worker, "config", "remote.origin.pushurl", filepath.Join(f.root, "remotes", "worker.git"))
+	gitTest(t, worker, "config", "remote.origin.pushurl", remote)
+	gitTest(t, worker, "config", "url.file://"+remote+".insteadOf", "https://github.com/acme/worker.git")
 	head := strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD"))
 	url := "https://github.com/acme/worker/pull/7"
 	writeView := func(stateName string) {

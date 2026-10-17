@@ -18,6 +18,17 @@ var externalCommandTimeout = 20 * time.Second
 
 const externalCommandWaitDelay = execgroup.WaitDelay
 
+func externalCommandTimeoutValue() time.Duration {
+	if os.Getenv("POSSE_TEST_HERDR") == "1" {
+		if value := strings.TrimSpace(os.Getenv("POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT")); value != "" {
+			if timeout, err := time.ParseDuration(value); err == nil && timeout > 0 {
+				return timeout
+			}
+		}
+	}
+	return externalCommandTimeout
+}
+
 func ensureNoMistakesInitialized(ctx context.Context, root string) error {
 	if _, err := exec.LookPath("no-mistakes"); err != nil {
 		return axi.Failure("no_mistakes_unavailable", "no-mistakes is not installed or not on PATH", false, "Install no-mistakes, then run `no-mistakes init` in this repository")
@@ -85,12 +96,12 @@ func commandStdoutArgs(ctx context.Context, cwd, name string, args ...string) (s
 
 func timeoutForExternalCommand(name string, args []string) time.Duration {
 	if name == "gh" || name == "glab" || name == "no-mistakes" {
-		return externalCommandTimeout
+		return externalCommandTimeoutValue()
 	}
 	if name == "git" {
 		for _, arg := range args {
 			if arg == "fetch" || arg == "ls-remote" {
-				return externalCommandTimeout
+				return externalCommandTimeoutValue()
 			}
 		}
 	}

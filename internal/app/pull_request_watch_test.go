@@ -82,6 +82,183 @@ func TestMergedPRNeverSilentlySkipsTask(t *testing.T) {
 	}
 }
 
+func (fixture *prLandingFixture) advanceTarget(t *testing.T, conflicting, push bool) string {
+	t.Helper()
+	worktree := filepath.Join(fixture.root, "target-advance")
+	gitTest(t, fixture.repo, "worktree", "add", "-b", "target-advance", worktree, "refs/heads/main")
+	path, contents := "target-only.txt", "target update\n"
+	if conflicting {
+		path, contents = "README.md", "target README update\n"
+	}
+	if err := os.WriteFile(filepath.Join(worktree, path), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, worktree, "add", path)
+	gitTest(t, worktree, "commit", "-m", "advance target")
+	tip := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+	if push {
+		gitTest(t, worktree, "push", "origin", tip+":refs/heads/main")
+	}
+	return tip
+}
+
+func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranches(t *testing.T) {
+	for _, scenario := range []struct {
+		name        string
+		conflicting bool
+		mergeable   string
+	}{
+		{name: "behind but clean", mergeable: "MERGEABLE"},
+		{name: "conflicting", conflicting: true, mergeable: "CONFLICTING"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newPRLandingFixture(t, "pr", store.StateDone)
+			if scenario.conflicting {
+				path := filepath.Join(fixture.worktree, "README.md")
+				if err := os.WriteFile(path, []byte("Task README update\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				gitTest(t, fixture.worktree, "add", "README.md")
+				gitTest(t, fixture.worktree, "commit", "-m", "change README")
+				fixture.headSHA = strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+			}
+			if code, output, stderr := fixture.run("land", "t1"); code != 0 {
+				t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+			}
+			targetTip := fixture.advanceTarget(t, scenario.conflicting, true)
+			if err := os.WriteFile(fixture.ghLog, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", scenario.mergeable, "", fixture.headSHA)
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			queryLog, err := os.ReadFile(fixture.ghLog)
+			if err != nil || strings.Contains(string(queryLog), "statusCheckRollup") {
+				t.Fatalf("watcher queried final CI for a branch already known to be behind: query=%q err=%v", queryLog, err)
+			}
+			observation, err := fixture.db.LatestPRObservation(context.Background(), fixture.task.ID)
+			if err != nil || decodeChecks(observation.Checks).State != "STALE" {
+				t.Fatalf("stale CI result remained usable: observation=%#v err=%v", observation, err)
+			}
+			notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+			if err != nil || countNoticeKind(notices, "land_ready") != 0 {
+				t.Fatalf("stale PR was treated as land-ready: notices=%#v err=%v", notices, err)
+			}
+			var body string
+			var queued int
+			if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&body); err != nil {
+				t.Fatalf("Posse did not queue a Rider freshness instruction: %v", err)
+			}
+			if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil || queued != 1 {
+				t.Fatalf("repeated watcher polls duplicated the freshness instruction: queued=%d err=%v", queued, err)
+			}
+			for _, required := range []string{targetTip, "origin/main", "Merge origin/main", "rerun the configured Gate", "never rebase a pushed branch", "posse publish"} {
+				if !strings.Contains(body, required) {
+					t.Errorf("freshness instruction omitted %q: %s", required, body)
+				}
+			}
+		})
+	}
+}
+
+func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	ctx := context.Background()
+	url := "https://github.com/acme/shop/pull/17"
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET autonomy_land='auto' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, url, ""); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll := func() {
+		t.Helper()
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poll() // Checks pass while the Rider is still working, so no Notice is due yet.
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil || task.State != store.StateWorking {
+		t.Fatalf("publish changed the Task state before the done Signal: task=%#v err=%v", task, err)
+	}
+	notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 0 {
+		t.Fatalf("working Task unexpectedly received land_ready: notices=%#v err=%v", notices, err)
+	}
+	if code, output, stderr := fixture.run("holler", "done", "Worker completion summary", "--pr", url); code != 0 {
+		t.Fatalf("done: %d %s %s", code, output, stderr)
+	}
+	if code, output, stderr := fixture.run("land", "t1"); code != 0 {
+		t.Fatalf("land: %d %s %s", code, output, stderr)
+	}
+	task, err = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil || task.State != store.StateLanding {
+		t.Fatalf("land did not move the Task to landing: task=%#v err=%v", task, err)
+	}
+	poll() // The forge observation is unchanged, but the Task is now landing.
+	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
+		t.Fatalf("green PR did not produce one land_ready Notice after the Task entered landing: notices=%#v err=%v", notices, err)
+	}
+	poll()
+	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
+		t.Fatalf("repeated ready observations duplicated land_ready: notices=%#v err=%v", notices, err)
+	}
+	if err := fixture.service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := fixture.db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 0 {
+		t.Fatalf("autonomy.land=auto should emit land_ready without creating a User Decision: decisions=%#v err=%v", decisions, err)
+	}
+}
+
+func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	if code, output, stderr := fixture.run("land", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+	}
+	targetTip := fixture.advanceTarget(t, false, false)
+	t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", targetTip)
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	remoteTip := strings.TrimSpace(gitTest(t, fixture.remote, "rev-parse", "refs/heads/main"))
+	if remoteTip != targetTip {
+		t.Fatalf("fake forge did not advance target during check observation: remote=%s want=%s", remoteTip, targetTip)
+	}
+	observation, err := fixture.db.LatestPRObservation(context.Background(), fixture.task.ID)
+	if err != nil || decodeChecks(observation.Checks).State != "STALE" {
+		t.Fatalf("CI observed before the target advanced was accepted: observation=%#v err=%v", observation, err)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 0 {
+		t.Fatalf("target advance during CI produced land-ready evidence: notices=%#v err=%v", notices, err)
+	}
+}
+
 func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateDone)
 	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
@@ -116,18 +293,26 @@ func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
 
 	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
 	poll()
-	fixture.setGraphQLState(t, "OPEN", "PENDING", "CHANGES_REQUESTED", "CONFLICTING", "", strings.Repeat("2", 40))
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "next.txt"), []byte("next head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", "next.txt")
+	gitTest(t, fixture.worktree, "commit", "-m", "advance PR head")
+	newHead := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	gitTest(t, fixture.worktree, "push", "origin", "HEAD:refs/heads/posse/t1")
+	fixture.setGHHead(t, newHead)
+	fixture.setGraphQLState(t, "OPEN", "PENDING", "CHANGES_REQUESTED", "CONFLICTING", "", newHead)
 	poll()
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
 	if err != nil || countNoticeKind(notices, "land_ready") != 1 || countNoticeKind(notices, "pr_changes_requested") != 1 || countNoticeKind(notices, "pr_conflict") != 1 {
 		t.Fatalf("review and conflict notices were not recorded once: %#v, %v", notices, err)
 	}
 	observation, err = fixture.db.LatestPRObservation(ctx, fixture.task.ID)
-	if err != nil || observation.HeadSHA != strings.Repeat("2", 40) || decodeChecks(observation.Checks).State != "PENDING" {
+	if err != nil || observation.HeadSHA != newHead || decodeChecks(observation.Checks).State != "PENDING" {
 		t.Fatalf("new head did not reset check status: %#v, %v", observation, err)
 	}
 
-	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", fixture.headSHA, fixture.headSHA)
+	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", fixture.headSHA, newHead)
 	poll()
 	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
 	if err != nil || task.State != store.StateLanded || task.LandedRef != fixture.headSHA {

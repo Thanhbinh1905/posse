@@ -74,6 +74,29 @@ func (w *observationWorkload) runPollers(t *testing.T, f *prLifecycleFixture, co
 	wait.Wait()
 }
 
+func prepareObservedTaskHeads(t *testing.T, f *prLifecycleFixture, taskID int64) (string, string) {
+	t.Helper()
+	gitTest(t, f.env, f.repo, "switch", "-c", "posse/t1")
+	path := filepath.Join(f.repo, "observed-head.txt")
+	if err := os.WriteFile(path, []byte("first observed head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, f.repo, "add", "observed-head.txt")
+	gitTest(t, f.env, f.repo, "commit", "-m", "first observed head")
+	headOne := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "HEAD"))
+	if err := os.WriteFile(path, []byte("second observed head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, f.repo, "add", "observed-head.txt")
+	gitTest(t, f.env, f.repo, "commit", "-m", "second observed head")
+	headTwo := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "HEAD"))
+	gitTest(t, f.env, f.repo, "switch", "main")
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET worktree_path=?, target_branch='main' WHERE id=?`, f.repo, taskID); err != nil {
+		t.Fatal(err)
+	}
+	return headOne, headTwo
+}
+
 func observationNotices(t *testing.T, f *prLifecycleFixture, kind string) []store.Notice {
 	t.Helper()
 	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
@@ -107,8 +130,7 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	headOne := strings.Repeat("1", 40)
-	headTwo := strings.Repeat("2", 40)
+	headOne, headTwo := prepareObservedTaskHeads(t, f, taskID)
 	workload := &observationWorkload{}
 	promptLog := filepath.Join(f.root, "lead-prompts.log")
 
@@ -265,6 +287,7 @@ func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
 	if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
+	headOne, headTwo := prepareObservedTaskHeads(t, f, taskID)
 	workload := &observationWorkload{}
 	produce := func(times int) {
 		for i := 0; i < times; i++ {
@@ -282,9 +305,9 @@ func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
 		}
 	}
 
-	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", strings.Repeat("1", 40))
+	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", headOne)
 	produce(3)
-	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", strings.Repeat("2", 40))
+	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", headTwo)
 	produce(2)
 
 	if calls := forgeCalls(t, f); calls != 5 {

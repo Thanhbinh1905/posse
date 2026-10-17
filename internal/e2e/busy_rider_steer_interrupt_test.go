@@ -99,6 +99,8 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		t.Fatalf("background delivery did not steer past the wait-for-idle head: output=%s message=%#v pane=%#v screen=%s input=%q logs=%s notices=%#v", backgroundOutput, backgroundMessage, currentPane(t, client, task.PaneID), screen, input, logs, notices)
 	}
 
+	// Stop the independent Lookout so its valid delivery cannot race this foreground send.
+	stopBackgroundLookout(t, fixture)
 	steering := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Send-time steering")
 	if !strings.Contains(steering, "state: delivered") || !strings.Contains(steering, "reason: steered") {
 		t.Fatalf("send-time steering did not report the sent message: %s", steering)
@@ -112,9 +114,6 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		t.Fatalf("fake Pi did not receive both steering messages while busy: %s", contents)
 	}
 
-	// The remaining assertions concern foreground command ordering, not the
-	// independent Lookout's valid attempts to deliver queued instructions.
-	stopBackgroundLookout(t, fixture)
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsend", strconv.FormatInt(pending.ID, 10)); !strings.Contains(output, "state: withdrawn") {
 		t.Fatalf("unsend did not withdraw the wait-for-idle message: %s", output)
 	}

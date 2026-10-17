@@ -508,11 +508,22 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 			return false, err
 		}
 	}
-	if !unchanged || effect.TransitionTo == StateLanded && transitions[current.State][StateLanded] {
-		for _, notice := range effect.Notices {
-			if err := insertNoticeTx(ctx, tx, notice); err != nil {
+	allowChangedEffects := !unchanged || effect.TransitionTo == StateLanded && transitions[current.State][StateLanded]
+	for _, notice := range effect.Notices {
+		if !allowChangedEffects && notice.Kind != "land_ready" {
+			continue
+		}
+		if notice.Kind == "land_ready" {
+			var exists bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='land_ready' AND json_extract(data_json,'$.url')=? AND json_extract(data_json,'$.head_sha')=?)`, notice.ProjectID, notice.TaskID, observation.PRURL, observation.HeadSHA).Scan(&exists); err != nil {
 				return false, err
 			}
+			if exists {
+				continue
+			}
+		}
+		if err := insertNoticeTx(ctx, tx, notice); err != nil {
+			return false, err
 		}
 	}
 	transitioned := false

@@ -309,6 +309,10 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 }
 
 func gitlabObservation(ctx context.Context, forge repositoryForge, task store.Task, expectedTarget string, now int64) (store.PRObservation, []failedCheck, error) {
+	return gitlabObservationWithChecks(ctx, forge, task, expectedTarget, now, true)
+}
+
+func gitlabObservationWithChecks(ctx context.Context, forge repositoryForge, task store.Task, expectedTarget string, now int64, includeChecks bool) (store.PRObservation, []failedCheck, error) {
 	number, err := forgeReference(task.PRURL, forge)
 	if err != nil {
 		return store.PRObservation{}, nil, err
@@ -330,11 +334,14 @@ func gitlabObservation(ctx context.Context, forge repositoryForge, task store.Ta
 	if state == "MERGED" && mr.TargetBranch != expectedTarget {
 		return store.PRObservation{}, nil, fmt.Errorf("GitLab MR targets %q, expected %q", mr.TargetBranch, expectedTarget)
 	}
-	checks := checkSnapshot{State: "SUCCESS"}
-	if state == "OPEN" && mr.MergeStatus != "mergeable" {
-		checks.State = "PENDING"
+	checks := checkSnapshot{State: "PENDING"}
+	if includeChecks {
+		checks.State = "SUCCESS"
+		if state == "OPEN" && mr.MergeStatus != "mergeable" {
+			checks.State = "PENDING"
+		}
 	}
-	if mr.HeadPipeline != nil {
+	if includeChecks && mr.HeadPipeline != nil {
 		switch mr.HeadPipeline.Status {
 		case "success":
 			// Mergeability still controls land_ready below.
