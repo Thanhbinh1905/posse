@@ -168,6 +168,68 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 	}
 }
 
+func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	ctx := context.Background()
+	url := "https://github.com/acme/shop/pull/17"
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET autonomy_land='auto' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, url, ""); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll := func() {
+		t.Helper()
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poll() // Checks pass while the Rider is still working, so no Notice is due yet.
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil || task.State != store.StateWorking {
+		t.Fatalf("publish changed the Task state before the done Signal: task=%#v err=%v", task, err)
+	}
+	notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 0 {
+		t.Fatalf("working Task unexpectedly received land_ready: notices=%#v err=%v", notices, err)
+	}
+	if code, output, stderr := fixture.run("holler", "done", "Worker completion summary", "--pr", url); code != 0 {
+		t.Fatalf("done: %d %s %s", code, output, stderr)
+	}
+	if code, output, stderr := fixture.run("land", "t1"); code != 0 {
+		t.Fatalf("land: %d %s %s", code, output, stderr)
+	}
+	task, err = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil || task.State != store.StateLanding {
+		t.Fatalf("land did not move the Task to landing: task=%#v err=%v", task, err)
+	}
+	poll() // The forge observation is unchanged, but the Task is now landing.
+	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
+		t.Fatalf("green PR did not produce one land_ready Notice after the Task entered landing: notices=%#v err=%v", notices, err)
+	}
+	poll()
+	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
+		t.Fatalf("repeated ready observations duplicated land_ready: notices=%#v err=%v", notices, err)
+	}
+	if err := fixture.service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := fixture.db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 0 {
+		t.Fatalf("autonomy.land=auto should emit land_ready without creating a User Decision: decisions=%#v err=%v", decisions, err)
+	}
+}
+
 func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
 	fixture := newPRLandingFixture(t, "pr", store.StateDone)
 	if code, output, stderr := fixture.run("land", "t1"); code != 0 {
