@@ -338,9 +338,16 @@ UPDATE tasks SET pane_id = ?, herdr_workspace_id = ?, agent_session = ?, agent_s
     );
 
 -- name: UpdateProjectObservation :exec
-UPDATE projects SET lead_pane_id = ?, herdr_workspace_id = ?, lead_absent_since = ? WHERE id = ? AND (
-    lead_pane_id IS NOT ? OR herdr_workspace_id IS NOT ? OR lead_absent_since IS NOT ?
-);
+UPDATE projects SET lead_pane_id = sqlc.arg(pane_id), herdr_workspace_id = sqlc.arg(workspace_id), lead_absent_since = sqlc.arg(lead_absent_since)
+WHERE id = sqlc.arg(project_id)
+    AND lead_pane_id IS sqlc.arg(expected_lead_pane_id)
+    AND herdr_workspace_id IS sqlc.arg(expected_workspace_id)
+    AND lead_label IS sqlc.arg(expected_lead_label)
+    AND (
+        lead_pane_id IS NOT sqlc.arg(pane_id) OR
+        herdr_workspace_id IS NOT sqlc.arg(workspace_id) OR
+        lead_absent_since IS NOT sqlc.arg(lead_absent_since)
+    );
 
 -- name: UpdateProgress :exec
 UPDATE tasks SET last_output_hash = ?, last_worktree_hash = ?, last_progress_at = ?, updated_at = ?
