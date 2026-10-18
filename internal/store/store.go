@@ -40,6 +40,8 @@ var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition
 var ErrBusy = errors.New("database contention; retry the operation")
 
 const sqliteBusyTimeoutMillis = 5000
+const storeOpenMigrationBudget = 30 * time.Second
+const migrationLockWaitBudget = 5 * time.Second
 
 // Observation lock waits stay short enough to defer contended work within
 // the overall reconciliation budget.
@@ -166,7 +168,7 @@ func Open(home string) (*DB, error) {
 }
 
 func OpenAt(path string) (*DB, error) {
-	return openAt(path, 5*time.Second)
+	return openAt(path, storeOpenMigrationBudget)
 }
 
 func openAt(path string, timeout time.Duration) (*DB, error) {
@@ -194,7 +196,9 @@ func openAt(path string, timeout time.Duration) (*DB, error) {
 
 func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	defer func() { migrationErr = retryableContention(migrationErr) }()
-	lock, err := acquireMigrationLock(ctx, db.Path)
+	lockCtx, cancelLock := context.WithTimeout(ctx, migrationLockWaitBudget)
+	lock, err := acquireMigrationLock(lockCtx, db.Path)
+	cancelLock()
 	if err != nil {
 		return err
 	}
@@ -2522,25 +2526,25 @@ func (db *DB) taskObservationMatches(ctx context.Context, taskID int64, paneID, 
 	return currentPaneID == paneID && currentWorkspaceID == workspaceID && currentAgentSession == agentSession && currentAgentSessionKind == agentSessionKind && currentAgentAbsentSince == agentAbsentSince && currentIdleSince == idleSince && currentAgentServerStartedAt == agentServerStartedAt, nil
 }
 
-func (db *DB) UpdateProjectObservation(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) error {
+func (db *DB) UpdateProjectObservation(ctx context.Context, project Project, paneID, workspaceID string, absentSince int64) error {
 	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
 	defer cancel()
 	// Concurrent CLI commands often observe the same Lead pane. Skip the write
 	// lock when another reconciliation already recorded this state.
-	unchanged, err := db.projectObservationMatches(ctx, projectID, paneID, workspaceID, absentSince)
+	unchanged, err := db.projectObservationMatches(ctx, project.ID, paneID, workspaceID, absentSince)
 	if err != nil || unchanged {
 		return err
 	}
 	params := dbgen.UpdateProjectObservationParams{
-		LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID,
-		LeadPaneID_2: paneID, HerdrWorkspaceID_2: workspaceID, LeadAbsentSince_2: absentSince,
+		PaneID: paneID, WorkspaceID: workspaceID, LeadAbsentSince: absentSince, ProjectID: project.ID,
+		ExpectedLeadPaneID: project.LeadPaneID, ExpectedWorkspaceID: project.HerdrWorkspaceID, ExpectedLeadLabel: project.LeadLabel,
 	}
 	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateProjectObservation(ctx, params)
 	}); err != nil {
 		return err
 	}
-	return db.PersistProject(ctx, projectID)
+	return db.PersistProject(ctx, project.ID)
 }
 
 func (db *DB) projectObservationMatches(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) (bool, error) {
