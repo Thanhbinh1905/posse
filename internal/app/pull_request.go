@@ -306,7 +306,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if forge.Kind == "gitlab" {
 		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
 	}
-	args := []string{"pr", "list", "--state", "open", "--base", taskTargetBranch(project, task), "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
+	args := []string{"pr", "list", "--state", "open", "--head", task.Branch, "--json", "url,headRefName,headRefOid,baseRefName,headRepository", "--limit", "100"}
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()
 	var urlValue, lastHead string
@@ -328,9 +328,12 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 			}
 			return "", false, axi.Failure("pr_list_failed", "could not find an existing open pull request for the Task branch", true, truncate(err.Error(), 1200))
 		}
-		candidateURL, candidateHead, found, err := openPullRequestForBranch(output, task.Branch)
+		candidateURL, candidateHead, found, mismatch, err := openPullRequestForBranchTarget(output, task.Branch, taskTargetBranch(project, task), forge.Path)
 		if err != nil {
 			return "", false, axi.Failure("pr_list_failed", "gh pr list returned invalid pull request data", true, err.Error())
+		}
+		if mismatch != nil {
+			return "", false, pullRequestTargetMismatch(mismatch.URL, mismatch.BaseRefName, taskTargetBranch(project, task))
 		}
 		if !found {
 			if !foundOpenPR {
@@ -491,25 +494,80 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 	return nil
 }
 
-func openPullRequestForBranch(output, branch string) (string, string, bool, error) {
-	var pullRequests []struct {
-		URL         string `json:"url"`
-		HeadRefName string `json:"headRefName"`
-		HeadRefOID  string `json:"headRefOid"`
-	}
+type openGitHubPullRequest struct {
+	URL            string `json:"url"`
+	HeadRefName    string `json:"headRefName"`
+	HeadRefOID     string `json:"headRefOid"`
+	BaseRefName    string `json:"baseRefName"`
+	HeadRepository struct {
+		NameWithOwner string `json:"nameWithOwner"`
+	} `json:"headRepository"`
+}
+
+func openPullRequestsForBranch(output, branch string) ([]openGitHubPullRequest, error) {
+	var pullRequests []openGitHubPullRequest
 	if err := json.Unmarshal([]byte(output), &pullRequests); err != nil {
-		return "", "", false, err
+		return nil, err
 	}
+	matches := make([]openGitHubPullRequest, 0, len(pullRequests))
 	for _, pull := range pullRequests {
 		if pull.HeadRefName != branch {
 			continue
 		}
 		if _, err := pullRequestReferenceFromURL(pull.URL); err != nil {
-			return "", "", false, err
+			return nil, err
 		}
-		return pull.URL, pull.HeadRefOID, true, nil
+		matches = append(matches, pull)
 	}
-	return "", "", false, nil
+	return matches, nil
+}
+
+func openPullRequestForBranchTarget(output, branch, target, repository string) (string, string, bool, *openGitHubPullRequest, error) {
+	pullRequests, err := openPullRequestsForBranch(output, branch)
+	if err != nil {
+		return "", "", false, nil, err
+	}
+	var targetMatch, targetMismatch *openGitHubPullRequest
+	for i := range pullRequests {
+		pull := &pullRequests[i]
+		if pull.HeadRepository.NameWithOwner != "" && !strings.EqualFold(pull.HeadRepository.NameWithOwner, repository) {
+			continue
+		}
+		if pull.BaseRefName == "" || pull.BaseRefName == target {
+			if targetMatch == nil {
+				targetMatch = pull
+			}
+		} else if targetMismatch == nil {
+			targetMismatch = pull
+		}
+	}
+	if targetMatch != nil {
+		return targetMatch.URL, targetMatch.HeadRefOID, true, nil, nil
+	}
+	if targetMismatch != nil {
+		return "", "", false, targetMismatch, nil
+	}
+	return "", "", false, nil, nil
+}
+
+func openPullRequestForBranch(output, branch string) (string, string, bool, error) {
+	pullRequests, err := openPullRequestsForBranch(output, branch)
+	if err != nil {
+		return "", "", false, err
+	}
+	if len(pullRequests) == 0 {
+		return "", "", false, nil
+	}
+	return pullRequests[0].URL, pullRequests[0].HeadRefOID, true, nil
+}
+
+func pullRequestTargetMismatch(prURL, actual, expected string) error {
+	return axi.Failure(
+		"pr_target_mismatch",
+		fmt.Sprintf("open PR/MR %s for the Task branch targets %q, but the Task's frozen target is %q", prURL, actual, expected),
+		false,
+		"Retarget the existing PR/MR to "+expected+" or close it before retrying `posse publish`",
+	)
 }
 
 func pullRequestHeadMismatch(actual, expected string) error {
