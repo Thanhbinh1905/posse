@@ -53,6 +53,24 @@ type Defaults struct {
 	Gate                []string `toml:"gate" json:"gate"`
 }
 
+type ReviewLoop struct {
+	Enabled   bool     `toml:"enabled" json:"enabled"`
+	MaxRounds int      `toml:"max_rounds" json:"max_rounds"`
+	BlockAt   string   `toml:"block_at" json:"block_at"`
+	AutoStart bool     `toml:"auto_start" json:"auto_start"`
+	Docs      bool     `toml:"docs" json:"docs"`
+	Guidance  []string `toml:"guidance" json:"guidance"`
+}
+
+type GateLoop struct {
+	MaxFixRounds int `toml:"max_fix_rounds" json:"max_fix_rounds"`
+}
+
+type CILoop struct {
+	MaxFixRounds   int `toml:"max_fix_rounds" json:"max_fix_rounds"`
+	RerunCancelled int `toml:"rerun_cancelled" json:"rerun_cancelled"`
+}
+
 type Remuda struct {
 	Clean    string   `toml:"clean" json:"clean"`
 	Setup    []string `toml:"setup" json:"setup"`
@@ -129,6 +147,9 @@ type Config struct {
 	Identity            Identity              `toml:"identity" json:"identity"`
 	Lead                Lead                  `toml:"lead" json:"lead"`
 	Defaults            Defaults              `toml:"defaults" json:"defaults"`
+	ReviewLoop          ReviewLoop            `toml:"review_loop" json:"review_loop"`
+	GateLoop            GateLoop              `toml:"gate_loop" json:"gate_loop"`
+	CILoop              CILoop                `toml:"ci_loop" json:"ci_loop"`
 	Remuda              Remuda                `toml:"remuda" json:"remuda"`
 	Retention           Retention             `toml:"retention" json:"retention"`
 	Kinds               map[string]Kind       `toml:"kinds" json:"kinds"`
@@ -369,10 +390,13 @@ func defaultMap() map[string]any {
 			"lead":   map[string]any{"name": "Lead", "persona": "", "language": "en", "address_user": ""},
 			"worker": map[string]any{"display_prefix": "rider"},
 		},
-		"remuda":    map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
-		"retention": map[string]any{"task_artifacts": "2160h"},
-		"lead":      map[string]any{"kind": "", "profiles": map[string]any{}},
-		"lowkey":    map[string]any{"lead": false},
+		"remuda":      map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
+		"retention":   map[string]any{"task_artifacts": "2160h"},
+		"review_loop": map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}},
+		"gate_loop":   map[string]any{"max_fix_rounds": 3},
+		"ci_loop":     map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1},
+		"lead":        map[string]any{"kind": "", "profiles": map[string]any{}},
+		"lowkey":      map[string]any{"lead": false},
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_unsaddle": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "landing_mode": "pr",
 			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "none", "gate": []string{},
