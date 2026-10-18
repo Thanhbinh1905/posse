@@ -298,6 +298,77 @@ func TestRefreshWorkerDisplayNeverRenamesWorkspaces(t *testing.T) {
 	}
 }
 
+func TestOwnsTaskPaneMatchesNamelessAgentByRecordedSession(t *testing.T) {
+	mount := t.TempDir()
+	project := store.Project{Name: "clouddbv1"}
+	task := store.Task{
+		Seq:              15,
+		WorktreePath:     mount,
+		PaneID:           "wT8:pM",
+		PaneLabel:        "posse:clouddbv1:t15",
+		AgentName:        "posse-clouddbv1-t15-1",
+		AgentSession:     `{"session_id":"01a1425b-3893-75f3-8310-79ae9e6f9b49"}`,
+		AgentSessionKind: "codex",
+	}
+	pane := herdr.Pane{
+		PaneID:       task.PaneID,
+		WorkspaceID:  "wT8",
+		TabID:        "wT8:tM",
+		Label:        task.PaneLabel,
+		CWD:          mount,
+		Agent:        "codex",
+		AgentSession: json.RawMessage(`{"agent":"codex","kind":"id","source":"herdr:codex","value":"01a1425b-3893-75f3-8310-79ae9e6f9b49"}`),
+	}
+	snapshot := herdr.Snapshot{
+		Panes:  []herdr.Pane{pane},
+		Agents: []herdr.Agent{{PaneID: pane.PaneID, Agent: "codex", SessionID: "01a1425b-3893-75f3-8310-79ae9e6f9b49"}},
+	}
+	if !ownsTaskPane(snapshot, project, task, nil, pane) {
+		t.Fatal("nameless agent with the Task's exact pane, Mount cwd, kind, and session was not recognized")
+	}
+	paneOnlySession := herdr.Snapshot{Panes: []herdr.Pane{pane}, Agents: []herdr.Agent{{PaneID: pane.PaneID, Agent: "codex"}}}
+	if !ownsTaskPane(paneOnlySession, project, task, nil, pane) {
+		t.Fatal("nameless agent with the exact session only on the pane was not recognized")
+	}
+	agentOnlySessionPane := pane
+	agentOnlySessionPane.AgentSession = nil
+	if !ownsTaskPane(herdr.Snapshot{Panes: []herdr.Pane{agentOnlySessionPane}, Agents: snapshot.Agents}, project, task, nil, agentOnlySessionPane) {
+		t.Fatal("nameless agent with the exact session only on the agent was not recognized")
+	}
+	conflictingSessionPane := pane
+	conflictingSessionPane.AgentSession = json.RawMessage(`{"agent":"codex","kind":"id","source":"herdr:codex","value":"replacement-session"}`)
+	if ownsTaskPane(herdr.Snapshot{Panes: []herdr.Pane{conflictingSessionPane}, Agents: snapshot.Agents}, project, task, nil, conflictingSessionPane) {
+		t.Fatal("conflicting Herdr session records were claimed")
+	}
+
+	for name, replacement := range map[string]herdr.Agent{
+		"different session":     {PaneID: pane.PaneID, Agent: "codex", SessionID: "replacement-session"},
+		"different harness":     {PaneID: pane.PaneID, Agent: "claude", SessionID: "01a1425b-3893-75f3-8310-79ae9e6f9b49"},
+		"different named agent": {Name: "replacement-agent", PaneID: pane.PaneID, Agent: "codex", SessionID: "01a1425b-3893-75f3-8310-79ae9e6f9b49"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ownsTaskPane(herdr.Snapshot{Panes: []herdr.Pane{pane}, Agents: []herdr.Agent{replacement}}, project, task, nil, pane) {
+				t.Fatalf("replacement agent was claimed: %#v", replacement)
+			}
+		})
+	}
+	ambiguousAgents := append(append([]herdr.Agent(nil), snapshot.Agents...), herdr.Agent{Name: "replacement-agent", PaneID: pane.PaneID, Agent: "codex", SessionID: "replacement-session"})
+	if ownsTaskPane(herdr.Snapshot{Panes: []herdr.Pane{pane}, Agents: ambiguousAgents}, project, task, nil, pane) {
+		t.Fatal("ambiguous Herdr agent records were claimed")
+	}
+
+	outside := pane
+	outside.CWD = t.TempDir()
+	if ownsTaskPane(herdr.Snapshot{Panes: []herdr.Pane{outside}, Agents: snapshot.Agents}, project, task, nil, outside) {
+		t.Fatal("nameless agent outside the Task Mount was claimed")
+	}
+	otherPane := pane
+	otherPane.PaneID = "wT8:pN"
+	if ownsTaskPane(herdr.Snapshot{Panes: []herdr.Pane{otherPane}, Agents: snapshot.Agents}, project, task, nil, otherPane) {
+		t.Fatal("agent in a replacement pane was claimed")
+	}
+}
+
 func TestAgentNameMatchesTaskFollowsAgentNameLimits(t *testing.T) {
 	project := "ride-agent.start-after-a-long-project"
 	if name := agentName(project, 1, 2); !agentNameMatchesTask(name, project, 1) {
