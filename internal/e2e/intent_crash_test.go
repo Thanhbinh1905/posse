@@ -110,10 +110,10 @@ func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 					return nil
 				}
 			}
-			waitMarker := func(marker string) {
+			waitMarker := func(marker string, output *bytes.Buffer) {
 				t.Helper()
 				if !waitForCondition(20*time.Second, func() bool { _, err := os.Stat(marker); return err == nil }) {
-					t.Fatalf("timed out waiting for pause marker %s", marker)
+					t.Fatalf("timed out waiting for pause marker %s: command=%s pollers=%v", marker, output.String(), lookoutPIDs(fixture.root))
 				}
 			}
 			continueAt := func(marker string) {
@@ -127,7 +127,7 @@ func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 			landEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "land:after:teardown.ready")
 			landEnv = setEnv(landEnv, "POSSE_INTENT_PAUSE_FILE", landMarker)
 			landOutput, landDone := startCLI(landEnv, "land", taskID, "--merge", "--user-approved", "User approved this local merge")
-			waitMarker(landMarker)
+			waitMarker(landMarker, landOutput)
 
 			var landErr error
 			if scenario.failTeardown {
@@ -135,7 +135,7 @@ func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 				otherEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "unsaddle:after:panes.close")
 				otherEnv = setEnv(otherEnv, "POSSE_INTENT_PAUSE_FILE", otherMarker)
 				otherOutput, otherDone := startCLI(otherEnv, "roster")
-				waitMarker(otherMarker)
+				waitMarker(otherMarker, otherOutput)
 				continueAt(landMarker)
 				time.Sleep(time.Second)
 				var task store.Task

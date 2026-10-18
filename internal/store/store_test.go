@@ -378,6 +378,21 @@ func TestTerminalTaskTransitionsMakeQueuedMessagesUndeliverable(t *testing.T) {
 	}
 }
 
+func latestEmbeddedMigrationVersion(t *testing.T) int64 {
+	t.Helper()
+	sources, err := embeddedMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var latest int64
+	for _, source := range sources {
+		if source.version > latest {
+			latest = source.version
+		}
+	}
+	return latest
+}
+
 func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
 	if err != nil {
@@ -388,8 +403,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != reportBundleMigrationVersion {
-		t.Fatalf("applied Goose migration version = %d, want %d", version, reportBundleMigrationVersion)
+	if version != latestEmbeddedMigrationVersion(t) {
+		t.Fatalf("applied Goose migration version = %d, want %d", version, latestEmbeddedMigrationVersion(t))
 	}
 }
 
@@ -448,6 +463,7 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`DROP TABLE project_lookout_pollers`,
 		`DROP TABLE report_acceptances`,
 		`DROP INDEX report_reviews_target_idx`,
 		`DROP TABLE report_reviews`,
@@ -550,6 +566,7 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE project_lookout_pollers`,
 		`DROP TABLE report_acceptances`,
 		`DROP INDEX report_reviews_target_idx`,
 		`DROP TABLE report_reviews`,
@@ -720,6 +737,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE project_lookout_pollers`,
 		`DROP TABLE report_acceptances`,
 		`DROP INDEX report_reviews_target_idx`,
 		`DROP TABLE report_reviews`,
@@ -854,9 +872,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != reportBundleMigrationVersion {
+	if version != latestEmbeddedMigrationVersion(t) {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want %d", version, reportBundleMigrationVersion)
+		t.Fatalf("initial Goose migration version = %d, want %d", version, latestEmbeddedMigrationVersion(t))
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -893,8 +911,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != reportBundleMigrationVersion {
-		t.Fatalf("reopened Goose migration version = %d, want %d", version, reportBundleMigrationVersion)
+	if version != latestEmbeddedMigrationVersion(t) {
+		t.Fatalf("reopened Goose migration version = %d, want %d", version, latestEmbeddedMigrationVersion(t))
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {

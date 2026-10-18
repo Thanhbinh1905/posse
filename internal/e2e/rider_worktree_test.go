@@ -176,6 +176,18 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 		t.Fatalf("Lead group close did not restore both Riders: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
 	}
 	snap = f.snapshot(t)
+	if !waitForCondition(10*time.Second, func() bool {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		project, err := db.ProjectByID(context.Background(), f.projectID)
+		return err == nil && project.LeadPaneID != "" && project.LeadLabel != ""
+	}) {
+		t.Fatal("Lead recovery did not finish recording its identity")
+	}
+	snap = f.snapshot(t)
 	assertRecoveredRiderRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
 		t.Fatal("Lead-primary recovery did not preserve the hidden Lookout poller")
@@ -218,7 +230,18 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 		t.Fatal(err)
 	}
 	focusedBeforeClose := f.snapshot(t).FocusedPaneID
-	runPosse(t, f.binary, f.repo, leadEnv, "unsaddle", "t2", "--discard", "--user-approved", "User approved the child teardown test")
+	command := exec.Command(f.binary, "unsaddle", "t2", "--discard", "--user-approved", "User approved the child teardown test")
+	command.Dir, command.Env = f.repo, leadEnv
+	commandOutput, commandErr := command.CombinedOutput()
+	if commandErr != nil {
+		db, dbErr := store.OpenReadOnly(f.home)
+		if dbErr == nil {
+			project, projectErr := db.ProjectByName(context.Background(), "shop")
+			db.Close()
+			t.Fatalf("posse unsaddle t2 failed: %v\n%s\ncontext=%s leadPane=%s project=%#v projectErr=%v", commandErr, commandOutput, runPosse(t, f.binary, f.repo, leadEnv, "_context"), lead.PaneID, project, projectErr)
+		}
+		t.Fatalf("posse unsaddle t2 failed: %v\n%s\nopen project: %v", commandErr, commandOutput, dbErr)
+	}
 	snap = f.snapshot(t)
 	if snap.FocusedPaneID != focusedBeforeClose {
 		t.Fatalf("Teardown stole focus: before %s after %s", focusedBeforeClose, snap.FocusedPaneID)
