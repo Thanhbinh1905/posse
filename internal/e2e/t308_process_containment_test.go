@@ -3,12 +3,15 @@
 package e2e
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -133,5 +136,81 @@ while True:
 	}
 	if current := f.task(t, "t1"); current.State != store.StateTornDown {
 		t.Fatalf("Task after Teardown = %s", current.State)
+	}
+}
+
+func TestTeardownStopsProcessStartedThroughHerdrServer(t *testing.T) {
+	f := newRiderTabsFixture(t)
+	task := f.ride(t, "t1", "Herdr server process", "herdr-server-process")
+	lockPath := filepath.Join(f.root, "posse.db.mount-lock")
+	readyPath := filepath.Join(f.root, "herdr-lock-owner.ready")
+	pidPath := filepath.Join(f.root, "herdr-lock-owner.pid")
+	var owner teardownFixtureProcess
+	t.Cleanup(func() {
+		if owner.PID > 1 && teardownFixtureProcessRunning(owner) {
+			_ = syscall.Kill(owner.PID, syscall.SIGKILL)
+		}
+	})
+	raw, err := f.client.Call(context.Background(), "tab.create", map[string]any{
+		"workspace_id": task.HerdrWorkspaceID,
+		"cwd":          task.WorktreePath,
+		"label":        "e2e-lock-owner",
+		"focus":        false,
+		"env":          map[string]string{"POSSE_TASK_ID": task.ContainmentMarker},
+	})
+	if err != nil {
+		t.Fatalf("create isolated Herdr shell tab: %v", err)
+	}
+	var testTab workspaceResult
+	if err := json.Unmarshal(raw, &testTab); err != nil || testTab.RootPane.PaneID == "" {
+		t.Fatalf("Herdr shell tab response = %s: %v", raw, err)
+	}
+	command := `setsid sh -c 'exec 9>"$1"; flock -x 9; printf locked > "$2"; echo $$ > "$3"; exec sleep 60' lock-owner ` + shellQuote(lockPath) + ` ` + shellQuote(readyPath) + ` ` + shellQuote(pidPath) + ` >/dev/null 2>&1 </dev/null &`
+	if _, err := f.client.Run(context.Background(), "pane", "run", testTab.RootPane.PaneID, command); err != nil {
+		t.Fatalf("start lock owner through Herdr server: %v", err)
+	}
+	if !waitForCondition(5*time.Second, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}) {
+		t.Fatal("Herdr server did not start the lock owner")
+	}
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("Herdr lock-owner PID = %q: %v", pidBytes, err)
+	}
+	bootID, startTime, err := store.ProcessIdentityForPID(pid)
+	if err != nil {
+		t.Fatalf("read Herdr lock-owner identity: %v", err)
+	}
+	owner = teardownFixtureProcess{PID: pid, BootID: bootID, StartTime: startTime}
+	if filepath.Clean(processCWD(pid)) != filepath.Clean(task.WorktreePath) {
+		t.Fatalf("Herdr-launched lock owner cwd = %q, want isolated Task Mount %q", processCWD(pid), task.WorktreePath)
+	}
+	environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil || !strings.Contains(string(environ), "POSSE_TASK_ID="+task.ContainmentMarker) {
+		t.Fatalf("Herdr-launched lock owner lost the Task marker: %q: %v", environ, err)
+	}
+	if task.ContainmentMode == "cgroup" && e2eProcessInTaskCgroup(pid, task.ContainmentPath) {
+		t.Fatalf("Herdr-launched lock owner unexpectedly inherited Task cgroup %s", task.ContainmentPath)
+	}
+	if _, err := f.client.Call(context.Background(), "tab.close", map[string]any{"tab_id": testTab.RootPane.TabID}); err != nil {
+		t.Fatalf("close the test-created shell tab: %v", err)
+	}
+	if !waitForCondition(3*time.Second, func() bool { return teardownFixtureProcessRunning(owner) }) {
+		t.Fatalf("Herdr lock owner %d did not survive its shell tab", pid)
+	}
+	markTaskReported(t, f, task)
+	f.exitRider(t, "t1")
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t1")
+	if !strings.Contains(output, "torn-down") {
+		t.Fatalf("Teardown failed for Herdr-launched process %d: %s", pid, output)
+	}
+	if waitForCondition(2*time.Second, func() bool { return teardownFixtureProcessRunning(owner) }) {
+		t.Fatalf("Teardown left Herdr-launched lock owner %d running", pid)
 	}
 }

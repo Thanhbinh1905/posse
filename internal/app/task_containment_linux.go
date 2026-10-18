@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,8 +19,14 @@ import (
 
 func stopTaskProcessContainment(ctx context.Context, task store.Task) ([]taskProcessDetail, error) {
 	if task.ContainmentMode == "cgroup" {
-		if err := stopTaskCgroup(ctx, task); err != nil {
-			return taskProcessesInCgroup(task.ContainmentPath), err
+		// Herdr can start Task-marked commands outside the pane shell's cgroup.
+		var markerErr error
+		if task.ContainmentMarker != "" {
+			_, markerErr = stopMarkedTaskProcesses(task.ContainmentMarker)
+		}
+		cgroupErr := stopTaskCgroup(ctx, task)
+		if markerErr != nil || cgroupErr != nil {
+			return taskContainmentProcessDetails(task), errors.Join(markerErr, cgroupErr)
 		}
 		return nil, nil
 	}
@@ -31,7 +38,15 @@ func stopTaskProcessContainment(ctx context.Context, task store.Task) ([]taskPro
 
 func taskContainmentProcessDetails(task store.Task) []taskProcessDetail {
 	if task.ContainmentMode == "cgroup" {
-		return taskProcessesInCgroup(task.ContainmentPath)
+		processes := taskProcessesInCgroup(task.ContainmentPath)
+		if task.ContainmentMarker == "" {
+			return processes
+		}
+		pids, err := markedTaskPIDs(task.ContainmentMarker)
+		if err != nil {
+			return processes
+		}
+		return mergeTaskProcessDetails(processes, processDetails(pids))
 	}
 	if task.ContainmentMarker == "" {
 		return nil
