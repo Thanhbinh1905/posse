@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -216,6 +217,45 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		}
 	}()
 	offlineRoot := filepath.Join(workspace, "offline")
+	// Hold only the offline checkout-sync lock while Lookout performs its
+	// target freshness fetch and reaches the deliberate Forge stall. This lets
+	// the test install the blackhole route before checkout sync can fetch.
+	syncLockOwner := exec.Command("sh", "-c", `exec 9>"$1"; flock -x 9; printf 'locked\n'; exec sleep 60`, "offline-sync-lock", filepath.Join(offlineRoot, ".git", "posse-sync.lock"))
+	syncLockOwner.Env = env
+	lockReady, err := syncLockOwner.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncLockOwner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	releaseSyncLock := func() {
+		if syncLockOwner.ProcessState != nil {
+			return
+		}
+		if syncLockOwner.Process != nil {
+			_ = syncLockOwner.Process.Kill()
+			_ = syncLockOwner.Wait()
+		}
+	}
+	defer releaseSyncLock()
+	lockResult := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(lockReady)
+		if scanner.Scan() {
+			lockResult <- scanner.Text()
+			return
+		}
+		lockResult <- ""
+	}()
+	select {
+	case line := <-lockResult:
+		if line != "locked" {
+			t.Fatalf("offline checkout sync lock owner did not acquire the lock: %q", line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("offline checkout sync lock acquisition timed out")
+	}
 
 	lookoutPaneID := ""
 	t.Cleanup(func() {
@@ -246,6 +286,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 	}
 	gitTest(t, env, offlineRoot, "config", "--unset-all", "url.file://"+filepath.Join(root, "offline.git")+".insteadOf")
 	gitTest(t, env, offlineRoot, "config", "url.http://"+blackhole.Addr().String()+"/.insteadOf", "https://vpn-t181.invalid/")
+	releaseSyncLock()
 	select {
 	case <-fetchStarted:
 	case <-time.After(5 * time.Second):
