@@ -21,6 +21,7 @@ const (
 	publishedReportBundleMigrationVersion       = 46
 	latestPublishedReportBundleMigrationVersion = 47
 	reportBundleMigrationVersion                = 48
+	taskContainmentMigrationVersion             = 49
 	legacyReportBundleMigrationChecksum         = "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
 )
 

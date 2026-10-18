@@ -5,6 +5,7 @@ set -eu
 # Keep this list complete so newly added tests cannot silently go unsharded.
 assignments='
 1 TestFailedRecoveryBoundWithRealHerdr
+1 TestTeardownStopsDetachedTaskServer
 1 TestStoppedRiderPaneCanBeRelaunched
 1 TestProjectCommandDoesNotWaitForeverForStoppedLockOwner
 1 TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch
@@ -50,6 +51,7 @@ assignments='
 1 TestRealPiInterruptStopsBusyTurnE2E
 1 TestT229RebuildPreservesStoppedProject
 2 TestLegacyRiderTabsAfterWorktreeUpgrade
+2 TestTeardownBlockedNoticeNamesForeignMountServer
 2 TestNoticeHandoffSurvivesHarnessCrashAndAvoidsRecordedReplay
 2 TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns
 2 TestObservationWorkloadCountersAreDeterministic
@@ -104,6 +106,7 @@ assignments='
 2 TestWorkspacePublishRetriesAfterTimeoutForUnverifiedPrePushHead
 2 TestWorkspacePublishRemembersUnverifiedPrePushHeadAcrossRestart
 3 TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup
+3 TestCleanDryRunAndReclaimsFinishedTask
 3 TestPublishRetriesAfterTimeoutForUnverifiedPrePushHead
 3 TestWorkspaceScoutTeardownPreservesMemberAndRootAttachments
 3 TestMergedPRSnapshotsUnmergedFollowUp

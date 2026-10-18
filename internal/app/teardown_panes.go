@@ -807,6 +807,9 @@ func (s *Service) unsaddleDiscardIncomplete(ctx context.Context, db *store.DB, p
 }
 
 func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
+	if err := s.recordTeardownBlocked(ctx, db, project, task, cause); err != nil {
+		return err
+	}
 	notices, err := db.Notices(ctx, project.ID, false)
 	if err != nil {
 		return err

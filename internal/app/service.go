@@ -21,20 +21,21 @@ import (
 )
 
 type Service struct {
-	Home          string
-	Version       string
-	updateURL     string
-	updateClient  *http.Client
-	Herdr         herdr.Adapter
-	Progress      runtime.ProgressSource
-	herdrContext  func() bool
-	removeMount   func(context.Context, string, string) error
-	pendingLead   *leadExecPlan
-	confirm       confirmFunc
-	updateConfirm confirmFunc
-	reexecUpdate  func(string, []string, []string) error
-	maintenanceMu sync.Mutex
-	maintenance   map[string]bool
+	Home                 string
+	Version              string
+	updateURL            string
+	updateClient         *http.Client
+	Herdr                herdr.Adapter
+	Progress             runtime.ProgressSource
+	herdrContext         func() bool
+	removeMount          func(context.Context, string, string) error
+	pendingLead          *leadExecPlan
+	confirm              confirmFunc
+	updateConfirm        confirmFunc
+	reexecUpdate         func(string, []string, []string) error
+	maintenanceMu        sync.Mutex
+	maintenance          map[string]bool
+	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
 }
 
 func New(home string, adapter herdr.Adapter) *Service {
@@ -131,6 +132,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the poll-only Lookout.", Handler: s.wait},
 		{Name: "remuda", Summary: "List a Project's Remuda or prune safe, Posse-owned leftovers.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},
+		{Name: "clean", Usage: "$ clean [--dry-run|--yes]", Summary: "Review or reclaim finished Tasks, their processes, scratch and held Mounts.", Handler: s.clean},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
 		{Name: "project", Summary: "Inspect or change a Project's settings.", Subcommands: []*axi.Command{
 			{Name: "add", Usage: "$ project add [--directory] [--name <n>]", Summary: "Register a repository or workspace, or explicitly register a local directory Project, without starting its Lead.", Handler: s.projectAdd},

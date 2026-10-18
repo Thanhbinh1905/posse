@@ -117,6 +117,7 @@ func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, ro
 			if _, err := gitCommand(env, repo, "show-ref", "--verify", "refs/heads/"+task.Branch); err != nil {
 				t.Fatalf("prune deleted the checked-out branch: %v", err)
 			}
+			runPosse(t, binary, repo, leadEnv, "unsaddle", "t1")
 			return
 		}
 		runPosse(t, binary, repo, leadEnv, "unsaddle", "t1")
@@ -162,10 +163,17 @@ func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, ro
 		assertFixtureDescriptorClosed(t, processes["background"], "3", "open-cache")
 		for _, name := range []string{"global-child", "other-task-child"} {
 			process := processes[name]
-			if !teardownFixtureProcessRunning(process) {
-				t.Errorf("Teardown signalled process in unowned %s storage: pid=%d", name, process.PID)
+			if !waitForCondition(7*time.Second, func() bool { return !teardownFixtureProcessRunning(process) }) {
+				t.Errorf("Rider-created %s process survived Teardown: pid=%d cwd=%q", name, process.PID, processCWD(process.PID))
 			}
-			assertFixtureDescriptorOpen(t, process, "4", "foreign-cache")
+			assertFixtureDescriptorClosed(t, process, "4", "foreign-cache")
+			cachePath := filepath.Join(root, "global-tmp", "foreign-cache")
+			if name == "other-task-child" {
+				cachePath = filepath.Join(root, "posse", "scratch", "shop", "t2", "foreign-cache")
+			}
+			if _, err := os.Stat(cachePath); err != nil {
+				t.Errorf("Teardown removed cache outside the Task scratch at %s: %v", cachePath, err)
+			}
 		}
 	default:
 		t.Fatalf("unknown lifecycle %q", mode)
@@ -246,14 +254,5 @@ func assertFixtureDescriptorClosed(t *testing.T, process teardownFixtureProcess,
 	path := fmt.Sprintf("/proc/%d/fd/%s", process.PID, fd)
 	if target, err := os.Readlink(path); err == nil && strings.Contains(target, name) {
 		t.Errorf("Teardown left the Rider cache descriptor open: %s -> %s", path, target)
-	}
-}
-
-func assertFixtureDescriptorOpen(t *testing.T, process teardownFixtureProcess, fd, name string) {
-	t.Helper()
-	path := fmt.Sprintf("/proc/%d/fd/%s", process.PID, fd)
-	target, err := os.Readlink(path)
-	if err != nil || !strings.Contains(target, name) {
-		t.Errorf("Teardown changed an unowned cache descriptor: %s -> %s err=%v", path, target, err)
 	}
 }

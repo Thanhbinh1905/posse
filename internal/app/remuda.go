@@ -1043,6 +1043,9 @@ type ownedProcess struct {
 }
 
 func verifyNoTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
+	if processes := taskContainmentProcessDetails(task); len(processes) > 0 {
+		return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, fmt.Sprint(processes), "No process was stopped or signalled. Inspect the Mount and scratch processes, then retry discard")
+	}
 	roots, err := taskOwnedProcessRoots(ctx, db, home, project, task)
 	if err != nil {
 		return err

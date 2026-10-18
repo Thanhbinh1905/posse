@@ -84,6 +84,8 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		}
 		addCheck("Posse-owned disk usage", "ok", fmt.Sprintf("%d bytes under %s (scratch, Remuda, Project data and state); %s", ownedBytes, home, retention), "")
 	}
+	cacheStatus, cacheDetail, cacheAction := sharedGoCacheDiagnostic(ctx.Context)
+	addCheck("Shared Go build cache", cacheStatus, cacheDetail, cacheAction)
 	if configErr != nil {
 		addCheck("config", "fail", configErr.Error(), "Fix the reported configuration key")
 	} else {
@@ -120,6 +122,22 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("database", "ok", "database opened", "")
 			hosts := map[string]bool{}
 			for _, project := range projects {
+				if detail, diskErr := projectDiskUsage(home, project); diskErr != nil {
+					addCheck("Project disk usage "+project.Name, "warn", diskErr.Error(), "Inspect this Project's scratch, Remuda and artifact directories")
+				} else {
+					addCheck("Project disk usage "+project.Name, "ok", detail, "")
+				}
+				tasks, tasksErr := db.Tasks(ctx.Context, project.ID, true)
+				if tasksErr != nil {
+					addCheck("Task temp and process leaks "+project.Name, "warn", tasksErr.Error(), "Inspect the Project Tasks and retry `posse doctor`")
+				} else {
+					status, detail := taskDiskLeakSummary(home, project, tasks)
+					action := ""
+					if status != "ok" {
+						action = "Review `posse clean`; use `posse clean --yes` to reclaim eligible finished Tasks"
+					}
+					addCheck("Task temp and process leaks "+project.Name, status, detail, action)
+				}
 				if reason := staleProjectRootReason(project.Root, home); reason != "" {
 					addCheck("project "+project.Name, "warn", reason, "Run `posse project remove "+project.Name+"`")
 					continue

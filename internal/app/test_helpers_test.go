@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func TestMain(m *testing.M) {
@@ -219,5 +221,8 @@ func gitTest(t *testing.T, cwd string, args ...string) string {
 func testService(home string, adapter herdr.Adapter) *Service {
 	service := New(home, adapter)
 	service.herdrContext = hasHerdrEnvironment
+	service.taskContainmentSetup = func(context.Context, store.Task, string, string) (string, error) {
+		return "marker", nil
+	}
 	return service
 }

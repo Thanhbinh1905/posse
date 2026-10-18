@@ -396,6 +396,9 @@ type Task struct {
 	ReportKind           string
 	ReportDigest         string
 	ReportManifestJson   string
+	ContainmentMode      string
+	ContainmentPath      string
+	ContainmentMarker    string
 }
 
 type TaskLaunchIdentity struct {

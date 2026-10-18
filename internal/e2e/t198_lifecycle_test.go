@@ -276,7 +276,8 @@ while IFS= read -r line; do :; done
 			source   string
 		}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateReported, "cli"}} {
 			if err := db.Transition(context.Background(), otherID, transition.from, transition.to, transition.source, "isolated other Task fixture"); err != nil {
-				t.Fatal(err)
+				current, stateErr := db.TaskByID(context.Background(), project.ID, otherID)
+				t.Fatalf("transition other Task %s -> %s failed: %v; current=%#v lookup=%v", transition.from, transition.to, err, current, stateErr)
 			}
 		}
 	}

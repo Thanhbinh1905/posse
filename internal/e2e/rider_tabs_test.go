@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -397,9 +398,59 @@ type riderTabsFixture struct {
 	projectID                int64
 }
 
+func cleanupEmptyFixtureTaskCgroups(t *testing.T, home string) {
+	t.Helper()
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	projects, err := db.Projects(context.Background())
+	if err != nil {
+		return
+	}
+	prefix := filepath.Join("/sys/fs/cgroup", "user.slice", fmt.Sprintf("user-%d.slice", os.Getuid()), fmt.Sprintf("user@%d.service", os.Getuid()), "app.slice")
+	for _, project := range projects {
+		tasks, err := db.Tasks(context.Background(), project.ID, true)
+		if err != nil {
+			continue
+		}
+		for _, task := range tasks {
+			if task.ContainmentMode != "cgroup" || len(task.ContainmentMarker) < 12 {
+				continue
+			}
+			path := task.ContainmentPath
+			want := filepath.Join(prefix, fmt.Sprintf("posse-task-t%d-%s.scope", task.ID, task.ContainmentMarker[:12]))
+			if path != want {
+				continue
+			}
+			pids := []string{}
+			_ = filepath.WalkDir(path, func(current string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil || entry.IsDir() || entry.Name() != "cgroup.procs" {
+					return nil
+				}
+				contents, err := os.ReadFile(current)
+				if err == nil {
+					pids = append(pids, strings.Fields(string(contents))...)
+				}
+				return nil
+			})
+			if len(pids) == 0 {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					t.Logf("remove empty E2E Task cgroup %s: %v", path, err)
+				}
+			} else {
+				t.Logf("leaving non-empty E2E Task cgroup %s with PIDs %s", path, strings.Join(pids, ","))
+			}
+		}
+	}
+}
+
 func newRiderTabsFixture(t *testing.T) *riderTabsFixture {
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("tabs-"))
+	home := filepath.Join(root, "posse")
+	t.Cleanup(func() { cleanupEmptyFixtureTaskCgroups(t, home) })
 	binDir := filepath.Join(root, "bin")
 	worktrees := filepath.Join(root, "posse", "remuda")
 	for _, directory := range []string{binDir, worktrees, filepath.Join(root, "claude", "skills"), filepath.Join(root, "codex"), filepath.Join(root, "home")} {
@@ -453,6 +504,13 @@ case "$PWD/" in
     if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then sleep 3; fi
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+    if [ -f "$POSSE_TEST_ROOT/check-task-env" ]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" > "$POSSE_TEST_ROOT/task-environment"
+    fi
+    if [ -f "$POSSE_TEST_ROOT/launch-detached-server" ]; then
+      setsid python3 "$POSSE_TEST_ROOT/detached-server.py" "$POSSE_TEST_ROOT" >/dev/null 2>&1 &
+      echo $! > "$POSSE_TEST_ROOT/detached-server.pid"
+    fi
     while [ ! -f "$PWD/.posse-e2e-agent-exit" ]; do sleep 0.05; done
     ;;
   *)
@@ -465,7 +523,6 @@ esac
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(agent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	home := filepath.Join(root, "posse")
 	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\nmax_workers = 4\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)

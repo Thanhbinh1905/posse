@@ -644,6 +644,9 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 					}
 				}
 			}
+			if _, containmentErr := stopTaskProcessContainment(ctx, task); containmentErr != nil {
+				return containmentErr
+			}
 			if mountHeld {
 				mountStopped, stopErr := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
 				if stopErr != nil {
@@ -683,7 +686,13 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	if err := s.runIntentStep(ctx, db, intent, "mount.stop", func() error {
 		if discardable {
-			return verifyNoTaskOwnedProcesses(ctx, db, home, project, task)
+			if processes := taskContainmentProcessDetails(task); len(processes) > 0 {
+				return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, fmt.Sprint(processes), "No residual process was stopped or signalled. Inspect the Mount and scratch processes, then retry discard")
+			}
+			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
+				return err
+			}
+			return retireEmptyTaskCgroup(task)
 		}
 		if !mountHeld {
 			return nil
