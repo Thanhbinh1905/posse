@@ -113,7 +113,8 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		Review: review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
 		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
-		Gate:  cfg.Defaults.Gate, MergeMethod: cfg.Defaults.MergeMethod, Remuda: config.Remuda{Clean: cfg.Remuda.Clean, Setup: cfg.Remuda.Setup}})
+		Gate:  cfg.Defaults.Gate, ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, Gate: cfg.GateLoop, CI: cfg.CILoop},
+		MergeMethod: cfg.Defaults.MergeMethod, Remuda: config.Remuda{Clean: cfg.Remuda.Clean, Setup: cfg.Remuda.Setup}})
 }
 
 // Restore files absent after a crash from the admitted inputs, never from
@@ -190,6 +191,9 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 }
 
 func admittedPlanFailure(err error) error {
+	if _, ok := err.(*dispatch.BriefError); ok {
+		return axi.Failure("brief_invalid", err.Error(), false)
+	}
 	return axi.Failure("plan_invalid", fmt.Sprintf("Task execution plan refused: %v", err), false)
 }
 

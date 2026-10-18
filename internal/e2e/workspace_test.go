@@ -82,6 +82,19 @@ case "$PWD/" in
           tries=$((tries + 1)); [ "$tries" -lt 100 ] || break; sleep 0.2
         done
         ;;
+      root-only-hold)
+        trap ': > "$POSSE_TEST_ROOT/root-scout-interrupted"' INT
+        trap 'posse holler failed "Rider stopped for approved discard" > "$POSSE_TEST_ROOT/root-scout-stop.log" 2>&1; exit 0' TERM
+        member_worktree=false
+        for member in */; do [ ! -e "$member/.git" ] || member_worktree=true; done
+        if [ "$member_worktree" = false ] && [ -r CLAUDE.md ] && [ ! -w CLAUDE.md ]; then
+          printf 'active root-only Scout has no editable Members\n' >> "$POSSE_E2E_WORKER_LOG"
+        else
+          printf 'active root-only workspace scope mismatch\n' >> "$POSSE_E2E_WORKER_LOG"
+        fi
+        : > "$POSSE_TEST_ROOT/root-scout-active"
+        while :; do sleep 0.02; done
+        ;;
       *)
         for member in $(sed -n 's/^- ` + "`" + `\([^/]*\)\/` + "`" + `.*/\1/p' "$launch"); do
           (cd "$member" && printf 'change\n' > worker-change.txt && git add worker-change.txt && git commit -qm "worker change in $member") >> "$POSSE_E2E_WORKER_LOG" 2>&1
@@ -375,8 +388,73 @@ esac
 			t.Fatalf("root-only Scout received Member %s: %v", member, err)
 		}
 	}
+	projectConfig = filepath.Join(root, "posse", "projects", "stack", "config.toml")
+	if err := os.WriteFile(projectConfig, []byte("[defaults]\npr_poll = \"1ms\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activeBrief := filepath.Join(root, "active-root-scout.md")
+	if err := os.WriteFile(activeBrief, []byte("---\ntype: scout\ntitle: Inspect active root context\ndone_when: approved cancellation succeeds\nroot_context: read-only\n---\nInspect shared-root context while PR polling continues.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "worker-mode"), []byte("root-only-hold\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output := runPosse(t, posseBinary, workspace, leadEnv, "ride", "--name", "active-root-scout", "--brief", activeBrief); !strings.Contains(output, "task: t4") {
+		t.Fatalf("ride active root-only Scout: %s", output)
+	}
+	if !waitForCondition(30*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(root, "root-scout-active"))
+		return err == nil
+	}) {
+		log, _ := os.ReadFile(workerLog)
+		t.Fatalf("active root-only Scout did not start: %s", log)
+	}
+	activeTask, err := db.Task(context.Background(), project.ID, "t4")
+	if err != nil || activeTask.State != store.StateWorking {
+		t.Fatalf("active root-only Scout state = %s, %v", activeTask.State, err)
+	}
+	if repos, err := db.TaskRepos(context.Background(), activeTask.ID); err != nil || len(repos) != 0 {
+		t.Fatalf("active root-only Scout member repositories = %#v, %v", repos, err)
+	}
+	var pollBefore int64
+	if err := db.QueryRowContext(context.Background(), `SELECT COALESCE((SELECT pr_polled_at FROM project_watch_state WHERE project_id=?), 0)`, project.ID).Scan(&pollBefore); err != nil {
+		t.Fatal(err)
+	}
+	// Make the Project poll due before each normal Lead command, matching the
+	// reported failure where a memberless Scout aborted maintenance.
+	time.Sleep(10 * time.Millisecond)
+	for _, args := range [][]string{
+		{},
+		{"peek", "t4"},
+		{"remuda"},
+		{"send", "t4", "Queue a note for the active Scout", "--queue"},
+	} {
+		runPosse(t, posseBinary, workspace, leadEnv, args...)
+		current, err := db.Task(context.Background(), project.ID, "t4")
+		if err != nil || current.State != store.StateWorking {
+			t.Fatalf("Lead command %v left active root-only Scout in %s: %v", args, current.State, err)
+		}
+	}
+	if !waitForCondition(5*time.Second, func() bool {
+		var lastPoll int64
+		err := db.QueryRowContext(context.Background(), `SELECT COALESCE((SELECT pr_polled_at FROM project_watch_state WHERE project_id=?), 0)`, project.ID).Scan(&lastPoll)
+		return err == nil && lastPoll > pollBefore
+	}) {
+		t.Fatal("workspace PR polling did not complete after the root-only Scout started")
+	}
+	discard := exec.Command(posseBinary, "unsaddle", "t4", "--discard", "--user-approved", "User approved discarding the active root-only Scout")
+	discard.Dir, discard.Env = workspace, leadEnv
+	discardOutput, discardErr := discard.CombinedOutput()
+	if discardErr != nil || !strings.Contains(string(discardOutput), "state: torn-down") {
+		current, taskErr := db.Task(context.Background(), project.ID, "t4")
+		transitions, transitionErr := db.TaskTransitions(context.Background(), activeTask.ID, 20)
+		t.Fatalf("discard active root-only Scout: err=%v output=%s current=%#v taskErr=%v transitions=%#v transitionErr=%v", discardErr, discardOutput, current, taskErr, transitions, transitionErr)
+	}
+	if current, err := db.Task(context.Background(), project.ID, "t4"); err != nil || current.State != store.StateTornDown {
+		t.Fatalf("active root-only Scout after discard = %s, %v", current.State, err)
+	}
 	log, _ := os.ReadFile(workerLog)
-	for _, proof := range []string{"mixed scope and read-only root verified", "root-only Scout has no editable Members"} {
+	for _, proof := range []string{"mixed scope and read-only root verified", "root-only Scout has no editable Members", "active root-only Scout has no editable Members"} {
 		if !strings.Contains(string(log), proof) {
 			t.Fatalf("E2E Rider did not verify %q: %s", proof, log)
 		}

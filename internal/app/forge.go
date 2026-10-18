@@ -185,7 +185,7 @@ type gitlabMergeRequest struct {
 }
 
 func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
-	endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests?state=opened&source_branch=" + url.QueryEscape(task.Branch) + "&target_branch=" + url.QueryEscape(taskTargetBranch(project, task))
+	endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests?state=opened&source_branch=" + url.QueryEscape(task.Branch) + "&per_page=100"
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()
 	foundOpenMR, lastHeadLagging := false, false
@@ -215,6 +215,9 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 		for _, mr := range existing {
 			if mr.SourceBranch != task.Branch || mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID {
 				continue // A fork's branch (or an unidentified source) is not this Project's Worker branch.
+			}
+			if mr.TargetBranch != taskTargetBranch(project, task) {
+				return "", false, pullRequestTargetMismatch(mr.WebURL, mr.TargetBranch, taskTargetBranch(project, task))
 			}
 			matched = true
 			foundOpenMR = true

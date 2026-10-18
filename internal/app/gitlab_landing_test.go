@@ -50,7 +50,13 @@ case "$*" in
      esac
    done
    printf 'updated\n' ;;
- *"merge_requests?state=opened"*) if [ -n "${POSSE_TEST_GLAB_LIST:-}" ]; then cat "$POSSE_TEST_GLAB_LIST"; else printf '[]\n'; fi ;;
+ *"merge_requests?state=opened"*)
+   if [ "${POSSE_TEST_GLAB_FILTER_TARGET:-}" = "1" ]; then
+     case "$*" in
+       *"target_branch="*) printf '[]\n' ;;
+       *) if [ -n "${POSSE_TEST_GLAB_LIST:-}" ]; then cat "$POSSE_TEST_GLAB_LIST"; else printf '[]\n'; fi ;;
+     esac
+   elif [ -n "${POSSE_TEST_GLAB_LIST:-}" ]; then cat "$POSSE_TEST_GLAB_LIST"; else printf '[]\n'; fi ;;
  *"/approvals"*) cat "$POSSE_TEST_GLAB_APPROVALS" ;;
  *"/merge_requests/"*) cat "$POSSE_TEST_GH_STATE" ;;
  "mr update "*)
@@ -116,6 +122,46 @@ func (f *prLandingFixture) setGitLabState(t *testing.T, state, mergeable, pipeli
 	}
 }
 
+func TestGitLabPublishRefusesExistingMRToDifferentFrozenTarget(t *testing.T) {
+	f := gitlabFixture(t, store.StateWorking)
+	const prURL = "https://git.example.com/group/sub/shop/-/merge_requests/105"
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET target_branch='main' WHERE id=?`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task.TargetBranch = "main"
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("[defaults]\nforge = \"gitlab\"\ntarget_branch = \"staging\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GLAB_BASE_BRANCH", "main")
+	f.setGitLabState(t, "opened", "mergeable", "running", f.headSHA)
+	existing, err := json.Marshal([]map[string]any{{
+		"web_url": prURL, "state": "opened", "sha": f.headSHA,
+		"source_branch": f.task.Branch, "target_branch": "staging",
+		"source_project_id": 7, "target_project_id": 7,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listPath := filepath.Join(f.root, "existing-mrs.json")
+	if err := os.WriteFile(listPath, existing, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GLAB_LIST", listPath)
+	t.Setenv("POSSE_TEST_GLAB_FILTER_TARGET", "1")
+
+	code, output, stderr := f.run("publish", "Worker completion summary")
+	if code != 1 || !strings.Contains(output, "pr_target_mismatch") || !strings.Contains(output, prURL) || !strings.Contains(output, "staging") || !strings.Contains(output, "main") {
+		t.Fatalf("publish did not refuse the MR to a different target: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	log, err := os.ReadFile(f.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "mr create ") {
+		t.Fatalf("publish created a duplicate MR instead of refusing: %s", log)
+	}
+}
+
 func TestGitLabWorkerPublishesAndLeadLands(t *testing.T) {
 	f := gitlabFixture(t, store.StateWorking)
 	briefPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "brief.md")
@@ -156,7 +202,7 @@ func TestGitLabPublishAddsIssueLinksToAnExistingMergeRequest(t *testing.T) {
 	}
 	request := map[string]any{
 		"web_url": "https://git.example.com/group/sub/shop/-/merge_requests/17",
-		"state":   "opened", "sha": f.headSHA, "source_branch": "posse/t1",
+		"state":   "opened", "sha": f.headSHA, "source_branch": "posse/t1", "target_branch": "main",
 		"source_project_id": 7, "target_project_id": 7,
 	}
 	encoded, err := json.Marshal([]any{request})

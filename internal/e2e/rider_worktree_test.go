@@ -223,9 +223,33 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": second.HerdrWorkspaceID}); err != nil {
 		t.Fatalf("close the exited Rider child workspace: %v", err)
 	}
-	lead, _ := findLeadInSnapshot(snap)
+	lead, found := findLeadInSnapshot(snap)
+	if !found {
+		t.Fatal("recovered Lead pane missing before child Teardown")
+	}
+	if !waitForCondition(5*time.Second, func() bool {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		project, err := db.ProjectByID(context.Background(), f.projectID)
+		return err == nil && project.LeadPaneID == lead.PaneID && project.HerdrWorkspaceID == lead.WorkspaceID
+	}) {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			t.Fatalf("recovered Lead identity did not settle before child Teardown: pane=%#v open store: %v", lead, err)
+		}
+		project, projectErr := db.ProjectByID(context.Background(), f.projectID)
+		_ = db.Close()
+		t.Fatalf("recovered Lead identity did not settle before child Teardown: pane=%#v Project=%#v err=%v", lead, project, projectErr)
+	}
 	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", lead.WorkspaceID)
+	leadEnv = setEnv(leadEnv, "HERDR_TAB_ID", lead.TabID)
+	if role := runPosse(t, f.binary, f.repo, leadEnv, "_context"); !strings.Contains(role, "role: lead\nproject: shop") {
+		t.Fatalf("recovered Lead caller did not resolve as Lead before child Teardown: %s", role)
+	}
 	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": f.userBefore.RootPane.PaneID}); err != nil {
 		t.Fatal(err)
 	}
