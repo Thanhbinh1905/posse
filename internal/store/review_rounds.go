@@ -9,7 +9,7 @@ import (
 
 var (
 	ErrReviewRoundActive    = errors.New("review round is already active")
-	ErrReviewRoundUnchanged = errors.New("Ship head is unchanged since its last review")
+	ErrReviewRoundUnchanged = errors.New("ship head is unchanged since its last review")
 	ErrReviewRoundCap       = errors.New("review round cap reached")
 	ErrReviewRoundNumber    = errors.New("review round number changed concurrently")
 )
