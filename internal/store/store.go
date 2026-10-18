@@ -712,14 +712,26 @@ type Mount struct {
 }
 
 func (db *DB) CreateTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, occupied func(int) (bool, error)) (int64, int, error) {
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, "", 0, occupied)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, "", 0, occupied, nil)
 }
 
 func (db *DB) CreateTaskWithSequenceAndIntent(ctx context.Context, projectID int64, projectName string, task Task, command string, processID int, occupied func(int) (bool, error)) (int64, int, error) {
 	if command == "" || processID < 1 {
 		return 0, 0, fmt.Errorf("intent command and process id are required")
 	}
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, nil)
+}
+
+// CreateReviewRoundTaskWithSequenceAndIntent atomically creates a Review Task
+// and admits all of its repository bindings as one numbered round.
+func (db *DB) CreateReviewRoundTaskWithSequenceAndIntent(ctx context.Context, projectID int64, projectName string, task Task, command string, processID int, admission ReviewRoundAdmission, occupied func(int) (bool, error)) (int64, int, error) {
+	if command == "" || processID < 1 {
+		return 0, 0, fmt.Errorf("intent command and process id are required")
+	}
+	if task.Type != "review" || task.ReviewsTaskID != admission.ShipTaskID {
+		return 0, 0, fmt.Errorf("review round task does not target its admitted Ship Task")
+	}
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission)
 }
 
 var ErrTaskBranchExists = errors.New("Task branch already used")
@@ -749,7 +761,7 @@ func (db *DB) TaskBranchExists(ctx context.Context, projectID int64, branch stri
 	return exists, err
 }
 
-func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, intentCommand string, processID int, occupied func(int) (bool, error)) (int64, int, error) {
+func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, intentCommand string, processID int, occupied func(int) (bool, error), roundAdmission *ReviewRoundAdmission) (int64, int, error) {
 	if task.ShortName == "" {
 		return 0, 0, fmt.Errorf("Task short name is required")
 	}
@@ -769,6 +781,11 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	var seq int
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET last_activity_at=last_activity_at WHERE id=?`, projectID); err != nil {
 		return 0, 0, err
+	}
+	if roundAdmission != nil {
+		if err := validateReviewRoundAdmissionTx(ctx, tx, *roundAdmission); err != nil {
+			return 0, 0, err
+		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM tasks WHERE project_id=?`, projectID).Scan(&seq); err != nil {
 		return 0, 0, err
@@ -823,6 +840,11 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 			return 0, 0, err
 		}
 	}
+	if roundAdmission != nil {
+		if err := insertReviewRoundBindingsTx(ctx, tx, id, *roundAdmission); err != nil {
+			return 0, 0, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES (?, '', 'spawning', 'cli', 'Task created', ?)`, id, now); err != nil {
 		return 0, 0, err
 	}
@@ -836,6 +858,11 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 	}
 	if err := db.PersistTask(ctx, id); err != nil {
 		return 0, 0, err
+	}
+	if roundAdmission != nil {
+		if err := db.PersistTask(ctx, roundAdmission.ShipTaskID); err != nil {
+			return 0, 0, err
+		}
 	}
 	return id, seq, nil
 }

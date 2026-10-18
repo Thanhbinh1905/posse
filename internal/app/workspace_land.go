@@ -75,7 +75,11 @@ func (s *Service) landWorkspace(out *axi.Context, db *store.DB, project store.Pr
 	if err != nil {
 		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
+	intentOpen := true
 	defer func() {
+		if !intentOpen {
+			return
+		}
 		if finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID); returnErr == nil && finishErr != nil && !errors.Is(finishErr, store.ErrIntentOwned) {
 			returnErr = finishErr
 		}
@@ -88,6 +92,23 @@ func (s *Service) landWorkspace(out *axi.Context, db *store.DB, project store.Pr
 		task.State = store.StateLanding
 		if members, err = s.workspaceMembers(ctx, db, project, task); err != nil {
 			return err
+		}
+	}
+	if plan, planErr := task.AdmittedPlan(); planErr != nil {
+		return admittedPlanFailure(planErr)
+	} else if autoStartReviewLoop(plan) {
+		home, homeErr := s.homePath()
+		if homeErr != nil {
+			return homeErr
+		}
+		if finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID); finishErr != nil {
+			return finishErr
+		}
+		intentOpen = false
+		if started, startErr := s.maybeAutoStartReviewRound(out, db, home, project, task); startErr != nil {
+			return startErr
+		} else if started {
+			return nil
 		}
 	}
 	if !merge {
@@ -274,8 +295,14 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 	if changed == 0 {
 		return axi.Failure("land_refused", "no member of "+taskIDString(task.Seq)+" has commits to Land", false, "Send the Rider an instruction with `posse send`")
 	}
-	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
-		return err
+	plan, planErr := task.AdmittedPlan()
+	if planErr != nil {
+		return admittedPlanFailure(planErr)
+	}
+	if !autoStartReviewLoop(plan) {
+		if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+			return err
+		}
 	}
 	note := "Every changed member is gated or has an open pull request"
 	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", note); err != nil {

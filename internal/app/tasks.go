@@ -107,11 +107,15 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) spawn(ctx *axi.Context, args []string) error {
+	return s.spawnTask(ctx, args, nil)
+}
+
+func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generatedReviewRound) error {
 	parsed, err := parseArgs("ride", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-leftover": {}, "user-approved": {}})
 	if err != nil {
 		return err
 	}
-	if len(parsed.Positionals) != 0 || parsed.Flags["brief"] == "" {
+	if len(parsed.Positionals) != 0 || parsed.Flags["brief"] == "" && generated == nil || parsed.Flags["brief"] != "" && generated != nil {
 		return axi.Usage("ride requires --brief <file>")
 	}
 	db, home, err := s.openDB()
@@ -130,9 +134,16 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return configError(err)
 	}
-	briefData, err := os.ReadFile(parsed.Flags["brief"])
-	if err != nil {
-		return axi.Failure("brief_invalid", "cannot read Brief: "+err.Error(), false, "Check the Brief path and retry")
+	sourceBriefPath := parsed.Flags["brief"]
+	var briefData []byte
+	if generated != nil {
+		sourceBriefPath = generated.BriefPath
+		briefData = append([]byte(nil), generated.BriefData...)
+	} else {
+		briefData, err = os.ReadFile(sourceBriefPath)
+		if err != nil {
+			return axi.Failure("brief_invalid", "cannot read Brief: "+err.Error(), false, "Check the Brief path and retry")
+		}
 	}
 	brief, err := dispatch.ParseBriefText(string(briefData))
 	if err != nil {
@@ -245,6 +256,9 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		reviewTargets, err = shipCandidateTargets(ctx.Context, db, project, reviewed)
 		if err != nil {
 			return axi.Failure("review_target_unresolved", "cannot pin the reviewed Ship revision: "+err.Error(), false)
+		}
+		if generated != nil && (generated.Admission.ShipTaskID != reviewed.ID || !store.SameReviewTargets(reviewTargets, generated.Targets)) {
+			return axi.Failure("review_head_changed", "Ship head changed while the Review Round was being admitted", true, "Retry `posse review start`; Posse will recompute its scope")
 		}
 		reviewsTaskID = reviewed.ID
 		baseRef = reviewed.Branch
@@ -399,9 +413,12 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyLand: defaultValue(autonomy.Land, "ask"),
 		Branch: branch, BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets,
 	}
-	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, parsed.Flags["brief"], briefData, members, choice)
+	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, sourceBriefPath, briefData, members, choice)
 	if err != nil {
 		return admittedPlanFailure(err)
+	}
+	if generated != nil {
+		plan.Inputs = append(plan.Inputs, reviewRoundPlanInputs(generated.Files)...)
 	}
 	if plan.Execution.BaseCommit != "" {
 		// All later diff, proof and teardown checks use the admitted commit,
@@ -421,7 +438,17 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		return err
 	}
 	crashIntentAt("ride", "before", "task.create")
-	taskID, sequence, intent, err := createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
+	var taskID int64
+	var sequence int
+	var intent store.Intent
+	if generated != nil {
+		taskID, sequence, intent, err = createReviewRoundTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, generated.Admission)
+	} else {
+		taskID, sequence, intent, err = createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
+	}
+	if generated != nil {
+		err = mapReviewRoundAdmissionError(err)
+	}
 	if errors.Is(err, store.ErrTaskBranchExists) {
 		return branchTaken(branch, "in Project "+project.Name+" Task history")
 	}
@@ -567,6 +594,12 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if err := s.runIntentStep(ctx.Context, db, intent, "brief.write", func() error { return writeFile(briefPath, briefData) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
+	}
+	if generated != nil {
+		if err := s.runIntentStep(ctx.Context, db, intent, "review.files", func() error { return writeReviewRoundFiles(taskHome, generated.Files) }); err != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+			return err
+		}
 	}
 	launchContents := workerProtocol(project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, plan.ProseLanguage) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "rider", planPreferences(&plan))
@@ -786,12 +819,24 @@ func createTaskWithSequence(ctx context.Context, db *store.DB, project store.Pro
 }
 
 func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task) (int64, int, store.Intent, error) {
+	return createTaskWithIntent(ctx, db, project, home, task, nil)
+}
+
+func createReviewRoundTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission store.ReviewRoundAdmission) (int64, int, store.Intent, error) {
+	return createTaskWithIntent(ctx, db, project, home, task, &admission)
+}
+
+func createTaskWithIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission *store.ReviewRoundAdmission) (int64, int, store.Intent, error) {
 	var taskID int64
 	var sequence int
 	var intent store.Intent
 	err := withMountStateLock(ctx, db, func() error {
 		var err error
-		taskID, sequence, err = db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "ride", os.Getpid(), taskSequenceOccupied(ctx, db, project, home))
+		if admission == nil {
+			taskID, sequence, err = db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "ride", os.Getpid(), taskSequenceOccupied(ctx, db, project, home))
+		} else {
+			taskID, sequence, err = db.CreateReviewRoundTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "ride", os.Getpid(), *admission, taskSequenceOccupied(ctx, db, project, home))
+		}
 		if err != nil {
 			return err
 		}

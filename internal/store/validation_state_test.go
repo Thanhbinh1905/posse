@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -92,6 +93,55 @@ func TestVoidValidationRoundNumberCanBeReused(t *testing.T) {
 	var count int
 	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM review_rounds WHERE ship_task_id=? AND round=1 AND repository='shop'`, f.ship).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("round 1 history count=%d err=%v; want both void and retry rows", count, err)
+	}
+}
+
+func TestReviewRoundAdmissionGuardsAndVoids(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	create := func(branch, name string, admission ReviewRoundAdmission) (int64, error) {
+		shipTask := f.task(t, f.ship)
+		returnID, _, err := f.db.CreateReviewRoundTaskWithSequenceAndIntent(f.ctx, shipTask.ProjectID, "shop", Task{
+			Type: "review", ReviewsTaskID: f.ship, Title: name, ShortName: name, LandingMode: "local", Branch: branch,
+			ReviewTargets: []ReviewTarget{{Repository: "shop", Commit: admission.Bindings[0].HeadSHA}},
+		}, "ride", 1, admission, func(int) (bool, error) { return false, nil })
+		return returnID, err
+	}
+	admission := func(round int, head string, maxRounds int) ReviewRoundAdmission {
+		return ReviewRoundAdmission{ShipTaskID: f.ship, Round: round, MaxRounds: maxRounds, Bindings: []ReviewRound{{
+			ShipTaskID: f.ship, Round: round, Repository: "shop", ScopeKind: "full", ScopeBaseSHA: reviewShaA,
+			HeadSHA: head, TargetCommitSHA: reviewShaA, BaselineTree: reviewShaA, DeltaSHA256: reportHash,
+			ConflictedPaths: "[]", Status: "admitted",
+		}}}
+	}
+	firstID, err := create("posse/t3", "round-one", admission(1, reviewShaA, 1))
+	if err != nil {
+		t.Fatalf("admit first round: %v", err)
+	}
+	if _, err := create("posse/t4", "active-retry", admission(1, reviewShaB, 1)); !errors.Is(err, ErrReviewRoundActive) {
+		t.Fatalf("active round error = %v", err)
+	}
+	if err := f.db.Transition(f.ctx, firstID, StateSpawning, StateFailed, "cli", "failed before verdict"); err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := create("posse/t4", "round-one-retry", admission(1, reviewShaB, 1))
+	if err != nil {
+		t.Fatalf("admit reused void round number: %v", err)
+	}
+	rounds, err := f.db.ReviewRoundsFor(f.ctx, f.ship)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[0].Round != 1 || rounds[0].Status != "void" || rounds[1].Round != 1 || rounds[1].Status != "admitted" || rounds[1].ReviewTaskID != secondID {
+		t.Fatalf("round history after void retry = %#v", rounds)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE review_rounds SET status='verdict',verdict='pass' WHERE review_task_id=?`, secondID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := create("posse/t5", "unchanged", admission(2, reviewShaB, 1)); !errors.Is(err, ErrReviewRoundUnchanged) {
+		t.Fatalf("unchanged head error = %v", err)
+	}
+	if _, err := create("posse/t5", "cap", admission(2, strings.Repeat("c", 40), 1)); !errors.Is(err, ErrReviewRoundCap) {
+		t.Fatalf("cap error = %v", err)
 	}
 }
 
