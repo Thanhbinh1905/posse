@@ -347,7 +347,7 @@ esac
 	if err := os.WriteFile(filepath.Join(root, "codex", "hooks.json"), []byte(codexHooks), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\nmax_workers = 4\n\n[remuda]\nkeep_idle = 1\n\n[profiles.deep]\nkind = \"claude\"\nmodel = \"sonnet\"\neffort = \"high\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\nmax_workers = 4\n\n[review_loop]\nenabled = false\n\n[remuda]\nkeep_idle = 1\n\n[profiles.deep]\nkind = \"claude\"\nmodel = \"sonnet\"\neffort = \"high\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
