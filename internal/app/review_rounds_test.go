@@ -409,7 +409,7 @@ func TestReviewRoundScopeUsesFrozenTargetVirtualBaseline(t *testing.T) {
 			previous := store.ReviewRound{Round: 1, Repository: "shop", HeadSHA: reviewed, Status: "verdict"}
 			scope, err := calculateReviewRoundScope(ctx, reviewRoundRepository{
 				name: "shop", root: repo, worktree: repo, targetBranch: "staging", head: head,
-			}, previous, 2, nil)
+			}, previous, 2, []string{"docs"})
 			if err != nil {
 				t.Fatal(err)
 			}
