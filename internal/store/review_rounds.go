@@ -106,6 +106,7 @@ WHERE rr.ship_task_id=? AND rr.status='admitted'
 		return ErrReviewRoundNumber
 	}
 	seen := make(map[string]bool, len(admission.Bindings))
+	anyNewHead := false
 	for _, binding := range admission.Bindings {
 		if binding.ShipTaskID != admission.ShipTaskID || binding.Round != admission.Round || binding.Repository == "" || seen[binding.Repository] || binding.Status != "admitted" || binding.Verdict != "" {
 			return fmt.Errorf("invalid repository binding in review round admission")
@@ -120,9 +121,12 @@ SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
 			admission.ShipTaskID, binding.Repository, binding.HeadSHA).Scan(&unchanged); err != nil {
 			return err
 		}
-		if unchanged {
-			return ErrReviewRoundUnchanged
+		if !unchanged {
+			anyNewHead = true
 		}
+	}
+	if !anyNewHead {
+		return ErrReviewRoundUnchanged
 	}
 	if used >= admission.MaxRounds {
 		return ErrReviewRoundCap

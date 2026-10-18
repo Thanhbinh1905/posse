@@ -145,6 +145,35 @@ func TestReviewRoundAdmissionGuardsAndVoids(t *testing.T) {
 	}
 }
 
+func TestReviewRoundAdmissionAllowsPartialWorkspaceDelta(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}, {Repository: "api", Commit: reviewShaB}})
+	for _, row := range []struct {
+		repository string
+		head       string
+	}{{"shop", reviewShaA}, {"api", reviewShaB}} {
+		if _, err := f.db.ExecContext(f.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,?, 'full',?,?,?,?,?,'[]','verdict','pass',10)`,
+			f.ship, f.review, row.repository, reviewShaA, row.head, reviewShaA, row.head, reportHash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admission := ReviewRoundAdmission{ShipTaskID: f.ship, Round: 2, MaxRounds: 2, Bindings: []ReviewRound{
+		{ShipTaskID: f.ship, Round: 2, Repository: "shop", ScopeKind: "delta", ScopeBaseSHA: reviewShaA, HeadSHA: reviewShaA, TargetCommitSHA: reviewShaA, BaselineTree: reviewShaA, DeltaSHA256: reportHash, ConflictedPaths: "[]", Status: "admitted"},
+		{ShipTaskID: f.ship, Round: 2, Repository: "api", ScopeKind: "delta", ScopeBaseSHA: reviewShaB, HeadSHA: strings.Repeat("c", 40), TargetCommitSHA: reviewShaA, BaselineTree: reviewShaB, DeltaSHA256: reportHash, ConflictedPaths: "[]", Status: "admitted"},
+	}}
+	ship := f.task(t, f.ship)
+	_, _, err := f.db.CreateReviewRoundTaskWithSequenceAndIntent(f.ctx, ship.ProjectID, "shop", Task{
+		Type: "review", ReviewsTaskID: f.ship, Title: "partial workspace delta", ShortName: "partial-delta", LandingMode: "local", Branch: "posse/t3",
+		ReviewTargets: []ReviewTarget{{Repository: "shop", Commit: reviewShaA}, {Repository: "api", Commit: strings.Repeat("c", 40)}},
+	}, "ride", 1, admission, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatalf("admit a round with one changed Member: %v", err)
+	}
+	rounds, err := f.db.ReviewRoundsFor(f.ctx, f.ship)
+	if err != nil || len(rounds) != 4 {
+		t.Fatalf("partial workspace round rows = %#v, %v", rounds, err)
+	}
+}
+
 func insertValidationStateFixture(t *testing.T, f reviewVerdictFixture) {
 	t.Helper()
 	statements := []struct {
