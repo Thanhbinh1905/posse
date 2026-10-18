@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const latestMigrationVersion = 49
+const latestMigrationVersion = 50
 
 func TestQuietPROpenedAckIsAtomicRetryableAndLeavesClaimedNotices(t *testing.T) {
 	ctx := context.Background()
