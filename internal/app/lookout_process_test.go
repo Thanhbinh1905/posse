@@ -3,15 +3,13 @@ package app
 import (
 	"bufio"
 	"context"
-	"fmt"
+	"github.com/thanhbinh1905/posse/internal/store"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/thanhbinh1905/posse/internal/herdr"
-	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func TestLookoutProcessListingMatchesPaneAndPosseHome(t *testing.T) {
@@ -41,7 +39,7 @@ func TestLookoutProcessListingRecognizesLeadWatchersRenamedBinariesAndDefaultHom
 	if processes[0].PID != 21 || processes[0].Kind != "lead" || !processes[0].QuietRoutine || processes[0].PaneID != "w1:p1" {
 		t.Fatalf("Lead watcher = %#v", processes[0])
 	}
-	if processes[1].PID != 23 || processes[1].Kind != "lookout_tab" || !processes[1].PollOnly {
+	if processes[1].PID != 23 || processes[1].Kind != "poller" || !processes[1].PollOnly {
 		t.Fatalf("renamed poll-only watcher = %#v", processes[1])
 	}
 	if _, found := lookoutFromArgs(25, []string{"/bin/sh", "-c", "posse lookout --poll-only"}, map[string]string{"POSSE_HOME": "/tmp/shop"}, "/tmp/shop"); found {
@@ -76,7 +74,7 @@ func TestLiveLeadLookoutExcludesPollOnlyAndOtherProjects(t *testing.T) {
 	project := store.Project{Root: "/workspace/shop", HerdrWorkspaceID: "w1", LeadPaneID: "w1:p1"}
 	pid := os.Getpid()
 	if liveLeadLookout(project, []lookoutProcess{{PID: pid, PaneID: "w1:p2", WorkingDir: project.Root, PollOnly: true}}) {
-		t.Fatal("poll-only Lookout tab is not the Lead watcher")
+		t.Fatal("poll-only Project process is not the Lead delivery watcher")
 	}
 	if liveLeadLookout(project, []lookoutProcess{{PID: pid, PaneID: "w1:p4", WorkingDir: "/workspace/other"}}) {
 		t.Fatal("other Project's watcher in the same workspace is not this Lead's watcher")
@@ -174,110 +172,48 @@ func TestStopLookoutsEscalatesToSIGKILL(t *testing.T) {
 	}
 }
 
-func TestFreshLookoutPaneWaitsWithoutBlockingPastStartupGrace(t *testing.T) {
-	previousGrace := lookoutStartupGracePeriod
-	lookoutStartupGracePeriod = 50 * time.Millisecond
-	t.Cleanup(func() { lookoutStartupGracePeriod = previousGrace })
-	ctx := context.Background()
-	db, project, home := newLookoutTestProject(t)
-	defer db.Close()
-	fake := herdr.NewFake()
-	project.HerdrWorkspaceID = "w1"
-	pane := herdr.Pane{PaneID: "fresh:p1", TabID: "fresh:t1", WorkspaceID: "w1", Label: lookoutTabLabel(project)}
-	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{pane}}
-	service := testService(home, fake)
-	t.Setenv("HERDR_PANE_ID", "")
-	startedAt := time.Now()
-	if err := service.ensureLookoutTab(ctx, db, project, fake.SnapshotValue, false); err != nil {
-		t.Fatal(err)
+func TestLookoutPollerEnvironmentIsDetachedFromHerdrIdentity(t *testing.T) {
+	project := store.Project{ID: 42, Name: "shop", Root: "/workspace/shop"}
+	env := lookoutPollerEnvironment([]string{
+		"PATH=/usr/bin", "POSSE_HOME=/tmp/old", "HERDR_PANE_ID=w1:p4", "HERDR_WORKSPACE_ID=w1", "HERDR_TAB_ID=w1:t1", "HERDR_ENV=1", "HERDR_PLUGIN_EVENT=focus", "CUSTOM=value",
+	}, "/tmp/posse", project, "random-token", 1234)
+	got := parseProcessEnvironment(strings.Join(env, "\x00"))
+	if got["POSSE_HOME"] != "/tmp/posse" || got[lookoutPollerProjectEnv] != "42" || got[lookoutPollerTokenEnv] != "random-token" || got[lookoutPollerStartedEnv] != "1234" || got["PWD"] != project.Root {
+		t.Fatalf("poller identity environment = %#v", got)
 	}
-	finishedAt := time.Now()
-	if elapsed := finishedAt.Sub(startedAt); elapsed >= 500*time.Millisecond {
-		t.Fatalf("startup grace blocked Lookout reconciliation for %s", elapsed)
-	}
-	if fake.CallCount("tab.close") != 0 || fake.CallCount("tab.create") != 0 {
-		t.Fatalf("fresh pane was replaced inside its startup grace: %#v", fake.Calls)
-	}
-	// The short test grace can expire before this database read under -race.
-	time.Sleep(lookoutStartupGracePeriod + 10*time.Millisecond)
-	state, err := db.LookoutRecovery(ctx, project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	graceStarted, graceFinished := startedAt.Add(lookoutStartupGracePeriod).UnixMilli(), finishedAt.Add(lookoutStartupGracePeriod).UnixMilli()
-	if state.PaneID != pane.PaneID || state.RetryAt < graceStarted || state.RetryAt > graceFinished || state.FailedStarts != 0 || state.NoticeRaised {
-		t.Fatalf("fresh pane grace state = %#v; retry deadline should be between %d and %d", state, graceStarted, graceFinished)
-	}
-	if err := service.ensureLookoutTab(ctx, db, project, fake.SnapshotValue, false); err != nil {
-		t.Fatal(err)
-	}
-	if fake.CallCount("tab.close") != 1 || fake.CallCount("tab.create") != 1 {
-		t.Fatalf("expired startup grace did not replace the pane: %#v", fake.Calls)
-	}
-}
-
-func TestLookoutRetryBackoffIsExponentialAndBounded(t *testing.T) {
-	if got := lookoutRetryBackoff(1); got != lookoutRetryBasePeriod {
-		t.Fatalf("first retry backoff = %s, want %s", got, lookoutRetryBasePeriod)
-	}
-	if got := lookoutRetryBackoff(2); got != 2*lookoutRetryBasePeriod {
-		t.Fatalf("second retry backoff = %s, want %s", got, 2*lookoutRetryBasePeriod)
-	}
-	if got := lookoutRetryBackoff(100); got != lookoutRetryMaxPeriod {
-		t.Fatalf("retry backoff = %s, want cap %s", got, lookoutRetryMaxPeriod)
-	}
-}
-
-func TestRepeatedLookoutStartupFailuresRaiseOneNotice(t *testing.T) {
-	ctx := context.Background()
-	db, project, _ := newLookoutTestProject(t)
-	defer db.Close()
-	for attempt := 1; attempt <= lookoutStartFailureNoticeAfter; attempt++ {
-		if err := markLookoutCreated(ctx, db, project.ID, fmt.Sprintf("pane-%d", attempt), true); err != nil {
-			t.Fatal(err)
+	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_ENV", "HERDR_PLUGIN_EVENT"} {
+		if _, found := got[key]; found {
+			t.Errorf("detached poller inherited %s", key)
 		}
 	}
-	failures, noticeRaised, err := lookoutStartFailureNotice(ctx, db, project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if failures != lookoutStartFailureNoticeAfter || noticeRaised {
-		t.Fatalf("repeated failure state = (%d, %v), want (%d, false)", failures, noticeRaised, lookoutStartFailureNoticeAfter)
-	}
-	if err := markLookoutStartFailureNotice(ctx, db, project.ID); err != nil {
-		t.Fatal(err)
-	}
-	failures, noticeRaised, err = lookoutStartFailureNotice(ctx, db, project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if failures != lookoutStartFailureNoticeAfter || !noticeRaised {
-		t.Fatalf("notice state = (%d, %v), want (%d, true)", failures, noticeRaised, lookoutStartFailureNoticeAfter)
+	if got["CUSTOM"] != "value" {
+		t.Fatalf("poller lost unrelated environment: %#v", got)
 	}
 }
 
-func TestUnknownLookoutProcessIsReplacedWithoutTypingIntoOldPane(t *testing.T) {
+func TestLookoutProcessListingExtractsPollerIdentity(t *testing.T) {
+	listing := "31 /usr/local/bin/posse lookout --poll-only POSSE_HOME=/tmp/shop POSSE_LOOKOUT_PROJECT_ID=8 POSSE_LOOKOUT_TOKEN=abc POSSE_LOOKOUT_STARTED_AT=900 PWD=/workspace/shop\n"
+	processes := lookoutProcessesInListingWithVerifier(listing, "/tmp/shop", func(path string) bool { return filepath.Base(path) == "posse" })
+	if len(processes) != 1 {
+		t.Fatalf("poller processes = %#v", processes)
+	}
+	process := processes[0]
+	if process.Kind != "poller" || !process.PollOnly || process.PollerProjectID != 8 || process.PollerToken != "abc" || process.PollerStartedAt != 900 || process.WorkingDir != "/workspace/shop" {
+		t.Fatalf("poller identity = %#v", process)
+	}
+}
+
+func TestLookoutPollerHealthReportsMissingProcess(t *testing.T) {
 	ctx := context.Background()
 	db, project, home := newLookoutTestProject(t)
 	defer db.Close()
 	project.HerdrWorkspaceID = "w1"
-	fake := herdr.NewFake()
-	pane := herdr.Pane{PaneID: "stale:p9", TabID: "stale:t9", WorkspaceID: "w1", Label: lookoutTabLabel(project)}
-	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{pane}}
-	service := testService(home, fake)
-	if err := db.SetLookoutRecovery(ctx, project.ID, store.LookoutRecovery{PaneID: pane.PaneID, RetryAt: time.Now().Add(-time.Second).UnixMilli()}); err != nil {
+	service := testService(home, nil)
+	check, err := service.lookoutPollerHealth(ctx, db, home, project)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HERDR_PANE_ID", "")
-	if err := service.ensureLookoutTab(ctx, db, project, fake.SnapshotValue, false); err != nil {
-		t.Fatal(err)
-	}
-	if fake.CallCount("tab.close") != 1 || fake.CallCount("tab.create") != 1 {
-		t.Fatalf("stale tab was not replaced: %#v", fake.Calls)
-	}
-	for _, call := range fake.Calls {
-		if call.Method == "pane.send_input" && call.Params["pane_id"] == pane.PaneID {
-			t.Fatal("queued a new command into an unknown live Lookout pane")
-		}
+	if check.Status != "warn" || !strings.Contains(check.Detail, "poller=missing") {
+		t.Fatalf("missing poller health = %#v", check)
 	}
 }

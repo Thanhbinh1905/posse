@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
-	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -28,64 +26,66 @@ func (s *Service) repairLookout(ctx *axi.Context, db *store.DB, home string, pro
 	if project.IsDown() {
 		return axi.Failure("project_down", "the Project is stopped; Lookout repair will not restart it", false, "Run `posse up` only when you intend to restart the Lead and recover Riders")
 	}
+	if project.HerdrWorkspaceID == "" {
+		return axi.Failure("lead_workspace_missing", "the Project has no active Lead workspace to supervise", false, "Run `posse up` from the Project folder to start its Lead")
+	}
 	if _, err := os.Stat(project.Root); err != nil {
 		return axi.Failure("project_missing", fmt.Sprintf("Project %s path is unavailable: %s", project.Name, project.Root), false, "Run `posse project move` to update the Project path")
 	}
 	if s.Herdr == nil {
 		return axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true, "Run `posse doctor` to inspect setup")
 	}
-
 	snapshot, err := s.snapshot(ctx.Context)
 	if err != nil {
-		return axi.Failure("lookout_repair_failed", "could not verify the existing Lead workspace; Lookout was not changed", true, err.Error(), "Restore Herdr, then retry `posse lookout --repair`")
+		return axi.Failure("lookout_repair_failed", "could not verify the existing Lead workspace; poller was not changed", true, err.Error(), "Restore Herdr, then retry `posse lookout --repair`")
 	}
 	workspaceID, found := leadWorkspace(snapshot, project)
 	if !found || workspaceID != project.HerdrWorkspaceID {
 		return axi.Failure("lead_workspace_missing", "the recorded Lead workspace is not open; Lookout repair will not restart the Lead", false, "Restore the Lead workspace, then retry `posse lookout --repair`")
 	}
-
-	beforeState, err := db.LookoutRecovery(ctx.Context, project.ID)
+	before, err := db.LookoutPoller(ctx.Context, project.ID)
 	if err != nil {
 		return err
 	}
-	beforeProcesses, processErr := systemLookoutProcesses(home)
-	beforeCheck := projectLookoutCheck(project, beforeState, snapshot, beforeProcesses, processErr)
-
-	if err := s.ensureLookoutTab(ctx.Context, db, project, snapshot, true); err != nil {
-		return axi.Failure("lookout_repair_failed", "could not restore the Project's poll-only Lookout", true, err.Error(), "Check Herdr availability and retry `posse lookout --repair`")
-	}
-	state, check, err := s.waitLookoutRepairVerification(ctx.Context, db, home, project)
+	beforeCheck, err := s.lookoutPollerHealth(ctx.Context, db, home, project)
 	if err != nil {
-		return axi.Failure("lookout_repair_failed", "could not verify the restored poll-only Lookout", true, err.Error(), "Check Herdr availability and retry `posse lookout --repair`")
+		return err
+	}
+	if err := s.ensureLookoutPoller(ctx.Context, db, home, project); err != nil {
+		return axi.Failure("lookout_repair_failed", "could not restore the Project poller", true, err.Error(), "Check process permissions and retry `posse lookout --repair`")
+	}
+	state, check, err := s.waitLookoutPollerVerification(ctx.Context, db, home, project)
+	if err != nil {
+		return axi.Failure("lookout_repair_failed", "could not verify the restored Project poller", true, err.Error(), "Check process permissions and retry `posse lookout --repair`")
 	}
 	if check.Status != "ok" {
-		return axi.Failure("lookout_repair_failed", "Lookout repair could not verify one matching pane and process", true, check.Detail, "Inspect Herdr and retry `posse lookout --repair`")
+		return axi.Failure("lookout_repair_failed", "the Project poller did not become healthy", true, check.Detail, "Inspect the Lookout log at "+lookoutPollerLogPath(home, project))
 	}
 	return ctx.Print(axi.Object{
 		{Key: "project", Value: project.Name},
-		{Key: "pane", Value: state.PaneID},
+		{Key: "pid", Value: state.PID},
 		{Key: "state", Value: "running"},
-		{Key: "repaired", Value: beforeCheck.Status != "ok"},
-		{Key: "help", Value: []any{"This operation restores only the poll-only Lookout; it does not recover the Lead or Riders or change config"}},
+		{Key: "repaired", Value: beforeCheck.Status != "ok" || before.PID != state.PID},
+		{Key: "heartbeat_at", Value: time.UnixMilli(state.HeartbeatAt).UTC().Format(time.RFC3339)},
+		{Key: "log", Value: lookoutPollerLogPath(home, project)},
+		{Key: "help", Value: []any{"The Project poller observes PRs, CI, checkout state and landed-Task Teardown; it never claims Notices"}},
 	})
 }
 
-func (s *Service) waitLookoutRepairVerification(ctx context.Context, db *store.DB, home string, project store.Project) (store.LookoutRecovery, doctorCheck, error) {
+func (s *Service) waitLookoutPollerVerification(ctx context.Context, db *store.DB, home string, project store.Project) (store.LookoutPoller, doctorCheck, error) {
 	deadline := time.Now().Add(lookoutStartupGracePeriod)
-	var state store.LookoutRecovery
+	var state store.LookoutPoller
 	var check doctorCheck
 	for {
 		var err error
-		state, err = db.LookoutRecovery(ctx, project.ID)
+		state, err = db.LookoutPoller(ctx, project.ID)
 		if err != nil {
 			return state, doctorCheck{}, err
 		}
-		snapshot, err := s.snapshot(ctx)
+		check, err = s.lookoutPollerHealth(ctx, db, home, project)
 		if err != nil {
-			return state, doctorCheck{}, err
+			return state, check, err
 		}
-		processes, processErr := systemLookoutProcesses(home)
-		check = projectLookoutCheck(project, state, snapshot, processes, processErr)
 		if check.Status == "ok" || !time.Now().Before(deadline) {
 			return state, check, nil
 		}
@@ -97,71 +97,89 @@ func (s *Service) waitLookoutRepairVerification(ctx context.Context, db *store.D
 	}
 }
 
-func projectLookoutCheck(project store.Project, state store.LookoutRecovery, snapshot herdr.Snapshot, processes []lookoutProcess, processErr error) doctorCheck {
-	panes := make([]herdr.Pane, 0, 1)
-	for _, pane := range snapshot.Panes {
-		if pane.Label == lookoutTabLabel(project) {
-			panes = append(panes, pane)
-		}
+func (s *Service) lookoutPollerHealth(ctx context.Context, db *store.DB, home string, project store.Project) (doctorCheck, error) {
+	state, err := db.LookoutPoller(ctx, project.ID)
+	if err != nil {
+		return doctorCheck{}, err
 	}
-	correctPanes := make([]herdr.Pane, 0, len(panes))
-	for _, pane := range panes {
-		if pane.WorkspaceID == project.HerdrWorkspaceID {
-			correctPanes = append(correctPanes, pane)
-		}
+	if project.IsDown() {
+		return doctorCheck{Name: "Project Lookout " + project.Name, Status: "ok", Detail: "Project is down; no poller", Action: ""}, nil
 	}
-	pollerPaneIDs := make([]string, 0, 1)
-	for _, process := range processes {
-		if process.PollOnly && processBelongsToProject(process, project) && lookoutPIDRunning(process.PID) {
-			pollerPaneIDs = append(pollerPaneIDs, process.PaneID)
-		}
+	if project.HerdrWorkspaceID == "" {
+		return doctorCheck{Name: "Project Lookout " + project.Name, Status: "ok", Detail: "Lead not started; no poller", Action: ""}, nil
 	}
-	leadRunning := liveLeadLookout(project, processes)
-
-	detail := fmt.Sprintf("recorded pane=%s; ", lookoutPaneValue(state.PaneID))
-	switch {
-	case len(panes) == 0:
-		detail += "poll-only pane missing"
-	case len(correctPanes) == 0:
-		detail += fmt.Sprintf("poll-only pane mismatched (workspace=%s)", panes[0].WorkspaceID)
-	case len(panes) > 1:
-		detail += fmt.Sprintf("multiple poll-only panes=%d", len(panes))
-	case state.PaneID != correctPanes[0].PaneID:
-		detail += fmt.Sprintf("recorded pane mismatch (observed=%s)", correctPanes[0].PaneID)
-	default:
-		detail += fmt.Sprintf("poll-only pane=%s", correctPanes[0].PaneID)
-	}
+	processes, processErr := systemLookoutProcesses(home)
 	if processErr != nil {
-		detail += "; poll-only processes=unknown (" + processErr.Error() + ")"
-	} else {
-		detail += fmt.Sprintf("; poll-only processes=%d", len(pollerPaneIDs))
-		if len(pollerPaneIDs) == 1 {
-			detail += "; poll-only process pane=" + pollerPaneIDs[0]
-		} else if len(pollerPaneIDs) > 1 {
-			detail += "; poll-only process panes=" + strings.Join(pollerPaneIDs, ",")
+		return doctorCheck{Name: "Project Lookout " + project.Name, Status: "warn", Detail: "poller process state unavailable: " + processErr.Error(), Action: "Check process-table access and run `posse lookout --repair`"}, nil
+	}
+	var found *lookoutProcess
+	for index := range processes {
+		process := &processes[index]
+		if process.PollOnly && process.PollerProjectID == project.ID && process.PID == state.PID && process.PollerToken == state.Token && process.PollerStartedAt == state.StartedAt {
+			found = process
+			break
 		}
 	}
-	if processErr != nil {
-		detail += "; Lead delivery Lookout=unknown"
-	} else if leadRunning {
-		detail += "; Lead delivery Lookout=running"
-	} else {
-		detail += "; Lead delivery Lookout=missing"
+	detail := "poller=missing"
+	if state.PID > 0 {
+		detail = fmt.Sprintf("pid=%d started_at=%s heartbeat_at=%s executable=%s (%d:%d)", state.PID, time.UnixMilli(state.StartedAt).UTC().Format(time.RFC3339), time.UnixMilli(state.HeartbeatAt).UTC().Format(time.RFC3339), state.ExecutablePath, state.ExecutableDevice, state.ExecutableInode)
 	}
-
-	pollerMatchesPane := len(correctPanes) == 1 && len(pollerPaneIDs) == 1 && pollerPaneIDs[0] == correctPanes[0].PaneID
-	healthy := len(panes) == 1 && len(correctPanes) == 1 && state.PaneID == correctPanes[0].PaneID && pollerMatchesPane && processErr == nil
+	healthy := state.PID > 0 && state.Token != "" && found != nil && lookoutPIDRunning(state.PID) && time.Since(time.UnixMilli(state.HeartbeatAt)) <= lookoutPollerStaleAfter
+	if found != nil && (found.Executable.Device != state.ExecutableDevice || found.Executable.Inode != state.ExecutableInode) {
+		detail += "; executable changed, re-exec pending"
+	}
+	if found == nil && state.PID > 0 {
+		detail += "; matching process not found"
+	}
+	if time.Since(time.UnixMilli(state.HeartbeatAt)) > lookoutPollerStaleAfter {
+		detail += "; heartbeat stale"
+	}
+	detail += "; log=" + lookoutPollerLogPath(home, project)
 	status, action := "ok", ""
 	if !healthy {
 		status = "warn"
-		action = "Run `posse lookout --repair` from the Project folder to restore only its poll-only Lookout"
+		action = "Run `posse lookout --repair` or another Project command to repair the poller"
 	}
-	return doctorCheck{Name: "Project Lookout " + project.Name, Status: status, Detail: detail, Action: action}
+	return doctorCheck{Name: "Project Lookout " + project.Name, Status: status, Detail: detail, Action: action}, nil
 }
 
-func lookoutPaneValue(paneID string) string {
-	if paneID == "" {
-		return "none"
+func (s *Service) lookoutPollerRow(ctx context.Context, db *store.DB, home string, project store.Project) map[string]any {
+	status := "missing"
+	state, err := db.LookoutPoller(ctx, project.ID)
+	if project.IsDown() {
+		status = "stopped"
+	} else if project.HerdrWorkspaceID == "" {
+		status = "not_started"
+	} else if err != nil {
+		status = "unavailable"
+	} else if check, checkErr := s.lookoutPollerHealth(ctx, db, home, project); checkErr != nil {
+		status = "unavailable"
+	} else if check.Status == "ok" {
+		status = "running"
+	} else {
+		status = "unhealthy"
 	}
-	return paneID
+	row := map[string]any{"state": status, "log": lookoutPollerLogPath(home, project)}
+	if err != nil {
+		row["error"] = err.Error()
+		return row
+	}
+	if state.PID > 0 {
+		row["pid"] = state.PID
+		row["started_at"] = time.UnixMilli(state.StartedAt).UTC().Format(time.RFC3339)
+		row["heartbeat_at"] = time.UnixMilli(state.HeartbeatAt).UTC().Format(time.RFC3339)
+		row["executable"] = state.ExecutablePath
+		row["device"] = state.ExecutableDevice
+		row["inode"] = state.ExecutableInode
+	}
+	return row
+}
+
+func (s *Service) lookoutPollerSummary(ctx context.Context, db *store.DB, home string, project store.Project) string {
+	row := s.lookoutPollerRow(ctx, db, home, project)
+	status, _ := row["state"].(string)
+	if pid, ok := row["pid"]; ok {
+		return fmt.Sprintf("%s (pid=%v, heartbeat=%v)", status, pid, row["heartbeat_at"])
+	}
+	return status
 }

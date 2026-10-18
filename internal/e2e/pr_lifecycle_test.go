@@ -1394,31 +1394,15 @@ func TestWorkerPublishDistinguishesMovedHeadFromLagTimeout(t *testing.T) {
 func TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
+	client := herdr.NewWithEnv("herdr", fixture.env)
 	brief := filepath.Join(fixture.root, "deferred-pr-recovery.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR create recovery\ndone_when: committed change exists\n---\nExercise deferred recovery of an interrupted PR creation.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.rideAndCommitLegacy(t, brief, "t1")
 
-	client := herdr.NewWithEnv("herdr", fixture.env)
-	snapshot, err := client.Snapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, pane := range snapshot.Panes {
-		if pane.Label != "posse:shop:lookout" || pane.WorkspaceID != fixture.project.HerdrWorkspaceID {
-			continue
-		}
-		if _, err := client.Run(context.Background(), "pane", "send-keys", pane.PaneID, "ctrl+c"); err != nil {
-			t.Fatalf("stop fixture Lookout before injecting interrupted intent: %v", err)
-		}
-		if pane.TabID != "" {
-			if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": pane.TabID}); err != nil {
-				t.Fatalf("close fixture Lookout tab: %v", err)
-			}
-		}
-		break
-	}
+	// Keep the independent poller from racing the injected interrupted intent.
+	stopBackgroundLookout(t, fixture)
 
 	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "land --open-pr:after:pr.create")
 	command := exec.Command(fixture.binary, "land", "t1")

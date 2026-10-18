@@ -50,21 +50,23 @@ func New(home string, adapter herdr.Adapter) *Service {
 func (s *Service) CLI() *axi.App {
 	root := s.commands()
 	s.guardWorkers(root, nil)
-	structureStoreErrors(root)
+	s.structureStoreErrors(root)
 	return &axi.App{Name: "posse", Root: root}
 }
 
 // Apply storage error classification at every command boundary, including
 // reconcile failures from preparation and failures after a Signal is recorded.
-func structureStoreErrors(command *axi.Command) {
+func (s *Service) structureStoreErrors(command *axi.Command) {
 	if command.Handler != nil {
 		handler := command.Handler
+		name := command.Name
 		command.Handler = func(ctx *axi.Context, args []string) error {
+			s.superviseLookoutPollers(ctx, name, args)
 			return normalizeCommandError(handler(ctx, args))
 		}
 	}
 	for _, subcommand := range command.Subcommands {
-		structureStoreErrors(subcommand)
+		s.structureStoreErrors(subcommand)
 	}
 }
 
@@ -128,7 +130,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "land", Summary: "Land a completed Ship Task; PR merges require the gated head to include the target branch.", Handler: s.land},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "unsaddle", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Mount work with User approval and verified Rider shutdown.", Handler: s.teardown},
-		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the poll-only Lookout.", Handler: s.wait},
+		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the Project poller.", Handler: s.wait},
 		{Name: "remuda", Summary: "List a Project's Remuda or prune safe, Posse-owned leftovers.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},

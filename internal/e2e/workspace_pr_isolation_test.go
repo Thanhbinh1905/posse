@@ -257,32 +257,19 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		t.Fatal("offline checkout sync lock acquisition timed out")
 	}
 
-	lookoutPaneID := ""
 	t.Cleanup(func() {
 		releaseBlackhole()
 		_ = os.WriteFile(releaseStall, []byte("release\n"), 0o600)
-		if lookoutPaneID != "" {
-			_, _ = client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c")
-		}
 	})
-	lookout, err := createTab(client, project.HerdrWorkspaceID, workspace, "posse:stack:lookout")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Call(context.Background(), "pane.rename", map[string]any{"pane_id": lookout.RootPane.PaneID, "label": "posse:stack:lookout"}); err != nil {
-		t.Fatal(err)
-	}
-	lookoutPaneID = lookout.RootPane.PaneID
-	if _, err := client.Run(context.Background(), "pane", "run", lookoutPaneID, binary+" lookout --poll-only"); err != nil {
-		t.Fatalf("start isolated Lookout: %v", err)
+	if output := runPosse(t, binary, workspace, env, "lookout", "--repair"); !strings.Contains(output, "state: running") {
+		t.Fatalf("start supervised hidden Lookout poller: %s", output)
 	}
 	if !waitForCondition(5*time.Second, func() bool {
 		_, err := os.Stat(stallStarted)
 		return err == nil
 	}) {
 		calls, _ := os.ReadFile(ghLog)
-		screen, _ := client.Run(context.Background(), "pane", "read", lookoutPaneID, "--lines", "30")
-		t.Fatalf("offline Member forge query did not enter its deliberate stall: gh calls=%s lookout=%s", calls, screen)
+		t.Fatalf("offline Member forge query did not enter its deliberate stall: gh calls=%s", calls)
 	}
 	gitTest(t, env, offlineRoot, "config", "--unset-all", "url.file://"+filepath.Join(root, "offline.git")+".insteadOf")
 	gitTest(t, env, offlineRoot, "config", "url.http://"+blackhole.Addr().String()+"/.insteadOf", "https://vpn-t181.invalid/")
@@ -354,7 +341,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		t.Fatal(err)
 	}
 	releaseBlackhole()
-	if !waitForCondition(5*time.Second, func() bool {
+	if !waitForCondition(15*time.Second, func() bool {
 		notices, err := db.Notices(context.Background(), project.ID, false)
 		if err != nil {
 			return false
@@ -368,11 +355,13 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
 		return foundFailure && watchErr == nil && watch.CheckoutCheckedAt > 0 && watch.CheckoutStatus == "fetch_failed"
 	}) {
-		t.Fatal("released forge failure and blackholed checkout failure were not recorded against the offline Member")
+		notices, _ := db.Notices(context.Background(), project.ID, false)
+		watch, watchErr := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
+		poller, pollerErr := db.LookoutPoller(context.Background(), project.ID)
+		logData, _ := os.ReadFile(filepath.Join(home, "projects", project.Name, "lookout.log"))
+		t.Fatalf("released forge failure and blackholed checkout failure were not recorded against the offline Member: notices=%#v watch=%#v watchErr=%v poller=%#v pollerErr=%v pids=%v log=%s", notices, watch, watchErr, poller, pollerErr, lookoutPIDs(root), logData)
 	}
-	if _, err := client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c"); err != nil {
-		t.Errorf("stop isolated Lookout: %v", err)
-	}
+	stopLiveLookoutPoller(t, root)
 	notices, err := db.Notices(context.Background(), project.ID, false)
 	if err != nil {
 		t.Fatal(err)

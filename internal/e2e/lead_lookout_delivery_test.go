@@ -27,33 +27,20 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 	if _, err := client.Run(context.Background(), "pane", "report-agent", f.project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := herdr.Snapshot{}
-	var snapshotErr error
-	otherPane := ""
-	if !waitForCondition(5*time.Second, func() bool {
-		snapshot, snapshotErr = client.Snapshot(context.Background())
-		if snapshotErr != nil {
-			return false
-		}
-		for _, pane := range snapshot.Panes {
-			if pane.WorkspaceID == f.project.HerdrWorkspaceID && pane.PaneID != f.project.LeadPaneID {
-				otherPane = pane.PaneID
-				break
-			}
-		}
-		return otherPane != ""
-	}) {
-		t.Fatalf("no other pane to focus: snapshot=%#v err=%v", snapshot.Panes, snapshotErr)
+	other, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, "fixture:other")
+	if err != nil || other.RootPane.PaneID == "" {
+		t.Fatalf("create an unfocused shell beside the Lead: %#v %v", other, err)
 	}
+	otherPane := other.RootPane.PaneID
 	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": otherPane}); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, snapshotErr = client.Snapshot(context.Background())
+	snapshot, snapshotErr := client.Snapshot(context.Background())
 	if snapshotErr != nil || snapshot.FocusedPaneID == f.project.LeadPaneID {
 		t.Fatalf("Lead is focused: %#v %v", snapshot, snapshotErr)
 	}
 	logPath := filepath.Join(f.root, "lead-prompts.log")
-	// The poll-only tab must not suppress fallback when the Lead has never
+	// The hidden poller must not suppress fallback when the Lead has never
 	// started a lookout.
 	if _, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "fallback before lookout starts", DataJSON: `{}`}); err != nil {
 		t.Fatal(err)
@@ -66,7 +53,7 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 		contents, _ := os.ReadFile(logPath)
 		t.Fatalf("typed fallback missing without Lead watcher: %s", contents)
 	}
-	// Start the actual Lead command in the isolated Project, not the poll-only tab.
+	// Start the actual Lead command in the isolated Project, not the Project poller.
 	command := exec.Command(f.binary, "lookout", "--timeout", "10000")
 	command.Dir, command.Env = f.repo, f.leadEnv
 	var output bytes.Buffer

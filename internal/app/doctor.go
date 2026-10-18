@@ -68,8 +68,6 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	}
 	checks := []doctorCheck{}
 	var registeredProjects []store.Project
-	lookoutStates := make(map[int64]store.LookoutRecovery)
-	lookoutStateErrors := make(map[int64]error)
 	addCheck := func(name, status, detail, action string) {
 		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail, Action: action})
 	}
@@ -109,15 +107,18 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("database", "fail", projectsErr.Error(), "Inspect the Posse database")
 		} else {
 			registeredProjects = projects
+			addCheck("database", "ok", "database opened", "")
 			for _, project := range projects {
-				state, stateErr := db.LookoutRecovery(ctx.Context, project.ID)
-				if stateErr != nil {
-					lookoutStateErrors[project.ID] = stateErr
+				if project.IsDown() {
+					continue
+				}
+				check, checkErr := s.lookoutPollerHealth(ctx.Context, db, home, project)
+				if checkErr != nil {
+					addCheck("Project Lookout "+project.Name, "warn", "runtime state unavailable: "+checkErr.Error(), "Inspect the Posse database, then rerun `posse doctor`")
 				} else {
-					lookoutStates[project.ID] = state
+					checks = append(checks, check)
 				}
 			}
-			addCheck("database", "ok", "database opened", "")
 			hosts := map[string]bool{}
 			for _, project := range projects {
 				if reason := staleProjectRootReason(project.Root, home); reason != "" {
@@ -249,17 +250,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 					}
 				}
 			}
-			processes, processErr := systemLookoutProcesses(home)
-			for _, project := range registeredProjects {
-				if project.IsDown() {
-					continue
-				}
-				if stateErr := lookoutStateErrors[project.ID]; stateErr != nil {
-					addCheck("Project Lookout "+project.Name, "warn", "runtime state unavailable: "+stateErr.Error(), "Inspect the Posse database, then rerun `posse doctor`")
-					continue
-				}
-				checks = append(checks, projectLookoutCheck(project, lookoutStates[project.ID], snapshot, processes, processErr))
-			}
+
 		}
 		pluginData, pluginErr := s.herdrCall(ctx.Context, "plugin.list", map[string]any{})
 		if pluginErr != nil {

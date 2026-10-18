@@ -9,12 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestLookoutTabPollsAndTearsDownMergedPR(t *testing.T) {
+func TestLookoutPollerDiscoversAndTearsDownMergedPR(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	brief := filepath.Join(f.root, "lookout-follow-up.md")
@@ -26,7 +27,7 @@ func TestLookoutTabPollsAndTearsDownMergedPR(t *testing.T) {
 	landing := f.mustTask(t, "t1")
 	merge := f.mergeOnLocalOrigin(t, landing, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
-	// No Lead command drives this reconcile. Only the Lookout tab polls.
+	// No Lead command drives this reconcile. The hidden Project poller observes the merge.
 	f.waitTaskState(t, "t1", store.StateTornDown)
 	f.requireNotice(t, "t1", "pr_merged")
 }
@@ -87,18 +88,11 @@ func TestMergeInterruptsFollowUpAndReleasesRider(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
-	snapshot, err := client.Snapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Fatalf("hidden Project poller missing: %v", lookoutPIDs(f.root))
 	}
-	foundLookout := false
-	for _, pane := range snapshot.Panes {
-		if pane.Label == "posse:shop:lookout" && pane.WorkspaceID == f.project.HerdrWorkspaceID {
-			foundLookout = true
-		}
-	}
-	if !foundLookout {
-		t.Fatal("Project Lookout tab missing from Lead workspace")
+	if panes := lookoutPanes(t, client); len(panes) != 0 {
+		t.Fatalf("Project poller opened visible Lookout panes: %#v", panes)
 	}
 	brief := filepath.Join(f.root, "follow-up.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {

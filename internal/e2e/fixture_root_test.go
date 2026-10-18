@@ -128,6 +128,7 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		// server stops. Wait for fixture processes to exit before removing
 		// their database, or a late backup write can race RemoveAll.
 		if runtime.GOOS == "linux" {
+			stopFixtureLookoutPollers(root)
 			servers, err := fixtureHerdrServerProcesses(root)
 			if err != nil {
 				t.Errorf("inspect isolated Herdr servers for %s: %v", root, err)

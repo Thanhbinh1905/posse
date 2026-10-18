@@ -25,16 +25,19 @@ type lookoutExecutableIdentity struct {
 }
 
 type lookoutProcess struct {
-	PID          int
-	Executable   lookoutExecutableIdentity
-	PaneID       string
-	WorkingDir   string
-	Project      string
-	Kind         string
-	PollOnly     bool
-	QuietRoutine bool
-	StopHook     bool
-	ForceKilled  bool
+	PID             int
+	Executable      lookoutExecutableIdentity
+	PaneID          string
+	WorkingDir      string
+	Project         string
+	Kind            string
+	PollOnly        bool
+	QuietRoutine    bool
+	StopHook        bool
+	ForceKilled     bool
+	PollerProjectID int64
+	PollerToken     string
+	PollerStartedAt int64
 }
 
 var lookoutStopGracePeriod = 5 * time.Second
@@ -228,17 +231,20 @@ func lookoutFromArgs(pid int, args []string, environment map[string]string, home
 		return lookoutProcess{}, false
 	}
 	process := lookoutProcess{
-		PID:        pid,
-		PaneID:     environment["HERDR_PANE_ID"],
-		WorkingDir: environment["PWD"],
-		Kind:       "lead",
-		StopHook:   args[1] == "_claude-stop",
+		PID:             pid,
+		PaneID:          environment["HERDR_PANE_ID"],
+		WorkingDir:      environment["PWD"],
+		Kind:            "lead",
+		StopHook:        args[1] == "_claude-stop",
+		PollerToken:     environment[lookoutPollerTokenEnv],
+		PollerStartedAt: parseProcessInt64(environment[lookoutPollerStartedEnv]),
 	}
+	process.PollerProjectID = parseProcessInt64(environment[lookoutPollerProjectEnv])
 	for _, arg := range args[2:] {
 		switch arg {
 		case "--poll-only":
 			process.PollOnly = true
-			process.Kind = "lookout_tab"
+			process.Kind = "poller"
 		case "--quiet-routine":
 			process.QuietRoutine = true
 		}
@@ -252,6 +258,11 @@ func lookoutFromArgs(pid int, args []string, environment map[string]string, home
 func isPosseExecutable(path string) bool {
 	info, err := buildinfo.ReadFile(path)
 	return err == nil && info.Main.Path == "github.com/thanhbinh1905/posse" && info.Path == "github.com/thanhbinh1905/posse/cmd/posse"
+}
+
+func parseProcessInt64(value string) int64 {
+	parsed, _ := strconv.ParseInt(value, 10, 64)
+	return parsed
 }
 
 func processHome(environment map[string]string) string {
@@ -496,6 +507,16 @@ func lookoutStopReason(home string, pid int) string {
 	marker := lookoutUpdateStopMarker(home, pid)
 	if err := os.Remove(marker); err == nil {
 		_ = os.Remove(filepath.Dir(marker))
+		return "update"
+	}
+	marker = lookoutReexecMarker(home, pid)
+	if err := os.Remove(marker); err == nil {
+		_ = os.Remove(filepath.Dir(marker))
+		return "update"
+	}
+	installed, installedOK := currentLookoutExecutable(home)
+	running, runningOK := inspectLookoutExecutable(pid)
+	if installedOK && runningOK && (installed.Device != running.Device || installed.Inode != running.Inode) {
 		return "update"
 	}
 	return "signal"

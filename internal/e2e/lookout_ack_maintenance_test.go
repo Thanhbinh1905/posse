@@ -443,21 +443,21 @@ func TestLookoutAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 // one command from competing message delivery or Teardown maintenance.
 func stopBackgroundLookout(t *testing.T, f *prLifecycleFixture) {
 	t.Helper()
+	// Mark subsequent commands as the current poller so their normal supervision
+	// does not restart the isolated process during this test.
+	f.env = setEnv(f.env, "POSSE_LOOKOUT_TOKEN", "e2e-manual-owner")
+	f.leadEnv = setEnv(f.leadEnv, "POSSE_LOOKOUT_TOKEN", "e2e-manual-owner")
 	stopFixtureBackgroundLookout(t, f.root, f.env, f.db, f.project.ID)
 }
 
 func stopFixtureBackgroundLookout(t *testing.T, root string, env []string, db *store.DB, projectID int64) {
 	t.Helper()
-	client := herdr.NewWithEnv("herdr", env)
+	_ = herdr.NewWithEnv("herdr", env) // Keep the fixture's Herdr environment isolated.
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(root)) == 1 }) {
 		t.Fatalf("initial Lookout did not start: %v", lookoutPIDs(root))
 	}
-	panes := lookoutPanes(t, client)
-	if len(panes) != 1 {
-		t.Fatalf("initial Lookout tabs = %d, want 1", len(panes))
-	}
 	for _, pid := range lookoutPIDs(root) {
-		// SIGTERM lets active maintenance release its poll leases before exit.
+		// SIGTERM lets active maintenance release its leases and SQLite writes.
 		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 			t.Fatalf("stop background Lookout: %v", err)
 		}
@@ -465,14 +465,14 @@ func stopFixtureBackgroundLookout(t *testing.T, root string, env []string, db *s
 	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(root)) == 0 }) {
 		t.Fatalf("background Lookout did not stop: %v", lookoutPIDs(root))
 	}
-	state, err := db.LookoutRecovery(context.Background(), projectID)
+	state, err := db.LookoutPoller(context.Background(), projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Foreground observation must not restart the independent poll-only process.
-	state.RetryAt = time.Now().Add(time.Hour).UnixMilli()
-	if err := db.SetLookoutRecovery(context.Background(), projectID, state); err != nil {
-		t.Fatal(err)
+	if state.PID > 0 {
+		if err := db.ClearLookoutPoller(context.Background(), projectID, state.PID, state.Token); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

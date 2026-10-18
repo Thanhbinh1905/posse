@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,10 +13,83 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestLeadLookoutReexecsAfterUpdateRequest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("POSSE_HOME", home)
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binary}); err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := lookoutExecutableVerifier
+	lookoutExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { lookoutExecutableVerifier = previousVerifier })
+	service := testService(home, nil)
+	var gotPath string
+	var gotArgs []string
+	service.reexecUpdate = func(path string, args, _ []string) error {
+		gotPath, gotArgs = path, append([]string(nil), args...)
+		return nil
+	}
+	marker := lookoutReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &axi.Context{Context: context.Background(), JSON: true, Out: io.Discard, ErrOut: io.Discard}
+	err = service.handleLeadLookoutUpdate(ctx, store.Project{ID: 1})
+	if err == nil || !strings.Contains(err.Error(), "re-exec returned unexpectedly") {
+		t.Fatalf("re-exec result = %v, want stub return guard", err)
+	}
+	identity, ok := lookoutExecutableAt(binary)
+	if !ok {
+		t.Fatal("test executable identity was not verifiable")
+	}
+	if gotPath != identity.Path || len(gotArgs) != len(os.Args) || gotArgs[0] != identity.Path {
+		t.Fatalf("re-exec used path=%q args=%q; want binary=%q args=%q", gotPath, gotArgs, identity.Path, os.Args)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("update marker remained after re-exec request: %v", err)
+	}
+}
+
+func TestClaudeStopLookoutReportsUpdateRequestAsRewake(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("POSSE_HOME", home)
+	previousArgs := os.Args
+	os.Args = []string{"posse", "_claude-stop"}
+	t.Cleanup(func() { os.Args = previousArgs })
+	service := testService(home, nil)
+	marker := lookoutReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	ctx := &axi.Context{Context: context.Background(), JSON: true, Out: &output, ErrOut: io.Discard}
+	if err := service.handleLeadLookoutUpdate(ctx, store.Project{Name: "shop"}); err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
+		t.Fatalf("update response %q: %v", output.String(), err)
+	}
+	if result["state"] != "stopped" || result["reason"] != "update" {
+		t.Fatalf("Claude Stop hook update response = %v", result)
+	}
+}
 
 func TestLeadLookoutReportsRestartAfterUpdateSignal(t *testing.T) {
 	root := t.TempDir()

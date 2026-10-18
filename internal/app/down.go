@@ -134,6 +134,15 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	} else if !allLookoutsStopped(remaining) {
 		return axi.Failure("lookout_stop_failed", "a Lookout of Project "+project.Name+" is still running", true, "Retry `posse down`")
 	}
+	poller, err := db.LookoutPoller(ctx.Context, project.ID)
+	if err != nil {
+		return err
+	}
+	if poller.PID > 0 {
+		if err := db.ClearLookoutPoller(ctx.Context, project.ID, poller.PID, poller.Token); err != nil {
+			return err
+		}
+	}
 	if err := db.ClearDownProjectLead(ctx.Context, project.ID); err != nil {
 		return err
 	}

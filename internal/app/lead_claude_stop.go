@@ -90,6 +90,9 @@ func (s *Service) claudeStop(ctx context.Context, input io.Reader, output io.Wri
 	if project.Status == "down" {
 		return nil
 	}
+	if err := s.ensureLookoutPoller(bounded, db, home, project); err != nil {
+		fmt.Fprintf(output, "Lookout supervision for %s failed: %v\n", project.Name, err)
+	}
 	// A new User turn can finish while the preceding async hook still waits.
 	// A process-owned flock excludes that overlap without an orphanable lease.
 	lock, err := os.OpenFile(filepath.Join(home, "projects", project.Name, "claude-stop.lock"), os.O_CREATE|os.O_RDWR, 0o600)
@@ -120,6 +123,7 @@ func (s *Service) claudeStop(ctx context.Context, input io.Reader, output io.Wri
 	}
 	var response struct {
 		State    string `json:"state"`
+		Reason   string `json:"reason"`
 		Wake     string `json:"wake"`
 		Warning  string `json:"warning"`
 		Delivery struct {
@@ -132,6 +136,9 @@ func (s *Service) claudeStop(ctx context.Context, input io.Reader, output io.Wri
 		}
 	}
 	if response.State == "stopped" {
+		if response.Reason == "update" {
+			return errClaudeRewake
+		}
 		return nil
 	}
 	message := "Posse Notice wait renewed. No Notice arrived. End this turn without tools or a User update; the next Stop hook owns the next bounded wait."

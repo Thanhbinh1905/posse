@@ -10,6 +10,51 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func TestLookoutPollerHeartbeatAndFailureNoticeEpisode(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "poller", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller := LookoutPoller{PID: 123, Token: "episode-one", StartedAt: 100, HeartbeatAt: 101, ExecutablePath: "/usr/bin/posse", ExecutableDevice: 7, ExecutableInode: 11}
+	if err := db.SetLookoutPoller(ctx, project.ID, poller); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.LookoutPoller(ctx, project.ID)
+	if err != nil || got != poller {
+		t.Fatalf("Lookout poller = %#v, want %#v: %v", got, poller, err)
+	}
+	raised, err := db.RaiseLookoutPollerFailure(ctx, project.ID, poller.Token, "Lookout poller heartbeat is stale", 102)
+	if err != nil || !raised {
+		t.Fatalf("first stale episode notice = %v, %v", raised, err)
+	}
+	raised, err = db.RaiseLookoutPollerFailure(ctx, project.ID, poller.Token, "duplicate stale poller", 103)
+	if err != nil || raised {
+		t.Fatalf("duplicate stale episode notice = %v, %v", raised, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "pr_watch_failing" || notices[0].Summary != "Lookout poller heartbeat is stale" {
+		t.Fatalf("stale episode Notices = %#v, %v", notices, err)
+	}
+	if ok, err := db.HeartbeatLookoutPoller(ctx, project.ID, poller.PID, poller.Token, 104); err != nil || !ok {
+		t.Fatalf("recovery heartbeat = %v, %v", ok, err)
+	}
+	if raised, err := db.RaiseLookoutPollerFailure(ctx, project.ID, poller.Token, "second stale episode", 105); err != nil || !raised {
+		t.Fatalf("second stale episode notice = %v, %v", raised, err)
+	}
+	if err := db.ClearLookoutPoller(ctx, project.ID, poller.PID, poller.Token); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.LookoutPoller(ctx, project.ID); err != nil || got != (LookoutPoller{}) {
+		t.Fatalf("cleared Lookout poller = %#v, %v", got, err)
+	}
+}
+
 func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
