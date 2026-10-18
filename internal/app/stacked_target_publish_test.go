@@ -32,7 +32,7 @@ func TestPublishReusesPRAfterStackedRetarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := string(log)
-	if !strings.Contains(calls, "pr list --state open --base staging --head "+upper.Branch) || strings.Contains(calls, "pr create") {
+	if !strings.Contains(calls, "pr list --state open --head "+upper.Branch) || strings.Contains(calls, "pr create") {
 		t.Fatalf("publish did not find the retargeted PR without creating a duplicate: %s", calls)
 	}
 	if strings.Count(calls, "pr edit "+prURL+" --title") != 1 {
@@ -74,7 +74,7 @@ func TestPublishReusesMergeRequestAfterStackedRetarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := string(log)
-	if !strings.Contains(calls, "target_branch=staging") || strings.Contains(calls, "mr create ") {
+	if !strings.Contains(calls, "source_branch=posse%2Ft1&per_page=100") || strings.Contains(calls, "target_branch=") || strings.Contains(calls, "mr create ") {
 		t.Fatalf("publish did not find the retargeted MR without creating a duplicate: %s", calls)
 	}
 	if strings.Count(calls, "--method PUT") != 1 {
