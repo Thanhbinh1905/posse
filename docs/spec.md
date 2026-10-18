@@ -121,16 +121,19 @@ target_branch = "staging"   # optional PR/MR target; unset uses each Project/mem
 review = "none"              # none | local | no-mistakes (deprecated); User-only evidence policy
 gate = []                    # local and pr: commands run in the worktree before landing
 
-[review_loop]                # User-only; built-in validation (section 25)
+[review_loop]                # User-only; global or Project scope (section 25)
 enabled = true
-max_rounds = 3               # 1..3
+max_rounds = 3               # 1..3; the Brief may only lower this cap
 block_at = "P1"              # P0 | P1 | P2
+auto_start = true            # admit a Review Round when its Gate passes
+docs = false                 # include documentation gaps in the review rubric
+guidance = []                # repository paths supplied from the frozen target
 
-[gate_loop]
-max_fix_rounds = 3           # automatic Gate fix instructions per Ship Task
+[gate_loop]                  # User-only
+max_fix_rounds = 3           # automatic Gate fix instructions per Ship Task; 0 disables
 
-[ci_loop]
-max_fix_rounds = 3           # automatic CI fix instructions per Ship Task
+[ci_loop]                    # User-only
+max_fix_rounds = 3           # automatic CI fix instructions per Ship Task; 0 disables
 rerun_cancelled = 1          # same-head reruns of provider-cancelled checks
 
 [remuda]
@@ -995,7 +998,7 @@ Inside one member of an unregistered workspace, `posse up` registers that reposi
 
 ## 25. Built-in validation
 
-Status: designed in [ADR 0024](adr/0024-built-in-validation-replaces-no-mistakes.md), not yet implemented. The built-in validation loop replaces the `no-mistakes` Landing Mode and review policy for `pr` and `local` delivery. It has five parts: the Review Loop (25.2-25.11), Gate Fix Rounds (25.12), the CI loop (25.13), head continuity (25.14) and Posse-owned PR evidence (25.15). It changes how validation is done, not whether review is required: `defaults.review` still selects the evidence Land needs (section 13, D02). Every part reads only Posse config (User-only) and the Task's frozen target branch.
+Status: implementation is in progress. Config and plan freezing are implemented; later slices will add the validation loop. The built-in validation loop replaces the `no-mistakes` Landing Mode and review policy for `pr` and `local` delivery. It has five parts: the Review Loop (25.2-25.11), Gate Fix Rounds (25.12), the CI loop (25.13), head continuity (25.14) and Posse-owned PR evidence (25.15). It changes how validation is done, not whether review is required: `defaults.review` still selects the evidence Land needs (section 13, D02). Every part reads only Posse config (User-only) and the Task's frozen target branch.
 
 ### 25.1 Configuration
 
@@ -1008,10 +1011,10 @@ auto_start = true            # admit the next round when a Gate passes on a new 
 docs = false                 # add documentation gaps (docs-* patterns, default P2) to the rubric
 guidance = []                # repository paths read from origin/<target> and given to Reviewers
 
-[gate_loop]
+[gate_loop]                  # User-only
 max_fix_rounds = 3           # 0 disables automatic Gate fix instructions
 
-[ci_loop]
+[ci_loop]                    # User-only
 max_fix_rounds = 3           # 0 disables automatic CI fix instructions
 rerun_cancelled = 1          # same-head reruns of provider-cancelled checks, per check
 ```

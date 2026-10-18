@@ -176,6 +176,114 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	}
 }
 
+func TestRideFreezesValidationLoopSettingsAndBriefTightening(t *testing.T) {
+	f := newRideFixture(t)
+	global := `[defaults]
+landing_mode = "local"
+
+[profiles.claude]
+kind = "claude"
+
+[dispatch.default]
+use = "claude"
+
+[review_loop]
+enabled = true
+max_rounds = 3
+block_at = "P1"
+auto_start = false
+docs = true
+guidance = ["docs/review.md"]
+
+[gate_loop]
+max_fix_rounds = 2
+
+[ci_loop]
+max_fix_rounds = 1
+rerun_cancelled = 2
+`
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nreview_rounds: 2\n---\nCreate a committed file.\n"
+	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := f.ride(t); code != 0 {
+		t.Fatalf("ride code=%d %s", code, output)
+	}
+	task, _ := f.onlyTask(t)
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil || plan.ValidationLoops == nil {
+		t.Fatalf("admitted validation loops = %#v, %v", plan, err)
+	}
+	frozen := plan.ValidationLoops
+	if frozen.Review.MaxRounds != 3 || frozen.BriefReviewRounds != 2 || frozen.MaxReviewRounds() != 2 || frozen.Review.AutoStart || !frozen.Review.Docs || !reflect.DeepEqual(frozen.Review.Guidance, []string{"docs/review.md"}) || frozen.Gate.MaxFixRounds != 2 || frozen.CI.MaxFixRounds != 1 || frozen.CI.RerunCancelled != 2 {
+		t.Fatalf("admitted validation settings = %#v", frozen)
+	}
+
+	changed := strings.ReplaceAll(global, "enabled = true", "enabled = false")
+	changed = strings.ReplaceAll(changed, "max_rounds = 3", "max_rounds = 1")
+	changed = strings.ReplaceAll(changed, "block_at = \"P1\"", "block_at = \"P2\"")
+	changed = strings.ReplaceAll(changed, "auto_start = false", "auto_start = true")
+	changed = strings.ReplaceAll(changed, "docs = true", "docs = false")
+	changed = strings.ReplaceAll(changed, "docs/review.md", "changed.md")
+	changed = strings.ReplaceAll(changed, "max_fix_rounds = 2", "max_fix_rounds = 0")
+	changed = strings.ReplaceAll(changed, "max_fix_rounds = 1", "max_fix_rounds = 0")
+	changed = strings.ReplaceAll(changed, "rerun_cancelled = 2", "rerun_cancelled = 0")
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(changed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task, _ = f.onlyTask(t)
+	updated, err := task.AdmittedPlan()
+	if err != nil || updated == nil || !reflect.DeepEqual(updated.ValidationLoops, frozen) {
+		t.Fatalf("admitted plan followed later config edits: %#v, %v", updated, err)
+	}
+}
+
+func TestRideRejectsValidationConfigAboveThreeRounds(t *testing.T) {
+	f := newRideFixture(t)
+	global := "[review_loop]\nmax_rounds = 4\n"
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := f.ride(t); code != 1 || !strings.Contains(output, "config_invalid") || !strings.Contains(output, "review_loop.max_rounds") {
+		t.Fatalf("invalid review cap exit=%d output=%s", code, output)
+	}
+	if f.fake.CallCount("tab.create") != 0 || f.fake.CallCount("agent.start") != 0 {
+		t.Fatalf("invalid loop config allocated Rider resources: %#v", f.fake.Calls)
+	}
+}
+
+func TestRideRejectsBriefReviewRoundsAboveConfiguredCap(t *testing.T) {
+	f := newRideFixture(t)
+	global := `[defaults]
+landing_mode = "local"
+
+[profiles.claude]
+kind = "claude"
+
+[dispatch.default]
+use = "claude"
+
+[review_loop]
+max_rounds = 2
+`
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nreview_rounds: 3\n---\nCreate a committed file.\n"
+	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := f.ride(t); code != 1 || !strings.Contains(output, "brief_invalid") || !strings.Contains(output, "cannot exceed") {
+		t.Fatalf("raised Brief cap exit=%d output=%s", code, output)
+	}
+	if f.fake.CallCount("tab.create") != 0 || f.fake.CallCount("agent.start") != 0 {
+		t.Fatalf("invalid Brief allocated Rider resources: %#v", f.fake.Calls)
+	}
+}
+
 func TestAdmittedCodexInstructionsDoNotReadCurrentHarnessConfig(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CODEX_HOME", root)
