@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"syscall"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+type taskProcessSignalGuard func(int, syscall.Signal) error
 
 type taskProcessDetail struct {
 	PID     int    `json:"pid"`

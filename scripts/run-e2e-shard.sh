@@ -5,7 +5,10 @@ set -eu
 # Keep this list complete so newly added tests cannot silently go unsharded.
 assignments='
 1 TestFailedRecoveryBoundWithRealHerdr
+1 TestE2ELockOwnerCannotOutliveTestProcess
 1 TestTeardownStopsDetachedTaskServer
+1 TestTeardownPreservesDetachedSSHControlMaster
+1 TestTeardownStopsProcessStartedThroughHerdrServer
 1 TestStoppedRiderPaneCanBeRelaunched
 1 TestProjectCommandDoesNotWaitForeverForStoppedLockOwner
 1 TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch

@@ -476,6 +476,44 @@ func (s *Service) verifyMountShellSignalOwnership(ctx context.Context, project s
 	return nil
 }
 
+func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project store.Project, task store.Task) (paneProcessInfo, error) {
+	if s.Herdr == nil {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "Herdr is required to verify an in-place Task pane before signaling", true)
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task pane before signaling", true, err.Error())
+	}
+	pane, found := findTaskPane(snapshot.Panes, task)
+	if !found || !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task pane before signaling", true)
+	}
+	info, err := s.mountPaneProcessInfo(ctx, pane.PaneID)
+	if err != nil {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task foreground before signaling", true, err.Error())
+	}
+	foreground := info.ForegroundProcessGroup
+	if foreground <= 1 {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", fmt.Sprintf("Herdr reports no identifiable foreground process in in-place Task pane %s", pane.PaneID), true)
+	}
+	if foreground == info.ShellPID {
+		return info, nil
+	}
+	if pane.Agent == "" || !taskAgentMatchesPane(snapshot, project, task, pane) {
+		return paneProcessInfo{}, axi.Failure("task_process_not_owned", fmt.Sprintf("in-place Task pane %s has a foreign foreground process; preserving it", pane.PaneID), false, "Stop or inspect the unrelated process, preserve its work, then retry Teardown")
+	}
+	name, cwd, processFound := foregroundProcess(info, foreground)
+	if !processFound || !strings.EqualFold(name, pane.Agent) || !pathInside(cwd, task.WorktreePath) {
+		return paneProcessInfo{}, axi.Failure("task_process_not_owned", fmt.Sprintf("in-place Task pane %s has a foreign foreground process that is not the Task's verified Rider; preserving it", pane.PaneID), false, "Stop or inspect the unrelated process, preserve its work, then retry Teardown")
+	}
+	return info, nil
+}
+
+func (s *Service) verifyInPlaceProcessSignalOwnership(ctx context.Context, project store.Project, task store.Task, _ int) error {
+	_, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
+	return err
+}
+
 func shellOnlyPaneInMount(snapshot herdr.Snapshot, pane herdr.Pane, mountPath string) bool {
 	return pane.Agent == "" && snapshotAgentName(snapshot, pane.PaneID) == "" && pathInside(pane.CWD, mountPath)
 }

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,6 +46,10 @@ herdr pane report-agent "$HERDR_PANE_ID" --source posse.e2e --agent claude --sta
 while [ ! -e "$POSSE_E2E_SIGNAL_GATE" ]; do sleep 0.05; done
 printf 'in-place E2E change\n' > src/created.txt
 posse holler done 'E2E changed the approved directory without a commit' >> "$POSSE_E2E_AGENT_LOG" 2>&1 || { echo 'done signal failed' >> "$POSSE_E2E_AGENT_LOG"; exit 1; }
+if [ -n "${POSSE_E2E_FOREGROUND_VIM:-}" ]; then
+  printf '%s\n' "$$" > "$POSSE_E2E_FOREGROUND_VIM"
+  exec python3 -c 'import ctypes, time; ctypes.CDLL(None).prctl(15, ctypes.c_char_p(b"vim"), 0, 0, 0); time.sleep(300)'
+fi
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.e2e --agent claude --state idle >/dev/null 2>&1 &
 sleep 300 >/dev/null 2>&1 &
 while IFS= read -r line; do :; done
@@ -52,12 +57,21 @@ while IFS= read -r line; do :; done
 	if err := os.WriteFile(claude, []byte(fakeAgent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, withGit := range []bool{false, true} {
-		name := "plain"
-		if withGit {
-			name = "git"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, testCase := range []struct {
+		name              string
+		withGit           bool
+		foreignForeground bool
+	}{
+		{name: "plain"},
+		{name: "git", withGit: true},
+		{name: "foreign foreground", foreignForeground: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			withGit := testCase.withGit
+			foreignForeground := testCase.foreignForeground
+			if foreignForeground && runtime.GOOS != "linux" {
+				t.Skip("process-containment signal guards are Linux-specific")
+			}
 			caseRoot := newFixtureRoot(t, herdr.TestRootName())
 			directory := filepath.Join(caseRoot, "project")
 			if err := os.MkdirAll(filepath.Join(directory, "src"), 0o700); err != nil {
@@ -68,6 +82,10 @@ while IFS= read -r line; do :; done
 			env = setEnv(env, "POSSE_E2E_DIRECTORY", directory)
 			env = setEnv(env, "POSSE_E2E_SIGNAL_GATE", filepath.Join(caseRoot, "signal.done"))
 			env = setEnv(env, "POSSE_E2E_AGENT_LOG", filepath.Join(caseRoot, "agent.log"))
+			foreignPIDPath := filepath.Join(caseRoot, "foreign-foreground.pid")
+			if foreignForeground {
+				env = setEnv(env, "POSSE_E2E_FOREGROUND_VIM", foreignPIDPath)
+			}
 			env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			env = setEnv(env, "GIT_AUTHOR_NAME", "Posse E2E")
 			env = setEnv(env, "GIT_AUTHOR_EMAIL", "posse-e2e@example.test")
@@ -88,7 +106,11 @@ while IFS= read -r line; do :; done
 					t.Fatal(err)
 				}
 			}
-			configText := "[defaults]\nlanding_mode = \"pr\"\ngate = [\"test -f src/created.txt\"]\nauto_unsaddle = \"never\"\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n"
+			autoUnsaddle := "never"
+			if foreignForeground {
+				autoUnsaddle = "finished"
+			}
+			configText := fmt.Sprintf("[defaults]\nlanding_mode = \"pr\"\ngate = [\"test -f src/created.txt\"]\nauto_unsaddle = %q\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n", autoUnsaddle)
 			if err := os.MkdirAll(filepath.Join(caseRoot, "posse"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -160,6 +182,22 @@ while IFS= read -r line; do :; done
 			if err != nil || len(leases) != 1 {
 				t.Fatalf("in-place lease was not held through completion: %#v, %v", leases, err)
 			}
+			taskDoneNoticeID := int64(0)
+			if foreignForeground {
+				notices, err := db.Notices(context.Background(), project.ID, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, notice := range notices {
+					if notice.TaskID == tasks[0].ID && notice.Kind == "task_done" {
+						taskDoneNoticeID = notice.ID
+						break
+					}
+				}
+				if taskDoneNoticeID == 0 {
+					t.Fatalf("reported in-place Task has no task_done Notice: %#v", notices)
+				}
+			}
 			paneID := tasks[0].PaneID
 			if paneID == "" {
 				t.Fatal("in-place Task has no Rider pane")
@@ -178,6 +216,110 @@ while IFS= read -r line; do :; done
 				}
 			}
 			_ = db.Close()
+			if foreignForeground {
+				var foreignPID int
+				var foreignBootID, foreignStartTime string
+				t.Cleanup(func() {
+					if foreignPID < 2 {
+						return
+					}
+					bootID, startTime, err := store.ProcessIdentityForPID(foreignPID)
+					if err == nil && bootID == foreignBootID && startTime == foreignStartTime {
+						_ = syscall.Kill(foreignPID, syscall.SIGKILL)
+					}
+				})
+				if !waitForCondition(10*time.Second, func() bool {
+					pidBytes, err := os.ReadFile(foreignPIDPath)
+					if err != nil {
+						return false
+					}
+					foreignPID, err = strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+					if err != nil || foreignPID <= 1 {
+						return false
+					}
+					foreignBootID, foreignStartTime, err = store.ProcessIdentityForPID(foreignPID)
+					if err != nil {
+						return false
+					}
+					raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": paneID})
+					if err != nil {
+						return false
+					}
+					var info struct {
+						ProcessInfo struct {
+							ShellPID                 int `json:"shell_pid"`
+							ForegroundProcessGroupID int `json:"foreground_process_group_id"`
+						} `json:"process_info"`
+					}
+					return json.Unmarshal(raw, &info) == nil && info.ProcessInfo.ForegroundProcessGroupID > 1 && info.ProcessInfo.ForegroundProcessGroupID != info.ProcessInfo.ShellPID
+				}) {
+					t.Fatal("foreign vim process did not become the in-place pane foreground")
+				}
+				unsaddleArgs := []string{"unsaddle", "t1"}
+				if taskDoneNoticeID != 0 {
+					unsaddleArgs = []string{"ack", strconv.FormatInt(taskDoneNoticeID, 10)}
+				}
+				unsaddle := exec.Command(binary, unsaddleArgs...)
+				unsaddle.Dir, unsaddle.Env = directory, leadEnv
+				outputBytes, unsaddleErr := unsaddle.CombinedOutput()
+				output := string(outputBytes)
+				if unsaddleErr == nil || !strings.Contains(output, "unsaddle_incomplete") || !strings.Contains(output, "foreign foreground process") {
+					t.Fatalf("Teardown did not refuse the foreign pane foreground: err=%v output=%s", unsaddleErr, output)
+				}
+				bootID, startTime, err := store.ProcessIdentityForPID(foreignPID)
+				if err != nil || bootID != foreignBootID || startTime != foreignStartTime {
+					t.Fatalf("Teardown signalled the foreign foreground PID %d: identity=%s/%s err=%v", foreignPID, bootID, startTime, err)
+				}
+				if contents, err := os.ReadFile(filepath.Join(directory, "src", "created.txt")); err != nil || string(contents) != "in-place E2E change\n" {
+					t.Fatalf("Teardown damaged in-place source: %q, %v", contents, err)
+				}
+				db, err = store.Open(home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				blockedTask, taskErr := db.Task(context.Background(), project.ID, "t1")
+				leases, leaseErr := db.ResourceLeases(context.Background(), project.ID)
+				notices, noticeErr := db.Notices(context.Background(), project.ID, false)
+				_ = db.Close()
+				blockedNotice := false
+				for _, notice := range notices {
+					blockedNotice = blockedNotice || notice.TaskID == blockedTask.ID && notice.Kind == "teardown_blocked" && strings.Contains(notice.Summary, strconv.Itoa(foreignPID))
+				}
+				if taskErr != nil || blockedTask.State != store.StateReported || leaseErr != nil || len(leases) != 1 || noticeErr != nil || !blockedNotice {
+					t.Fatalf("blocked Teardown did not preserve Task, lease and PID Notice: task=%#v leases=%#v notices=%#v errs=%v/%v/%v", blockedTask, leases, notices, taskErr, leaseErr, noticeErr)
+				}
+				if err := syscall.Kill(foreignPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+					t.Fatalf("stop test-owned foreign foreground: %v", err)
+				}
+				if !waitForCondition(10*time.Second, func() bool {
+					raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": paneID})
+					if err != nil {
+						return false
+					}
+					var info struct {
+						ProcessInfo struct {
+							ShellPID                 int `json:"shell_pid"`
+							ForegroundProcessGroupID int `json:"foreground_process_group_id"`
+						} `json:"process_info"`
+					}
+					return json.Unmarshal(raw, &info) == nil && info.ProcessInfo.ShellPID > 1 && info.ProcessInfo.ForegroundProcessGroupID == info.ProcessInfo.ShellPID
+				}) {
+					t.Fatal("pane did not return to its shell after stopping the test-owned foreground")
+				}
+				if output := runPosse(t, binary, directory, leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
+					t.Fatalf("Teardown did not finish after the foreign process exited: %s", output)
+				}
+				db, err = store.Open(home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				leases, err = db.ResourceLeases(context.Background(), project.ID)
+				if err != nil || len(leases) != 0 {
+					t.Fatalf("successful retry retained in-place leases: %#v, %v", leases, err)
+				}
+				return
+			}
 			if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": paneID}); err != nil {
 				t.Fatalf("close the completed Rider pane before normal Teardown: %v", err)
 			}

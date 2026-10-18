@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -136,6 +137,133 @@ while True:
 	}
 	if current := f.task(t, "t1"); current.State != store.StateTornDown {
 		t.Fatalf("Task after Teardown = %s", current.State)
+	}
+}
+
+func TestTeardownPreservesDetachedSSHControlMaster(t *testing.T) {
+	f := newRiderTabsFixture(t)
+	task := f.ride(t, "t1", "Detached SSH ControlMaster", "ssh-control-master")
+	pidPath := filepath.Join(f.root, "ssh-control-master.pid")
+	socketPath := filepath.Join(f.root, "ssh-control.sock")
+	var master teardownFixtureProcess
+	t.Cleanup(func() {
+		if teardownFixtureProcessRunning(master) {
+			_ = syscall.Kill(master.PID, syscall.SIGKILL)
+		}
+	})
+	raw, err := f.client.Call(context.Background(), "tab.create", map[string]any{
+		"workspace_id": task.HerdrWorkspaceID,
+		"cwd":          task.WorktreePath,
+		"label":        "e2e-ssh-control-master",
+		"focus":        false,
+		"env":          map[string]string{"POSSE_TASK_ID": task.ContainmentMarker},
+	})
+	if err != nil {
+		t.Fatalf("create isolated Herdr shell tab: %v", err)
+	}
+	var shellTab workspaceResult
+	if err := json.Unmarshal(raw, &shellTab); err != nil || shellTab.RootPane.PaneID == "" {
+		t.Fatalf("Herdr shell tab response = %s: %v", raw, err)
+	}
+	command := `setsid bash -c 'echo $$ > "$1"; exec -a "ssh -M -S $2" sleep 300' e2e-control-master ` + shellQuote(pidPath) + ` ` + shellQuote(socketPath) + ` >/dev/null 2>&1 </dev/null &`
+	if _, err := f.client.Run(context.Background(), "pane", "run", shellTab.RootPane.PaneID, command); err != nil {
+		t.Fatalf("start detached fake ControlMaster through Herdr: %v", err)
+	}
+	if !waitForCondition(5*time.Second, func() bool {
+		contents, err := os.ReadFile(pidPath)
+		return err == nil && len(strings.TrimSpace(string(contents))) > 0
+	}) {
+		t.Fatal("detached fake ControlMaster did not record its PID")
+	}
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("ControlMaster PID = %q: %v", pidBytes, err)
+	}
+	bootID, startTime, err := store.ProcessIdentityForPID(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	master = teardownFixtureProcess{PID: pid, BootID: bootID, StartTime: startTime}
+	if task.ContainmentMode == "cgroup" && e2eProcessInTaskCgroup(pid, task.ContainmentPath) {
+		t.Fatalf("detached ControlMaster unexpectedly inherited Task cgroup %s", task.ContainmentPath)
+	}
+	environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil || !strings.Contains(string(environ), "POSSE_TASK_ID="+task.ContainmentMarker) {
+		t.Fatalf("detached ControlMaster lost the Task marker: %q: %v", environ, err)
+	}
+	if !waitForCondition(5*time.Second, func() bool {
+		commandLine, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		return err == nil && strings.Contains(string(commandLine), "ssh -M -S "+socketPath)
+	}) {
+		t.Fatal("detached fake ControlMaster did not exec with its SSH ControlMaster command line")
+	}
+	if _, err := f.client.Call(context.Background(), "tab.close", map[string]any{"tab_id": shellTab.RootPane.TabID}); err != nil {
+		t.Fatalf("close the temporary Herdr shell tab: %v", err)
+	}
+	if !waitForCondition(3*time.Second, func() bool { return teardownFixtureProcessRunning(master) }) {
+		t.Fatalf("detached ControlMaster %d did not survive its shell tab", pid)
+	}
+	markTaskReported(t, f, task)
+	f.exitRider(t, "t1")
+	unsaddle := exec.Command(f.binary, "unsaddle", "t1")
+	unsaddle.Dir, unsaddle.Env = f.repo, f.leadEnv
+	outputBytes, unsaddleErr := unsaddle.CombinedOutput()
+	output := string(outputBytes)
+	if unsaddleErr == nil || !strings.Contains(output, "preserving detached shared daemon") || !strings.Contains(output, strconv.Itoa(pid)) {
+		t.Fatalf("Teardown did not report the preserved ControlMaster: err=%v output=%s", unsaddleErr, output)
+	}
+	if !teardownFixtureProcessRunning(master) {
+		t.Fatalf("Teardown signalled detached ControlMaster PID %d", pid)
+	}
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(context.Background(), task.ProjectID, false)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedNotice := false
+	for _, notice := range notices {
+		blockedNotice = blockedNotice || notice.TaskID == task.ID && notice.Kind == "teardown_blocked" && strings.Contains(notice.Summary, strconv.Itoa(pid))
+	}
+	if !blockedNotice {
+		t.Fatalf("Teardown did not publish a PID-specific blocked Notice: %#v", notices)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		t.Fatalf("stop test-owned detached ControlMaster: %v", err)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return !teardownFixtureProcessRunning(master) }) {
+		t.Fatalf("test-owned ControlMaster %d did not exit", pid)
+	}
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
+		t.Fatalf("Teardown did not finish after the shared daemon exited: %s", output)
+	}
+	if current := f.task(t, "t1"); current.State != store.StateTornDown {
+		t.Fatalf("Task after retry = %s", current.State)
+	}
+	if _, err := f.client.Call(context.Background(), "pane.close", map[string]any{"pane_id": f.leadPaneID}); err != nil {
+		t.Fatalf("close the test Lead pane after Teardown: %v", err)
+	}
+	if !waitForCondition(10*time.Second, func() bool {
+		processes, err := fixtureProcessDetails(f.root)
+		if err != nil {
+			return false
+		}
+		for _, process := range processes {
+			if strings.Contains(process, "_finalize-lead") {
+				return false
+			}
+		}
+		return true
+	}) {
+		processes, _ := fixtureProcessDetails(f.root)
+		t.Fatalf("isolated Lead finalizer did not exit after the fixture pane closed: %v", processes)
 	}
 }
 

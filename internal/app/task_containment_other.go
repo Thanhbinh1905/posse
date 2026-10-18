@@ -21,6 +21,10 @@ func stopTaskProcessContainment(context.Context, store.Task) ([]taskProcessDetai
 	return nil, nil
 }
 
+func stopTaskProcessContainmentWithGuard(context.Context, store.Task, taskProcessSignalGuard) ([]taskProcessDetail, error) {
+	return nil, nil
+}
+
 func stopTaskCgroup(context.Context, store.Task) error {
 	return fmt.Errorf("Task cgroup shutdown is unavailable on this platform")
 }

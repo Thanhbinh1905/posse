@@ -106,7 +106,7 @@ func setupTaskProcessContainment(ctx context.Context, service *Service, _ store.
 		return "", fmt.Errorf("inspect Task cgroup before attaching Rider shell: %w", err)
 	}
 	for _, pid := range pids {
-		if pid != pane.ShellPID && !processHasTaskMarker(pid, task.ContainmentMarker) {
+		if !taskCgroupMemberBelongsToTask(pid, pane.ShellPID, task.ContainmentPath) {
 			return "", fmt.Errorf("task cgroup contains unowned process %d", pid)
 		}
 	}
@@ -176,6 +176,10 @@ func validateTaskCgroupPath(path string, task store.Task) error {
 		return fmt.Errorf("task cgroup path does not match its recorded identity")
 	}
 	return nil
+}
+
+func taskCgroupMemberBelongsToTask(pid, paneShellPID int, cgroupPath string) bool {
+	return pid == paneShellPID || processInCgroup(pid, cgroupPath)
 }
 
 func taskCgroupRelativePath(path string) (string, error) {
@@ -270,12 +274,24 @@ func retireEmptyTaskCgroup(task store.Task) error {
 	return removeEmptyTaskCgroup(task.ContainmentPath)
 }
 
-func stopTaskCgroup(_ context.Context, task store.Task) error {
+func stopTaskCgroup(ctx context.Context, task store.Task) error {
+	return stopTaskCgroupWithGuard(ctx, task, nil)
+}
+
+func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard taskProcessSignalGuard) error {
 	if task.ContainmentPath == "" {
 		return nil
 	}
 	if err := validateTaskCgroupPath(task.ContainmentPath, task); err != nil {
 		return err
+	}
+	preserved, err := detachedSharedTaskProcessPIDs(task)
+	if err != nil {
+		return err
+	}
+	if len(preserved) > 0 {
+		processes := processDetails(preserved)
+		return fmt.Errorf("preserving detached shared daemon processes outside the Rider's parent chain: %s", describeSharedTaskProcesses(processes))
 	}
 	if _, err := os.Stat(task.ContainmentPath); errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -326,6 +342,9 @@ func stopTaskCgroup(_ context.Context, task store.Task) error {
 			if !processInCgroup(pid, task.ContainmentPath) {
 				_ = handle.Close()
 				continue
+			}
+			if signalGuard != nil {
+				handle.signalGuard = func(signal syscall.Signal) error { return signalGuard(pid, signal) }
 			}
 			handles[pid] = handle
 		}

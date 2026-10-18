@@ -18,13 +18,25 @@ import (
 )
 
 func stopTaskProcessContainment(ctx context.Context, task store.Task) ([]taskProcessDetail, error) {
+	return stopTaskProcessContainmentWithGuard(ctx, task, nil)
+}
+
+func stopTaskProcessContainmentWithGuard(ctx context.Context, task store.Task, signalGuard taskProcessSignalGuard) ([]taskProcessDetail, error) {
+	preserved, err := detachedSharedTaskProcessPIDs(task)
+	if err != nil {
+		return taskContainmentProcessDetails(task), err
+	}
+	if len(preserved) > 0 {
+		processes := processDetails(preserved)
+		return processes, fmt.Errorf("preserving detached shared daemon processes outside the Rider's parent chain: %s", describeSharedTaskProcesses(processes))
+	}
 	if task.ContainmentMode == "cgroup" {
 		// Herdr can start Task-marked commands outside the pane shell's cgroup.
 		var markerErr error
 		if task.ContainmentMarker != "" {
-			_, markerErr = stopMarkedTaskProcesses(task.ContainmentMarker)
+			_, markerErr = stopMarkedTaskProcesses(task.ContainmentMarker, signalGuard)
 		}
-		cgroupErr := stopTaskCgroup(ctx, task)
+		cgroupErr := stopTaskCgroupWithGuard(ctx, task, signalGuard)
 		if markerErr != nil || cgroupErr != nil {
 			return taskContainmentProcessDetails(task), errors.Join(markerErr, cgroupErr)
 		}
@@ -33,7 +45,7 @@ func stopTaskProcessContainment(ctx context.Context, task store.Task) ([]taskPro
 	if task.ContainmentMarker == "" {
 		return nil, nil
 	}
-	return stopMarkedTaskProcesses(task.ContainmentMarker)
+	return stopMarkedTaskProcesses(task.ContainmentMarker, signalGuard)
 }
 
 func taskContainmentProcessDetails(task store.Task) []taskProcessDetail {
@@ -96,7 +108,7 @@ func processHasTaskMarker(pid int, marker string) bool {
 	return false
 }
 
-func stopMarkedTaskProcesses(marker string) ([]taskProcessDetail, error) {
+func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard) ([]taskProcessDetail, error) {
 	handles := map[int]*mountProcessHandle{}
 	terminated := map[int]bool{}
 	defer func() {
@@ -141,6 +153,9 @@ func stopMarkedTaskProcesses(marker string) ([]taskProcessDetail, error) {
 			if !processHasTaskMarker(pid, marker) {
 				_ = handle.Close()
 				continue
+			}
+			if signalGuard != nil {
+				handle.signalGuard = func(signal syscall.Signal) error { return signalGuard(pid, signal) }
 			}
 			handles[pid] = handle
 		}

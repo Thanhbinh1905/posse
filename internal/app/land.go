@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -632,19 +633,32 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	if !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
-			if inPlace && task.AgentName != "" && s.Herdr != nil {
-				snapshot, err := s.snapshot(ctx)
-				if err != nil {
+			if inPlace && len(taskContainmentProcessDetails(task)) > 0 {
+				if _, err := s.verifyInPlaceForegroundOwnership(ctx, project, task); err != nil {
 					return err
 				}
-				pane, found := findTaskPane(snapshot.Panes, task)
-				if found && pane.Agent != "" {
-					if err := s.stopPaneAgent(ctx, pane.PaneID, pane.Agent); err != nil {
+				if task.AgentName != "" && processIdentityCapabilityError() != "" {
+					snapshot, err := s.snapshot(ctx)
+					if err != nil {
 						return err
+					}
+					pane, found := findTaskPane(snapshot.Panes, task)
+					if found && pane.Agent != "" {
+						if err := s.stopPaneAgent(ctx, pane.PaneID, pane.Agent); err != nil {
+							return err
+						}
 					}
 				}
 			}
-			if _, containmentErr := stopTaskProcessContainment(ctx, task); containmentErr != nil {
+			signalGuard := taskProcessSignalGuard(nil)
+			if inPlace {
+				signalGuard = func(pid int, _ syscall.Signal) error {
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid)
+				}
+			} else if processAuthorization != nil {
+				signalGuard = processAuthorization.guardSignal
+			}
+			if _, containmentErr := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard); containmentErr != nil {
 				return containmentErr
 			}
 			if mountHeld {

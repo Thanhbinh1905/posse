@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -12,9 +13,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -92,6 +95,150 @@ while True:
 	}
 }
 
+func TestTaskProcessContainmentPreservesDetachedSSHControlMaster(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	pidPath := filepath.Join(root, "control-master.pid")
+	t.Cleanup(func() {
+		pids, err := markedTaskPIDs(marker)
+		if err != nil {
+			t.Errorf("find test-owned ControlMaster processes for cleanup: %v", err)
+			return
+		}
+		for _, pid := range pids {
+			handle, err := openMountProcessHandle(pid)
+			if err != nil {
+				continue
+			}
+			_ = handle.Signal(syscall.SIGKILL)
+			_ = handle.Close()
+		}
+	})
+	script := `import os, sys
+pid = os.fork()
+if pid:
+    os._exit(0)
+os.setsid()
+pid = os.fork()
+if pid:
+    os._exit(0)
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_WRONLY, 0o600)
+os.write(fd, str(os.getpid()).encode())
+os.close(fd)
+os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sleep 300"])
+`
+	command := exec.Command("python3", "-c", script, pidPath)
+	command.Env = taskContainmentTestEnvironment(marker, pidPath, 0)
+	command.Stdout, command.Stderr = os.Stdout, os.Stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("launch detached fake ControlMaster: %v", err)
+	}
+	if !waitForTaskContainmentFile(5*time.Second, pidPath) {
+		t.Fatal("detached fake ControlMaster did not write its PID")
+	}
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("ControlMaster PID = %q: %v", pidBytes, err)
+	}
+	handle, err := openMountProcessHandle(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if alive, _ := handle.Alive(); alive {
+			_ = handle.Signal(syscall.SIGKILL)
+		}
+		_ = handle.Close()
+	}()
+	if !processHasTaskMarker(pid, marker) {
+		t.Fatalf("detached ControlMaster PID %d lost its inherited Task marker", pid)
+	}
+	parent, err := mountProcessParentID(pid)
+	if err != nil || parent > 1 && processHasTaskMarker(parent, marker) {
+		t.Fatalf("ControlMaster PID %d still appears to have a Rider parent %d: %v", pid, parent, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		processes := processDetails([]int{pid})
+		if len(processes) == 1 && strings.Contains(processes[0].Command, "ssh -M -S") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fake ControlMaster command did not exec: %#v", processes)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	preserved, err := stopTaskProcessContainment(context.Background(), store.Task{ContainmentMode: "marker", ContainmentMarker: marker})
+	if err == nil || !strings.Contains(err.Error(), "preserving detached shared daemon") {
+		t.Fatalf("Task teardown did not report the detached shared daemon: %v", err)
+	}
+	alive, err := handle.Alive()
+	if err != nil || !alive {
+		t.Fatalf("detached ControlMaster was signalled: alive=%t err=%v", alive, err)
+	}
+	if len(preserved) != 1 || preserved[0].PID != pid || !strings.Contains(preserved[0].Command, "ssh -M -S") {
+		t.Fatalf("preserved shared daemons = %#v, want PID %d with its command", preserved, pid)
+	}
+}
+
+func TestInPlaceContainmentPreservesForeignForegroundProcess(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	command := exec.Command("sleep", "300")
+	command.Dir = root
+	command.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "unused"), 0)
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := openMountProcessHandle(command.Process.Pid)
+	if err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatal(err)
+	}
+	defer func() {
+		if alive, _ := handle.Alive(); alive {
+			_ = handle.Signal(syscall.SIGKILL)
+		}
+		_ = handle.Close()
+		_ = command.Wait()
+	}()
+
+	const paneID = "w1:p2"
+	project := store.Project{ID: 1, Name: "local", Root: root, Kind: store.ProjectKindDirectory, HerdrWorkspaceID: "w1"}
+	task := store.Task{ID: 2, Seq: 1, WorktreePath: root, HerdrWorkspaceID: "w1", PaneID: paneID, PaneLabel: "posse:local:t1", ContainmentMode: "marker", ContainmentMarker: marker}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: paneID, WorkspaceID: "w1", TabID: "w1:t2", Label: task.PaneLabel, CWD: root}}}
+	processInfo, err := json.Marshal(map[string]any{"process_info": map[string]any{
+		"pane_id": paneID, "shell_pid": os.Getpid(), "foreground_process_group_id": command.Process.Pid,
+		"foreground_processes": []map[string]any{{"pid": command.Process.Pid, "name": "vim", "cwd": root}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.Results["pane.process_info"] = processInfo
+	service := testService(t.TempDir(), fake)
+	_, err = stopTaskProcessContainmentWithGuard(context.Background(), task, func(pid int, _ syscall.Signal) error {
+		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid)
+	})
+	if err == nil || !strings.Contains(err.Error(), "foreign foreground process") {
+		t.Fatalf("foreign pane foreground was not refused: %v", err)
+	}
+	alive, err := handle.Alive()
+	if err != nil || !alive {
+		t.Fatalf("foreign foreground PID %d was signalled: alive=%t err=%v", command.Process.Pid, alive, err)
+	}
+}
+
 func TestCgroupModeStopsMarkedProcessOutsideCgroup(t *testing.T) {
 	marker := fmt.Sprintf("containment-test-%d", os.Getpid())
 	ready := filepath.Join(t.TempDir(), "ready")
@@ -148,7 +295,7 @@ func TestCgroupModeStopsMarkedProcessOutsideCgroup(t *testing.T) {
 func waitForTaskContainmentFile(timeout time.Duration, path string) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
+		if contents, err := os.ReadFile(path); err == nil && len(contents) > 0 {
 			return true
 		}
 		time.Sleep(20 * time.Millisecond)
