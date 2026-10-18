@@ -114,12 +114,24 @@ recovery_attempts = 3        # automatic relaunch budget per Rider recovery epis
 recovery_backoff = "5s"      # doubles between failures, capped at one minute
 pr_poll = "2m"               # how often PR state is refreshed while a Task is landing
 idle_after = "3m"            # a working Task whose agent sits idle this long with no Signal raises worker_idle
-landing_mode = "pr"          # local | pr | no-mistakes
+landing_mode = "pr"          # local | pr | no-mistakes (deprecated, section 25.17)
 merge_method = "squash"      # pr and no-mistakes: squash | merge | rebase
 forge = "auto"              # auto (from remote) | github | gitlab
 target_branch = "staging"   # optional PR/MR target; unset uses each Project/member default
-review = "none"              # none | local | no-mistakes; User-only evidence policy
+review = "none"              # none | local | no-mistakes (deprecated); User-only evidence policy
 gate = []                    # local and pr: commands run in the worktree before landing
+
+[review_loop]                # User-only; built-in validation (section 25)
+enabled = true
+max_rounds = 3               # 1..3
+block_at = "P1"              # P0 | P1 | P2
+
+[gate_loop]
+max_fix_rounds = 3           # automatic Gate fix instructions per Ship Task
+
+[ci_loop]
+max_fix_rounds = 3           # automatic CI fix instructions per Ship Task
+rerun_cancelled = 1          # same-head reruns of provider-cancelled checks
 
 [remuda]
 clean = "warm"               # warm (keep ignored files) | pristine (git clean -fdx)
@@ -336,6 +348,7 @@ pr_body_markers(task_id, repo, pr_url, marker_token, updated_at)
   -- one current cryptographically random description token per Task/member PR
 repo_watch_state(project_id, repo, root_behind_head, checkout_checked_at, checkout_status, checkout_reason)  -- per-member checkout status and root_behind dedupe
 repo_fetch_failures(project_id, repo, consecutive_failures, last_error, updated_at)  -- consecutive origin-fetch failures; repo is empty for a repo Project
+review_rounds, review_patterns, review_findings, review_finding_events, review_carries, review_dispositions, validation_fix_rounds  -- built-in validation (section 25.10)
 ```
 
 Retention: `events` rows older than 7 days are deleted on ingest. Nothing else is deleted automatically.
@@ -422,7 +435,7 @@ It exits 0 even on internal errors (logged to the `events` row) so Herdr never r
 
 ## 9. Notices and waking the Lead
 
-Notice kinds: `task_done`, `rider_resumed` (a Rider reopened its Task after a direct User follow-up or a new turn and must signal completion again), `needs_decision`, `task_failed`, `worker_blocked`, `worker_exited`, `task_lost`, `stalled`, `gate_failed`, `message_delivery_uncertain`, `notice_delivery_uncertain`, `queued_message_undeliverable` (terminal Task transition stranded queued messages), `model_stream_error` (bounded automatic recovery exhausted or was withheld), `model_refused` (provider refusal, never retried), `land_ready` (a `local` Task is ready to merge, or a PR is ready to merge), the PR Notices of section 14 (`pr_opened`, `pr_checks_failed`, `pr_changes_requested`, `pr_conflict`, `pr_merged`, `pr_closed`, `pr_watch_failing`, `review_policy_violation`), and `root_behind` when a new upstream head cannot be synced safely, plus coalesced `root_fetch_failing` after repeated origin-fetch failures.
+Notice kinds: `task_done`, `rider_resumed` (a Rider reopened its Task after a direct User follow-up or a new turn and must signal completion again), `needs_decision`, `task_failed`, `worker_blocked`, `worker_exited`, `task_lost`, `stalled`, `gate_failed`, `message_delivery_uncertain`, `notice_delivery_uncertain`, `queued_message_undeliverable` (terminal Task transition stranded queued messages), `model_stream_error` (bounded automatic recovery exhausted or was withheld), `model_refused` (provider refusal, never retried), `land_ready` (a `local` Task is ready to merge, or a PR is ready to merge), the PR Notices of section 14 (`pr_opened`, `pr_checks_failed`, `pr_changes_requested`, `pr_conflict`, `pr_merged`, `pr_closed`, `pr_watch_failing`, `review_policy_violation`), `root_behind` when a new upstream head cannot be synced safely, the validation Notices of section 25 (`gate_fix_queued`, `gate_fix_exhausted`, `ci_fix_queued`, `ci_fix_exhausted`, `ci_rerun_requested`, `head_discontinuity`, `review_round_done`, `review_round_due`, `review_regression`, `review_cap_reached`), plus coalesced `root_fetch_failing` after repeated origin-fetch failures.
 
 Not Notices: ordinary `working`/`idle` flips, `working` Signals, Herdr `done` without a Signal. A Rider `working` Signal that reopens a Task is the `rider_resumed` exception.
 
@@ -572,6 +585,8 @@ A Review Rider reports `posse holler done "<summary>" --report <file> --verdict 
 
 A verdict qualifies the Ship Task only while its targets equal the Ship branch tips resolved now, so a changed candidate has no current pass and an old pass is never rebound to new commits. Only `pass` satisfies local review; a missing verdict, `changes_requested`, `inconclusive` or a pass whose Reviewer launch no longer differs from every author launch does not. With selected review policy `local`, `posse land` refuses with `review_required` until a current qualifying pass exists. `posse show <review>` reports the verdict, targets, Report digest, Reviewer launch and whether it is current. Scout Report review is not part of this record.
 
+With the Review Loop enabled for the Ship Task (section 25), each Review Task is a numbered Review Round with a bound delta scope, requires `--findings`, and Posse derives its verdict from the Finding Ledger.
+
 **Selected review policy (D02).** `defaults.review` defaults to `none`; `repositories.<member>.review` overrides it for a workspace Member. Both are User-only. `none` requires no independent-review record, but all Gates, fast-forward checks and merge-authority checks remain. `local` requires a D01 pass for the exact current branch commit (the current target vector for a workspace). Posse checks before opening Land, again after Gates before `done -> landing`, and immediately before each local merge. A missing, stale, failed or identity-ineligible verdict causes no local merge effect. Neither `autonomy.review = "lead"` nor `autonomy.yolo` supplies or bypasses evidence. `no-mistakes` requires a pipeline-owned review receipt for the exact candidate (D03, below); local verdicts, forge approvals and ordinary CI cannot substitute. Delivery mode `no-mistakes` remains a separate setting. No risk classifier, Land risk flags or risk-assessment records exist. The publish `--risk` field is PR documentation, not a review-policy override.
 
 **PR and pipeline-owned candidate evidence (D03).** For `pr` and `no-mistakes` delivery the candidate is the gated PR head, not the Mount tip. `posse land` checks the selected evidence at the gated head after Gates and before `done -> landing`. `posse land --merge` reads the forge head, which must equal `gated_sha` (`branch_moved` otherwise). Under the merge lock it then requires the newest PR observation to be green at that head (`checks_not_green` otherwise) and rechecks the selected evidence at that head, immediately before the forge merge pinned with `--match-head-commit`/`--sha`. A green observation or verdict for an older or different head never qualifies. `local` requires a D01 pass whose target is that exact commit. Workspace Member PRs recheck the selected Member policy under the merge lock before each Member merge; exact Member vectors belong to D04. PR Land recovery has no merge effect to repeat: an interrupted `land --merge` intent is settled, and the next PR observation records any merge that happened.
@@ -626,7 +641,7 @@ A kind without a prepare step that still stops at a dialog surfaces as `blocked`
 |---|---|---|
 | `local` | require a clean Mount; record the branch tip as `gated_sha`; run gate in the Mount; check fast-forward onto the Task's frozen target branch; Task → landing; Notice `land_ready` | `posse land <task> --merge` fast-forwards the frozen target branch to exactly `gated_sha`: `git merge --ff-only <gated_sha>` in the root checkout if it is on the target branch and clean, `git fetch . <gated_sha>:refs/heads/<target>` if the target branch is not checked out, else `land_target_busy`. If the branch tip is no longer `gated_sha`, refuse with `branch_moved` (help: run `posse land` again to re-gate) |
 | `pr` | verify the Worker-reported open PR and remote head; fetch the frozen target and require its tip to be an ancestor of the PR head before running the configured gate; verify target freshness again after the Gate; Task → landing and emit `pr_opened`. Legacy completed Tasks without a PR URL still push and open a PR at Land. A stale branch queues a Rider instruction and does not acquire gated evidence. | `posse land <task> --merge` uses the repository's forge CLI, pins the gated head SHA, refreshes the frozen target under the repository sync lock, and refuses with `pr_branch_behind` naming the missing target commit unless the target tip is an ancestor of the gated head |
-| `no-mistakes` | verify the Worker-reported PR head includes the current frozen target before entering landing; a stale branch queues the same Rider update instruction | same as `pr` |
+| `no-mistakes` | verify the Worker-reported PR head includes the current frozen target before entering landing; a stale branch queues the same Rider update instruction; deprecated; a frozen target other than the default branch is refused at admission (planned, section 25.17) | same as `pr` |
 
 - `posse publish [--repo <member>] [--refresh] "<summary>" [--verify "<command> -> <result>"]... [--proof "<markdown>"]... [--risk "<markdown>"]...` validates a clean, committed PR-mode Mount on its own Task branch, pushes only that ref without force, and creates or refreshes the forge PR/MR using the Task's saved PR title, or the Brief title when no override is set. `posse retitle <task> "<conventional title>"` is Lead-only, validates conventional-commit form, and saves a Task-level title override; the Rider's next publish applies it to the PR/MR. A direct forge title edit is overwritten by publish unless the Lead records that title with `posse retitle`. Repeated `--verify`, `--proof` and `--risk` values are retained in order; verification values render as separate checked items, while proof and risk values are separated by blank lines. Every new body uses the shared seven-section template, in order: `Summary` from the supplied summary; `Issue Link` with `Closes #N` only for the canonical ticket and `Refs #N` for references; `Changes` from `git log <base>..HEAD`; `Verification`, rendering each supplied line as a checked `<command> -> <result>` item or `- [ ] Not run; reason: not supplied`; `Proof`, using supplied Markdown or `_No proof supplied._`; `Risk And Rollback`, using supplied Markdown or `Risk: not stated` plus `Rollback: revert this PR`; and the static unchecked `Documentation` checklist. Posse wraps the template in start/end markers containing a per-Task/member cryptographically random token persisted with the PR/MR URL in SQLite and the Task snapshot. A refresh replaces only one complete span whose markers contain that exact stored token; duplicate or incomplete matching markers conflict without edits, and all other marker-like text remains human-authored content. The selected Task or Brief title is the PR/MR title; the forge request uses the Task's frozen target branch, defaulting to the Project/member default when none is configured or requested. Before pushing, publish persists the origin's current Task ref under the Task and member, then associates it with the open request when the forge reports that head; this durable retry evidence is not a verified PR head. If an existing request reports that pre-push SHA or a previously verified Task head, Posse polls with exponential backoff for up to 30 seconds; another SHA fails with non-retryable `branch_moved`. If the forge still reports the prior SHA at timeout, publish returns retryable `pr_head_lag_timeout` before editing request metadata. An existing PR/MR is validated against its repository, source branch, target, state and pushed head before metadata changes. An unmarked legacy Posse description is not changed unless `--refresh` is supplied; explicit refresh preserves the entire existing description byte-for-byte and appends a tokenized Posse section. If a PR/MR has a tokenized Posse section but its token is absent from SQLite, publish returns a retryable `pr_body_marker_missing` error without forge edits; `posse recover --rebuild` restores the token from the Task snapshot before retrying. If the snapshot also lacks the token, restore a POSSE_HOME backup rather than editing the PR/MR markers. An unstructured human description or ambiguous matching markers are reported as conflicts and left unchanged. Metadata updates are safe to retry after interruption. `.github/pull_request_template.md` presents the same structure for human-created PRs. Workspace issue references are emitted only in the PR/MR for their named member. `posse holler done --pr` repeats URL and head checks; the Lead gates and verifies again before starting the watch. A workspace Rider adds `--repo <member>` to publish each changed PR member; `posse holler done` checks each recorded member PR without `--pr`. The Worker does not run the gate or merge.
 - A failed gate creates `gate_failed` with the output tail; the Task stays `done` and the Lead decides whether to `posse send` a fix.
@@ -840,7 +855,8 @@ Every command prints TOON on stdout (JSON with `--json`), uses lowercase snake_c
 | `posse lookout --receipt <id> --receipt-outcome accepted\|rejected` | Lead after inspecting an uncertain session | explicitly resolve an ambiguous receipt; acceptance marks the exact batch delivered and rejection retries it |
 | `posse lookout --poll-only` | dedicated Lookout tab | reconcile PRs and Teardown; never claim Notices |
 | `posse ack <id...\|all>` | Lead | close Notices |
-| `posse holler <verb> <note> [...]` | Worker | records a Signal (`--verdict` on a Review done Signal); `done` is refused while queued instructions remain undelivered (section 13) |
+| `posse review <ship> [start\|fix\|dispose\|merge ...]` | Lead, User | Review Loop rounds, fix rounds and finding dispositions (section 25.11) |
+| `posse holler <verb> <note> [...]` | Worker | records a Signal (`--verdict` and `--findings` on a Review done Signal, `--resolutions` on a Ship done Signal after a fix round); `done` is refused while queued instructions remain undelivered (section 13) |
 | `posse publish [--repo <member>] [--refresh] "<summary>" [--verify "<command> -> <result>"]... [--proof "<markdown>"]... [--risk "<markdown>"]...` | PR-mode Ship Worker | push own Task branch in a repository or selected workspace member and open or refresh its PR (sections 14, 24) |
 | `posse brief` | Worker | reprint own `launch.md` |
 | `posse status` | Worker | read own recorded state and admitted plan without maintenance |
@@ -915,6 +931,7 @@ Each has an automated test.
 22. This version of posse migrates an existing database only from the installed binary, and refuses a schema it does not know unless the User forces it. Older binaries lack these checks.
 23. Posse-managed writers cannot hold equal, ancestor or descendant path scopes at once; conflicting Git common-dir/ref scopes serialize, independent refs do not, and a crash never expires a lease without custody reconciliation.
 24. In-place Tasks require explicit User consent and frozen path scope, never create Git delivery artifacts, preserve all source changes through failure and Teardown, and cannot hold overlapping path leases.
+25. A loop-enabled Ship Task never has more verdict-recorded Review Rounds than its frozen `max_rounds` (at most 3), no round creates a finding whose fingerprint is already in its Finding Ledger, and automatic Gate and CI fix instructions never exceed their frozen budgets.
 
 ## 22. Testing
 
@@ -975,3 +992,218 @@ Inside one member of an unregistered workspace, `posse up` registers that reposi
 **Rider protocol.** A Rider told directly by the User to continue after a Ship Task is `done` or `landing`, or after any Task is `stalled` or `needs-decision`, first records `posse holler working "<reason>"` and waits for success before acting. This cancels a pending Land and invalidates Gate evidence; if the forge merge has started, Posse refuses and the Rider asks the Lead to resolve it. `launch.md` adds a Workspace section that lists only the selected Member worktrees and states whether bounded shared-root context was selected. New Tasks have no shared-root copy by default. A selected `root_context: read-only` copy cannot be changed; completion checks its files and directories against the acquisition baseline. Legacy Tasks retain the old workspace-wide copy and Report preservation behavior. It also lists which members are on the Task branch with their base, Landing Mode and frozen target branch, and tells the Rider to commit inside each selected Member it changes and leave every other folder unchanged; no unselected Member checkout is provided. Each changed PR member must be published with `posse publish --repo <member> "<summary>" [--verify "<command> -> <result>"] [--proof "<markdown>"] [--risk "<markdown>"]`; verification lists commands and results, proof uses screenshots/images for UI changes or test/log evidence otherwise, and risk includes rollback details. `posse holler done` requires every requested Member clean, at least one with commits ahead of its base, and every changed PR Member to have a validated open PR.
 
 **Landing.** `posse land <task>` on a `done` workspace Task, for each member with commits (the others become `unchanged`): `local` requires a fast-forward and a clean worktree, runs the member's gate and records the gated commit (`gated`); `pr` verifies the Worker's reported pull request and remote head, runs the gate, verifies again and starts watching (`landing`, `pr_opened`) through the member's forge. Older completed Tasks without a member PR still push and open one at Land. The Task enters `landing` once every changed member is ready, with one `land_ready` naming the local members. `--merge` (approval rules of section 14) fast-forwards each gated member's frozen target branch to exactly its gated commit and merges each member pull request or merge request pinned to its gated head. Before a PR/MR merge, Posse fetches that member's frozen target and requires its latest commit to be an ancestor of the gated head; a stale member is refused with `pr_branch_behind` and must merge the target, rerun its Gate, and report done. The watch reads each member through its forge (`gh` or `glab`) and applies the Notices of section 14 with the member named in the summary and `repo` in the data; a merged request lands that member. The Task becomes `landed`, with `landed_ref` listing `repo@commit` per member, only when every changed member has Landed. A moved member branch (`branch_moved`) sends the Task back to `done` and that member to `open`; members already landed stay landed. A Member pull request closed without merging raises one `pr_closed` Decision to reopen and relaunch or discard, with its Task and other Members unchanged. A merged Member is recorded as landed even if the Task is `working`, `blocked`, `stalled`, `failed` or `lost`; the Task Lands once every changed Member has Landed. A Worker fix after `posse send` re-gates every member not landing through an open pull request. Teardown deletes the recorded Task branch in each member when it is merged into the member's frozen target branch or matches the exact landed PR head; later branch commits are preserved. An approved discard records every member's branch tip as `repo=sha` pairs first. An interrupted `land --workspace` intent is settled by reconcile: a gated member whose commit reached its frozen target branch becomes landed.
+
+## 25. Built-in validation
+
+Status: designed in [ADR 0024](adr/0024-built-in-validation-replaces-no-mistakes.md), not yet implemented. The built-in validation loop replaces the `no-mistakes` Landing Mode and review policy for `pr` and `local` delivery. It has five parts: the Review Loop (25.2-25.11), Gate Fix Rounds (25.12), the CI loop (25.13), head continuity (25.14) and Posse-owned PR evidence (25.15). It changes how validation is done, not whether review is required: `defaults.review` still selects the evidence Land needs (section 13, D02). Every part reads only Posse config (User-only) and the Task's frozen target branch.
+
+### 25.1 Configuration
+
+```toml
+[review_loop]                # User-only; global or Project config
+enabled = true               # false: Review Tasks behave as before this section
+max_rounds = 3               # 1..3; values above 3 are refused (`config_invalid`)
+block_at = "P1"              # P0 | P1 | P2: introduced findings at or above this severity block
+auto_start = true            # admit the next round when a Gate passes on a new head
+docs = false                 # add documentation gaps (docs-* patterns, default P2) to the rubric
+guidance = []                # repository paths read from origin/<target> and given to Reviewers
+
+[gate_loop]
+max_fix_rounds = 3           # 0 disables automatic Gate fix instructions
+
+[ci_loop]
+max_fix_rounds = 3           # 0 disables automatic CI fix instructions
+rerun_cancelled = 1          # same-head reruns of provider-cancelled checks, per check
+```
+
+Ship admission freezes these values into the Task plan, so later config edits do not change an admitted Ship Task. A Brief may tighten with `review_rounds: <n>` (lower only). Disabling the Review Loop for one Task is a lighter review and needs the scoped User quote of section 4. Tasks admitted before this section have no frozen loop and keep their existing behavior.
+
+The flow after a loop-enabled Ship Task signals done:
+
+1. Freshness: a head that lacks the frozen target tip gets the existing merge instruction (section 14, ADR 0019).
+2. Gate: `posse land` runs the Gates at the head; a failure starts a Gate Fix Round (25.12).
+3. Review: with `auto_start`, Posse admits the next round on the gated head; otherwise the Lead runs `posse review start`.
+4. CI: the PR watch runs in parallel with review; failures start CI Fix Rounds (25.13).
+5. Land: the selected evidence, a green observation and the current target at one head (D03), and no blocking finding (25.7).
+
+Fix instructions are coalesced per head: Gate, CI and review work still queued and undelivered for the same head is merged into one instruction. Every new head restarts at step 1.
+
+### 25.2 Rounds
+
+A **Review Round** is a Review Task of a loop-enabled Ship Task. Round numbers are assigned at admission, starting at 1. A round that records a verdict (`pass`, `changes_requested` or `inconclusive`) consumes the cap. A round whose Review Task ends `failed`, `lost` or is discarded without a verdict is `void`: it stays visible, does not consume the cap, and its number is reused by the next admission.
+
+Admission (through `posse review start <ship>` or a Brief with `review_of:`) refuses:
+
+- `review_round_active` while another round of the same Ship Task is live;
+- `review_round_unchanged` when the Ship head equals the last reviewed head, or a carry already covers it;
+- `review_round_cap` when the verdict-recorded rounds equal the frozen `max_rounds`.
+
+Gate fixes, CI fixes, review fixes and target merges are author changes, never rounds. They enter the next round's delta.
+
+**Cap.** Posse raises `review_cap_reached` and one User-only `review_cap` Decision (origin `review_cap:<ship>:<head>`) when round `max_rounds` records a verdict other than `pass`, or when author changes appear after the last allowed round (for example a CI fix after a final pass). Options:
+
+| Option | `posse apply` effect |
+|---|---|
+| `accept-head` | Records a `review_dispositions` row binding the current Ship head with the User quote. Open blocking findings become `accepted`, and open non-blocking ones become `deferred` pending follow-up issues. Satisfies `local` evidence for that exact head only. |
+| `final-fix` | Queues one fix round (25.5) for the open blocking patterns; the next done Signal raises a new `review_cap` Decision for the resulting head. |
+| `rethink` | Prints the command to start a new Ship Task with `supersedes: <ship>`. The new Task gets a fresh cap and inherits the ledger's findings as `inherited` entries so they are not reported again. The old Task follows the normal discard or Leftover path. |
+| `discard` | Tears down with the recorded discard approval. |
+
+Autonomy never answers a `review_cap` Decision.
+
+### 25.3 Scope
+
+Every round binds, at admission and per repository (per changed Member for a workspace): `scope_base` (round 1: `merge-base(H, origin/<target>)`, later: the head reviewed by the previous verdict-recorded round `R`), `head` (`H`, the Ship branch tip, also written to `review_targets`), `target_commit` (`T = merge-base(H, origin/<target>)` after fetching the frozen target), `baseline_tree`, `delta_sha256` and `scope_kind` (`full`, `delta` or `full_fallback`). `<target>` is always the Task's or Member's frozen target branch, never the repository default.
+
+- Round 1: `baseline_tree` is the tree of `scope_base`; the scope is the full candidate.
+- Later rounds: if `R` contains `T`, `baseline_tree` is `R`'s tree. Otherwise Posse runs `git merge-tree --write-tree R T` and uses the resulting tree, conflict markers included, and records the conflicted paths. The scope is `git diff <baseline_tree> <H tree>`. A clean merge of the target adds nothing, and a conflict resolution shows exactly as the resolved hunks.
+- If `R` is not an ancestor of `H`, the scope is `full_fallback` (the round 1 rule). It still consumes a round, and the ledger still deduplicates.
+
+Posse copies each `guidance` path from `origin/<target>` (never from the Ship branch) into `review/guidance/`, and writes into the Review Task directory `review/round.json` (bindings, round number, remaining rounds), `review/delta.patch` (the scope), `review/cumulative.patch` (merge base to `H`, context only), `review/conflicts.txt`, and `review/ledger.md` (every ledger finding with its ID, pattern, state and fingerprint, plus the patterns claimed fixed since `R`). `launch.md` names these files and the rules below. The Reviewer works in a checkout of `H` and may read anything.
+
+A finding is **in scope** when its excerpt overlaps an added or changed line of `delta.patch`, or when it names a `cause` hunk in `delta.patch` (an interaction finding: the delta broke unchanged code). Anything else is recorded `out_of_scope` with origin `pre_existing`, never blocks, and is listed for follow-up. In round 1 every introduced finding is in scope.
+
+### 25.4 Findings and patterns
+
+A Reviewer finishes with `posse holler done "<summary>" --report <file> --verdict <v> --findings <file>`. Under the loop `--findings` is required; a pass uses an empty `patterns` list. Schema:
+
+```json
+{
+  "schema": "posse.review-findings.v1",
+  "patterns": [{
+    "key": "unchecked-error-return",
+    "title": "Errors from store writes are dropped",
+    "rule": "Every store write error reaches the caller",
+    "root_cause": "New helpers call db.Exec without checking err",
+    "fix_guidance": "Fix every call site of db.Exec in internal/app added by this change; rg 'db.Exec(' finds them",
+    "severity": "P1",
+    "origin": "introduced",
+    "instances": [{
+      "repository": "posse", "path": "internal/app/x.go", "line": 42,
+      "symbol": "func saveRound", "excerpt": "db.Exec(ctx, q)",
+      "description": "error ignored", "cause": null,
+      "matches": null, "regresses": null
+    }]
+  }],
+  "resolutions": [{"finding": "F-3", "status": "resolved", "note": "checked at x.go:40"}]
+}
+```
+
+Rules, applied in the Signal transaction:
+
+1. **Validation.** Unknown schema or malformed JSON refuses the Signal (`review_findings_invalid`). Each instance's `excerpt` must occur in `path` at `H` after whitespace normalization, else `review_finding_unanchored`. `line` is informational.
+2. **Fail-closed defaults.** A missing or unknown `severity` is `unclassified`; a missing `origin` is `introduced`; a missing `key` places the instance in its own pattern `unclassified-<fingerprint prefix>`.
+3. **Pattern keys** are lowercased, with runs of non-alphanumerics collapsed to `-`. Patterns with the same key within one Ship Task merge into one pattern. A key must name a rule or cause; Lead may merge patterns later (25.6).
+4. **Fingerprint** = SHA-256 of `key \x00 repository \x00 path \x00 symbol \x00 normalized excerpt`.
+5. **Deduplication** against the ledger, in order. (a) A fingerprint already in the ledger in any state is dropped and counted as `suppressed_repeats`, except rule 6. (b) A `matches: F-n` claim naming an existing finding is dropped the same way. (c) Otherwise the instance becomes a new finding `F-<n>`. If its key equals an existing pattern, it joins that pattern as a `recurrence`.
+6. **Regression.** An instance whose fingerprint matches, or whose `regresses: F-n` names, a `fixed` finding and that is in scope records a `regressed` event on that finding instead of a new finding, and raises `review_regression`. A `regresses` claim on a finding that is not `fixed` or not in scope is treated as a new instance.
+7. **Resolutions.** For every finding claimed `fixed` by the last fix round, the Reviewer answers `resolved` or `unresolved`. `resolved` moves it to `fixed`, and `unresolved` keeps it open with an event. A missing answer marks it `unverified`. Resolutions never create findings.
+8. **Scope classification** per 25.3.
+9. **Verdict.** Posse derives `pass` when no finding is blocking (25.7) after rules 1-8, otherwise `changes_requested`. A Reviewer `pass` or `changes_requested` that differs from the derived verdict refuses the Signal (`review_verdict_inconsistent`). `inconclusive` is recorded as given and never passes.
+
+The existing verdict row (section 13) is written as today; the round, findings, patterns and events commit in the same transaction.
+
+### 25.5 Fix rounds
+
+`posse review fix <ship> [--pattern P-<n>]...` (or Posse, after a `changes_requested` verdict under `autonomy.review = "lead"`) queues one instruction to the Ship Rider through the normal message path (Task → `working`, `gated_sha` cleared). Without `--pattern` it selects every pattern with an open, unresolved, unverified or regressed blocking finding, plus non-blocking patterns the Lead marked `fix`. The instruction quotes the Brief's User intent verbatim and lists each pattern's rule, root cause, fix guidance and instances, and asks the Rider to fix every instance of the class, including unlisted ones, then signal done with `--resolutions <file>`:
+
+```json
+{"schema": "posse.review-resolutions.v1",
+ "patterns": [{"pattern": "P-2", "status": "fixed", "note": "also fixed y.go:88"},
+              {"pattern": "P-4", "status": "disputed", "note": "the value is validated in caller z.go:12"}]}
+```
+
+The Ship done Signal is refused with `review_resolution_missing` until every pattern of the pending fix instruction has an answer. `fixed` marks its open findings `fix_claimed`, which the next round verifies (25.4 rule 7). `disputed` marks them `disputed`, which needs a Lead or User disposition (25.6). After the done Signal, Posse raises `review_round_due` if rounds remain, or `review_cap_reached` if none remain.
+
+### 25.6 Dispositions
+
+`posse review dispose <ship> <F-n|P-n>... <action> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]`, where `action` is `fix`, `accept`, `defer`, `withdraw` or `reclassify`. `posse review merge <ship> <P-n> <P-n>...` merges patterns into the first. Each is a ledger event with actor and quote.
+
+- Any action that leaves a blocking finding unfixed (`accept`, `defer`, `withdraw`, or a `reclassify` below `block_at`) needs a User quote under every Autonomy (`review_disposition_requires_user`).
+- With `autonomy.review = "lead"`, the Lead may `fix`, `defer` (with `--issue`), `withdraw` (with `--reason`) or reclassify non-blocking findings. With `ask`, the Lead raises the existing `review` Decision with the round summary.
+- `--issue` records the follow-up URL. The Lead files the issue; Posse never creates forge issues.
+
+### 25.7 Severity and blocking
+
+A finding blocks while its state is `open`, `fix_claimed`, `unverified`, `disputed` or `regressed`, its origin is `introduced`, it is in scope, and its severity is `unclassified` or at or above the frozen `block_at`. `pre_existing` and out-of-scope findings never block. Non-blocking findings stay `open` until deferred, fixed or withdrawn. `land_ready` lists any still undisposed.
+
+`posse land` and `land --merge` refuse with `review_findings_open` while a blocking finding exists, under every review policy, until it is fixed or accepted by the User.
+
+### 25.8 Evidence and freshness
+
+Under `defaults.review = "local"`, the current head qualifies when one of the following holds and no finding blocks:
+
+1. a qualifying D01 `pass` targets it (section 13);
+2. a `review_carries` row maps a passed head to it. Posse writes one when a new Ship head `H` has the passed head `P` as an ancestor, `git merge-tree --write-tree P T` reports no conflicts, and its tree equals `H`'s tree, with `T` the newest frozen-target commit in `H`. The check runs when the Ship Task signals done and before Land. It never rebinds the verdict;
+3. an `accept-head` disposition binds it.
+
+Any other new commit needs a round or a `review_cap` Decision. ADR 0019 is unchanged: a round may review a behind head, and Land still requires the current target. Carries let the target merges that freshness requires keep the existing pass. Under `no-mistakes` review policy the receipt remains the only evidence.
+
+### 25.9 Roles
+
+Every round is a fresh Review Task subject to the Local Review identity rule (section 13). Consecutive rounds may use the same Review Profile. The Reviewer never edits; the Ship Rider applies every fix, and fixes are reviewed as author code. The Lead dispatches rounds, selects fix rounds and records dispositions within its Autonomy. The User answers `review_cap` Decisions and accepts blocking risk.
+
+### 25.10 State
+
+```sql
+review_rounds(ship_task_id, round, review_task_id, repository, scope_kind,  -- full | delta | full_fallback
+  scope_base_sha, head_sha, target_commit_sha, baseline_tree, delta_sha256, conflicted_paths_json,
+  status, verdict, created_at,                                              -- status admitted | verdict | void
+  PRIMARY KEY(ship_task_id, review_task_id, repository))
+review_patterns(id, ship_task_id, seq, key, title, rule, root_cause, fix_guidance, merged_into, created_round)
+review_findings(id, ship_task_id, seq, pattern_id, fingerprint, round, repository, path, symbol, excerpt,
+  line_at_report, head_sha, severity, origin, in_scope, state, follow_up_url, inherited_from,
+  UNIQUE(ship_task_id, fingerprint))
+  -- state open | fix_claimed | unverified | fixed | disputed | regressed | accepted | deferred | withdrawn
+review_finding_events(id, finding_id, round, event, actor, note, user_quote, at)   -- insert-only
+review_carries(ship_task_id, repository, from_head, to_head, target_commit_sha, tree, created_at)  -- insert-only
+review_dispositions(id, ship_task_id, head_sha, decision_id, user_quote, at)       -- insert-only
+validation_fix_rounds(id, ship_task_id, kind, seq, expected_base_head, dedupe_key, message_id, created_at)
+  -- kind gate | ci | review | freshness; insert-only; gate and ci rows count against the frozen budgets
+```
+
+Finding IDs (`F-<seq>`) and pattern IDs (`P-<seq>`) are per Ship Task and never reused. A finding's `state` is derived from its latest event and stored for queries. All rows are in Task snapshots and restored by rebuild.
+
+### 25.11 CLI and Notices
+
+| Command | Caller | Purpose |
+|---|---|---|
+| `posse review <ship> [--full]` | Lead, User | rounds used and remaining, bindings, patterns, findings by state, suppressed repeats, carries |
+| `posse review start <ship> [--profile p] [--name n]` | Lead | admit the next round with a generated Review Brief |
+| `posse review fix <ship> [--pattern P-n]...` | Lead | queue one fix round |
+| `posse review dispose <ship> <ids>... <action> [...]` | Lead, User | record a disposition (25.6) |
+| `posse review merge <ship> <P-n> <P-n>...` | Lead | merge patterns |
+| `posse holler done ... --findings <file>` | Review Rider | loop round findings (25.4) |
+| `posse holler done ... --resolutions <file>` | Ship Rider | answers to a fix round (25.5) |
+
+Notices: `gate_fix_queued`, `gate_fix_exhausted`, `ci_fix_queued`, `ci_fix_exhausted`, `ci_rerun_requested`, `head_discontinuity`, `review_round_done` (round n of max, verdict, new patterns and findings by severity, suppressed repeats, out-of-scope count), `review_round_due` (a fixed Ship Task awaits the next round), `review_regression`, `review_cap_reached`. Lowkey reports `review_cap_reached`, `review_regression`, `gate_fix_exhausted`, `ci_fix_exhausted` and `head_discontinuity` to the User; the others follow the `task_done` rule.
+
+### 25.12 Gate Fix Rounds
+
+When `posse land` finds a failed Gate on a loop-enabled Ship Task and the frozen `gate_loop.max_fix_rounds` is not used up, Posse queues one fix instruction instead of leaving the decision to the Lead. The instruction names the failed command, exit status, output tail and the gated head. It raises `gate_fix_queued`, and the Task returns to `working`. Each queued instruction consumes one Gate fix round for the Ship Task. When none remain, Posse raises `gate_fix_exhausted` (in addition to `gate_failed`), and the Lead decides. Gate commands come only from Posse config and run in the Mount at the exact head (section 14). Repository code still runs, as with any test command.
+
+### 25.13 CI loop
+
+The PR watch (section 14) records each observation by head. For a loop-enabled Ship Task in `done` or `landing`:
+
+- **Cancelled checks.** When every failed required check on the current head reports a provider cancellation (GitHub `CANCELLED`, GitLab `canceled`), and the forge head equals `gated_sha`, Posse reruns those checks on the same head through the forge CLI (`gh run rerun --failed`, `glab ci retry`), up to `ci_loop.rerun_cancelled` per check name and head. It raises `ci_rerun_requested`. A changed head or exhausted budget treats the cancellation as a failure.
+- **Fix rounds.** For any other failed required check on the current head, Posse fetches failed-log tails (`gh run view --log-failed`, bounded to 200 lines per check; GitLab job trace), then queues one fix instruction with check names, log URLs and tails, and raises `ci_fix_queued`. Instructions are deduplicated by the set of failing check names per head, so a repeated observation does not queue twice. Each queued instruction consumes one CI fix round. When none remain, Posse raises `ci_fix_exhausted` (in addition to `pr_checks_failed`), and the Lead decides.
+- Stale observations (section 14) never start a fix round. A behind head gets the freshness instruction instead.
+
+### 25.14 Head continuity
+
+Every automatic instruction (freshness, Gate, CI, review fix) records `expected_base_head`, the head it was issued for. The Rider's next done Signal must have a Task branch tip that descends from it. Otherwise Posse refuses the Signal with `head_discontinuity`, naming both heads, and raises the Notice; the Lead decides. `posse publish` already refuses non-fast-forward pushes. At Land, the gated head, the review evidence head (pass, carry or `accept-head`), the newest green observation and the forge head must all be the same commit (D03 plus 25.8), and the merge stays pinned to it.
+
+### 25.15 PR evidence
+
+Posse renders a `Validation` block inside its tokenized PR/MR body span (section 14) whenever evidence changes: the head SHA, Gate result, review rounds used and remaining with the latest verdict, finding counts by state, carries, and CI state. Posse refreshes it during publish and when the watch records new evidence, using the stored marker token. The block is a report; Land reads evidence only from SQLite.
+
+### 25.16 Target branch
+
+Scope, freshness, carries, Gate context, CI and Land use the Task's frozen target (section 4: Brief `target:`, `repositories.<member>.target_branch`, `defaults.target_branch`), per Member for workspaces. Nothing in this section reads the repository default branch.
+
+### 25.17 Deprecating and removing no-mistakes
+
+- **Interim.** Ship admission refuses `no_mistakes_target_unsupported` when the frozen Landing Mode is `no-mistakes` and the frozen target is not the repository default branch, for every no-mistakes version. no-mistakes rebases onto and opens PRs against its recorded default branch unless given `--base-branch`, and before v1.86.0 it scopes review and tests against the default branch even then. `posse config set` of `no-mistakes` as a Landing Mode or review policy succeeds with a `deprecated` warning. `posse doctor` lists Projects and Members still using either.
+- **Migration.** `posse doctor` and `posse up` print, for each Project still on no-mistakes, the replacement settings: `landing_mode = "pr"`, the Project's review choice with `local` suggested, `[review_loop]`, `[gate_loop]`, `[ci_loop]`, and `gate` commands suggested from the no-mistakes trusted `commands.test` and `commands.lint` read from the default branch. Posse never writes config; the User applies it with `posse config set`. Admitted Tasks keep their frozen `no-mistakes` plan and finish under it.
+- **Removal.** A later release rejects `no-mistakes` in `landing_mode`, `repositories.<member>.landing_mode`, `defaults.review` and `repositories.<member>.review` with `config_migration_required`, naming the file, key and replacement, as section 13 does for legacy review values. `posse update` refuses that release while any live Task has a frozen `no-mistakes` plan. Stored `review_receipts` remain readable in `posse show` and snapshots.
