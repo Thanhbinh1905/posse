@@ -59,12 +59,16 @@ The typed outcome (`pass`, `changes_requested` or `inconclusive`) of a Review Ta
 _Avoid_: Approval, review result
 
 **Review Loop**:
-The optional built-in protocol that turns successive Review Tasks of one Ship Task into at most three Review Rounds over a Finding Ledger.
+The optional built-in protocol that turns successive Review Tasks of one Ship Task into at most three Review Rounds over a Finding Ledger; part of the built-in validation that replaces no-mistakes.
 _Avoid_: Review pipeline, review cycle
 
 **Review Round**:
 One Review Task in a Review Loop that records a verdict for one exact Ship head; round 1 reviews the full candidate and later rounds only the author changes since the last reviewed head.
 _Avoid_: Pass, iteration, rereview
+
+**Fix Round**:
+One instruction Posse or the Lead queues to a Ship Rider to fix a failed Gate, failed CI checks or selected Finding Patterns for one head, within a per-Project budget.
+_Avoid_: Retry, fix attempt
 
 **Finding Pattern**:
 A group of findings that share one root cause or violated rule, fixed together in one fix round.
@@ -123,7 +127,7 @@ Work a Worker made on a Landed Task beyond what Landed, such as later commits or
 _Avoid_: Follow-up (that is a message to a Worker), residue, diff
 
 **Landing Mode**:
-How a Project's Ship Tasks Land: `local` (merge on this machine), `pr` (a pull request) or `no-mistakes` (through the no-mistakes pipeline).
+How a Project's Ship Tasks Land: `local` (merge on this machine), `pr` (a pull request) or the deprecated `no-mistakes` (through the no-mistakes pipeline, replaced by built-in validation).
 _Avoid_: Delivery mode, ship mode
 
 **Autonomy**:
