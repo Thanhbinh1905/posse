@@ -18,6 +18,7 @@ type Brief struct {
 	Execution      string
 	Paths          []string
 	Review         string
+	ReviewRounds   int
 	Base           string
 	BaseByRepo     map[string]string
 	Target         string
@@ -104,7 +105,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "execution", "paths", "review", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "landing_mode", "execution", "paths", "review", "review_rounds", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -123,6 +124,16 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
+	}
+	if raw, found := values["review_rounds"]; found {
+		rounds, err := strconv.Atoi(unquote(raw))
+		if err != nil {
+			return Brief{}, &BriefError{Field: "review_rounds", Reason: "must be an integer from 1 to 3"}
+		}
+		if rounds < 1 || rounds > 3 {
+			return Brief{}, &BriefError{Field: "review_rounds", Reason: "must be between 1 and 3"}
+		}
+		brief.ReviewRounds = rounds
 	}
 	if raw, found := values["paths"]; found {
 		paths, err := parsePaths(raw)
@@ -222,6 +233,9 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	}
 	if brief.Type != "ship" && (brief.Target != "" || len(brief.TargetByRepo) > 0) {
 		return Brief{}, &BriefError{Field: "target", Reason: "is valid only for a Ship Task"}
+	}
+	if brief.ReviewRounds > 0 && brief.Type != "ship" {
+		return Brief{}, &BriefError{Field: "review_rounds", Reason: "is valid only for a Ship Task"}
 	}
 	if brief.Title == "" {
 		return Brief{}, &BriefError{Field: "title", Reason: "is required"}

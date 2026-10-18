@@ -23,6 +23,32 @@ func TestReviewPolicyBriefSelectionAndMigration(t *testing.T) {
 	}
 }
 
+func TestBriefReviewRoundsAreShipOnlyAndBounded(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: ship\ntitle: Limited review\ndone_when: checked\nreview_rounds: 2\n---\n")
+	if err != nil || brief.ReviewRounds != 2 {
+		t.Fatalf("review_rounds parse = %#v, %v", brief, err)
+	}
+	for _, testCase := range []struct {
+		name string
+		text string
+	}{
+		{"zero", "review_rounds: 0"},
+		{"above hard cap", "review_rounds: 4"},
+		{"non-integer", "review_rounds: two"},
+		{"non-Ship", "type: scout\nreview_rounds: 2"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			body := "type: ship\n"
+			if strings.HasPrefix(testCase.text, "type:") {
+				body = ""
+			}
+			if _, err := ParseBriefText("---\n" + body + "title: Test\ndone_when: checked\n" + testCase.text + "\n---\n"); err == nil {
+				t.Fatalf("accepted %s", testCase.text)
+			}
+		})
+	}
+}
+
 func TestReviewPolicyTighteningAndScopedChoice(t *testing.T) {
 	for _, tc := range []struct {
 		current, requested string

@@ -45,6 +45,9 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if name == "posse" && !strings.Contains(string(want), "directly gives follow-up work") {
+			t.Fatalf("embedded posse skill omits direct User follow-up guidance: %s", want)
+		}
 		frozenPath := filepath.Join(skills.ClaudePluginDir, "skills", name, "SKILL.md")
 		got, err := os.ReadFile(frozenPath)
 		if err != nil || !bytes.Equal(got, want) {
