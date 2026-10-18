@@ -82,6 +82,12 @@ func (db *DB) ObserveCompletedRider(ctx context.Context, expected Task, paneID, 
 		return nil, tx.Commit()
 	}
 
+	if err := cancelPendingLandIntentTx(ctx, tx, expected.ID); err != nil {
+		if errors.Is(err, ErrTaskMergeInProgress) || errors.Is(err, ErrIntentOwned) {
+			return nil, tx.Commit()
+		}
+		return nil, err
+	}
 	note := fmt.Sprintf("Herdr observed a new working turn in pane %s after the completed Rider's turn ended", paneID)
 	if err := validateTransitionSource(state, StateWorking, "watcher"); err != nil {
 		return nil, err
@@ -93,10 +99,13 @@ func (db *DB) ObserveCompletedRider(ctx context.Context, expected Task, paneID, 
 		return nil, err
 	}
 	// Preserve already merged members, but invalidate every remaining gate.
-	if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='',state=CASE WHEN state IN ('gated','unchanged') THEN 'open' ELSE state END,updated_at=? WHERE task_id=? AND state<>'landed'`, now.UnixMilli(), expected.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='',state=CASE WHEN state IN ('gated','unchanged','landing') THEN 'open' ELSE state END,updated_at=? WHERE task_id=? AND state<>'landed'`, now.UnixMilli(), expected.ID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM completed_rider_busy WHERE task_id=?`, expected.ID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Task reopened after completed Rider turn' WHERE task_id=? AND kind='land_ready' AND answered_at=0 AND obsolete_at=0`, now.UnixMilli(), expected.ID); err != nil {
 		return nil, err
 	}
 	data, err := json.Marshal(map[string]any{"pane_id": paneID, "agent_status": status, "turn_ended": true, "previous_state": state})

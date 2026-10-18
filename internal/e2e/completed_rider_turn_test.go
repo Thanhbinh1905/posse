@@ -14,8 +14,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// Reproduce #279 with a Rider-like foreground process: it signals done, writes
-// its closing reply, and remains working until its turn ends.
+// Reproduce #279 and a direct User follow-up: the closing reply stays done,
+// then a new turn signals working, publishes and completes again.
 func TestDoneRiderClosingReplyDoesNotReopenTask(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
@@ -43,6 +43,18 @@ case "$PWD/" in
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     : > "$POSSE_TEST_ROOT/turn-ended-$task_id"
     while [ ! -e "$POSSE_E2E_SIGNAL_GATE/new-turn-$task_id" ]; do sleep 0.02; done
+    IFS= read -r request || exit 0
+    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+    printf 'holler working %s\\n' "$request" >> "$POSSE_TEST_ROOT/worker-delivery.log"
+    "$POSSE_E2E_POSSE_BIN" holler working "$request" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+    : > "$POSSE_TEST_ROOT/follow-up-working-$task_id"
+    printf 'direct User follow-up\n' > "follow-up-$task_id.txt"
+    git add "follow-up-$task_id.txt"
+    git commit -m "direct User follow-up $task_id" >/dev/null
+    printf 'publish Published direct User follow-up %s\\n' "$task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log"
+    "$POSSE_E2E_POSSE_BIN" publish "Published direct User follow-up $task_id" --verify "focused E2E -> passed" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+    "$POSSE_E2E_POSSE_BIN" holler done "Completed direct User follow-up $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+    : > "$POSSE_TEST_ROOT/follow-up-done-$task_id"
     while IFS= read -r instruction; do printf '%s\n' "$instruction" >> "$POSSE_TEST_ROOT/worker-delivery.log"; done
     ;;
   *)
@@ -97,20 +109,75 @@ esac
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	stateAfterTurnEnd := fixture.mustTask(t, "t1").State
 
-	// A subsequent working event represents new input after the turn boundary
-	// and must reopen the completed Task.
-	if _, err := herdr.NewWithEnv("herdr", fixture.env).Run(context.Background(), "pane", "report-agent", fixture.mustTask(t, "t1").PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
-		t.Fatalf("report new Rider turn: %v", err)
+	// A direct User request starts a fresh Rider turn. The Rider explicitly
+	// reopens its Task before changing and publishing the branch.
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if _, err := client.Run(context.Background(), "pane", "run", fixture.mustTask(t, "t1").PaneID, "The User asked me to make one more change."); err != nil {
+		t.Fatalf("send direct User follow-up to Rider: %v", err)
 	}
-	if !waitForCondition(12*time.Second, func() bool {
-		return fixture.mustTask(t, "t1").State == store.StateWorking
-	}) {
-		t.Fatalf("new Rider turn did not reopen Task: %#v", fixture.mustTask(t, "t1"))
-	}
-	if err := os.WriteFile(filepath.Join(fixture.root, "signal-gates", "new-turn-t1"), []byte("finish\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(fixture.root, "signal-gates", "new-turn-t1"), []byte("continue\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	workingMarker := filepath.Join(fixture.root, "follow-up-working-t1")
+	if !waitForCondition(15*time.Second, func() bool {
+		_, err := os.Stat(workingMarker)
+		return err == nil
+	}) {
+		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
+		t.Fatalf("Rider did not record its working Signal: %s", log)
+	}
+	if task := fixture.mustTask(t, "t1"); task.State != store.StateWorking {
+		t.Fatalf("direct User follow-up did not reopen Task before publishing: %#v", task)
+	}
+	doneMarker := filepath.Join(fixture.root, "follow-up-done-t1")
+	if !waitForCondition(30*time.Second, func() bool {
+		_, err := os.Stat(doneMarker)
+		return err == nil
+	}) {
+		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
+		t.Fatalf("Rider did not publish and complete the direct User follow-up: %s", log)
+	}
+	fixture.waitTaskState(t, "t1", store.StateDone)
+	final := fixture.mustTask(t, "t1")
+	if final.PRURL != "https://github.com/acme/shop/pull/17" {
+		t.Fatalf("follow-up completion lost the published PR: %#v", final)
+	}
+	publishedSHA := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/posse/t1"))
+	worktreeSHA := strings.TrimSpace(gitTest(t, fixture.env, final.WorktreePath, "rev-parse", "HEAD"))
+	if publishedSHA != worktreeSHA {
+		t.Fatalf("direct User follow-up was not published: remote=%s Rider=%s", publishedSHA, worktreeSHA)
+	}
+	transitions, err := fixture.db.TaskTransitions(context.Background(), final.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := false
+	for _, transition := range transitions {
+		if transition.To == string(store.StateWorking) && transition.Source == "rider" && transition.Note == "The User asked me to make one more change." {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatalf("direct User follow-up lacks a reasoned Rider resume transition: %#v", transitions)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notified := false
+	for _, notice := range notices {
+		if notice.TaskID == final.ID && notice.Kind == "rider_resumed" && strings.Contains(notice.Summary, `"The User asked me to make one more change."`) {
+			notified = true
+		}
+	}
+	if !notified {
+		t.Fatalf("Lead was not notified with the direct follow-up reason: %#v", notices)
 	}
 	if stateAfterClosingReply != store.StateDone || stateAfterTurnEnd != store.StateDone {
 		t.Fatalf("same-turn closing reply reopened done Task: after reply=%s after turn end=%s; want done", stateAfterClosingReply, stateAfterTurnEnd)
+	}
+	log, err := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
+	if err != nil || !strings.Contains(string(log), "holler working The User asked me to make one more change.") || !strings.Contains(string(log), "publish Published direct User follow-up t1") {
+		t.Fatalf("follow-up Signal and publish were not recorded: %s err=%v", log, err)
 	}
 }

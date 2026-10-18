@@ -102,7 +102,7 @@ func TestCompletedRiderObservationIsDurableAtomicAndConcurrent(t *testing.T) {
 			if repo.State != TaskRepoLanded || repo.GatedSHA != "head" {
 				t.Fatalf("merged Member changed: %#v", repo)
 			}
-		} else if repo.GatedSHA != "" || ((repo.Repo == "gated" || repo.Repo == "unchanged") && repo.State != TaskRepoOpen) {
+		} else if repo.GatedSHA != "" || ((repo.Repo == "gated" || repo.Repo == "landing" || repo.Repo == "unchanged") && repo.State != TaskRepoOpen) {
 			t.Fatalf("stale Member gate survived: %#v", repo)
 		}
 	}
