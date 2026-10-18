@@ -74,6 +74,69 @@ func TestMountCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 	}
 }
 
+func TestReportedCodexScoutAcceptsNamelessAgentWithRecordedSession(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	attachPRFixtureMount(t, fixture)
+	ctx := context.Background()
+	const sessionID = "01a1425b-3893-75f3-8310-79ae9e6f9b49"
+	if err := fixture.db.UpdateTaskLaunch(ctx, fixture.task.ID, fixture.worktree, "w2", "w2:p1", "posse:shop:t1", agentName("shop", 1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET agent_session=?,agent_session_kind='codex' WHERE id=?`, `{"session_id":"`+sessionID+`"}`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shell := startMountProcess(t, fixture.worktree)
+	agent := startMountProcess(t, fixture.worktree)
+	pane := herdr.Pane{
+		PaneID:       task.PaneID,
+		WorkspaceID:  task.HerdrWorkspaceID,
+		TabID:        "w2:t1",
+		Label:        task.PaneLabel,
+		CWD:          fixture.worktree,
+		Agent:        "codex",
+		AgentSession: json.RawMessage(`{"agent":"codex","kind":"id","source":"herdr:codex","value":"` + sessionID + `"}`),
+	}
+	snapshot := herdr.Snapshot{
+		Panes: []herdr.Pane{
+			{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude"},
+			pane,
+		},
+		Agents: []herdr.Agent{{PaneID: pane.PaneID, Agent: "codex", SessionID: sessionID}},
+	}
+	adapter := &scoutProcessChurnAdapter{
+		Fake:             fixture.service.Herdr.(*herdr.Fake),
+		snapshot:         snapshot,
+		shellPID:         shell.Process.Pid,
+		agentPID:         agent.Process.Pid,
+		worktree:         fixture.worktree,
+		leadCWD:          fixture.repo,
+		agentProcessName: "codex",
+	}
+	fixture.service.Herdr = adapter
+	authorization := newMountProcessAuthorization()
+	defer authorization.Close()
+	if err := fixture.service.verifyMountForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
+		t.Fatalf("same-session nameless Codex Rider was refused teardown ownership: %v", err)
+	}
+	if authorization.handle(agent.Process.Pid) == nil {
+		t.Fatal("exact Codex process was not retained after ownership verification")
+	}
+
+	adapter.snapshot.Agents[0].SessionID = "replacement-session"
+	adapter.processCalls = 0
+	replacementAuthorization := newMountProcessAuthorization()
+	err = fixture.service.verifyMountForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, replacementAuthorization)
+	replacementAuthorization.Close()
+	if err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("replacement session was not refused: %v", err)
+	}
+}
+
 func TestReportedScoutAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	mount := attachPRFixtureMount(t, fixture)
@@ -176,6 +239,7 @@ type scoutProcessChurnAdapter struct {
 	secondForegroundGroup int
 	worktree              string
 	leadCWD               string
+	agentProcessName      string
 	processCalls          int
 }
 
@@ -192,7 +256,11 @@ func (adapter *scoutProcessChurnAdapter) Call(ctx context.Context, method string
 	if paneID != "w2:p1" {
 		cwd = adapter.leadCWD
 	}
-	processes := []map[string]any{{"pid": adapter.agentPID, "name": "claude", "cwd": cwd}}
+	processName := adapter.agentProcessName
+	if processName == "" {
+		processName = "claude"
+	}
+	processes := []map[string]any{{"pid": adapter.agentPID, "name": processName, "cwd": cwd}}
 	foregroundGroup := adapter.agentPID
 	if paneID == "w2:p1" {
 		adapter.processCalls++
