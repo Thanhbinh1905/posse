@@ -54,6 +54,15 @@ var keySpecs = []KeySpec{
 	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Default: "none", Meaning: "Independent-review evidence required to Land a Ship Task; does not grant merge authority.", UserOnly: true},
 	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
 	{Key: "defaults.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in the Mount before a Ship Task may Land.", UserOnly: true},
+	{Key: "review_loop.enabled", Type: TypeBoolean, Default: true, Meaning: "Enable built-in Review Rounds for Ship Tasks.", UserOnly: true},
+	{Key: "review_loop.max_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum Review Rounds per Ship Task; may be lowered to 1 or 2.", UserOnly: true},
+	{Key: "review_loop.block_at", Type: TypeString, Allowed: []string{"P0", "P1", "P2"}, Default: "P1", Meaning: "Finding severity at or above which introduced findings block Land.", UserOnly: true},
+	{Key: "review_loop.auto_start", Type: TypeBoolean, Default: true, Meaning: "Automatically admit the next Review Round after its Gate passes.", UserOnly: true},
+	{Key: "review_loop.docs", Type: TypeBoolean, Default: false, Meaning: "Include documentation gaps in the Review rubric.", UserOnly: true},
+	{Key: "review_loop.guidance", Type: TypeStringArray, Default: []string{}, Meaning: "Repository guidance paths supplied to Reviewers from the frozen target branch.", UserOnly: true},
+	{Key: "gate_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic Gate fix instructions per Ship Task; 0 disables them.", UserOnly: true},
+	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Ship Task; 0 disables them.", UserOnly: true},
+	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Ship Task.", UserOnly: true},
 	{Key: "repositories.<repo>.landing_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Meaning: "How this member repository of a workspace Project Lands; defaults to local without an origin, else the Project landing_mode. no-mistakes is deprecated and unavailable for workspace Tasks."},
 	{Key: "repositories.<repo>.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for this workspace Member; overrides defaults.target_branch and the Member's default branch."},
 	{Key: "repositories.<repo>.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in this member's worktree before it may Land; replaces defaults.gate for the member.", UserOnly: true},
@@ -161,6 +170,16 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 	if key == "defaults.max_workers" || key == "defaults.recovery_attempts" {
 		if number, ok := integerValue(value); ok && number < 1 {
 			return fmt.Errorf("%s must be positive", key)
+		}
+	}
+	if key == "review_loop.max_rounds" {
+		if number, ok := integerValue(value); ok && (number < 1 || number > 3) {
+			return fmt.Errorf("%s must be between 1 and 3", key)
+		}
+	}
+	if key == "gate_loop.max_fix_rounds" || key == "ci_loop.max_fix_rounds" || key == "ci_loop.rerun_cancelled" {
+		if number, ok := integerValue(value); ok && number < 0 {
+			return fmt.Errorf("%s cannot be negative", key)
 		}
 	}
 	if strings.HasPrefix(key, "profiles.") && strings.HasSuffix(key, ".kind") {

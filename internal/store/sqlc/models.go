@@ -23,6 +23,7 @@ type CompletedRiderBusy struct {
 	PaneID          string
 	ServerStartedAt string
 	BusySince       int64
+	TurnEnded       int64
 }
 
 type ConfigApproval struct {

@@ -58,6 +58,62 @@ func TestLegacyBriefsResolveWithoutChangingInputsOrLaunchSettings(t *testing.T) 
 	}
 }
 
+func TestValidationLoopsFreezeConfigAndBriefCanOnlyTightenReviewRounds(t *testing.T) {
+	loops := taskplan.ValidationLoops{
+		Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1", AutoStart: true, Guidance: []string{"docs/review.md"}},
+		Gate:   config.GateLoop{MaxFixRounds: 2},
+		CI:     config.CILoop{MaxFixRounds: 1, RerunCancelled: 2},
+	}
+	r := request("ship")
+	r.ValidationLoops = &loops
+	r.Brief = taskplan.Select("brief", "ship.md", []byte("---\ntype: ship\ntitle: Frozen validation\ndone_when: checked\nreview_rounds: 2\n---\n"))
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ValidationLoops == nil || plan.ValidationLoops.Review.MaxRounds != 3 || plan.ValidationLoops.BriefReviewRounds != 2 || plan.ValidationLoops.MaxReviewRounds() != 2 || plan.ValidationLoops.Gate.MaxFixRounds != 2 || plan.ValidationLoops.CI.RerunCancelled != 2 {
+		t.Fatalf("validation loops were not frozen with the tightened review cap: %#v", plan.ValidationLoops)
+	}
+	loops.Review.MaxRounds = 1
+	loops.Review.Guidance[0] = "changed.md"
+	loops.Gate.MaxFixRounds = 0
+	if plan.ValidationLoops.Review.MaxRounds != 3 || plan.ValidationLoops.BriefReviewRounds != 2 || plan.ValidationLoops.MaxReviewRounds() != 2 || plan.ValidationLoops.Review.Guidance[0] != "docs/review.md" || plan.ValidationLoops.Gate.MaxFixRounds != 2 {
+		t.Fatalf("frozen plan followed mutable config: %#v", plan.ValidationLoops)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := taskplan.Decode(encoded)
+	if err != nil || decoded.ValidationLoops.MaxReviewRounds() != 2 {
+		t.Fatalf("frozen loops did not survive plan round-trip: %#v %v", decoded.ValidationLoops, err)
+	}
+
+	r.ValidationLoops = &taskplan.ValidationLoops{Review: config.ReviewLoop{Enabled: true, MaxRounds: 1, BlockAt: "P1"}}
+	if _, err := taskplan.Resolve(r); err == nil || !strings.Contains(err.Error(), "cannot exceed") {
+		t.Fatalf("Brief raised the configured review cap: %v", err)
+	}
+}
+
+func TestLegacyPlansWithoutValidationLoopsKeepTheirOldContract(t *testing.T) {
+	r := request("ship")
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ValidationLoops != nil {
+		t.Fatalf("legacy plan unexpectedly enabled validation loops: %#v", plan.ValidationLoops)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := taskplan.Decode(encoded)
+	if err != nil || decoded.ValidationLoops != nil || strings.Contains(encoded, "validation_loops") {
+		t.Fatalf("legacy plan changed during round-trip: %#v %s %v", decoded.ValidationLoops, encoded, err)
+	}
+}
+
 func TestWorkspaceRootContextIsFrozenAndDefaultsToNone(t *testing.T) {
 	r := request("scout")
 	r.Brief = taskplan.Select("brief", "brief.md", []byte("---\ntype: scout\ntitle: Inspect workspace\ndone_when: report is saved\nroot_context: read-only\n---\n"))
