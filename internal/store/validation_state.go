@@ -3,7 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
+	"time"
 )
 
 // ReviewRound binds one repository in a Review Task to an exact Ship head.
@@ -103,6 +108,193 @@ type ValidationFixRound struct {
 	DedupeKey        string `toml:"dedupe_key"`
 	MessageID        int64  `toml:"message_id"`
 	CreatedAt        int64  `toml:"created_at"`
+}
+
+// QueueValidationFixResult describes whether an automatic instruction was added.
+type QueueValidationFixResult struct {
+	MessageID int64
+	Queued    bool
+	Coalesced bool
+}
+
+// ValidationContinuitySnapshot binds a done Signal to the current fix rounds.
+type ValidationContinuitySnapshot struct {
+	Heads         []string
+	LatestRoundID int64
+}
+
+// ErrValidationHeadsChanged means a new fix instruction arrived after continuity was checked.
+var ErrValidationHeadsChanged = errors.New("validation fix instructions changed while recording done")
+
+// QueueValidationFixInstruction records a fix round and queues or extends the
+// unsent validation message for the same head in one transaction.
+func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string) (QueueValidationFixResult, error) {
+	if taskID < 1 || (kind != "gate" && kind != "ci" && kind != "review" && kind != "freshness") {
+		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix task or kind")
+	}
+	if len(expectedBaseHead) != 40 && len(expectedBaseHead) != 64 {
+		return QueueValidationFixResult{}, fmt.Errorf("expected base head must be a commit SHA")
+	}
+	if _, err := hex.DecodeString(expectedBaseHead); err != nil {
+		return QueueValidationFixResult{}, fmt.Errorf("expected base head must be a hexadecimal commit SHA")
+	}
+	if strings.TrimSpace(dedupeKey) == "" || strings.TrimSpace(body) == "" {
+		return QueueValidationFixResult{}, fmt.Errorf("validation fix dedupe key and body are required")
+	}
+
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	defer tx.Rollback()
+	var state, taskType string
+	if err := tx.QueryRowContext(ctx, `SELECT state,type FROM tasks WHERE id=?`, taskID).Scan(&state, &taskType); err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	if taskType != "ship" || !taskAcceptsInstruction(State(state), taskType) {
+		return QueueValidationFixResult{}, ErrStateRace
+	}
+
+	var existingMessageID int64
+	var existingExpected string
+	err = tx.QueryRowContext(ctx, `SELECT expected_base_head,message_id FROM validation_fix_rounds WHERE ship_task_id=? AND kind=? AND dedupe_key=?`, taskID, kind, dedupeKey).Scan(&existingExpected, &existingMessageID)
+	if err == nil {
+		if existingExpected != expectedBaseHead {
+			return QueueValidationFixResult{}, fmt.Errorf("validation fix dedupe key %q was reused for another head", dedupeKey)
+		}
+		return QueueValidationFixResult{MessageID: existingMessageID}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return QueueValidationFixResult{}, err
+	}
+
+	var seq int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM validation_fix_rounds WHERE ship_task_id=? AND kind=?`, taskID, kind).Scan(&seq); err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	var messageID int64
+	var coalesced bool
+	var existingBody string
+	err = tx.QueryRowContext(ctx, `SELECT m.id,m.body FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.expected_base_head=? AND m.status='queued' ORDER BY m.id LIMIT 1`, taskID, expectedBaseHead).Scan(&messageID, &existingBody)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return QueueValidationFixResult{}, err
+	}
+	createdAt := time.Now().UnixMilli()
+	var lastDone sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'`, taskID).Scan(&lastDone); err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	if lastDone.Valid && createdAt <= lastDone.Int64 {
+		createdAt = lastDone.Int64 + 1
+	}
+	if messageID != 0 {
+		updated, err := tx.ExecContext(ctx, `UPDATE messages SET body=? WHERE id=? AND status='queued'`, existingBody+"\n\n---\n\n"+strings.TrimSpace(body), messageID)
+		if err != nil {
+			return QueueValidationFixResult{}, err
+		}
+		changed, err := updated.RowsAffected()
+		if err != nil {
+			return QueueValidationFixResult{}, err
+		}
+		if changed != 1 {
+			return QueueValidationFixResult{}, ErrStateRace
+		}
+		coalesced = true
+	} else {
+		result, err := tx.ExecContext(ctx, `INSERT INTO messages(task_id,body,created_at,status,wait_for_idle) VALUES(?,?,?,'queued',1)`, taskID, strings.TrimSpace(body), createdAt)
+		if err != nil {
+			return QueueValidationFixResult{}, err
+		}
+		messageID, err = result.LastInsertId()
+		if err != nil {
+			return QueueValidationFixResult{}, err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(?,?,?,?,?,?,?)`, taskID, kind, seq, expectedBaseHead, dedupeKey, messageID, createdAt)
+	if err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	if _, err := result.LastInsertId(); err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	return QueueValidationFixResult{MessageID: messageID, Queued: true, Coalesced: coalesced}, nil
+}
+
+// ValidationContinuitySnapshot returns the heads named by automatic
+// instructions issued since the Ship Task's most recent done Signal, together
+// with a revision that detects additional rounds on an already-known head.
+func (db *DB) ValidationContinuitySnapshot(ctx context.Context, taskID int64) (ValidationContinuitySnapshot, error) {
+	return validationContinuitySnapshot(ctx, db, taskID)
+}
+
+// ValidationExpectedBaseHeads returns the unique expected heads for callers
+// that do not need to bind a done Signal to the current round revision.
+func (db *DB) ValidationExpectedBaseHeads(ctx context.Context, taskID int64) ([]string, error) {
+	snapshot, err := db.ValidationContinuitySnapshot(ctx, taskID)
+	return snapshot.Heads, err
+}
+
+func validationContinuitySnapshotTx(ctx context.Context, tx *writeTx, taskID int64) (ValidationContinuitySnapshot, error) {
+	return validationContinuitySnapshot(ctx, tx, taskID)
+}
+
+type validationRows interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func validationContinuitySnapshot(ctx context.Context, queryer validationRows, taskID int64) (ValidationContinuitySnapshot, error) {
+	var snapshot ValidationContinuitySnapshot
+	rows, err := queryer.QueryContext(ctx, `SELECT r.id,r.expected_base_head FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND m.status IN ('queued','claimed','interrupting','submitting','delivered') AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'),0) ORDER BY r.id`, taskID, taskID)
+	if err != nil {
+		return snapshot, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for rows.Next() {
+		var id int64
+		var head string
+		if err := rows.Scan(&id, &head); err != nil {
+			return snapshot, err
+		}
+		if id > snapshot.LatestRoundID {
+			snapshot.LatestRoundID = id
+		}
+		if !seen[head] {
+			seen[head] = true
+			snapshot.Heads = append(snapshot.Heads, head)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return snapshot, err
+	}
+	sort.Strings(snapshot.Heads)
+	return snapshot, nil
+}
+
+func sameValidationSnapshot(left, right ValidationContinuitySnapshot) bool {
+	return left.LatestRoundID == right.LatestRoundID && sameValidationHeadList(left.Heads, right.Heads)
+}
+
+func sameValidationHeadList(left, right []string) bool {
+	left = append([]string(nil), left...)
+	right = append([]string(nil), right...)
+	sort.Strings(left)
+	sort.Strings(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 type validationStateSnapshot struct {

@@ -159,6 +159,10 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 			if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil || queued != 1 {
 				t.Fatalf("repeated watcher polls duplicated the freshness instruction: queued=%d err=%v", queued, err)
 			}
+			var expectedHead, kind string
+			if err := fixture.db.QueryRowContext(context.Background(), `SELECT expected_base_head,kind FROM validation_fix_rounds WHERE ship_task_id=?`, fixture.task.ID).Scan(&expectedHead, &kind); err != nil || expectedHead != fixture.headSHA || kind != "freshness" {
+				t.Fatalf("freshness instruction binding = %q kind=%q err=%v, want %q/freshness", expectedHead, kind, err, fixture.headSHA)
+			}
 			for _, required := range []string{targetTip, "origin/main", "Merge origin/main", "rerun the configured Gate", "never rebase a pushed branch", "posse publish"} {
 				if !strings.Contains(body, required) {
 					t.Errorf("freshness instruction omitted %q: %s", required, body)

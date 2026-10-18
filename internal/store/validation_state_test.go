@@ -4,7 +4,9 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestValidationStateSurvivesSnapshotRebuild(t *testing.T) {
@@ -18,7 +20,7 @@ func TestValidationStateSurvivesSnapshotRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(before.ReviewRounds) != 1 || len(before.ReviewPatterns) != 1 || len(before.ReviewFindings) != 1 ||
-		len(before.ReviewFindingEvents) != 1 || len(before.ReviewCarries) != 1 || len(before.ReviewDispositions) != 1 || len(before.ValidationFixRounds) != 1 {
+		len(before.ReviewFindingEvents) != 1 || len(before.ReviewCarries) != 1 || len(before.ReviewDispositions) != 1 || len(before.ValidationFixRounds) != 2 {
 		t.Fatalf("fixture did not cover every validation table: %#v", before)
 	}
 	if count, err := f.db.RebuildFromSnapshots(f.ctx, f.home); err != nil || count != 2 {
@@ -187,10 +189,135 @@ func insertValidationStateFixture(t *testing.T, f reviewVerdictFixture) {
 		{`INSERT INTO review_carries(ship_task_id,repository,from_head,to_head,target_commit_sha,tree,created_at) VALUES(?,'shop',?,?,?, ?,12)`, []any{f.ship, reviewShaA, reviewShaB, reviewShaB, reviewShaB}},
 		{`INSERT INTO review_dispositions(id,ship_task_id,head_sha,decision_id,user_quote,at) VALUES(802,?,?,NULL,'accepted by User',13)`, []any{f.ship, reviewShaB}},
 		{`INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(803,?,'gate',1,?,'gate:1',901,14)`, []any{f.ship, reviewShaB}},
+		{`INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(804,?,'ci',1,?,'ci:1',901,15)`, []any{f.ship, reviewShaB}},
 	}
 	for _, statement := range statements {
 		if _, err := f.db.ExecContext(f.ctx, statement.query, statement.args...); err != nil {
 			t.Fatalf("insert validation fixture %q: %v", statement.query, err)
 		}
+	}
+}
+
+func TestQueueValidationFixCoalescesKindsForOneHead(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	gate, err := f.db.QueueValidationFixInstruction(f.ctx, f.ship, "gate", reviewShaA, "gate:1", "Gate command failed")
+	if err != nil || !gate.Queued || gate.Coalesced || gate.MessageID == 0 {
+		t.Fatalf("Gate fix queue = %#v, %v", gate, err)
+	}
+	ci, err := f.db.QueueValidationFixInstruction(f.ctx, f.ship, "ci", reviewShaA, "ci:unit", "CI check failed")
+	if err != nil || !ci.Queued || !ci.Coalesced || ci.MessageID != gate.MessageID {
+		t.Fatalf("CI fix was not coalesced with Gate: %#v, %v", ci, err)
+	}
+	duplicate, err := f.db.QueueValidationFixInstruction(f.ctx, f.ship, "gate", reviewShaA, "gate:1", "Gate command failed")
+	if err != nil || duplicate.Queued || duplicate.MessageID != gate.MessageID {
+		t.Fatalf("duplicate Gate observation = %#v, %v", duplicate, err)
+	}
+
+	var messageCount, roundCount int
+	var body string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*),MIN(body) FROM messages WHERE task_id=?`, f.ship).Scan(&messageCount, &body); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND message_id=?`, f.ship, gate.MessageID).Scan(&roundCount); err != nil {
+		t.Fatal(err)
+	}
+	if messageCount != 1 || roundCount != 2 || !strings.Contains(body, "Gate command failed") || !strings.Contains(body, "CI check failed") {
+		t.Fatalf("coalesced message count=%d rounds=%d body=%q", messageCount, roundCount, body)
+	}
+	heads, err := f.db.ValidationExpectedBaseHeads(f.ctx, f.ship)
+	if err != nil || !reflect.DeepEqual(heads, []string{reviewShaA}) {
+		t.Fatalf("expected heads = %v, %v", heads, err)
+	}
+
+	other, err := f.db.QueueValidationFixInstruction(f.ctx, f.ship, "ci", reviewShaB, "ci:integration", "Another head failed")
+	if err != nil || !other.Queued || other.Coalesced || other.MessageID == gate.MessageID {
+		t.Fatalf("different head was coalesced: %#v, %v", other, err)
+	}
+}
+
+func TestConcurrentValidationFixesForOneHeadShareAQueuedMessage(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	type response struct {
+		result QueueValidationFixResult
+		err    error
+	}
+	responses := make(chan response, 2)
+	var workers sync.WaitGroup
+	for _, item := range []struct{ kind, key, body string }{
+		{"gate", "gate:parallel", "Gate failure"},
+		{"ci", "ci:parallel", "CI failure"},
+	} {
+		workers.Add(1)
+		go func(item struct{ kind, key, body string }) {
+			defer workers.Done()
+			result, err := f.db.QueueValidationFixInstruction(f.ctx, f.ship, item.kind, reviewShaA, item.key, item.body)
+			responses <- response{result: result, err: err}
+		}(item)
+	}
+	workers.Wait()
+	close(responses)
+	var messageID int64
+	coalesced := 0
+	for result := range responses {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if messageID == 0 {
+			messageID = result.result.MessageID
+		} else if result.result.MessageID != messageID {
+			t.Fatalf("concurrent fix instructions used different messages: %d and %d", messageID, result.result.MessageID)
+		}
+		if result.result.Coalesced {
+			coalesced++
+		}
+	}
+	var messageCount, roundCount int
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM messages WHERE task_id=?`, f.ship).Scan(&messageCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND message_id=?`, f.ship, messageID).Scan(&roundCount); err != nil {
+		t.Fatal(err)
+	}
+	if messageCount != 1 || roundCount != 2 || coalesced != 1 {
+		t.Fatalf("concurrent coalescing: messages=%d rounds=%d coalesced=%d", messageCount, roundCount, coalesced)
+	}
+}
+
+func TestDoneSignalBindsValidationHeadsCheckedByCaller(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	if err := f.db.Transition(f.ctx, f.ship, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := f.db.QueueValidationFixInstruction(f.ctx, f.ship, "gate", reviewShaA, "gate:continuity", "Fix the Gate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE messages SET status='delivered',delivered_at=? WHERE id=?`, time.Now().UnixMilli(), queued.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	task := f.task(t, f.ship)
+	checked, err := f.db.ValidationContinuitySnapshot(f.ctx, f.ship)
+	if err != nil || !reflect.DeepEqual(checked.Heads, []string{reviewShaA}) {
+		t.Fatalf("checked heads = %v, %v", checked.Heads, err)
+	}
+	second, err := f.db.QueueValidationFixInstruction(f.ctx, f.ship, "ci", reviewShaA, "ci:later", "Fix the CI check")
+	if err != nil || !second.Queued || second.Coalesced {
+		t.Fatalf("queue later same-head fix = %#v, %v", second, err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE messages SET status='delivered',delivered_at=created_at WHERE id=?`, second.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.RecordWorkerSignalWithValidation(f.ctx, task, "done", "Finished", nil, "task_done", checked); !errors.Is(err, ErrValidationHeadsChanged) {
+		t.Fatalf("done with stale continuity revision error = %v", err)
+	}
+	snapshot, err := f.db.ValidationContinuitySnapshot(f.ctx, f.ship)
+	if err != nil || !reflect.DeepEqual(snapshot.Heads, []string{reviewShaA}) || snapshot.LatestRoundID == checked.LatestRoundID {
+		t.Fatalf("current continuity snapshot = %#v, checked %#v, err=%v", snapshot, checked, err)
+	}
+	if state, err := f.db.RecordWorkerSignalWithValidation(f.ctx, task, "done", "Finished", nil, "task_done", snapshot); err != nil || state != StateDone {
+		t.Fatalf("done with checked head state=%s err=%v", state, err)
+	}
+	if heads, err := f.db.ValidationExpectedBaseHeads(f.ctx, f.ship); err != nil || len(heads) != 0 {
+		t.Fatalf("completed instruction remained active: heads=%v err=%v", heads, err)
 	}
 }
