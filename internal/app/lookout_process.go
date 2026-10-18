@@ -45,59 +45,6 @@ var lookoutExecutableVerifier = isPosseExecutable
 
 var lookoutProcRoot = "/proc"
 
-// Check the process rather than trusting a restored shell pane's label.
-func lookoutProcessRunning(paneID, home string) bool {
-	if runtime.GOOS == "linux" {
-		return linuxLookoutProcessRunning(paneID, home)
-	}
-	processes, err := systemLookoutProcesses(home)
-	if err != nil {
-		return false
-	}
-	for _, process := range processes {
-		if process.PaneID == paneID && process.PollOnly {
-			return true
-		}
-	}
-	return false
-}
-
-func linuxLookoutProcessRunning(paneID, home string) bool {
-	entries, err := os.ReadDir(lookoutProcRoot)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-		root := filepath.Join(lookoutProcRoot, entry.Name())
-		environment, err := os.ReadFile(filepath.Join(root, "environ"))
-		if err != nil {
-			continue
-		}
-		env := parseProcessEnvironment(string(environment))
-		if env["HERDR_PANE_ID"] != paneID || !sameLookoutHome(processHome(env), home) {
-			continue
-		}
-		command, err := os.ReadFile(filepath.Join(root, "cmdline"))
-		if err != nil {
-			continue
-		}
-		executable, verified := inspectLookoutExecutable(pid)
-		if !verified || !lookoutExecutableVerifier(executable.Path) {
-			continue
-		}
-		process, found := lookoutFromArgs(pid, splitProcessArgs(string(command)), env, home)
-		if found && process.PollOnly {
-			process.Executable = executable
-			return true
-		}
-	}
-	return false
-}
-
 func systemLookoutProcesses(home string) ([]lookoutProcess, error) {
 	if runtime.GOOS == "darwin" {
 		output, err := exec.Command("ps", "-axEww", "-o", "pid=,command=").Output()

@@ -607,7 +607,7 @@ func (s *Service) reexecLookoutIfUpdated(projectID int64, poller *store.LookoutP
 	if err := execProcess(installed.Path, args, os.Environ()); err != nil {
 		return fmt.Errorf("re-exec updated Lookout: %w", err)
 	}
-	return errors.New("Lookout re-exec returned unexpectedly")
+	return errors.New("lookout re-exec returned unexpectedly")
 }
 
 func lookoutReexecMarker(home string, pid int) string {
