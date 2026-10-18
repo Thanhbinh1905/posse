@@ -105,11 +105,18 @@ func (s *Service) landWorkspace(out *axi.Context, db *store.DB, project store.Pr
 			return finishErr
 		}
 		intentOpen = false
-		if started, startErr := s.maybeAutoStartReviewRound(out, db, home, project, task); startErr != nil {
+		started, startErr := s.maybeAutoStartReviewRound(out, db, home, project, task)
+		if startErr != nil {
 			return startErr
-		} else if started {
+		}
+		if started {
 			return nil
 		}
+		intent, err = s.startTaskIntent(ctx, db, project.ID, task.ID, workspaceLandIntent)
+		if err != nil {
+			return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+		}
+		intentOpen = true
 	}
 	if !merge {
 		for _, member := range members {
