@@ -39,7 +39,9 @@ func TestT283DirectPaneWorkReopensCompletedShip(t *testing.T) {
 			before := fixture.mustTask(t, "t2")
 			client := herdr.NewWithEnv("herdr", fixture.env)
 			waitForRelaunchHelpAgentStatus(t, fixture, before.PaneID, "idle")
-			// Keep the worktree clean: sustained Herdr busy status alone must suffice.
+			// Observe the old turn ending before direct input starts a new one.
+			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
+			// Keep the worktree clean: the new turn status alone must suffice.
 			if err := os.WriteFile(filepath.Join(fixture.root, "pause-fix-commit"), nil, 0600); err != nil {
 				t.Fatal(err)
 			}

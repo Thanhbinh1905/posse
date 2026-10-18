@@ -204,6 +204,11 @@ func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T)
 	if code, output, stderr := fixture.run("holler", "done", "Worker completion summary", "--pr", url); code != 0 {
 		t.Fatalf("done: %d %s %s", code, output, stderr)
 	}
+	poll() // The Task became done after its green PR observation was recorded.
+	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
+		t.Fatalf("green PR did not produce land_ready when the Task became done: notices=%#v err=%v", notices, err)
+	}
 	if code, output, stderr := fixture.run("land", "t1"); code != 0 {
 		t.Fatalf("land: %d %s %s", code, output, stderr)
 	}
@@ -211,10 +216,10 @@ func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T)
 	if err != nil || task.State != store.StateLanding {
 		t.Fatalf("land did not move the Task to landing: task=%#v err=%v", task, err)
 	}
-	poll() // The forge observation is unchanged, but the Task is now landing.
+	poll() // The unchanged green observation must not duplicate land_ready.
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
 	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
-		t.Fatalf("green PR did not produce one land_ready Notice after the Task entered landing: notices=%#v err=%v", notices, err)
+		t.Fatalf("repeated ready observation duplicated land_ready after Landing: notices=%#v err=%v", notices, err)
 	}
 	poll()
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)

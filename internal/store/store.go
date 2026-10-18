@@ -530,6 +530,9 @@ func validateTransitionSource(from, to State, source string) error {
 		expected = "herdr"
 	case from == StateNeedsDecision && to == StateWorking:
 		expected = "lead"
+		if source == "worker" {
+			expected = "worker"
+		}
 	case (from == StateDone || from == StateLanding) && to == StateWorking:
 		expected = "lead"
 		if source == "watcher" {
@@ -1385,6 +1388,12 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 		}
 		current = StateWorking
 	}
+	if current == StateNeedsDecision && verb == "working" {
+		if err := transitionTx(ctx, queries, task.ID, StateNeedsDecision, StateWorking, "worker", note); err != nil {
+			return "", err
+		}
+		current = StateWorking
+	}
 	if current != StateWorking {
 		return "", fmt.Errorf("%w: Task %d is %q", ErrStateRace, task.ID, current)
 	}
@@ -1429,6 +1438,18 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 		current = next
 		if err := blockModelErrorEpisodeTx(ctx, tx, task.ID, "Task transitioned to "+string(next)+" before automatic continue submission", time.Now().UnixMilli()); err != nil {
 			return "", err
+		}
+	}
+	if verb == "done" && task.Type == "ship" && !inPlace {
+		var taskType, paneID, server string
+		var transitionID int64
+		if err := tx.QueryRowContext(ctx, `SELECT type,pane_id,agent_server_started_at,COALESCE((SELECT id FROM transitions WHERE task_id=tasks.id AND to_state='done' ORDER BY id DESC LIMIT 1),0) FROM tasks WHERE id=?`, task.ID).Scan(&taskType, &paneID, &server, &transitionID); err != nil {
+			return "", err
+		}
+		if taskType == "ship" {
+			if err := upsertCompletedRiderTurn(ctx, tx, task.ID, transitionID, paneID, server, time.Now().UnixMilli(), false); err != nil {
+				return "", err
+			}
 		}
 	}
 	if verb == "done" && (task.Type != "ship" || inPlace) {

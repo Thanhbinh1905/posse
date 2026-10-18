@@ -43,8 +43,7 @@ func TestCompletedRiderObservationIsDurableAtomicAndConcurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	grace := 5 * time.Second
-	if notice, err := db.ObserveCompletedRider(ctx, task, "w1:p2", "generation", true, now, grace); err != nil || notice != nil {
+	if notice, err := db.ObserveCompletedRider(ctx, task, "w1:p2", "generation", "working", now); err != nil || notice != nil {
 		t.Fatalf("first observation: %#v %v", notice, err)
 	}
 	if err := db.Close(); err != nil {
@@ -60,7 +59,10 @@ func TestCompletedRiderObservationIsDurableAtomicAndConcurrent(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `CREATE TRIGGER reject_resumed BEFORE INSERT ON notices WHEN NEW.kind='rider_resumed' BEGIN SELECT RAISE(ABORT,'test Notice failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ObserveCompletedRider(ctx, task, "w1:p2", "generation", true, now.Add(grace), grace); err == nil {
+	if _, err := db.ObserveCompletedRider(ctx, task, "w1:p2", "generation", "idle", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ObserveCompletedRider(ctx, task, "w1:p2", "generation", "working", now.Add(2*time.Second)); err == nil {
 		t.Fatal("failed Notice insert was ignored")
 	}
 	current, _ := db.Task(ctx, project.ID, "t2")
@@ -76,7 +78,7 @@ func TestCompletedRiderObservationIsDurableAtomicAndConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := db.ObserveCompletedRider(ctx, task, "w1:p2", "generation", true, now.Add(grace), grace)
+			_, err := db.ObserveCompletedRider(ctx, task, "w1:p2", "generation", "working", now.Add(3*time.Second))
 			results <- err
 		}()
 	}

@@ -1140,8 +1140,8 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if task.State != store.StateWorking && task.State != store.StateStalled {
-		return axi.Failure("signal_state_invalid", fmt.Sprintf("Task %s is %s and cannot accept a %s Signal", taskIDString(task.Seq), task.State, verb), false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
+	if task.State != store.StateWorking && task.State != store.StateStalled && !(task.State == store.StateNeedsDecision && verb == "working") {
+		return axi.Failure("signal_state_invalid", fmt.Sprintf("Task %s is %s and cannot accept a %s Signal", taskIDString(task.Seq), task.State, verb), false, "Ask the Lead to reopen this Task before retrying the Signal")
 	}
 	verdictFlag, verdictGiven := parsed.Flags["verdict"]
 	if verdictGiven {

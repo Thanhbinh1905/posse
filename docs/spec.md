@@ -362,11 +362,11 @@ spawning ─► working ─┬─► done ─► landing ─► landed ─► to
 | working ↔ blocked | herdr | agent status `blocked`, then any non-blocked status |
 | working → stalled | cli | stall rule (section 10) |
 | stalled → working | cli / worker | new output or worktree change, any `posse holler` (applied before the Signal), or `posse relaunch` |
-| needs-decision → working | lead | `posse send` starts durable submission |
+| needs-decision → working | lead / worker | `posse send` starts durable submission; Rider records a `working` Signal |
 | done → working | lead | `posse send` starts durable submission to a `done` Ship Task; clears `gated_sha` |
 | done → landing | cli | `posse land` started (gate passed, PR opened or ready to merge) |
 | landing → working | lead | `posse send` starts durable submission to a landing Ship Task; clears `gated_sha` and keeps its branch and PR |
-| done / landing → working | watcher | Ship Rider reports `working` across consecutive observations at least five seconds apart; records busy evidence, clears Task and unlanded Member gates, keeps branch and PR, raises `rider_resumed` |
+| done / landing → working | watcher | after the completed turn ends (`idle` or `done`), Herdr reports a new `working` turn; clears Task and unlanded Member gates, keeps branch and PR, raises `rider_resumed` |
 | any non-landed PR Task → landed | cli | forge reports the Task's verified PR head merged; records the merge commit without passing through `done` |
 | done → reported | cli | scout/review: Report copied in; in-place Ship: output evidence recorded without Land |
 | spawning (with a pane), working, needs-decision, blocked, stalled → lost | cli | reconcile: pane gone and no resumable session |
@@ -401,7 +401,7 @@ For each live Task:
 3. **Pane present but the agent exited**: if `agent_session` is known and Herdr native resume is enabled, leave it to Herdr (resume happens on client attach) and mark nothing; after 2 minutes without an agent **and** no resumable session (no `agent_session`, or native resume disabled), mark `lost`.
 4. **No pane and no label match**: mark `lost`. The worktree and branch are never touched.
 
-For a `done` or `landing` Ship Task, consecutive Herdr `working` observations at least five seconds apart reopen it as `working`. The watcher persists the first busy observation, keyed by completion transition, pane and server generation. A non-working status, absent agent or missing pane resets that evidence; a new completion transition or Rider identity starts a new grace period. This ignores transient status flicker and the tail of the turn that signalled done. Posse instruction delivery already reopens the Task before submission, so it produces no duplicate watcher transition. The reopen, gate invalidation and `rider_resumed` Lead Notice commit atomically. Land refuses until a fresh Rider done Signal. A forge-reported merge remains authoritative under ADR 0011.
+For a `done` or `landing` Ship Task, the done Signal arms its current Rider turn. The watcher does not reopen the Task while that turn remains `working`, so the Signal's closing reply cannot undo completion. An observed `idle` or `done` status ends that turn; a later `working` status identifies new input and immediately reopens the Task. The boundary is keyed by completion transition, pane and server generation. A new completion or Rider identity starts a fresh boundary. Posse instruction delivery already reopens the Task before submission, so it produces no duplicate watcher transition. The reopen, gate invalidation and `rider_resumed` Lead Notice commit atomically. Land refuses until a fresh Rider done Signal. A forge-reported merge remains authoritative under ADR 0011.
 
 Herdr idle is never evidence of completion. Only a Worker Signal moves a Task to `done`.
 

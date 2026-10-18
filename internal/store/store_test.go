@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const latestMigrationVersion = 49
+
 func TestQuietPROpenedAckIsAtomicRetryableAndLeavesClaimedNotices(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
@@ -388,8 +390,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != reportBundleMigrationVersion {
-		t.Fatalf("applied Goose migration version = %d, want %d", version, reportBundleMigrationVersion)
+	if version != latestMigrationVersion {
+		t.Fatalf("applied Goose migration version = %d, want %d", version, latestMigrationVersion)
 	}
 }
 
@@ -854,9 +856,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != reportBundleMigrationVersion {
+	if version != latestMigrationVersion {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want %d", version, reportBundleMigrationVersion)
+		t.Fatalf("initial Goose migration version = %d, want %d", version, latestMigrationVersion)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -893,8 +895,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != reportBundleMigrationVersion {
-		t.Fatalf("reopened Goose migration version = %d, want %d", version, reportBundleMigrationVersion)
+	if version != latestMigrationVersion {
+		t.Fatalf("reopened Goose migration version = %d, want %d", version, latestMigrationVersion)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {

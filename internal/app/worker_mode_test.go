@@ -113,6 +113,117 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 	}
 }
 
+func TestNeedsDecisionRiderCanSignalWorkingAndGetsUsableRefusalHelp(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Transition(context.Background(), task.ID, store.StateWorking, store.StateNeedsDecision, "worker", "Waiting on a decision"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", task.PaneID)
+	t.Chdir(fixture.mount)
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
+	service := testService(fixture.home, fake)
+	if code, output := runCLI(t, service, "holler", "working", "Resuming after my question"); code != 0 || !strings.Contains(output, "state: working") {
+		t.Fatalf("needs-decision Rider could not signal working: code=%d output=%s", code, output)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || current.State != store.StateWorking {
+		db.Close()
+		t.Fatalf("working Signal did not reopen Task: %#v %v", current, err)
+	}
+	if err := db.Transition(context.Background(), task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runCLI(t, service, "holler", "working", "Still working"); code == 0 || !strings.Contains(output, "Ask the Lead") || strings.Contains(output, "posse show") || strings.Contains(output, "posse status") {
+		t.Fatalf("Rider refusal help suggested an unusable command: code=%d output=%s", code, output)
+	}
+}
+
+func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.mount, "switch", "-c", "posse/t1")
+	if err := os.WriteFile(filepath.Join(fixture.mount, "instruction.txt"), []byte("applied\n"), 0o600); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.mount, "add", "instruction.txt")
+	gitTest(t, fixture.mount, "commit", "-m", "Apply delivered instruction")
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET branch='posse/t1',base_ref='main' WHERE id=?`, task.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	messageID, err := db.QueueMessage(ctx, task.ID, "Apply the final instruction", false)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	claimed, err := db.ClaimMessage(ctx, messageID, "delivery", 100, 0)
+	if err != nil || !claimed {
+		db.Close()
+		t.Fatalf("claim queued instruction = %v, %v", claimed, err)
+	}
+	if err := db.MarkMessageSubmitting(ctx, messageID, "delivery"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.MarkClaimedMessageDelivered(ctx, messageID, "delivery", 101); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	pending, err := db.HasPendingTaskInstructions(ctx, task.ID)
+	if err != nil || pending {
+		db.Close()
+		t.Fatalf("delivered instruction remained pending: %v %v", pending, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", task.PaneID)
+	t.Chdir(fixture.mount)
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
+	service := testService(fixture.home, fake)
+	if code, output := runCLI(t, service, "holler", "done", "Applied the delivered instruction"); code != 0 || !strings.Contains(output, "state: done") {
+		t.Fatalf("done Signal after delivered instruction was rejected: code=%d output=%s", code, output)
+	}
+}
+
 func TestWorkerMayExperimentAgainstATemporaryHome(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	t.Setenv(workerHomeEnv, fixture.home)
