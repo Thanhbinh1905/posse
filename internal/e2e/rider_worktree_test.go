@@ -33,6 +33,15 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	}
 	first := f.ride(t, "t1", "Native first", "native-first")
 	second := f.ride(t, "t2", "Native second", "native-second")
+	staleProjectDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleProject, err := staleProjectDB.ProjectByID(context.Background(), f.projectID)
+	_ = staleProjectDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	snap := f.snapshot(t)
 	if snap.FocusedPaneID != f.leadPaneID {
 		t.Fatalf("ride stole focus: %s", snap.FocusedPaneID)
@@ -241,7 +250,12 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 			t.Fatalf("recovered Lead identity did not settle before child Teardown: pane=%#v open store: %v", lead, err)
 		}
 		project, projectErr := db.ProjectByID(context.Background(), f.projectID)
+		recovery, recoveryErr := db.ProjectRecovery(context.Background(), f.projectID)
+		firstRecovery, firstRecoveryErr := db.TaskRecovery(context.Background(), first.ID)
+		secondRecovery, secondRecoveryErr := db.TaskRecovery(context.Background(), second.ID)
 		_ = db.Close()
+		logs, logErr := f.client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.group-e2e"})
+		t.Logf("Project=%#v recovery=%#v first=%#v second=%#v errors=%v/%v/%v/%v hook logs=%s log error=%v", project, recovery, firstRecovery, secondRecovery, projectErr, recoveryErr, firstRecoveryErr, secondRecoveryErr, logs, logErr)
 		t.Fatalf("recovered Lead identity did not settle before child Teardown: pane=%#v Project=%#v err=%v", lead, project, projectErr)
 	}
 	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
@@ -254,6 +268,24 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 		t.Fatal(err)
 	}
 	focusedBeforeClose := f.snapshot(t).FocusedPaneID
+	// A delayed reconciliation can still carry the pre-recovery Lead identity.
+	// Reproduce that stale observation after the recovered Lead has settled.
+	staleObservationDB, err := store.OpenAt(filepath.Join(f.home, "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := staleObservationDB.UpdateProjectObservation(context.Background(), staleProject, staleProject.LeadPaneID, staleProject.HerdrWorkspaceID, time.Now().UnixMilli()); err != nil {
+		_ = staleObservationDB.Close()
+		t.Fatal(err)
+	}
+	currentProject, err := staleObservationDB.ProjectByID(context.Background(), f.projectID)
+	_ = staleObservationDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentProject.LeadPaneID != lead.PaneID || currentProject.HerdrWorkspaceID != lead.WorkspaceID {
+		t.Fatalf("stale observation reverted the recovered Lead identity: got %#v, want pane=%s workspace=%s", currentProject, lead.PaneID, lead.WorkspaceID)
+	}
 	command := exec.Command(f.binary, "unsaddle", "t2", "--discard", "--user-approved", "User approved the child teardown test")
 	command.Dir, command.Env = f.repo, leadEnv
 	commandOutput, commandErr := command.CombinedOutput()

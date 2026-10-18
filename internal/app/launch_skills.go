@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -23,8 +24,8 @@ type posseLaunchSkills struct {
 }
 
 // freezePosseLaunchSkills writes the embedded skills into a content-addressed
-// snapshot under POSSE_HOME. Harnesses receive only this exact snapshot, never
-// the User's global skill directories or a Project/workspace path.
+// snapshot under POSSE_HOME. Pi receives these frozen skills plus unrelated
+// User skills from its global filesystem discovery roots.
 func freezePosseLaunchSkills(home, project, projectRoot string) (posseLaunchSkills, error) {
 	return freezePosseLaunchSkillInputs(home, project, projectRoot, nil)
 }
@@ -111,7 +112,15 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 	}
 	codexInstructions := "Read these frozen Posse skill files when relevant: " + strings.Join(skillPaths, "; ") + "."
 
-	piArgs := make([]string, 0, len(files)*2)
+	// Preserve native discovery unless legacy Posse copies would shadow the frozen files.
+	userSkillPaths, hasLegacyPosseSkills := collectPiSkillPaths()
+	var piArgs []string
+	if hasLegacyPosseSkills {
+		piArgs = append(piArgs, "--no-skills")
+		for _, path := range userSkillPaths {
+			piArgs = append(piArgs, "--skill", path)
+		}
+	}
 	for _, file := range files {
 		piArgs = append(piArgs, "--skill", filepath.Join(root, "skills", file.name, "SKILL.md"))
 	}
@@ -120,6 +129,140 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 		PiArgs:            piArgs,
 		CodexInstructions: codexInstructions,
 	}, nil
+}
+
+func collectPiSkillPaths() ([]string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		current, userErr := user.Current()
+		if userErr != nil || current.HomeDir == "" {
+			return nil, false
+		}
+		home = current.HomeDir
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return nil, false
+	}
+	agentDir := os.Getenv("PI_CODING_AGENT_DIR")
+	if agentDir == "" {
+		agentDir = filepath.Join(home, ".pi", "agent")
+	} else if agentDir == "~" {
+		agentDir = home
+	} else if strings.HasPrefix(agentDir, "~"+string(os.PathSeparator)) {
+		agentDir = filepath.Join(home, strings.TrimPrefix(agentDir, "~"+string(os.PathSeparator)))
+	}
+	if !filepath.IsAbs(agentDir) {
+		if absolute, absErr := filepath.Abs(agentDir); absErr == nil {
+			agentDir = absolute
+		}
+	}
+
+	roots := []string{
+		filepath.Join(agentDir, "skills"),
+		filepath.Join(home, ".agents", "skills"),
+	}
+
+	var paths []string
+	var hasLegacyPosseSkills bool
+	seenRoots := make(map[string]bool)
+	seenFiles := make(map[string]bool)
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if seenRoots[root] {
+			continue
+		}
+		seenRoots[root] = true
+		collectPiSkillsFromDir(root, true, seenFiles, &paths, &hasLegacyPosseSkills)
+	}
+	return paths, hasLegacyPosseSkills
+}
+
+func collectPiSkillsFromDir(dir string, includeRootFiles bool, seenFiles map[string]bool, paths *[]string, hasLegacyPosseSkills *bool) {
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return
+	}
+	if seenFiles[resolvedDir] {
+		return
+	}
+	seenFiles[resolvedDir] = true
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	declaredSkill := filepath.Join(dir, "SKILL.md")
+	if info, statErr := os.Stat(declaredSkill); statErr == nil && info.Mode().IsRegular() {
+		appendPiSkillPath(declaredSkill, seenFiles, paths, hasLegacyPosseSkills)
+		return
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") || entry.Name() == "node_modules" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			continue
+		}
+		if info.IsDir() {
+			collectPiSkillsFromDir(path, false, seenFiles, paths, hasLegacyPosseSkills)
+		} else if includeRootFiles && info.Mode().IsRegular() && filepath.Ext(entry.Name()) == ".md" {
+			appendPiSkillPath(path, seenFiles, paths, hasLegacyPosseSkills)
+		}
+	}
+}
+
+func appendPiSkillPath(path string, seenFiles map[string]bool, paths *[]string, hasLegacyPosseSkills *bool) {
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil || seenFiles[resolvedPath] {
+		return
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	name, hasDescription := piSkillIdentity(contents, path)
+	if !hasDescription {
+		return
+	}
+	if name == "posse" || name == "posse-setup" {
+		*hasLegacyPosseSkills = true
+		return
+	}
+	seenFiles[resolvedPath] = true
+	*paths = append(*paths, path)
+}
+
+func piSkillIdentity(contents []byte, path string) (string, bool) {
+	name := filepath.Base(filepath.Dir(path))
+	lines := strings.Split(string(contents), "\n")
+	if len(lines) == 0 || strings.TrimSpace(strings.TrimSuffix(lines[0], "\r")) != "---" {
+		return name, false
+	}
+	var hasDescription bool
+	var closedFrontmatter bool
+	for _, rawLine := range lines[1:] {
+		line := strings.TrimSpace(strings.TrimSuffix(rawLine, "\r"))
+		if line == "---" {
+			closedFrontmatter = true
+			break
+		}
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "name":
+			if value = strings.TrimSpace(value); value != "" {
+				name = strings.Trim(value, "\"'")
+			}
+		case "description":
+			description := strings.Trim(strings.TrimSpace(value), "\"'")
+			hasDescription = description != ""
+		}
+	}
+	return name, hasDescription && closedFrontmatter
 }
 
 func ensureLaunchSkillDirectories(base, target string) error {
@@ -151,6 +294,10 @@ func ensureLaunchSkillDirectories(base, target string) error {
 }
 
 func writeFrozenSkill(root, path string, contents []byte) error {
+	return writeFrozenSkillWith(root, path, contents, nil)
+}
+
+func writeFrozenSkillWith(root, path string, contents []byte, writeContents func(*os.File, []byte) error) error {
 	if !pathWithin(root, path) {
 		return fmt.Errorf("frozen posse skill path escapes its snapshot: %s", path)
 	}
@@ -174,22 +321,26 @@ func writeFrozenSkill(root, path string, contents []byte) error {
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return writeFrozenSkill(root, path, contents)
-	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".posse-skill-*")
 	if err != nil {
 		return err
 	}
-	_, writeErr := file.Write(contents)
+	temporaryPath := file.Name()
+	defer os.Remove(temporaryPath)
+	if writeContents != nil {
+		err = writeContents(file, contents)
+	} else {
+		_, err = file.Write(contents)
+	}
 	closeErr := file.Close()
-	if writeErr != nil {
-		_ = os.Remove(path)
-		return writeErr
+	if err != nil {
+		return err
 	}
 	if closeErr != nil {
-		_ = os.Remove(path)
 		return closeErr
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
 	}
 	return nil
 }
