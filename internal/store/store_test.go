@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const latestMigrationVersion = 52
+
 func TestQuietPROpenedAckIsAtomicRetryableAndLeavesClaimedNotices(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
@@ -388,8 +390,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != taskContainmentMigrationVersion {
-		t.Fatalf("applied Goose migration version = %d, want %d", version, taskContainmentMigrationVersion)
+	if version != latestMigrationVersion {
+		t.Fatalf("applied Goose migration version = %d, want %d", version, latestMigrationVersion)
 	}
 }
 
@@ -477,6 +479,13 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 		`ALTER TABLE tasks DROP COLUMN containment_marker`,
 		`ALTER TABLE tasks DROP COLUMN containment_path`,
 		`ALTER TABLE tasks DROP COLUMN containment_mode`,
+		`DROP TABLE validation_fix_rounds`,
+		`DROP TABLE review_dispositions`,
+		`DROP TABLE review_carries`,
+		`DROP TABLE review_finding_events`,
+		`DROP TABLE review_findings`,
+		`DROP TABLE review_patterns`,
+		`DROP TABLE review_rounds`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`ALTER TABLE projects ADD COLUMN project_uuid TEXT NOT NULL DEFAULT ''`,
@@ -583,6 +592,13 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		`ALTER TABLE tasks DROP COLUMN containment_marker`,
 		`ALTER TABLE tasks DROP COLUMN containment_path`,
 		`ALTER TABLE tasks DROP COLUMN containment_mode`,
+		`DROP TABLE validation_fix_rounds`,
+		`DROP TABLE review_dispositions`,
+		`DROP TABLE review_carries`,
+		`DROP TABLE review_finding_events`,
+		`DROP TABLE review_findings`,
+		`DROP TABLE review_patterns`,
+		`DROP TABLE review_rounds`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`,
@@ -761,6 +777,13 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE tasks DROP COLUMN containment_marker`,
 		`ALTER TABLE tasks DROP COLUMN containment_path`,
 		`ALTER TABLE tasks DROP COLUMN containment_mode`,
+		`DROP TABLE validation_fix_rounds`,
+		`DROP TABLE review_dispositions`,
+		`DROP TABLE review_carries`,
+		`DROP TABLE review_finding_events`,
+		`DROP TABLE review_findings`,
+		`DROP TABLE review_patterns`,
+		`DROP TABLE review_rounds`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -863,9 +886,9 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if version != taskContainmentMigrationVersion {
+	if version != latestMigrationVersion {
 		db.Close()
-		t.Fatalf("initial Goose migration version = %d, want %d", version, taskContainmentMigrationVersion)
+		t.Fatalf("initial Goose migration version = %d, want %d", version, latestMigrationVersion)
 	}
 	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
 		db.Close()
@@ -902,8 +925,8 @@ func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != taskContainmentMigrationVersion {
-		t.Fatalf("reopened Goose migration version = %d, want %d", version, taskContainmentMigrationVersion)
+	if version != latestMigrationVersion {
+		t.Fatalf("reopened Goose migration version = %d, want %d", version, latestMigrationVersion)
 	}
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {

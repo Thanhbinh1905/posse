@@ -615,6 +615,31 @@ func TestPRLandingDoesNotWriteBranchTrackingConfig(t *testing.T) {
 	}
 }
 
+func TestPublishRefusesExistingPRToDifferentFrozenTarget(t *testing.T) {
+	f := newPRLandingFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\ntarget_branch = \"staging\"\nmerge_method = \"squash\"\nauto_unsaddle = \"never\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/acme/shop/pull/105"
+	openPRs := fmt.Sprintf(`[{"url":%q,"headRefName":%q,"headRefOid":%q,"baseRefName":"staging","headRepository":{"nameWithOwner":"acme/shop"}}]`, prURL, f.task.Branch, f.headSHA)
+	if err := os.WriteFile(f.ghOpenPRs, []byte(openPRs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_FILTER_BASE", "1")
+
+	code, output, stderr := f.run("publish", "Worker completion summary")
+	if code != 1 || !strings.Contains(output, "pr_target_mismatch") || !strings.Contains(output, prURL) || !strings.Contains(output, "staging") || !strings.Contains(output, "main") {
+		t.Fatalf("publish did not refuse the PR to a different target: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	log, err := os.ReadFile(f.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "pr create") {
+		t.Fatalf("publish created a duplicate PR instead of refusing: %s", log)
+	}
+}
+
 func TestWorkerPublishesPRToFrozenNonDefaultTarget(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateWorking)
 	mount := attachPRFixtureMount(t, f)
@@ -1043,7 +1068,7 @@ func TestLeadInstructionsExplainPRAndCheckoutNoticeActions(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("lead instructions exit=%d output=%s error=%s", code, output, errOutput)
 	}
-	for _, expected := range []string{"pr_opened", "pr_checks_failed", "pr_changes_requested", "pr_conflict", "land_ready", "pr_merged", "pr_closed", "pr_watch_failing", "root_behind", "root_fetch_failing", "Autonomy"} {
+	for _, expected := range []string{"pr_opened", "pr_checks_failed", "pr_changes_requested", "pr_conflict", "land_ready", "pr_merged", "pr_closed", "pr_watch_failing", "root_behind", "root_fetch_failing", "head_discontinuity", "Autonomy"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("Lead instructions omit PR handling for %q: %s", expected, output)
 		}
@@ -1202,7 +1227,13 @@ case "$1 $2" in
     fi
     cat "$POSSE_TEST_GH_STATE"
     if [ -e "$POSSE_TEST_GH_STATE.exit" ]; then printf 'GraphQL request returned errors\n' >&2; exit 1; fi ;;
-  "pr list") cat "$POSSE_TEST_GH_OPEN_PRS" ;;
+  "pr list")
+    if [ "${POSSE_TEST_GH_FILTER_BASE:-}" = "1" ]; then
+      case "$*" in
+        *" --base "*) printf '[]\n' ;;
+        *) cat "$POSSE_TEST_GH_OPEN_PRS" ;;
+      esac
+    else cat "$POSSE_TEST_GH_OPEN_PRS"; fi ;;
   "issue view")
     case "$3" in
       12) printf '{"state":"CLOSED"}\n' ;;

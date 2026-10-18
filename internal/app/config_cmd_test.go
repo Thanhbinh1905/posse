@@ -75,6 +75,7 @@ func TestConfigUserOnlyBoundaryForPaneRoles(t *testing.T) {
 	for _, args := range [][]string{
 		{"config", "set", "defaults.max_workers", "6", "--project", "shop"},
 		{"config", "set", "defaults.gate", `["make check"]`, "--project", "shop"},
+		{"config", "set", "review_loop.max_rounds", "2", "--project", "shop"},
 	} {
 		if code := cli.Run(args); code != 1 || !strings.Contains(output.String()+errorsOut.String(), "worker_forbidden") {
 			t.Fatalf("Worker was allowed to change config with %v: code=%d out=%s err=%s", args, code, output, errorsOut)
@@ -93,6 +94,11 @@ func TestConfigUserOnlyBoundaryForPaneRoles(t *testing.T) {
 	output.Reset()
 	if code := cli.Run([]string{"config", "set", "autonomy.land", `"auto"`, "--project", "shop"}); code != 1 || !strings.Contains(output.String()+errorsOut.String(), "user_only") {
 		t.Fatalf("Lead was allowed to change a User-only setting: code=%d out=%s err=%s", code, output, errorsOut)
+	}
+	output.Reset()
+	errorsOut.Reset()
+	if code := cli.Run([]string{"config", "set", "review_loop.max_rounds", "2", "--project", "shop"}); code != 1 || !strings.Contains(output.String()+errorsOut.String(), "user_only") {
+		t.Fatalf("Lead was allowed to change a User-only validation setting: code=%d out=%s err=%s", code, output, errorsOut)
 	}
 	if _, err := os.Stat(filepath.Join(home, "projects", "shop", "config.toml")); err != nil {
 		t.Fatal(err)
@@ -198,6 +204,36 @@ func TestConfigUserOnlyApprovalIsRecordedForLeadOnly(t *testing.T) {
 	after, err := os.ReadFile(projectPath)
 	if err != nil || !bytes.Equal(after, before) {
 		t.Fatalf("failed approval changed config: before=%q after=%q err=%v", before, after, err)
+	}
+}
+
+func TestConfigSetWarnsWhenSelectingNoMistakesPolicies(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateProject(context.Background(), "shop", repo, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	output, errorsOut := &bytes.Buffer{}, &bytes.Buffer{}
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, errorsOut
+	t.Chdir(repo)
+	installReadyNoMistakes(t)
+	for _, key := range []string{"defaults.landing_mode", "repositories.api.landing_mode", "defaults.review", "repositories.api.review"} {
+		output.Reset()
+		errorsOut.Reset()
+		if code := cli.Run([]string{"config", "set", key, "no-mistakes", "--project", "shop"}); code != 0 || !strings.Contains(output.String()+errorsOut.String(), "deprecated") {
+			t.Fatalf("config set %s no-mistakes: code=%d stdout=%s stderr=%s", key, code, output, errorsOut)
+		}
 	}
 }
 
@@ -385,7 +421,7 @@ func TestConfigSchemaRunsThroughCLIInToonAndJSON(t *testing.T) {
 	for _, row := range decoded.Keys {
 		userOnly[row.Key] = row.UserOnly
 	}
-	for key, want := range map[string]bool{"defaults.gate": true, "remuda.setup": true, "kinds.<kind>.lead_auto_approve": true, "autonomy.yolo": true, "autonomy.review": true, "autonomy.land": true, "defaults.landing_mode": false} {
+	for key, want := range map[string]bool{"defaults.gate": true, "review_loop.max_rounds": true, "gate_loop.max_fix_rounds": true, "ci_loop.max_fix_rounds": true, "remuda.setup": true, "kinds.<kind>.lead_auto_approve": true, "autonomy.yolo": true, "autonomy.review": true, "autonomy.land": true, "defaults.landing_mode": false} {
 		if userOnly[key] != want {
 			t.Fatalf("config schema user_only for %s = %v, want %v", key, userOnly[key], want)
 		}

@@ -140,6 +140,16 @@ func TestLookoutLogsAndRetriesMaintenanceContention(t *testing.T) {
 	}
 }
 
+func TestShowDefersTaskStateRaceDuringObservation(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture.service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = store.ErrStateRace
+
+	code, output, errOut := fixture.run("show", "t1")
+	if code != 0 || !strings.Contains(output, "t1") || !strings.Contains(errOut, "Project observations were deferred") {
+		t.Fatalf("show did not return its durable Task view after a concurrent state change: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+}
+
 func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
@@ -175,18 +185,29 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	}
 
 	const taskCount = 256
+	tx, err := fixture.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
 	for seq := 2; seq <= taskCount; seq++ {
-		id, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
-			Seq: seq, Type: "scout", Title: fmt.Sprintf("Review %d", seq), LandingMode: "local",
-			WorktreePath: filepath.Join(fixture.root, fmt.Sprintf("task-%d", seq)), PaneID: "w3:p1",
-			PaneLabel: fmt.Sprintf("posse:shop:t%d", seq), HerdrWorkspaceID: "w3",
-		})
+		result, err := tx.ExecContext(ctx, `INSERT INTO tasks(project_id,seq,type,title,state,landing_mode,worktree_path,pane_id,pane_label,herdr_workspace_id,created_at,updated_at) VALUES(?,?,?,?,'working',?,?,?,?,?,1,1)`,
+			fixture.project.ID, seq, "scout", fmt.Sprintf("Review %d", seq), "local",
+			filepath.Join(fixture.root, fmt.Sprintf("task-%d", seq)), "w3:p1",
+			fmt.Sprintf("posse:shop:t%d", seq), "w3")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := fixture.db.Transition(ctx, id, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		taskID, err := result.LastInsertId()
+		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,'spawning','working','cli','started',1)`, taskID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET updated_at=1 WHERE project_id=?`, fixture.project.ID); err != nil {
 		t.Fatal(err)

@@ -43,6 +43,15 @@ type TaskSnapshot struct {
 	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
 	// ReviewReceipts are the no-mistakes receipts that qualified a Ship Task.
 	ReviewReceipts []ReviewReceipt `toml:"review_receipts,omitempty"`
+	// Validation state is owned by a Ship Task and includes its review rounds,
+	// finding ledger, carry proofs, dispositions, and fix-round budget.
+	ReviewRounds        []ReviewRound        `toml:"review_rounds,omitempty"`
+	ReviewPatterns      []ReviewPattern      `toml:"review_patterns,omitempty"`
+	ReviewFindings      []ReviewFinding      `toml:"review_findings,omitempty"`
+	ReviewFindingEvents []ReviewFindingEvent `toml:"review_finding_events,omitempty"`
+	ReviewCarries       []ReviewCarry        `toml:"review_carries,omitempty"`
+	ReviewDispositions  []ReviewDisposition  `toml:"review_dispositions,omitempty"`
+	ValidationFixRounds []ValidationFixRound `toml:"validation_fix_rounds,omitempty"`
 }
 
 type projectSnapshot struct {
@@ -339,6 +348,19 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if snapshot.ReviewReceipts, err = db.ReviewReceipts(ctx, taskID); err != nil {
 		return err
 	}
+	if task.Type == "ship" {
+		validationState, err := db.validationStateForTask(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		snapshot.ReviewRounds = validationState.ReviewRounds
+		snapshot.ReviewPatterns = validationState.ReviewPatterns
+		snapshot.ReviewFindings = validationState.ReviewFindings
+		snapshot.ReviewFindingEvents = validationState.ReviewFindingEvents
+		snapshot.ReviewCarries = validationState.ReviewCarries
+		snapshot.ReviewDispositions = validationState.ReviewDispositions
+		snapshot.ValidationFixRounds = validationState.ValidationFixRounds
+	}
 	if project.IsWorkspace() {
 		if snapshot.Members, err = db.ProjectRepos(ctx, projectID); err != nil {
 			return err
@@ -467,7 +489,7 @@ func (db *DB) BackupDaily(now time.Time) error {
 	} else if err != nil {
 		return err
 	}
-	entries, err := filepath.Glob(filepath.Join(directory, "posse-*.db"))
+	entries, err := filepath.Glob(filepath.Join(directory, "posse-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].db"))
 	if err != nil {
 		return err
 	}
@@ -828,7 +850,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_fix_rounds", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -954,6 +976,66 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				return fmt.Errorf("rebuild t%d review receipt: %w", task.Seq, err)
 			}
 		}
+		for _, round := range snapshot.ReviewRounds {
+			if round.ShipTaskID != 0 && round.ShipTaskID != task.ID {
+				return fmt.Errorf("review round in snapshot for t%d belongs to Task %d", task.Seq, round.ShipTaskID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				task.ID, round.Round, round.ReviewTaskID, round.Repository, round.ScopeKind, round.ScopeBaseSHA, round.HeadSHA, round.TargetCommitSHA, round.BaselineTree, round.DeltaSHA256, round.ConflictedPaths, round.Status, nullableText(round.Verdict), round.CreatedAt); err != nil {
+				return fmt.Errorf("rebuild t%d review round: %w", task.Seq, err)
+			}
+		}
+		for _, pattern := range snapshot.ReviewPatterns {
+			if pattern.ShipTaskID != 0 && pattern.ShipTaskID != task.ID {
+				return fmt.Errorf("review pattern in snapshot for t%d belongs to Task %d", task.Seq, pattern.ShipTaskID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_patterns(id,ship_task_id,seq,key,title,rule,root_cause,fix_guidance,merged_into,created_round) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+				pattern.ID, task.ID, pattern.Seq, pattern.Key, pattern.Title, pattern.Rule, pattern.RootCause, pattern.FixGuidance, nullableID(pattern.MergedInto), pattern.CreatedRound); err != nil {
+				return fmt.Errorf("rebuild t%d review pattern: %w", task.Seq, err)
+			}
+		}
+		for _, finding := range snapshot.ReviewFindings {
+			if finding.ShipTaskID != 0 && finding.ShipTaskID != task.ID {
+				return fmt.Errorf("review finding in snapshot for t%d belongs to Task %d", task.Seq, finding.ShipTaskID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_findings(id,ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state,follow_up_url,inherited_from) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				finding.ID, task.ID, finding.Seq, finding.PatternID, finding.Fingerprint, finding.Round, finding.Repository, finding.Path, finding.Symbol, finding.Excerpt, finding.LineAtReport, finding.HeadSHA, finding.Severity, finding.Origin, finding.InScope, finding.State, finding.FollowUpURL, nullableID(finding.InheritedFrom)); err != nil {
+				return fmt.Errorf("rebuild t%d review finding: %w", task.Seq, err)
+			}
+		}
+		for _, event := range snapshot.ReviewFindingEvents {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_finding_events(id,finding_id,round,event,actor,note,user_quote,at) VALUES(?,?,?,?,?,?,?,?)`,
+				event.ID, event.FindingID, event.Round, event.Event, event.Actor, event.Note, event.UserQuote, event.At); err != nil {
+				return fmt.Errorf("rebuild t%d review finding event: %w", task.Seq, err)
+			}
+		}
+		for _, carry := range snapshot.ReviewCarries {
+			if carry.ShipTaskID != 0 && carry.ShipTaskID != task.ID {
+				return fmt.Errorf("review carry in snapshot for t%d belongs to Task %d", task.Seq, carry.ShipTaskID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_carries(ship_task_id,repository,from_head,to_head,target_commit_sha,tree,created_at) VALUES(?,?,?,?,?,?,?)`,
+				task.ID, carry.Repository, carry.FromHead, carry.ToHead, carry.TargetCommitSHA, carry.Tree, carry.CreatedAt); err != nil {
+				return fmt.Errorf("rebuild t%d review carry: %w", task.Seq, err)
+			}
+		}
+		for _, disposition := range snapshot.ReviewDispositions {
+			if disposition.ShipTaskID != 0 && disposition.ShipTaskID != task.ID {
+				return fmt.Errorf("review disposition in snapshot for t%d belongs to Task %d", task.Seq, disposition.ShipTaskID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(id,ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?,?)`,
+				disposition.ID, task.ID, disposition.HeadSHA, nullableID(disposition.DecisionID), disposition.UserQuote, disposition.At); err != nil {
+				return fmt.Errorf("rebuild t%d review disposition: %w", task.Seq, err)
+			}
+		}
+		for _, fixRound := range snapshot.ValidationFixRounds {
+			if fixRound.ShipTaskID != 0 && fixRound.ShipTaskID != task.ID {
+				return fmt.Errorf("validation fix round in snapshot for t%d belongs to Task %d", task.Seq, fixRound.ShipTaskID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt); err != nil {
+				return fmt.Errorf("rebuild t%d validation fix round: %w", task.Seq, err)
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, "", task.State, "cli", "Rebuilt from atomic Task snapshot", task.UpdatedAt); err != nil {
 			return err
 		}
@@ -1038,4 +1120,11 @@ func nullableTime(value int64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: value, Valid: true}
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

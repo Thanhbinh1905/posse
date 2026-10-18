@@ -32,9 +32,6 @@ func (s *Service) workspaceMembers(ctx context.Context, db *store.DB, project st
 	if err != nil {
 		return nil, err
 	}
-	if len(repos) == 0 {
-		return nil, axi.Failure("land_refused", "workspace Task has no member repositories", false)
-	}
 	members := make([]memberLanding, 0, len(repos))
 	for _, repo := range repos {
 		target, err := s.projectTarget(ctx, db, project, repo.Repo)
@@ -67,6 +64,13 @@ func (s *Service) landWorkspace(out *axi.Context, db *store.DB, project store.Pr
 	if merge && task.AutonomyLand != "auto" && quote == "" {
 		return axi.Failure("land_approval_required", "merging a workspace Task needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
 	}
+	members, err := s.workspaceMembers(ctx, db, project, task)
+	if err != nil {
+		return err
+	}
+	if len(members) == 0 {
+		return axi.Failure("land_refused", "workspace Task has no member repositories", false)
+	}
 	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, workspaceLandIntent)
 	if err != nil {
 		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
@@ -76,10 +80,6 @@ func (s *Service) landWorkspace(out *axi.Context, db *store.DB, project store.Pr
 			returnErr = finishErr
 		}
 	}()
-	members, err := s.workspaceMembers(ctx, db, project, task)
-	if err != nil {
-		return err
-	}
 	if task.State == store.StateDone {
 		if err := s.openWorkspaceLanding(ctx, db, project, cfg, task, intent, members); err != nil {
 			_ = s.deliverNotices(ctx, db, project)

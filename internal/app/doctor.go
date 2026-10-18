@@ -122,6 +122,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("database", "ok", "database opened", "")
 			hosts := map[string]bool{}
 			for _, project := range projects {
+				projectCfg, projectConfigErr := config.Load(home, project.Name)
 				if detail, diskErr := projectDiskUsage(home, project); diskErr != nil {
 					addCheck("Project disk usage "+project.Name, "warn", diskErr.Error(), "Inspect this Project's scratch, Remuda and artifact directories")
 				} else {
@@ -138,13 +139,21 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 					}
 					addCheck("Task temp and process leaks "+project.Name, status, detail, action)
 				}
+				if projectConfigErr == nil {
+					usages, usageErr := noMistakesConfigUsage(ctx.Context, db, project, projectCfg)
+					if usageErr != nil {
+						addCheck("deprecated no-mistakes "+project.Name, "warn", "could not inspect Project policies: "+usageErr.Error(), "Inspect the Project configuration and migrate away from no-mistakes")
+					} else if len(usages) > 0 {
+						detail := strings.Join(usages, "; ")
+						addCheck("deprecated no-mistakes "+project.Name, "warn", detail, "Migrate this Project to built-in validation and set its Landing Mode to pr or local and review policy to local or none")
+					}
+				}
 				if reason := staleProjectRootReason(project.Root, home); reason != "" {
 					addCheck("project "+project.Name, "warn", reason, "Run `posse project remove "+project.Name+"`")
 					continue
 				}
-				projectCfg, err := config.Load(home, project.Name)
-				if err != nil {
-					addCheck("forge "+project.Name, "warn", err.Error(), "Fix the Project config")
+				if projectConfigErr != nil {
+					addCheck("forge "+project.Name, "warn", projectConfigErr.Error(), "Fix the Project config")
 					continue
 				}
 				if detail, countErr := executionResourceSummary(ctx.Context, db, project.ID, projectCfg.Defaults.MaxWorkers); countErr != nil {
@@ -391,6 +400,35 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		}
 	}
 	return doctorResult{Checks: checks, Manifests: manifests}, nil
+}
+
+func noMistakesConfigUsage(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]string, error) {
+	if project.IsDirectory() {
+		return nil, nil
+	}
+	var usages []string
+	if cfg.Defaults.LandingMode == "no-mistakes" {
+		usages = append(usages, "Project "+project.Name+" defaults.landing_mode")
+	}
+	if cfg.Defaults.Review == "no-mistakes" {
+		usages = append(usages, "Project "+project.Name+" defaults.review")
+	}
+	if !project.IsWorkspace() {
+		return usages, nil
+	}
+	repos, err := db.ProjectRepos(ctx, project.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, repo := range repos {
+		if savedMemberLandingMode(cfg, repo.Name, repo.OriginHost) == "no-mistakes" {
+			usages = append(usages, "Member "+repo.Name+" effective landing_mode")
+		}
+		if cfg.MemberReview(repo.Name) == "no-mistakes" {
+			usages = append(usages, "Member "+repo.Name+" effective review policy")
+		}
+	}
+	return usages, nil
 }
 
 func executionResourceSummary(ctx context.Context, db *store.DB, projectID int64, maxWorkers int) (string, error) {

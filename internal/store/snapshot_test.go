@@ -275,6 +275,42 @@ func TestRebuildCreatesVACUUMBackupBeforeReplacingState(t *testing.T) {
 	}
 }
 
+func TestBackupDailyRetentionPreservesPreRebuildBackups(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for rebuild := 0; rebuild < 9; rebuild++ {
+		if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
+			t.Fatalf("rebuild %d: %v", rebuild+1, err)
+		}
+	}
+	backupDir := filepath.Join(home, "backup")
+	before, err := filepath.Glob(filepath.Join(backupDir, "posse-before-rebuild-*.db"))
+	if err != nil || len(before) != 9 {
+		t.Fatalf("pre-rebuild backups before daily maintenance = %d: %v (%v)", len(before), before, err)
+	}
+	if err := db.BackupDaily(time.Now().Add(24 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for _, backup := range before {
+		if _, err := os.Stat(backup); err != nil {
+			t.Errorf("daily retention removed pre-rebuild backup %s: %v", filepath.Base(backup), err)
+		}
+	}
+}
+
 func TestOpenSurvivesDailyBackupFailure(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "backup"), []byte("not a directory"), 0o600); err != nil {

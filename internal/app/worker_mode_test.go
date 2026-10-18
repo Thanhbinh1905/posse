@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
@@ -113,6 +114,394 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 	}
 }
 
+func TestNeedsDecisionRiderCanSignalWorkingAndGetsUsableRefusalHelp(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Transition(context.Background(), task.ID, store.StateWorking, store.StateNeedsDecision, "worker", "Waiting on a decision"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", task.PaneID)
+	t.Chdir(fixture.mount)
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
+	service := testService(fixture.home, fake)
+	if code, output := runCLI(t, service, "holler", "working", "Resuming after my question"); code != 0 || !strings.Contains(output, "state: working") {
+		t.Fatalf("needs-decision Rider could not signal working: code=%d output=%s", code, output)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || current.State != store.StateWorking {
+		db.Close()
+		t.Fatalf("working Signal did not reopen Task: %#v %v", current, err)
+	}
+	if err := db.Transition(context.Background(), task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Transition(context.Background(), task.ID, store.StateDone, store.StateLanded, "cli", "landed"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runCLI(t, service, "holler", "working", "Still working"); code == 0 || !strings.Contains(output, "Ask the Lead") || strings.Contains(output, "posse show") || strings.Contains(output, "posse status") {
+		t.Fatalf("Rider refusal help suggested an unusable command: code=%d output=%s", code, output)
+	}
+}
+
+func TestWorkingSignalReopensOwnCompletedTaskWithReason(t *testing.T) {
+	for _, initial := range []store.State{store.StateDone, store.StateLanding, store.StateStalled, store.StateNeedsDecision} {
+		t.Run(string(initial), func(t *testing.T) {
+			fixture := newWorkerFixture(t)
+			ctx := context.Background()
+			db, err := store.Open(fixture.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, err := db.Task(ctx, fixture.project.ID, "t1")
+			if err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			switch initial {
+			case store.StateDone, store.StateLanding:
+				if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+				if err := db.SetTaskGatedSHA(ctx, task.ID, "old-gate"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+				if initial == store.StateLanding {
+					if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "gate passed"); err != nil {
+						db.Close()
+						t.Fatal(err)
+					}
+					if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "land --merge", "started", `{}`, os.Getpid()); err != nil {
+						db.Close()
+						t.Fatal(err)
+					}
+					if err := db.CreateTaskRepos(ctx, task.ID, []store.TaskRepo{{Repo: "shop", WorktreePath: fixture.mount, LandingMode: "pr"}}); err != nil {
+						db.Close()
+						t.Fatal(err)
+					}
+					if err := db.UpdateTaskRepo(ctx, store.TaskRepo{TaskID: task.ID, Repo: "shop", WorktreePath: fixture.mount, LandingMode: "pr", State: store.TaskRepoLanding, GatedSHA: "old-member-gate", PRURL: "https://github.com/acme/shop/pull/1"}); err != nil {
+						db.Close()
+						t.Fatal(err)
+					}
+					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, TaskID: task.ID, Kind: "land_ready", Summary: "Task is ready", DataJSON: `{}`}); err != nil {
+						db.Close()
+						t.Fatal(err)
+					}
+					if _, err := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: fixture.project.ID, TaskID: task.ID, Origin: "land-ready", Kind: "land_ready", Question: "Land Task?", Options: []string{"land", "wait"}}); err != nil {
+						db.Close()
+						t.Fatal(err)
+					}
+					if initial == store.StateLanding {
+						observed, err := db.TaskByID(ctx, fixture.project.ID, task.ID)
+						if err != nil {
+							db.Close()
+							t.Fatal(err)
+						}
+						now := time.Now()
+						for _, status := range []string{"working", "idle", "working"} {
+							if _, err := db.ObserveCompletedRider(ctx, observed, task.PaneID, "generation", status, now); err != nil {
+								db.Close()
+								t.Fatalf("watcher observation %s: %v", status, err)
+							}
+							now = now.Add(time.Second)
+						}
+					} else if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "land --open-pr", "pr.lookup", `{}`, os.Getpid()); err != nil {
+						db.Close()
+						t.Fatal(err)
+					}
+				}
+			case store.StateStalled:
+				if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateStalled, "cli", "stalled"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+			case store.StateNeedsDecision:
+				if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateNeedsDecision, "worker", "needs answer"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+			}
+			reason := "The User asked me to make one more change."
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(workerHomeEnv, fixture.home)
+			t.Setenv("HERDR_ENV", "1")
+			t.Setenv("HERDR_PANE_ID", task.PaneID)
+			t.Chdir(fixture.mount)
+			fake := herdr.NewFake()
+			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
+			service := testService(fixture.home, fake)
+			if code, output := runCLI(t, service, "holler", "working", reason); code != 0 || !strings.Contains(output, "state: working") {
+				t.Fatalf("working Signal did not reopen %s Task: code=%d output=%s", initial, code, output)
+			}
+			db, err = store.Open(fixture.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			current, err := db.Task(ctx, fixture.project.ID, "t1")
+			if err != nil || current.State != store.StateWorking || current.GatedSHA != "" {
+				t.Fatalf("reopened Task retained its state or gate: %#v %v", current, err)
+			}
+			transitions, err := db.TaskTransitions(ctx, task.ID, 10)
+			if err != nil || len(transitions) == 0 {
+				t.Fatalf("read Task transitions: %#v %v", transitions, err)
+			}
+			last := transitions[0]
+			if last.From != string(initial) || last.To != string(store.StateWorking) || last.Source != "rider" || last.Note != reason {
+				t.Fatalf("reopen transition = %#v; want Rider transition with quoted reason", last)
+			}
+			signals, err := db.TaskSignals(ctx, task.ID, 10)
+			if err != nil || len(signals) == 0 || signals[0].Verb != "working" || signals[0].Note != reason {
+				t.Fatalf("working Signal = %#v %v", signals, err)
+			}
+			notices, err := db.Notices(ctx, fixture.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, notice := range notices {
+				if notice.TaskID == task.ID && notice.Kind == "rider_resumed" && strings.Contains(notice.Summary, `"`+reason+`"`) && strings.Contains(notice.DataJSON, reason) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("no rider_resumed Notice quoted %q: %#v", reason, notices)
+			}
+			if _, err := db.IntentByTask(ctx, task.ID); !store.IsNotFound(err) {
+				t.Fatalf("pending Land intent was not canceled: %v", err)
+			}
+			if initial == store.StateLanding {
+				repos, err := db.TaskRepos(ctx, task.ID)
+				if err != nil || len(repos) != 1 || repos[0].State != store.TaskRepoOpen || repos[0].GatedSHA != "" {
+					t.Fatalf("reopened Task retained member Land evidence: %#v %v", repos, err)
+				}
+				decisions, err := db.Decisions(ctx, fixture.project.ID, false)
+				if err != nil || len(decisions) != 1 || decisions[0].ObsoleteAt == 0 {
+					t.Fatalf("reopened Task retained its land_ready Decision: %#v %v", decisions, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkingSignalRefusesWhilePullRequestMergeIsInFlight(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "gate passed"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "land --merge", "in_progress:pr.merge:shop", `{}`, os.Getpid()); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	observed, err := db.TaskByID(ctx, fixture.project.ID, task.ID)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, status := range []string{"working", "idle", "working"} {
+		if notice, err := db.ObserveCompletedRider(ctx, observed, task.PaneID, "generation", status, now); err != nil || notice != nil {
+			db.Close()
+			t.Fatalf("watcher reopened Task during in-flight merge at %s: notice=%#v err=%v", status, notice, err)
+		}
+		now = now.Add(time.Second)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", task.PaneID)
+	t.Chdir(fixture.mount)
+	service := testService(fixture.home, herdr.NewFake())
+	if code, output := runCLI(t, service, "holler", "working", "The User asked me to make one more change."); code == 0 || !strings.Contains(output, "merge") || !strings.Contains(output, "in progress") {
+		t.Fatalf("working Signal did not clearly refuse an in-flight merge: code=%d output=%s", code, output)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	current, err := db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || current.State != store.StateLanding {
+		t.Fatalf("in-flight merge refusal changed Task: %#v %v", current, err)
+	}
+	if _, err := db.IntentByTask(ctx, task.ID); err != nil {
+		t.Fatalf("in-flight merge intent was canceled: %v", err)
+	}
+	signals, err := db.TaskSignals(ctx, task.ID, 10)
+	if err != nil || len(signals) != 0 {
+		t.Fatalf("in-flight merge refusal recorded a Signal: %#v %v", signals, err)
+	}
+}
+
+func TestWorkingSignalRejectsTerminalTaskStates(t *testing.T) {
+	for _, target := range []store.State{store.StateLanded, store.StateTornDown, store.StateFailed, store.StateLost} {
+		t.Run(string(target), func(t *testing.T) {
+			fixture := newWorkerFixture(t)
+			ctx := context.Background()
+			db, err := store.Open(fixture.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, err := db.Task(ctx, fixture.project.ID, "t1")
+			if err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			switch target {
+			case store.StateLanded:
+				if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+				if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanded, "cli", "landed"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+			case store.StateTornDown:
+				if err := db.TransitionWithApproval(ctx, task.ID, store.StateWorking, store.StateTornDown, "user", "discarded", "discard", "User approved discard"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+			default:
+				source := "worker"
+				if target == store.StateLost {
+					source = "cli"
+				}
+				if err := db.Transition(ctx, task.ID, store.StateWorking, target, source, "terminal"); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(workerHomeEnv, fixture.home)
+			t.Setenv("HERDR_ENV", "1")
+			t.Setenv("HERDR_PANE_ID", task.PaneID)
+			t.Chdir(fixture.mount)
+			service := testService(fixture.home, herdr.NewFake())
+			if code, output := runCLI(t, service, "holler", "working", "Late follow-up"); code == 0 || !strings.Contains(output, "signal_state_invalid") {
+				t.Fatalf("working Signal reopened terminal %s Task: code=%d output=%s", target, code, output)
+			}
+			db, err = store.Open(fixture.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			signals, err := db.TaskSignals(ctx, task.ID, 10)
+			if err != nil || len(signals) != 0 {
+				t.Fatalf("terminal-state refusal recorded a Signal: %#v %v", signals, err)
+			}
+		})
+	}
+}
+
+func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.mount, "switch", "-c", "posse/t1")
+	if err := os.WriteFile(filepath.Join(fixture.mount, "instruction.txt"), []byte("applied\n"), 0o600); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.mount, "add", "instruction.txt")
+	gitTest(t, fixture.mount, "commit", "-m", "Apply delivered instruction")
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET branch='posse/t1',base_ref='main' WHERE id=?`, task.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	messageID, err := db.QueueMessage(ctx, task.ID, "Apply the final instruction", false)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	claimed, err := db.ClaimMessage(ctx, messageID, "delivery", 100, 0)
+	if err != nil || !claimed {
+		db.Close()
+		t.Fatalf("claim queued instruction = %v, %v", claimed, err)
+	}
+	if err := db.MarkMessageSubmitting(ctx, messageID, "delivery"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.MarkClaimedMessageDelivered(ctx, messageID, "delivery", 101); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	pending, err := db.HasPendingTaskInstructions(ctx, task.ID)
+	if err != nil || pending {
+		db.Close()
+		t.Fatalf("delivered instruction remained pending: %v %v", pending, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", task.PaneID)
+	t.Chdir(fixture.mount)
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
+	service := testService(fixture.home, fake)
+	if code, output := runCLI(t, service, "holler", "done", "Applied the delivered instruction"); code != 0 || !strings.Contains(output, "state: done") {
+		t.Fatalf("done Signal after delivered instruction was rejected: code=%d output=%s", code, output)
+	}
+}
+
 func TestWorkerMayExperimentAgainstATemporaryHome(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	t.Setenv(workerHomeEnv, fixture.home)
@@ -129,7 +518,7 @@ func TestWorkerMayExperimentAgainstATemporaryHome(t *testing.T) {
 
 func TestWorkerProtocolRequiresIsolatedExperiments(t *testing.T) {
 	protocol := workerProtocol(store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "ship", LandingMode: "local"}, dispatch.Brief{DoneWhen: "done"}, "/tmp/launch.md", "/tmp/posse/scratch/shop/t3", "none", "English")
-	for _, want := range []string{"# Rider protocol", "isolated Herdr server", "POSSE_HOME under a temp dir", "never touch panes, tabs or workspaces you did not create", "A `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered", "Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`/tmp/posse/scratch/shop/t3`)"} {
+	for _, want := range []string{"# Rider protocol", "isolated Herdr server", "POSSE_HOME under a temp dir", "never touch panes, tabs or workspaces you did not create", "A `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered", "first run `posse holler working \"<reason>\"` and wait for success before acting", "Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`/tmp/posse/scratch/shop/t3`)"} {
 		if !strings.Contains(protocol, want) {
 			t.Fatalf("Worker protocol lacks %q:\n%s", want, protocol)
 		}

@@ -35,6 +35,7 @@ var ErrNotFound = sql.ErrNoRows
 var ErrStateRace = errors.New("Task state changed concurrently")
 var ErrMessageDeliveryInProgress = errors.New("a message delivery is already in progress")
 var ErrQueuedInstructionsPending = errors.New("queued instructions remain undelivered")
+var ErrTaskMergeInProgress = errors.New("Task merge has started or is in progress")
 var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition is only valid for User-approved discard")
 var ErrBusy = errors.New("database contention; retry the operation")
 
@@ -530,13 +531,18 @@ func validateTransitionSource(from, to State, source string) error {
 		expected = "herdr"
 	case from == StateNeedsDecision && to == StateWorking:
 		expected = "lead"
+		if source == "worker" || source == "rider" {
+			expected = source
+		}
 	case (from == StateDone || from == StateLanding) && to == StateWorking:
 		expected = "lead"
-		if source == "watcher" {
-			expected = "watcher"
+		if source == "watcher" || source == "rider" {
+			expected = source
 		}
 	case from == StateStalled && to == StateWorking:
-		if source != "cli" {
+		if source == "rider" {
+			expected = "rider"
+		} else if source != "cli" {
 			expected = "worker"
 		}
 	case (from == StateFailed || from == StateLost) && to == StateWorking:
@@ -631,7 +637,7 @@ func nullableID(id int64) sql.NullInt64 {
 
 func oneOfSource(source string) bool {
 	switch source {
-	case "worker", "herdr", "cli", "lead", "user":
+	case "worker", "rider", "herdr", "cli", "lead", "user":
 		return true
 	default:
 		return false
@@ -1356,6 +1362,16 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 // RecordWorkerSignalWithVerdict records a Signal and, for a Review Task's done
 // Signal, its verdict in one transaction.
 func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput) (State, error) {
+	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, verdict, nil)
+}
+
+// RecordWorkerSignalWithValidation records a Ship done Signal only if the
+// automatic validation instructions checked by the caller have not changed.
+func (db *DB) RecordWorkerSignalWithValidation(ctx context.Context, task Task, verb, note string, data any, noticeKind string, validation ValidationContinuitySnapshot) (State, error) {
+	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, nil, &validation)
+}
+
+func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput, validationHeads *ValidationContinuitySnapshot) (State, error) {
 	inPlace := false
 	if verb == "done" {
 		plan, err := task.AdmittedPlan()
@@ -1377,19 +1393,97 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 	}
 	defer tx.Rollback()
 	queries := db.queries.WithTx(tx.Tx)
-	var state string
-	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=?`, task.ID).Scan(&state); err != nil {
+	var state, taskType string
+	if err := tx.QueryRowContext(ctx, `SELECT state,type FROM tasks WHERE id=?`, task.ID).Scan(&state, &taskType); err != nil {
 		return "", err
 	}
 	current := State(state)
-	if current == StateStalled {
-		if err := transitionTx(ctx, queries, task.ID, StateStalled, StateWorking, "worker", "Rider resumed with a Signal"); err != nil {
+	if verb == "done" && taskType == "ship" && validationHeads != nil {
+		currentHeads, err := validationContinuitySnapshotTx(ctx, tx, task.ID)
+		if err != nil {
 			return "", err
 		}
-		current = StateWorking
+		if !sameValidationSnapshot(currentHeads, *validationHeads) {
+			return "", ErrValidationHeadsChanged
+		}
 	}
-	if current != StateWorking {
-		return "", fmt.Errorf("%w: Task %d is %q", ErrStateRace, task.ID, current)
+	previousState := current
+	riderResumed := false
+	watcherTransitionAt := int64(0)
+	if verb == "working" && current == StateWorking && taskType == "ship" {
+		var transitionID, transitionAt int64
+		var fromState, source string
+		err := tx.QueryRowContext(ctx, `SELECT id,from_state,source,at FROM transitions WHERE task_id=? AND to_state='working' ORDER BY id DESC LIMIT 1`, task.ID).Scan(&transitionID, &fromState, &source, &transitionAt)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		if err == nil && source == "watcher" && (fromState == string(StateDone) || fromState == string(StateLanding)) {
+			var alreadySignaled bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM signals WHERE task_id=? AND verb='working' AND at>?)`, task.ID, transitionAt).Scan(&alreadySignaled); err != nil {
+				return "", err
+			}
+			if !alreadySignaled {
+				if err := cancelPendingLandIntentTx(ctx, tx, task.ID); err != nil {
+					return "", err
+				}
+				result, err := tx.ExecContext(ctx, `UPDATE transitions SET source='rider',note=? WHERE id=? AND source='watcher'`, note, transitionID)
+				if err != nil {
+					return "", err
+				}
+				changed, err := result.RowsAffected()
+				if err != nil {
+					return "", err
+				}
+				if changed != 1 {
+					return "", ErrStateRace
+				}
+				previousState = State(fromState)
+				watcherTransitionAt = transitionAt
+				riderResumed = true
+			}
+		}
+	}
+	completedShip := taskType == "ship" && oneOfState(current, StateDone, StateLanding)
+	if !riderResumed {
+		if verb == "working" && (completedShip || oneOfState(current, StateStalled, StateNeedsDecision)) {
+			if completedShip {
+				if err := cancelPendingLandIntentTx(ctx, tx, task.ID); err != nil {
+					return "", err
+				}
+			}
+			if err := transitionTx(ctx, queries, task.ID, current, StateWorking, "rider", note); err != nil {
+				return "", err
+			}
+			previousState = current
+			current = StateWorking
+			riderResumed = true
+		} else {
+			if current == StateStalled {
+				if err := transitionTx(ctx, queries, task.ID, StateStalled, StateWorking, "worker", "Rider resumed with a Signal"); err != nil {
+					return "", err
+				}
+				current = StateWorking
+			}
+			if current != StateWorking {
+				return "", fmt.Errorf("%w: Task %d is %q", ErrStateRace, task.ID, current)
+			}
+		}
+	}
+	if riderResumed {
+		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET gated_sha='' WHERE id=?`, task.ID); err != nil {
+			return "", err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='',state=CASE WHEN state IN ('gated','unchanged','landing') THEN 'open' ELSE state END,updated_at=? WHERE task_id=? AND state<>'landed'`, time.Now().UnixMilli(), task.ID); err != nil {
+			return "", err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM completed_rider_busy WHERE task_id=?`, task.ID); err != nil {
+			return "", err
+		}
+		if taskType == "ship" && oneOfState(previousState, StateDone, StateLanding) {
+			if _, err := tx.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Rider reopened Task' WHERE task_id=? AND kind='land_ready' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), task.ID); err != nil {
+				return "", err
+			}
+		}
 	}
 	if verb == "done" {
 		pending, err := hasPendingTaskInstructions(ctx, tx.Tx, task.ID)
@@ -1400,7 +1494,17 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 			return "", ErrQueuedInstructionsPending
 		}
 	}
-	signal, err := queries.InsertSignal(ctx, dbgen.InsertSignalParams{TaskID: task.ID, Verb: verb, Note: note, DataJson: string(encoded), At: time.Now().UnixMilli()})
+	signalAt := time.Now().UnixMilli()
+	if verb == "done" && taskType == "ship" && validationHeads != nil {
+		var latestInstruction sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT MAX(m.created_at) FROM messages m JOIN validation_fix_rounds r ON r.message_id=m.id WHERE r.ship_task_id=?`, task.ID).Scan(&latestInstruction); err != nil {
+			return "", err
+		}
+		if latestInstruction.Valid && signalAt <= latestInstruction.Int64 {
+			signalAt = latestInstruction.Int64 + 1
+		}
+	}
+	signal, err := queries.InsertSignal(ctx, dbgen.InsertSignalParams{TaskID: task.ID, Verb: verb, Note: note, DataJson: string(encoded), At: signalAt})
 	if err != nil {
 		return "", err
 	}
@@ -1434,6 +1538,18 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 			return "", err
 		}
 	}
+	if verb == "done" && task.Type == "ship" && !inPlace {
+		var taskType, paneID, server string
+		var transitionID int64
+		if err := tx.QueryRowContext(ctx, `SELECT type,pane_id,agent_server_started_at,COALESCE((SELECT id FROM transitions WHERE task_id=tasks.id AND to_state='done' ORDER BY id DESC LIMIT 1),0) FROM tasks WHERE id=?`, task.ID).Scan(&taskType, &paneID, &server, &transitionID); err != nil {
+			return "", err
+		}
+		if taskType == "ship" {
+			if err := upsertCompletedRiderTurn(ctx, tx, task.ID, transitionID, paneID, server, time.Now().UnixMilli(), false); err != nil {
+				return "", err
+			}
+		}
+	}
 	if verb == "done" && (task.Type != "ship" || inPlace) {
 		reason := "Rider Report copied to the Project home"
 		if inPlace {
@@ -1444,9 +1560,49 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 		}
 		current = StateReported
 	}
+	noticeSummary := note
+	noticeDataJSON := string(encoded)
+	if riderResumed {
+		noticeKind = "rider_resumed"
+		noticeSummary = task.Title + ": Rider resumed: " + strconv.Quote(note)
+		noticeData, marshalErr := json.Marshal(map[string]any{"previous_state": previousState, "reason": note})
+		if marshalErr != nil {
+			return "", marshalErr
+		}
+		noticeDataJSON = string(noticeData)
+	} else if noticeKind == "rider_resumed" {
+		noticeKind = ""
+	}
 	if noticeKind != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,?,?,?,?)`, task.ProjectID, task.ID, noticeKind, note, string(encoded), time.Now().UnixMilli()); err != nil {
-			return "", err
+		updatedWatcherNotice := false
+		if riderResumed && watcherTransitionAt > 0 {
+			var noticeID int64
+			var priorDataJSON string
+			err := tx.QueryRowContext(ctx, `SELECT id,data_json FROM notices WHERE task_id=? AND kind='rider_resumed' AND delivered_at=0 AND created_at>=? ORDER BY id DESC LIMIT 1`, task.ID, watcherTransitionAt).Scan(&noticeID, &priorDataJSON)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return "", err
+			}
+			if err == nil {
+				var noticeData map[string]any
+				if err := json.Unmarshal([]byte(priorDataJSON), &noticeData); err != nil {
+					return "", err
+				}
+				noticeData["previous_state"] = previousState
+				noticeData["reason"] = note
+				encodedNotice, err := json.Marshal(noticeData)
+				if err != nil {
+					return "", err
+				}
+				if _, err := tx.ExecContext(ctx, `UPDATE notices SET summary=?,data_json=? WHERE id=? AND delivered_at=0`, noticeSummary, string(encodedNotice), noticeID); err != nil {
+					return "", err
+				}
+				updatedWatcherNotice = true
+			}
+		}
+		if !updatedWatcherNotice {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,?,?,?,?)`, task.ProjectID, task.ID, noticeKind, noticeSummary, noticeDataJSON, time.Now().UnixMilli()); err != nil {
+				return "", err
+			}
 		}
 	}
 	if verb == "done" && data != nil {
@@ -1470,6 +1626,38 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 		log.Printf("posse: Signal %q committed for Task %d, but recovery snapshot refresh failed: %v", verb, task.ID, err)
 	}
 	return current, nil
+}
+
+func cancelPendingLandIntentTx(ctx context.Context, tx *writeTx, taskID int64) error {
+	var intentID int64
+	var command, step string
+	err := tx.QueryRowContext(ctx, `SELECT id,command,step FROM intents WHERE task_id=?`, taskID).Scan(&intentID, &command, &step)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if command != "land --merge" && command != "land --open-pr" {
+		return fmt.Errorf("%w: %s", ErrIntentOwned, command)
+	}
+	step = strings.TrimPrefix(step, "resuming:")
+	step = strings.TrimPrefix(strings.TrimPrefix(step, "in_progress:"), "done:")
+	if step == "merge" || strings.HasPrefix(step, "merge:") || step == "pr.merge" || strings.HasPrefix(step, "pr.merge:") {
+		return ErrTaskMergeInProgress
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM intents WHERE id=? AND task_id=?`, intentID, taskID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrIntentOwned
+	}
+	return nil
 }
 
 func (db *DB) TaskSignals(ctx context.Context, taskID int64, limit int) ([]Signal, error) {
