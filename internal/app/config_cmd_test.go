@@ -201,6 +201,35 @@ func TestConfigUserOnlyApprovalIsRecordedForLeadOnly(t *testing.T) {
 	}
 }
 
+func TestConfigSetWarnsWhenSelectingNoMistakesPolicies(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateProject(context.Background(), "shop", repo, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	output, errorsOut := &bytes.Buffer{}, &bytes.Buffer{}
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, errorsOut
+	t.Chdir(repo)
+	for _, key := range []string{"defaults.landing_mode", "repositories.api.landing_mode", "defaults.review", "repositories.api.review"} {
+		output.Reset()
+		errorsOut.Reset()
+		if code := cli.Run([]string{"config", "set", key, "no-mistakes", "--project", "shop"}); code != 0 || !strings.Contains(output.String()+errorsOut.String(), "deprecated") {
+			t.Fatalf("config set %s no-mistakes: code=%d stdout=%s stderr=%s", key, code, output, errorsOut)
+		}
+	}
+}
+
 func TestProjectAddRegistersWithoutStartingLead(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
