@@ -1363,6 +1363,16 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 // RecordWorkerSignalWithVerdict records a Signal and, for a Review Task's done
 // Signal, its verdict in one transaction.
 func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput) (State, error) {
+	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, verdict, nil)
+}
+
+// RecordWorkerSignalWithValidation records a Ship done Signal only if the
+// automatic validation instructions checked by the caller have not changed.
+func (db *DB) RecordWorkerSignalWithValidation(ctx context.Context, task Task, verb, note string, data any, noticeKind string, validation ValidationContinuitySnapshot) (State, error) {
+	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, nil, &validation)
+}
+
+func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput, validationHeads *ValidationContinuitySnapshot) (State, error) {
 	inPlace := false
 	if verb == "done" {
 		plan, err := task.AdmittedPlan()
@@ -1389,6 +1399,15 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 		return "", err
 	}
 	current := State(state)
+	if verb == "done" && taskType == "ship" && validationHeads != nil {
+		currentHeads, err := validationContinuitySnapshotTx(ctx, tx, task.ID)
+		if err != nil {
+			return "", err
+		}
+		if !sameValidationSnapshot(currentHeads, *validationHeads) {
+			return "", ErrValidationHeadsChanged
+		}
+	}
 	previousState := current
 	riderResumed := false
 	watcherTransitionAt := int64(0)
@@ -1476,7 +1495,17 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 			return "", ErrQueuedInstructionsPending
 		}
 	}
-	signal, err := queries.InsertSignal(ctx, dbgen.InsertSignalParams{TaskID: task.ID, Verb: verb, Note: note, DataJson: string(encoded), At: time.Now().UnixMilli()})
+	signalAt := time.Now().UnixMilli()
+	if verb == "done" && taskType == "ship" && validationHeads != nil {
+		var latestInstruction sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT MAX(m.created_at) FROM messages m JOIN validation_fix_rounds r ON r.message_id=m.id WHERE r.ship_task_id=?`, task.ID).Scan(&latestInstruction); err != nil {
+			return "", err
+		}
+		if latestInstruction.Valid && signalAt <= latestInstruction.Int64 {
+			signalAt = latestInstruction.Int64 + 1
+		}
+	}
+	signal, err := queries.InsertSignal(ctx, dbgen.InsertSignalParams{TaskID: task.ID, Verb: verb, Note: note, DataJson: string(encoded), At: signalAt})
 	if err != nil {
 		return "", err
 	}

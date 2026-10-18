@@ -1068,7 +1068,7 @@ func TestLeadInstructionsExplainPRAndCheckoutNoticeActions(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("lead instructions exit=%d output=%s error=%s", code, output, errOutput)
 	}
-	for _, expected := range []string{"pr_opened", "pr_checks_failed", "pr_changes_requested", "pr_conflict", "land_ready", "pr_merged", "pr_closed", "pr_watch_failing", "root_behind", "root_fetch_failing", "Autonomy"} {
+	for _, expected := range []string{"pr_opened", "pr_checks_failed", "pr_changes_requested", "pr_conflict", "land_ready", "pr_merged", "pr_closed", "pr_watch_failing", "root_behind", "root_fetch_failing", "head_discontinuity", "Autonomy"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("Lead instructions omit PR handling for %q: %s", expected, output)
 		}
