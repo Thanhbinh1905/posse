@@ -30,10 +30,13 @@ func TestResumedRiderCannotLandOrRaiseLandReady(t *testing.T) {
 		snapshot.Panes[0].Label = "rider-t2"
 	}
 	now := time.Now()
-	for _, when := range []time.Time{now, now.Add(runtime.CompletedRiderBusyGrace)} {
-		if _, err := runtime.ReconcileSnapshot(ctx, f.db, f.project.ID, snapshot, when); err != nil {
-			t.Fatal(err)
-		}
+	snapshot.Panes[0].AgentStatus = "idle"
+	if _, err := runtime.ReconcileSnapshot(ctx, f.db, f.project.ID, snapshot, now); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Panes[0].AgentStatus = "working"
+	if _, err := runtime.ReconcileSnapshot(ctx, f.db, f.project.ID, snapshot, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
 	if err != nil || task.State != store.StateWorking {

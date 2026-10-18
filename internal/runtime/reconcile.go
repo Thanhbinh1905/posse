@@ -16,9 +16,6 @@ import (
 const ReconcileBudget = store.ObservationWriteBudget
 const AgentAbsentGrace = 2 * time.Minute
 
-// Ignore brief status flicker and the tail of the turn that signalled done.
-const CompletedRiderBusyGrace = 5 * time.Second
-
 type RunResult struct {
 	Snapshot           herdr.Snapshot
 	Notices            []store.Notice
@@ -193,8 +190,11 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		return fmt.Errorf("update observation: %w", err)
 	}
 	pane, found := findPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-	busy := found && pane.Agent != "" && pane.AgentStatus == "working"
-	resumed, err := db.ObserveCompletedRider(ctx, task, pane.PaneID, snapshot.ServerStartedAt, busy, now, CompletedRiderBusyGrace)
+	status := ""
+	if found && pane.Agent != "" {
+		status = pane.AgentStatus
+	}
+	resumed, err := db.ObserveCompletedRider(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, now)
 	if err != nil {
 		return nil, observationFailure(err)
 	}
