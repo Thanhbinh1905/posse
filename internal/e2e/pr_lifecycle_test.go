@@ -549,6 +549,9 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	fixture.writeGraphQL(t, "pr2", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", second.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
+	// Isolate the explicit Land check from the independent watcher, which can
+	// deliver its own target-sync instruction and reopen t2 first.
+	stopBackgroundLookout(t, fixture)
 
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge"); !strings.Contains(output, "landing") {
 		t.Fatalf("first PR did not merge: %s", output)
@@ -558,6 +561,7 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	beforeSecondMerge := fixture.mustTask(t, "t2")
 	command := exec.Command(fixture.binary, "land", "t2", "--merge")
 	command.Dir, command.Env = fixture.repo, fixture.leadEnv
 	output, err := command.CombinedOutput()
@@ -569,7 +573,10 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	}
 	targetTip := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/main"))
 	if !strings.Contains(string(output), `"pr_branch_behind"`) || !strings.Contains(string(output), targetTip) {
-		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s", err, output, targetTip)
+		afterSecondMerge, taskErr := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
+		transitions, transitionErr := fixture.db.TaskTransitions(context.Background(), second.ID, 30)
+		recovery, recoveryErr := fixture.db.ProjectRecovery(context.Background(), fixture.project.ID)
+		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s\nTask state before/after: %q -> %q (err=%v)\ntransitions: %#v (err=%v)\nproject recovery: %#v (err=%v)", err, output, targetTip, beforeSecondMerge.State, afterSecondMerge.State, taskErr, transitions, transitionErr, recovery, recoveryErr)
 	}
 	var instruction string
 	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, second.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Merge origin/main") {
