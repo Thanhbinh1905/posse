@@ -140,6 +140,16 @@ func TestLookoutLogsAndRetriesMaintenanceContention(t *testing.T) {
 	}
 }
 
+func TestShowDefersTaskStateRaceDuringObservation(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture.service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = store.ErrStateRace
+
+	code, output, errOut := fixture.run("show", "t1")
+	if code != 0 || !strings.Contains(output, "t1") || !strings.Contains(errOut, "Project observations were deferred") {
+		t.Fatalf("show did not return its durable Task view after a concurrent state change: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+}
+
 func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))

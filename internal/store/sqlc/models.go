@@ -326,6 +326,70 @@ type ResourceLease struct {
 	AcquiredAt     int64
 }
 
+type ReviewCarry struct {
+	ShipTaskID      int64
+	Repository      string
+	FromHead        string
+	ToHead          string
+	TargetCommitSha string
+	Tree            string
+	CreatedAt       int64
+}
+
+type ReviewDisposition struct {
+	ID         int64
+	ShipTaskID int64
+	HeadSha    string
+	DecisionID sql.NullInt64
+	UserQuote  string
+	At         int64
+}
+
+type ReviewFinding struct {
+	ID            int64
+	ShipTaskID    int64
+	Seq           int64
+	PatternID     int64
+	Fingerprint   string
+	Round         int64
+	Repository    string
+	Path          string
+	Symbol        string
+	Excerpt       string
+	LineAtReport  int64
+	HeadSha       string
+	Severity      string
+	Origin        string
+	InScope       int64
+	State         string
+	FollowUpUrl   string
+	InheritedFrom sql.NullInt64
+}
+
+type ReviewFindingEvent struct {
+	ID        int64
+	FindingID int64
+	Round     int64
+	Event     string
+	Actor     string
+	Note      string
+	UserQuote string
+	At        int64
+}
+
+type ReviewPattern struct {
+	ID           int64
+	ShipTaskID   int64
+	Seq          int64
+	Key          string
+	Title        string
+	Rule         string
+	RootCause    string
+	FixGuidance  string
+	MergedInto   sql.NullInt64
+	CreatedRound int64
+}
+
 type ReviewReceipt struct {
 	TaskID          int64
 	Repository      string
@@ -337,6 +401,23 @@ type ReviewReceipt struct {
 	ReportSha256    string
 	ReceiptSha256   string
 	ObservedAt      int64
+}
+
+type ReviewRound struct {
+	ShipTaskID          int64
+	Round               int64
+	ReviewTaskID        int64
+	Repository          string
+	ScopeKind           string
+	ScopeBaseSha        string
+	HeadSha             string
+	TargetCommitSha     string
+	BaselineTree        string
+	DeltaSha256         string
+	ConflictedPathsJson string
+	Status              string
+	Verdict             sql.NullString
+	CreatedAt           int64
 }
 
 type ReviewTarget struct {
@@ -474,6 +555,17 @@ type Transition struct {
 	Source    string
 	Note      string
 	At        int64
+}
+
+type ValidationFixRound struct {
+	ID               int64
+	ShipTaskID       int64
+	Kind             string
+	Seq              int64
+	ExpectedBaseHead string
+	DedupeKey        string
+	MessageID        int64
+	CreatedAt        int64
 }
 
 type VerifiedPrHead struct {
