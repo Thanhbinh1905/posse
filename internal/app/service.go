@@ -79,11 +79,33 @@ func normalizeCommandError(err error) error {
 func deferObservationContention(ctx *axi.Context, err error, message string) error {
 	// File-lock waits guard maintenance state, so keep them visible to callers.
 	var lockWait *fileLockWaitError
-	if err == nil || !store.IsOnlyBusy(err) || errors.As(err, &lockWait) {
+	if err == nil || (!store.IsOnlyBusy(err) && !isOnlyStateRace(err)) || errors.As(err, &lockWait) {
 		return err
 	}
 	fmt.Fprintln(ctx.ErrOut, message)
 	return nil
+}
+
+func isOnlyStateRace(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !isOnlyStateRace(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return isOnlyStateRace(wrapped.Unwrap())
+	}
+	return err == store.ErrStateRace
 }
 
 func (s *Service) commands() *axi.Command {

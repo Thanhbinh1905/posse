@@ -124,6 +124,68 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	t.Fatalf("doctor omitted execution resource counts: %#v", result.Checks)
 }
 
+func TestDoctorListsProjectsAndMembersUsingNoMistakes(t *testing.T) {
+	root := t.TempDir()
+	shopRoot := filepath.Join(root, "shop")
+	initRepo(t, shopRoot)
+	workspaceRoot := filepath.Join(root, "stack")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateProject(context.Background(), "shop", shopRoot, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateWorkspaceProject(context.Background(), "stack", workspaceRoot, []store.ProjectRepo{{
+		Name: "api", Path: "api", DefaultBranch: "main", Status: store.RepoActive, OriginHost: "github.com",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for project, text := range map[string]string{
+		"shop": `[defaults]
+landing_mode = "no-mistakes"
+review = "no-mistakes"
+`,
+		"stack": `[defaults]
+landing_mode = "pr"
+review = "none"
+[repositories.api]
+landing_mode = "no-mistakes"
+review = "no-mistakes"
+`,
+	} {
+		path := filepath.Join(home, "projects", project, "config.toml")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := testService(home, nil)
+	output := &bytes.Buffer{}
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"doctor", "--json"}); code != 0 {
+		t.Fatalf("doctor exit=%d output=%s", code, output.String())
+	}
+	for _, want := range []string{
+		"deprecated no-mistakes shop", "Project shop defaults.landing_mode", "Project shop defaults.review",
+		"deprecated no-mistakes stack", "Member api effective landing_mode", "Member api effective review policy",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("doctor omitted %q: %s", want, output.String())
+		}
+	}
+}
+
 func TestDoctorRecommendsRemovingProjectsWithStaleRoots(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "posse-home")

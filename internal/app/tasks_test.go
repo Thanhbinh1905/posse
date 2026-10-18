@@ -171,6 +171,89 @@ func TestRideRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {
 	}
 }
 
+func TestRideRejectsNoMistakesOnNonDefaultTargetBeforeAllocatingResources(t *testing.T) {
+	fixture := newRideFixture(t)
+	origin := filepath.Join(filepath.Dir(fixture.repo), "origin.git")
+	gitTest(t, filepath.Dir(fixture.repo), "init", "--bare", origin)
+	gitTest(t, fixture.repo, "remote", "add", "origin", origin)
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	gitTest(t, fixture.repo, "switch", "-c", "staging")
+	gitTest(t, fixture.repo, "push", "origin", "staging")
+	gitTest(t, fixture.repo, "switch", "main")
+	installReadyNoMistakes(t)
+	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nlanding_mode: no-mistakes\ntarget: staging\n---\nCreate a committed file.\n"
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := fixture.ride(t)
+	if code != 1 || !strings.Contains(output, "no_mistakes_target_unsupported") {
+		t.Fatalf("ride did not refuse unsupported no-mistakes target: code=%d output=%s", code, output)
+	}
+	if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
+		t.Fatalf("unsupported no-mistakes target allocated Herdr resources: calls=%#v", fixture.fake.Calls)
+	}
+	db, err := store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
+	if err != nil || len(tasks) != 0 {
+		t.Fatalf("unsupported no-mistakes target allocated Tasks: %#v, %v", tasks, err)
+	}
+	mounts, err := db.Mounts(context.Background(), fixture.project.ID)
+	if err != nil || len(mounts) != 0 {
+		t.Fatalf("unsupported no-mistakes target acquired Mounts: %#v, %v", mounts, err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.home, "scratch", "shop", "t1")); !os.IsNotExist(err) {
+		t.Fatalf("unsupported no-mistakes target allocated Task scratch: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.home, "projects", "shop", "tasks", "t1")); !os.IsNotExist(err) {
+		t.Fatalf("unsupported no-mistakes target allocated Task files: %v", err)
+	}
+	if _, err := gitOutput(context.Background(), fixture.repo, "rev-parse", "--verify", "refs/heads/posse/t1"); err == nil {
+		t.Fatal("unsupported no-mistakes target allocated a Task branch")
+	}
+}
+
+func TestRideAdmitsDefaultTargetNoMistakesWithDeprecationWarning(t *testing.T) {
+	fixture := newRideFixture(t)
+	origin := filepath.Join(filepath.Dir(fixture.repo), "origin.git")
+	gitTest(t, filepath.Dir(fixture.repo), "init", "--bare", origin)
+	gitTest(t, fixture.repo, "remote", "add", "origin", origin)
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	installReadyNoMistakes(t)
+	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nlanding_mode: no-mistakes\n---\nCreate a committed file.\n"
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := fixture.ride(t)
+	if code != 0 || !strings.Contains(output, "deprecated") {
+		t.Fatalf("default-target no-mistakes Task was not admitted with warning: code=%d output=%s", code, output)
+	}
+	db, err := store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
+	if err != nil || len(tasks) != 1 || tasks[0].LandingMode != "no-mistakes" || tasks[0].TargetBranch != "main" || tasks[0].State != store.StateWorking {
+		t.Fatalf("default-target Task behavior changed: %#v, %v", tasks, err)
+	}
+}
+
+func installReadyNoMistakes(t *testing.T) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "no-mistakes"), []byte("#!/bin/sh\necho initialized\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestRideReportsMountSetupFailureAndReleasesMount(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
