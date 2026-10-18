@@ -40,6 +40,8 @@ var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition
 var ErrBusy = errors.New("database contention; retry the operation")
 
 const sqliteBusyTimeoutMillis = 5000
+const storeOpenMigrationBudget = 30 * time.Second
+const migrationLockWaitBudget = 5 * time.Second
 
 // Observation lock waits stay short enough to defer contended work within
 // the overall reconciliation budget.
@@ -166,7 +168,7 @@ func Open(home string) (*DB, error) {
 }
 
 func OpenAt(path string) (*DB, error) {
-	return openAt(path, 5*time.Second)
+	return openAt(path, storeOpenMigrationBudget)
 }
 
 func openAt(path string, timeout time.Duration) (*DB, error) {
@@ -194,7 +196,9 @@ func openAt(path string, timeout time.Duration) (*DB, error) {
 
 func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	defer func() { migrationErr = retryableContention(migrationErr) }()
-	lock, err := acquireMigrationLock(ctx, db.Path)
+	lockCtx, cancelLock := context.WithTimeout(ctx, migrationLockWaitBudget)
+	lock, err := acquireMigrationLock(lockCtx, db.Path)
+	cancelLock()
 	if err != nil {
 		return err
 	}
@@ -715,14 +719,26 @@ type Mount struct {
 }
 
 func (db *DB) CreateTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, occupied func(int) (bool, error)) (int64, int, error) {
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, "", 0, occupied)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, "", 0, occupied, nil)
 }
 
 func (db *DB) CreateTaskWithSequenceAndIntent(ctx context.Context, projectID int64, projectName string, task Task, command string, processID int, occupied func(int) (bool, error)) (int64, int, error) {
 	if command == "" || processID < 1 {
 		return 0, 0, fmt.Errorf("intent command and process id are required")
 	}
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, nil)
+}
+
+// CreateReviewRoundTaskWithSequenceAndIntent atomically creates a Review Task
+// and admits all of its repository bindings as one numbered round.
+func (db *DB) CreateReviewRoundTaskWithSequenceAndIntent(ctx context.Context, projectID int64, projectName string, task Task, command string, processID int, admission ReviewRoundAdmission, occupied func(int) (bool, error)) (int64, int, error) {
+	if command == "" || processID < 1 {
+		return 0, 0, fmt.Errorf("intent command and process id are required")
+	}
+	if task.Type != "review" || task.ReviewsTaskID != admission.ShipTaskID {
+		return 0, 0, fmt.Errorf("review round task does not target its admitted Ship Task")
+	}
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission)
 }
 
 var ErrTaskBranchExists = errors.New("Task branch already used")
@@ -752,7 +768,7 @@ func (db *DB) TaskBranchExists(ctx context.Context, projectID int64, branch stri
 	return exists, err
 }
 
-func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, intentCommand string, processID int, occupied func(int) (bool, error)) (int64, int, error) {
+func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, intentCommand string, processID int, occupied func(int) (bool, error), roundAdmission *ReviewRoundAdmission) (int64, int, error) {
 	if task.ShortName == "" {
 		return 0, 0, fmt.Errorf("Task short name is required")
 	}
@@ -772,6 +788,11 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	var seq int
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET last_activity_at=last_activity_at WHERE id=?`, projectID); err != nil {
 		return 0, 0, err
+	}
+	if roundAdmission != nil {
+		if err := validateReviewRoundAdmissionTx(ctx, tx, *roundAdmission); err != nil {
+			return 0, 0, err
+		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM tasks WHERE project_id=?`, projectID).Scan(&seq); err != nil {
 		return 0, 0, err
@@ -826,6 +847,11 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 			return 0, 0, err
 		}
 	}
+	if roundAdmission != nil {
+		if err := insertReviewRoundBindingsTx(ctx, tx, id, *roundAdmission); err != nil {
+			return 0, 0, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES (?, '', 'spawning', 'cli', 'Task created', ?)`, id, now); err != nil {
 		return 0, 0, err
 	}
@@ -839,6 +865,11 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 	}
 	if err := db.PersistTask(ctx, id); err != nil {
 		return 0, 0, err
+	}
+	if roundAdmission != nil {
+		if err := db.PersistTask(ctx, roundAdmission.ShipTaskID); err != nil {
+			return 0, 0, err
+		}
 	}
 	return id, seq, nil
 }
@@ -2568,25 +2599,25 @@ func (db *DB) taskObservationMatches(ctx context.Context, taskID int64, paneID, 
 	return currentPaneID == paneID && currentWorkspaceID == workspaceID && currentAgentSession == agentSession && currentAgentSessionKind == agentSessionKind && currentAgentAbsentSince == agentAbsentSince && currentIdleSince == idleSince && currentAgentServerStartedAt == agentServerStartedAt, nil
 }
 
-func (db *DB) UpdateProjectObservation(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) error {
+func (db *DB) UpdateProjectObservation(ctx context.Context, project Project, paneID, workspaceID string, absentSince int64) error {
 	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
 	defer cancel()
 	// Concurrent CLI commands often observe the same Lead pane. Skip the write
 	// lock when another reconciliation already recorded this state.
-	unchanged, err := db.projectObservationMatches(ctx, projectID, paneID, workspaceID, absentSince)
+	unchanged, err := db.projectObservationMatches(ctx, project.ID, paneID, workspaceID, absentSince)
 	if err != nil || unchanged {
 		return err
 	}
 	params := dbgen.UpdateProjectObservationParams{
-		LeadPaneID: paneID, HerdrWorkspaceID: workspaceID, LeadAbsentSince: absentSince, ID: projectID,
-		LeadPaneID_2: paneID, HerdrWorkspaceID_2: workspaceID, LeadAbsentSince_2: absentSince,
+		PaneID: paneID, WorkspaceID: workspaceID, LeadAbsentSince: absentSince, ProjectID: project.ID,
+		ExpectedLeadPaneID: project.LeadPaneID, ExpectedWorkspaceID: project.HerdrWorkspaceID, ExpectedLeadLabel: project.LeadLabel,
 	}
 	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateProjectObservation(ctx, params)
 	}); err != nil {
 		return err
 	}
-	return db.PersistProject(ctx, projectID)
+	return db.PersistProject(ctx, project.ID)
 }
 
 func (db *DB) projectObservationMatches(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) (bool, error) {

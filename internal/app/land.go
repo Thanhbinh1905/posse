@@ -23,7 +23,7 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if len(parsed.Positionals) != 1 {
 		return axi.Usage("land requires one Task id")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -76,8 +76,10 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 		// Pull request evidence binds to the gated forge head, not the Mount tip.
 		return s.landPullRequest(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
 	}
-	if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
-		return err
+	if task.State != store.StateDone || !autoStartReviewLoop(plan) {
+		if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+			return err
+		}
 	}
 	if project.IsWorkspace() {
 		return s.landWorkspace(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
@@ -150,6 +152,7 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 		if err := runLandStep("gate.record", func() error { return db.SetTaskGatedSHA(ctx.Context, task.ID, gatedSHA) }); err != nil {
 			return err
 		}
+		task.GatedSHA = gatedSHA
 		if err := runLandStep("gate.run", func() error { return runGates(ctx.Context, cfg, task) }); err != nil {
 			_, noticeErr := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "gate_failed", Summary: task.Title + ": " + truncate(err.Error(), 240), DataJSON: `{}`})
 			if noticeErr != nil {
@@ -160,6 +163,11 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 			}
 			_ = s.deliverNotices(ctx.Context, db, project)
 			return axi.Failure("gate_failed", err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
+		}
+		if started, err := s.maybeAutoStartReviewRound(ctx, db, home, project, task); err != nil {
+			return err
+		} else if started {
+			return nil
 		}
 		if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
 			return err

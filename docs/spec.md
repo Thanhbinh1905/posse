@@ -125,7 +125,7 @@ gate = []                    # local and pr: commands run in the worktree before
 enabled = true
 max_rounds = 3               # 1..3; the Brief may only lower this cap
 block_at = "P1"              # P0 | P1 | P2
-auto_start = true            # admit a Review Round when its Gate passes
+auto_start = true            # admit after Gate when an eligible reviewer Profile resolves
 docs = false                 # include documentation gaps in the review rubric
 guidance = []                # repository paths supplied from the frozen target
 
@@ -754,7 +754,7 @@ Work is never lost to a crash: commits live on the recorded Task branch, uncommi
 
 1. Allowed from `working`, `stalled`, `lost` and `failed` (a `failed` Task only if its Mount is still held). Writes a `relaunch` intent.
 2. Finds the Task's pane (by id, then label); if none, reopens the Mount in a new workspace exactly as `posse ride` does and labels the new pane.
-3. For admitted Tasks, uses frozen Profile, kind, model/effort, arguments, resume templates and selected skill/instruction inputs without rereading launch configuration. Explicit `--profile`, even with the same name, resolves current launch settings and appends a plan revision before execution effects. The revision links its predecessor's digest and atomically clears Task/member Gate evidence; prior Signals retain their revision/digest as historical evidence. A failed or interrupted attempt keeps that revision for recovery. Legacy Tasks still resolve their stored Profile from current config. A recorded session resumes only when its owner kind matches the selected harness; another or unknown owner starts fresh. A kind change runs the selected kind's `prepare` step.
+3. For admitted Tasks, uses frozen Profile, kind, model/effort, arguments, resume templates and selected skill/instruction inputs without rereading launch configuration. Explicit `--profile`, even with the same name, resolves current launch settings and appends a plan revision before execution effects. The revision links its predecessor's digest and atomically clears Task/member Gate evidence; prior Signals retain their revision/digest as historical evidence. A failed or interrupted attempt keeps that revision for recovery. Legacy Tasks still resolve their stored Profile from current config. A recorded session resumes only when its owner kind matches the selected harness. If a legacy Task has no recorded owner, its stored (or frozen) Profile kind supplies it; another or unknown owner starts fresh. A kind change runs the selected kind's `prepare` step.
 4. Stops any live agent in the pane (see Stopping an agent in section 16), increments `launches`, and starts the agent with full Profile arguments. Each Launch Identity Record binds the attempted launch to its admitted revision (zero for legacy), including failed attempts. For legacy Tasks, a Profile change is recorded only after readiness; admitted Tasks already recorded it with the revision. Missing `brief.md` or `launch.md` files are restored from admitted inputs, not mutable source files.
 5. Clears stale Git state in the Mount: removes `index.lock` only when no git process runs in the Mount, and reports an in-progress merge, rebase or cherry-pick instead of touching it.
 6. Prompts one line pointing at a generated `relaunch.md`: re-read `launch.md`; inspect `git status` and `git log`; continue the Task; report with `posse holler`. It includes delivered Lead messages sent after the Brief in order, bounded to the most recent 32 messages and 1,200 bytes per message; later messages supersede earlier ones. Then moves the Task to `working`.
@@ -1010,7 +1010,7 @@ Status: Config and plan freezing are implemented. The interim refusal and deprec
 enabled = true               # false: Review Tasks behave as before this section
 max_rounds = 3               # 1..3; values above 3 are refused (`config_invalid`)
 block_at = "P1"              # P0 | P1 | P2: introduced findings at or above this severity block
-auto_start = true            # admit the next round when a Gate passes on a new head
+auto_start = true            # admit after Gate when an eligible reviewer Profile resolves
 docs = false                 # add documentation gaps (docs-* patterns, default P2) to the rubric
 guidance = []                # repository paths read from origin/<target> and given to Reviewers
 
@@ -1028,7 +1028,7 @@ The flow after a loop-enabled Ship Task signals done:
 
 1. Freshness: a head that lacks the frozen target tip gets the existing merge instruction (section 14, ADR 0019).
 2. Gate: `posse land` runs the Gates at the head; a failure starts a Gate Fix Round (25.12).
-3. Review: with `auto_start`, Posse admits the next round on the gated head; otherwise the Lead runs `posse review start`.
+3. Review: with `auto_start`, Posse admits the next round on the gated head when an eligible reviewer Profile resolves. If none resolves, it records one readiness Notice and does not fail auto-start; explicit `posse review start` still reports the Profile or identity error. With auto-start disabled, the Lead runs `posse review start`.
 4. CI: the PR watch runs in parallel with review; failures start CI Fix Rounds (25.13).
 5. Land: the selected evidence, a green observation and the current target at one head (D03), and no blocking finding (25.7).
 
