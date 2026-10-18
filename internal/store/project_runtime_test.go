@@ -76,6 +76,42 @@ func TestRememberKnownGenerationDoesNotContendWithWriters(t *testing.T) {
 	}
 }
 
+func TestStaleProjectObservationCannotRevertRecoveredLead(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectWorkspace(ctx, project.ID, "w2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(ctx, project.ID, "w2", "w2:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateProjectObservation(ctx, stale, stale.LeadPaneID, stale.HerdrWorkspaceID, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.HerdrWorkspaceID != "w2" || current.LeadPaneID != "w2:p1" || current.LeadLabel != "posse:shop:lead" {
+		t.Fatalf("stale Lead observation reverted the recovered identity: %#v", current)
+	}
+}
+
 func TestUnchangedProjectObservationDoesNotWaitForWriter(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
@@ -87,7 +123,7 @@ func TestUnchangedProjectObservationDoesNotWaitForWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateProjectObservation(ctx, project.ID, "w1:p1", "w1", 0); err != nil {
+	if err := db.UpdateProjectObservation(ctx, project, "w1:p1", "w1", 0); err != nil {
 		t.Fatal(err)
 	}
 	writer, err := db.BeginTx(ctx, nil)
@@ -101,7 +137,7 @@ func TestUnchangedProjectObservationDoesNotWaitForWriter(t *testing.T) {
 
 	writeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if err := db.UpdateProjectObservation(writeCtx, project.ID, "w1:p1", "w1", 0); err != nil {
+	if err := db.UpdateProjectObservation(writeCtx, project, "w1:p1", "w1", 0); err != nil {
 		t.Fatalf("unchanged Project observation waited for a write lock: %v", err)
 	}
 }
