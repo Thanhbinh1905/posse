@@ -221,6 +221,7 @@ func TestConfigSetWarnsWhenSelectingNoMistakesPolicies(t *testing.T) {
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = output, errorsOut
 	t.Chdir(repo)
+	installReadyNoMistakes(t)
 	for _, key := range []string{"defaults.landing_mode", "repositories.api.landing_mode", "defaults.review", "repositories.api.review"} {
 		output.Reset()
 		errorsOut.Reset()

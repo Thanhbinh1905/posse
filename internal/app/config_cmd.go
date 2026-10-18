@@ -92,6 +92,24 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if key == "defaults.landing_mode" && parsed.Positionals[1] == "no-mistakes" {
+		root := ""
+		if projectName != "" {
+			project, err := s.projectByName(ctx.Context, db, projectName)
+			if err != nil {
+				return err
+			}
+			root = project.Root
+		} else {
+			root, err = gitTop(ctx.Context, "")
+			if err != nil {
+				return err
+			}
+		}
+		if err := ensureNoMistakesInitialized(ctx.Context, root); err != nil {
+			return err
+		}
+	}
 	path := config.ConfigPath(home, projectName)
 	original, originalMode, originalExists, err := configSnapshot(path)
 	if err != nil {
