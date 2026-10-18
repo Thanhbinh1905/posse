@@ -212,11 +212,6 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	if !project.IsWorkspace() && !project.IsDirectory() && brief.Type == "ship" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
 		return axi.Failure("brief_invalid", "a repository without origin can only Land locally", false)
 	}
-	if mode == "no-mistakes" && !project.IsWorkspace() && !project.IsDirectory() {
-		if err := ensureNoMistakesInitialized(ctx.Context, project.Root); err != nil {
-			return err
-		}
-	}
 	baseRef := project.DefaultBranch
 	if project.IsDirectory() {
 		baseRef = ""
@@ -296,10 +291,18 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 		}
 		var targetSelected bool
 		targetBranch, targetSelected = targetBranchForTask(cfg, brief, "", project.DefaultBranch)
+		if mode == "no-mistakes" && targetBranch != project.DefaultBranch {
+			return axi.Failure("no_mistakes_target_unsupported", fmt.Sprintf("no-mistakes delivery only supports the repository default branch %q, but this Task targets %q", project.DefaultBranch, targetBranch), false, "Use `landing_mode: pr` for a non-default target, or remove `target:` to use the default branch")
+		}
 		if targetSelected {
 			if _, err := selectedBranchRef(ctx.Context, project.Root, targetBranch, "target"); err != nil {
 				return err
 			}
+		}
+	}
+	if mode == "no-mistakes" && !project.IsWorkspace() && !project.IsDirectory() {
+		if err := ensureNoMistakesInitialized(ctx.Context, project.Root); err != nil {
+			return err
 		}
 	}
 	if project.IsWorkspace() {
@@ -615,7 +618,12 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 			if refreshErr := s.regenerateProjects(ctx.Context, db); refreshErr != nil {
 				return refreshErr
 			}
-			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "state", Value: "spawning"}, {Key: "worker", Value: workerName}, {Key: "help", Value: []any{"Brief delivery waits for the Rider pane to become unfocused"}}})
+			result := axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "state", Value: "spawning"}, {Key: "worker", Value: workerName}}
+			if mode == "no-mistakes" {
+				result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning("landing_mode")}})
+			}
+			result = append(result, axi.Field{Key: "help", Value: []any{"Brief delivery waits for the Rider pane to become unfocused"}})
+			return ctx.Print(result)
 		}
 		if err != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -652,6 +660,9 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
 	if reviewIdentityDetails != nil {
 		result = append(result, axi.Field{Key: "review_identity", Value: reviewIdentityDetails})
+	}
+	if mode == "no-mistakes" {
+		result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning("landing_mode")}})
 	}
 	return ctx.Print(result)
 }

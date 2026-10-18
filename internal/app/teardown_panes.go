@@ -14,6 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/sessionref"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -312,7 +313,7 @@ func (s *Service) verifyMountForegroundOwnershipWithAuthorization(ctx context.Co
 		currentAgentName := snapshotAgentName(currentSnapshot, pane.PaneID)
 		currentTaskPane := currentFound && ownsTaskPane(currentSnapshot, project, task, taskTabs(currentSnapshot, project, task), currentPane)
 		currentForeignShell := currentFound && shellOnlyPaneInMount(currentSnapshot, currentPane, heldMount.Path)
-		currentAgentMatches := agentNameMatchesTask(currentAgentName, project.Name, task.Seq)
+		currentAgentMatches := currentFound && taskAgentMatchesPane(currentSnapshot, project, task, currentPane)
 		if currentFound && currentAgentName == "" && currentPane.Agent == "" && pathInside(currentPane.CWD, heldMount.Path) {
 			currentAgentMatches = true // The Task pane's shell or command is authorized by its exact pane identity.
 		}
@@ -447,8 +448,8 @@ func (s *Service) verifyMountShellSignalOwnership(ctx context.Context, project s
 		}
 		return nil
 	}
-	if !agentNameMatchesTask(agentName, project.Name, task.Seq) {
-		return fmt.Errorf("pane %s now has unrelated agent %q; preserving it", paneID, agentName)
+	if !taskAgentMatchesPane(snapshot, project, task, pane) {
+		return fmt.Errorf("pane %s no longer has the Task's verified agent identity; preserving it", paneID)
 	}
 	if foreground == shellPID {
 		return nil // The exact retained Task pane shell is the only signalable process Herdr exposed.
@@ -732,15 +733,70 @@ func ownsTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Tas
 	if pane.Agent == "" {
 		return true
 	}
-	for _, agent := range snapshot.Agents {
+	return taskAgentMatchesPane(snapshot, project, task, pane)
+}
+
+// taskAgentMatchesPane accepts a canonical launch name or the exact recorded
+// session for a named Task pane whose current Herdr agent has no name.
+func taskAgentMatchesPane(snapshot herdr.Snapshot, project store.Project, task store.Task, pane herdr.Pane) bool {
+	var nameless *herdr.Agent
+	namelessCount := 0
+	hasNamedAgent := false
+	for i := range snapshot.Agents {
+		agent := snapshot.Agents[i]
 		if agent.PaneID != pane.PaneID {
 			continue
 		}
-		if agentNameMatchesTask(agent.Name, project.Name, task.Seq) {
-			return true
+		if agent.Name != "" {
+			if agentNameMatchesTask(agent.Name, project.Name, task.Seq) {
+				return true
+			}
+			hasNamedAgent = true
+			continue
+		}
+		namelessCount++
+		if nameless == nil {
+			nameless = &snapshot.Agents[i]
 		}
 	}
-	return false
+	if nameless == nil || namelessCount != 1 || hasNamedAgent {
+		return false
+	}
+	return namelessAgentMatchesTaskSession(*nameless, task, pane)
+}
+
+func namelessAgentMatchesTaskSession(agent herdr.Agent, task store.Task, pane herdr.Pane) bool {
+	expectedKind := sessionref.NormalizeKind(task.AgentSessionKind)
+	if expectedKind == "" || task.PaneID == "" || pane.PaneID != task.PaneID || !pathInside(pane.CWD, task.WorktreePath) {
+		return false
+	}
+	if sessionref.NormalizeKind(pane.Agent) != expectedKind {
+		return false
+	}
+	agentKind := agent.Agent
+	if agentKind == "" {
+		agentKind = agent.Kind
+	}
+	if agentKind == "" {
+		agentKind = pane.Agent
+	}
+	if sessionref.NormalizeKind(agentKind) != expectedKind {
+		return false
+	}
+	expectedSession := agentSessionID(task.AgentSessionKind, task.AgentSession)
+	if expectedSession == "" {
+		return false
+	}
+	agentSession := agentSessionID(agentKind, agent.SessionID)
+	paneSession := agentSessionID(agentKind, string(pane.AgentSession))
+	if agentSession != "" && paneSession != "" && agentSession != paneSession {
+		return false
+	}
+	observedSession := agentSession
+	if observedSession == "" {
+		observedSession = paneSession
+	}
+	return observedSession != "" && observedSession == expectedSession
 }
 
 // agentNameMatchesTask reports whether name is one of the Task's launches as

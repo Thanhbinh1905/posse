@@ -43,6 +43,18 @@ func ensureNoMistakesInitialized(ctx context.Context, root string) error {
 	return nil
 }
 
+func isNoMistakesPolicySetting(key string) bool {
+	return key == "defaults.landing_mode" || key == "defaults.review" ||
+		strings.HasPrefix(key, "repositories.") && (strings.HasSuffix(key, ".landing_mode") || strings.HasSuffix(key, ".review"))
+}
+
+func noMistakesDeprecatedWarning(setting string) axi.Object {
+	return axi.Object{
+		{Key: "code", Value: "deprecated"},
+		{Key: "message", Value: setting + " uses deprecated no-mistakes; migrate to the built-in validation settings in docs/spec.md section 25"},
+	}
+}
+
 func commandOutputArgs(ctx context.Context, cwd, name string, args ...string) (string, error) {
 	return commandOutputArgsWithTimeout(ctx, timeoutForExternalCommand(name, args), cwd, name, args...)
 }
