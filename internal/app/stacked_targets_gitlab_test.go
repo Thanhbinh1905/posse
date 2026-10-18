@@ -27,9 +27,9 @@ func TestOpenGitLabMRWatchDoesNotRejectAChangedTarget(t *testing.T) {
 	}
 	task := fixture.task
 	task.PRURL = "https://git.example.com/group/sub/shop/-/merge_requests/17"
-	observation, _, err := gitlabObservation(context.Background(), forge, task, "main", time.Now().UnixMilli())
-	if err != nil || observation.State != "OPEN" {
-		t.Fatalf("open MR with an external retarget was not observed: %+v, %v", observation, err)
+	observation, _, err := gitlabObservationWithChecks(context.Background(), forge, task, "main", time.Now().UnixMilli(), false)
+	if err != nil || observation.State != "OPEN" || decodeChecks(observation.Checks).State != "PENDING" {
+		t.Fatalf("open MR with an external retarget was not observed without accepting CI: %+v, %v", observation, err)
 	}
 	fixture.setGitLabState(t, "merged", "mergeable", "success", fixture.headSHA)
 	if _, _, err := gitlabObservation(context.Background(), forge, task, "main", time.Now().UnixMilli()); err == nil || !strings.Contains(err.Error(), `targets "staging", expected "main"`) {

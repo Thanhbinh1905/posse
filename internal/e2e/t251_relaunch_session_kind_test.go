@@ -39,6 +39,9 @@ func TestRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testing.T) {
 		t.Fatalf("Pi review spawn: code=%d %s", code, output)
 	}
 	review := fixture.mustTask(t, "t2")
+	// This test seeds a synthetic observation. Stop the live Lookout first so a
+	// poll of the fixture's session-less Pi pane cannot overwrite that seed.
+	stopBackgroundLookout(t, fixture)
 	const piSession = "pi-session-211"
 	// Seed the session Herdr observed from Pi. Older schemas have no owner-kind
 	// column, so this setup also reproduces the pre-fix database state.

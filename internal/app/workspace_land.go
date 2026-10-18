@@ -90,6 +90,16 @@ func (s *Service) landWorkspace(out *axi.Context, db *store.DB, project store.Pr
 			return err
 		}
 	}
+	if !merge {
+		for _, member := range members {
+			if member.repo.State != store.TaskRepoLanding || member.repo.LandingMode != "pr" || member.repo.GatedSHA == "" {
+				continue
+			}
+			if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, member.repo.Repo, member.repo.LandingMode, member.repo.GatedSHA); err != nil {
+				return prefixFailure(member.repo.Repo, err)
+			}
+		}
+	}
 	if merge {
 		if quote != "" {
 			if err := db.RecordApproval(ctx, task.ID, "merge", quote); err != nil {
@@ -186,6 +196,11 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 		}
 		gated := member.task
 		gated.GatedSHA = gatedSHA
+		if repo.LandingMode == "pr" {
+			if err := s.requirePRTargetFresh(ctx, db, member.project, gated, repo.Repo, repo.LandingMode, gatedSHA); err != nil {
+				return prefixFailure(repo.Repo, err)
+			}
+		}
 		if repo.LandingMode == "pr" && repo.PRURL != "" {
 			forge, err := forgeForRepository(ctx, member.target.Root, cfg, repo.Repo)
 			if err != nil {
@@ -206,6 +221,11 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 			return memberFailure(repo.Repo, err)
 		} else if current != gatedSHA {
 			return axi.Failure("branch_moved", repo.Repo+": Task branch moved while the Gate was running", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
+		}
+		if repo.LandingMode == "pr" {
+			if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, repo.Repo, repo.LandingMode, gatedSHA); err != nil {
+				return prefixFailure(repo.Repo, err)
+			}
 		}
 		repo.GatedSHA = gatedSHA
 		if repo.LandingMode == "local" {
@@ -369,11 +389,14 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 		return prefixFailure(repo.Repo, err)
 	}
 	defer mergeLock.Close()
-	if err := verifyPRTargetIsUpToDate(ctx, member.target.Root, taskTargetBranch(member.project, member.task), repo.GatedSHA, task.Seq); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, repo.Repo, repo.LandingMode, repo.GatedSHA); err != nil {
 		return prefixFailure(repo.Repo, err)
 	}
 	// Recheck the selected evidence immediately before each Member merge effect.
 	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+		return prefixFailure(repo.Repo, err)
+	}
+	if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, repo.Repo, repo.LandingMode, repo.GatedSHA); err != nil {
 		return prefixFailure(repo.Repo, err)
 	}
 	method := defaultValue(cfg.Defaults.MergeMethod, "squash")
@@ -617,14 +640,41 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				err := forgeErr
 				var observation store.PRObservation
 				var checks []failedCheck
+				skipChecks := false
+				if err == nil {
+					headSHA := member.repo.GatedSHA
+					if headSHA == "" && member.task.WorktreePath != "" && target.task.Branch != "" {
+						headSHA, _ = gitOutput(pollCtx, member.task.WorktreePath, "rev-parse", "refs/heads/"+target.task.Branch)
+					}
+					freshness, freshnessErr := inspectPRTargetFreshness(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task), headSHA)
+					if freshnessErr != nil {
+						err = freshnessErr
+					} else if !freshness.Fresh {
+						skipChecks = true
+						err = queuePRTargetSyncInstruction(pollCtx, db, target.task, member.repo.Repo, member.repo.LandingMode, freshness, headSHA)
+					}
+				}
 				if err == nil {
 					if forge.Kind == "gitlab" {
-						observation, checks, err = gitlabObservation(pollCtx, forge, member.task, taskTargetBranch(member.project, member.task), now.UnixMilli())
+						observation, checks, err = gitlabObservationWithChecks(pollCtx, forge, member.task, taskTargetBranch(member.project, member.task), now.UnixMilli(), !skipChecks)
 					} else {
 						var pull *ghPullRequest
-						pull, err = viewMemberPullRequest(pollCtx, member)
+						pull, err = viewMemberPullRequest(pollCtx, member, !skipChecks)
 						if err == nil {
 							observation, checks, err = makePRObservation(project.ID, member.task, pull, now, taskTargetBranch(member.project, member.task))
+						}
+					}
+				}
+				if err == nil && observation.State == "OPEN" {
+					freshness, freshnessErr := inspectPRTargetFreshness(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task), observation.HeadSHA)
+					if freshnessErr != nil {
+						err = freshnessErr
+					} else if !freshness.Fresh {
+						if queueErr := queuePRTargetSyncInstruction(pollCtx, db, target.task, member.repo.Repo, member.repo.LandingMode, freshness, observation.HeadSHA); queueErr != nil {
+							err = queueErr
+						} else {
+							observation.Checks = stalePRChecks()
+							checks = nil
 						}
 					}
 				}
@@ -767,8 +817,12 @@ func settleUnchangedWorkspaceMembers(ctx context.Context, db *store.DB, members 
 
 // viewMemberPullRequest reads one member pull request with `gh pr view`, in the
 // shape the GraphQL watch of a repository Project produces.
-func viewMemberPullRequest(ctx context.Context, member memberLanding) (*ghPullRequest, error) {
-	output, err := commandOutputArgs(ctx, member.target.Root, "gh", "pr", "view", member.repo.PRURL, "--json", "url,state,headRefOid,baseRefName,mergeable,reviewDecision,mergeCommit,statusCheckRollup")
+func viewMemberPullRequest(ctx context.Context, member memberLanding, includeChecks bool) (*ghPullRequest, error) {
+	fields := "url,state,headRefOid,baseRefName,mergeable,reviewDecision,mergeCommit"
+	if includeChecks {
+		fields += ",statusCheckRollup"
+	}
+	output, err := commandOutputArgs(ctx, member.target.Root, "gh", "pr", "view", member.repo.PRURL, "--json", fields)
 	if err != nil {
 		return nil, fmt.Errorf("gh pr view: %w: %s", err, strings.TrimSpace(output))
 	}
@@ -793,9 +847,11 @@ func viewMemberPullRequest(ctx context.Context, member memberLanding) (*ghPullRe
 			OID string `json:"oid"`
 		}{OID: view.MergeCommit.OID}
 	}
-	rollup := &ghStatusCheckRollup{State: rollupState(view.Checks)}
-	rollup.Contexts.Nodes = view.Checks
-	pull.StatusCheckRollup = rollup
+	if includeChecks {
+		rollup := &ghStatusCheckRollup{State: rollupState(view.Checks)}
+		rollup.Contexts.Nodes = view.Checks
+		pull.StatusCheckRollup = rollup
+	}
 	return pull, nil
 }
 

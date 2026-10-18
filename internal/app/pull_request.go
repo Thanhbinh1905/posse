@@ -77,6 +77,7 @@ type prWatchTarget struct {
 	Task       store.Task
 	Repository string
 	Pull       string
+	SkipChecks bool
 }
 
 type failedCheck struct {
@@ -126,6 +127,11 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 		}
 		if task.AutonomyLand != "auto" && userQuote == "" {
 			return axi.Failure("land_approval_required", "pull request merge needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
+		}
+	}
+	if task.State == store.StateLanding && task.GatedSHA != "" {
+		if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, task.GatedSHA); err != nil {
+			return err
 		}
 	}
 	if task.State == store.StateDone {
@@ -195,6 +201,9 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return err
 				}
 			}
+			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, gatedSHA); err != nil {
+				return err
+			}
 			if err := db.SetTaskGatedSHA(ctx, task.ID, gatedSHA); err != nil {
 				return err
 			}
@@ -216,6 +225,12 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return err
 				}
 				return axi.Failure("branch_moved", "Task branch moved while the Gate was running", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
+			}
+			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, gatedSHA); err != nil {
+				if clearErr := db.ClearTaskGatedSHA(ctx, task.ID); clearErr != nil {
+					return errors.Join(err, clearErr)
+				}
+				return err
 			}
 			if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
 				return err
@@ -516,6 +531,9 @@ func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, proj
 	if err != nil {
 		return err
 	}
+	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, gatedSHA); err != nil {
+		return err
+	}
 	if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
 		return err
 	}
@@ -578,15 +596,15 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		}
 		return axi.Failure("branch_moved", "pull request head moved after the Gate passed", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
 	}
-	if err := requireGreenObservation(ctx, db, task); err != nil {
-		return err
-	}
 	mergeLock, err := acquirePRMergeLock(ctx, project.Root)
 	if err != nil {
 		return err
 	}
 	defer mergeLock.Close()
-	if err := verifyPRTargetIsUpToDate(ctx, project.Root, taskTargetBranch(project, task), task.GatedSHA, task.Seq); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, task.GatedSHA); err != nil {
+		return err
+	}
+	if err := requireGreenObservation(ctx, db, task); err != nil {
 		return err
 	}
 	// Recheck under the merge lock: the forge head is pinned by the merge
@@ -612,6 +630,12 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 			returnErr = finishErr
 		}
 	}()
+	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, task.GatedSHA); err != nil {
+		return err
+	}
+	if err := requireGreenObservation(ctx, db, task); err != nil {
+		return err
+	}
 	method := defaultValue(cfg.Defaults.MergeMethod, "squash")
 	if forge.Kind == "gitlab" {
 		number, _ := forgeReference(task.PRURL, forge)
@@ -650,31 +674,6 @@ func acquirePRMergeLock(ctx context.Context, root string) (*os.File, error) {
 		return nil, axi.Failure("pr_merge_busy", "another repository sync or pull request merge is in progress", true, err.Error())
 	}
 	return lock, err
-}
-
-func verifyPRTargetIsUpToDate(ctx context.Context, root, targetBranch, gatedSHA string, taskSeq int) error {
-	targetRef := "refs/remotes/origin/" + targetBranch
-	refspec := "+refs/heads/" + targetBranch + ":" + targetRef
-	output, err := gitFetch(ctx, root, "origin", refspec)
-	if err != nil {
-		details := strings.TrimSpace(output)
-		if details == "" {
-			details = err.Error()
-		}
-		return axi.Failure("target_branch_unavailable", "could not refresh PR target branch "+targetBranch, true, details)
-	}
-	if _, err := gitOutput(ctx, root, "rev-parse", "--verify", targetRef+"^{commit}"); err != nil {
-		return axi.Failure("target_branch_unavailable", "could not inspect PR target branch "+targetBranch, true, err.Error())
-	}
-	if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", targetRef, gatedSHA); err != nil {
-		return axi.Failure(
-			"pr_branch_behind",
-			"pull request branch is behind the latest target branch "+targetBranch,
-			false,
-			"Merge origin/"+targetBranch+" into the Task branch, resolve conflicts, run the Gate again, and report done before retrying `posse land "+taskIDString(taskSeq)+" --merge`; do not rebase a pushed branch",
-		)
-	}
-	return nil
 }
 
 func runOutputStep(ctx context.Context, db *store.DB, intent store.Intent, step, cwd, name string, args ...string) (string, error) {
@@ -894,6 +893,35 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	}
 	targets := make([]prWatchTarget, 0, len(watched))
 	failedTasks := make(map[int64]error)
+	staleBeforeQuery := make(map[int64]bool)
+	for _, task := range watched {
+		headSHA := task.GatedSHA
+		if headSHA == "" && task.WorktreePath != "" && task.Branch != "" {
+			headSHA, _ = gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+		}
+		if headSHA == "" {
+			previous, previousErr := db.LatestPRObservation(ctx, task.ID)
+			if previousErr == nil && previous.PRURL == task.PRURL {
+				headSHA = previous.HeadSHA
+			}
+		}
+		if headSHA == "" {
+			staleBeforeQuery[task.ID] = true
+			continue
+		}
+		freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), headSHA)
+		if freshnessErr != nil {
+			failedTasks[task.ID] = freshnessErr
+			staleBeforeQuery[task.ID] = true
+			continue
+		}
+		if !freshness.Fresh {
+			staleBeforeQuery[task.ID] = true
+			if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.LandingMode, freshness, headSHA); err != nil {
+				return err
+			}
+		}
+	}
 	forge, forgeErr := forgeForRepository(ctx, project.Root, cfg, "")
 	// Forge probe failures are attributed to each watched Task below, rather than
 	// also incrementing the Project-wide failure streak.
@@ -911,7 +939,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		if forge.Kind == "gitlab" {
 			gitlabTargets = append(gitlabTargets, task)
 		} else {
-			targets = append(targets, prWatchTarget{Task: task, Pull: "pr" + strconv.Itoa(task.Seq)})
+			targets = append(targets, prWatchTarget{Task: task, Pull: "pr" + strconv.Itoa(task.Seq), SkipChecks: staleBeforeQuery[task.ID]})
 		}
 	}
 	query, targets := pullRequestGraphQLQuery(targets)
@@ -982,7 +1010,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	gitlabObservations := make(map[int64]store.PRObservation)
 	gitlabFailures := make(map[int64][]failedCheck)
 	for _, task := range gitlabTargets {
-		observation, failures, pollErr := gitlabObservation(ctx, forge, task, taskTargetBranch(project, task), now.UnixMilli())
+		observation, failures, pollErr := gitlabObservationWithChecks(ctx, forge, task, taskTargetBranch(project, task), now.UnixMilli(), !staleBeforeQuery[task.ID])
 		if pollErr != nil {
 			failedTasks[task.ID] = pollErr
 			continue
@@ -1038,6 +1066,22 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 				return recordErr
 			}
 			continue
+		}
+		if observation.State == "OPEN" {
+			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
+			if freshnessErr != nil {
+				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, freshnessErr, now); recordErr != nil {
+					return recordErr
+				}
+				continue
+			}
+			if !freshness.Fresh {
+				if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.LandingMode, freshness, observation.HeadSHA); err != nil {
+					return err
+				}
+				observation.Checks = stalePRChecks()
+				failures = nil
+			}
 		}
 		if observation.State == "MERGED" {
 			verified, verifyErr := db.WasVerifiedPRHead(ctx, task.ID, task.PRURL, observation.HeadSHA)
@@ -1144,7 +1188,8 @@ func reviewPolicyViolation(ctx context.Context, db *store.DB, project store.Proj
 // gh may exit nonzero for a single GraphQL error while still printing usable
 // data for the other aliases. Keep stderr separate so it cannot corrupt JSON.
 func graphQLCommandOutput(ctx context.Context, root, query string) (string, string, error) {
-	commandCtx, cancel := context.WithTimeout(ctx, externalCommandTimeout)
+	timeout := externalCommandTimeoutValue()
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := execgroup.CommandContext(commandCtx, "gh", "api", "graphql", "-f", "query="+query)
 	command.Dir = root
@@ -1154,7 +1199,7 @@ func graphQLCommandOutput(ctx context.Context, root, query string) (string, stri
 	err := command.Run()
 	if commandCtx.Err() != nil {
 		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
-			err = fmt.Errorf("gh timed out after %s: %w", externalCommandTimeout, context.DeadlineExceeded)
+			err = fmt.Errorf("gh timed out after %s: %w", timeout, context.DeadlineExceeded)
 		} else {
 			err = commandCtx.Err()
 		}
@@ -1182,9 +1227,9 @@ func pullRequestGraphQLQuery(targets []prWatchTarget) (string, []prWatchTarget) 
 			groups = append(groups, repository)
 		}
 		targets[index].Repository = repository
-		groupFields[repository] = append(groupFields[repository], fmt.Sprintf(`%s: pullRequest(number: %d) {
-  url state headRefOid baseRefName mergeable reviewDecision mergeCommit { oid }
-  statusCheckRollup {
+		checksField := ""
+		if !targets[index].SkipChecks {
+			checksField = `statusCheckRollup {
     state
     contexts(first: 100) {
       nodes {
@@ -1193,8 +1238,12 @@ func pullRequestGraphQLQuery(targets []prWatchTarget) (string, []prWatchTarget) 
         ... on StatusContext { context state targetUrl }
       }
     }
-  }
-	}`, targets[index].Pull, ref.Number))
+  }`
+		}
+		groupFields[repository] = append(groupFields[repository], fmt.Sprintf(`%s: pullRequest(number: %d) {
+  url state headRefOid baseRefName mergeable reviewDecision mergeCommit { oid }
+  %s
+	}`, targets[index].Pull, ref.Number, checksField))
 	}
 	rootFields := make([]string, 0, len(groups))
 	for _, repository := range groups {
@@ -1355,8 +1404,7 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			addNotice("pr_conflict", task.Title+": pull request conflicts with the Task's frozen target branch", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 		ready := checks.State == "SUCCESS" && current.Review != "CHANGES_REQUESTED" && current.Review != "REVIEW_REQUIRED" && current.Mergeable == "MERGEABLE"
-		previousReady := hasPrevious && previous.State == "OPEN" && previous.HeadSHA == current.HeadSHA && previousChecks.State == "SUCCESS" && previous.Review != "CHANGES_REQUESTED" && previous.Review != "REVIEW_REQUIRED" && previous.Mergeable == "MERGEABLE"
-		if ready && !previousReady && (task.State == store.StateDone || task.State == store.StateLanding) {
+		if ready && (task.State == store.StateDone || task.State == store.StateLanding) {
 			addNotice("land_ready", task.Title+": pull request checks and reviews are ready to merge", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	}

@@ -40,8 +40,11 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 				if err := f.db.RecordCheckoutAttempt(context.Background(), f.project.ID, time.Now().UnixMilli()); err != nil {
 					t.Fatalf("defer background checkout sync: %v", err)
 				}
+				// Stop the poll-only Lookout before checking lock availability; it
+				// can race the synthetic fresh checkout and reacquire sync afterward.
+				stopBackgroundLookout(t, f)
 				// Let any sync already in progress finish before holding only the
-				// fetch lock. The fresh checkout timestamp keeps the Lookout idle.
+				// fetch lock; a one-time free-lock check cannot prevent a new poll.
 				syncLock := filepath.Join(f.repo, ".git", "posse-sync.lock")
 				deadline := time.Now().Add(5 * time.Second)
 				for {

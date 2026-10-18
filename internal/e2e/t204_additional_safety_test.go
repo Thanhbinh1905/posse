@@ -350,7 +350,9 @@ func TestRiderMappingIsStoppedBeforeRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	injection := "setsid python3 \"$POSSE_TEST_ROOT/map-cache.py\" \"$TMPDIR/mapped-cache\" \"$POSSE_TEST_ROOT\" \"$POSSE_TEST_ROOT/mapped-ready\" </dev/null >/dev/null 2>&1 &\n    echo $! > \"$POSSE_TEST_ROOT/mapped-pid\"\n    printf 'worker change %s\\n'"
+	// Keep the mapped helper a direct Rider child; setsid may fork and sever
+	// the process ancestry Teardown retains to authorize cleanup.
+	injection := "python3 \"$POSSE_TEST_ROOT/map-cache.py\" \"$TMPDIR/mapped-cache\" \"$POSSE_TEST_ROOT\" \"$POSSE_TEST_ROOT/mapped-ready\" </dev/null >/dev/null 2>&1 &\n    echo $! > \"$POSSE_TEST_ROOT/mapped-pid\"\n    printf 'worker change %s\\n'"
 	updated := strings.Replace(string(agent), "printf 'worker change %s\\n'", injection, 1)
 	if updated == string(agent) {
 		t.Fatal("Rider mapping injection did not match fixture agent")

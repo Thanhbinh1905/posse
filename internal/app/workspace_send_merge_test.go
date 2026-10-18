@@ -12,7 +12,7 @@ import (
 )
 
 func TestWorkspaceSendRefreshesMergedMemberBeforePromptingRider(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
+	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n[repositories.worker]\nforge = \"github\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
 	bin := filepath.Join(f.root, "bin")
 	_ = os.MkdirAll(bin, 0o700)
 	viewPath := filepath.Join(f.root, "gh-view.json")
@@ -21,7 +21,11 @@ func TestWorkspaceSendRefreshesMergedMemberBeforePromptingRider(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("POSSE_TEST_GH_VIEW", viewPath)
-	gitTest(t, filepath.Join(f.workspace, "worker"), "remote", "set-url", "origin", "https://github.com/acme/worker.git")
+	worker := filepath.Join(f.workspace, "worker")
+	remote := filepath.Join(f.root, "remotes", "worker.git")
+	gitTest(t, worker, "remote", "set-url", "origin", "https://github.com/acme/worker.git")
+	gitTest(t, worker, "config", "remote.origin.pushurl", remote)
+	gitTest(t, worker, "config", "url.file://"+remote+".insteadOf", "https://github.com/acme/worker.git")
 	head := strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD"))
 	url := "https://github.com/acme/worker/pull/7"
 	repo := f.repos()["worker"]
