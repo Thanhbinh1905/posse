@@ -125,7 +125,7 @@ gate = []                    # local and pr: commands run in the worktree before
 enabled = true
 max_rounds = 3               # 1..3; the Brief may only lower this cap
 block_at = "P1"              # P0 | P1 | P2
-auto_start = true            # admit a Review Round when its Gate passes
+auto_start = true            # admit after Gate when an eligible reviewer Profile resolves
 docs = false                 # include documentation gaps in the review rubric
 guidance = []                # repository paths supplied from the frozen target
 
@@ -1007,7 +1007,7 @@ Status: Config and plan freezing are implemented. The interim refusal and deprec
 enabled = true               # false: Review Tasks behave as before this section
 max_rounds = 3               # 1..3; values above 3 are refused (`config_invalid`)
 block_at = "P1"              # P0 | P1 | P2: introduced findings at or above this severity block
-auto_start = true            # admit the next round when a Gate passes on a new head
+auto_start = true            # admit after Gate when an eligible reviewer Profile resolves
 docs = false                 # add documentation gaps (docs-* patterns, default P2) to the rubric
 guidance = []                # repository paths read from origin/<target> and given to Reviewers
 
@@ -1025,7 +1025,7 @@ The flow after a loop-enabled Ship Task signals done:
 
 1. Freshness: a head that lacks the frozen target tip gets the existing merge instruction (section 14, ADR 0019).
 2. Gate: `posse land` runs the Gates at the head; a failure starts a Gate Fix Round (25.12).
-3. Review: with `auto_start`, Posse admits the next round on the gated head; otherwise the Lead runs `posse review start`.
+3. Review: with `auto_start`, Posse admits the next round on the gated head when an eligible reviewer Profile resolves. If none resolves, it records one readiness Notice and does not fail auto-start; explicit `posse review start` still reports the Profile or identity error. With auto-start disabled, the Lead runs `posse review start`.
 4. CI: the PR watch runs in parallel with review; failures start CI Fix Rounds (25.13).
 5. Land: the selected evidence, a green observation and the current target at one head (D03), and no blocking finding (25.7).
 

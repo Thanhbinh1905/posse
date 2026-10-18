@@ -98,6 +98,84 @@ func TestVoidValidationRoundNumberCanBeReused(t *testing.T) {
 	}
 }
 
+func TestReviewRoundAdmissionGuardsAndVoids(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	create := func(branch, name string, admission ReviewRoundAdmission) (int64, error) {
+		shipTask := f.task(t, f.ship)
+		returnID, _, err := f.db.CreateReviewRoundTaskWithSequenceAndIntent(f.ctx, shipTask.ProjectID, "shop", Task{
+			Type: "review", ReviewsTaskID: f.ship, Title: name, ShortName: name, LandingMode: "local", Branch: branch,
+			ReviewTargets: []ReviewTarget{{Repository: "shop", Commit: admission.Bindings[0].HeadSHA}},
+		}, "ride", 1, admission, func(int) (bool, error) { return false, nil })
+		return returnID, err
+	}
+	admission := func(round int, head string, maxRounds int) ReviewRoundAdmission {
+		return ReviewRoundAdmission{ShipTaskID: f.ship, Round: round, MaxRounds: maxRounds, Bindings: []ReviewRound{{
+			ShipTaskID: f.ship, Round: round, Repository: "shop", ScopeKind: "full", ScopeBaseSHA: reviewShaA,
+			HeadSHA: head, TargetCommitSHA: reviewShaA, BaselineTree: reviewShaA, DeltaSHA256: reportHash,
+			ConflictedPaths: "[]", Status: "admitted",
+		}}}
+	}
+	firstID, err := create("posse/t3", "round-one", admission(1, reviewShaA, 1))
+	if err != nil {
+		t.Fatalf("admit first round: %v", err)
+	}
+	if _, err := create("posse/t4", "active-retry", admission(1, reviewShaB, 1)); !errors.Is(err, ErrReviewRoundActive) {
+		t.Fatalf("active round error = %v", err)
+	}
+	if err := f.db.Transition(f.ctx, firstID, StateSpawning, StateFailed, "cli", "failed before verdict"); err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := create("posse/t4", "round-one-retry", admission(1, reviewShaB, 1))
+	if err != nil {
+		t.Fatalf("admit reused void round number: %v", err)
+	}
+	rounds, err := f.db.ReviewRoundsFor(f.ctx, f.ship)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[0].Round != 1 || rounds[0].Status != "void" || rounds[1].Round != 1 || rounds[1].Status != "admitted" || rounds[1].ReviewTaskID != secondID {
+		t.Fatalf("round history after void retry = %#v", rounds)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE review_rounds SET status='verdict',verdict='pass' WHERE review_task_id=?`, secondID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := create("posse/t5", "unchanged", admission(2, reviewShaB, 1)); !errors.Is(err, ErrReviewRoundUnchanged) {
+		t.Fatalf("unchanged head error = %v", err)
+	}
+	if _, err := create("posse/t5", "cap", admission(2, strings.Repeat("c", 40), 1)); !errors.Is(err, ErrReviewRoundCap) {
+		t.Fatalf("cap error = %v", err)
+	}
+}
+
+func TestReviewRoundAdmissionAllowsPartialWorkspaceDelta(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}, {Repository: "api", Commit: reviewShaB}})
+	for _, row := range []struct {
+		repository string
+		head       string
+	}{{"shop", reviewShaA}, {"api", reviewShaB}} {
+		if _, err := f.db.ExecContext(f.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,?, 'full',?,?,?,?,?,'[]','verdict','pass',10)`,
+			f.ship, f.review, row.repository, reviewShaA, row.head, reviewShaA, row.head, reportHash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admission := ReviewRoundAdmission{ShipTaskID: f.ship, Round: 2, MaxRounds: 2, Bindings: []ReviewRound{
+		{ShipTaskID: f.ship, Round: 2, Repository: "shop", ScopeKind: "delta", ScopeBaseSHA: reviewShaA, HeadSHA: reviewShaA, TargetCommitSHA: reviewShaA, BaselineTree: reviewShaA, DeltaSHA256: reportHash, ConflictedPaths: "[]", Status: "admitted"},
+		{ShipTaskID: f.ship, Round: 2, Repository: "api", ScopeKind: "delta", ScopeBaseSHA: reviewShaB, HeadSHA: strings.Repeat("c", 40), TargetCommitSHA: reviewShaA, BaselineTree: reviewShaB, DeltaSHA256: reportHash, ConflictedPaths: "[]", Status: "admitted"},
+	}}
+	ship := f.task(t, f.ship)
+	_, _, err := f.db.CreateReviewRoundTaskWithSequenceAndIntent(f.ctx, ship.ProjectID, "shop", Task{
+		Type: "review", ReviewsTaskID: f.ship, Title: "partial workspace delta", ShortName: "partial-delta", LandingMode: "local", Branch: "posse/t3",
+		ReviewTargets: []ReviewTarget{{Repository: "shop", Commit: reviewShaA}, {Repository: "api", Commit: strings.Repeat("c", 40)}},
+	}, "ride", 1, admission, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatalf("admit a round with one changed Member: %v", err)
+	}
+	rounds, err := f.db.ReviewRoundsFor(f.ctx, f.ship)
+	if err != nil || len(rounds) != 4 {
+		t.Fatalf("partial workspace round rows = %#v, %v", rounds, err)
+	}
+}
+
 func insertValidationStateFixture(t *testing.T, f reviewVerdictFixture) {
 	t.Helper()
 	statements := []struct {
