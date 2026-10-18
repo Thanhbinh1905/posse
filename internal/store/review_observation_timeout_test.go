@@ -35,7 +35,7 @@ func TestReviewObservationTimeoutRestoredAfterContention(t *testing.T) {
 	writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	started := time.Now()
-	err = db.UpdateProjectObservation(writeCtx, project.ID, "w1:p1", "w1", 0)
+	err = db.UpdateProjectObservation(writeCtx, project, "w1:p1", "w1", 0)
 	elapsed := time.Since(started)
 	if !IsBusy(err) || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("observation error=%v, want typed busy without deadline", err)
@@ -53,7 +53,7 @@ func TestReviewObservationTimeoutRestoredAfterContention(t *testing.T) {
 	if err := writer.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateProjectObservation(ctx, project.ID, "w1:p1", "w1", 0); err != nil {
+	if err := db.UpdateProjectObservation(ctx, project, "w1:p1", "w1", 0); err != nil {
 		t.Fatalf("observation did not recover after writer release: %v", err)
 	}
 	t.Logf("contended observation waited %s, restored busy_timeout=%d, subsequent write succeeded", elapsed, restored)

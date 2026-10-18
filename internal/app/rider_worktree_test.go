@@ -123,6 +123,10 @@ func TestPartlyRecoveredGroupStillNeedsRecovery(t *testing.T) {
 	if !riderGroupClosed(adapter.snapshot, project, []store.Task{{ID: 1}}) {
 		t.Fatal("partial Lead workspace hid an incomplete recovery")
 	}
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "w1:p1", WorkspaceID: project.HerdrWorkspaceID, Label: "posse:shop:lead", Agent: "claude", AgentStatus: "working"})
+	if riderGroupClosed(adapter.snapshot, project, []store.Task{{ID: 1}}) {
+		t.Fatal("live Lead was treated as a closed group before its identity was persisted")
+	}
 	adapter.snapshot.Panes = nil // The last Rider failed while the group was closed.
 	adapter.snapshot.Workspaces = nil
 	if !riderGroupClosed(adapter.snapshot, project, nil) {
