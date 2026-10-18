@@ -1,0 +1,253 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+)
+
+// ReviewRound binds one repository in a Review Task to an exact Ship head.
+type ReviewRound struct {
+	ShipTaskID      int64  `toml:"ship_task_id"`
+	Round           int    `toml:"round"`
+	ReviewTaskID    int64  `toml:"review_task_id"`
+	Repository      string `toml:"repository"`
+	ScopeKind       string `toml:"scope_kind"`
+	ScopeBaseSHA    string `toml:"scope_base_sha"`
+	HeadSHA         string `toml:"head_sha"`
+	TargetCommitSHA string `toml:"target_commit_sha"`
+	BaselineTree    string `toml:"baseline_tree"`
+	DeltaSHA256     string `toml:"delta_sha256"`
+	ConflictedPaths string `toml:"conflicted_paths_json"`
+	Status          string `toml:"status"`
+	Verdict         string `toml:"verdict"`
+	CreatedAt       int64  `toml:"created_at"`
+}
+
+// ReviewPattern groups findings that share one root cause or violated rule.
+type ReviewPattern struct {
+	ID           int64  `toml:"id"`
+	ShipTaskID   int64  `toml:"ship_task_id"`
+	Seq          int    `toml:"seq"`
+	Key          string `toml:"key"`
+	Title        string `toml:"title"`
+	Rule         string `toml:"rule"`
+	RootCause    string `toml:"root_cause"`
+	FixGuidance  string `toml:"fix_guidance"`
+	MergedInto   int64  `toml:"merged_into"`
+	CreatedRound int    `toml:"created_round"`
+}
+
+// ReviewFinding is one stable, anchored instance in a Ship Task's ledger.
+type ReviewFinding struct {
+	ID            int64  `toml:"id"`
+	ShipTaskID    int64  `toml:"ship_task_id"`
+	Seq           int    `toml:"seq"`
+	PatternID     int64  `toml:"pattern_id"`
+	Fingerprint   string `toml:"fingerprint"`
+	Round         int    `toml:"round"`
+	Repository    string `toml:"repository"`
+	Path          string `toml:"path"`
+	Symbol        string `toml:"symbol"`
+	Excerpt       string `toml:"excerpt"`
+	LineAtReport  int    `toml:"line_at_report"`
+	HeadSHA       string `toml:"head_sha"`
+	Severity      string `toml:"severity"`
+	Origin        string `toml:"origin"`
+	InScope       bool   `toml:"in_scope"`
+	State         string `toml:"state"`
+	FollowUpURL   string `toml:"follow_up_url"`
+	InheritedFrom int64  `toml:"inherited_from"`
+}
+
+// ReviewFindingEvent is an append-only ledger event for a finding.
+type ReviewFindingEvent struct {
+	ID        int64  `toml:"id"`
+	FindingID int64  `toml:"finding_id"`
+	Round     int    `toml:"round"`
+	Event     string `toml:"event"`
+	Actor     string `toml:"actor"`
+	Note      string `toml:"note"`
+	UserQuote string `toml:"user_quote"`
+	At        int64  `toml:"at"`
+}
+
+// ReviewCarry records proof that a clean target merge preserves a passed tree.
+type ReviewCarry struct {
+	ShipTaskID      int64  `toml:"ship_task_id"`
+	Repository      string `toml:"repository"`
+	FromHead        string `toml:"from_head"`
+	ToHead          string `toml:"to_head"`
+	TargetCommitSHA string `toml:"target_commit_sha"`
+	Tree            string `toml:"tree"`
+	CreatedAt       int64  `toml:"created_at"`
+}
+
+// ReviewDisposition records a risk decision against one exact Ship head.
+type ReviewDisposition struct {
+	ID         int64  `toml:"id"`
+	ShipTaskID int64  `toml:"ship_task_id"`
+	HeadSHA    string `toml:"head_sha"`
+	DecisionID int64  `toml:"decision_id"`
+	UserQuote  string `toml:"user_quote"`
+	At         int64  `toml:"at"`
+}
+
+// ValidationFixRound records one queued automatic validation instruction.
+type ValidationFixRound struct {
+	ID               int64  `toml:"id"`
+	ShipTaskID       int64  `toml:"ship_task_id"`
+	Kind             string `toml:"kind"`
+	Seq              int    `toml:"seq"`
+	ExpectedBaseHead string `toml:"expected_base_head"`
+	DedupeKey        string `toml:"dedupe_key"`
+	MessageID        int64  `toml:"message_id"`
+	CreatedAt        int64  `toml:"created_at"`
+}
+
+type validationStateSnapshot struct {
+	ReviewRounds        []ReviewRound
+	ReviewPatterns      []ReviewPattern
+	ReviewFindings      []ReviewFinding
+	ReviewFindingEvents []ReviewFindingEvent
+	ReviewCarries       []ReviewCarry
+	ReviewDispositions  []ReviewDisposition
+	ValidationFixRounds []ValidationFixRound
+}
+
+func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validationStateSnapshot, error) {
+	var state validationStateSnapshot
+	rows, err := db.QueryContext(ctx, `SELECT ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at FROM review_rounds WHERE ship_task_id=? ORDER BY round,repository,review_task_id`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ReviewRound
+		var verdict sql.NullString
+		if err := rows.Scan(&value.ShipTaskID, &value.Round, &value.ReviewTaskID, &value.Repository, &value.ScopeKind, &value.ScopeBaseSHA, &value.HeadSHA, &value.TargetCommitSHA, &value.BaselineTree, &value.DeltaSHA256, &value.ConflictedPaths, &value.Status, &verdict, &value.CreatedAt); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		value.Verdict = verdict.String
+		state.ReviewRounds = append(state.ReviewRounds, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,seq,key,title,rule,root_cause,fix_guidance,merged_into,created_round FROM review_patterns WHERE ship_task_id=? ORDER BY seq`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ReviewPattern
+		var mergedInto sql.NullInt64
+		if err := rows.Scan(&value.ID, &value.ShipTaskID, &value.Seq, &value.Key, &value.Title, &value.Rule, &value.RootCause, &value.FixGuidance, &mergedInto, &value.CreatedRound); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		value.MergedInto = mergedInto.Int64
+		state.ReviewPatterns = append(state.ReviewPatterns, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state,follow_up_url,inherited_from FROM review_findings WHERE ship_task_id=? ORDER BY seq`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ReviewFinding
+		var inScope int
+		var inheritedFrom sql.NullInt64
+		if err := rows.Scan(&value.ID, &value.ShipTaskID, &value.Seq, &value.PatternID, &value.Fingerprint, &value.Round, &value.Repository, &value.Path, &value.Symbol, &value.Excerpt, &value.LineAtReport, &value.HeadSHA, &value.Severity, &value.Origin, &inScope, &value.State, &value.FollowUpURL, &inheritedFrom); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		value.InScope = inScope == 1
+		value.InheritedFrom = inheritedFrom.Int64
+		state.ReviewFindings = append(state.ReviewFindings, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT e.id,e.finding_id,e.round,e.event,e.actor,e.note,e.user_quote,e.at FROM review_finding_events e JOIN review_findings f ON f.id=e.finding_id WHERE f.ship_task_id=? ORDER BY e.id`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ReviewFindingEvent
+		if err := rows.Scan(&value.ID, &value.FindingID, &value.Round, &value.Event, &value.Actor, &value.Note, &value.UserQuote, &value.At); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		state.ReviewFindingEvents = append(state.ReviewFindingEvents, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT ship_task_id,repository,from_head,to_head,target_commit_sha,tree,created_at FROM review_carries WHERE ship_task_id=? ORDER BY repository,from_head,to_head`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ReviewCarry
+		if err := rows.Scan(&value.ShipTaskID, &value.Repository, &value.FromHead, &value.ToHead, &value.TargetCommitSHA, &value.Tree, &value.CreatedAt); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		state.ReviewCarries = append(state.ReviewCarries, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,head_sha,decision_id,user_quote,at FROM review_dispositions WHERE ship_task_id=? ORDER BY id`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ReviewDisposition
+		var decisionID sql.NullInt64
+		if err := rows.Scan(&value.ID, &value.ShipTaskID, &value.HeadSHA, &decisionID, &value.UserQuote, &value.At); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		value.DecisionID = decisionID.Int64
+		state.ReviewDispositions = append(state.ReviewDispositions, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at FROM validation_fix_rounds WHERE ship_task_id=? ORDER BY kind,seq`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ValidationFixRound
+		if err := rows.Scan(&value.ID, &value.ShipTaskID, &value.Kind, &value.Seq, &value.ExpectedBaseHead, &value.DedupeKey, &value.MessageID, &value.CreatedAt); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		state.ValidationFixRounds = append(state.ValidationFixRounds, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+	return state, nil
+}
+
+func closeSnapshotRows(rows *sql.Rows) error {
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close validation snapshot rows: %w", err)
+	}
+	return nil
+}
