@@ -557,6 +557,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		target      pollTarget
 		observation store.PRObservation
 		checks      []failedCheck
+		forge       repositoryForge
 		err         error
 	}
 	type memberGroup struct {
@@ -678,7 +679,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 						}
 					}
 				}
-				results <- pollResult{target: target, observation: observation, checks: checks, err: err}
+				results <- pollResult{target: target, observation: observation, checks: checks, forge: forge, err: err}
 			}
 		}()
 	}
@@ -742,6 +743,13 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			processingErr = err
 			cancelPoll()
 			continue
+		}
+		if observation.State == "OPEN" {
+			if err := s.processCIObservation(ctx, db, project, member.task, observation, result.checks, result.forge, member.repo.Repo); err != nil {
+				processingErr = err
+				cancelPoll()
+				continue
+			}
 		}
 		if observation.State == "MERGED" {
 			mergedTargets = append(mergedTargets, result.target)
