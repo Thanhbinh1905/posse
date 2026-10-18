@@ -58,6 +58,22 @@ _Avoid_: Code review, audit
 The typed outcome (`pass`, `changes_requested` or `inconclusive`) of a Review Task, bound by Posse to the exact Ship revision it examined. Only a current `pass` satisfies local review.
 _Avoid_: Approval, review result
 
+**Review Loop**:
+The optional built-in protocol that turns successive Review Tasks of one Ship Task into at most three Review Rounds over a Finding Ledger.
+_Avoid_: Review pipeline, review cycle
+
+**Review Round**:
+One Review Task in a Review Loop that records a verdict for one exact Ship head; round 1 reviews the full candidate and later rounds only the author changes since the last reviewed head.
+_Avoid_: Pass, iteration, rereview
+
+**Finding Pattern**:
+A group of findings that share one root cause or violated rule, fixed together in one fix round.
+_Avoid_: Category, file group
+
+**Finding Ledger**:
+The durable record of every finding a Ship Task's Review Rounds raised, keyed by stable fingerprints, so no finding is reported twice.
+_Avoid_: Findings list, issue log
+
 **Report**:
 The standalone written findings a Scout Task leaves behind, preserved with its attachments as an immutable, digested Report Bundle after Teardown.
 _Avoid_: Summary, output
