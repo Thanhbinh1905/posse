@@ -66,30 +66,37 @@ jobs:
           done
           rm -rf -- "$GOCACHE" "$GOMODCACHE"
 
-  test:
+  test-shard:
+    name: test shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
       - name: Use job-local Go caches
         run: |
-          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test" >> "$GITHUB_ENV"
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test-${{ matrix.shard }}" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test-${{ matrix.shard }}" >> "$GITHUB_ENV"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
-      - name: Run race-enabled tests
-        run: |
-          export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-test-"
-          # The race-enabled app suite took about 28 minutes under two Go CPUs in a full local run.
-          # Allow seven minutes of runner variance above that measured duration.
-          go test -race -count=1 -timeout=35m ./...
-      - name: Clean test temporary roots
+      - name: Check race shard assignments
+        if: ${{ matrix.shard == 1 }}
+        run: scripts/run-race-shard.sh --self-test
+      - name: Run race-enabled test shard
+        env:
+          POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-test-${{ matrix.shard }}-
+        run: scripts/run-race-shard.sh "${{ matrix.shard }}"
+      - name: Clean test temporary roots and caches
         if: ${{ always() }}
         run: |
-          for root in /tmp/posse-e2e-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"-test-*; do
+          prefix="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-test-${{ matrix.shard }}-"
+          for root in /tmp/"$prefix"*; do
             [ -d "$root" ] || continue
             find "$root" -type d -exec chmod u+rwx {} +
             rm -rf -- "$root"
@@ -100,16 +107,36 @@ jobs:
           done
           rm -rf -- "$GOCACHE" "$GOMODCACHE"
 
-  e2e:
+  test:
+    if: ${{ always() }}
+    needs: [test-shard]
     runs-on: ubuntu-latest
+    steps:
+      - name: Preserve the required test check
+        env:
+          SHARDS_RESULT: ${{ needs.test-shard.result }}
+        run: |
+          if [ "$SHARDS_RESULT" != success ]; then
+            echo "Race test shard matrix result: $SHARDS_RESULT"
+            exit 1
+          fi
+          echo "All race-enabled test shards passed."
+
+  e2e-shard:
+    name: e2e shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
       - name: Use job-local Go caches
         run: |
-          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e" >> "$GITHUB_ENV"
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-${{ matrix.shard }}" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-${{ matrix.shard }}" >> "$GITHUB_ENV"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
@@ -128,16 +155,22 @@ jobs:
           chmod 755 "$herdr"
           echo "$tool_dir" >> "$GITHUB_PATH"
           "$herdr" --version
-      - name: Run first isolated Herdr end-to-end suite
+      - name: Check E2E shard assignments
+        if: ${{ matrix.shard == 1 }}
+        run: scripts/run-e2e-shard.sh --self-test
+      - name: Run first isolated Herdr end-to-end shard
+        env:
+          POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-
+        run: scripts/run-e2e-shard.sh "${{ matrix.shard }}"
+      - name: Check command CPU budgets without the race detector
+        if: ${{ matrix.shard == 1 }}
+        env:
+          POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-perf-
+        run: go test -tags='e2e perf' -count=1 ./internal/e2e -run '^TestCommandPerformanceBudgets$'
+      - name: Clean first-pass Herdr processes, fixtures and caches
+        if: ${{ always() }}
         run: |
-          export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass1-"
-          scripts/run-e2e-shard.sh --self-test
-          for shard in 1 2 3 4; do
-            scripts/run-e2e-shard.sh "$shard"
-          done
-      - name: Clean first-pass Herdr processes and fixtures
-        run: |
-          prefix="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass1-"
+          prefix="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass1-shard-${{ matrix.shard }}-"
           for process in /proc/[0-9]*; do
             [ -r "$process/environ" ] || continue
             if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Fxq 'POSSE_TEST_HERDR=1'; then
@@ -156,12 +189,131 @@ jobs:
             find "$root" -type d -exec chmod u+rwx {} +
             rm -rf -- "$root"
           done
+          rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          for cache in "$GOCACHE" "$GOMODCACHE"; do
+            [ -d "$cache" ] || continue
+            find "$cache" -type d -exec chmod u+w {} +
+          done
+          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+
+  e2e:
+    if: ${{ always() }}
+    needs: [e2e-shard]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve the required e2e check
+        env:
+          SHARDS_RESULT: ${{ needs.e2e-shard.result }}
+        run: |
+          if [ "$SHARDS_RESULT" != success ]; then
+            echo "E2E shard matrix result: $SHARDS_RESULT"
+            exit 1
+          fi
+          echo "All E2E shards passed."
+
+  e2e-main-duplicate:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    name: e2e main duplicate shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use job-local Go caches
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-duplicate-${{ matrix.shard }}" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-duplicate-${{ matrix.shard }}" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install pinned Herdr release
+        run: |
+          tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/herdr"
+          mkdir -p "$tool_dir"
+          herdr="$tool_dir/herdr"
+          curl -fsSL \
+            https://github.com/herdrdev/herdr/releases/download/v0.9.1/herdr-linux-x86_64 \
+            -o "$herdr"
+          printf '%s  %s\n' \
+            2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7 \
+            "$herdr" | sha256sum --check --status
+          chmod 755 "$herdr"
+          echo "$tool_dir" >> "$GITHUB_PATH"
+          "$herdr" --version
+      - name: Run duplicate isolated Herdr E2E shard
+        env:
+          POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass2-shard-${{ matrix.shard }}-
+        run: scripts/run-e2e-shard.sh "${{ matrix.shard }}"
+      - name: Clean duplicate-pass Herdr processes, fixtures and caches
+        if: ${{ always() }}
+        run: |
+          prefix="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass2-shard-${{ matrix.shard }}-"
+          for process in /proc/[0-9]*; do
+            [ -r "$process/environ" ] || continue
+            if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Fxq 'POSSE_TEST_HERDR=1'; then
+              continue
+            fi
+            if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Eq "^XDG_CONFIG_HOME=/tmp/${prefix}[^/]*/xdg$"; then
+              continue
+            fi
+            command_line=$(tr '\0' ' ' < "$process/cmdline" 2>/dev/null || true)
+            case "$command_line" in
+              *herdr*server*) kill "${process##*/}" 2>/dev/null || true ;;
+            esac
+          done
+          for root in /tmp/"$prefix"* /var/tmp/"$prefix"installed-*; do
+            [ -d "$root" ] || continue
+            find "$root" -type d -exec chmod u+rwx {} +
+            rm -rf -- "$root"
+          done
+          rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          for cache in "$GOCACHE" "$GOMODCACHE"; do
+            [ -d "$cache" ] || continue
+            find "$cache" -type d -exec chmod u+w {} +
+          done
+          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+
+  e2e-main-stress:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use job-local Go caches
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-stress" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-stress" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install pinned Herdr release
+        run: |
+          tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/herdr"
+          mkdir -p "$tool_dir"
+          herdr="$tool_dir/herdr"
+          curl -fsSL \
+            https://github.com/herdrdev/herdr/releases/download/v0.9.1/herdr-linux-x86_64 \
+            -o "$herdr"
+          printf '%s  %s\n' \
+            2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7 \
+            "$herdr" | sha256sum --check --status
+          chmod 755 "$herdr"
+          echo "$tool_dir" >> "$GITHUB_PATH"
+          "$herdr" --version
       - name: Run stopped Rider relaunch stress regression
         env:
           POSSE_E2E_RELAUNCH_STRESS: "1"
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-relaunch-stress-
         run: go test -tags=e2e -count=1 -timeout=9m ./internal/e2e -run '^TestStoppedRiderPaneCanBeRelaunched$'
-      - name: Clean stopped Rider stress test fixtures
+      - name: Clean stopped Rider stress fixtures and caches
         if: ${{ always() }}
         run: |
           prefix="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-relaunch-stress-"
@@ -183,36 +335,7 @@ jobs:
             find "$root" -type d -exec chmod u+rwx {} +
             rm -rf -- "$root"
           done
-      - name: Run second isolated Herdr end-to-end suite
-        run: |
-          export POSSE_E2E_TMP_PREFIX="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pass2-"
-          for shard in 1 2 3 4; do
-            scripts/run-e2e-shard.sh "$shard"
-          done
-      - name: Check command CPU budgets without the race detector
-        run: go test -tags='e2e perf' -count=1 ./internal/e2e -run '^TestCommandPerformanceBudgets$'
-      - name: Clean isolated E2E processes and state
-        if: ${{ always() }}
-        run: |
-          for process in /proc/[0-9]*; do
-            [ -r "$process/environ" ] || continue
-            if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Fxq 'POSSE_TEST_HERDR=1'; then
-              continue
-            fi
-            if ! tr '\0' '\n' < "$process/environ" 2>/dev/null | grep -Eq "^XDG_CONFIG_HOME=/tmp/posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-[^/]*/xdg$"; then
-              continue
-            fi
-            command_line=$(tr '\0' ' ' < "$process/cmdline" 2>/dev/null || true)
-            case "$command_line" in
-              *herdr*server*) kill "${process##*/}" 2>/dev/null || true ;;
-            esac
-          done
-          for root in /tmp/posse-e2e-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"-* /var/tmp/posse-e2e-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"-installed-*; do
-            [ -d "$root" ] || continue
-            find "$root" -type d -exec chmod u+rwx {} +
-            rm -rf -- "$root"
-          done
-          rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e"
+          rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
           for cache in "$GOCACHE" "$GOMODCACHE"; do
             [ -d "$cache" ] || continue
             find "$cache" -type d -exec chmod u+w {} +
