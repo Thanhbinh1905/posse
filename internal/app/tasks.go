@@ -1239,6 +1239,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			if err := validateShipSignal(ctx.Context, task); err != nil {
 				return axi.Failure("signal_invalid", err.Error(), false, "Commit the change and leave the worktree clean before signalling done")
 			}
+			if !project.IsWorkspace() {
+				if _, err := s.checkedValidationContinuity(ctx.Context, db, project, task); err != nil {
+					return err
+				}
+			}
 			if (task.LandingMode == "no-mistakes" || task.LandingMode == "pr") && parsed.Flags["pr"] == "" {
 				return axi.Failure("signal_invalid", "a PR-mode Ship Task requires --pr <url>", false)
 			}
@@ -1389,7 +1394,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		verdict = &store.ReviewVerdictInput{Verdict: verdictFlag, ReportSHA256: digest}
 	}
-	state, err := db.RecordWorkerSignalWithVerdict(ctx.Context, task, verb, note, data, noticeKind, verdict)
+	state, err := s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, inPlace)
 	if err != nil {
 		if errors.Is(err, store.ErrTaskMergeInProgress) {
 			return axi.Failure("merge_in_progress", "cannot reopen the Task because its Land merge has started or is in progress", false, "Wait for the Lead to resolve the merge outcome before retrying the Signal")

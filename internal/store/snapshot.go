@@ -489,7 +489,7 @@ func (db *DB) BackupDaily(now time.Time) error {
 	} else if err != nil {
 		return err
 	}
-	entries, err := filepath.Glob(filepath.Join(directory, "posse-*.db"))
+	entries, err := filepath.Glob(filepath.Join(directory, "posse-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].db"))
 	if err != nil {
 		return err
 	}

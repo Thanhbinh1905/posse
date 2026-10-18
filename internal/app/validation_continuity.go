@@ -1,0 +1,80 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/store"
+)
+
+func (s *Service) recordWorkerSignalWithContinuity(
+	ctx context.Context,
+	db *store.DB,
+	project store.Project,
+	task store.Task,
+	verb, note string,
+	data any,
+	noticeKind string,
+	verdict *store.ReviewVerdictInput,
+	inPlace bool,
+) (store.State, error) {
+	if verb != "done" || task.Type != "ship" || inPlace || project.IsWorkspace() {
+		return db.RecordWorkerSignalWithVerdict(ctx, task, verb, note, data, noticeKind, verdict)
+	}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		validation, err := s.checkedValidationContinuity(ctx, db, project, task)
+		if err != nil {
+			return "", err
+		}
+		state, err := db.RecordWorkerSignalWithValidation(ctx, task, verb, note, data, noticeKind, validation)
+		if !errors.Is(err, store.ErrValidationHeadsChanged) {
+			return state, err
+		}
+	}
+	return "", axi.Failure(
+		"head_discontinuity",
+		"automatic validation instructions changed repeatedly while recording the done Signal",
+		true,
+		"Retry `posse holler done` after the validation instructions settle",
+	)
+}
+
+func (s *Service) checkedValidationContinuity(ctx context.Context, db *store.DB, project store.Project, task store.Task) (store.ValidationContinuitySnapshot, error) {
+	validation, err := db.ValidationContinuitySnapshot(ctx, task.ID)
+	if err != nil {
+		return validation, err
+	}
+	actualHead, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		return validation, err
+	}
+	for _, expectedHead := range validation.Heads {
+		if _, err := gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", expectedHead, actualHead); err != nil {
+			return validation, recordHeadDiscontinuity(ctx, db, project, task, expectedHead, actualHead)
+		}
+	}
+	return validation, nil
+}
+
+func recordHeadDiscontinuity(ctx context.Context, db *store.DB, project store.Project, task store.Task, expectedHead, actualHead string) error {
+	summary := fmt.Sprintf("%s: Task head %s does not descend from expected head %s", task.Title, actualHead, expectedHead)
+	data := marshalJSON(map[string]any{"expected_base_head": expectedHead, "actual_head": actualHead})
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='head_discontinuity' AND data_json=?)`, task.ID, data).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "head_discontinuity", Summary: summary, DataJSON: data}); err != nil {
+			return err
+		}
+	}
+	return axi.Failure(
+		"head_discontinuity",
+		summary,
+		false,
+		"The Lead must decide whether to restore the expected history or discard the Task",
+	)
+}
