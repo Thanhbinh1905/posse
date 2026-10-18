@@ -181,7 +181,7 @@ func recoveryHeld(project store.Project, cfg config.Config) bool {
 	return project.IsDown() || !cfg.Defaults.AutoRecover
 }
 
-func recoveryWork(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot, previousGeneration string) ([]store.Task, bool, string, error) {
+func recoveryWork(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot, previousGeneration, projectRecoveryGeneration string) ([]store.Task, bool, string, error) {
 	serverRestarted := previousGeneration != "" && snapshot.ServerStartedAt != "" && previousGeneration != snapshot.ServerStartedAt
 	allTasks, err := db.Tasks(ctx, project.ID, false)
 	if err != nil {
@@ -194,9 +194,12 @@ func recoveryWork(ctx context.Context, db *store.DB, project store.Project, snap
 			tasks = append(tasks, task)
 		}
 	}
-	projectRecovery, err := db.ProjectRecovery(ctx, project.ID)
-	if err != nil {
-		return nil, false, "", err
+	if projectRecoveryGeneration == "" {
+		projectRecovery, err := db.ProjectRecovery(ctx, project.ID)
+		if err != nil {
+			return nil, false, "", err
+		}
+		projectRecoveryGeneration = projectRecovery.Generation
 	}
 	pendingGroupGeneration := ""
 	for _, task := range tasks {
@@ -216,7 +219,7 @@ func recoveryWork(ctx context.Context, db *store.DB, project store.Project, snap
 		// Another hook may recover only that Lead from a pre-close snapshot.
 		// Missing Riders from the older group episode still need recovery,
 		// even though the server generation and the new Lead are now current.
-		unfinishedGroup := state.Status == "recovered" && strings.Contains(state.Generation, "/group/") && strings.Contains(projectRecovery.Generation, "/group/") && state.Generation != projectRecovery.Generation && missing
+		unfinishedGroup := state.Status == "recovered" && strings.Contains(state.Generation, "/group/") && strings.Contains(projectRecoveryGeneration, "/group/") && state.Generation != projectRecoveryGeneration && missing
 		if taskNeedsRestartRecovery(task, snapshot) || unfinishedGroup {
 			serverRestarted = true
 		}
@@ -292,7 +295,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, err
 	}
-	tasks, serverRestarted, pendingGroupGeneration, err := recoveryWork(ctx, db, project, snapshot, previousGeneration)
+	tasks, serverRestarted, pendingGroupGeneration, err := recoveryWork(ctx, db, project, snapshot, previousGeneration, "")
 	if err != nil {
 		return 0, err
 	}
@@ -370,7 +373,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, err
 	}
-	tasks, serverRestarted, pendingGroupGeneration, err = recoveryWork(ctx, db, current, fresh, previousGeneration)
+	tasks, serverRestarted, pendingGroupGeneration, err = recoveryWork(ctx, db, current, fresh, previousGeneration, previousRecovery.Generation)
 	if err != nil {
 		return 0, err
 	}
