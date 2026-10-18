@@ -2352,37 +2352,30 @@ func (q *Queries) UpdateProgress(ctx context.Context, arg UpdateProgressParams) 
 }
 
 const updateProjectObservation = `-- name: UpdateProjectObservation :exec
-UPDATE projects SET lead_pane_id = ?1, herdr_workspace_id = ?2, lead_absent_since = ?3
-WHERE id = ?4
-    AND lead_pane_id IS ?5
-    AND herdr_workspace_id IS ?6
-    AND lead_label IS ?7
-    AND (
-        lead_pane_id IS NOT ?1 OR
-        herdr_workspace_id IS NOT ?2 OR
-        lead_absent_since IS NOT ?3
-    )
+UPDATE projects SET lead_pane_id = ?, herdr_workspace_id = ?, lead_absent_since = ? WHERE id = ? AND (
+    lead_pane_id IS NOT ? OR herdr_workspace_id IS NOT ? OR lead_absent_since IS NOT ?
+)
 `
 
 type UpdateProjectObservationParams struct {
-	PaneID              string
-	WorkspaceID         string
-	LeadAbsentSince     int64
-	ProjectID           int64
-	ExpectedLeadPaneID  string
-	ExpectedWorkspaceID string
-	ExpectedLeadLabel   string
+	LeadPaneID         string
+	HerdrWorkspaceID   string
+	LeadAbsentSince    int64
+	ID                 int64
+	LeadPaneID_2       string
+	HerdrWorkspaceID_2 string
+	LeadAbsentSince_2  int64
 }
 
 func (q *Queries) UpdateProjectObservation(ctx context.Context, arg UpdateProjectObservationParams) error {
 	_, err := q.db.ExecContext(ctx, updateProjectObservation,
-		arg.PaneID,
-		arg.WorkspaceID,
+		arg.LeadPaneID,
+		arg.HerdrWorkspaceID,
 		arg.LeadAbsentSince,
-		arg.ProjectID,
-		arg.ExpectedLeadPaneID,
-		arg.ExpectedWorkspaceID,
-		arg.ExpectedLeadLabel,
+		arg.ID,
+		arg.LeadPaneID_2,
+		arg.HerdrWorkspaceID_2,
+		arg.LeadAbsentSince_2,
 	)
 	return err
 }

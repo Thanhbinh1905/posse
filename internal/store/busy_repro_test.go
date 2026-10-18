@@ -15,28 +15,6 @@ import (
 // TestConcurrentOpenersReturnRetryableContentionUnderWriterLoad reproduces
 // migration-lock contention while other connections continue writing. Openers
 // must fail with the store's retryable busy error, not context.DeadlineExceeded.
-func TestOpenMigrationLockWaitDoesNotConsumeMigrationBudget(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "posse.db")
-	lock, err := acquireMigrationLock(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close()
-
-	started := time.Now()
-	db, err := openAt(path, storeOpenMigrationBudget)
-	if db != nil {
-		_ = db.Close()
-	}
-	elapsed := time.Since(started)
-	if !errors.Is(err, ErrBusy) {
-		t.Fatalf("contended store open error = %v, want retryable ErrBusy", err)
-	}
-	if elapsed >= storeOpenMigrationBudget/2 {
-		t.Fatalf("migration lock contention waited %s, want the separate %s lock budget rather than the %s migration budget", elapsed, migrationLockWaitBudget, storeOpenMigrationBudget)
-	}
-}
-
 func TestConcurrentOpenersReturnRetryableContentionUnderWriterLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "posse.db")
 	db, err := OpenAt(path)

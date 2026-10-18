@@ -326,7 +326,7 @@ func reconcileLeadObservation(ctx context.Context, db *store.DB, project store.P
 	} else if absentSince == 0 {
 		absentSince = now.UnixMilli()
 	}
-	return db.UpdateProjectObservation(ctx, project, paneID, workspaceID, absentSince)
+	return db.UpdateProjectObservation(ctx, project.ID, paneID, workspaceID, absentSince)
 }
 
 func hasRecordedSession(session string) bool {

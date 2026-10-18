@@ -181,52 +181,6 @@ func recoveryHeld(project store.Project, cfg config.Config) bool {
 	return project.IsDown() || !cfg.Defaults.AutoRecover
 }
 
-func recoveryWork(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot, previousGeneration, projectRecoveryGeneration string) ([]store.Task, bool, string, error) {
-	serverRestarted := previousGeneration != "" && snapshot.ServerStartedAt != "" && previousGeneration != snapshot.ServerStartedAt
-	allTasks, err := db.Tasks(ctx, project.ID, false)
-	if err != nil {
-		return nil, false, "", err
-	}
-	// LiveTasks omits lost Riders. Include Lost while keeping failed Tasks out of recovery.
-	tasks := make([]store.Task, 0, len(allTasks))
-	for _, task := range allTasks {
-		if task.State != store.StateFailed {
-			tasks = append(tasks, task)
-		}
-	}
-	if projectRecoveryGeneration == "" {
-		projectRecovery, err := db.ProjectRecovery(ctx, project.ID)
-		if err != nil {
-			return nil, false, "", err
-		}
-		projectRecoveryGeneration = projectRecovery.Generation
-	}
-	pendingGroupGeneration := ""
-	for _, task := range tasks {
-		state, err := db.TaskRecovery(ctx, task.ID)
-		if err != nil {
-			return nil, false, "", err
-		}
-		if state.Status == "exhausted" {
-			continue
-		}
-		if pendingGroupGeneration == "" && groupRecoveryInProgress(state) {
-			pendingGroupGeneration = groupRecoveryEpisode(state.Generation)
-		}
-		pane, found := findTaskPane(snapshot.Panes, task)
-		missing := !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped"
-		// A group can close again while its first Lead is still starting.
-		// Another hook may recover only that Lead from a pre-close snapshot.
-		// Missing Riders from the older group episode still need recovery,
-		// even though the server generation and the new Lead are now current.
-		unfinishedGroup := state.Status == "recovered" && strings.Contains(state.Generation, "/group/") && strings.Contains(projectRecoveryGeneration, "/group/") && state.Generation != projectRecoveryGeneration && missing
-		if taskNeedsRestartRecovery(task, snapshot) || unfinishedGroup {
-			serverRestarted = true
-		}
-	}
-	return tasks, serverRestarted, pendingGroupGeneration, nil
-}
-
 func rebuildCallerMayBeUser(ctx context.Context, home string) bool {
 	if os.Getenv("HERDR_PANE_ID") != "" {
 		return false
@@ -295,9 +249,44 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, err
 	}
-	tasks, serverRestarted, pendingGroupGeneration, err := recoveryWork(ctx, db, project, snapshot, previousGeneration, "")
+	serverRestarted := previousGeneration != "" && snapshot.ServerStartedAt != "" && previousGeneration != snapshot.ServerStartedAt
+	allTasks, err := db.Tasks(ctx, project.ID, false)
 	if err != nil {
 		return 0, err
+	}
+	// LiveTasks omits lost Riders. Include Lost while keeping failed Tasks out of recovery.
+	tasks := make([]store.Task, 0, len(allTasks))
+	for _, task := range allTasks {
+		if task.State != store.StateFailed {
+			tasks = append(tasks, task)
+		}
+	}
+	projectRecovery, err := db.ProjectRecovery(ctx, project.ID)
+	if err != nil {
+		return 0, err
+	}
+	pendingGroupGeneration := ""
+	for _, task := range tasks {
+		state, err := db.TaskRecovery(ctx, task.ID)
+		if err != nil {
+			return 0, err
+		}
+		if state.Status == "exhausted" {
+			continue
+		}
+		if pendingGroupGeneration == "" && groupRecoveryInProgress(state) {
+			pendingGroupGeneration = groupRecoveryEpisode(state.Generation)
+		}
+		pane, found := findTaskPane(snapshot.Panes, task)
+		missing := !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped"
+		// A group can close again while its first Lead is still starting.
+		// Another hook may recover only that Lead from a pre-close snapshot.
+		// Missing Riders from the older group episode still need recovery,
+		// even though the server generation and the new Lead are now current.
+		unfinishedGroup := state.Status == "recovered" && strings.Contains(state.Generation, "/group/") && strings.Contains(projectRecovery.Generation, "/group/") && state.Generation != projectRecovery.Generation && missing
+		if taskNeedsRestartRecovery(task, snapshot) || unfinishedGroup {
+			serverRestarted = true
+		}
 	}
 	groupClosed := riderGroupClosed(snapshot, project, tasks) && !serverRestarted
 	groupRecoveryPending := pendingGroupGeneration != ""
@@ -359,32 +348,28 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 			}
 		}
 	}()
-	// A second event may have waited for another recovery to finish. Re-read
-	// both sides of the reconciliation boundary before acting on its snapshot.
-	fresh, snapErr := s.snapshot(ctx)
-	if snapErr != nil {
-		return 0, snapErr
+	if groupClosed {
+		// A second event can arrive after the first recovery finished. Check
+		// current labeled panes before relaunching anything.
+		fresh, snapErr := s.snapshot(ctx)
+		if snapErr != nil {
+			return 0, snapErr
+		}
+		current, dbErr := db.ProjectByID(ctx, project.ID)
+		if dbErr != nil {
+			return 0, dbErr
+		}
+		groupStillClosed := riderGroupClosed(fresh, current, tasks)
+		if !groupStillClosed && !groupRecoveryPending {
+			recoveryComplete = true
+			return 0, nil
+		}
+		// Use the confirmed snapshot below. The initial snapshot can still
+		// contain the workspace while Herdr is finishing close_group.
+		snapshot = fresh
+		project = current
+		groupClosed = groupStillClosed
 	}
-	current, dbErr := db.ProjectByID(ctx, project.ID)
-	if dbErr != nil {
-		return 0, dbErr
-	}
-	previousGeneration, err = db.ProjectServerStartedAt(ctx, current.ID)
-	if err != nil {
-		return 0, err
-	}
-	tasks, serverRestarted, pendingGroupGeneration, err = recoveryWork(ctx, db, current, fresh, previousGeneration, previousRecovery.Generation)
-	if err != nil {
-		return 0, err
-	}
-	groupRecoveryPending = pendingGroupGeneration != ""
-	groupClosed = riderGroupClosed(fresh, current, tasks) && !serverRestarted
-	if !serverRestarted && !groupClosed && !groupRecoveryPending {
-		recoveryComplete = true
-		return 0, nil
-	}
-	snapshot = fresh
-	project = current
 	if _, err := os.Stat(project.Root); err != nil {
 		return 0, axi.Failure("project_missing", fmt.Sprintf("Project %s path no longer exists: %s", project.Name, project.Root), false, "Run `posse project move "+project.Name+" <new-root>`")
 	}
@@ -557,17 +542,14 @@ func riderGroupClosed(snapshot herdr.Snapshot, project store.Project, tasks []st
 			}
 		}
 	}
-	label := project.LeadLabel
-	if label == "" {
-		label = "posse:" + project.Name + ":lead"
+	if project.LeadPaneID == "" || project.LeadLabel == "" {
+		return true // A prior recovery has not recorded its Lead yet.
 	}
+	label := project.LeadLabel
 	for _, pane := range snapshot.Panes {
 		if pane.Label == label {
 			return false
 		}
-	}
-	if project.LeadPaneID == "" || project.LeadLabel == "" {
-		return true // A prior recovery has not recorded its Lead yet.
 	}
 	// A recovery may have created the Lead workspace before its Lead pane.
 	// Its label alone is not proof that the recovery completed.

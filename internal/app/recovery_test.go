@@ -726,15 +726,12 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 
 	lead := herdr.Pane{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "claude", AgentStatus: "working"}
 	worker := herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: before.PaneLabel, CWD: mount.Path, Agent: "claude", AgentStatus: "working"}
-	// The pre-hook reconcile sees the Worker missing, recover --all initially
-	// sees it present, and the claim-time refresh sees it missing again. The
-	// next snapshot reports the Lead shell after stopLeadAgent.
-	leadShell := herdr.Pane{PaneID: lead.PaneID, WorkspaceID: lead.WorkspaceID, Label: lead.Label}
+	// The plugin event sees the Worker missing in a new generation, recover --all
+	// sees it present, and the next snapshot sees it missing again.
 	snapshots := []herdr.Snapshot{
 		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{lead}},
-		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{lead, worker}},
+		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{{PaneID: lead.PaneID, WorkspaceID: lead.WorkspaceID, Label: lead.Label}, worker}},
 		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{lead}},
-		{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Root: repo}}, Panes: []herdr.Pane{leadShell}},
 	}
 	adapter := &recoveryOrderingAdapter{Fake: herdr.NewFake(), snapshots: snapshots}
 	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t3","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p3","tab_id":"w1:t3"}}`)
