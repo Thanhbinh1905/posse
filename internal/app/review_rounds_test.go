@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -275,6 +276,160 @@ auto_start = true
 	current, err := db.TaskByID(ctx, ship.ProjectID, ship.ID)
 	if err != nil || current.State != store.StateDone {
 		t.Fatalf("auto-start moved Ship Task before review: %#v, %v", current, err)
+	}
+}
+
+func TestAutoStartSkipsUnavailableReviewerWithoutBlockingLand(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		config       string
+		explicitCode string
+	}{
+		{
+			name: "ineligible identity",
+			config: `[defaults]
+landing_mode = "local"
+
+[profiles.author]
+kind = "claude"
+
+[dispatch.default]
+use = "author"
+
+[review_loop]
+enabled = true
+auto_start = true
+`,
+			explicitCode: "review_identity_ineligible",
+		},
+		{
+			name: "no review dispatch",
+			config: `[defaults]
+landing_mode = "local"
+
+[profiles.author]
+kind = "claude"
+
+[[dispatch]]
+type = "ship"
+use = "author"
+
+[review_loop]
+enabled = true
+auto_start = true
+`,
+			explicitCode: "profile_required",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assertAutoStartSkipsUnavailableReviewer(t, test.config, test.explicitCode)
+		})
+	}
+}
+
+func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitCode string) {
+	t.Helper()
+	f := newRideFixture(t)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	gitTest(t, f.repo, "init", "--bare", remote)
+	gitTest(t, f.repo, "remote", "add", "origin", remote)
+	gitTest(t, f.repo, "push", "-u", "origin", "main")
+	if code, output := f.ride(t); code != 0 {
+		t.Fatalf("ride code=%d %s", code, output)
+	}
+	ship, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(ship.WorktreePath, "change.txt"), []byte("candidate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, ship.WorktreePath, "add", "change.txt")
+	gitTest(t, ship.WorktreePath, "commit", "-m", "candidate change")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Transition(ctx, ship.ID, ship.State, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"land", fmt.Sprintf("t%d", ship.Seq)}); code != 0 {
+		t.Fatalf("Land blocked by unavailable auto-start reviewer: code=%d output=%s", code, output.String())
+	}
+	current, err := db.TaskByID(ctx, ship.ProjectID, ship.ID)
+	if err != nil || current.State != store.StateLanding {
+		t.Fatalf("Land did not reach landing: task=%#v err=%v", current, err)
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, ship.ID)
+	if err != nil || len(rounds) != 0 {
+		t.Fatalf("unavailable auto-start admitted Review Rounds: %#v, %v", rounds, err)
+	}
+	assertOneReviewAutoStartReadinessNotice(t, db, ctx, ship)
+	current, err = db.TaskByID(ctx, ship.ProjectID, ship.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := f.service.maybeAutoStartReviewRound(&axi.Context{Context: ctx, Out: &bytes.Buffer{}}, db, f.home, f.project, current)
+	if err != nil || started {
+		t.Fatalf("repeat auto-start result = started %v, err %v", started, err)
+	}
+	assertOneReviewAutoStartReadinessNotice(t, db, ctx, ship)
+	output.Reset()
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", ship.Seq)}); code == 0 || !strings.Contains(output.String(), explicitCode) {
+		t.Fatalf("explicit review start should fail with %s: code=%d output=%s", explicitCode, code, output.String())
+	}
+}
+
+func TestAutoStartReviewerUnavailableOnlySkipsProfileResolutionFailures(t *testing.T) {
+	for _, test := range []struct {
+		code string
+		want bool
+	}{
+		{code: "review_identity_ineligible", want: true},
+		{code: "profile_required", want: true},
+		{code: "profile_unknown", want: true},
+		{code: "kind_disabled", want: true},
+		{code: "review_target_unresolved", want: false},
+		{code: "gate_failed", want: false},
+	} {
+		t.Run(test.code, func(t *testing.T) {
+			failure, got := autoStartReviewerUnavailable(fmt.Errorf("wrapped: %w", axi.Failure(test.code, "details", false)))
+			if got != test.want {
+				t.Fatalf("autoStartReviewerUnavailable(%q) = %v, want %v", test.code, got, test.want)
+			}
+			if got && failure.Code != test.code {
+				t.Fatalf("matched failure code = %q, want %q", failure.Code, test.code)
+			}
+		})
+	}
+}
+
+func assertOneReviewAutoStartReadinessNotice(t *testing.T, db *store.DB, ctx context.Context, ship store.Task) {
+	t.Helper()
+	notices, err := db.Notices(ctx, ship.ProjectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skipped := 0
+	for _, notice := range notices {
+		if notice.Kind != "review_auto_start_skipped" {
+			continue
+		}
+		skipped++
+		if !strings.Contains(notice.Summary, "eligible reviewer") || !strings.Contains(notice.Summary, "posse review start") {
+			t.Fatalf("auto-start readiness notice = %#v", notice)
+		}
+	}
+	if skipped != 1 {
+		t.Fatalf("auto-start readiness notices = %d, want exactly one; all notices=%#v", skipped, notices)
 	}
 }
 

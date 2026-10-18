@@ -522,6 +522,30 @@ func autoStartReviewLoop(plan *taskplan.Plan) bool {
 	return plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled && plan.ValidationLoops.Review.AutoStart
 }
 
+func autoStartReviewerUnavailable(err error) (*axi.Error, bool) {
+	var failure *axi.Error
+	if !errors.As(err, &failure) {
+		return nil, false
+	}
+	switch failure.Code {
+	case "review_identity_ineligible", "profile_required", "profile_unknown", "kind_disabled":
+		return failure, true
+	default:
+		return failure, false
+	}
+}
+
+func recordAutoStartReviewerReadiness(ctx context.Context, db *store.DB, project store.Project, ship store.Task, failure *axi.Error) error {
+	found, err := db.HasNotice(ctx, project.ID, ship.ID, "review_auto_start_skipped")
+	if err != nil || found {
+		return err
+	}
+	summary := fmt.Sprintf("%s: Review auto-start skipped because no eligible reviewer Profile is configured. Configure a distinct Profile with a known model, then run `posse review start %s --profile <profile>`.", ship.Title, taskIDString(ship.Seq))
+	data := marshalJSON(map[string]any{"reason_code": failure.Code, "reason": failure.Message, "help": failure.Help})
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: ship.ID, Kind: "review_auto_start_skipped", Summary: summary, DataJSON: data})
+	return err
+}
+
 func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home string, project store.Project, ship store.Task) (bool, error) {
 	plan, err := ship.AdmittedPlan()
 	if err != nil {
@@ -552,11 +576,14 @@ func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home
 		return false, nil
 	}
 	err = s.startReviewRound(ctx, db, home, project, ship, "", "")
-	var failure *axi.Error
-	if errors.As(err, &failure) && failure.Code == "review_round_unchanged" {
+	if failure, unavailable := autoStartReviewerUnavailable(err); unavailable {
+		if noticeErr := recordAutoStartReviewerReadiness(ctx.Context, db, project, ship, failure); noticeErr != nil {
+			return false, noticeErr
+		}
 		return false, nil
 	}
-	if errors.As(err, &failure) && failure.Code == "review_round_active" {
+	var failure *axi.Error
+	if errors.As(err, &failure) && (failure.Code == "review_round_unchanged" || failure.Code == "review_round_active") {
 		return false, nil
 	}
 	return err == nil, err
