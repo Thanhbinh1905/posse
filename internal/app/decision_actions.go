@@ -48,6 +48,43 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		return err
 	}
 	switch decision.Kind {
+	case "land_ready":
+		if decision.Answer == "discard" && task.State == store.StateTornDown {
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		}
+		if decision.Answer != "discard" {
+			state := "waiting"
+			if decision.Answer == "land" {
+				state = "land_ready"
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: state}, {Key: "help", Value: []any{"Run `posse land " + taskIDString(task.Seq) + " --merge` to Land this Task, or answer `discard` to tear it down"}}})
+		}
+		if !canDiscardFromDecision(decision.Kind, task.State) || task.Launches != decision.TaskLaunches {
+			return axi.Failure("decision_refused", "land-ready Decision no longer applies to this Task state or Rider launch", false)
+		}
+		if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+			return err
+		}
+		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+	case "worker_exited":
+		if decision.Answer == "discard" && task.State == store.StateTornDown {
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		}
+		if task.Launches != decision.TaskLaunches || (task.State != store.StateDone && task.State != store.StateLanding) {
+			return axi.Failure("decision_refused", "worker-exited Decision no longer applies to this Task state or Rider launch", false)
+		}
+		if decision.Answer == "relaunch" {
+			if _, err := s.relaunchTask(out.Context, db, home, project, cfg, task, ""); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "working"}})
+		}
+		if decision.Answer == "discard" {
+			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		}
 	case "recovery":
 		if decision.Answer == "relaunch" {
 			if task.State == store.StateWorking || task.State == store.StateTornDown {
@@ -78,11 +115,8 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if task.State == store.StateTornDown {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 			}
-			if task.State == store.StateLanded {
-				return axi.Failure("decision_refused", "a landed Task cannot be discarded; resolve its Leftover separately", false)
-			}
-			if !store.IsApprovedDiscardSourceState(task.State) {
-				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)
+			if !canDiscardFromDecision(decision.Kind, task.State) {
+				return axi.Failure("decision_refused", "recovery Decision cannot discard a Task in state "+string(task.State), false)
 			}
 			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
 				return err
@@ -211,8 +245,8 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if err := s.requireNoLiveTaskAgent(out.Context, project, task); err != nil {
 				return err
 			}
-			if !store.IsApprovedDiscardSourceState(task.State) {
-				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)
+			if !canDiscardFromDecision(decision.Kind, task.State) {
+				return axi.Failure("decision_refused", "closed-PR Decision cannot discard a Task in state "+string(task.State), false)
 			}
 			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
 				return err
@@ -288,4 +322,24 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "working"}})
 	}
 	return axi.Failure("decision_refused", "this Decision has no apply action", false)
+}
+
+func canDiscardFromDecision(kind string, state store.State) bool {
+	if !store.IsApprovedDiscardSourceState(state) {
+		return false
+	}
+	switch kind {
+	case "recovery":
+		return state == store.StateFailed || state == store.StateLost
+	case "worker_exited":
+		return state == store.StateDone || state == store.StateLanding
+	case "land_ready":
+		return state == store.StateLanding
+	case "pr_closed":
+		return state != store.StateReported && state != store.StateLanded
+	case "leftover":
+		return true
+	default:
+		return false
+	}
 }

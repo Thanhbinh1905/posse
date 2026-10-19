@@ -278,8 +278,15 @@ func TestReconcileKeepsDoneTaskAndNoticesWorkerExitOnce(t *testing.T) {
 		t.Fatalf("done Task became lost: %#v, %v", updated, err)
 	}
 	var count int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='worker_exited'`, task.ID).Scan(&count); err != nil || count != 1 {
+	var dataJSON string
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*),MAX(data_json) FROM notices WHERE task_id=? AND kind='worker_exited'`, task.ID).Scan(&count, &dataJSON); err != nil || count != 1 {
 		t.Fatalf("worker_exited Notice count = %d, %v", count, err)
+	}
+	var data struct {
+		TaskLaunches int `json:"task_launches"`
+	}
+	if err := json.Unmarshal([]byte(dataJSON), &data); err != nil || data.TaskLaunches != updated.Launches {
+		t.Fatalf("worker_exited Notice launch identity = %#v, data=%s, launches=%d: %v", data, dataJSON, updated.Launches, err)
 	}
 }
 
