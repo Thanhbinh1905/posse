@@ -68,7 +68,7 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(changeScratch, "findings.md"), []byte("task findings\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runSignal(change, "signal", "needs-decision", "Need review", "--findings", filepath.Join(changeScratch, "findings.md")); code != 0 {
+	if code, output := runSignal(change, "signal", "needs-decision", "Need review", "--findings", filepath.Join(changeScratch, "findings.md"), "--report", filepath.Join(changeScratch, "findings.md")); code != 0 {
 		t.Fatalf("own Task scratch --findings failed: code=%d output=%s", code, output)
 	}
 	if !waitForCondition(10*time.Second, func() bool {
@@ -76,9 +76,6 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		return err == nil && string(contents) == "task findings\n"
 	}) {
 		t.Fatal("accepted findings file was not copied into the Task record")
-	}
-	if code, output := runSignal(change, "signal", "needs-decision", "Need review", "--report", filepath.Join(changeScratch, "findings.md")); code != 0 {
-		t.Fatalf("own Task scratch --report failed: code=%d output=%s", code, output)
 	}
 	if contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "report.md")); err != nil || string(contents) != "task findings\n" {
 		t.Fatalf("own Task scratch report was not copied: %q %v", contents, err)
