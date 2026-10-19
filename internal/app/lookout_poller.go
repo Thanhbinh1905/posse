@@ -345,7 +345,8 @@ func lookoutPollerEnvironment(parent []string, home string, project store.Projec
 }
 
 func (s *Service) superviseLookoutPollers(ctx *axi.Context, command string, args []string) {
-	if os.Getenv(lookoutPollerTokenEnv) != "" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" {
+	// A Notice acknowledgement is delivery work, not a Project maintenance boundary.
+	if os.Getenv(lookoutPollerTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" {
 		return
 	}
 	binary, err := os.Executable()

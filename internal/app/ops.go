@@ -267,7 +267,8 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Bool("repair") {
 		return s.repairLookout(ctx, db, home, project)
 	}
-	if !parsed.Bool("poll-only") {
+	// Adapter handoffs and receipt decisions own Notice delivery, not maintenance.
+	if !parsed.Bool("poll-only") && !parsed.Bool("handoff") && parsed.Flags["receipt"] == "" {
 		if err := s.ensureLookoutPoller(ctx.Context, db, home, project); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Lookout supervision for %s failed: %v\n", project.Name, err)
 		}
