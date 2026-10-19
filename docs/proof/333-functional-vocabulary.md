@@ -50,6 +50,8 @@ New Projects allocate `pool/<project>/sandbox-<n>`. Existing `remuda/<project>/m
 
 ## Verification evidence
 
+Latest complete local E2E verification: all four shards passed at `8332042`, including the R2 config fix and CI fixture hardening. Details are in CI follow-up #747 below. The previously published R2 head `af1669b` also passed all CI checks; the final refreshed head still requires CI before Merge.
+
 Commands and final outcomes are recorded in the PR verification entries. Task-local transcripts include `gate-unit.log`, `canonical-vocabulary.log`, `contracts-final.log`, `upgrade-e2e.log`, `retained-shell-settlement.log`, `e2e-final-{1,2,3,4}.log`, `vet-canonical.log` and `staticcheck-canonical.log`.
 
 The full unit suite passed with a 30-minute timeout before the final migration refinements and merge from main: app tests took 1044 seconds on the shared host. The earlier timeout stack was in SQLite `fsync`, not a lock deadlock. Final-code vocabulary regressions also pass under the race detector across app, config, dispatch, store and taskplan. Formatting, vet, staticcheck, regeneration and shard-assignment checks pass.
@@ -79,6 +81,14 @@ Top-level `landing_mode` and `auto_unsaddle` now migrate to `merge_mode` and `au
 Main's #331 observation-contention coverage was merged without rebasing at `5529e5d`. Its conditional-write helpers and concurrent-observation/Lead protections remain intact; incoming tests use `change`, `pool`, `sandboxes` and canonical fixtures.
 
 Post-merge verification passed: full config, AXI, dispatch and taskplan suites under race; focused app/store race coverage including the new observation-contention tests (104.661/57.794 seconds); and seven real E2E flows (77.316 seconds), including both shorthand modes, both retained adapters, malformed config, Signal paths, busy steering, PR Merge and the 0.14 upgrade. Formatting, tagged vet/staticcheck, tagged compilation, regeneration and both shard self-checks passed. Logs are `review-round2-config-race.log`, `review-round2-main-race.log`, `review-round2-main-e2e.log`, `review-round2-main-static.log` and `review-round2-main-compile.log`. Full final-head Gate/all-four-shard CI remains a dependency, not a local pass claim.
+
+## CI follow-up (#747)
+
+CI run `39203912594` at `c72fc08` failed the no-mistakes receipt refusal and PR failed-check Notice assertions. The captured log is `instruction-747-failed-ci.log`. The initial local run and six unmodified repeats passed (248.357 seconds), so the exact CI interleaving was not reproduced locally and is not claimed as a proven production root cause.
+
+The fixtures now make observation ordering explicit. Review-policy completion waits for the fake to consume its launch prompt; the no-mistakes case stops the independent Watch and checks that both Merge phases refuse the missing receipt while leaving the candidate done and the target unchanged. The PR lifecycle case stops the Watch before its foreground forge-state assertions, retaining both the `pr_checks_failed` assertion and a new `ci_fix_exhausted` assertion for the zero budget, plus zero queued instructions and zero fix rounds. Background Watch behavior remains covered by dedicated E2Es. Production state, review and ownership checks are unchanged.
+
+At `8332042`, all four unmodified shard runners exited 0: `scripts/run-e2e-shard.sh 1` (751.491 seconds), shard 2 (643.744), shard 3 (643.737) and shard 4 (830.392). Logs and exit receipts are `instruction-747-shard-{1,2,3,4}.log/.exit` in Task scratch. The focused two-test rerun also passed, and tagged vet/staticcheck passed. No manifest or Go source changed during the shard runs. CI for the previously published R2 head `af1669b` independently passed all 13 checks, including all four unit and E2E shards (`instruction-747-ci-current.log`). The final refreshed head must still pass CI before Merge.
 
 ## Risk and rollback
 
