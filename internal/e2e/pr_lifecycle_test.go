@@ -262,9 +262,13 @@ func TestPRMergeLifecycleAndExternalMerge(t *testing.T) {
 		t.Fatalf("PR push head=%s, gated SHA=%s", got, first.GatedSHA)
 	}
 
+	// Make foreground CLI observation authoritative for the forge-state
+	// assertions below, rather than racing an independent in-flight poll.
+	stopBackgroundWatch(t, fixture)
 	fixture.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", first.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	fixture.requireNotice(t, "t1", "pr_checks_failed")
+	fixture.requireNotice(t, "t1", "ci_fix_exhausted")
 	var queued, rounds int
 	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, first.ID).Scan(&queued); err != nil || queued != 0 {
 		t.Fatalf("disabled CI loop queued %d automatic instructions: %v", queued, err)
@@ -328,9 +332,8 @@ func TestPRMergeLifecycleAndExternalMerge(t *testing.T) {
 		t.Fatalf("second PR did not open: %s", output)
 	}
 	second := fixture.mustTask(t, "t2")
-	// The offline observer must be the only process that can record this merge.
-	// Otherwise the live Watch can advance merged to torn-down before the read.
-	stopBackgroundWatch(t, fixture)
+	// The Watch remains stopped so only the offline observer can record this
+	// merge; no live observer can advance merged to torn-down before the read.
 	mergeTwo := fixture.mergeOnLocalOrigin(t, second, "t2")
 	fixture.writeGraphQL(t, "pr2", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", mergeTwo, second.GatedSHA)
 	time.Sleep(5 * time.Millisecond)

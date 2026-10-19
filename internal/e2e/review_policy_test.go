@@ -19,6 +19,15 @@ func signalReviewPolicyTask(t *testing.T, f *prLifecycleFixture, task store.Task
 	t.Helper()
 	env := setEnv(f.env, "HERDR_PANE_ID", task.PaneID)
 	env = setEnv(env, "POSSE_WORKER_HOME", f.home)
+	// Do not complete a turn before the fake has consumed its launch prompt.
+	// A late prompt must not turn the completed pane back into a working pane.
+	ready := filepath.Join(f.root, "review-working-"+task.PaneID)
+	if !waitForCondition(10*time.Second, func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	}) {
+		t.Fatalf("Review-policy fake did not consume the launch prompt for %s", task.PaneID)
+	}
 	output := runPosse(t, f.binary, task.WorktreePath, env, append([]string{"signal", "done", "Checked"}, args...)...)
 	// The identity fixture reports working after its launch prompt and then waits
 	// for input. Complete that fake turn too, so reconciliation does not correctly
@@ -135,6 +144,9 @@ func runReviewIdentityCLIWithResourceConflictRetry(t *testing.T, f *prLifecycleF
 
 func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
 	f := reviewIdentityFixture(t)
+	// Both Merge phases must inspect the same completed candidate, without
+	// independent Watch reconciliation between the receipt refusals.
+	stopBackgroundWatch(t, f)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "no-mistakes")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	// The fake matches the installed upstream: it has no receipt query.
@@ -147,9 +159,15 @@ func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
 	signalReviewPolicyTask(t, f, change)
 	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
 	for _, args := range [][]string{{"merge", "t1"}, {"merge", "t1", "--execute"}} {
+		if candidate := f.mustTask(t, "t1"); candidate.State != store.StateDone {
+			t.Fatalf("receipt phase %v has no completed candidate: %s", args, candidate.State)
+		}
 		code, out := runReviewIdentityCLI(t, f, args...)
 		if code != 1 || !strings.Contains(out, "review_receipt_unsupported") {
 			t.Fatalf("missing receipt admitted: %d %s", code, out)
+		}
+		if candidate := f.mustTask(t, "t1"); candidate.State != store.StateDone {
+			t.Fatalf("receipt refusal %v changed candidate state: %s", args, candidate.State)
 		}
 	}
 	if got := gitTest(t, f.env, f.repo, "rev-parse", "main"); got != before {
