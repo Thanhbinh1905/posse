@@ -10,6 +10,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 func resourceConflictReason(err error) (string, bool) {
@@ -30,7 +31,18 @@ func resourceLeaseError(err error) error {
 	return err
 }
 
+// Keep explicit Land effects behind checkout sync so the two operations cannot
+// contend for the same durable path and ref leases.
 func withIntentGitResources(ctx context.Context, db *store.DB, project store.Project, task store.Task, intentID int64, repository string, refs []string, path string, effect func() error) error {
+	syncLock, err := acquireRepositorySyncLock(ctx, repository)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = unix.Flock(int(syncLock.Fd()), unix.LOCK_UN)
+		_ = syncLock.Close()
+	}()
+
 	manager := execution.NewManager(db)
 	if err := manager.EnsureMountLeases(ctx); err != nil {
 		return resourceLeaseError(err)

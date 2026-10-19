@@ -24,6 +24,7 @@ type projectSummary struct {
 	Mode          string              `json:"mode"`
 	Autonomy      string              `json:"autonomy"`
 	Lead          string              `json:"lead"`
+	Lookout       string              `json:"lookout"`
 	OpenTasks     int                 `json:"open_tasks"`
 	Tasks         []activeTaskSummary `json:"tasks,omitempty"`
 	OpenNotices   int                 `json:"open_notices"`
@@ -132,7 +133,12 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 			summaries = append(summaries, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
 			continue
 		}
-		summaries = append(summaries, summarizeProject(project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project)))
+		summary := summarizeProject(project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project))
+		home, homeErr := s.homePath()
+		if homeErr == nil {
+			summary.Lookout = s.lookoutPollerSummary(ctx.Context, db, home, project)
+		}
+		summaries = append(summaries, summary)
 	}
 	update, _ := s.availableUpdate(ctx.Context, db, nil)
 	if len(summaries) == 0 {
@@ -191,8 +197,13 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		noticeRows = append(noticeRows, noticeSummary{ID: notice.ID, Task: noticeTaskID(ctx.Context, db, project.ID, notice.TaskID), Name: noticeTaskName(ctx.Context, db, project.ID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
 	}
 	help := homeHelp(project, tasks, openNotices)
+	home, homeErr := s.homePath()
+	if homeErr != nil {
+		return homeErr
+	}
 	result := axi.Object{
 		{Key: "project", Value: summarizeHomeProject(project, cfg, s.leadStatus(ctx.Context, project))},
+		{Key: "lookout", Value: s.lookoutPollerRow(ctx.Context, db, home, project)},
 	}
 	if project.IsWorkspace() {
 		targets, err := s.projectTargets(ctx.Context, db, project)
@@ -224,7 +235,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		if err != nil {
 			return err
 		}
-		result = axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: active}, {Key: "needs_you", Value: attention}, {Key: "undelivered_notices", Value: len(pending)}, {Key: "next_action", Value: help[0]}}
+		result = axi.Object{{Key: "project", Value: project.Name}, {Key: "lookout", Value: s.lookoutPollerRow(ctx.Context, db, home, project)}, {Key: "tasks", Value: active}, {Key: "needs_you", Value: attention}, {Key: "undelivered_notices", Value: len(pending)}, {Key: "next_action", Value: help[0]}}
 	}
 	update, _ := s.availableUpdate(ctx.Context, db, &project)
 	rule := reportingRule(cfg.Lowkey.Lead)

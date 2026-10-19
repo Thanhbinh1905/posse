@@ -221,6 +221,9 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	if err := db.normalizeLegacyReportBundleMigration(ctx); err != nil {
 		return err
 	}
+	if err := db.normalizeLegacyTaskContainmentMigration(ctx); err != nil {
+		return err
+	}
 	sources, err := embeddedMigrations()
 	if err != nil {
 		return err

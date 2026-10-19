@@ -68,7 +68,7 @@ func TestUpdateCheckReportsRunningLookouts(t *testing.T) {
 	service.Version = "0.1.0"
 	service.updateURL = url
 	code, output := runCLI(t, service, "update", "--check", "--json")
-	if code != 0 || !strings.Contains(output, `"lookouts"`) || !strings.Contains(output, `"project":"demo"`) || !strings.Contains(output, `"kind":"lead"`) || !strings.Contains(output, `"kind":"lookout_tab"`) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lead.command.Process.Pid)) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lookoutTab.command.Process.Pid)) {
+	if code != 0 || !strings.Contains(output, `"lookouts"`) || !strings.Contains(output, `"project":"demo"`) || !strings.Contains(output, `"kind":"lead"`) || !strings.Contains(output, `"kind":"poller"`) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lead.command.Process.Pid)) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lookoutTab.command.Process.Pid)) {
 		t.Fatalf("update --check omitted running Lead/Lookout processes: %d %s", code, output)
 	}
 	for _, process := range []updateLookoutHelper{lead, lookoutTab} {
@@ -150,7 +150,7 @@ func waitForFile(timeout time.Duration, path string) bool {
 	return false
 }
 
-func TestUpdateRefusesRunningLookoutsUnlessRequested(t *testing.T) {
+func TestUpdateAllowsRunningLookoutsToReexec(t *testing.T) {
 	home := t.TempDir()
 	db, err := store.Open(home)
 	if err != nil {
@@ -175,11 +175,114 @@ func TestUpdateRefusesRunningLookoutsUnlessRequested(t *testing.T) {
 	service.Version = "0.1.0"
 	service.updateURL = server.URL
 	code, output := runCLI(t, service, "update")
-	if code != 1 || !strings.Contains(output, "lookouts_running") || !strings.Contains(output, "demo") || !strings.Contains(output, "lookout_tab") || !strings.Contains(output, "lead") {
-		t.Fatalf("update did not refuse with the running process list: %d %s", code, output)
+	if code != 1 || strings.Contains(output, "lookouts_running") || !strings.Contains(output, "release_assets_missing") {
+		t.Fatalf("update did not proceed to release verification with live pollers: %d %s", code, output)
 	}
-	if requests != 0 {
-		t.Fatalf("update fetched a release before refusing: %d request(s)", requests)
+	if requests == 0 {
+		t.Fatal("update refused before fetching the release while lookouts were running")
+	}
+}
+
+func TestRequestLookoutReexecSkipsAnAlreadyUpdatedProcess(t *testing.T) {
+	home := t.TempDir()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binary}); err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := lookoutExecutableVerifier
+	lookoutExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { lookoutExecutableVerifier = previousVerifier })
+	current, ok := inspectLookoutExecutable(os.Getpid())
+	if !ok {
+		t.Fatal("test process executable identity is unavailable")
+	}
+	process := lookoutProcess{PID: os.Getpid(), Executable: current}
+	if err := requestLookoutReexec(home, []lookoutProcess{process}); err != nil {
+		t.Fatalf("already updated process produced a re-exec warning: %v", err)
+	}
+	if _, err := os.Stat(lookoutReexecMarker(home, os.Getpid())); !os.IsNotExist(err) {
+		t.Fatalf("already updated process got another re-exec marker: %v", err)
+	}
+}
+
+func TestRequestLookoutReexecSkipsUpdatedProcessesAndMarksRemainingOnes(t *testing.T) {
+	home := t.TempDir()
+	old := startUpdateLookoutProcess(t, home, "lookout")
+	installed := filepath.Join(t.TempDir(), "posse")
+	binary, err := os.ReadFile(old.command.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installed, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(t.TempDir(), "ready")
+	stopped := filepath.Join(t.TempDir(), "stopped")
+	current := exec.Command(installed, "lookout")
+	current.Dir = home
+	current.Env = append(os.Environ(), "POSSE_HOME="+home, "PWD="+home, "POSSE_TEST_READY_FILE="+ready, "POSSE_TEST_STOP_FILE="+stopped)
+	if err := current.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if current.Process != nil {
+			_ = current.Process.Signal(syscall.SIGTERM)
+			_ = current.Wait()
+		}
+	})
+	if !waitForFile(2*time.Second, ready) {
+		t.Fatalf("updated Lookout helper PID %d did not start", current.Process.Pid)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: installed}); err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := lookoutExecutableVerifier
+	lookoutExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { lookoutExecutableVerifier = previousVerifier })
+	processes, err := systemLookoutProcesses(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processes) != 2 {
+		t.Fatalf("expected old and updated helper processes, found %#v", processes)
+	}
+	if err := requestLookoutReexec(home, processes); err != nil {
+		t.Fatalf("an already updated Lookout caused a warning: %v", err)
+	}
+	if _, err := os.Stat(lookoutReexecMarker(home, current.Process.Pid)); !os.IsNotExist(err) {
+		t.Fatalf("updated process was requested to re-exec again: %v", err)
+	}
+	if _, err := os.Stat(lookoutReexecMarker(home, old.command.Process.Pid)); err != nil {
+		t.Fatalf("remaining old process did not receive a re-exec marker: %v", err)
+	}
+}
+
+func TestRequestLookoutReexecWritesAProcessScopedMarker(t *testing.T) {
+	home := t.TempDir()
+	poller := startUpdateLookoutProcess(t, home, "lookout", "--poll-only")
+	processes, err := systemLookoutProcesses(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *lookoutProcess
+	for index := range processes {
+		if processes[index].PID == poller.command.Process.Pid {
+			found = &processes[index]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("poller process %d was not discovered: %#v", poller.command.Process.Pid, processes)
+	}
+	if err := requestLookoutReexec(home, []lookoutProcess{*found}); err != nil {
+		t.Fatal(err)
+	}
+	marker := lookoutReexecMarker(home, poller.command.Process.Pid)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("update did not request poller re-exec: %v", err)
 	}
 }
 
@@ -514,7 +617,7 @@ func TestUpdateFromUserShellPaneBacksUpAndAtomicallyInstallsVerifiedArchive(t *t
 	if code != 0 {
 		t.Fatalf("update --stop-lookouts: %d %s", code, output)
 	}
-	if !strings.Contains(output, "stopped_lookouts") || !strings.Contains(output, "lookout_tab") || !strings.Contains(output, "lead") || !strings.Contains(output, "Lookout tab owner") || !strings.Contains(output, "Lead restarts") {
+	if !strings.Contains(output, "stopped_lookouts") || !strings.Contains(output, "poller") || !strings.Contains(output, "lead") || !strings.Contains(output, "Project poller re-execs") || !strings.Contains(output, "Lead restarts") {
 		t.Fatalf("update omitted stopped processes or restart owners: %s", output)
 	}
 	leadStopped := waitForFile(2*time.Second, lead.stopped)

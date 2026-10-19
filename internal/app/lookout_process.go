@@ -25,75 +25,25 @@ type lookoutExecutableIdentity struct {
 }
 
 type lookoutProcess struct {
-	PID          int
-	Executable   lookoutExecutableIdentity
-	PaneID       string
-	WorkingDir   string
-	Project      string
-	Kind         string
-	PollOnly     bool
-	QuietRoutine bool
-	StopHook     bool
-	ForceKilled  bool
+	PID             int
+	Executable      lookoutExecutableIdentity
+	PaneID          string
+	WorkingDir      string
+	Project         string
+	Kind            string
+	PollOnly        bool
+	QuietRoutine    bool
+	StopHook        bool
+	ForceKilled     bool
+	PollerProjectID int64
+	PollerToken     string
+	PollerStartedAt int64
 }
 
 var lookoutStopGracePeriod = 5 * time.Second
 var lookoutExecutableVerifier = isPosseExecutable
 
 var lookoutProcRoot = "/proc"
-
-// Check the process rather than trusting a restored shell pane's label.
-func lookoutProcessRunning(paneID, home string) bool {
-	if runtime.GOOS == "linux" {
-		return linuxLookoutProcessRunning(paneID, home)
-	}
-	processes, err := systemLookoutProcesses(home)
-	if err != nil {
-		return false
-	}
-	for _, process := range processes {
-		if process.PaneID == paneID && process.PollOnly {
-			return true
-		}
-	}
-	return false
-}
-
-func linuxLookoutProcessRunning(paneID, home string) bool {
-	entries, err := os.ReadDir(lookoutProcRoot)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-		root := filepath.Join(lookoutProcRoot, entry.Name())
-		environment, err := os.ReadFile(filepath.Join(root, "environ"))
-		if err != nil {
-			continue
-		}
-		env := parseProcessEnvironment(string(environment))
-		if env["HERDR_PANE_ID"] != paneID || !sameLookoutHome(processHome(env), home) {
-			continue
-		}
-		command, err := os.ReadFile(filepath.Join(root, "cmdline"))
-		if err != nil {
-			continue
-		}
-		executable, verified := inspectLookoutExecutable(pid)
-		if !verified || !lookoutExecutableVerifier(executable.Path) {
-			continue
-		}
-		process, found := lookoutFromArgs(pid, splitProcessArgs(string(command)), env, home)
-		if found && process.PollOnly {
-			process.Executable = executable
-			return true
-		}
-	}
-	return false
-}
 
 func systemLookoutProcesses(home string) ([]lookoutProcess, error) {
 	if runtime.GOOS == "darwin" {
@@ -228,17 +178,20 @@ func lookoutFromArgs(pid int, args []string, environment map[string]string, home
 		return lookoutProcess{}, false
 	}
 	process := lookoutProcess{
-		PID:        pid,
-		PaneID:     environment["HERDR_PANE_ID"],
-		WorkingDir: environment["PWD"],
-		Kind:       "lead",
-		StopHook:   args[1] == "_claude-stop",
+		PID:             pid,
+		PaneID:          environment["HERDR_PANE_ID"],
+		WorkingDir:      environment["PWD"],
+		Kind:            "lead",
+		StopHook:        args[1] == "_claude-stop",
+		PollerToken:     environment[lookoutPollerTokenEnv],
+		PollerStartedAt: parseProcessInt64(environment[lookoutPollerStartedEnv]),
 	}
+	process.PollerProjectID = parseProcessInt64(environment[lookoutPollerProjectEnv])
 	for _, arg := range args[2:] {
 		switch arg {
 		case "--poll-only":
 			process.PollOnly = true
-			process.Kind = "lookout_tab"
+			process.Kind = "poller"
 		case "--quiet-routine":
 			process.QuietRoutine = true
 		}
@@ -252,6 +205,11 @@ func lookoutFromArgs(pid int, args []string, environment map[string]string, home
 func isPosseExecutable(path string) bool {
 	info, err := buildinfo.ReadFile(path)
 	return err == nil && info.Main.Path == "github.com/thanhbinh1905/posse" && info.Path == "github.com/thanhbinh1905/posse/cmd/posse"
+}
+
+func parseProcessInt64(value string) int64 {
+	parsed, _ := strconv.ParseInt(value, 10, 64)
+	return parsed
 }
 
 func processHome(environment map[string]string) string {
@@ -496,6 +454,16 @@ func lookoutStopReason(home string, pid int) string {
 	marker := lookoutUpdateStopMarker(home, pid)
 	if err := os.Remove(marker); err == nil {
 		_ = os.Remove(filepath.Dir(marker))
+		return "update"
+	}
+	marker = lookoutReexecMarker(home, pid)
+	if err := os.Remove(marker); err == nil {
+		_ = os.Remove(filepath.Dir(marker))
+		return "update"
+	}
+	installed, installedOK := currentLookoutExecutable(home)
+	running, runningOK := inspectLookoutExecutable(pid)
+	if installedOK && runningOK && (installed.Device != running.Device || installed.Inode != running.Inode) {
 		return "update"
 	}
 	return "signal"

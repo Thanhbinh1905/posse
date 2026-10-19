@@ -87,6 +87,9 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			return err
 		}
+		if err := s.ensureLookoutPoller(ctx, db, home, project); err != nil {
+			fmt.Fprintf(os.Stderr, "Lookout supervision for %s failed: %v\n", project.Name, err)
+		}
 		cfg, err := config.Load(home, project.Name)
 		if err != nil {
 			if focusEvent {

@@ -102,6 +102,8 @@ func TestApprovedWorkingDiscardResumesAfterCrash(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer db.Close()
+				f.env = setEnv(f.env, "POSSE_LOOKOUT_TOKEN", "e2e-manual-owner")
+				f.leadEnv = setEnv(f.leadEnv, "POSSE_LOOKOUT_TOKEN", "e2e-manual-owner")
 				stopFixtureBackgroundLookout(t, f.root, f.env, db, f.projectID)
 				command := exec.Command(f.binary, "unsaddle", "t1", "--discard", "--user-approved", "destroy t3 now")
 				command.Dir = f.repo

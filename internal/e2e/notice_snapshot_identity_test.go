@@ -60,6 +60,9 @@ func TestNoticeReceiptRebuildRejectsReusedProjectID(t *testing.T) {
 	ctx := context.Background()
 	oldProject := f.project
 	batch := deliverAndAcceptNotice(t, f)
+	// Notice commands start the hidden Project poller. Stop it before deleting
+	// the database and snapshot so it cannot recreate the old Project snapshot.
+	stopLiveLookoutPoller(t, f.root)
 	if err := os.Remove(f.db.ProjectSnapshotPath(oldProject.Name)); err != nil {
 		t.Fatal(err)
 	}

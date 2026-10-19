@@ -87,6 +87,7 @@ case "$PWD/" in
    local-*) posse holler done 'Ship fixture completed' > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
    *) posse holler done 'Review fixture completed' --report report.md > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
   esac
+  printf 'complete\n' > "$POSSE_TEST_ROOT/signal-finished"
   ;;
  *) printf 'lead started\n' > "$POSSE_TEST_ROOT/lead-started";;
 esac
@@ -259,13 +260,19 @@ while IFS= read -r line; do :; done
 		t.Fatalf("Rider TMPDIR=%q, want Task scratch %q", riderTmp, wanted)
 	}
 	if mode == "scratch-child" {
+		if !waitForCondition(5*time.Second, func() bool {
+			_, err := os.Stat(filepath.Join(root, "signal-finished"))
+			return err == nil
+		}) {
+			t.Fatal("Rider done command did not finish before stopping the Project Lookout")
+		}
 		for _, pid := range lookoutPIDs(root) {
 			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 				t.Fatal(err)
 			}
 		}
 		if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(root)) == 0 }) {
-			t.Fatal("fixture Lookout did not stop before creating the unrelated Task")
+			t.Fatalf("fixture Lookout did not stop before creating the unrelated Task: live PIDs=%v", lookoutPIDs(root))
 		}
 		// Prevent the active Lead from restarting its poll-only Lookout while
 		// the synthetic Task moves through states without a Rider pane.

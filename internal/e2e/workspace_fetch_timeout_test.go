@@ -147,19 +147,8 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 		t.Fatal(err)
 	}
 	project.HerdrWorkspaceID = workspace.Workspace.WorkspaceID
-	lookout, err := createTab(client, project.HerdrWorkspaceID, workspaceRoot, "posse:stack:lookout")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Call(ctx, "pane.rename", map[string]any{"pane_id": lookout.RootPane.PaneID, "label": "posse:stack:lookout"}); err != nil {
-		t.Fatal(err)
-	}
-	lookoutPaneID := lookout.RootPane.PaneID
-	t.Cleanup(func() {
-		_, _ = client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c")
-	})
-	if _, err := client.Run(ctx, "pane", "run", lookoutPaneID, binary+" lookout --poll-only"); err != nil {
-		t.Fatalf("start isolated Lookout: %v", err)
+	if output := runPosse(t, binary, workspaceRoot, env, "lookout", "--repair"); !strings.Contains(output, "state: running") {
+		t.Fatalf("start supervised hidden Lookout poller: %s", output)
 	}
 
 	if !waitForCondition(12*time.Second, func() bool {

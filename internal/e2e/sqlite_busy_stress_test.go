@@ -20,7 +20,7 @@ func TestConcurrentLookoutSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.
 	defer f.db.Close()
 
 	if !waitForCondition(15*time.Second, func() bool { return len(lookoutPIDs(f.root)) > 0 }) {
-		t.Fatalf("isolated Lookout poller did not start: panes=%#v", lookoutPanes(t, herdr.NewWithEnv("herdr", f.env)))
+		t.Fatalf("isolated Lookout poller did not start: pids=%v", lookoutPIDs(f.root))
 	}
 
 	client := herdr.NewWithEnv("herdr", f.env)

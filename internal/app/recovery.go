@@ -308,24 +308,13 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if err := db.RememberProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt); err != nil {
 			return 0, err
 		}
-		// The first Lookout tick may not have recorded the previous server
-		// generation before Herdr restarted. Reconcile its process even when
-		// generation comparison cannot prove a restart: a restored tab label
-		// does not mean its poller was restored.
+		// A restored Herdr pane does not restore this process. Commands repair
+		// the detached poller from its SQLite heartbeat instead.
 		if _, found := leadWorkspace(snapshot, project); found {
-			replaceUnstarted := false
-			for _, pane := range snapshot.Panes {
-				if pane.Label != lookoutTabLabel(project) || pane.WorkspaceID != project.HerdrWorkspaceID || lookoutProcessRunning(pane.PaneID, home) {
-					continue
-				}
-				running, err := s.waitLookoutRecovery(ctx, project, pane.PaneID, home)
-				if err != nil {
-					return 0, err
-				}
-				replaceUnstarted = !running
-				break
+			if err := s.cleanupLegacyLookoutTabs(ctx, project, snapshot); err != nil {
+				return 0, err
 			}
-			return 0, s.ensureLookoutTab(ctx, db, project, snapshot, replaceUnstarted)
+			return 0, s.ensureLookoutPoller(ctx, db, home, project)
 		}
 		return 0, nil
 	}
@@ -761,7 +750,10 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	s.relabelProjectTabs(ctx, db, project)
 	freshSnapshot, lookoutErr := s.snapshot(ctx)
 	if lookoutErr == nil {
-		lookoutErr = s.ensureLookoutTab(ctx, db, project, freshSnapshot, true)
+		lookoutErr = s.cleanupLegacyLookoutTabs(ctx, project, freshSnapshot)
+	}
+	if lookoutErr == nil {
+		lookoutErr = s.ensureLookoutPoller(ctx, db, home, project)
 	}
 	if lookoutErr != nil {
 		_, _ = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout restart failed: " + truncate(lookoutErr.Error(), 240), DataJSON: `{}`})
