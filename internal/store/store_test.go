@@ -882,6 +882,54 @@ func TestMigrationMakesLegacyMessageClaimsNonRetryable(t *testing.T) {
 	}
 }
 
+func TestPendingLandReadyDecisionMigrationAddsDiscard(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "ready to Land", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to State
+		source   string
+	}{{StateSpawning, StateWorking, "cli"}, {StateWorking, StateDone, "worker"}, {StateDone, StateLanding, "cli"}} {
+		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "notice:1", Kind: "land_ready", Question: "Land the Task?", Options: []string{"land", "wait"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id=52`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(home)
+	if err != nil {
+		t.Fatalf("apply land_ready option migration: %v", err)
+	}
+	defer db.Close()
+	migrated, err := db.Decision(ctx, project.ID, decision.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(migrated.Options, ","); got != "land,wait,discard" {
+		t.Fatalf("migrated land_ready options = %q", got)
+	}
+}
+
 func TestOpenAtAppliesMissingMigrationBelowCurrentVersion(t *testing.T) {
 	home := t.TempDir()
 	db, err := Open(home)

@@ -627,7 +627,10 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				return result, shaErr
 			}
 		}
-		if err := s.runIntentStep(ctx, db, intent, "approval.record", func() error { return db.RecordApprovalWithBranch(ctx, task.ID, "discard", quote, branchSHA) }); err != nil {
+		if err := s.runIntentStep(ctx, db, intent, "approval.record", func() error {
+			_, err := db.RecordDiscardApprovalForIntent(ctx, intent.ID, intent.ProcessID, task.ID, quote, branchSHA)
+			return err
+		}); err != nil {
 			return result, err
 		}
 	}

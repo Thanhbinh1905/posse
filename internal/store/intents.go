@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -99,6 +100,90 @@ func (db *DB) UpdateIntentPayload(ctx context.Context, intentID int64, processID
 		return ErrIntentOwned
 	}
 	return nil
+}
+
+// RecordDiscardApprovalForIntent pins the first post-stop branch tips for an
+// interrupted discard. The approval row and intent payload commit atomically,
+// so retrying approval.record cannot authorize later branch movement.
+func (db *DB) RecordDiscardApprovalForIntent(ctx context.Context, intentID int64, processID int, taskID int64, quote, branchSHA string) (string, error) {
+	if strings.TrimSpace(quote) == "" {
+		return "", fmt.Errorf("user approval quote is required")
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var recordedTaskID int64
+	var recordedProcessID int
+	var payloadJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT task_id,process_id,payload_json FROM intents WHERE id=?`, intentID).Scan(&recordedTaskID, &recordedProcessID, &payloadJSON); err != nil {
+		return "", err
+	}
+	if recordedTaskID != taskID || recordedProcessID != processID {
+		return "", ErrIntentOwned
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return "", err
+	}
+	if payload == nil {
+		return "", fmt.Errorf("discard intent payload must be a JSON object")
+	}
+	var intentQuote string
+	if err := json.Unmarshal(payload["user_quote"], &intentQuote); err != nil || intentQuote != quote {
+		return "", fmt.Errorf("discard approval does not match the User quote recorded in its intent")
+	}
+	var recorded bool
+	if raw := payload["discard_approval_recorded"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &recorded); err != nil {
+			return "", err
+		}
+	}
+	if recorded {
+		var approvedSHA string
+		if err := json.Unmarshal(payload["discard_approval_branch_sha"], &approvedSHA); err != nil {
+			return "", err
+		}
+		if err := tx.Commit(); err != nil {
+			return "", err
+		}
+		if err := db.PersistTask(ctx, taskID); err != nil {
+			return "", err
+		}
+		return approvedSHA, nil
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO approvals(task_id,action,user_quote,branch_sha,at) VALUES(?,'discard',?,?,?)`, taskID, quote, branchSHA, time.Now().UnixMilli()); err != nil {
+		return "", err
+	}
+	payload["discard_approval_recorded"] = json.RawMessage("true")
+	branchSHAJSON, err := json.Marshal(branchSHA)
+	if err != nil {
+		return "", err
+	}
+	payload["discard_approval_branch_sha"] = branchSHAJSON
+	updated, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE intents SET payload_json=?,updated_at=? WHERE id=? AND process_id=?`, string(updated), time.Now().UnixMilli(), intentID, processID)
+	if err != nil {
+		return "", err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		if err != nil {
+			return "", err
+		}
+		return "", ErrIntentOwned
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		return "", err
+	}
+	return branchSHA, nil
 }
 
 func (db *DB) ClaimIntent(ctx context.Context, intentID int64, oldProcessID, newProcessID int, step string) (bool, error) {
