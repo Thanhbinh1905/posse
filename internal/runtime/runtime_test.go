@@ -20,7 +20,7 @@ func TestReconcileObservationWritesReturnRetryableBusyUnderConcurrentWriter(t *t
 	ctx := context.Background()
 	tasks := []store.Task{first}
 	for seq := 2; seq <= 4; seq++ {
-		task := store.Task{Seq: seq, Type: "ship", Title: fmt.Sprintf("Task %d", seq), LandingMode: "local", WorktreePath: first.WorktreePath, PaneID: fmt.Sprintf("w1:p%d", seq), PaneLabel: fmt.Sprintf("posse:shop:t%d", seq), HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyLand: "ask"}
+		task := store.Task{Seq: seq, Type: "change", Title: fmt.Sprintf("Task %d", seq), MergeMode: "local", WorktreePath: first.WorktreePath, PaneID: fmt.Sprintf("w1:p%d", seq), PaneLabel: fmt.Sprintf("posse:shop:t%d", seq), HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyMerge: "ask"}
 		id, err := db.CreateTask(ctx, project.ID, task)
 		if err != nil {
 			t.Fatal(err)
@@ -108,7 +108,7 @@ func TestReconcileDoesNotRestoreStalePaneIDsAfterRecovery(t *testing.T) {
 	}
 	updated, err := db.Task(ctx, project.ID, "t1")
 	if err != nil || updated.PaneID != "w1:p2" {
-		t.Fatalf("stale snapshot replaced the restored Rider pane: %#v, %v", updated, err)
+		t.Fatalf("stale snapshot replaced the restored Worker pane: %#v, %v", updated, err)
 	}
 	currentProject, err := db.ProjectByID(ctx, project.ID)
 	if err != nil || currentProject.LeadPaneID != "w1:p3" {
@@ -165,11 +165,11 @@ func TestReconcileMarksUnrecoverableMissingPaneLost(t *testing.T) {
 		t.Fatal(err)
 	}
 	if updated.State != store.StateLost || updated.WorktreePath != task.WorktreePath || len(notices) != 1 || notices[0].Kind != "task_lost" {
-		t.Fatalf("unrecoverable missing Rider was not marked lost: task=%#v notices=%#v", updated, notices)
+		t.Fatalf("unrecoverable missing Worker was not marked lost: task=%#v notices=%#v", updated, notices)
 	}
 }
 
-func TestReconcileWaitsBeforeMarkingMissingGroupedRiderLost(t *testing.T) {
+func TestReconcileWaitsBeforeMarkingMissingGroupedWorkerLost(t *testing.T) {
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -194,7 +194,7 @@ func TestReconcileWaitsBeforeMarkingMissingGroupedRiderLost(t *testing.T) {
 		t.Fatal(err)
 	}
 	if updated.State != store.StateWorking || updated.AgentAbsentSince != now.UnixMilli() || updated.WorktreePath != task.WorktreePath || len(notices) != 0 {
-		t.Fatalf("missing grouped Rider did not receive a recovery grace period: task=%#v notices=%#v", updated, notices)
+		t.Fatalf("missing grouped Worker did not receive a recovery grace period: task=%#v notices=%#v", updated, notices)
 	}
 	notices, err = ReconcileSnapshot(ctx, db, project.ID, snapshot, now.Add(AgentAbsentGrace-time.Millisecond))
 	if err != nil {
@@ -202,7 +202,7 @@ func TestReconcileWaitsBeforeMarkingMissingGroupedRiderLost(t *testing.T) {
 	}
 	updated, err = db.Task(ctx, project.ID, "t1")
 	if err != nil || updated.State != store.StateWorking || len(notices) != 0 {
-		t.Fatalf("grouped Rider was marked lost before the grace period: task=%#v notices=%#v err=%v", updated, notices, err)
+		t.Fatalf("grouped Worker was marked lost before the grace period: task=%#v notices=%#v err=%v", updated, notices, err)
 	}
 	notices, err = ReconcileSnapshot(ctx, db, project.ID, snapshot, now.Add(AgentAbsentGrace))
 	if err != nil {
@@ -210,7 +210,7 @@ func TestReconcileWaitsBeforeMarkingMissingGroupedRiderLost(t *testing.T) {
 	}
 	updated, err = db.Task(ctx, project.ID, "t1")
 	if err != nil || updated.State != store.StateLost || updated.WorktreePath != task.WorktreePath || len(notices) != 1 || notices[0].Kind != "task_lost" {
-		t.Fatalf("persistently missing grouped Rider was not marked lost: task=%#v notices=%#v err=%v", updated, notices, err)
+		t.Fatalf("persistently missing grouped Worker was not marked lost: task=%#v notices=%#v err=%v", updated, notices, err)
 	}
 }
 
@@ -290,13 +290,13 @@ func TestReconcileKeepsDoneTaskAndNoticesWorkerExitOnce(t *testing.T) {
 	}
 }
 
-func TestReconcileKeepsLandingTaskAndNoticesWorkerExitOnce(t *testing.T) {
+func TestReconcileKeepsMergeTaskAndNoticesWorkerExitOnce(t *testing.T) {
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
 	if err := db.Transition(context.Background(), task.ID, store.StateWorking, store.StateDone, "worker", "committed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(context.Background(), task.ID, store.StateDone, store.StateLanding, "cli", "gate passed"); err != nil {
+	if err := db.Transition(context.Background(), task.ID, store.StateDone, store.StateMerging, "cli", "gate passed"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -305,8 +305,8 @@ func TestReconcileKeepsLandingTaskAndNoticesWorkerExitOnce(t *testing.T) {
 		}
 	}
 	updated, err := db.Task(context.Background(), project.ID, "t1")
-	if err != nil || updated.State != store.StateLanding {
-		t.Fatalf("landing Task became lost: %#v, %v", updated, err)
+	if err != nil || updated.State != store.StateMerging {
+		t.Fatalf("merging Task became lost: %#v, %v", updated, err)
 	}
 	var count int
 	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='worker_exited'`, task.ID).Scan(&count); err != nil || count != 1 {
@@ -455,7 +455,7 @@ func createSpawningTask(t *testing.T) (*store.DB, store.Project, error) {
 		_ = db.Close()
 		return nil, store.Project{}, err
 	}
-	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "ship", Title: "Spawning", LandingMode: "local", PaneLabel: "posse:shop:t1"}); err != nil {
+	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "change", Title: "Spawning", MergeMode: "local", PaneLabel: "posse:shop:t1"}); err != nil {
 		_ = db.Close()
 		return nil, store.Project{}, err
 	}
@@ -636,7 +636,7 @@ func TestReconcileDoesNotProcessLostTaskSessionObservation(t *testing.T) {
 	ctx := context.Background()
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
-	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateLost, "cli", "Rider pane disappeared"); err != nil {
+	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateLost, "cli", "Worker pane disappeared"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -861,7 +861,7 @@ func createWorkingTask(t *testing.T) (*store.DB, store.Project, store.Task) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := store.Task{Seq: 1, Type: "ship", Title: "Fix issue", LandingMode: "local", WorktreePath: filepath.Join(t.TempDir(), "worktree"), PaneID: "w1:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyLand: "ask"}
+	task := store.Task{Seq: 1, Type: "change", Title: "Fix issue", MergeMode: "local", WorktreePath: filepath.Join(t.TempDir(), "worktree"), PaneID: "w1:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyMerge: "ask"}
 	id, err := db.CreateTask(ctx, project.ID, task)
 	if err != nil {
 		t.Fatal(err)

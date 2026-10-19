@@ -160,7 +160,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 	defer lock.Close()
 	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
 	manager := execution.NewManager(db)
-	if err := manager.EnsureMountLeases(ctx); err != nil {
+	if err := manager.EnsureSandboxLeases(ctx); err != nil {
 		return result, resourceLeaseError(err)
 	}
 	canonicalRoot, err := execution.CanonicalPath(target.Root)

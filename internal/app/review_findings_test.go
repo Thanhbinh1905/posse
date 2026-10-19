@@ -84,9 +84,9 @@ func TestFindingAnchorsNormalizeWhitespaceAndScopeChangedLines(t *testing.T) {
 }
 
 func TestReviewRoundFindingsAdmissionAnchoringAndVerdictE2E(t *testing.T) {
-	f := newRideFixture(t)
+	f := newStartFixture(t)
 	configText := `[defaults]
-landing_mode = "local"
+merge_mode = "local"
 
 [profiles.author]
 kind = "claude"
@@ -112,25 +112,25 @@ block_at = "P1"
 	gitTest(t, f.repo, "init", "--bare", remote)
 	gitTest(t, f.repo, "remote", "add", "origin", remote)
 	gitTest(t, f.repo, "push", "-u", "origin", "main")
-	if code, output := f.ride(t); code != 0 {
-		t.Fatalf("ride code=%d %s", code, output)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
 	}
-	ship, _ := f.onlyTask(t)
-	if err := os.MkdirAll(filepath.Join(ship.WorktreePath, "internal", "app"), 0o700); err != nil {
+	change, _ := f.onlyTask(t)
+	if err := os.MkdirAll(filepath.Join(change.WorktreePath, "internal", "app"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	codeText := "package app\n\nfunc save() {\n\tdb.Exec(ctx, q)\n}\n"
-	if err := os.WriteFile(filepath.Join(ship.WorktreePath, "internal", "app", "x.go"), []byte(codeText), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "internal", "app", "x.go"), []byte(codeText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, ship.WorktreePath, "add", "internal/app/x.go")
-	gitTest(t, ship.WorktreePath, "commit", "-m", "add unchecked write")
+	gitTest(t, change.WorktreePath, "add", "internal/app/x.go")
+	gitTest(t, change.WorktreePath, "commit", "-m", "add unchecked write")
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := db.Transition(ctx, ship.ID, ship.State, store.StateDone, "worker", "done"); err != nil {
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -149,7 +149,7 @@ block_at = "P1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	rounds, err := db.ReviewRoundsFor(ctx, ship.ID)
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil || len(rounds) != 1 {
 		t.Fatalf("review rounds = %#v, %v", rounds, err)
 	}
@@ -165,7 +165,7 @@ block_at = "P1"
 	if err := os.WriteFile(reportPath, []byte("Review complete\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runHoller := func(arguments ...string) (int, string) {
+	runSignal := func(arguments ...string) (int, string) {
 		t.Helper()
 		previousPane, panePresent := os.LookupEnv("HERDR_PANE_ID")
 		previousHome, homePresent := os.LookupEnv(workerHomeEnv)
@@ -186,10 +186,10 @@ block_at = "P1"
 		var output bytes.Buffer
 		cli := f.service.CLI()
 		cli.Out, cli.ErrOut = &output, &output
-		args := append([]string{"holler"}, arguments...)
+		args := append([]string{"signal"}, arguments...)
 		return cli.Run(args), output.String()
 	}
-	if code, message := runHoller("done", "Reviewed", "--report", reportPath, "--verdict", "pass"); code == 0 || !strings.Contains(message, "review_findings_required") {
+	if code, message := runSignal("done", "Reviewed", "--report", reportPath, "--verdict", "pass"); code == 0 || !strings.Contains(message, "review_findings_required") {
 		t.Fatalf("Review Round without --findings accepted: %d %s", code, message)
 	}
 	writeFindings := func(severity, excerpt string) {
@@ -211,18 +211,18 @@ block_at = "P1"
 		}
 	}
 	writeFindings("P1", "not present in the candidate")
-	if code, message := runHoller("done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", "pass"); code == 0 || !strings.Contains(message, "review_finding_unanchored") {
+	if code, message := runSignal("done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", "pass"); code == 0 || !strings.Contains(message, "review_finding_unanchored") {
 		t.Fatalf("unanchored finding accepted: %d %s", code, message)
 	}
 	writeFindings("__missing__", "db.Exec(ctx, q)")
-	if code, message := runHoller("done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", "pass"); code == 0 || !strings.Contains(message, "review_verdict_inconsistent") {
+	if code, message := runSignal("done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", "pass"); code == 0 || !strings.Contains(message, "review_verdict_inconsistent") {
 		t.Fatalf("pass with missing severity accepted: %d %s", code, message)
 	}
 	writeFindings("P1", "db.Exec(ctx, q)")
-	if code, message := runHoller("done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", "pass"); code == 0 || !strings.Contains(message, "review_verdict_inconsistent") {
+	if code, message := runSignal("done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", "pass"); code == 0 || !strings.Contains(message, "review_verdict_inconsistent") {
 		t.Fatalf("pass with open P1 accepted: %d %s", code, message)
 	}
-	if code, message := runHoller("done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", "changes_requested"); code != 0 {
+	if code, message := runSignal("done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", "changes_requested"); code != 0 {
 		t.Fatalf("changes_requested with open P1 failed: %d %s", code, message)
 	}
 	db, err = store.Open(f.home)
@@ -232,7 +232,7 @@ block_at = "P1"
 	defer db.Close()
 	var key, state, severity string
 	var inScope int
-	if err := db.QueryRowContext(ctx, `SELECT p.key,f.state,f.severity,f.in_scope FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id WHERE f.ship_task_id=?`, ship.ID).
+	if err := db.QueryRowContext(ctx, `SELECT p.key,f.state,f.severity,f.in_scope FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id WHERE f.ship_task_id=?`, change.ID).
 		Scan(&key, &state, &severity, &inScope); err != nil {
 		t.Fatal(err)
 	}

@@ -36,7 +36,7 @@ func finishShowAfterTeardown(t *testing.T, f *prLifecycleFixture, taskID string,
 	t.Helper()
 	if err != nil && !strings.Contains(string(output), `"teardown_in_progress"`) {
 		task, taskErr := f.db.Task(context.Background(), f.project.ID, taskID)
-		stateRaceDuringTeardown := strings.Contains(string(output), "Task state changed concurrently") && taskErr == nil && (task.State == store.StateLanded || task.State == store.StateTornDown)
+		stateRaceDuringTeardown := strings.Contains(string(output), "Task state changed concurrently") && taskErr == nil && (task.State == store.StateMerged || task.State == store.StateTornDown)
 		if !stateRaceDuringTeardown {
 			var transitions []store.TransitionRecord
 			var transitionsErr error
@@ -67,15 +67,15 @@ func TestShowWaitsForDeferredTeardown(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	ctx := context.Background()
-	brief := filepath.Join(f.root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
+	brief := filepath.Join(f.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
+	f.startAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
-	// Hold the poll until the foreground read has returned, so the Lookout
+	// Hold the poll until the foreground read has returned, so the Watch
 	// cannot complete Teardown before this test exercises its wait condition.
 	var token string
 	if !waitForCondition(5*time.Second, func() bool {
@@ -139,12 +139,12 @@ func TestShowWaitsForDeferredTeardown(t *testing.T) {
 func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
-	brief := filepath.Join(f.root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
+	brief := filepath.Join(f.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
+	f.startAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merged, task.GatedSHA)
@@ -153,12 +153,12 @@ func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 	if task.State != store.StateTornDown {
 		t.Fatalf("Task did not tear down: %#v", task)
 	}
-	// Model a leftover local branch at its recorded, safe squash-merged head.
+	// Model a orphan local branch at its recorded, safe squash-merged head.
 	ref := "refs/heads/" + task.Branch
 	gitTest(t, f.env, f.repo, "update-ref", ref, task.GatedSHA)
-	dry := runPosse(t, f.binary, f.repo, f.leadEnv, "remuda", "prune")
+	dry := runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune")
 	if !strings.Contains(dry, task.Branch) {
-		t.Fatalf("safe leftover branch was not planned: %s", dry)
+		t.Fatalf("safe orphan branch was not planned: %s", dry)
 	}
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -174,7 +174,7 @@ func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	prune := exec.Command(f.binary, "remuda", "prune", "--yes")
+	prune := exec.Command(f.binary, "pool", "prune", "--yes")
 	prune.Dir, prune.Env = f.repo, setEnv(f.leadEnv, "PATH", shimDir+":"+t202EnvValue(f.leadEnv, "PATH"))
 	output := filepath.Join(f.root, "branch-prune-output")
 	out, err := os.Create(output)
@@ -195,19 +195,19 @@ func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 		contents, _ := os.ReadFile(output)
 		t.Fatalf("prune did not reach deletion after its SHA check: %s", contents)
 	}
-	// A normal Git writer does not participate in Posse's private Mount lock.
+	// A normal Git writer does not participate in Posse's private Sandbox lock.
 	writer := filepath.Join(f.root, "detached-writer")
 	gitTest(t, f.env, f.repo, "worktree", "add", "--detach", writer, task.GatedSHA)
-	if err := os.WriteFile(filepath.Join(writer, "unlanded-after-prune-check.txt"), []byte("unlanded work must survive\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(writer, "unmerged-after-prune-check.txt"), []byte("unmerged work must survive\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, f.env, writer, "add", "unlanded-after-prune-check.txt")
+	gitTest(t, f.env, writer, "add", "unmerged-after-prune-check.txt")
 	gitTest(t, f.env, writer, "commit", "-m", "Unlanded follow-up after prune SHA check")
 	advanced := strings.TrimSpace(gitTest(t, f.env, writer, "rev-parse", "HEAD"))
 	gitTest(t, f.env, f.repo, "update-ref", ref, advanced, task.GatedSHA)
 	gitTest(t, f.env, f.repo, "worktree", "remove", writer)
 	if _, err := gitCommand(f.env, f.repo, "merge-base", "--is-ancestor", advanced, "main"); err == nil {
-		t.Fatal("probe follow-up unexpectedly landed")
+		t.Fatal("probe follow-up unexpectedly merged")
 	}
 	if err := os.WriteFile(resume, []byte("resume"), 0o600); err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 	}
 	got, refErr := gitCommand(f.env, f.repo, "rev-parse", "--verify", ref)
 	if refErr != nil || strings.TrimSpace(got) != advanced {
-		t.Errorf("prune did not preserve the unlanded branch tip advanced after its final check: old=%s new=%s ref=%s got=%q err=%v", task.GatedSHA, advanced, ref, got, refErr)
+		t.Errorf("prune did not preserve the unmerged branch tip advanced after its final check: old=%s new=%s ref=%s got=%q err=%v", task.GatedSHA, advanced, ref, got, refErr)
 	}
 }
 
@@ -252,7 +252,7 @@ func TestPruneReclaimsMappedCacheStorage(t *testing.T) {
 	if err := os.MkdirAll(otherTaskScratch, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	otherTaskID, err := f.db.CreateTask(context.Background(), f.project.ID, store.Task{Seq: 998, Type: "scout", Title: "Active other Task"})
+	otherTaskID, err := f.db.CreateTask(context.Background(), f.project.ID, store.Task{Seq: 998, Type: "research", Title: "Active other Task"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,11 +287,11 @@ func TestPruneReclaimsMappedCacheStorage(t *testing.T) {
 			t.Fatalf("mmap fixture unexpectedly retains an open cache descriptor: %s", target)
 		}
 	}
-	dry := runPosse(t, f.binary, f.repo, f.leadEnv, "remuda", "prune")
+	dry := runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune")
 	if !strings.Contains(dry, "t999") || !strings.Contains(dry, "65536") {
 		t.Fatalf("mapped cache not planned: %s", dry)
 	}
-	runPosse(t, f.binary, f.repo, f.leadEnv, "remuda", "prune", "--yes")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune", "--yes")
 	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
 		t.Fatalf("scratch pathname remains: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestPruneReclaimsMappedCacheStorage(t *testing.T) {
 			t.Errorf("prune changed mapped process in %s: cache=%s maps=%s err=%v", foreign.name, foreign.cache, foreignMaps, err)
 		}
 	}
-	runPosse(t, f.binary, f.repo, f.leadEnv, "remuda", "prune", "--yes")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune", "--yes")
 }
 
 func startMappedCacheHolder(t *testing.T, env []string, cwd, cache, ready string) *exec.Cmd {
@@ -348,7 +348,7 @@ while True:
     time.sleep(0.1)
 `
 
-func TestRiderMappingIsStoppedBeforeRelease(t *testing.T) {
+func TestWorkerMappingIsStoppedBeforeRelease(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	if err := os.WriteFile(filepath.Join(f.root, "map-cache.py"), []byte(t204MapCachePython), 0o600); err != nil {
@@ -359,23 +359,23 @@ func TestRiderMappingIsStoppedBeforeRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Keep the mapped helper a direct Rider child; setsid may fork and sever
+	// Keep the mapped helper a direct Worker child; setsid may fork and sever
 	// the process ancestry Teardown retains to authorize cleanup.
 	injection := "python3 \"$POSSE_TEST_ROOT/map-cache.py\" \"$TMPDIR/mapped-cache\" \"$POSSE_TEST_ROOT\" \"$POSSE_TEST_ROOT/mapped-ready\" </dev/null >/dev/null 2>&1 &\n    echo $! > \"$POSSE_TEST_ROOT/mapped-pid\"\n    printf 'worker change %s\\n'"
 	updated := strings.Replace(string(agent), "printf 'worker change %s\\n'", injection, 1)
 	if updated == string(agent) {
-		t.Fatal("Rider mapping injection did not match fixture agent")
+		t.Fatal("Worker mapping injection did not match fixture agent")
 	}
 	if err := os.WriteFile(agentPath, []byte(updated), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	brief := filepath.Join(f.root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
+	brief := filepath.Join(f.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	if !waitForCondition(3*time.Second, func() bool { _, err := os.Stat(filepath.Join(f.root, "mapped-ready")); return err == nil }) {
-		t.Fatal("actual Rider did not start its cache mapping")
+		t.Fatal("actual Worker did not start its cache mapping")
 	}
 	pidBytes, err := os.ReadFile(filepath.Join(f.root, "mapped-pid"))
 	if err != nil {
@@ -383,7 +383,7 @@ func TestRiderMappingIsStoppedBeforeRelease(t *testing.T) {
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	if err != nil || pid < 2 {
-		t.Fatalf("invalid Rider child PID: %q %v", pidBytes, err)
+		t.Fatalf("invalid Worker child PID: %q %v", pidBytes, err)
 	}
 	boot, start, err := store.ProcessIdentityForPID(pid)
 	if err != nil {
@@ -399,21 +399,21 @@ func TestRiderMappingIsStoppedBeforeRelease(t *testing.T) {
 	cache := filepath.Join(scratch, "mapped-cache")
 	maps, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
 	if err != nil || !strings.Contains(string(maps), cache) {
-		t.Fatalf("actual Rider cache mapping missing: %s %v", maps, err)
+		t.Fatalf("actual Worker cache mapping missing: %s %v", maps, err)
 	}
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merged, task.GatedSHA)
 	showAfterActiveTeardown(t, f, "t1")
 	task = f.mustTask(t, "t1")
 	if task.State != store.StateTornDown {
-		t.Fatalf("actual Rider did not finish Teardown: %#v", task)
+		t.Fatalf("actual Worker did not finish Teardown: %#v", task)
 	}
 	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
 		t.Fatalf("scratch path remains: %v", err)
 	}
 	if teardownFixtureProcessRunning(process) {
-		t.Errorf("actual Rider-owned process survived Teardown despite its scratch cache mapping")
+		t.Errorf("actual Worker-owned process survived Teardown despite its scratch cache mapping")
 	}
 }

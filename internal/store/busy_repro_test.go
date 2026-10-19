@@ -102,7 +102,7 @@ func TestConcurrentOpenersReturnRetryableContentionUnderWriterLoad(t *testing.T)
 	}
 }
 
-// TestConcurrentWritesNeverReturnBusy reproduces the load posse holler hit under
+// TestConcurrentWritesNeverReturnBusy reproduces the load posse signal hit under
 // t1's stress harness: many Workers hammering write paths concurrently while the
 // filesystem is under fsync pressure. Before the fix (BEGIN on a deferred
 // transaction that later upgrades to a write), this test reliably produced
@@ -125,7 +125,7 @@ func TestConcurrentWritesNeverReturnBusy(t *testing.T) {
 	const taskCount = 6
 	tasks := make([]Task, taskCount)
 	for i := 0; i < taskCount; i++ {
-		id, err := db.CreateTask(ctx, project.ID, Task{Seq: i + 1, Type: "ship", Title: fmt.Sprintf("Fix %d", i), LandingMode: "local", AutonomyReview: "ask", AutonomyLand: "ask"})
+		id, err := db.CreateTask(ctx, project.ID, Task{Seq: i + 1, Type: "change", Title: fmt.Sprintf("Fix %d", i), MergeMode: "local", AutonomyReview: "ask", AutonomyMerge: "ask"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -188,7 +188,7 @@ func TestConcurrentWritesNeverReturnBusy(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for i := 0; i < iterations; i++ {
-					// Exercises the same read-then-write pattern posse holler uses.
+					// Exercises the same read-then-write pattern posse signal uses.
 					_, err := db.RecordWorkerSignal(ctx, task, "working", "progress", nil, "")
 					recordErr(err)
 				}
@@ -196,23 +196,23 @@ func TestConcurrentWritesNeverReturnBusy(t *testing.T) {
 		}
 	}
 
-	// A few goroutines hammering Mount acquire/release, the other contended write
-	// path shared by multiple posse commands (ride, land, recovery).
+	// A few goroutines hammering Sandbox acquire/release, the other contended write
+	// path shared by multiple posse commands (start, merge, recovery).
 	for g := 0; g < 4; g++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				mount, err := db.AcquireMount(ctx, project.ID, tasks[0].ID, "/mounts")
+				sandbox, err := db.AcquireSandbox(ctx, project.ID, tasks[0].ID, "/sandboxes")
 				if err != nil {
 					recordErr(err)
 					continue
 				}
-				if err := db.BeginMountRelease(ctx, mount.ID, tasks[0].ID); err != nil {
+				if err := db.BeginSandboxRelease(ctx, sandbox.ID, tasks[0].ID); err != nil {
 					recordErr(err)
 					continue
 				}
-				if err := db.FinishMountRelease(ctx, mount.ID, tasks[0].ID); err != nil {
+				if err := db.FinishSandboxRelease(ctx, sandbox.ID, tasks[0].ID); err != nil {
 					recordErr(err)
 				}
 			}

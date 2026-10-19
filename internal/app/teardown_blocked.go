@@ -13,9 +13,9 @@ import (
 func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
 	processes := taskContainmentProcessDetails(task)
 	if task.WorktreePath != "" {
-		mountProcesses, err := mountTaskProcessDetails(task.WorktreePath)
+		sandboxProcesses, err := sandboxTaskProcessDetails(task.WorktreePath)
 		if err == nil {
-			processes = mergeTaskProcessDetails(processes, mountProcesses)
+			processes = mergeTaskProcessDetails(processes, sandboxProcesses)
 		}
 	}
 	if home, err := s.homePath(); err == nil {

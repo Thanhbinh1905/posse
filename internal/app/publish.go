@@ -39,7 +39,7 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		return err
 	}
 	if len(parsed.Positionals) != 1 || strings.TrimSpace(parsed.Positionals[0]) == "" {
-		return axi.Usage("publish requires a Rider summary")
+		return axi.Usage("publish requires a Worker summary")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -47,11 +47,11 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	defer db.Close()
 	if !s.workerCaller(out.Context, home) {
-		return axi.Failure("worker_only", "publish must run from a Rider", false)
+		return axi.Failure("worker_only", "publish must run from a Worker", false)
 	}
 	task, err := s.workerTask(out.Context, db)
 	if err != nil {
-		return axi.Failure("worker_task_unknown", "cannot find the Rider's Task", false)
+		return axi.Failure("worker_task_unknown", "cannot find the Worker's Task", false)
 	}
 	project, err := db.ProjectByID(out.Context, task.ProjectID)
 	if err != nil {
@@ -91,14 +91,14 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("stack_retarget_incomplete", "stacked PR/MR target change is "+change.Status+": "+change.Error, change.Status == "pending", "Resolve the stacked PR/MR target change before publishing again")
 		}
 	}
-	if task.Type != "ship" || (task.State != store.StateWorking && task.State != store.StateStalled) || task.WorktreePath == "" || task.Branch == "" {
-		return axi.Failure("publish_refused", "only a working PR-mode Ship Rider with its own Task branch can publish", false)
+	if task.Type != "change" || (task.State != store.StateWorking && task.State != store.StateStalled) || task.WorktreePath == "" || task.Branch == "" {
+		return axi.Failure("publish_refused", "only a working PR-mode Change Worker with its own Task branch can publish", false)
 	}
 	cwd, err := currentDir()
 	if err != nil || !pathWithin(task.WorktreePath, cwd) {
-		return axi.Failure("publish_refused", "publish must run inside this Rider's Task Mount", false)
+		return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox", false)
 	}
-	var member *memberLanding
+	var member *memberMerge
 	if project.IsWorkspace() {
 		members, err := s.workspaceMembers(out.Context, db, project, task)
 		if err != nil {
@@ -110,25 +110,25 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 				break
 			}
 		}
-		if member == nil || member.repo.LandingMode != "pr" {
+		if member == nil || member.repo.MergeMode != "pr" {
 			return axi.Failure("publish_refused", "only a PR-mode member named in this Task may be published", false)
 		}
 		project, task = member.project, member.task
 	} else {
-		if parsed.Flags["repo"] != "" || task.LandingMode != "pr" {
-			return axi.Failure("publish_refused", "only a PR-mode Ship Task may be published without --repo", false)
+		if parsed.Flags["repo"] != "" || task.MergeMode != "pr" {
+			return axi.Failure("publish_refused", "only a PR-mode Change Task may be published without --repo", false)
 		}
 		root, err := gitTop(out.Context, "")
 		if err != nil || !samePath(root, task.WorktreePath) {
-			return axi.Failure("publish_refused", "publish must run inside this Rider's Task Mount", false)
+			return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox", false)
 		}
 	}
-	if err := validateShipSignal(out.Context, task); err != nil {
+	if err := validateChangeSignal(out.Context, task); err != nil {
 		return axi.Failure("publish_refused", err.Error(), false)
 	}
 	branch, err := gitOutput(out.Context, task.WorktreePath, "symbolic-ref", "HEAD")
 	if err != nil || branch != "refs/heads/"+task.Branch {
-		return axi.Failure("publish_refused", "Mount must be checked out on its Task branch", false)
+		return axi.Failure("publish_refused", "Sandbox must be checked out on its Task branch", false)
 	}
 	sha, err := gitOutput(out.Context, task.WorktreePath, "rev-parse", "HEAD")
 	if err != nil {
@@ -181,14 +181,14 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 	}
-	help := "Run `posse holler done \"<summary>\" --pr " + prURL + "` after committing and ensuring a clean worktree"
+	help := "Run `posse signal done \"<summary>\" --pr " + prURL + "` after committing and ensuring a clean worktree"
 	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "pr_url", Value: prURL}}
 	if member != nil {
 		member.repo.PRURL = prURL
 		if err := db.UpdateTaskRepo(out.Context, member.repo); err != nil {
 			return err
 		}
-		help = "Publish every changed PR member, then run `posse holler done \"<summary>\"`"
+		help = "Publish every changed PR member, then run `posse signal done \"<summary>\"`"
 		result = append(result, axi.Field{Key: "repo", Value: member.repo.Repo})
 	}
 	return out.Print(append(result, axi.Field{Key: "help", Value: []any{help}}))
@@ -202,7 +202,7 @@ func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.D
 		return err
 	}
 	for _, member := range members {
-		if member.repo.LandingMode != "pr" {
+		if member.repo.MergeMode != "pr" {
 			continue
 		}
 		ahead, err := commitsAhead(ctx, member.repo.WorktreePath, member.repo.BaseRef, "refs/heads/"+task.Branch)

@@ -223,7 +223,7 @@ func TestInPlaceScopeNoticesDeduplicateEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Scoped change", ShortName: "scoped-change", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Scoped change", ShortName: "scoped-change", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestInPlaceTeardownDoesNotClaimTheLeadWorkspace(t *testing.T) {
 	}
 }
 
-func TestInPlaceRiderCannotStartProjectLead(t *testing.T) {
+func TestInPlaceWorkerCannotStartProjectLead(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	projectRoot := filepath.Join(root, "source")
@@ -304,14 +304,14 @@ func TestInPlaceRiderCannotStartProjectLead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	briefBytes := []byte("---\ntype: ship\ntitle: Edit source\ndone_when: checks pass\nexecution: in-place\npaths: [src]\n---\n")
+	briefBytes := []byte("---\ntype: change\ntitle: Edit source\ndone_when: checks pass\nexecution: in-place\npaths: [src]\n---\n")
 	plan, err := taskplan.Resolve(taskplan.Request{
 		Brief:     taskplan.Select("brief", "brief.md", briefBytes),
-		Execution: taskplan.Execution{Mode: "mount", Scope: "directory"},
+		Execution: taskplan.Execution{Mode: "sandbox", Scope: "directory"},
 		Launch:    taskplan.Launch{ProfileName: "deep", Profile: config.Profile{Kind: "pi", Model: "model"}, Args: []string{"--model", "model"}, ModelKnown: true, ConfiguredModel: "model"},
-		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
 		Paths:      taskplan.Paths{Scratch: filepath.Join(harness.home, "scratch", "source", "tasks", "t1"), Output: filepath.Join(harness.home, "projects", "source", "tasks", "t1")},
-		UserChoice: &taskplan.UserChoice{Quote: "I approve edits to src", Actor: "lead", Source: "ride --user-approved"},
+		UserChoice: &taskplan.UserChoice{Quote: "I approve edits to src", Actor: "lead", Source: "start --user-approved"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func TestInPlaceRiderCannotStartProjectLead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Edit source", ShortName: "edit-source", PlanJSON: string(planJSON), WorktreePath: projectRoot, LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Edit source", ShortName: "edit-source", PlanJSON: string(planJSON), WorktreePath: projectRoot, MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,18 +331,18 @@ func TestInPlaceRiderCannotStartProjectLead(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code := harness.run("up", "--claude"); code == 0 || !strings.Contains(harness.out.String(), "worker_forbidden") {
-		t.Fatalf("CLI did not refuse `up` from an in-place Rider: code=%d output=%s", code, harness.out.String())
+		t.Fatalf("CLI did not refuse `up` from an in-place Worker: code=%d output=%s", code, harness.out.String())
 	}
 	var output strings.Builder
 	err = harness.service.upCore(&axi.Context{Context: ctx, Out: &output, ErrOut: &output}, []string{"--claude"})
 	var failure *axi.Error
 	if !errors.As(err, &failure) || failure.Code != "lead_only" {
-		t.Fatalf("up handler did not refuse an in-place Rider pane: %v output=%s", err, output.String())
+		t.Fatalf("up handler did not refuse an in-place Worker pane: %v output=%s", err, output.String())
 	}
 	t.Setenv("HERDR_PANE_ID", "w1:p3")
 	harness.fake.SnapshotValue.Panes = append(harness.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p3", WorkspaceID: "w1"})
 	if code := harness.run("down"); code == 0 || !strings.Contains(harness.out.String(), "tasks_open") {
-		t.Fatalf("User shell was mistaken for the in-place Rider: code=%d output=%s", code, harness.out.String())
+		t.Fatalf("User shell was mistaken for the in-place Worker: code=%d output=%s", code, harness.out.String())
 	}
 }
 
@@ -365,7 +365,7 @@ func TestInPlaceLeasesPersistAcrossReopenAndRefuseOverlappingScopes(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Edit source", ShortName: "edit-source", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Edit source", ShortName: "edit-source", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestInPlaceLeasesPersistAcrossReopenAndRefuseOverlappingScopes(t *testing.T
 	}
 }
 
-func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testing.T) {
+func TestInPlaceStartCompletesGitAndPlainDirectoriesWithoutCommitOrMerge(t *testing.T) {
 	for _, withGit := range []bool{false, true} {
 		name := "plain directory"
 		if withGit {
@@ -440,12 +440,12 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 			if err := os.MkdirAll(home, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			configText := "[defaults]\nlanding_mode = \"pr\"\ngate = [\"test -f src/created.txt\"]\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n"
+			configText := "[defaults]\nmerge_mode = \"pr\"\ngate = [\"test -f src/created.txt\"]\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n"
 			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			briefPath := filepath.Join(root, "brief.md")
-			brief := "---\ntype: ship\ntitle: Add a local file\ndone_when: the approved check passes\nexecution: in-place\npaths: [src]\n---\nCreate src/created.txt.\n"
+			brief := "---\ntype: change\ntitle: Add a local file\ndone_when: the approved check passes\nexecution: in-place\npaths: [src]\n---\nCreate src/created.txt.\n"
 			if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -475,11 +475,11 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 			var output strings.Builder
 			cli := service.CLI()
 			cli.Out, cli.ErrOut = &output, &output
-			if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "add-local-file"}); code == 0 || !strings.Contains(output.String(), "in_place_consent_required") {
-				t.Fatalf("unconsented ride = %d\n%s", code, output.String())
+			if code := cli.Run([]string{"start", "--brief", briefPath, "--name", "add-local-file"}); code == 0 || !strings.Contains(output.String(), "in_place_consent_required") {
+				t.Fatalf("unconsented start = %d\n%s", code, output.String())
 			}
 			if fake.CallCount("tab.create") != 0 {
-				t.Fatalf("unconsented ride launched a Rider: %#v", fake.Calls)
+				t.Fatalf("unconsented start launched a Worker: %#v", fake.Calls)
 			}
 			db, err = store.Open(home)
 			if err != nil {
@@ -488,18 +488,18 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 			unconsentedTasks, err := db.Tasks(ctx, project.ID, true)
 			_ = db.Close()
 			if err != nil || len(unconsentedTasks) != 0 {
-				t.Fatalf("unconsented ride created Tasks: %#v, %v", unconsentedTasks, err)
+				t.Fatalf("unconsented start created Tasks: %#v, %v", unconsentedTasks, err)
 			}
 			for _, unsupported := range []struct {
 				name, title, brief, code string
 			}{
-				{"PR delivery", "Publish the local change", "---\ntype: ship\ntitle: Publish the local change\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nlanding_mode: pr\n---\n", "in_place_delivery_unsupported"},
-				{"ticket closure", "Close the ticket", "---\ntype: ship\ntitle: Close the ticket\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nticket: 148\n---\n", "in_place_ticket_unsupported"},
-				{"issue references", "Add an issue reference", "---\ntype: ship\ntitle: Add an issue reference\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nrefs: [18]\n---\n", "in_place_ticket_unsupported"},
+				{"PR delivery", "Publish the local change", "---\ntype: change\ntitle: Publish the local change\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nmerge_mode: pr\n---\n", "in_place_delivery_unsupported"},
+				{"ticket closure", "Close the ticket", "---\ntype: change\ntitle: Close the ticket\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nticket: 148\n---\n", "in_place_ticket_unsupported"},
+				{"issue references", "Add an issue reference", "---\ntype: change\ntitle: Add an issue reference\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nrefs: [18]\n---\n", "in_place_ticket_unsupported"},
 				{"Review", "Review a branch", "---\ntype: review\ntitle: Review a branch\ndone_when: report is saved\nreview_of: t1\nexecution: in-place\npaths: [src]\n---\n", "in_place_review_unsupported"},
-				{"Review policy", "Review local edits", "---\ntype: ship\ntitle: Review local edits\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nreview: local\n---\n", "in_place_review_unsupported"},
-				{"Git ref", "Edit from a base ref", "---\ntype: ship\ntitle: Edit from a base ref\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nbase: main\n---\n", "in_place_git_scope_unsupported"},
-				{"no-mistakes", "Run no-mistakes", "---\ntype: ship\ntitle: Run no-mistakes\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nlanding_mode: no-mistakes\n---\n", "in_place_delivery_unsupported"},
+				{"Review policy", "Review local edits", "---\ntype: change\ntitle: Review local edits\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nreview: local\n---\n", "in_place_review_unsupported"},
+				{"Git ref", "Edit from a base ref", "---\ntype: change\ntitle: Edit from a base ref\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nbase: main\n---\n", "in_place_git_scope_unsupported"},
+				{"no-mistakes", "Run no-mistakes", "---\ntype: change\ntitle: Run no-mistakes\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nmerge_mode: no-mistakes\n---\n", "in_place_delivery_unsupported"},
 			} {
 				unsupportedPath := filepath.Join(root, "unsupported-brief.md")
 				if err := os.WriteFile(unsupportedPath, []byte(unsupported.brief), 0o600); err != nil {
@@ -507,11 +507,11 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 				}
 				output.Reset()
 				name := taskTitleSlug(unsupported.title)
-				if code := cli.Run([]string{"ride", "--brief", unsupportedPath, "--name", name, "--user-approved", "I approve edits under src"}); code == 0 || !strings.Contains(output.String(), unsupported.code) {
-					t.Fatalf("unsupported %s ride = %d\n%s", unsupported.name, code, output.String())
+				if code := cli.Run([]string{"start", "--brief", unsupportedPath, "--name", name, "--user-approved", "I approve edits under src"}); code == 0 || !strings.Contains(output.String(), unsupported.code) {
+					t.Fatalf("unsupported %s start = %d\n%s", unsupported.name, code, output.String())
 				}
 				if fake.CallCount("tab.create") != 0 {
-					t.Fatalf("unsupported %s ride launched a Rider: %#v", unsupported.name, fake.Calls)
+					t.Fatalf("unsupported %s start launched a Worker: %#v", unsupported.name, fake.Calls)
 				}
 			}
 			db, err = store.Open(home)
@@ -524,11 +524,11 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 				t.Fatalf("incompatible requests created Tasks: %#v, %v", unsupportedTasks, err)
 			}
 			output.Reset()
-			if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "add-local-file", "--user-approved", "I approve edits under src"}); code != 0 {
-				t.Fatalf("ride: %d\n%s", code, output.String())
+			if code := cli.Run([]string{"start", "--brief", briefPath, "--name", "add-local-file", "--user-approved", "I approve edits under src"}); code != 0 {
+				t.Fatalf("start: %d\n%s", code, output.String())
 			}
 			output.Reset()
-			if code := cli.Run([]string{"holler", "working", "Lead must not impersonate the Rider"}); code == 0 || !strings.Contains(output.String(), "worker_task_unknown") {
+			if code := cli.Run([]string{"signal", "working", "Lead must not impersonate the Worker"}); code == 0 || !strings.Contains(output.String(), "worker_task_unknown") {
 				t.Fatalf("Lead signal in the shared in-place directory = %d\n%s", code, output.String())
 			}
 			output.Reset()
@@ -541,12 +541,12 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 				t.Fatalf("Tasks = %#v, %v", tasks, err)
 			}
 			task := tasks[0]
-			if task.State != store.StateWorking || task.Branch != "" || task.MountID != 0 || filepath.Clean(task.WorktreePath) != directory {
+			if task.State != store.StateWorking || task.Branch != "" || task.SandboxID != 0 || filepath.Clean(task.WorktreePath) != directory {
 				t.Fatalf("in-place Task custody = %#v", task)
 			}
-			mounts, err := db.Mounts(ctx, project.ID)
-			if err != nil || len(mounts) != 0 {
-				t.Fatalf("in-place ride created Mounts: %#v, %v", mounts, err)
+			sandboxes, err := db.Sandboxes(ctx, project.ID)
+			if err != nil || len(sandboxes) != 0 {
+				t.Fatalf("in-place start created Sandboxes: %#v, %v", sandboxes, err)
 			}
 			plan, err := task.AdmittedPlan()
 			if err != nil || plan == nil {
@@ -560,14 +560,14 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 				t.Fatalf("in-place path lease = %#v, %v", leases, err)
 			}
 			fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"})
-			fake.Results["pane.read"] = json.RawMessage(`{"text":"Rider working"}`)
+			fake.Results["pane.read"] = json.RawMessage(`{"text":"Worker working"}`)
 			t.Setenv("HERDR_PANE_ID", "w1:p2")
 			output.Reset()
 			if code := cli.Run([]string{"publish", "Attempt to publish in-place changes"}); code == 0 || !strings.Contains(output.String(), "publish_refused") {
-				t.Fatalf("in-place Rider publish = %d\n%s", code, output.String())
+				t.Fatalf("in-place Worker publish = %d\n%s", code, output.String())
 			}
 			output.Reset()
-			if code := cli.Run([]string{"holler", "needs-decision", "Attach findings", "--findings", "README.md"}); code == 0 || !strings.Contains(output.String(), "in-place findings must come from this Task's scratch directory") {
+			if code := cli.Run([]string{"signal", "needs-decision", "Attach findings", "--findings", "README.md"}); code == 0 || !strings.Contains(output.String(), "in-place findings must come from this Task's scratch directory") {
 				t.Fatalf("in-place findings accepted from source root = %d\n%s", code, output.String())
 			}
 			t.Setenv("HERDR_PANE_ID", "w1:p1")
@@ -577,7 +577,7 @@ func TestInPlaceRideCompletesGitAndPlainDirectoriesWithoutCommitOrLand(t *testin
 			}
 			overlapBrief := filepath.Join(root, "overlap-brief.md")
 			if err := os.WriteFile(overlapBrief, []byte(`---
-type: ship
+type: change
 title: Add overlapping file
 done_when: nested file exists
 execution: in-place
@@ -588,25 +588,25 @@ Create the nested file.
 				t.Fatal(err)
 			}
 			output.Reset()
-			if code := cli.Run([]string{"ride", "--brief", overlapBrief, "--name", "add-overlapping-file", "--user-approved", "I approve edits under src/nested"}); code == 0 || !strings.Contains(output.String(), "resource_conflict") {
-				t.Fatalf("overlapping in-place ride = %d\n%s", code, output.String())
+			if code := cli.Run([]string{"start", "--brief", overlapBrief, "--name", "add-overlapping-file", "--user-approved", "I approve edits under src/nested"}); code == 0 || !strings.Contains(output.String(), "resource_conflict") {
+				t.Fatalf("overlapping in-place start = %d\n%s", code, output.String())
 			}
 			parentTasks, err := db.Tasks(ctx, project.ID, true)
 			if err != nil || len(parentTasks) != 2 || parentTasks[1].State != store.StateFailed || parentTasks[1].Branch != "" || fake.CallCount("tab.create") != 1 {
-				t.Fatalf("overlap failure launched a Rider or lost its Task record: %#v calls=%#v err=%v", parentTasks, fake.Calls, err)
+				t.Fatalf("overlap failure launched a Worker or lost its Task record: %#v calls=%#v err=%v", parentTasks, fake.Calls, err)
 			}
 			t.Setenv("HERDR_PANE_ID", "")
 			output.Reset()
 			if code := cli.Run([]string{"project", "show"}); code != 0 {
-				t.Fatalf("User shell in shared in-place directory was treated as a Rider: %d\n%s", code, output.String())
+				t.Fatalf("User shell in shared in-place directory was treated as a Worker: %d\n%s", code, output.String())
 			}
 			t.Setenv("HERDR_PANE_ID", "w1:p1")
 			if fake.CallCount("worktree.open") != 0 || fake.CallCount("tab.create") != 1 {
-				t.Fatalf("in-place Rider placement = %#v", fake.Calls)
+				t.Fatalf("in-place Worker placement = %#v", fake.Calls)
 			}
 			t.Setenv("HERDR_PANE_ID", "w1:p2")
 			output.Reset()
-			if code := cli.Run([]string{"holler", "done", "The approved check must pass"}); code == 0 || !strings.Contains(output.String(), "in_place_check_failed") {
+			if code := cli.Run([]string{"signal", "done", "The approved check must pass"}); code == 0 || !strings.Contains(output.String(), "in_place_check_failed") {
 				t.Fatalf("failed approved check was not refused: %d\n%s", code, output.String())
 			}
 			failedCheckData, err := os.ReadFile(inPlaceOutputPath(*plan))
@@ -623,7 +623,7 @@ Create the nested file.
 				t.Fatal(err)
 			}
 			fake.SnapshotValue.Panes = fake.SnapshotValue.Panes[:1]
-			if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateLost, "cli", "simulated interrupted in-place Rider"); err != nil {
+			if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateLost, "cli", "simulated interrupted in-place Worker"); err != nil {
 				t.Fatal(err)
 			}
 			if err := captureLostInPlaceEvidence(ctx, db, project); err != nil {
@@ -647,7 +647,7 @@ Create the nested file.
 				t.Fatalf("in-place recovery options = %#v, %v", decisions, err)
 			}
 			output.Reset()
-			if code := cli.Run([]string{"unsaddle", "t2"}); code == 0 || !strings.Contains(output.String(), "decision_required") {
+			if code := cli.Run([]string{"teardown", "t2"}); code == 0 || !strings.Contains(output.String(), "decision_required") {
 				t.Fatalf("failed in-place Task stopped without User choice: %d\n%s", code, output.String())
 			}
 			var overlapRecovery *store.Decision
@@ -730,8 +730,8 @@ Create the nested file.
 			output.Reset()
 			cli.Out, cli.ErrOut = &output, &output
 			t.Setenv("HERDR_PANE_ID", "w1:p2")
-			if code := cli.Run([]string{"holler", "done", "Created the file without a branch or commit"}); code != 0 {
-				t.Fatalf("holler done: %d\n%s", code, output.String())
+			if code := cli.Run([]string{"signal", "done", "Created the file without a branch or commit"}); code != 0 {
+				t.Fatalf("signal done: %d\n%s", code, output.String())
 			}
 			db, err = store.Open(home)
 			if err != nil {
@@ -758,8 +758,8 @@ Create the nested file.
 				t.Fatalf("completion evidence = %#v", evidence)
 			}
 			output.Reset()
-			if code := cli.Run([]string{"land", "t1"}); code == 0 || !strings.Contains(output.String(), "land_refused") {
-				t.Fatalf("in-place Task Land = %d\n%s", code, output.String())
+			if code := cli.Run([]string{"merge", "t1"}); code == 0 || !strings.Contains(output.String(), "merge_refused") {
+				t.Fatalf("in-place Task Merge = %d\n%s", code, output.String())
 			}
 			if contents, err := os.ReadFile(preexisting); err != nil || string(contents) != "pre-existing dirty change\n" {
 				t.Fatalf("pre-existing edit was not preserved: %q, %v", contents, err)
@@ -779,12 +779,12 @@ Create the nested file.
 			output.Reset()
 			cli.Out, cli.ErrOut = &output, &output
 			t.Setenv("HERDR_PANE_ID", "w1:p1")
-			if code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "Discard these source changes"}); code == 0 || !strings.Contains(output.String(), "teardown_refused") {
+			if code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "Discard these source changes"}); code == 0 || !strings.Contains(output.String(), "teardown_refused") {
 				t.Fatalf("in-place discard was not refused: %d\n%s", code, output.String())
 			}
 			output.Reset()
-			if code := cli.Run([]string{"unsaddle", "t1"}); code != 0 {
-				t.Fatalf("unsaddle: %d\n%s", code, output.String())
+			if code := cli.Run([]string{"teardown", "t1"}); code != 0 {
+				t.Fatalf("teardown: %d\n%s", code, output.String())
 			}
 			db, err = store.Open(home)
 			if err != nil {

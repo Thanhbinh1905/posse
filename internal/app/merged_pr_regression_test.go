@@ -14,9 +14,9 @@ import (
 )
 
 // A: a workspace member PR published but not yet gated (repo state "open")
-// merges on the forge. The Task must Land.
-func TestWorkspaceOpenMemberMergedLands(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
+// merges on the forge. The Task must Merge.
+func TestWorkspaceOpenMemberMergedMerges(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
 	bin := filepath.Join(f.root, "bin")
 	state := filepath.Join(f.root, "gh-view.json")
 	script := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$POSSE_TEST_GH_LOG\"\ncase \"$1 $2\" in\n" +
@@ -63,10 +63,10 @@ func TestWorkspaceOpenMemberMergedLands(t *testing.T) {
 	for _, n := range notices {
 		kinds = append(kinds, n.Kind)
 	}
-	if f.state() != store.StateLanded || f.repos()["worker"].TargetBranch != "staging" {
-		t.Fatalf("merged member did not Land against staging: state=%s worker repo=%#v notices=%v", f.state(), f.repos()["worker"], kinds)
+	if f.state() != store.StateMerged || f.repos()["worker"].TargetBranch != "staging" {
+		t.Fatalf("merged member did not Merge against staging: state=%s worker repo=%#v notices=%v", f.state(), f.repos()["worker"], kinds)
 	}
-	if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, f.config()); err != nil {
+	if err := f.service.autoTeardownMergedTasks(ctx, f.db, f.project, f.config()); err != nil {
 		t.Fatalf("teardown merged workspace Task: %v", err)
 	}
 	if f.state() != store.StateTornDown {
@@ -74,30 +74,30 @@ func TestWorkspaceOpenMemberMergedLands(t *testing.T) {
 	}
 }
 
-func TestLandedPRTeardownUsesMergeObservationWhenTargetBranchWasDeleted(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+func TestMergedPRTeardownUsesMergeObservationWhenTargetBranchWasDeleted(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	ctx := context.Background()
 	const targetBranch = "posse/lower"
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET target_branch=? WHERE id=?`, targetBranch, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
-	attachPRFixtureMount(t, fixture)
-	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	attachPRFixtureSandbox(t, fixture)
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateDone, "worker", "Worker completed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateLanding, "cli", "Gate passed"); err != nil {
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerging, "cli", "Gate passed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateLanding, store.StateLanded, "cli", "PR merged"); err != nil {
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateMerging, store.StateMerged, "cli", "PR merged"); err != nil {
 		t.Fatal(err)
 	}
 	insertObservation(t, fixture.db, fixture.project.ID, fixture.task.ID, "https://github.com/acme/shop/pull/17", fixture.headSHA, "MERGED", fixture.headSHA)
 	removeFixtureTaskPane(fixture)
 
-	if code, output, stderr := fixture.run("unsaddle", "t1"); code != 0 {
+	if code, output, stderr := fixture.run("teardown", "t1"); code != 0 {
 		t.Fatalf("teardown after merged PR target deletion: code=%d output=%s stderr=%s", code, output, stderr)
 	}
 	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
@@ -117,13 +117,13 @@ func insertObservation(t *testing.T, db *store.DB, projectID, taskID int64, url,
 }
 
 // B: upgrade. The previous release recorded a MERGED observation but kept the
-// Task working (pr_follow_up_pending). The first reconcile must Land it.
-func TestUpgradeWorkingTaskWithRecordedMergeLands(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateWorking)
+// Task working (pr_follow_up_pending). The first reconcile must Merge it.
+func TestUpgradeWorkingTaskWithRecordedMergeMerges(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
 	url := "https://github.com/acme/shop/pull/17"
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, url, ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, url, ""); err != nil {
 		t.Fatal(err)
 	}
 	insertObservation(t, f.db, f.project.ID, f.task.ID, url, f.headSHA, "MERGED", f.headSHA)
@@ -136,7 +136,7 @@ func TestUpgradeWorkingTaskWithRecordedMergeLands(t *testing.T) {
 		if err := f.service.pollProjectPullRequests(ctx, f.db, f.project, cfg, true); err != nil {
 			t.Fatal(err)
 		}
-		if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, cfg); err != nil {
+		if err := f.service.autoTeardownMergedTasks(ctx, f.db, f.project, cfg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -146,18 +146,18 @@ func TestUpgradeWorkingTaskWithRecordedMergeLands(t *testing.T) {
 	for _, n := range notices {
 		kinds = append(kinds, n.Kind)
 	}
-	if task.State != store.StateTornDown && task.State != store.StateLanded {
+	if task.State != store.StateTornDown && task.State != store.StateMerged {
 		t.Fatalf("upgraded merged Task silently skipped: state=%s notices=%v", task.State, kinds)
 	}
 }
 
-// C: a PR closed, then reopened on the forge and merged. The Task must Land.
+// C: a PR closed, then reopened on the forge and merged. The Task must Merge.
 func TestReopenedPRIsWatchedAgain(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateWorking)
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
 	url := "https://github.com/acme/shop/pull/17"
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, url, ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, url, ""); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(f.home, f.project.Name)
@@ -178,21 +178,21 @@ func TestReopenedPRIsWatchedAgain(t *testing.T) {
 	}
 	log, _ := os.ReadFile(f.ghLog)
 	task, _ := f.db.Task(ctx, f.project.ID, "t1")
-	if task.State != store.StateLanded {
-		t.Fatalf("reopened+merged PR never Landed: state=%s gh calls after close=%q", task.State, log)
+	if task.State != store.StateMerged {
+		t.Fatalf("reopened+merged PR never Merged: state=%s gh calls after close=%q", task.State, log)
 	}
 }
 
 // D: the Task's PR changes after the first one closed (new PR published).
 // The new PR must be watched and no Decision must claim it closed.
 func TestNewPRAfterClosedOneIsWatched(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateWorking)
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
 	oldURL := "https://github.com/acme/shop/pull/16"
 	insertObservation(t, f.db, f.project.ID, f.task.ID, oldURL, f.headSHA, "CLOSED", "")
 	url := "https://github.com/acme/shop/pull/17"
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, url, ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, url, ""); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(f.home, f.project.Name)
@@ -210,7 +210,7 @@ func TestNewPRAfterClosedOneIsWatched(t *testing.T) {
 	for _, d := range decisions {
 		t.Logf("decision %s %s: %s", d.Kind, d.Origin, d.Question)
 	}
-	if task.State != store.StateLanded {
+	if task.State != store.StateMerged {
 		t.Fatalf("new PR not watched: state=%s decisions=%d", task.State, len(decisions))
 	}
 }
@@ -230,14 +230,14 @@ func TestGuardGitPushSubcommands(t *testing.T) {
 	}
 }
 
-// F: a concurrent Teardown (another process holds the unsaddle intent) must
+// F: a concurrent Teardown (another process holds the teardown intent) must
 // not leave a false "teardown incomplete" reason on a Task that is torn down.
 func TestConcurrentTeardownRaisesNoFalseReason(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateWorking)
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
 	url := "https://github.com/acme/shop/pull/17"
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, url, ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, url, ""); err != nil {
 		t.Fatal(err)
 	}
 	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
@@ -251,24 +251,24 @@ func TestConcurrentTeardownRaisesNoFalseReason(t *testing.T) {
 	fake := f.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue = herdr.Snapshot{Panes: fake.SnapshotValue.Panes[:1]}
 	// Another live posse process (this test process) is mid-Teardown.
-	if err := f.db.StartIntent(ctx, f.project.ID, f.task.ID, "unsaddle", "panes.close", `{"discard":false}`, os.Getppid()); err != nil {
+	if err := f.db.StartIntent(ctx, f.project.ID, f.task.ID, "teardown", "panes.close", `{"discard":false}`, os.Getppid()); err != nil {
 		t.Fatal(err)
 	}
 	intent, err := f.db.IntentByTask(ctx, f.task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, cfg); err != nil {
+	if err := f.service.autoTeardownMergedTasks(ctx, f.db, f.project, cfg); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.db.FinishIntent(ctx, intent.ID, intent.ProcessID)
-	if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, cfg); err != nil {
+	if err := f.service.autoTeardownMergedTasks(ctx, f.db, f.project, cfg); err != nil {
 		t.Fatal(err)
 	}
 	task, _ := f.db.Task(ctx, f.project.ID, "t1")
 	notices, _ := f.db.Notices(ctx, f.project.ID, false)
 	for _, n := range notices {
-		if n.Kind == "unsaddle_incomplete" {
+		if n.Kind == "teardown_incomplete" {
 			t.Errorf("state=%s false reason: %s", task.State, n.Summary)
 		} else {
 			t.Logf("notice %s: %s", n.Kind, n.Summary)
@@ -276,12 +276,12 @@ func TestConcurrentTeardownRaisesNoFalseReason(t *testing.T) {
 	}
 }
 
-// T: a PR closes while its Task is landing with an open land_ready Decision.
-// The Decision must not stay answerable with "land".
-func TestClosedPRObsoletesLandReadyDecision(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+// T: a PR closes while its Task is merging with an open merge_ready Decision.
+// The Decision must not stay answerable with "merge".
+func TestClosedPRObsoletesMergeReadyDecision(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
-	if code, output, errOutput := f.run("land", "t1"); code != 0 {
+	if code, output, errOutput := f.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	cfg, err := config.Load(f.home, f.project.Name)
@@ -309,17 +309,17 @@ func TestClosedPRObsoletesLandReadyDecision(t *testing.T) {
 	}
 	for _, d := range decisions {
 		t.Logf("pending decision %s: %s %v", d.Kind, d.Question, d.Options)
-		if d.Kind == "land_ready" {
-			t.Errorf("land_ready Decision still pending after the PR closed")
+		if d.Kind == "merge_ready" {
+			t.Errorf("merge_ready Decision still pending after the PR closed")
 		}
 	}
 }
 
-// W: a workspace Task Lands from working because its PR member merged. Edits
-// the Rider left in another member (here the already-landed local member) must
-// be snapshotted or kept, not discarded by Mount release.
+// W: a workspace Task Merges from working because its PR member merged. Edits
+// the Worker left in another member (here the already-merged local member) must
+// be snapshotted or kept, not discarded by Sandbox release.
 func TestWorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
 	bin := filepath.Join(f.root, "bin")
 	state := filepath.Join(f.root, "gh-view.json")
 	script := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$POSSE_TEST_GH_LOG\"\ncase \"$1 $2\" in\n" +
@@ -354,35 +354,35 @@ func TestWorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
 		}
 	}
 	writeView("OPEN", "")
-	if code := f.run("land", "t1"); code != 0 {
-		t.Fatalf("land: %d\n%s", code, f.out.String())
+	if code := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge: %d\n%s", code, f.out.String())
 	}
-	if code := f.run("land", "t1", "--merge", "--user-approved", "ship it"); code != 0 {
-		t.Fatalf("land --merge: %d\n%s", code, f.out.String())
+	if code := f.run("merge", "t1", "--execute", "--user-approved", "change it"); code != 0 {
+		t.Fatalf("merge --execute: %d\n%s", code, f.out.String())
 	}
 	ctx := context.Background()
-	// The Lead sends a follow-up; the Rider starts editing the local member.
-	if err := f.db.Transition(ctx, f.task.ID, store.StateLanding, store.StateWorking, "lead", "follow-up"); err != nil {
+	// The Lead sends a follow-up; the Worker starts editing the local member.
+	if err := f.db.Transition(ctx, f.task.ID, store.StateMerging, store.StateWorking, "lead", "follow-up"); err != nil {
 		t.Fatal(err)
 	}
 	unsaved := filepath.Join(f.task.WorktreePath, "e2e-tool", "follow-up-edit.txt")
-	if err := os.WriteFile(unsaved, []byte("Rider work\n"), 0o600); err != nil {
+	if err := os.WriteFile(unsaved, []byte("Worker work\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	writeView("MERGED", head)
 	if err := f.service.pollWorkspacePullRequests(ctx, f.db, f.project, f.config(), true); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, f.config()); err != nil {
+	if err := f.service.autoTeardownMergedTasks(ctx, f.db, f.project, f.config()); err != nil {
 		t.Fatal(err)
 	}
 	if f.state() != store.StateTornDown {
 		t.Fatalf("state=%s", f.state())
 	}
 	tool := filepath.Join(f.workspace, "e2e-tool")
-	content := gitTest(t, tool, "show", "refs/heads/"+f.task.Branch+"-leftover:follow-up-edit.txt")
-	if content != "Rider work\n" {
-		t.Fatalf("uncommitted Member Leftover was not saved: %q", content)
+	content := gitTest(t, tool, "show", "refs/heads/"+f.task.Branch+"-orphan:follow-up-edit.txt")
+	if content != "Worker work\n" {
+		t.Fatalf("uncommitted Member Orphan was not saved: %q", content)
 	}
 	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
 	if err != nil {
@@ -390,10 +390,10 @@ func TestWorkspaceTeardownKeepsNonPRMemberWork(t *testing.T) {
 	}
 	found := false
 	for _, d := range decisions {
-		found = found || d.Kind == "leftover" && strings.Contains(d.Origin, "e2e-tool")
+		found = found || d.Kind == "orphan" && strings.Contains(d.Origin, "e2e-tool")
 	}
 	if !found {
-		t.Fatalf("Member Leftover has no Decision: %#v", decisions)
+		t.Fatalf("Member Orphan has no Decision: %#v", decisions)
 	}
 	_ = unsaved
 }

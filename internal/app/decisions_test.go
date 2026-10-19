@@ -27,7 +27,7 @@ func TestWorkerExitedNoticePastCursorStillRaisesDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "completed Rider", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "completed Worker", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestWorkerExitedNoticePastCursorStillRaisesDecision(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	noticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: taskID, Kind: "worker_exited", Summary: "Rider exited after reporting done"})
+	noticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: taskID, Kind: "worker_exited", Summary: "Worker exited after reporting done"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestLegacyWorkerExitedNoticeDoesNotAttachToLaterLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "relaunched Rider", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "relaunched Worker", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestLegacyWorkerExitedNoticeDoesNotAttachToLaterLaunch(t *testing.T) {
 	if err := db.AdvanceDecisionNoticeCursor(ctx, project.ID, noticeID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, taskID, store.StateDone, store.StateWorking, "lead", "Rider relaunched"); err != nil {
+	if err := db.Transition(ctx, taskID, store.StateDone, store.StateWorking, "lead", "Worker relaunched"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.NextTaskLaunch(ctx, taskID); err != nil {
@@ -133,7 +133,7 @@ func TestAskAndDecideThroughCLIWithUserOnlyBoundary(t *testing.T) {
 	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix things", LandingMode: "local", AutonomyLand: "ask", PaneID: "w1:p2"})
+	id, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix things", MergeMode: "local", AutonomyMerge: "ask", PaneID: "w1:p2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	ctx := context.Background()
 	create := func(seq int, kind string, state store.State, reviewOf int64) store.Task {
 		t.Helper()
-		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: kind, ReviewsTaskID: reviewOf, Title: fmt.Sprintf("Task %d", seq), LandingMode: "local", AutonomyLand: "ask", AutonomyReview: "ask"})
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: kind, ReviewsTaskID: reviewOf, Title: fmt.Sprintf("Task %d", seq), MergeMode: "local", AutonomyMerge: "ask", AutonomyReview: "ask"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,11 +237,11 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 			if err := db.Transition(ctx, id, store.StateWorking, state, "worker", "done"); err != nil {
 				t.Fatal(err)
 			}
-		} else if state == store.StateLanding {
+		} else if state == store.StateMerging {
 			if err := db.Transition(ctx, id, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.Transition(ctx, id, store.StateDone, state, "cli", "landing"); err != nil {
+			if err := db.Transition(ctx, id, store.StateDone, state, "cli", "merging"); err != nil {
 				t.Fatal(err)
 			}
 		} else if state == store.StateReported {
@@ -258,12 +258,12 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		}
 		return task
 	}
-	ship := create(1, "ship", store.StateLanding, 0)
-	lost := create(2, "ship", store.StateLost, 0)
-	failed := create(3, "ship", store.StateFailed, 0)
-	review := create(4, "review", store.StateReported, ship.ID)
-	findings := create(5, "ship", store.StateWorking, 0)
-	workerExited := create(6, "ship", store.StateDone, 0)
+	change := create(1, "change", store.StateMerging, 0)
+	lost := create(2, "change", store.StateLost, 0)
+	failed := create(3, "change", store.StateFailed, 0)
+	review := create(4, "review", store.StateReported, change.ID)
+	findings := create(5, "change", store.StateWorking, 0)
+	workerExited := create(6, "change", store.StateDone, 0)
 	if _, err := db.NextTaskLaunch(ctx, workerExited.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -283,13 +283,13 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	for _, item := range []struct {
 		task store.Task
 		kind string
-	}{{ship, "land_ready"}, {lost, "task_lost"}, {failed, "task_failed"}, {review, "task_done"}, {findings, "needs_decision"}, {workerExited, "worker_exited"}} {
+	}{{change, "merge_ready"}, {lost, "task_lost"}, {failed, "task_failed"}, {review, "task_done"}, {findings, "needs_decision"}, {workerExited, "worker_exited"}} {
 		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: item.task.ID, Kind: item.kind, Summary: item.task.Title}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// This ship task_done Notice produces no Decision, including after ack.
-	ignoredID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: ship.ID, Kind: "task_done", Summary: "Ship Task done"})
+	// This change task_done Notice produces no Decision, including after ack.
+	ignoredID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: change.ID, Kind: "task_done", Summary: "Change Task done"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,8 +306,8 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	if err != nil || len(items) != 6 {
 		t.Fatalf("raised Decisions: %#v %v", items, err)
 	}
-	want := [][]string{{"land", "wait", "discard"}, {"relaunch", "discard"}, {"relaunch", "discard"}, {"accept", "request-changes", "ignore"}, {"accept", "request-changes", "ignore"}, {"relaunch", "discard"}}
-	wantKinds := []string{"land_ready", "recovery", "recovery", "review", "review", "worker_exited"}
+	want := [][]string{{"merge", "wait", "discard"}, {"relaunch", "discard"}, {"relaunch", "discard"}, {"accept", "request-changes", "ignore"}, {"accept", "request-changes", "ignore"}, {"relaunch", "discard"}}
+	wantKinds := []string{"merge_ready", "recovery", "recovery", "review", "review", "worker_exited"}
 	for i, d := range items {
 		if d.Kind != wantKinds[i] || !strings.HasPrefix(d.Origin, "notice:") {
 			t.Fatalf("Decision origin or kind not recorded explicitly: %#v", d)
@@ -322,7 +322,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	if err != nil || len(unseen) != 0 {
 		t.Fatalf("rescanned evaluated Notices: %#v %v", unseen, err)
 	}
-	if err := db.Transition(ctx, ship.ID, store.StateLanding, store.StateLanded, "cli", "merged"); err != nil {
+	if err := db.Transition(ctx, change.ID, store.StateMerging, store.StateMerged, "cli", "merged"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Transition(ctx, lost.ID, store.StateLost, store.StateWorking, "cli", "relaunched"); err != nil {
@@ -331,7 +331,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	if err := db.Transition(ctx, failed.ID, store.StateFailed, store.StateTornDown, "user", "discarded"); err == nil {
 		t.Fatal("discard without approval unexpectedly succeeded")
 	}
-	if err := db.Transition(ctx, workerExited.ID, store.StateDone, store.StateWorking, "lead", "Rider relaunched"); err != nil {
+	if err := db.Transition(ctx, workerExited.ID, store.StateDone, store.StateWorking, "lead", "Worker relaunched"); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
@@ -342,7 +342,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		t.Fatalf("resolved Decisions stayed pending: %#v %v", pending, err)
 	}
 	all, err := db.Decisions(ctx, project.ID, false)
-	if err != nil || all[0].ObsoleteReason != "Task left landing" || all[1].ObsoleteReason != "Task no longer failed or lost" || all[0].Answer != "" {
+	if err != nil || all[0].ObsoleteReason != "Task left merging" || all[1].ObsoleteReason != "Task no longer failed or lost" || all[0].Answer != "" {
 		t.Fatalf("resolved Decisions were not marked obsolete: %#v %v", all, err)
 	}
 	// Repeated failure Notices still produce at most one pending recovery

@@ -18,10 +18,10 @@ import (
 func admittedStorePlan(t *testing.T, home string) taskplan.Plan {
 	t.Helper()
 	plan, err := taskplan.Resolve(taskplan.Request{
-		Brief:     taskplan.Select("brief", "selected brief", []byte("---\ntype: ship\ntitle: Frozen contract\ndone_when: checked\n---\nKeep the intent.\n")),
+		Brief:     taskplan.Select("brief", "selected brief", []byte("---\ntype: change\ntitle: Frozen contract\ndone_when: checked\n---\nKeep the intent.\n")),
 		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
 		Launch:    taskplan.Launch{ProfileName: "deep", Profile: config.Profile{Kind: "pi"}, Args: []string{}},
-		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
 		Paths: taskplan.Paths{Scratch: filepath.Join(home, "scratch", "shop", "{task}"), Output: filepath.Join(home, "projects", "shop", "tasks", "{task}")},
 	})
 	if err != nil {
@@ -44,7 +44,7 @@ func TestTaskCreationAtomicallyStoresAdmittedPlanAndRevision(t *testing.T) {
 	}
 	plan := admittedStorePlan(t, home)
 	data, _ := plan.Encode()
-	taskID, seq, err := db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, Task{Type: "ship", Title: "Frozen contract", ShortName: "frozen-contract", Profile: "deep", LandingMode: "local", PlanJSON: data}, "ride", 12345, func(int) (bool, error) { return false, nil })
+	taskID, seq, err := db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, Task{Type: "change", Title: "Frozen contract", ShortName: "frozen-contract", Profile: "deep", MergeMode: "local", PlanJSON: data}, "start", 12345, func(int) (bool, error) { return false, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestExplicitPlanRevisionInvalidatesEvidenceAndSurvivesRebuild(t *testing.T)
 	}
 	plan := admittedStorePlan(t, home).Bind("t1")
 	data, _ := plan.Encode()
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Profile: "deep", LandingMode: "local", PlanJSON: data})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Profile: "deep", MergeMode: "local", PlanJSON: data})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestExplicitPlanRevisionInvalidatesEvidenceAndSurvivesRebuild(t *testing.T)
 	if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateTaskRepos(ctx, id, []TaskRepo{{Repo: "api", LandingMode: "local"}}); err != nil {
+	if err := db.CreateTaskRepos(ctx, id, []TaskRepo{{Repo: "api", MergeMode: "local"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET gated_sha='old-gate' WHERE id=?`, id); err != nil {
@@ -175,7 +175,7 @@ func TestConcurrentSnapshotsKeepAdmittedPlanAndHistoryCoherent(t *testing.T) {
 	}
 	plan := admittedStorePlan(t, home).Bind("t1")
 	data, _ := plan.Encode()
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Profile: "deep", LandingMode: "local", PlanJSON: data})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Profile: "deep", MergeMode: "local", PlanJSON: data})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestHistoricalTaskRemainsLegacyAfterRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Profile: "old"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Profile: "old"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -73,15 +73,15 @@ func TestPRTaskWatchFailuresRaiseAfterThree(t *testing.T) {
 		t.Fatal(err)
 	}
 	prURL := "https://github.com/acme/shop/pull/1"
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "First PR", LandingMode: "pr", PRURL: prURL})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "First PR", MergeMode: "pr", PRURL: prURL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: "api", LandingMode: "pr"}, {Repo: "worker", LandingMode: "pr"}}); err != nil {
+	if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: "api", MergeMode: "pr"}, {Repo: "worker", MergeMode: "pr"}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, repo := range []string{"api", "worker"} {
-		if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: repo, LandingMode: "pr", State: TaskRepoOpen, PRURL: prURL}); err != nil {
+		if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: repo, MergeMode: "pr", State: TaskRepoOpen, PRURL: prURL}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -138,15 +138,15 @@ func TestPRTaskWatchFailureIgnoresStalePRURL(t *testing.T) {
 			}
 			oldURL := "https://github.com/acme/shop/pull/1"
 			newURL := "https://github.com/acme/shop/pull/2"
-			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "First PR", LandingMode: "pr", PRURL: oldURL})
+			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "First PR", MergeMode: "pr", PRURL: oldURL})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if test.repo != "" {
-				if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: test.repo, LandingMode: "pr"}}); err != nil {
+				if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: test.repo, MergeMode: "pr"}}); err != nil {
 					t.Fatal(err)
 				}
-				if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: test.repo, LandingMode: "pr", State: TaskRepoOpen, PRURL: oldURL}); err != nil {
+				if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: test.repo, MergeMode: "pr", State: TaskRepoOpen, PRURL: oldURL}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -154,11 +154,11 @@ func TestPRTaskWatchFailureIgnoresStalePRURL(t *testing.T) {
 				t.Fatal(err)
 			}
 			if test.repo == "" {
-				if err := db.UpdateTaskLanding(ctx, taskID, newURL, ""); err != nil {
+				if err := db.UpdateTaskMerge(ctx, taskID, newURL, ""); err != nil {
 					t.Fatal(err)
 				}
 			} else {
-				if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: test.repo, LandingMode: "pr", State: TaskRepoOpen, PRURL: newURL}); err != nil {
+				if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: test.repo, MergeMode: "pr", State: TaskRepoOpen, PRURL: newURL}); err != nil {
 					t.Fatal(err)
 				}
 			}

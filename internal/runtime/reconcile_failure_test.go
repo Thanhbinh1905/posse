@@ -39,9 +39,9 @@ func TestRunPreservesTaskFailureWhenAnotherTaskTimesOut(t *testing.T) {
 	defer db.Close()
 
 	second := store.Task{
-		Seq: 2, Type: "ship", Title: "Second task", LandingMode: "local",
+		Seq: 2, Type: "change", Title: "Second task", MergeMode: "local",
 		WorktreePath: t.TempDir(), PaneID: "w1:p2", PaneLabel: "posse:shop:t2",
-		HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyLand: "ask",
+		HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyMerge: "ask",
 	}
 	secondID, err := db.CreateTask(context.Background(), project.ID, second)
 	if err != nil {
@@ -74,10 +74,10 @@ func TestRunPreservesTaskFailureWhenAnotherTaskTimesOut(t *testing.T) {
 		t.Fatalf("Run() error = %v, classified the whole pass as contention and hid the other Task failure", err)
 	}
 	visible := store.WithoutBusy(err)
-	if visible == nil || !strings.Contains(visible.Error(), "read Rider worktree t1") || !strings.Contains(visible.Error(), "synthetic persistent failure") {
+	if visible == nil || !strings.Contains(visible.Error(), "read Worker worktree t1") || !strings.Contains(visible.Error(), "synthetic persistent failure") {
 		t.Fatalf("visible failure = %v, want the attributed t1 failure", visible)
 	}
-	if !strings.Contains(err.Error(), "read Rider worktree t2") {
+	if !strings.Contains(err.Error(), "read Worker worktree t2") {
 		t.Fatalf("Run() error = %v, want the timeout attributed to t2", err)
 	}
 }

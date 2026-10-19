@@ -32,14 +32,14 @@ func TestRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testing.T) {
 		runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", setting[0], setting[1])
 	}
 
-	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
-	if code, output := rideReviewIdentityTask(t, fixture, "Pi review", "reviewer", "t1"); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Pi review", "reviewer", "t1"); code != 0 {
 		t.Fatalf("Pi review spawn: code=%d %s", code, output)
 	}
 	review := fixture.mustTask(t, "t2")
-	// The shared review fixture keeps its poll-only Lookout stopped, so it
+	// The shared review fixture keeps its poll-only Watch stopped, so it
 	// cannot overwrite the synthetic session observation seeded below.
 	const piSession = "pi-session-211"
 	// Seed the session Herdr observed from Pi. Older schemas have no owner-kind

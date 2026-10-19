@@ -32,7 +32,7 @@ func TestGuardRefusesHerdrChangesToTheWorkerSession(t *testing.T) {
 		"env -u HERDR_SOCKET_PATH herdr worktree remove w2 --force",
 		"bash -c 'herdr workspace close --group wGN'",
 		"herdr tab close w1:t1",
-		// Riders share the Lead's workspace: their own ids reach the Lead and every sibling.
+		// Workers share the Lead's workspace: their own ids reach the Lead and every sibling.
 		`herdr tab close "$HERDR_TAB_ID"`,
 		`herdr workspace close "$HERDR_WORKSPACE_ID"`,
 		"herdr tab move w1:t2 --index 0",
@@ -281,15 +281,15 @@ func TestGuardRecognizesSocketHardlinks(t *testing.T) {
 	}
 }
 
-func TestRiderGuardBlocksDirectGitPush(t *testing.T) {
+func TestWorkerGuardBlocksDirectGitPush(t *testing.T) {
 	scope, _ := guardFixture(t)
 	for _, command := range []string{"git push origin HEAD", "env git -C repo push origin main", "sh -c 'git push'"} {
 		if refused, reason := guardCommand(command, scope); !refused || !strings.Contains(reason.why, "posse publish") {
-			t.Errorf("direct Rider push allowed: %q (%v, %#v)", command, refused, reason)
+			t.Errorf("direct Worker push allowed: %q (%v, %#v)", command, refused, reason)
 		}
 	}
 	if refused, reason := guardCommand("git status --short", scope); refused {
-		t.Fatalf("Rider read blocked: %#v", reason)
+		t.Fatalf("Worker read blocked: %#v", reason)
 	}
 }
 
@@ -399,11 +399,11 @@ func TestGuardFollowsIndirection(t *testing.T) {
 		"socat - UNIX-CONNECT:$HERDR_SOCKET_PATH",
 		"nc -U ~/.config/herdr/herdr.sock",
 		"HERDR_SOCKET_PATH=/tmp/iso.sock python3 literal.py",
-		"./posse-copy config set defaults.auto_unsaddle never",
-		dir + "/posse-copy ride --brief b.md",
-		"env -u POSSE_WORKER_HOME -u HERDR_PANE_ID sh -c './posse-copy config set defaults.auto_unsaddle never'",
-		"go run ./cmd/posse config set defaults.auto_unsaddle never",
-		"POSSE_HOME=/home/u/.posse ./posse-copy roster",
+		"./posse-copy config set defaults.auto_teardown never",
+		dir + "/posse-copy start --brief b.md",
+		"env -u POSSE_WORKER_HOME -u HERDR_PANE_ID sh -c './posse-copy config set defaults.auto_teardown never'",
+		"go run ./cmd/posse config set defaults.auto_teardown never",
+		"POSSE_HOME=/home/u/.posse ./posse-copy list",
 	} {
 		if refused, reason := guardCommand(command, scope); !refused {
 			t.Errorf("guard allowed %q", command)
@@ -423,9 +423,9 @@ func TestGuardAllowsIndirectionThatStaysIsolated(t *testing.T) {
 		"HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock python3 raw.py",
 		"env -u HERDR_SOCKET_PATH XDG_CONFIG_HOME=/tmp/posse-e2e-x/xdg sh close.sh",
 		"echo hi | sh",
-		"posse holler working 'still going'",
+		"posse signal working 'still going'",
 		dir + "/posse brief",
-		"POSSE_HOME=/tmp/posse-e2e-x/posse ./posse-copy ride --brief b.md",
+		"POSSE_HOME=/tmp/posse-e2e-x/posse ./posse-copy start --brief b.md",
 		"go test ./internal/e2e/...",
 		"curl https://example.com",
 		"find . -name '*.go' -exec grep -l herdr {} +",

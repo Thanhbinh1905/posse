@@ -46,8 +46,8 @@ func (db *DB) RecordReportBundle(ctx context.Context, taskID int64, digest, mani
 	if err := tx.QueryRowContext(ctx, `SELECT type,state,report_digest,report_manifest_json FROM tasks WHERE id=?`, taskID).Scan(&taskType, &state, &currentDigest, &currentManifest); err != nil {
 		return err
 	}
-	if taskType != "scout" || State(state) != StateReported && State(state) != StateTornDown {
-		return fmt.Errorf("report bundle can only be finalized for a reported Scout Task")
+	if taskType != "research" || State(state) != StateReported && State(state) != StateTornDown {
+		return fmt.Errorf("report bundle can only be finalized for a reported Research Task")
 	}
 	if currentDigest != "" {
 		if currentDigest != digest || currentManifest != manifestJSON {
@@ -59,7 +59,7 @@ func (db *DB) RecordReportBundle(ctx context.Context, taskID int64, digest, mani
 		return db.PersistTask(ctx, taskID)
 	}
 	if State(state) != StateReported {
-		return fmt.Errorf("cannot finalize a Report bundle for a Scout Task without a reported result")
+		return fmt.Errorf("cannot finalize a Report bundle for a Research Task without a reported result")
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET report_digest=?,report_manifest_json=?,updated_at=? WHERE id=? AND report_digest=''`, digest, manifestJSON, time.Now().UnixMilli(), taskID); err != nil {
 		return err
@@ -85,8 +85,8 @@ func (db *DB) RecordReportReview(ctx context.Context, reportTaskID, reviewTaskID
 	if err := tx.QueryRowContext(ctx, `SELECT project_id,type,state,report_digest,report_manifest_json,launches FROM tasks WHERE id=?`, reportTaskID).Scan(&reportProjectID, &reportType, &reportState, &currentDigest, &manifest, &reportLaunches); err != nil {
 		return ReportReview{}, err
 	}
-	if reportType != "scout" || State(reportState) != StateTornDown || currentDigest == "" || manifest == "" || currentDigest != digest {
-		return ReportReview{}, fmt.Errorf("report review must target the current finalized bundle of a torn-down Scout Task")
+	if reportType != "research" || State(reportState) != StateTornDown || currentDigest == "" || manifest == "" || currentDigest != digest {
+		return ReportReview{}, fmt.Errorf("report review must target the current finalized bundle of a torn-down Research Task")
 	}
 	var reviewerType, reviewerState string
 	var reviewsTaskID sql.NullInt64
@@ -204,11 +204,11 @@ func (db *DB) AcceptReport(ctx context.Context, reportTaskID int64, digest, reco
 	if err := tx.QueryRowContext(ctx, `SELECT project_id,type,state,report_kind,report_digest,report_manifest_json FROM tasks WHERE id=?`, reportTaskID).Scan(&reportProjectID, &taskType, &taskState, &reportKind, &currentDigest, &manifest); err != nil {
 		return ReportAcceptance{}, err
 	}
-	if taskType != "scout" || reportKind != "spec" && reportKind != "tickets" {
-		return ReportAcceptance{}, fmt.Errorf("only Scout Reports marked report_kind spec or tickets require acceptance")
+	if taskType != "research" || reportKind != "spec" && reportKind != "tickets" {
+		return ReportAcceptance{}, fmt.Errorf("only Research Reports marked report_kind spec or tickets require acceptance")
 	}
 	if State(taskState) != StateTornDown || currentDigest == "" || currentDigest != digest || manifest == "" || reportManifestDigest(manifest) != currentDigest {
-		return ReportAcceptance{}, fmt.Errorf("acceptance requires the current finalized Report bundle of a torn-down Scout Task")
+		return ReportAcceptance{}, fmt.Errorf("acceptance requires the current finalized Report bundle of a torn-down Research Task")
 	}
 	var existing ReportAcceptance
 	err = tx.QueryRowContext(ctx, `SELECT report_task_id,report_digest,accepted_by,recorded_by,provenance,user_quote,accepted_at FROM report_acceptances WHERE report_task_id=?`, reportTaskID).Scan(

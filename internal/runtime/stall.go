@@ -66,21 +66,21 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 				}
 				continue
 			}
-			failures = append(failures, fmt.Errorf("read Rider pane %s: %w", taskID(task.Seq), err))
+			failures = append(failures, fmt.Errorf("read Worker pane %s: %w", taskID(task.Seq), err))
 			continue
 		}
 		directoryWorktree := project.IsDirectory()
 		if project.IsWorkspace() {
 			members, err := db.TaskRepos(ctx, task.ID)
 			if err != nil {
-				failures = append(failures, fmt.Errorf("read Rider member repositories %s: %w", taskID(task.Seq), err))
+				failures = append(failures, fmt.Errorf("read Worker member repositories %s: %w", taskID(task.Seq), err))
 				continue
 			}
 			directoryWorktree = len(members) == 0
 		}
 		worktree, err := progress.WorktreeFingerprint(ctx, task.WorktreePath, directoryWorktree)
 		if err != nil {
-			failures = append(failures, fmt.Errorf("read Rider worktree %s: %w", taskID(task.Seq), err))
+			failures = append(failures, fmt.Errorf("read Worker worktree %s: %w", taskID(task.Seq), err))
 			continue
 		}
 		outputHash := digest(output)
@@ -88,7 +88,7 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 		changed := task.LastProgressAt == 0 || task.LastOutputHash != outputHash || task.LastWorktreeHash != worktreeHash
 		if task.State == store.StateStalled {
 			if changed {
-				if err := db.Transition(ctx, task.ID, store.StateStalled, store.StateWorking, "cli", "Rider output or worktree changed"); err != nil {
+				if err := db.Transition(ctx, task.ID, store.StateStalled, store.StateWorking, "cli", "Worker output or worktree changed"); err != nil {
 					if !errors.Is(err, store.ErrStateRace) {
 						failures = append(failures, err)
 					}
@@ -105,7 +105,7 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 		if now.Sub(time.UnixMilli(task.LastProgressAt)) < stallAfter {
 			continue
 		}
-		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateStalled, "cli", "Rider output and worktree unchanged for "+stallAfter.String()); err != nil {
+		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateStalled, "cli", "Worker output and worktree unchanged for "+stallAfter.String()); err != nil {
 			if errors.Is(err, store.ErrStateRace) {
 				continue
 			}
@@ -164,8 +164,8 @@ func (SystemProgress) ReadPane(ctx context.Context, adapter herdr.Adapter, paneI
 	return "", fmt.Errorf("pane.read result did not include text")
 }
 
-// WorktreeFingerprint uses Git state for repository Mounts and workspace Mounts
-// with Members. Directory Projects and memberless workspace Mounts use file
+// WorktreeFingerprint uses Git state for repository Sandboxes and workspace Sandboxes
+// with Members. Directory Projects and memberless workspace Sandboxes use file
 // contents because they have no Git worktree.
 func (SystemProgress) WorktreeFingerprint(ctx context.Context, path string, directoryWorktree bool) (string, error) {
 	if path == "" {

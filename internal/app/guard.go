@@ -64,7 +64,7 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	if !refused {
 		return 0
 	}
-	fmt.Fprintf(stderr, "posse: refused %s from a posse Rider: %s. Riders never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server`, with your isolated Herdr binary on PATH.\n", reason.command, reason.why)
+	fmt.Fprintf(stderr, "posse: refused %s from a posse Worker: %s. Workers never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server`, with your isolated Herdr binary on PATH.\n", reason.command, reason.why)
 	return guardExitBlocked
 }
 
@@ -375,11 +375,11 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			return g.curl(e, args, literal, raw)
 		case name == "git" && g.workerHome != "":
 			if gitRemoteWrite(e, args[1:], literal[1:]) {
-				return refuse(raw, "Riders must push their Task branch through `posse publish`, not `git push`")
+				return refuse(raw, "Workers must push their Task branch through `posse publish`, not `git push`")
 			}
 			return false, guardReason{}
 		case name == "ln" && len(args) >= 3 && sameSocket(args[len(args)-2], g.realSocket):
-			return refuse(raw, "it aliases the Rider's Herdr socket")
+			return refuse(raw, "it aliases the Worker's Herdr socket")
 		case name == "make" || name == "gmake":
 			code := ""
 			if strings.Contains(stdin, ">") {
@@ -619,12 +619,12 @@ func (g *guard) opaque(e *shellEnv, raw, code string) (bool, guardReason) {
 		return false, guardReason{}
 	}
 	if g.namesRealSocket(code) {
-		return refuse(raw, "it names the socket of the Herdr session this Rider runs in")
+		return refuse(raw, "it names the socket of the Herdr session this Worker runs in")
 	}
 	if socket, known := e.socket(); known && g.realSocket != "" && !sameSocket(socket, g.realSocket) {
 		return false, guardReason{}
 	}
-	return refuse(raw, "it reaches Herdr in a way posse cannot check, and its environment still points at the Rider's Herdr session")
+	return refuse(raw, "it reaches Herdr in a way posse cannot check, and its environment still points at the Worker's Herdr session")
 }
 
 var herdrReference = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])herdr($|[^A-Za-z0-9_-])|herdr\.sock|HERDR_SOCKET_PATH|HERDR_BIN_PATH`)
@@ -695,7 +695,7 @@ func (g *guard) posseBuild(e *shellEnv, program, raw string) (bool, guardReason)
 	if known && !samePath(home, g.workerHome) {
 		return false, guardReason{}
 	}
-	return refuse(raw, "it runs a posse build other than the installed one against the Rider's posse home")
+	return refuse(raw, "it runs a posse build other than the installed one against the Worker's posse home")
 }
 
 func (g *guard) curl(e *shellEnv, args []string, literal []bool, raw string) (bool, guardReason) {
@@ -729,7 +729,7 @@ func (g *guard) curl(e *shellEnv, args []string, literal []bool, raw string) (bo
 			return refuse(raw, "posse cannot tell which Herdr server curl reaches")
 		}
 		if sameSocket(socket, g.realSocket) {
-			return refuse(raw, "it targets the Herdr session this Rider runs in")
+			return refuse(raw, "it targets the Herdr session this Worker runs in")
 		}
 	}
 	return false, guardReason{}
@@ -775,7 +775,7 @@ func (g *guard) herdr(e *shellEnv, args []string, literal []bool) (bool, guardRe
 		if g.realSocket != "" && e.values["HERDR_SOCKET_PATH"] == "" {
 			return refuse(display, "the default socket reaches the User's Herdr server")
 		}
-		return refuse(display, "it changes the Herdr session this Rider runs in")
+		return refuse(display, "it changes the Herdr session this Worker runs in")
 	}
 	return false, guardReason{}
 }

@@ -19,8 +19,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func (s *Service) recordLookoutMaintenanceFailure(ctx context.Context, db *store.DB, project store.Project, cause error) error {
-	summary := "Lookout maintenance failed (retryable): " + truncate(normalizeCommandError(cause).Error(), 200)
+func (s *Service) recordWatchMaintenanceFailure(ctx context.Context, db *store.DB, project store.Project, cause error) error {
+	summary := "Watch maintenance failed (retryable): " + truncate(normalizeCommandError(cause).Error(), 200)
 	var exists bool
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND kind='pr_watch_failing' AND summary=? AND acked_at IS NULL)`, project.ID, summary).Scan(&exists); err != nil {
 		return err
@@ -63,17 +63,17 @@ func (s *Service) startWorkspacePRPolls(ctx context.Context, db *store.DB, proje
 		}
 		go func(repo, key, token string) {
 			defer s.endMaintenance(key)
-			landedMember := false
-			onLanded := func() {
-				landedMember = true
-				s.startLandedMemberSync(ctx, db, project, repo)
+			mergedMember := false
+			onMerged := func() {
+				mergedMember = true
+				s.startMergedMemberSync(ctx, db, project, repo)
 			}
-			pollErr := s.pollWorkspacePullRequestsForRepo(ctx, db, project, cfg, false, onLanded, repo, false, false, token)
-			if landedMember {
-				s.startLandedTaskTeardown(ctx, db, project, cfg)
+			pollErr := s.pollWorkspacePullRequestsForRepo(ctx, db, project, cfg, false, onMerged, repo, false, false, token)
+			if mergedMember {
+				s.startMergedTaskTeardown(ctx, db, project, cfg)
 			}
 			if pollErr != nil && !store.IsBusy(pollErr) {
-				_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s PR polling: %w", repo, pollErr))
+				_ = s.recordWatchMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s PR polling: %w", repo, pollErr))
 			}
 		}(repo, key, token)
 	}
@@ -109,14 +109,14 @@ func (s *Service) startWorkspaceCheckoutSync(ctx context.Context, db *store.DB, 
 				syncErr = db.RecordCheckoutAttempt(ctx, project.ID, now.UnixMilli())
 			}
 			if syncErr != nil && !store.IsBusy(syncErr) {
-				_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s checkout sync: %w", target.Name, syncErr))
+				_ = s.recordWatchMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s checkout sync: %w", target.Name, syncErr))
 			}
 		}()
 	}
 	return nil
 }
 
-func (s *Service) startLandedMemberSync(ctx context.Context, db *store.DB, project store.Project, repo string) {
+func (s *Service) startMergedMemberSync(ctx context.Context, db *store.DB, project store.Project, repo string) {
 	go func() {
 		var result projectSyncResult
 		target, err := s.projectTarget(ctx, db, project, repo)
@@ -135,20 +135,20 @@ func (s *Service) startLandedMemberSync(ctx context.Context, db *store.DB, proje
 			err = db.RecordCheckoutAttempt(ctx, project.ID, time.Now().UnixMilli())
 		}
 		if err != nil && !store.IsBusy(err) {
-			_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s landed checkout sync: %w", repo, err))
+			_ = s.recordWatchMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s merged checkout sync: %w", repo, err))
 		}
 	}()
 }
 
-func (s *Service) startLandedTaskTeardown(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) {
+func (s *Service) startMergedTaskTeardown(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) {
 	key := fmt.Sprintf("teardown:%d", project.ID)
 	if !s.beginMaintenance(key) {
 		return
 	}
 	go func() {
 		defer s.endMaintenance(key)
-		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil && !store.IsBusy(err) {
-			_ = s.recordLookoutMaintenanceFailure(context.Background(), db, project, fmt.Errorf("landed Task Teardown: %w", err))
+		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil && !store.IsBusy(err) {
+			_ = s.recordWatchMaintenanceFailure(context.Background(), db, project, fmt.Errorf("merged Task Teardown: %w", err))
 		}
 	}()
 }
@@ -163,7 +163,7 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		return configError(err)
 	}
 	if project.IsWorkspace() {
-		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {
 			return err
 		}
 		if err := s.startWorkspacePRPolls(ctx, db, project, cfg); err != nil {
@@ -176,12 +176,12 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		return nil
 	}
 	var failures []error
-	landedTasks := make(chan struct{}, 1)
+	mergedTasks := make(chan struct{}, 1)
 	pollResult := make(chan error, 1)
 	go func() {
-		pollResult <- s.pollProjectPullRequestsWithLandedCallback(ctx, db, project, cfg, false, func() {
+		pollResult <- s.pollProjectPullRequestsWithMergedCallback(ctx, db, project, cfg, false, func() {
 			select {
-			case landedTasks <- struct{}{}:
+			case mergedTasks <- struct{}{}:
 			default:
 			}
 		})
@@ -195,15 +195,15 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		checkoutResult <- err
 	}()
 	runTeardown := func() {
-		if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
-			failures = append(failures, fmt.Errorf("landed Task Teardown: %w", err))
+		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {
+			failures = append(failures, fmt.Errorf("merged Task Teardown: %w", err))
 		}
 	}
 	runTeardown()
 	pollPending, checkoutPending := true, true
 	for pollPending || checkoutPending {
 		select {
-		case <-landedTasks:
+		case <-mergedTasks:
 			runTeardown()
 		case err := <-pollResult:
 			pollPending = false
@@ -220,7 +220,7 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		}
 	}
 	select {
-	case <-landedTasks:
+	case <-mergedTasks:
 		runTeardown()
 	default:
 	}
@@ -237,12 +237,12 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	stopSignals := make(chan os.Signal, 1)
 	signal.Notify(stopSignals, syscall.SIGTERM)
 	defer signal.Stop(stopSignals)
-	parsed, err := parseArgs("lookout", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}, "repair": {boolean: true}})
+	parsed, err := parseArgs("watch", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}, "repair": {boolean: true}})
 	if err != nil {
 		return err
 	}
 	if len(parsed.Positionals) != 0 {
-		return axi.Usage("lookout does not take positional arguments")
+		return axi.Usage("watch does not take positional arguments")
 	}
 	timeout := time.Duration(0)
 	if value := parsed.Flags["timeout"]; value != "" {
@@ -253,7 +253,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		timeout = time.Duration(milliseconds) * time.Millisecond
 	}
 	if parsed.Bool("repair") && (parsed.Flags["timeout"] != "" || parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Flags["destination"] != "" || parsed.Flags["receipt"] != "" || parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" || parsed.Bool("handoff") || parsed.Bool("quiet-routine") || parsed.Bool("poll-only")) {
-		return axi.Usage("--repair cannot be combined with Lookout wait or delivery options")
+		return axi.Usage("--repair cannot be combined with Watch wait or delivery options")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -265,19 +265,19 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if parsed.Bool("repair") {
-		return s.repairLookout(ctx, db, home, project)
+		return s.repairWatch(ctx, db, home, project)
 	}
 	// Adapter handoffs and receipt decisions own Notice delivery, not maintenance.
 	if !parsed.Bool("poll-only") && !parsed.Bool("handoff") && parsed.Flags["receipt"] == "" {
-		if err := s.ensureLookoutPoller(ctx.Context, db, home, project); err != nil {
-			fmt.Fprintf(ctx.ErrOut, "Lookout supervision for %s failed: %v\n", project.Name, err)
+		if err := s.ensureWatchRuntime(ctx.Context, db, home, project); err != nil {
+			fmt.Fprintf(ctx.ErrOut, "Watch supervision for %s failed: %v\n", project.Name, err)
 		}
 	}
 	if parsed.Bool("poll-only") {
 		if parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Flags["destination"] != "" || parsed.Flags["receipt"] != "" || parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" || parsed.Bool("quiet-routine") || parsed.Bool("handoff") {
 			return axi.Usage("--poll-only cannot deliver or acknowledge Notices")
 		}
-		return s.runProjectLookoutPoller(ctx, db, project, timeout, stopSignals)
+		return s.runProjectWatchRuntime(ctx, db, project, timeout, stopSignals)
 	}
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
@@ -316,7 +316,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if ids := parsed.Flags["ack"]; ids != "" {
 		var err error
 		acknowledged, _, err = s.ackNoticesWithCommit(ctx, db, project, strings.Split(ids, ","), func(count int) {
-			fmt.Fprintf(ctx.ErrOut, "Lookout acknowledgement committed: %d\n", count)
+			fmt.Fprintf(ctx.ErrOut, "Watch acknowledgement committed: %d\n", count)
 		})
 		if err != nil {
 			return err
@@ -348,7 +348,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	for {
 		select {
 		case <-stopSignals:
-			return s.reportLookoutStopped(ctx, project, false)
+			return s.reportWatchStopped(ctx, project, false)
 		default:
 		}
 		var retryDelivery *store.NoticeDelivery
@@ -410,11 +410,11 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			if lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute {
 				if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
 					if store.IsBusy(err) {
-						// Contention is transient. Keep this Lookout armed, and retry
+						// Contention is transient. Keep this Watch armed, and retry
 						// rather than requiring the Lead to restart it after release.
-						fmt.Fprintf(ctx.ErrOut, "Lookout maintenance deferred: %v\n", normalizeCommandError(err))
-					} else if noticeErr := s.recordLookoutMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
-						fmt.Fprintf(ctx.ErrOut, "Lookout maintenance failure could not be recorded: %v\n", noticeErr)
+						fmt.Fprintf(ctx.ErrOut, "Watch maintenance deferred: %v\n", normalizeCommandError(err))
+					} else if noticeErr := s.recordWatchMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
+						fmt.Fprintf(ctx.ErrOut, "Watch maintenance failure could not be recorded: %v\n", noticeErr)
 					}
 				} else {
 					lastHerdrReconcile = time.Now()
@@ -422,8 +422,8 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			}
 			if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
 				if store.IsBusy(err) {
-					fmt.Fprintf(ctx.ErrOut, "Lookout maintenance deferred: %v\n", normalizeCommandError(err))
-				} else if noticeErr := s.recordLookoutMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
+					fmt.Fprintf(ctx.ErrOut, "Watch maintenance deferred: %v\n", normalizeCommandError(err))
+				} else if noticeErr := s.recordWatchMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
 					return noticeErr
 				}
 			}
@@ -517,7 +517,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			if ctx.JSON || cfg.Lowkey.Lead {
 				result = append(result, axi.Field{Key: "wake", Value: noticeWakeMessage(ctx.Context, db, notices, cfg.Lowkey.Lead)})
 			}
-			result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse show <task>` for Task details", "Run `posse lookout --ack <ids>` to acknowledge and keep waiting (or `posse ack all`)"}})
+			result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse show <task>` for Task details", "Run `posse watch --ack <ids>` to acknowledge and keep waiting (or `posse ack all`)"}})
 			if err := ctx.Print(result); err != nil {
 				if handoff != nil {
 					return errors.Join(err, db.ResolveNoticeDelivery(ctx.Context, project.ID, handoff.DeliveryID, token, "uncertain", currentTime()))
@@ -539,10 +539,10 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			}
 			if len(os.Args) > 1 && os.Args[1] == "_claude-stop" {
 				// The hook cannot re-exec after consuming stdin. Its setup-manifest binary may differ, so only an explicit marker can request one rewake.
-				if lookoutReexecRequested(home, os.Getpid()) {
-					return s.reportLookoutStopped(ctx, project, false)
+				if watchReexecRequested(home, os.Getpid()) {
+					return s.reportWatchStopped(ctx, project, false)
 				}
-			} else if err := s.reexecLookoutIfUpdated(project.ID, nil); err != nil {
+			} else if err := s.reexecWatchIfUpdated(project.ID, nil); err != nil {
 				return err
 			}
 			lastReexecCheck = time.Now()
@@ -560,12 +560,12 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			if acknowledged >= 0 {
 				result = append(result, axi.Field{Key: "acknowledged", Value: acknowledged})
 			}
-			result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse lookout` to keep waiting for a Notice"}})
+			result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse watch` to keep waiting for a Notice"}})
 			return ctx.Print(result)
 		}
 		select {
 		case <-stopSignals:
-			return s.reportLookoutStopped(ctx, project, false)
+			return s.reportWatchStopped(ctx, project, false)
 		case <-ctx.Context.Done():
 			return ctx.Context.Err()
 		case <-time.After(100 * time.Millisecond):
@@ -573,15 +573,15 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	}
 }
 
-func (s *Service) reportLookoutStopped(ctx *axi.Context, project store.Project, pollOnly bool) error {
+func (s *Service) reportWatchStopped(ctx *axi.Context, project store.Project, pollOnly bool) error {
 	home, err := s.homePath()
 	if err != nil {
 		return err
 	}
-	reason := lookoutStopReason(home, os.Getpid())
-	help := "The Lead should restart `posse lookout` on its next wake"
+	reason := watchStopReason(home, os.Getpid())
+	help := "The Lead should restart `posse watch` on its next wake"
 	if pollOnly {
-		help = "The Project poller supervisor repairs this process on the next posse command"
+		help = "The Project watch supervisor repairs this process on the next posse command"
 	}
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "state", Value: "stopped"}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})
 }
@@ -602,11 +602,11 @@ func (s *Service) ack(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	count, autoUnsaddled, err := s.ackNotices(ctx, db, project, args)
+	count, autoTornDown, err := s.ackNotices(ctx, db, project, args)
 	if err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "acknowledged", Value: count}, {Key: "auto_unsaddled", Value: autoUnsaddled}, {Key: "help", Value: []any{"Run `posse` to see remaining open Notices"}}})
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "acknowledged", Value: count}, {Key: "auto_torn_down", Value: autoTornDown}, {Key: "help", Value: []any{"Run `posse` to see remaining open Notices"}}})
 }
 
 func (s *Service) ackNotices(ctx *axi.Context, db *store.DB, project store.Project, args []string) (int, []string, error) {
@@ -633,8 +633,8 @@ func (s *Service) ackNoticesWithCommit(ctx *axi.Context, db *store.DB, project s
 	if err != nil {
 		return count, nil, axi.Failure("notice_invalid", err.Error(), false)
 	}
-	autoUnsaddled := []string{}
-	if autoUnsaddleMode(cfg) == "finished" {
+	autoTornDown := []string{}
+	if autoTeardownMode(cfg) == "finished" {
 		notices, err := db.Notices(ctx.Context, project.ID, false)
 		if err != nil {
 			return 0, nil, err
@@ -650,16 +650,16 @@ func (s *Service) ackNoticesWithCommit(ctx *axi.Context, db *store.DB, project s
 			if task.State != store.StateReported {
 				continue
 			}
-			if _, err := s.unsaddleTask(ctx.Context, db, project, cfg, task, false, ""); err != nil {
+			if _, err := s.teardownTask(ctx.Context, db, project, cfg, task, false, ""); err != nil {
 				return 0, nil, err
 			}
-			autoUnsaddled = append(autoUnsaddled, taskDisplayName(task))
+			autoTornDown = append(autoTornDown, taskDisplayName(task))
 		}
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return 0, nil, err
 	}
-	return count, autoUnsaddled, nil
+	return count, autoTornDown, nil
 }
 
 func ackIncludes(identifiers []string, noticeID int64) bool {
@@ -709,13 +709,13 @@ func (s *Service) projectShow(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "repos", Value: repos}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set repositories.<repo>.landing_mode pr --project " + project.Name + "` to change one member's Landing Mode", "Run `posse config set repositories.<repo>.target_branch <branch> --project " + project.Name + "` to set one member's PR/MR target", "Run `posse project scan` after adding or removing a member repository"}}})
+		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "repos", Value: repos}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set repositories.<repo>.merge_mode pr --project " + project.Name + "` to change one member's Merge Mode", "Run `posse config set repositories.<repo>.target_branch <branch> --project " + project.Name + "` to set one member's PR/MR target", "Run `posse project scan` after adding or removing a member repository"}}})
 	}
 	if project.IsDirectory() {
-		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "execution_mode", Value: "in-place"}, {Key: "landing_mode", Value: "local"}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Write a Brief with `execution: in-place` and selected `paths:`, then run `posse ride --user-approved \"<User's words>\"`", "Directory Projects do not branch, commit, publish, or Land"}}})
+		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "execution_mode", Value: "in-place"}, {Key: "merge_mode", Value: "local"}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Write a Brief with `execution: in-place` and selected `paths:`, then run `posse start --user-approved \"<User's words>\"`", "Directory Projects do not branch, commit, publish, or Merge"}}})
 	}
 	targetBranch, _ := configTargetBranch(cfg, "", project.DefaultBranch)
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "root", Value: project.Root}, {Key: "default_branch", Value: project.DefaultBranch}, {Key: "target_branch", Value: targetBranch}, {Key: "status", Value: project.Status}, {Key: "landing_mode", Value: projectLandingMode(project, cfg)}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "land": defaultValue(cfg.Autonomy.Land, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set defaults.landing_mode \"local\" --project " + project.Name + "` to update Project settings", "Run `posse config set defaults.target_branch <branch> --project " + project.Name + "` to change the PR/MR target"}}})
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "root", Value: project.Root}, {Key: "default_branch", Value: project.DefaultBranch}, {Key: "target_branch", Value: targetBranch}, {Key: "status", Value: project.Status}, {Key: "merge_mode", Value: projectMergeMode(project, cfg)}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set defaults.merge_mode \"local\" --project " + project.Name + "` to update Project settings", "Run `posse config set defaults.target_branch <branch> --project " + project.Name + "` to change the PR/MR target"}}})
 }
 
 func (s *Service) projectMove(ctx *axi.Context, args []string) error {
@@ -807,7 +807,7 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 			fmt.Fprintf(&out, "- Error: %s\n\n", err)
 			continue
 		}
-		fmt.Fprintf(&out, "- Path: `%s`\n- Kind: %s\n- Landing Mode: %s\n- Autonomy: review=%s land=%s\n- Lead: %s\n", project.Root, project.Kind, projectLandingMode(project, cfg), defaultValue(cfg.Autonomy.Review, "ask"), defaultValue(cfg.Autonomy.Land, "ask"), s.leadStatus(ctx, project))
+		fmt.Fprintf(&out, "- Path: `%s`\n- Kind: %s\n- Merge Mode: %s\n- Autonomy: review=%s merge=%s\n- Lead: %s\n", project.Root, project.Kind, projectMergeMode(project, cfg), defaultValue(cfg.Autonomy.Review, "ask"), defaultValue(cfg.Autonomy.Merge, "ask"), s.leadStatus(ctx, project))
 		if project.IsDirectory() {
 			out.WriteString("- Execution: in-place when explicitly selected per Task\n")
 		}

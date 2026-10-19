@@ -16,13 +16,13 @@ import (
 
 const deadIntentProcessID = 1 << 30
 
-func TestInterruptedRideWithoutPaneFailsAndReleasesMount(t *testing.T) {
+func TestInterruptedStartWithoutPaneFailsAndReleasesSandbox(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
-	mountPath := filepath.Join(root, "mount")
-	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
+	sandboxPath := filepath.Join(root, "sandbox")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
 	home := filepath.Join(root, "posse")
 	db, err := store.Open(home)
 	if err != nil {
@@ -33,17 +33,17 @@ func TestInterruptedRideWithoutPaneFailsAndReleasesMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Interrupted ride", LandingMode: "local", Branch: "posse/t1", WorktreePath: mountPath})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Interrupted start", MergeMode: "local", Branch: "posse/t1", WorktreePath: sandboxPath})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, mountPath, taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, sandboxPath, taskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?),created_at=? WHERE id=?`, taskID, time.Now().Add(-6*time.Minute).UnixMilli(), taskID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, project.ID, taskID, "ride", "done:mount.acquire", `{}`, deadIntentProcessID); err != nil {
+	if err := db.StartIntent(ctx, project.ID, taskID, "start", "done:sandbox.acquire", `{}`, deadIntentProcessID); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(home, project.Name)
@@ -55,26 +55,26 @@ func TestInterruptedRideWithoutPaneFailsAndReleasesMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := db.TaskByID(ctx, project.ID, taskID)
-	if err != nil || task.State != store.StateFailed || task.MountID != 0 {
-		t.Fatalf("interrupted ride state and Mount = %#v, %v", task, err)
+	if err != nil || task.State != store.StateFailed || task.SandboxID != 0 {
+		t.Fatalf("interrupted start state and Sandbox = %#v, %v", task, err)
 	}
-	mounts, err := db.Mounts(ctx, project.ID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" || mounts[0].TaskID != 0 {
-		t.Fatalf("Mount after interrupted ride = %#v, %v", mounts, err)
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "idle" || sandboxes[0].TaskID != 0 {
+		t.Fatalf("Sandbox after interrupted start = %#v, %v", sandboxes, err)
 	}
 	if _, err := db.IntentByTask(ctx, taskID); !store.IsNotFound(err) {
-		t.Fatalf("ride intent remains after recovery: %v", err)
+		t.Fatalf("start intent remains after recovery: %v", err)
 	}
 }
 
-func TestInterruptedLandIntentFinishesOrUndoesFromRepositoryState(t *testing.T) {
+func TestInterruptedMergeIntentFinishesOrUndoesFromRepositoryState(t *testing.T) {
 	for _, merged := range []bool{false, true} {
 		t.Run(map[bool]string{false: "unmerged", true: "merged"}[merged], func(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
 			repo := filepath.Join(root, "repo")
 			initRepo(t, repo)
-			worktree := filepath.Join(root, "mount")
+			worktree := filepath.Join(root, "sandbox")
 			gitTest(t, repo, "worktree", "add", "-b", "posse/t1", worktree, "main")
 			if err := os.WriteFile(filepath.Join(worktree, "change.txt"), []byte("work\n"), 0o600); err != nil {
 				t.Fatal(err)
@@ -91,14 +91,14 @@ func TestInterruptedLandIntentFinishesOrUndoesFromRepositoryState(t *testing.T) 
 				t.Fatal(err)
 			}
 			defer db.Close()
-			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nauto_unsaddle = \"never\"\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nauto_teardown = \"never\"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			project, err := db.CreateProject(ctx, "shop", repo, "main")
 			if err != nil {
 				t.Fatal(err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Interrupted land", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: worktree})
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Interrupted merge", MergeMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: worktree})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -113,10 +113,10 @@ func TestInterruptedLandIntentFinishesOrUndoesFromRepositoryState(t *testing.T) 
 			if err := db.SetTaskGatedSHA(ctx, taskID, gatedSHA); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.Transition(ctx, taskID, store.StateDone, store.StateLanding, "cli", "gate passed"); err != nil {
+			if err := db.Transition(ctx, taskID, store.StateDone, store.StateMerging, "cli", "gate passed"); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.StartIntent(ctx, project.ID, taskID, "land --merge", "done:merge", `{}`, deadIntentProcessID); err != nil {
+			if err := db.StartIntent(ctx, project.ID, taskID, "merge --execute", "done:merge", `{}`, deadIntentProcessID); err != nil {
 				t.Fatal(err)
 			}
 			cfg, err := config.Load(home, project.Name)
@@ -131,26 +131,26 @@ func TestInterruptedLandIntentFinishesOrUndoesFromRepositoryState(t *testing.T) 
 				t.Fatal(err)
 			}
 			if merged {
-				if task.State != store.StateLanded || task.LandedRef == "" {
+				if task.State != store.StateMerged || task.MergedRef == "" {
 					t.Fatalf("merged recovery state = %#v", task)
 				}
 			} else if task.State != store.StateDone || task.GatedSHA != "" {
-				t.Fatalf("unmerged recovery did not undo landing: %#v", task)
+				t.Fatalf("unmerged recovery did not undo merging: %#v", task)
 			}
 			if _, err := db.IntentByTask(ctx, taskID); !store.IsNotFound(err) {
-				t.Fatalf("land intent remains after recovery: %v", err)
+				t.Fatalf("merge intent remains after recovery: %v", err)
 			}
 		})
 	}
 }
 
-func TestInterruptedUnsaddleRerunsThroughMountRelease(t *testing.T) {
+func TestInterruptedTeardownRerunsThroughSandboxRelease(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
-	mountPath := filepath.Join(root, "mount")
-	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
+	sandboxPath := filepath.Join(root, "sandbox")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
 	home := filepath.Join(root, "posse")
 	db, err := store.Open(home)
 	if err != nil {
@@ -161,25 +161,25 @@ func TestInterruptedUnsaddleRerunsThroughMountRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Interrupted unsaddle", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mountPath})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Interrupted teardown", MergeMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: sandboxPath})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, transition := range []struct {
 		from, to store.State
 		source   string
-	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateLanding, "cli"}, {store.StateLanding, store.StateLanded, "cli"}} {
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerging, "cli"}, {store.StateMerging, store.StateMerged, "cli"}} {
 		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, mountPath, taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, sandboxPath, taskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, taskID, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, project.ID, taskID, "unsaddle", "done:panes.close", `{}`, deadIntentProcessID); err != nil {
+	if err := db.StartIntent(ctx, project.ID, taskID, "teardown", "done:panes.close", `{}`, deadIntentProcessID); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(home, project.Name)
@@ -190,27 +190,27 @@ func TestInterruptedUnsaddleRerunsThroughMountRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := db.TaskByID(ctx, project.ID, taskID)
-	if err != nil || task.State != store.StateTornDown || task.MountID != 0 {
-		t.Fatalf("interrupted unsaddle state = %#v, %v", task, err)
+	if err != nil || task.State != store.StateTornDown || task.SandboxID != 0 {
+		t.Fatalf("interrupted teardown state = %#v, %v", task, err)
 	}
-	mounts, err := db.Mounts(ctx, project.ID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" || mounts[0].TaskID != 0 {
-		t.Fatalf("Mount after interrupted unsaddle = %#v, %v", mounts, err)
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "idle" || sandboxes[0].TaskID != 0 {
+		t.Fatalf("Sandbox after interrupted teardown = %#v, %v", sandboxes, err)
 	}
 	if _, err := db.IntentByTask(ctx, taskID); !store.IsNotFound(err) {
-		t.Fatalf("unsaddle intent remains after recovery: %v", err)
+		t.Fatalf("teardown intent remains after recovery: %v", err)
 	}
 }
 
-func TestStartupUnsaddleRecoveryDoesNotFetchWhileReleasingMount(t *testing.T) {
+func TestStartupTeardownRecoveryDoesNotFetchWhileReleasingSandbox(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
 	remote := filepath.Join(root, "remote.git")
 	gitTest(t, root, "clone", "--bare", repo, remote)
-	mountPath := filepath.Join(root, "mount")
-	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
+	sandboxPath := filepath.Join(root, "sandbox")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
 	home := filepath.Join(root, "posse")
 	db, err := store.Open(home)
 	if err != nil {
@@ -221,7 +221,7 @@ func TestStartupUnsaddleRecoveryDoesNotFetchWhileReleasingMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Interrupted unsaddle", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mountPath})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Interrupted teardown", MergeMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: sandboxPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,20 +231,20 @@ func TestStartupUnsaddleRecoveryDoesNotFetchWhileReleasingMount(t *testing.T) {
 	}{
 		{store.StateSpawning, store.StateWorking, "cli"},
 		{store.StateWorking, store.StateDone, "worker"},
-		{store.StateDone, store.StateLanding, "cli"},
-		{store.StateLanding, store.StateLanded, "cli"},
+		{store.StateDone, store.StateMerging, "cli"},
+		{store.StateMerging, store.StateMerged, "cli"},
 	} {
 		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, mountPath, taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, sandboxPath, taskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, taskID, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, project.ID, taskID, "unsaddle", "done:panes.close", `{}`, deadIntentProcessID); err != nil {
+	if err := db.StartIntent(ctx, project.ID, taskID, "teardown", "done:panes.close", `{}`, deadIntentProcessID); err != nil {
 		t.Fatal(err)
 	}
 	gitTest(t, repo, "remote", "add", "origin", "https://blackhole.invalid/acme/repo.git")
@@ -273,29 +273,29 @@ func TestStartupUnsaddleRecoveryDoesNotFetchWhileReleasingMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := db.TaskByID(ctx, project.ID, taskID)
-	if err != nil || task.State != store.StateTornDown || task.MountID != 0 {
+	if err != nil || task.State != store.StateTornDown || task.SandboxID != 0 {
 		t.Fatalf("startup recovery Task = %#v, %v", task, err)
 	}
-	mounts, err := db.Mounts(ctx, project.ID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" || mounts[0].TaskID != 0 {
-		t.Fatalf("startup recovery Mount = %#v, %v", mounts, err)
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "idle" || sandboxes[0].TaskID != 0 {
+		t.Fatalf("startup recovery Sandbox = %#v, %v", sandboxes, err)
 	}
 	if _, err := os.Stat(fetchLog); !os.IsNotExist(err) {
 		contents, _ := os.ReadFile(fetchLog)
 		t.Fatalf("startup recovery fetched origin: %q (%v)", contents, err)
 	}
 	if _, err := db.IntentByTask(ctx, taskID); !store.IsNotFound(err) {
-		t.Fatalf("unsaddle intent remains after local recovery: %v", err)
+		t.Fatalf("teardown intent remains after local recovery: %v", err)
 	}
 }
 
-func TestInterruptedCompletionUnsaddleCannotReleaseFailedTaskMount(t *testing.T) {
+func TestInterruptedCompletionTeardownCannotReleaseFailedTaskSandbox(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
-	mountPath := filepath.Join(root, "mount")
-	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
+	sandboxPath := filepath.Join(root, "sandbox")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
 	home := filepath.Join(root, "posse")
 	db, err := store.Open(home)
 	if err != nil {
@@ -306,7 +306,7 @@ func TestInterruptedCompletionUnsaddleCannotReleaseFailedTaskMount(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Failed Task", LandingMode: "local", Branch: "posse/t1", WorktreePath: mountPath})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Failed Task", MergeMode: "local", Branch: "posse/t1", WorktreePath: sandboxPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,13 +316,13 @@ func TestInterruptedCompletionUnsaddleCannotReleaseFailedTaskMount(t *testing.T)
 	if err := db.Transition(ctx, taskID, store.StateWorking, store.StateFailed, "worker", "failed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, mountPath, taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, sandboxPath, taskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, taskID, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, project.ID, taskID, "unsaddle", "done:panes.close", `{}`, deadIntentProcessID); err != nil {
+	if err := db.StartIntent(ctx, project.ID, taskID, "teardown", "done:panes.close", `{}`, deadIntentProcessID); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(home, project.Name)
@@ -332,12 +332,12 @@ func TestInterruptedCompletionUnsaddleCannotReleaseFailedTaskMount(t *testing.T)
 	if err := testService(home, nil).reconcileIntents(ctx, db, project, cfg, herdr.Snapshot{}); err != nil {
 		t.Fatal(err)
 	}
-	mounts, err := db.Mounts(ctx, project.ID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "held" || mounts[0].TaskID != taskID {
-		t.Fatalf("recovery released a failed Task without discard approval: %#v, %v", mounts, err)
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "held" || sandboxes[0].TaskID != taskID {
+		t.Fatalf("recovery released a failed Task without discard approval: %#v, %v", sandboxes, err)
 	}
 	task, err := db.TaskByID(ctx, project.ID, taskID)
-	if err != nil || task.State != store.StateFailed || task.MountID == 0 {
+	if err != nil || task.State != store.StateFailed || task.SandboxID == 0 {
 		t.Fatalf("recovery changed the failed Task without discard approval: %#v, %v", task, err)
 	}
 }

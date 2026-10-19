@@ -14,13 +14,13 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
-func TestPRLandingQueuesThreeGateFixRoundsThenExhaustsBudget(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+func TestPRMergeQueuesThreeGateFixRoundsThenExhaustsBudget(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	installGateValidationPlan(t, fixture, 3)
 	writeFailingGate(t, fixture, "printf 'gate output tail'; exit 7")
 
 	for round := 1; round <= 4; round++ {
-		code, output, errOutput := fixture.run("land", "t1")
+		code, output, errOutput := fixture.run("merge", "t1")
 		if code != 1 || !strings.Contains(output, "gate_failed") || !strings.Contains(output, "exit status 7") {
 			t.Fatalf("Gate failure %d was not reported: exit=%d output=%s error=%s", round, code, output, errOutput)
 		}
@@ -69,12 +69,12 @@ func TestPRLandingQueuesThreeGateFixRoundsThenExhaustsBudget(t *testing.T) {
 	}
 }
 
-func TestLocalLandingQueuesGateFixInstruction(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateDone)
+func TestLocalMergeQueuesGateFixInstruction(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
 	installGateValidationPlan(t, fixture, 1)
 	writeFailingGate(t, fixture, "printf 'local gate failure'; exit 1")
 
-	code, output, errOutput := fixture.run("land", "t1")
+	code, output, errOutput := fixture.run("merge", "t1")
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -91,12 +91,12 @@ func TestLocalLandingQueuesGateFixInstruction(t *testing.T) {
 	}
 }
 
-func TestPRLandingZeroGateFixRoundsKeepsManualFailurePath(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+func TestPRMergeZeroGateFixRoundsKeepsManualFailurePath(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	installGateValidationPlan(t, fixture, 0)
 	writeFailingGate(t, fixture, "printf 'failure'; exit 1")
 
-	code, output, errOutput := fixture.run("land", "t1")
+	code, output, errOutput := fixture.run("merge", "t1")
 	task, taskErr := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
 	notices, noticeErr := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	var queued, rounds int
@@ -111,7 +111,7 @@ func TestPRLandingZeroGateFixRoundsKeepsManualFailurePath(t *testing.T) {
 	}
 }
 
-func installGateValidationPlan(t *testing.T, fixture *prLandingFixture, maxFixRounds int) {
+func installGateValidationPlan(t *testing.T, fixture *prMergeFixture, maxFixRounds int) {
 	t.Helper()
 	ctx := context.Background()
 	briefPath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
@@ -120,20 +120,20 @@ func installGateValidationPlan(t *testing.T, fixture *prLandingFixture, maxFixRo
 		t.Fatal(err)
 	}
 	var userChoice *taskplan.UserChoice
-	if fixture.task.LandingMode == "local" {
+	if fixture.task.MergeMode == "local" {
 		briefData = []byte(strings.Replace(string(briefData), "done_when: commit exists\n", "done_when: commit exists\nreview: none\n", 1))
 		if err := os.WriteFile(briefPath, briefData, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		userChoice = &taskplan.UserChoice{Actor: "user", Source: "ride --user-approved", Quote: "User approved no review for this Gate fixture"}
+		userChoice = &taskplan.UserChoice{Actor: "user", Source: "start --user-approved", Quote: "User approved no review for this Gate fixture"}
 	}
 	plan, err := taskplan.Resolve(taskplan.Request{
 		Brief:         taskplan.Select("brief", briefPath, briefData),
-		Execution:     taskplan.Execution{Mode: "mount", Scope: "repo", Base: "main", Target: "main"},
+		Execution:     taskplan.Execution{Mode: "sandbox", Scope: "repo", Base: "main", Target: "main"},
 		Launch:        taskplan.Launch{ProfileName: "claude", Profile: config.Profile{Kind: "claude"}},
 		Review:        "local",
-		Delivery:      fixture.task.LandingMode,
-		Autonomy:      config.Autonomy{Review: "ask", Land: "ask"},
+		Delivery:      fixture.task.MergeMode,
+		Autonomy:      config.Autonomy{Review: "ask", Merge: "ask"},
 		ConfigSources: []string{"test"},
 		UserChoice:    userChoice,
 		Paths: taskplan.Paths{
@@ -162,15 +162,15 @@ func installGateValidationPlan(t *testing.T, fixture *prLandingFixture, maxFixRo
 	}
 }
 
-func writeFailingGate(t *testing.T, fixture *prLandingFixture, command string) {
+func writeFailingGate(t *testing.T, fixture *prMergeFixture, command string) {
 	t.Helper()
-	configText := fmt.Sprintf("[defaults]\nlanding_mode = %q\nmerge_method = \"squash\"\nauto_unsaddle = \"never\"\ngate = [%q]\n\n[gate_loop]\nmax_fix_rounds = 0\n", fixture.task.LandingMode, command)
+	configText := fmt.Sprintf("[defaults]\nmerge_mode = %q\nmerge_method = \"squash\"\nauto_teardown = \"never\"\ngate = [%q]\n\n[gate_loop]\nmax_fix_rounds = 0\n", fixture.task.MergeMode, command)
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func completeGateFixRound(t *testing.T, fixture *prLandingFixture, round int) {
+func completeGateFixRound(t *testing.T, fixture *prMergeFixture, round int) {
 	t.Helper()
 	ctx := context.Background()
 	adapter := fixture.service.Herdr.(*herdr.Fake)

@@ -28,7 +28,7 @@ func (s *Service) enqueueStackedTargetChanges(ctx context.Context, db *store.DB,
 		return err
 	}
 	for _, upper := range tasks {
-		if upper.ID == lower.ID || !strings.EqualFold(upper.Type, "ship") || upper.State == store.StateLanded || upper.State == store.StateTornDown || upper.State == store.StateReported {
+		if upper.ID == lower.ID || !strings.EqualFold(upper.Type, "change") || upper.State == store.StateMerged || upper.State == store.StateTornDown || upper.State == store.StateReported {
 			continue
 		}
 		if !project.IsWorkspace() {
@@ -45,7 +45,7 @@ func (s *Service) enqueueStackedTargetChanges(ctx context.Context, db *store.DB,
 			return err
 		}
 		for _, member := range repos {
-			if member.Repo != repo || member.State == store.TaskRepoLanded || member.TargetBranch != lower.Branch {
+			if member.Repo != repo || member.State == store.TaskRepoMerged || member.TargetBranch != lower.Branch {
 				continue
 			}
 			if _, err := db.BeginTaskTargetChange(ctx, project.ID, upper.ID, repo, lower.ID, lower.Branch, lowerTarget); err != nil {

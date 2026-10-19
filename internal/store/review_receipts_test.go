@@ -8,7 +8,7 @@ import (
 func TestReviewReceiptsAreInsertOnceImmutableAndSurviveRebuild(t *testing.T) {
 	f := newReviewVerdictFixture(t, nil)
 	receipt := ReviewReceipt{
-		TaskID: f.ship, Repository: "github.com/acme/shop", RunID: "01RUN", HeadSHA: reviewShaA, ReviewStatus: "passed",
+		TaskID: f.change, Repository: "github.com/acme/shop", RunID: "01RUN", HeadSHA: reviewShaA, ReviewStatus: "passed",
 		ReviewerProfile: "nm-reviewer", ReviewerModel: "model-r", ReportSHA256: reportHash, ReceiptSHA256: strings.Repeat("d", 64), ObservedAt: 10,
 	}
 	for range 2 {
@@ -21,16 +21,16 @@ func TestReviewReceiptsAreInsertOnceImmutableAndSurviveRebuild(t *testing.T) {
 	if err := f.db.RecordReviewReceipt(f.ctx, later); err != nil {
 		t.Fatal(err)
 	}
-	if receipts, err := f.db.ReviewReceipts(f.ctx, f.ship); err != nil || len(receipts) != 1 || receipts[0] != receipt {
+	if receipts, err := f.db.ReviewReceipts(f.ctx, f.change); err != nil || len(receipts) != 1 || receipts[0] != receipt {
 		t.Fatalf("receipts = %#v, %v", receipts, err)
 	}
-	if _, err := f.db.ExecContext(f.ctx, `UPDATE review_receipts SET head_sha=? WHERE task_id=?`, reviewShaB, f.ship); err == nil || !strings.Contains(err.Error(), "immutable") {
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE review_receipts SET head_sha=? WHERE task_id=?`, reviewShaB, f.change); err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("receipt update was not refused: %v", err)
 	}
 	if _, err := f.db.RebuildFromSnapshots(f.ctx, f.home); err != nil {
 		t.Fatal(err)
 	}
-	if receipts, err := f.db.ReviewReceipts(f.ctx, f.ship); err != nil || len(receipts) != 1 || receipts[0] != receipt {
+	if receipts, err := f.db.ReviewReceipts(f.ctx, f.change); err != nil || len(receipts) != 1 || receipts[0] != receipt {
 		t.Fatalf("rebuilt receipts = %#v, %v", receipts, err)
 	}
 }

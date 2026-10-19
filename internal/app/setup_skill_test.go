@@ -16,10 +16,14 @@ func TestPosseSetupSkillNamesOnlySchemaKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyPattern := regexp.MustCompile(`^(identity|lead|defaults|remuda|kinds|profiles|dispatch|autonomy)(\.[a-z_<>*]+)*$`)
+	keyPattern := regexp.MustCompile(`^(identity|lead|defaults|pool|kinds|profiles|dispatch|autonomy)(\.[a-z_<>*]+)*$`)
 	// A bare field name such as `gate` is not a key; config set refuses it.
 	fieldNames := map[string]bool{}
+	allowedValues := map[string]bool{}
 	for _, spec := range config.Schema() {
+		for _, value := range spec.Allowed {
+			allowedValues[value] = true
+		}
 		parts := strings.Split(spec.Key, ".")
 		if len(parts) > 1 && parts[0] != "dispatch" {
 			fieldNames[parts[len(parts)-1]] = true
@@ -31,7 +35,9 @@ func TestPosseSetupSkillNamesOnlySchemaKeys(t *testing.T) {
 		if len(fields) >= 4 && fields[0] == "posse" && fields[1] == "config" && (fields[2] == "set" || fields[2] == "unset") {
 			fields = fields[3:]
 		}
-		if len(fields) == 1 && fieldNames[fields[0]] {
+		// A value such as `merge` is also a valid field name; do not
+		// mistake the documented merge_method value for a bare config key.
+		if len(fields) == 1 && fieldNames[fields[0]] && !allowedValues[fields[0]] {
 			t.Errorf("skill names bare field %q instead of its full schema key", fields[0])
 			continue
 		}
@@ -51,7 +57,7 @@ func TestPosseSetupSkillNamesOnlySchemaKeys(t *testing.T) {
 		}
 		checked[key] = true
 	}
-	for _, key := range []string{"defaults.gate", "remuda.setup", "kinds.<kind>.lead_auto_approve", "autonomy.review", "autonomy.land", "autonomy.yolo"} {
+	for _, key := range []string{"defaults.gate", "pool.setup", "kinds.<kind>.lead_auto_approve", "autonomy.review", "autonomy.merge", "autonomy.yolo"} {
 		if !checked[key] {
 			t.Errorf("skill no longer names User-only key %s", key)
 		}

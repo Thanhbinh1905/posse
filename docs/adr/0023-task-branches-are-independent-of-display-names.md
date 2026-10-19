@@ -4,6 +4,6 @@ A Task Name is presentation and may repeat or be localized; deriving a Git branc
 
 ## Consequences
 
-- The Task's recorded `branch` is the source of truth for checkout, publish, landing, recovery and teardown.
-- Dispatch and `ride` accept an optional safe display name; repeated names require `t<n>` for unambiguous lookup.
+- The Task's recorded `branch` is the source of truth for checkout, publish, merging, recovery and teardown.
+- Dispatch and `start` accept an optional safe display name; repeated names require `t<n>` for unambiguous lookup.
 - A generated branch collision with Task history or a local or remote ref refuses admission rather than renaming or reusing a branch.

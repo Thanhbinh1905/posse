@@ -20,19 +20,19 @@ import (
 )
 
 // Every observed merged PR must finish Teardown or retain exactly one
-// deduplicated, visible reason. A terminal Rider state never drops the watch.
+// deduplicated, visible reason. A terminal Worker state never drops the watch.
 func TestMergedPRNeverSilentlySkipsTask(t *testing.T) {
-	states := []store.State{store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled, store.StateFailed, store.StateLost, store.StateDone, store.StateLanding}
+	states := []store.State{store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled, store.StateFailed, store.StateLost, store.StateDone, store.StateMerging}
 	for _, state := range states {
 		t.Run(string(state), func(t *testing.T) {
-			f := newPRLandingFixture(t, "pr", store.StateWorking)
+			f := newPRMergeFixture(t, "pr", store.StateWorking)
 			defer f.db.Close()
 			ctx := context.Background()
-			if state == store.StateLanding {
+			if state == store.StateMerging {
 				if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
 					t.Fatal(err)
 				}
-				if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateLanding, "cli", "landing"); err != nil {
+				if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateMerging, "cli", "merging"); err != nil {
 					t.Fatal(err)
 				}
 			} else if state != store.StateWorking {
@@ -47,7 +47,7 @@ func TestMergedPRNeverSilentlySkipsTask(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+			if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 				t.Fatal(err)
 			}
 			f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
@@ -59,7 +59,7 @@ func TestMergedPRNeverSilentlySkipsTask(t *testing.T) {
 				if err := f.service.pollProjectPullRequests(ctx, f.db, f.project, cfg, true); err != nil {
 					t.Fatal(err)
 				}
-				if err := f.service.autoTeardownLandedTasks(ctx, f.db, f.project, cfg); err != nil {
+				if err := f.service.autoTeardownMergedTasks(ctx, f.db, f.project, cfg); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -71,8 +71,8 @@ func TestMergedPRNeverSilentlySkipsTask(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reasons := countNoticeKind(notices, "unsaddle_incomplete") + countNoticeKind(notices, "pr_watch_failing")
-			if task.State != store.StateTornDown && (task.State != store.StateLanded || reasons != 1) {
+			reasons := countNoticeKind(notices, "teardown_incomplete") + countNoticeKind(notices, "pr_watch_failing")
+			if task.State != store.StateTornDown && (task.State != store.StateMerged || reasons != 1) {
 				t.Fatalf("merged PR silently skipped: state=%s reasons=%d notices=%#v", task.State, reasons, notices)
 			}
 			if countNoticeKind(notices, "pr_merged") != 1 {
@@ -82,7 +82,7 @@ func TestMergedPRNeverSilentlySkipsTask(t *testing.T) {
 	}
 }
 
-func (fixture *prLandingFixture) advanceTarget(t *testing.T, conflicting, push bool) string {
+func (fixture *prMergeFixture) advanceTarget(t *testing.T, conflicting, push bool) string {
 	t.Helper()
 	worktree := filepath.Join(fixture.root, "target-advance")
 	gitTest(t, fixture.repo, "worktree", "add", "-b", "target-advance", worktree, "refs/heads/main")
@@ -112,7 +112,7 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 		{name: "conflicting", conflicting: true, mergeable: "CONFLICTING"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			fixture := newPRLandingFixture(t, "pr", store.StateDone)
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
 			if scenario.conflicting {
 				path := filepath.Join(fixture.worktree, "README.md")
 				if err := os.WriteFile(path, []byte("Task README update\n"), 0o600); err != nil {
@@ -122,7 +122,7 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 				gitTest(t, fixture.worktree, "commit", "-m", "change README")
 				fixture.headSHA = strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
 			}
-			if code, output, stderr := fixture.run("land", "t1"); code != 0 {
+			if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
 				t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
 			}
 			targetTip := fixture.advanceTarget(t, scenario.conflicting, true)
@@ -148,13 +148,13 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 				t.Fatalf("stale CI result remained usable: observation=%#v err=%v", observation, err)
 			}
 			notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-			if err != nil || countNoticeKind(notices, "land_ready") != 0 {
-				t.Fatalf("stale PR was treated as land-ready: notices=%#v err=%v", notices, err)
+			if err != nil || countNoticeKind(notices, "merge_ready") != 0 {
+				t.Fatalf("stale PR was treated as merge-ready: notices=%#v err=%v", notices, err)
 			}
 			var body string
 			var queued int
 			if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&body); err != nil {
-				t.Fatalf("Posse did not queue a Rider freshness instruction: %v", err)
+				t.Fatalf("Posse did not queue a Worker freshness instruction: %v", err)
 			}
 			if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil || queued != 1 {
 				t.Fatalf("repeated watcher polls duplicated the freshness instruction: queued=%d err=%v", queued, err)
@@ -172,8 +172,8 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 	}
 }
 
-func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+func TestPRWatchRaisesMergeReadyWhenTaskEntersMergeAfterPRIsGreen(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	ctx := context.Background()
 	url := "https://github.com/acme/shop/pull/17"
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET autonomy_land='auto' WHERE id=?`, fixture.task.ID); err != nil {
@@ -182,7 +182,7 @@ func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T)
 	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
 		t.Fatalf("publish: %d %s %s", code, output, stderr)
 	}
-	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, url, ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, url, ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
@@ -196,52 +196,52 @@ func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	poll() // Checks pass while the Rider is still working, so no Notice is due yet.
+	poll() // Checks pass while the Worker is still working, so no Notice is due yet.
 	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
 	if err != nil || task.State != store.StateWorking {
 		t.Fatalf("publish changed the Task state before the done Signal: task=%#v err=%v", task, err)
 	}
 	notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "land_ready") != 0 {
-		t.Fatalf("working Task unexpectedly received land_ready: notices=%#v err=%v", notices, err)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 0 {
+		t.Fatalf("working Task unexpectedly received merge_ready: notices=%#v err=%v", notices, err)
 	}
-	if code, output, stderr := fixture.run("holler", "done", "Worker completion summary", "--pr", url); code != 0 {
+	if code, output, stderr := fixture.run("signal", "done", "Worker completion summary", "--pr", url); code != 0 {
 		t.Fatalf("done: %d %s %s", code, output, stderr)
 	}
 	poll() // The Task became done after its green PR observation was recorded.
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
-		t.Fatalf("green PR did not produce land_ready when the Task became done: notices=%#v err=%v", notices, err)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 1 {
+		t.Fatalf("green PR did not produce merge_ready when the Task became done: notices=%#v err=%v", notices, err)
 	}
-	if code, output, stderr := fixture.run("land", "t1"); code != 0 {
-		t.Fatalf("land: %d %s %s", code, output, stderr)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge: %d %s %s", code, output, stderr)
 	}
 	task, err = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
-	if err != nil || task.State != store.StateLanding {
-		t.Fatalf("land did not move the Task to landing: task=%#v err=%v", task, err)
+	if err != nil || task.State != store.StateMerging {
+		t.Fatalf("merge did not move the Task to merging: task=%#v err=%v", task, err)
 	}
-	poll() // The unchanged green observation must not duplicate land_ready.
+	poll() // The unchanged green observation must not duplicate merge_ready.
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
-		t.Fatalf("repeated ready observation duplicated land_ready after Landing: notices=%#v err=%v", notices, err)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 1 {
+		t.Fatalf("repeated ready observation duplicated merge_ready after Merge: notices=%#v err=%v", notices, err)
 	}
 	poll()
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
-		t.Fatalf("repeated ready observations duplicated land_ready: notices=%#v err=%v", notices, err)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 1 {
+		t.Fatalf("repeated ready observations duplicated merge_ready: notices=%#v err=%v", notices, err)
 	}
 	if err := fixture.service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
 		t.Fatal(err)
 	}
 	decisions, err := fixture.db.Decisions(ctx, fixture.project.ID, true)
 	if err != nil || len(decisions) != 0 {
-		t.Fatalf("autonomy.land=auto should emit land_ready without creating a User Decision: decisions=%#v err=%v", decisions, err)
+		t.Fatalf("autonomy.merge=auto should emit merge_ready without creating a User Decision: decisions=%#v err=%v", decisions, err)
 	}
 }
 
 func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, output, stderr := fixture.run("land", "t1"); code != 0 {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
 	}
 	targetTip := fixture.advanceTarget(t, false, false)
@@ -263,14 +263,14 @@ func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
 		t.Fatalf("CI observed before the target advanced was accepted: observation=%#v err=%v", observation, err)
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "land_ready") != 0 {
-		t.Fatalf("target advance during CI produced land-ready evidence: notices=%#v err=%v", notices, err)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 0 {
+		t.Fatalf("target advance during CI produced merge-ready evidence: notices=%#v err=%v", notices, err)
 	}
 }
 
 func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
@@ -313,7 +313,7 @@ func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
 	fixture.setGraphQLState(t, "OPEN", "PENDING", "CHANGES_REQUESTED", "CONFLICTING", "", newHead)
 	poll()
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "land_ready") != 1 || countNoticeKind(notices, "pr_changes_requested") != 1 || countNoticeKind(notices, "pr_conflict") != 1 {
+	if err != nil || countNoticeKind(notices, "merge_ready") != 1 || countNoticeKind(notices, "pr_changes_requested") != 1 || countNoticeKind(notices, "pr_conflict") != 1 {
 		t.Fatalf("review and conflict notices were not recorded once: %#v, %v", notices, err)
 	}
 	observation, err = fixture.db.LatestPRObservation(ctx, fixture.task.ID)
@@ -324,8 +324,8 @@ func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
 	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", fixture.headSHA, newHead)
 	poll()
 	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateLanded || task.LandedRef != fixture.headSHA {
-		t.Fatalf("merged PR did not land at the GitHub merge commit: %#v, %v", task, err)
+	if err != nil || task.State != store.StateMerged || task.MergedRef != fixture.headSHA {
+		t.Fatalf("merged PR did not merge at the GitHub merge commit: %#v, %v", task, err)
 	}
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
 	if err != nil || countNoticeKind(notices, "pr_merged") != 1 {
@@ -338,9 +338,9 @@ func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
 }
 
 func TestPRWatchRerunsCancelledCheckOnceThenQueuesOneCIFixRound(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
-	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	freezeCILoop(t, fixture, 3, 1)
@@ -402,7 +402,7 @@ func TestPRWatchRerunsCancelledCheckOnceThenQueuesOneCIFixRound(t *testing.T) {
 func TestGitLabPRWatchRetriesCancelledJobAndQueuesOneCIFixRound(t *testing.T) {
 	fixture := gitlabFixture(t, store.StateDone)
 	ctx := context.Background()
-	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://git.example.com/group/sub/shop/-/merge_requests/17", ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://git.example.com/group/sub/shop/-/merge_requests/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	freezeCILoop(t, fixture, 3, 1)
@@ -447,9 +447,9 @@ func TestGitLabPRWatchRetriesCancelledJobAndQueuesOneCIFixRound(t *testing.T) {
 }
 
 func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
-	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	freezeCILoop(t, fixture, 1, 0)
@@ -480,9 +480,9 @@ func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
 }
 
 func TestPRWatchDoesNotStartCILoopForStaleGatedHead(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
-	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	freezeCILoop(t, fixture, 3, 1)
@@ -510,15 +510,15 @@ func TestPRWatchDoesNotStartCILoopForStaleGatedHead(t *testing.T) {
 	}
 }
 
-func TestPRWatchLandsDoneTaskWhenItsPRIsMerged(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"finished\"\n"), 0o600); err != nil {
+func TestPRWatchMergesDoneTaskWhenItsPRIsMerged(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"finished\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	mount := attachPRFixtureMount(t, fixture)
+	sandbox := attachPRFixtureSandbox(t, fixture)
 	prURL := "https://github.com/acme/shop/pull/17"
-	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, prURL, ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, prURL, ""); err != nil {
 		t.Fatal(err)
 	}
 	mergeCommit := strings.Repeat("9", 40)
@@ -535,16 +535,16 @@ func TestPRWatchLandsDoneTaskWhenItsPRIsMerged(t *testing.T) {
 		t.Fatalf("reconcile merged PR: %v", err)
 	}
 	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateTornDown || task.LandedRef != mergeCommit {
-		t.Fatalf("merged PR did not land and follow auto_unsaddle=finished: %#v, %v", task, err)
+	if err != nil || task.State != store.StateTornDown || task.MergedRef != mergeCommit {
+		t.Fatalf("merged PR did not merge and follow auto_teardown=finished: %#v, %v", task, err)
 	}
-	releasedMount, err := fixture.db.MountByTask(ctx, task.ID)
+	releasedSandbox, err := fixture.db.SandboxByTask(ctx, task.ID)
 	if err == nil {
-		t.Fatalf("auto-teardown left Mount held: %#v", releasedMount)
+		t.Fatalf("auto-teardown left Sandbox held: %#v", releasedSandbox)
 	}
-	mounts, err := fixture.db.Mounts(ctx, fixture.project.ID)
-	if err != nil || len(mounts) != 1 || mounts[0].ID != mount.ID || mounts[0].State != "idle" || mounts[0].TaskID != 0 {
-		t.Fatalf("safe merged Task Mount was not released: %#v, %v", mounts, err)
+	sandboxes, err := fixture.db.Sandboxes(ctx, fixture.project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].ID != sandbox.ID || sandboxes[0].State != "idle" || sandboxes[0].TaskID != 0 {
+		t.Fatalf("safe merged Task Sandbox was not released: %#v, %v", sandboxes, err)
 	}
 	observation, err := fixture.db.LatestPRObservation(ctx, task.ID)
 	if err != nil || observation.State != "MERGED" || observation.MergeCommit != mergeCommit {
@@ -558,26 +558,26 @@ func TestPRWatchLandsDoneTaskWhenItsPRIsMerged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	foundLanded := false
+	foundMerged := false
 	for _, transition := range transitions {
-		if transition.From == string(store.StateDone) && transition.To == string(store.StateLanded) {
-			foundLanded = true
+		if transition.From == string(store.StateDone) && transition.To == string(store.StateMerged) {
+			foundMerged = true
 			break
 		}
 	}
-	if !foundLanded {
-		t.Fatalf("done Task did not transition through landed: %#v", transitions)
+	if !foundMerged {
+		t.Fatalf("done Task did not transition through merged: %#v", transitions)
 	}
 }
 
 func TestPRWatchPreservesMergedDoneTaskWithUnsafeWorktree(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		edit func(*testing.T, *prLandingFixture)
+		edit func(*testing.T, *prMergeFixture)
 	}{
 		{
 			name: "dirty worktree",
-			edit: func(t *testing.T, fixture *prLandingFixture) {
+			edit: func(t *testing.T, fixture *prMergeFixture) {
 				t.Helper()
 				if err := os.WriteFile(filepath.Join(fixture.worktree, "late-change.txt"), []byte("preserve me\n"), 0o600); err != nil {
 					t.Fatal(err)
@@ -586,7 +586,7 @@ func TestPRWatchPreservesMergedDoneTaskWithUnsafeWorktree(t *testing.T) {
 		},
 		{
 			name: "branch moved past merged head",
-			edit: func(t *testing.T, fixture *prLandingFixture) {
+			edit: func(t *testing.T, fixture *prMergeFixture) {
 				t.Helper()
 				if err := os.WriteFile(filepath.Join(fixture.worktree, "follow-up.txt"), []byte("unreviewed\n"), 0o600); err != nil {
 					t.Fatal(err)
@@ -597,17 +597,17 @@ func TestPRWatchPreservesMergedDoneTaskWithUnsafeWorktree(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := newPRLandingFixture(t, "pr", store.StateDone)
-			mount := attachPRFixtureMount(t, fixture)
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			sandbox := attachPRFixtureSandbox(t, fixture)
 			if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(`[defaults]
-landing_mode = "pr"
+merge_mode = "pr"
 merge_method = "squash"
-auto_unsaddle = "finished"
+auto_teardown = "finished"
 `), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
-			if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+			if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 				t.Fatal(err)
 			}
 			if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
@@ -632,38 +632,38 @@ auto_unsaddle = "finished"
 				t.Fatalf("merged Task was not torn down: %#v, %v", task, err)
 			}
 			if containsPane(adapter.currentSnapshot(), "w2:p1") {
-				t.Fatal("merged Rider pane remained open")
+				t.Fatal("merged Worker pane remained open")
 			}
-			if held, err := fixture.db.MountByTask(ctx, task.ID); err == nil {
-				t.Fatalf("Mount %d remained held: %#v", mount.ID, held)
+			if held, err := fixture.db.SandboxByTask(ctx, task.ID); err == nil {
+				t.Fatalf("Sandbox %d remained held: %#v", sandbox.ID, held)
 			}
-			leftover := "refs/heads/posse/t1-leftover"
+			orphan := "refs/heads/posse/t1-orphan"
 			if tc.name == "dirty worktree" {
-				if content := gitTest(t, fixture.repo, "show", leftover+":late-change.txt"); content != "preserve me\n" {
-					t.Fatalf("Leftover omitted untracked work: %q", content)
+				if content := gitTest(t, fixture.repo, "show", orphan+":late-change.txt"); content != "preserve me\n" {
+					t.Fatalf("Orphan omitted untracked work: %q", content)
 				}
-			} else if commit := gitTest(t, fixture.repo, "log", "-1", "--format=%s", leftover); !strings.Contains(commit, "unreviewed follow-up") {
-				t.Fatalf("Leftover omitted committed work: %q", commit)
+			} else if commit := gitTest(t, fixture.repo, "log", "-1", "--format=%s", orphan); !strings.Contains(commit, "unreviewed follow-up") {
+				t.Fatalf("Orphan omitted committed work: %q", commit)
 			}
 			decisions, err := fixture.db.Decisions(ctx, fixture.project.ID, true)
-			if err != nil || len(decisions) != 1 || decisions[0].Kind != "leftover" {
-				t.Fatalf("Leftover Decision: %#v %v", decisions, err)
+			if err != nil || len(decisions) != 1 || decisions[0].Kind != "orphan" {
+				t.Fatalf("Orphan Decision: %#v %v", decisions, err)
 			}
 		})
 	}
 }
 
-func TestPlainUnsaddleRefusesLandedPRWithLateWork(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, out, stderr := f.run("land", "t1"); code != 0 {
-		t.Fatalf("land: %d %s %s", code, out, stderr)
+func TestPlainTeardownRefusesMergedPRWithLateWork(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, out, stderr := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge: %d %s %s", code, out, stderr)
 	}
 	ctx := context.Background()
-	landed, err := f.db.Task(ctx, f.project.ID, "t1")
+	merged, err := f.db.Task(ctx, f.project.ID, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, landed.GatedSHA)
+	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, merged.GatedSHA)
 	cfg, err := config.Load(f.home, f.project.Name)
 	if err != nil {
 		t.Fatal(err)
@@ -675,7 +675,7 @@ func TestPlainUnsaddleRefusesLandedPRWithLateWork(t *testing.T) {
 	if err := os.WriteFile(work, []byte("keep\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, _ := f.run("unsaddle", "t1"); code == 0 {
+	if code, _, _ := f.run("teardown", "t1"); code == 0 {
 		t.Fatal("Teardown succeeded without verifying the pane closed")
 	}
 	if content, err := os.ReadFile(work); err != nil || string(content) != "keep\n" {
@@ -684,18 +684,18 @@ func TestPlainUnsaddleRefusesLandedPRWithLateWork(t *testing.T) {
 }
 
 func TestPRMergePreservesWorkWrittenDuringPaneShutdown(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
-	mount := attachPRFixtureMount(t, f)
-	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"finished\"\n"), 0o600); err != nil {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	sandbox := attachPRFixtureSandbox(t, f)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"finished\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
 	fake := f.service.Herdr.(*herdr.Fake)
-	worker := exec.Command("bash", "-c", "trap 'printf \"%s\\n\" \"preserve me\" > late-rider-work.txt; exit 0' TERM; while true; do read -t 0.1 || :; done")
+	worker := exec.Command("bash", "-c", "trap 'printf \"%s\\n\" \"preserve me\" > late-worker-work.txt; exit 0' TERM; while true; do read -t 0.1 || :; done")
 	worker.Dir = f.worktree
 	worker.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := worker.Start(); err != nil {
@@ -707,7 +707,7 @@ func TestPRMergePreservesWorkWrittenDuringPaneShutdown(t *testing.T) {
 	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		pids, err := mountProcessIDs(f.worktree)
+		pids, err := sandboxProcessIDs(f.worktree)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -715,7 +715,7 @@ func TestPRMergePreservesWorkWrittenDuringPaneShutdown(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("worker did not start in Mount")
+			t.Fatal("worker did not start in Sandbox")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -725,7 +725,7 @@ func TestPRMergePreservesWorkWrittenDuringPaneShutdown(t *testing.T) {
 	fake.SnapshotValue.Panes[0].Agent = ""
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":2147483647,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"claude","cwd":%q}]}}`, worker.Process.Pid, worker.Process.Pid, f.worktree))
-	work := filepath.Join(f.worktree, "late-rider-work.txt")
+	work := filepath.Join(f.worktree, "late-worker-work.txt")
 	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue, autoCloseWhenFile: work, autoClosePaneID: f.task.PaneID}
 	f.service.Herdr = adapter
 	if _, err := f.service.prepareProject(ctx, f.db, f.project); err != nil {
@@ -733,29 +733,29 @@ func TestPRMergePreservesWorkWrittenDuringPaneShutdown(t *testing.T) {
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
 	if err != nil || task.State != store.StateTornDown {
-		t.Fatalf("Task after late Rider write: %#v %v", task, err)
+		t.Fatalf("Task after late Worker write: %#v %v", task, err)
 	}
-	if content := gitTest(t, f.repo, "show", "refs/heads/posse/t1-leftover:late-rider-work.txt"); content != "preserve me\n" {
+	if content := gitTest(t, f.repo, "show", "refs/heads/posse/t1-orphan:late-worker-work.txt"); content != "preserve me\n" {
 		t.Fatalf("late work missing from snapshot: %q", content)
 	}
-	if held, err := f.db.MountByTask(ctx, task.ID); err == nil {
-		t.Fatalf("Mount %d was not released: %#v", mount.ID, held)
+	if held, err := f.db.SandboxByTask(ctx, task.ID); err == nil {
+		t.Fatalf("Sandbox %d was not released: %#v", sandbox.ID, held)
 	}
 	_ = work
 }
 
 func TestPRWatchDoesNotTeardownWorkingTaskWithMergedPR(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
-	mount := attachPRFixtureMount(t, fixture)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	sandbox := attachPRFixtureSandbox(t, fixture)
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(`[defaults]
-landing_mode = "pr"
+merge_mode = "pr"
 merge_method = "squash"
-auto_unsaddle = "finished"
+auto_teardown = "finished"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
@@ -767,26 +767,26 @@ auto_unsaddle = "finished"
 		t.Fatalf("reconcile working Task: %v", err)
 	}
 	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateLanded {
-		t.Fatalf("merged PR did not Land working Task: %#v, %v", task, err)
+	if err != nil || task.State != store.StateMerged {
+		t.Fatalf("merged PR did not Merge working Task: %#v, %v", task, err)
 	}
 	fake, ok := fixture.service.Herdr.(*herdr.Fake)
 	if !ok || !containsPane(fake.SnapshotValue, "w2:p1") {
 		t.Fatal("working Task Worker pane was closed")
 	}
-	preservedMount, err := fixture.db.MountByTask(ctx, task.ID)
-	if err != nil || preservedMount.ID != mount.ID || preservedMount.State != "held" {
-		t.Fatalf("working Task Mount was not preserved: %#v, %v", preservedMount, err)
+	preservedSandbox, err := fixture.db.SandboxByTask(ctx, task.ID)
+	if err != nil || preservedSandbox.ID != sandbox.ID || preservedSandbox.State != "held" {
+		t.Fatalf("working Task Sandbox was not preserved: %#v, %v", preservedSandbox, err)
 	}
 }
 
 func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name, state, source, branch, base, head string
-		verified, land                          bool
+		verified, merge                         bool
 	}{
-		{name: "verified working", state: "MERGED", verified: true, land: true},
-		{name: "verified needs decision", state: "MERGED", verified: true, land: true},
+		{name: "verified working", state: "MERGED", verified: true, merge: true},
+		{name: "verified needs decision", state: "MERGED", verified: true, merge: true},
 		{name: "open PR", state: "OPEN", verified: true},
 		{name: "unverified head", state: "MERGED"},
 		{name: "different head", state: "MERGED", verified: true, head: strings.Repeat("f", 40)},
@@ -796,10 +796,10 @@ func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 		{name: "wrong recorded URL", state: "MERGED", verified: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+			fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 			ctx := context.Background()
 			url := "https://github.com/acme/shop/pull/17"
-			if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, url, ""); err != nil {
+			if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, url, ""); err != nil {
 				t.Fatal(err)
 			}
 			if tc.name == "verified needs decision" {
@@ -847,20 +847,20 @@ func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 			if tc.name == "verified needs decision" {
 				want = store.StateNeedsDecision
 			}
-			if tc.land || tc.name == "unverified head" || tc.name == "wrong recorded URL" {
-				// The observed head is on the Mount's Task branch, even if no
+			if tc.merge || tc.name == "unverified head" || tc.name == "wrong recorded URL" {
+				// The observed head is on the Sandbox's Task branch, even if no
 				// publish record was retained.
-				want = store.StateLanded
+				want = store.StateMerged
 			}
-			if task.State != want || (want != store.StateLanded && task.LandedRef != "") {
-				t.Fatalf("state=%s ref=%s, want=%s", task.State, task.LandedRef, want)
+			if task.State != want || (want != store.StateMerged && task.MergedRef != "") {
+				t.Fatalf("state=%s ref=%s, want=%s", task.State, task.MergedRef, want)
 			}
 			notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
 			if err != nil {
 				t.Fatal(err)
 			}
 			wantNotices := 0
-			if want == store.StateLanded {
+			if want == store.StateMerged {
 				wantNotices = 1
 			}
 			if got := countNoticeKind(notices, "pr_merged"); got != wantNotices {
@@ -873,21 +873,21 @@ func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 func TestPRObservationRejectsStaleTaskIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		change func(*testing.T, *prLandingFixture)
+		change func(*testing.T, *prMergeFixture)
 	}{
-		{"new PR", func(t *testing.T, f *prLandingFixture) {
+		{"new PR", func(t *testing.T, f *prMergeFixture) {
 			t.Helper()
-			if err := f.db.UpdateTaskLanding(context.Background(), f.task.ID, "https://github.com/acme/shop/pull/18", ""); err != nil {
+			if err := f.db.UpdateTaskMerge(context.Background(), f.task.ID, "https://github.com/acme/shop/pull/18", ""); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"new head", func(t *testing.T, f *prLandingFixture) {
+		{"new head", func(t *testing.T, f *prMergeFixture) {
 			t.Helper()
 			if err := f.db.SetTaskGatedSHA(context.Background(), f.task.ID, strings.Repeat("f", 40)); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"new state", func(t *testing.T, f *prLandingFixture) {
+		{"new state", func(t *testing.T, f *prMergeFixture) {
 			t.Helper()
 			if err := f.db.Transition(context.Background(), f.task.ID, store.StateDone, store.StateWorking, "lead", "follow-up"); err != nil {
 				t.Fatal(err)
@@ -895,9 +895,9 @@ func TestPRObservationRejectsStaleTaskIdentity(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newPRLandingFixture(t, "pr", store.StateDone)
+			f := newPRMergeFixture(t, "pr", store.StateDone)
 			ctx := context.Background()
-			if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+			if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 				t.Fatal(err)
 			}
 			if err := f.db.SetTaskGatedSHA(ctx, f.task.ID, f.headSHA); err != nil {
@@ -917,27 +917,27 @@ func TestPRObservationRejectsStaleTaskIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.State == store.StateLanded {
-				t.Fatalf("stale observation landed Task: %#v", current)
+			if current.State == store.StateMerged {
+				t.Fatalf("stale observation merged Task: %#v", current)
 			}
 		})
 	}
 }
 
-func attachPRFixtureMount(t *testing.T, fixture *prLandingFixture) store.Mount {
+func attachPRFixtureSandbox(t *testing.T, fixture *prMergeFixture) store.Sandbox {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state) VALUES(?,1,?,'idle')`, fixture.project.ID, fixture.worktree); err != nil {
 		t.Fatal(err)
 	}
-	mount, err := fixture.db.AcquireMount(ctx, fixture.project.ID, fixture.task.ID, filepath.Join(fixture.root, "remuda"))
+	sandbox, err := fixture.db.AcquireSandbox(ctx, fixture.project.ID, fixture.task.ID, filepath.Join(fixture.root, "pool"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mount.Path != fixture.worktree || mount.State != "held" || mount.TaskID != fixture.task.ID {
-		t.Fatalf("fixture Mount is not attached to the Task worktree: %#v", mount)
+	if sandbox.Path != fixture.worktree || sandbox.State != "held" || sandbox.TaskID != fixture.task.ID {
+		t.Fatalf("fixture Sandbox is not attached to the Task worktree: %#v", sandbox)
 	}
-	return mount
+	return sandbox
 }
 
 func containsPane(snapshot herdr.Snapshot, paneID string) bool {
@@ -950,8 +950,8 @@ func containsPane(snapshot herdr.Snapshot, paneID string) bool {
 }
 
 func TestPRWatchRetainsMergeabilityWhenGitHubReportsUnknown(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
@@ -971,14 +971,14 @@ func TestPRWatchRetainsMergeabilityWhenGitHubReportsUnknown(t *testing.T) {
 	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
 	poll()
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
+	if err != nil || countNoticeKind(notices, "merge_ready") != 1 {
 		t.Fatalf("UNKNOWN mergeability re-emitted readiness Notice: notices=%#v err=%v", notices, err)
 	}
 }
 
 func TestPRWatchClosedPRRaisesDecisionOnce(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
@@ -990,7 +990,7 @@ func TestPRWatchClosedPRRaisesDecisionOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateLanding {
+	if err != nil || task.State != store.StateMerging {
 		t.Fatalf("closed PR moved Task unexpectedly: %#v, %v", task, err)
 	}
 	before, err := os.ReadFile(fixture.ghLog)
@@ -1015,12 +1015,12 @@ func TestPRWatchClosedPRRaisesDecisionOnce(t *testing.T) {
 }
 
 func TestPRMergeAutoTeardownRetriesAfterHerdrReturns(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	configText := "[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"landed\"\n"
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	configText := "[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"merged\"\n"
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
@@ -1037,7 +1037,7 @@ func TestPRMergeAutoTeardownRetriesAfterHerdrReturns(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateLanded {
+	if err != nil || task.State != store.StateMerged {
 		t.Fatalf("PR merge was not recorded while Herdr was unavailable: %#v, %v", task, err)
 	}
 	snapshot := availableHerdr.SnapshotValue
@@ -1050,7 +1050,7 @@ func TestPRMergeAutoTeardownRetriesAfterHerdrReturns(t *testing.T) {
 	}
 	task, err = fixture.db.Task(context.Background(), fixture.project.ID, "t1")
 	if err != nil || task.State != store.StateTornDown {
-		t.Fatalf("landed Task did not auto-teardown on the next healthy reconcile: %#v, %v", task, err)
+		t.Fatalf("merged Task did not auto-teardown on the next healthy reconcile: %#v, %v", task, err)
 	}
 }
 
@@ -1063,18 +1063,18 @@ func TestPRWatchAttributesPartialGraphQLErrorsAndKeepsGlobalFailures(t *testing.
 		{name: "unattributed error", alias: "unknown", global: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newPRLandingFixture(t, "pr", store.StateDone)
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
 			defer fixture.db.Close()
-			if code, out, stderr := fixture.run("land", "t1"); code != 0 {
+			if code, out, stderr := fixture.run("merge", "t1"); code != 0 {
 				t.Fatalf("open PR: %d %s %s", code, out, stderr)
 			}
 			ctx := context.Background()
-			badID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "ship", Title: "old PR", State: store.StateSpawning, LandingMode: "pr", Branch: "posse/old", BaseRef: "main"})
+			badID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "old PR", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/old", BaseRef: "main"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, step := range []struct{ from, to store.State }{
-				{store.StateSpawning, store.StateWorking}, {store.StateWorking, store.StateDone}, {store.StateDone, store.StateLanding},
+				{store.StateSpawning, store.StateWorking}, {store.StateWorking, store.StateDone}, {store.StateDone, store.StateMerging},
 			} {
 				source := "cli"
 				if step.to == store.StateDone {
@@ -1151,8 +1151,8 @@ func TestPRWatchAttributesPartialGraphQLErrorsAndKeepsGlobalFailures(t *testing.
 }
 
 func TestPRWatchFailureNoticeRequiresThreeConsecutiveFailures(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
@@ -1176,8 +1176,8 @@ func TestPRWatchFailureNoticeRequiresThreeConsecutiveFailures(t *testing.T) {
 }
 
 func TestPRStateAppearsInShowAndProjectHome(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
@@ -1199,12 +1199,12 @@ func TestPRStateAppearsInShowAndProjectHome(t *testing.T) {
 }
 
 func TestPRWatchReconcilesOnlyAfterConfiguredInterval(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	configText := "[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"never\"\npr_poll = \"1h\"\n"
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	configText := "[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\npr_poll = \"1h\"\n"
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
@@ -1219,7 +1219,7 @@ func TestPRWatchReconcilesOnlyAfterConfiguredInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := fixture.service.maintainProjectWatch(context.Background(), fixture.db, fixture.project); err != nil {
-		t.Fatalf("Lookout poll after the configured interval: %v", err)
+		t.Fatalf("Watch poll after the configured interval: %v", err)
 	}
 	log, err = os.ReadFile(fixture.ghLog)
 	observation, observationErr := fixture.db.LatestPRObservation(context.Background(), fixture.task.ID)
@@ -1228,13 +1228,13 @@ func TestPRWatchReconcilesOnlyAfterConfiguredInterval(t *testing.T) {
 	}
 }
 
-func TestLookoutPollsPRsAtConfiguredInterval(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	configText := "[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"never\"\npr_poll = \"20ms\"\n"
+func TestWatchPollsPRsAtConfiguredInterval(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	configText := "[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\npr_poll = \"20ms\"\n"
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	if _, err := fixture.db.AckNotices(context.Background(), fixture.project.ID, []string{"all"}); err != nil {
@@ -1254,23 +1254,23 @@ func TestLookoutPollsPRsAtConfiguredInterval(t *testing.T) {
 	cli.Out = &fixture.output
 	cli.ErrOut = &fixture.errOut
 	done := make(chan int, 1)
-	go func() { done <- cli.Run([]string{"lookout", "--timeout", "3000"}) }()
+	go func() { done <- cli.Run([]string{"watch", "--timeout", "3000"}) }()
 
 	if !waitForPRCondition(done, func() bool {
 		log, err := os.ReadFile(fixture.ghLog)
 		return err == nil && strings.Count(string(log), "api graphql") >= 1 && fake.CallCount("session.snapshot") > herdrCallsBefore
 	}) {
-		t.Fatal("lookout returned before polling the watched PR")
+		t.Fatal("watch returned before polling the watched PR")
 	}
 	if !waitForPRCondition(done, func() bool {
 		log, err := os.ReadFile(fixture.ghLog)
 		return err == nil && strings.Count(string(log), "api graphql") >= 2
 	}) {
-		t.Fatal("lookout did not poll again at the configured PR interval")
+		t.Fatal("watch did not poll again at the configured PR interval")
 	}
 	herdrCallsAfterInitialReconcile := fake.CallCount("session.snapshot")
 	if code := <-done; code != 0 || !strings.Contains(fixture.output.String(), "timeout") {
-		t.Fatalf("lookout did not finish its bounded wait: exit=%d output=%s error=%s", code, fixture.output.String(), fixture.errOut.String())
+		t.Fatalf("watch did not finish its bounded wait: exit=%d output=%s error=%s", code, fixture.output.String(), fixture.errOut.String())
 	}
 	if got := fake.CallCount("session.snapshot"); got != herdrCallsAfterInitialReconcile || herdrCallsAfterInitialReconcile <= herdrCallsBefore {
 		t.Fatalf("short PR cadence also repeated Herdr reconciliation: snapshots=%d after initial reconcile=%d before=%d", got, herdrCallsAfterInitialReconcile, herdrCallsBefore)
@@ -1302,7 +1302,7 @@ func countNoticeKind(notices []store.Notice, kind string) int {
 	return count
 }
 
-func updateBareMain(t *testing.T, fixture *prLandingFixture, filename, contents string) string {
+func updateBareMain(t *testing.T, fixture *prMergeFixture, filename, contents string) string {
 	t.Helper()
 	checkout := filepath.Join(fixture.root, "upstream-change")
 	gitTest(t, fixture.root, "clone", "--branch", "main", fixture.remote, checkout)
@@ -1318,7 +1318,7 @@ func updateBareMain(t *testing.T, fixture *prLandingFixture, filename, contents 
 }
 
 func TestProjectSyncFastForwardsCleanDefaultBranch(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	upstream := updateBareMain(t, fixture, "upstream.txt", "origin update\n")
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
 	if err != nil {
@@ -1334,7 +1334,7 @@ func TestProjectSyncFastForwardsCleanDefaultBranch(t *testing.T) {
 }
 
 func TestProjectSyncUpdatesDefaultBranchWhenItIsNotCheckedOut(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	gitTest(t, fixture.repo, "checkout", "-b", "lead-work")
 	dirty := filepath.Join(fixture.repo, "dirty-lead-file.txt")
 	if err := os.WriteFile(dirty, []byte("preserve this dirty file\n"), 0o600); err != nil {
@@ -1355,7 +1355,7 @@ func TestProjectSyncUpdatesDefaultBranchWhenItIsNotCheckedOut(t *testing.T) {
 }
 
 func TestProjectSyncRefusesWhenDefaultBranchIsCheckedOutElsewhere(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	gitTest(t, fixture.repo, "checkout", "-b", "lead-work")
 	otherWorktree := filepath.Join(fixture.root, "main-checkout")
 	gitTest(t, fixture.repo, "worktree", "add", otherWorktree, "main")
@@ -1378,7 +1378,7 @@ func TestProjectSyncRefusesWhenDefaultBranchIsCheckedOutElsewhere(t *testing.T) 
 }
 
 func TestProjectSyncFastForwardsWithUnrelatedUntrackedFiles(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	localPath := filepath.Join(fixture.repo, "AGENTS.md")
 	localContents := []byte("preserve this untracked file\n")
 	if err := os.WriteFile(localPath, localContents, 0o600); err != nil {
@@ -1398,7 +1398,7 @@ func TestProjectSyncFastForwardsWithUnrelatedUntrackedFiles(t *testing.T) {
 }
 
 func TestProjectSyncWithUntrackedFilesReportsCurrentWhenAlreadyUpToDate(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	localPath := filepath.Join(fixture.repo, "AGENTS.md")
 	localContents := []byte("preserve this untracked file\n")
 	if err := os.WriteFile(localPath, localContents, 0o600); err != nil {
@@ -1418,7 +1418,7 @@ func TestProjectSyncWithUntrackedFilesReportsCurrentWhenAlreadyUpToDate(t *testi
 }
 
 func TestProjectSyncWatcherFastForwardsWithUnrelatedUntrackedFiles(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	localPath := filepath.Join(fixture.repo, "AGENTS.md")
 	localContents := []byte("preserve this untracked file\n")
 	if err := os.WriteFile(localPath, localContents, 0o600); err != nil {
@@ -1439,7 +1439,7 @@ func TestProjectSyncWatcherFastForwardsWithUnrelatedUntrackedFiles(t *testing.T)
 }
 
 func TestProjectSyncLeavesDirtyRootBytesUntouchedAndDeduplicatesNotice(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	tracked := filepath.Join(fixture.repo, "README.md")
 	if err := os.WriteFile(tracked, []byte("local dirty edit\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1483,7 +1483,7 @@ func TestProjectSyncLeavesDirtyRootBytesUntouchedAndDeduplicatesNotice(t *testin
 }
 
 func TestProjectSyncRefusesToOverwriteUntrackedLocalPath(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	localPath := filepath.Join(fixture.repo, "AGENTS.md")
 	localContents := []byte("preserve user content\n")
 	if err := os.WriteFile(localPath, localContents, 0o600); err != nil {
@@ -1512,7 +1512,7 @@ func TestProjectSyncRefusesToOverwriteUntrackedLocalPath(t *testing.T) {
 }
 
 func TestProjectSyncRefusesToOverwriteIgnoredLocalPath(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	exclude := filepath.Join(fixture.repo, ".git", "info", "exclude")
 	if err := os.WriteFile(exclude, []byte("/generated.cache\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1578,7 +1578,7 @@ func snapshotProjectFiles(t *testing.T, root string) map[string][]byte {
 }
 
 func TestProjectSyncLeavesLocalCommitsAheadOfOriginUntouched(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	if err := os.WriteFile(filepath.Join(fixture.repo, "local-only.txt"), []byte("keep local commit\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1601,9 +1601,9 @@ func TestProjectSyncLeavesLocalCommitsAheadOfOriginUntouched(t *testing.T) {
 }
 
 func TestPRWatchMissingGraphQLRepositoryDataEscalatesAtProjectScope(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()
-	if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	if err := os.WriteFile(fixture.ghState, []byte("{\"data\":{}}\n"), 0o600); err != nil {

@@ -56,22 +56,22 @@ func TestClassifyModelErrorAtTurnEnd(t *testing.T) {
 		{
 			name:   "ordinary tool output quoting stream failure",
 			agent:  "pi",
-			output: "$ grep stream-error rider.log\n2026-10-06 log entry: Error: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine,
+			output: "$ grep stream-error worker.log\n2026-10-06 log entry: Error: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine,
 		},
 		{
 			name:   "successful shell result copying complete Pi error block",
 			agent:  "pi",
-			output: "────────────────\n$ grep -A1 'stream error' rider.log\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine + "\n────────────────",
+			output: "────────────────\n$ grep -A1 'stream error' worker.log\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine + "\n────────────────",
 		},
 		{
 			name:   "tool result copying complete Pi error block",
 			agent:  "pi",
-			output: "────────────────\nRead rider.log\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine + "\n────────────────",
+			output: "────────────────\nRead worker.log\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine + "\n────────────────",
 		},
 		{
 			name:   "Pi failure after a completed tool result",
 			agent:  "pi",
-			output: "────────────────\n$ grep stream-error rider.log\nno match\n────────────────\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine,
+			output: "────────────────\n$ grep stream-error worker.log\nno match\n────────────────\nError: stream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine,
 			want:   "model_stream_error",
 		},
 		{
@@ -82,7 +82,7 @@ func TestClassifyModelErrorAtTurnEnd(t *testing.T) {
 
 ────────────────────────────────────────────────
 ────────────────────────────────────────────────
-~/.posse/remuda/posse/mount-17 (posse/accept-findings-report)
+~/.posse/pool/posse/sandbox-17 (posse/accept-findings-report)
 ↑445k ↓86k R18M $0.263 21.2%/272k (auto)                       (openai) gpt-6-luna • xhigh`,
 			want: "model_stream_error",
 		},
@@ -111,7 +111,7 @@ func TestClassifyModelErrorAtTurnEnd(t *testing.T) {
 		{
 			name:  "issue 228 unprefixed stream error after edit tool line",
 			agent: "pi",
-			output: ` edit ~/.../busy_rider_steer_interrupt_test.go
+			output: ` edit ~/.../busy_worker_steer_interrupt_test.go
 
 
  stream error: stream disconnected before completion: stream closed before response.completed
@@ -126,7 +126,7 @@ func TestClassifyModelErrorAtTurnEnd(t *testing.T) {
 		{
 			name:   "unprefixed stream error inside tool output is ignored",
 			agent:  "pi",
-			output: "─────\nedit ~/.../busy_rider_steer_interrupt_test.go\nstream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine + "\n─────",
+			output: "─────\nedit ~/.../busy_worker_steer_interrupt_test.go\nstream error: stream disconnected before completion: stream closed before response.completed\n" + piErrorHelpLine + "\n─────",
 		},
 		{
 			name:   "quoted refusal is not a harness error result",

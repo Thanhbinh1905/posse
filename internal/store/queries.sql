@@ -47,20 +47,20 @@ DELETE FROM resource_leases WHERE id = ? AND custody_token = ?;
 -- name: DeleteResourceLeasesByIntent :exec
 DELETE FROM resource_leases WHERE intent_id = ?;
 
--- name: DeleteResourceLeaseByMount :exec
+-- name: DeleteResourceLeaseBySandbox :exec
 DELETE FROM resource_leases WHERE mount_id = ?;
 
 -- name: MarkResourceLeaseForRecovery :execresult
 UPDATE resource_leases SET custody = 'recovery' WHERE id = ? AND custody_token = ? AND custody = 'held';
 
--- name: MountResourceOwners :many
+-- name: SandboxResourceOwners :many
 SELECT m.id, m.project_id, p.name, m.n, m.path, m.state,
        COALESCE(m.task_id, 0), COALESCE(t.seq, 0)
 FROM mounts m JOIN projects p ON p.id = m.project_id
 LEFT JOIN tasks t ON t.id = m.task_id
 WHERE m.state != 'idle' ORDER BY m.project_id, m.n;
 
--- name: ResourceMountLeases :many
+-- name: ResourceSandboxLeases :many
 SELECT id, mount_id FROM resource_leases WHERE mount_id IS NOT NULL ORDER BY id;
 
 -- name: PRBodyMarkerByTaskRepo :one
@@ -149,35 +149,35 @@ WHERE project_id = ? AND state IN ('spawning', 'working', 'needs-decision', 'blo
 -- name: AllocateTaskSequence :one
 SELECT COALESCE(MAX(seq), 0) + 1 FROM tasks WHERE project_id = ?;
 
--- name: AcquireIdleMount :execresult
+-- name: AcquireIdleSandbox :execresult
 UPDATE mounts SET state = 'held', task_id = ?, acquired_at = ?, released_at = 0
 WHERE mounts.id = (
   SELECT candidate.id FROM mounts candidate WHERE candidate.project_id = ? AND candidate.state = 'idle' ORDER BY candidate.n LIMIT 1
 ) AND mounts.state = 'idle';
 
--- name: NextMountNumber :one
+-- name: NextSandboxNumber :one
 SELECT COALESCE(MAX(n), 0) + 1 FROM mounts WHERE project_id = ?;
 
--- name: InsertMount :execresult
+-- name: InsertSandbox :execresult
 INSERT INTO mounts(project_id, n, path, state, task_id, acquired_at, released_at)
 VALUES (?, ?, ?, ?, ?, ?, 0);
 
--- name: MountByTask :one
+-- name: SandboxByTask :one
 SELECT * FROM mounts WHERE task_id = ?;
 
--- name: Mounts :many
+-- name: Sandboxes :many
 SELECT * FROM mounts WHERE project_id = ? ORDER BY n;
 
--- name: ReleaseMount :exec
+-- name: ReleaseSandbox :exec
 UPDATE mounts SET state = 'idle', task_id = NULL, released_at = ? WHERE id = ? AND task_id = ? AND state = 'held';
 
--- name: BreakMount :exec
+-- name: BreakSandbox :exec
 UPDATE mounts SET state = 'broken', task_id = NULL, released_at = ? WHERE id = ?;
 
--- name: DeleteMount :execresult
+-- name: DeleteSandbox :execresult
 DELETE FROM mounts WHERE id = ? AND project_id = ? AND state IN ('idle', 'broken');
 
--- name: UpdateTaskMount :exec
+-- name: UpdateTaskSandbox :exec
 UPDATE tasks SET mount_id = ?, worktree_path = ?, updated_at = ? WHERE id = ?;
 
 -- name: UpdateTaskWorkspace :exec
@@ -198,7 +198,7 @@ UPDATE tasks SET gated_sha = ?, updated_at = ? WHERE id = ? AND state = 'done';
 -- name: ClearTaskGatedSHA :exec
 UPDATE tasks SET gated_sha = '', updated_at = ? WHERE id = ? AND state = 'done';
 
--- name: ClearGatedSHALandingToDone :exec
+-- name: ClearGatedSHAMergeToDone :exec
 UPDATE tasks SET gated_sha = '' WHERE id = ? AND state = 'done';
 
 -- name: TaskGatedSHA :one
@@ -212,7 +212,7 @@ ON CONFLICT(project_id) DO UPDATE SET notified_at = 0;
 UPDATE tasks SET worktree_path = ?, herdr_workspace_id = ?, pane_id = ?, pane_label = ?,
     agent_name = ?, updated_at = ? WHERE id = ?;
 
--- name: UpdateTaskLanding :exec
+-- name: UpdateTaskMerge :exec
 UPDATE tasks SET pr_url = ?, landed_ref = ?, updated_at = ? WHERE id = ?;
 
 -- name: SetTaskPRTitle :execresult
@@ -321,14 +321,14 @@ WHERE worktree_path = ? AND state != 'torn-down' ORDER BY id DESC LIMIT 1;
 
 -- name: Tasks :many
 SELECT * FROM tasks
-WHERE project_id = ? AND state NOT IN ('landed', 'reported', 'torn-down') ORDER BY seq;
+WHERE project_id = ? AND state NOT IN ('merged', 'reported', 'torn-down') ORDER BY seq;
 
 -- name: AllTasks :many
 SELECT * FROM tasks WHERE project_id = ? ORDER BY seq;
 
 -- name: LiveTasks :many
 SELECT * FROM tasks
-WHERE project_id = ? AND state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled', 'done', 'landing') ORDER BY seq;
+WHERE project_id = ? AND state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled', 'done', 'merging') ORDER BY seq;
 
 -- name: StallTasks :many
 SELECT * FROM tasks

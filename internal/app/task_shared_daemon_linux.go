@@ -62,7 +62,7 @@ func detachedSharedTaskProcessPIDs(task store.Task) ([]int, error) {
 	}
 
 	// Preserve descendants of a detached shared daemon as a group. Their
-	// parent may be a daemon process rather than a Rider process.
+	// parent may be a daemon process rather than a Worker process.
 	changed := true
 	for changed {
 		changed = false
@@ -70,7 +70,7 @@ func detachedSharedTaskProcessPIDs(task store.Task) ([]int, error) {
 			if preserved[pid] {
 				continue
 			}
-			parent, err := mountProcessParentID(pid)
+			parent, err := sandboxProcessParentID(pid)
 			if processGone(err) {
 				continue
 			}
@@ -95,7 +95,7 @@ func processHasTaskAncestor(pid int, task store.Task) (bool, error) {
 	current := pid
 	seen := map[int]bool{pid: true}
 	for range 1024 {
-		parent, err := mountProcessParentID(current)
+		parent, err := sandboxProcessParentID(current)
 		if processGone(err) {
 			return false, nil
 		}

@@ -103,7 +103,7 @@ func setupTaskProcessContainment(ctx context.Context, service *Service, _ store.
 	}
 	pids, err := cgroupProcesses(task.ContainmentPath)
 	if err != nil {
-		return "", fmt.Errorf("inspect Task cgroup before attaching Rider shell: %w", err)
+		return "", fmt.Errorf("inspect Task cgroup before attaching Worker shell: %w", err)
 	}
 	for _, pid := range pids {
 		if !taskCgroupMemberBelongsToTask(pid, pane.ShellPID, task.ContainmentPath) {
@@ -125,7 +125,7 @@ func setupTaskProcessContainment(ctx context.Context, service *Service, _ store.
 		}
 	}
 	if !processInCgroup(pane.ShellPID, task.ContainmentPath) {
-		return "", fmt.Errorf("rider shell %d did not enter its Task cgroup", pane.ShellPID)
+		return "", fmt.Errorf("worker shell %d did not enter its Task cgroup", pane.ShellPID)
 	}
 	return "cgroup", nil
 }
@@ -163,7 +163,7 @@ func fallbackToMarkerIfUnmoved(pid int, cgroupPath string, err error) (string, e
 		_ = os.Remove(cgroupPath)
 		return "marker", nil
 	}
-	return "", fmt.Errorf("attach Rider shell to Task cgroup: %w", err)
+	return "", fmt.Errorf("attach Worker shell to Task cgroup: %w", err)
 }
 
 func validateTaskCgroupPath(path string, task store.Task) error {
@@ -291,7 +291,7 @@ func stopTaskCgroup(ctx context.Context, task store.Task) error {
 	}
 	if len(preserved) > 0 {
 		processes := processDetails(preserved)
-		return fmt.Errorf("preserving detached shared daemon processes outside the Rider's parent chain: %s", describeSharedTaskProcesses(processes))
+		return fmt.Errorf("preserving detached shared daemon processes outside the Worker's parent chain: %s", describeSharedTaskProcesses(processes))
 	}
 	return nil
 }
@@ -309,7 +309,7 @@ func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard tas
 	} else if err != nil {
 		return err
 	}
-	handles := map[int]*mountProcessHandle{}
+	handles := map[int]*sandboxProcessHandle{}
 	terminated := map[int]bool{}
 	defer func() {
 		for _, handle := range handles {
@@ -347,7 +347,7 @@ func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard tas
 				delete(handles, pid)
 				delete(terminated, pid)
 			}
-			handle, err := openMountProcessHandle(pid)
+			handle, err := openSandboxProcessHandle(pid)
 			if err != nil {
 				if !processInCgroup(pid, task.ContainmentPath) {
 					continue

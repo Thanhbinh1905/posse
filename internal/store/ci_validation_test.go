@@ -9,13 +9,13 @@ import (
 
 func TestQueueCIFixInstructionEnforcesBudgetAtomically(t *testing.T) {
 	fixture := newReviewVerdictFixture(t, nil)
-	if err := fixture.db.Transition(fixture.ctx, fixture.ship, StateSpawning, StateWorking, "cli", "started"); err != nil {
+	if err := fixture.db.Transition(fixture.ctx, fixture.change, StateSpawning, StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.Transition(fixture.ctx, fixture.ship, StateWorking, StateDone, "worker", "completed"); err != nil {
+	if err := fixture.db.Transition(fixture.ctx, fixture.change, StateWorking, StateDone, "worker", "completed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.db.ExecContext(fixture.ctx, `UPDATE tasks SET landing_mode='pr',gated_sha=?,pr_url='https://github.com/acme/shop/pull/1' WHERE id=?`, reviewShaA, fixture.ship); err != nil {
+	if _, err := fixture.db.ExecContext(fixture.ctx, `UPDATE tasks SET landing_mode='pr',gated_sha=?,pr_url='https://github.com/acme/shop/pull/1' WHERE id=?`, reviewShaA, fixture.change); err != nil {
 		t.Fatal(err)
 	}
 
@@ -28,7 +28,7 @@ func TestQueueCIFixInstructionEnforcesBudgetAtomically(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := fixture.db.QueueCIFixInstruction(context.Background(), fixture.ship, reviewShaA, "https://github.com/acme/shop/pull/1", "ci:"+check, "Fix "+check, "", 1)
+			_, err := fixture.db.QueueCIFixInstruction(context.Background(), fixture.change, reviewShaA, "https://github.com/acme/shop/pull/1", "ci:"+check, "Fix "+check, "", 1)
 			errs <- err
 		}()
 	}
@@ -51,10 +51,10 @@ func TestQueueCIFixInstructionEnforcesBudgetAtomically(t *testing.T) {
 		t.Fatalf("queued=%d exhausted=%d, want one each", queued, exhausted)
 	}
 	var rounds, messages int
-	if err := fixture.db.QueryRowContext(fixture.ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.ship).Scan(&rounds); err != nil {
+	if err := fixture.db.QueryRowContext(fixture.ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.change).Scan(&rounds); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.QueryRowContext(fixture.ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.ship).Scan(&messages); err != nil {
+	if err := fixture.db.QueryRowContext(fixture.ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.change).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
 	if rounds != 1 || messages != 1 {

@@ -30,7 +30,7 @@ func projectReadiness(cfg config.Config, checks []doctorCheck) []readinessGap {
 	gaps := []readinessGap{}
 	for _, code := range []string{"forge_auth", "gate_empty", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"} {
 		if code == "autonomy_ask" {
-			if cfg.Defaults.LandingMode == "" {
+			if cfg.Defaults.MergeMode == "" {
 				continue // Machine-only diagnostics have no Project authority.
 			}
 			var actions []string
@@ -39,9 +39,9 @@ func projectReadiness(cfg config.Config, checks []doctorCheck) []readinessGap {
 				actions = append(actions, "decide review findings")
 				keys = append(keys, "autonomy.review")
 			}
-			if cfg.Autonomy.Land == "" || cfg.Autonomy.Land == "ask" {
-				actions = append(actions, "Land (merge)")
-				keys = append(keys, "autonomy.land")
+			if cfg.Autonomy.Merge == "" || cfg.Autonomy.Merge == "ask" {
+				actions = append(actions, "Merge (merge)")
+				keys = append(keys, "autonomy.merge")
 			}
 			if len(actions) > 0 {
 				gaps = append(gaps, readinessGap{Code: code, Consequence: "The Lead must ask before it may " + strings.Join(actions, " or ") + ".", Key: strings.Join(keys, ", "), UserOnly: true, Fix: "Keep ask unless this request needs more authority. Record one-off approvals separately; change standing Autonomy only with the User's explicit grant.", Informational: true})
@@ -95,7 +95,7 @@ func (s *Service) projectReadinessChecks(ctx context.Context, db *store.DB, proj
 	return repositoryReadinessChecks(ctx, cfg, targets), nil
 }
 
-// These checks use the same effective Member policies as Landing, never a
+// These checks use the same effective Member policies as Merge, never a
 // guessed test command or a repository script. Auth/status probes are read-only.
 type forgeReadinessResult struct {
 	Forge repositoryForge
@@ -229,9 +229,9 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 			remote = originHost(ctx, target.Root)
 		}
 		target.OriginHost = remote
-		modes[index] = cfg.Defaults.LandingMode
+		modes[index] = cfg.Defaults.MergeMode
 		if target.Name != "" {
-			modes[index] = savedMemberLandingMode(cfg, target.Name, remote)
+			modes[index] = savedMemberMergeMode(cfg, target.Name, remote)
 		}
 		if modes[index] != "pr" {
 			continue
@@ -263,7 +263,7 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 		gateCheck := doctorCheck{Name: "Gate" + suffix, Status: "ok", Detail: "Gate configured", GapCode: "gate_empty", Key: gateKey, Member: target.Name, UserOnly: true}
 		if len(gate) == 0 {
 			gateCheck.Status = "info"
-			gateCheck.Detail = "No Project Gate commands run before Landing" + suffix + "."
+			gateCheck.Detail = "No Project Gate commands run before Merge" + suffix + "."
 			gateCheck.Action = "Propose Gate commands found in the repository; save them only after an explicit yes with --user-approved, or continue without a Gate if the User declines."
 		}
 		checks = append(checks, gateCheck)
@@ -299,7 +299,7 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 			checks = append(checks, auth)
 		}
 		if mode == "no-mistakes" {
-			check := doctorCheck{Name: "no-mistakes" + suffix, Status: "ok", Detail: "initialized", GapCode: "no_mistakes_uninitialized", Key: "defaults.landing_mode", Member: target.Name}
+			check := doctorCheck{Name: "no-mistakes" + suffix, Status: "ok", Detail: "initialized", GapCode: "no_mistakes_uninitialized", Key: "defaults.merge_mode", Member: target.Name}
 			if err := ensureNoMistakesInitialized(ctx, target.Root); err != nil {
 				check.Status = "warn"
 				check.Detail = "The no-mistakes pipeline cannot run" + suffix + ": " + err.Error()
@@ -356,7 +356,7 @@ func (s *Service) machineSetupCheck(ctx context.Context) []doctorCheck {
 	}
 	if err := inspect(); err != nil {
 		check.Status = "warn"
-		check.Detail = "Rider guards or Notice delivery may be missing: " + err.Error() + "."
+		check.Detail = "Worker guards or Notice delivery may be missing: " + err.Error() + "."
 	}
 	return []doctorCheck{check}
 }

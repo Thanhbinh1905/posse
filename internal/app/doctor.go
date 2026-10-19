@@ -80,7 +80,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		if configErr == nil {
 			retention = "retention.task_artifacts=" + cfg.Retention.TaskArtifacts
 		}
-		addCheck("Posse-owned disk usage", "ok", fmt.Sprintf("%d bytes under %s (scratch, Remuda, Project data and state); %s", ownedBytes, home, retention), "")
+		addCheck("Posse-owned disk usage", "ok", fmt.Sprintf("%d bytes under %s (scratch, Pool, Project data and state); %s", ownedBytes, home, retention), "")
 	}
 	cacheStatus, cacheDetail, cacheAction := sharedGoCacheDiagnostic(ctx.Context)
 	addCheck("Shared Go build cache", cacheStatus, cacheDetail, cacheAction)
@@ -114,9 +114,9 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 				if project.IsDown() {
 					continue
 				}
-				check, checkErr := s.lookoutPollerHealth(ctx.Context, db, home, project)
+				check, checkErr := s.watchRuntimeHealth(ctx.Context, db, home, project)
 				if checkErr != nil {
-					addCheck("Project Lookout "+project.Name, "warn", "runtime state unavailable: "+checkErr.Error(), "Inspect the Posse database, then rerun `posse doctor`")
+					addCheck("Project Watch "+project.Name, "warn", "runtime state unavailable: "+checkErr.Error(), "Inspect the Posse database, then rerun `posse doctor`")
 				} else {
 					checks = append(checks, check)
 				}
@@ -125,7 +125,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			for _, project := range projects {
 				projectCfg, projectConfigErr := config.Load(home, project.Name)
 				if detail, diskErr := projectDiskUsage(home, project); diskErr != nil {
-					addCheck("Project disk usage "+project.Name, "warn", diskErr.Error(), "Inspect this Project's scratch, Remuda and artifact directories")
+					addCheck("Project disk usage "+project.Name, "warn", diskErr.Error(), "Inspect this Project's scratch, Pool and artifact directories")
 				} else {
 					addCheck("Project disk usage "+project.Name, "ok", detail, "")
 				}
@@ -146,7 +146,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 						addCheck("deprecated no-mistakes "+project.Name, "warn", "could not inspect Project policies: "+usageErr.Error(), "Inspect the Project configuration and migrate away from no-mistakes")
 					} else if len(usages) > 0 {
 						detail := strings.Join(usages, "; ")
-						addCheck("deprecated no-mistakes "+project.Name, "warn", detail, "Migrate this Project to built-in validation and set its Landing Mode to pr or local and review policy to local or none")
+						addCheck("deprecated no-mistakes "+project.Name, "warn", detail, "Migrate this Project to built-in validation and set its Merge Mode to pr or local and review policy to local or none")
 					}
 				}
 				if reason := staleProjectRootReason(project.Root, home); reason != "" {
@@ -158,7 +158,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 					continue
 				}
 				if detail, countErr := executionResourceSummary(ctx.Context, db, project.ID, projectCfg.Defaults.MaxWorkers); countErr != nil {
-					addCheck("execution resources "+project.Name, "warn", countErr.Error(), "Inspect the Project Tasks and Remuda")
+					addCheck("execution resources "+project.Name, "warn", countErr.Error(), "Inspect the Project Tasks and Pool")
 				} else {
 					addCheck("execution resources "+project.Name, "ok", detail, "")
 				}
@@ -177,7 +177,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			}
 			if len(hosts) > 0 {
 				if _, err := exec.LookPath("glab"); err != nil {
-					addCheck("glab", "warn", "not installed", "Install glab to use GitLab MR landing")
+					addCheck("glab", "warn", "not installed", "Install glab to use GitLab MR merging")
 				} else {
 					ordered := make([]string, 0, len(hosts))
 					for host := range hosts {
@@ -233,7 +233,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		addCheck("Herdr", "warn", "adapter is not configured", "Configure Herdr and run `posse setup`")
 		for _, project := range registeredProjects {
 			if !project.IsDown() {
-				addCheck("Project Lookout "+project.Name, "warn", "watcher state unavailable: Herdr adapter is not configured", "Configure Herdr, then rerun `posse doctor`")
+				addCheck("Project Watch "+project.Name, "warn", "watcher state unavailable: Herdr adapter is not configured", "Configure Herdr, then rerun `posse doctor`")
 			}
 		}
 	} else {
@@ -250,7 +250,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		if snapErr != nil {
 			for _, project := range registeredProjects {
 				if !project.IsDown() {
-					addCheck("Project Lookout "+project.Name, "warn", "watcher state unavailable: "+snapErr.Error(), "Restore Herdr, then rerun `posse doctor`")
+					addCheck("Project Watch "+project.Name, "warn", "watcher state unavailable: "+snapErr.Error(), "Restore Herdr, then rerun `posse doctor`")
 				}
 			}
 		} else {
@@ -273,7 +273,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 				}
 				for _, workspace := range snapshot.Workspaces {
 					if workspace.WorkspaceID != leadID && workspace.Worktree.RepoKey == key && !workspace.Worktree.IsLinkedWorktree {
-						addCheck("Herdr group "+project.Name, "warn", "another primary workspace "+workspace.WorkspaceID+" shares the Lead's repository; its group close also closes the Lead and Riders", "Do not use workspace close --group on another primary; Posse recovers the group if it happens")
+						addCheck("Herdr group "+project.Name, "warn", "another primary workspace "+workspace.WorkspaceID+" shares the Lead's repository; its group close also closes the Lead and Workers", "Do not use workspace close --group on another primary; Posse recovers the group if it happens")
 					}
 				}
 			}
@@ -380,14 +380,14 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		if len(staleHooks) == 0 {
 			addCheck("agent hooks", "ok", "current", "")
 		} else {
-			addCheck("agent hooks", "warn", strings.Join(staleHooks, ", "), "Run `posse setup` to refresh the SessionStart and Rider guard hooks")
+			addCheck("agent hooks", "warn", strings.Join(staleHooks, ", "), "Run `posse setup` to refresh the SessionStart and Worker guard hooks")
 		}
 	}
 	for _, tool := range []string{"gh", "no-mistakes"} {
 		if path, lookErr := exec.LookPath(tool); lookErr == nil {
 			addCheck(tool, "ok", path, "")
 		} else {
-			addCheck(tool, "warn", "not installed", "Install "+tool+" to use the corresponding Landing Mode")
+			addCheck(tool, "warn", "not installed", "Install "+tool+" to use the corresponding Merge Mode")
 		}
 	}
 	return doctorResult{Checks: checks, Manifests: manifests}, nil
@@ -398,8 +398,8 @@ func noMistakesConfigUsage(ctx context.Context, db *store.DB, project store.Proj
 		return nil, nil
 	}
 	var usages []string
-	if cfg.Defaults.LandingMode == "no-mistakes" {
-		usages = append(usages, "Project "+project.Name+" defaults.landing_mode")
+	if cfg.Defaults.MergeMode == "no-mistakes" {
+		usages = append(usages, "Project "+project.Name+" defaults.merge_mode")
 	}
 	if cfg.Defaults.Review == "no-mistakes" {
 		usages = append(usages, "Project "+project.Name+" defaults.review")
@@ -412,8 +412,8 @@ func noMistakesConfigUsage(ctx context.Context, db *store.DB, project store.Proj
 		return nil, err
 	}
 	for _, repo := range repos {
-		if savedMemberLandingMode(cfg, repo.Name, repo.OriginHost) == "no-mistakes" {
-			usages = append(usages, "Member "+repo.Name+" effective landing_mode")
+		if savedMemberMergeMode(cfg, repo.Name, repo.OriginHost) == "no-mistakes" {
+			usages = append(usages, "Member "+repo.Name+" effective merge_mode")
 		}
 		if cfg.MemberReview(repo.Name) == "no-mistakes" {
 			usages = append(usages, "Member "+repo.Name+" effective review policy")
@@ -423,7 +423,7 @@ func noMistakesConfigUsage(ctx context.Context, db *store.DB, project store.Proj
 }
 
 func executionResourceSummary(ctx context.Context, db *store.DB, projectID int64, maxWorkers int) (string, error) {
-	activeRiders, err := db.ActiveWorkerCount(ctx, projectID)
+	activeWorkers, err := db.ActiveWorkerCount(ctx, projectID)
 	if err != nil {
 		return "", err
 	}
@@ -438,17 +438,17 @@ func executionResourceSummary(ctx context.Context, db *store.DB, projectID int64
 			activeTaskIDs[task.ID] = true
 		}
 	}
-	mounts, err := db.Mounts(ctx, projectID)
+	sandboxes, err := db.Sandboxes(ctx, projectID)
 	if err != nil {
 		return "", err
 	}
 	parkedResources := 0
-	for _, mount := range mounts {
-		if mount.State == "held" && !activeTaskIDs[mount.TaskID] {
+	for _, sandbox := range sandboxes {
+		if sandbox.State == "held" && !activeTaskIDs[sandbox.TaskID] {
 			parkedResources++
 		}
 	}
-	return fmt.Sprintf("active_riders=%d/%d; native_children=0 tracked (native execution unsupported); parked_resources=%d", activeRiders, maxWorkers, parkedResources), nil
+	return fmt.Sprintf("active_workers=%d/%d; native_children=0 tracked (native execution unsupported); parked_resources=%d", activeWorkers, maxWorkers, parkedResources), nil
 }
 
 func stringListContains(values []string, wanted string) bool {

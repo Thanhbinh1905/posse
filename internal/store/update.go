@@ -58,7 +58,7 @@ func (db *DB) RefuseLiveMigration(ctx context.Context, pending []int64, force bo
 		return nil
 	}
 	var count int
-	err := db.QueryRowContext(ctx, `SELECT count(*) FROM tasks WHERE state IN ('spawning','working','needs-decision','blocked','stalled','done','landing')`).Scan(&count)
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM tasks WHERE state IN ('spawning','working','needs-decision','blocked','stalled','done','merging')`).Scan(&count)
 	if err != nil {
 		return err
 	}

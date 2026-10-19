@@ -40,9 +40,9 @@ const codexOpeningPrompt = "Run `posse` and give the User a short status of the 
 
 // noPollRule forbids spending turns on waiting; each polling turn resends the
 // Lead's whole context.
-const noPollRule = "Never poll with sleep, `posse peek`, `posse roster` or repeated `posse` calls to wait for Riders, CI or PRs; use `posse peek` only to inspect a specific concern."
+const noPollRule = "Never poll with sleep, `posse peek`, `posse list` or repeated `posse` calls to wait for Workers, CI or PRs; use `posse peek` only to inspect a specific concern."
 
-const lowkeyReportingRule = "Lowkey mode on: message the User only for needs-decision, message_delivery_uncertain, notice_delivery_uncertain, land_ready when autonomy.land=ask, failed/lost, pr_closed, review_policy_violation, head_discontinuity, gate_fix_exhausted, persistent pr_watch_failing or root_fetch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, working notes, first pr_watch_failing, restarts) silently; group them into one short line only if useful. This changes reporting, not autonomy: never answer a needs-decision Notice for the User. The wake message already contains the Notice text; do not run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
+const lowkeyReportingRule = "Lowkey mode on: message the User only for needs-decision, message_delivery_uncertain, notice_delivery_uncertain, merge_ready when autonomy.merge=ask, failed/lost, pr_closed, review_policy_violation, head_discontinuity, gate_fix_exhausted, persistent pr_watch_failing or root_fetch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, working notes, first pr_watch_failing, restarts) silently; group them into one short line only if useful. This changes reporting, not autonomy: never answer a needs-decision Notice for the User. The wake message already contains the Notice text; do not run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
 
 const normalReportingRule = "Lowkey mode off: handle every Notice, tell the User the outcome in your own words without waiting to be asked, then run `posse ack <id|all>`."
 
@@ -57,19 +57,19 @@ func reportingRule(lowkey bool) string {
 // and how to wait for them.
 func noticeRule(delivery, kind string) string {
 	switch delivery {
-	case config.NoticeDeliveryLookout:
+	case config.NoticeDeliveryWatch:
 		if kind != "claude" {
-			return "Keep exactly one `posse lookout` running as a background command that re-invokes you when it returns. Handle Notices, acknowledge handled IDs with `posse ack <ids>`, then restart the background watch. " + noPollRule + " After (re)starting it, end your turn and let it wake you."
+			return "Keep exactly one `posse watch` running as a background command that re-invokes you when it returns. Handle Notices, acknowledge handled IDs with `posse ack <ids>`, then restart the background watch. " + noPollRule + " After (re)starting it, end your turn and let it wake you."
 		}
-		return "The Claude Stop hook owns one bounded Notice wait through the harness's asyncRewake lifecycle. Do not run `posse lookout` as a background command or start a relay. Handle Notice reminders and acknowledge handled IDs with `posse ack <ids>`. The hook renews after four minutes without a Notice; end a quiet renewal turn without tools or a User update. A stopped hook does not restart itself; the next normal Stop owns the next wait. Read the current lowkey state and reporting rule in each Notice. " + noPollRule + " End your turn and let the Stop hook wake you."
+		return "The Claude Stop hook owns one bounded Notice wait through the harness's asyncRewake lifecycle. Do not run `posse watch` as a background command or start a relay. Handle Notice reminders and acknowledge handled IDs with `posse ack <ids>`. The hook renews after four minutes without a Notice; end a quiet renewal turn without tools or a User update. A stopped hook does not restart itself; the next normal Stop owns the next wait. Read the current lowkey state and reporting rule in each Notice. " + noPollRule + " End your turn and let the Stop hook wake you."
 	case config.NoticeDeliveryCodexQueue:
-		return "posse queues each batch of Notices into this conversation as a Posse Notice message, also while your pane is focused or the User is typing. Read the current lowkey state and reporting rule in each message. Do not run `posse lookout`. " + noPollRule + " End your turn and let that message wake you."
+		return "posse queues each batch of Notices into this conversation as a Posse Notice message, also while your pane is focused or the User is typing. Read the current lowkey state and reporting rule in each message. Do not run `posse watch`. " + noPollRule + " End your turn and let that message wake you."
 	case config.NoticeDeliveryPiExtension:
-		return "The Pi extension delivers Notices through Pi's persisted session queue, using a durable Posse receipt keyed by a stable batch ID. A queued follow-up is not accepted until `agent_settled` confirms its delivery or batch ID in persisted session entries. It checks the session before injection and does not repeat an accepted batch. If the persisted receipt is missing or unsupported at settlement, inspect the named session and do not retry blindly; a replacement session may reconcile a matching current-session batch record, otherwise ask the User if the outcome cannot be established. Actionable Notices arrive as hidden Posse Notice messages when lowkey is on, even while the User is typing or you are working. It acknowledges pr_opened without a turn only when lowkey is on; handle and acknowledge all other Notices yourself. With lowkey off, every Notice arrives as a visible Posse Notice message and needs full reporting. Read the current lowkey state and reporting rule in each message. Do not run `posse lookout`. " + noPollRule + " End your turn and let that message wake you."
+		return "The Pi extension delivers Notices through Pi's persisted session queue, using a durable Posse receipt keyed by a stable batch ID. A queued follow-up is not accepted until `agent_settled` confirms its delivery or batch ID in persisted session entries. It checks the session before injection and does not repeat an accepted batch. If the persisted receipt is missing or unsupported at settlement, inspect the named session and do not retry blindly; a replacement session may reconcile a matching current-session batch record, otherwise ask the User if the outcome cannot be established. Actionable Notices arrive as hidden Posse Notice messages when lowkey is on, even while the User is typing or you are working. It acknowledges pr_opened without a turn only when lowkey is on; handle and acknowledge all other Notices yourself. With lowkey off, every Notice arrives as a visible Posse Notice message and needs full reporting. Read the current lowkey state and reporting rule in each message. Do not run `posse watch`. " + noPollRule + " End your turn and let that message wake you."
 	case config.NoticeDeliveryOpenCodePlugin:
-		return "The Lead-only OpenCode plugin delivers actionable Notices as Posse Notice turns through the session API after your current turn ends, without touching the composer. It uses a durable Posse receipt keyed by a stable batch ID and queries the session before retrying. While a prompt runs, it observes at most one successor batch and submits it only after the session is idle. When a replacement session finds a printed receipt from an earlier session, it checks that prior session's history and accepts a recorded receipt or rejects a confirmed absence; unsupported or ambiguous history remains uncertain. Inspect the named session and do not retry blindly; ask the User if the outcome cannot be established. It acknowledges pr_opened without a turn only when lowkey is on; handle and acknowledge all other Notices yourself. Read the current lowkey state and reporting rule in each message. Do not run `posse lookout`. " + noPollRule + " End your turn and let that message wake you."
+		return "The Lead-only OpenCode plugin delivers actionable Notices as Posse Notice turns through the session API after your current turn ends, without touching the composer. It uses a durable Posse receipt keyed by a stable batch ID and queries the session before retrying. While a prompt runs, it observes at most one successor batch and submits it only after the session is idle. When a replacement session finds a printed receipt from an earlier session, it checks that prior session's history and accepts a recorded receipt or rejects a confirmed absence; unsupported or ambiguous history remains uncertain. Inspect the named session and do not retry blindly; ask the User if the outcome cannot be established. It acknowledges pr_opened without a turn only when lowkey is on; handle and acknowledge all other Notices yourself. Read the current lowkey state and reporting rule in each message. Do not run `posse watch`. " + noPollRule + " End your turn and let that message wake you."
 	default:
-		return "Notices arrive as a Posse Notice prompt only while your pane is idle and unfocused. Read the current lowkey state and reporting rule in each message. Do not run `posse lookout`; run `posse` before you answer the User so waiting Notices are not missed. " + noPollRule + " End your turn and let that prompt wake you."
+		return "Notices arrive as a Posse Notice prompt only while your pane is idle and unfocused. Read the current lowkey state and reporting rule in each message. Do not run `posse watch`; run `posse` before you answer the User so waiting Notices are not missed. " + noPollRule + " End your turn and let that prompt wake you."
 	}
 }
 
@@ -79,7 +79,7 @@ func workerWaitRules(kind config.Kind) string {
 	if kind.BackgroundCommands {
 		rules += "- Run long commands (full test suites, e2e, builds) as background commands and never poll them with sleep, ps or repeated reads; do other work or end your turn until they finish.\n"
 	}
-	return rules + "- Do not wait for PR CI after `posse holler done`; posse watches the PR and the Lead sends fix instructions."
+	return rules + "- Do not wait for PR CI after `posse signal done`; posse watches the PR and the Lead sends fix instructions."
 }
 
 func noticeDelivery(kind config.Kind) string {
@@ -162,7 +162,7 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 			return leadLaunch{}, err
 		}
 		launch.Args = append(launch.Args, "--plugin-dir", plugin, "--plugin-dir", skills.ClaudePluginDir)
-		if noticeDelivery(kindConfig) == config.NoticeDeliveryLookout {
+		if noticeDelivery(kindConfig) == config.NoticeDeliveryWatch {
 			stopPlugin, err := s.writeLeadClaudeStop(home, project)
 			if err != nil {
 				return leadLaunch{}, err

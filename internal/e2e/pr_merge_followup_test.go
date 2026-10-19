@@ -15,19 +15,19 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestLookoutPollerDiscoversAndTearsDownMergedPR(t *testing.T) {
+func TestWatchRuntimeDiscoversAndTearsDownMergedPR(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
-	brief := filepath.Join(f.root, "lookout-follow-up.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+	brief := filepath.Join(f.root, "watch-follow-up.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
-	landing := f.mustTask(t, "t1")
-	merge := f.mergeOnLocalOrigin(t, landing, "t1")
-	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
-	// No Lead command drives this reconcile. The hidden Project poller observes the merge.
+	f.startAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
+	candidate := f.mustTask(t, "t1")
+	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
+	// No Lead command drives this reconcile. The hidden Project Watch observes the merge.
 	f.waitTaskState(t, "t1", store.StateTornDown)
 	assertNoValidationFixRound(t, f, "t1", "gate")
 	assertNoValidationFixRound(t, f, "t1", "freshness")
@@ -38,22 +38,22 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	brief := filepath.Join(f.root, "unsafe-follow-up.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
-	landing := f.mustTask(t, "t1")
-	if err := os.WriteFile(filepath.Join(landing.WorktreePath, "untracked.txt"), []byte("leftover"), 0o600); err != nil {
+	f.startAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
+	candidate := f.mustTask(t, "t1")
+	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, "untracked.txt"), []byte("orphan"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	merge := f.mergeOnLocalOrigin(t, landing, "t1")
-	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
 	for i := 0; i < 2; i++ {
 		showAfterActiveTeardown(t, f, "t1")
 	}
 	task := f.mustTask(t, "t1")
-	if task.State != store.StateTornDown || task.LandedRef != merge {
+	if task.State != store.StateTornDown || task.MergedRef != merge {
 		t.Fatalf("merged PR not torn down: %#v", task)
 	}
 	assertNoValidationFixRound(t, f, "t1", "gate")
@@ -64,7 +64,7 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 	}
 	reasons := 0
 	for _, n := range notices {
-		if n.TaskID == task.ID && n.Kind == "unsaddle_incomplete" {
+		if n.TaskID == task.ID && n.Kind == "teardown_incomplete" {
 			reasons++
 		}
 	}
@@ -72,8 +72,8 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 		t.Fatalf("torn-down PR still has %d teardown failure reasons", reasons)
 	}
 	decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
-	if err != nil || len(decisions) != 1 || decisions[0].Kind != "leftover" {
-		t.Fatalf("Leftover Decision: %#v %v", decisions, err)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "orphan" {
+		t.Fatalf("Orphan Decision: %#v %v", decisions, err)
 	}
 }
 
@@ -90,34 +90,34 @@ func assertNoValidationFixRound(t *testing.T, f *prLifecycleFixture, taskID, kin
 }
 
 // Assert against Git's worktree registry, not only the checkout filesystem.
-func assertMountUnlocked(t *testing.T, env []string, repo, path string) {
+func assertSandboxUnlocked(t *testing.T, env []string, repo, path string) {
 	t.Helper()
 	listing := gitTest(t, env, repo, "worktree", "list", "--porcelain")
 	for _, block := range strings.Split(listing, "\n\n") {
 		if strings.HasPrefix(block, "worktree "+path+"\n") && strings.Contains("\n"+block+"\n", "\nlocked ") {
-			t.Fatalf("released Mount %s is still locked: %s", path, block)
+			t.Fatalf("released Sandbox %s is still locked: %s", path, block)
 		}
 	}
 }
 
-func TestMergeInterruptsFollowUpAndReleasesRider(t *testing.T) {
+func TestMergeInterruptsFollowUpAndReleasesWorker(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
-	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
-		t.Fatalf("hidden Project poller missing: %v", lookoutPIDs(f.root))
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("hidden Project watch missing: %v", watchPIDs(f.root))
 	}
-	if panes := lookoutPanes(t, client); len(panes) != 0 {
-		t.Fatalf("Project poller opened visible Lookout panes: %#v", panes)
+	if panes := watchPanes(t, client); len(panes) != 0 {
+		t.Fatalf("Project watch opened visible Watch panes: %#v", panes)
 	}
 	brief := filepath.Join(f.root, "follow-up.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
-	landing := f.mustTask(t, "t1")
-	f.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", landing.GatedSHA)
+	f.startAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
+	candidate := f.mustTask(t, "t1")
+	f.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.GatedSHA)
 	if err := os.WriteFile(filepath.Join(f.root, "pause-fix-commit"), []byte("wait"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +125,8 @@ func TestMergeInterruptsFollowUpAndReleasesRider(t *testing.T) {
 	if got := f.mustTask(t, "t1"); got.State != store.StateWorking {
 		t.Fatalf("follow-up state: %s", got.State)
 	}
-	merge := f.mergeOnLocalOrigin(t, landing, "t1")
-	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
 	command := exec.Command(f.binary, "send", "t1", "Do not deliver after the merge")
 	command.Dir, command.Env = f.repo, f.leadEnv
 	output, err := command.CombinedOutput()
@@ -135,14 +135,14 @@ func TestMergeInterruptsFollowUpAndReleasesRider(t *testing.T) {
 	}
 	f.waitTaskState(t, "t1", store.StateTornDown)
 	task := f.mustTask(t, "t1")
-	if task.State != store.StateTornDown || task.LandedRef != merge {
-		t.Fatalf("merge left Rider open: state=%s ref=%s", task.State, task.LandedRef)
+	if task.State != store.StateTornDown || task.MergedRef != merge {
+		t.Fatalf("merge left Worker open: state=%s ref=%s", task.State, task.MergedRef)
 	}
-	mounts, err := f.db.Mounts(context.Background(), f.project.ID)
-	if err != nil || len(mounts) != 1 || mounts[0].TaskID != 0 {
-		t.Fatalf("Mount retained: %#v %v", mounts, err)
+	sandboxes, err := f.db.Sandboxes(context.Background(), f.project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].TaskID != 0 {
+		t.Fatalf("Sandbox retained: %#v %v", sandboxes, err)
 	}
-	assertMountUnlocked(t, f.env, f.repo, mounts[0].Path)
+	assertSandboxUnlocked(t, f.env, f.repo, sandboxes[0].Path)
 	f.requireNotice(t, "t1", "pr_merged")
 	if log, err := os.ReadFile(f.ghLog); err != nil || strings.Contains(string(log), "pr merge") {
 		t.Fatalf("watcher merged PR: %s %v", log, err)

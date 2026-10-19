@@ -15,7 +15,7 @@ const composerDraft = { text: "half-typed User draft" };
 const settlementCodes = [];
 const settlementAttempts = [];
 const watchFailures = [];
-const activeLookouts = new Set();
+const activeWatches = new Set();
 const spawnedPids = [];
 const closedPids = new Set();
 let promptCalls = 0;
@@ -41,9 +41,9 @@ function spawn(command, args, options) {
       if (settlementCodes.length >= 3 && promptCalls >= 3) resolveFinished({ complete: true });
     });
   } else if (args.includes("--handoff")) {
-    activeLookouts.add(child);
+    activeWatches.add(child);
     child.once("close", (code) => {
-      activeLookouts.delete(child);
+      activeWatches.delete(child);
       if (!disposing && code !== 0) watchFailures.push(code);
     });
   }
@@ -67,13 +67,13 @@ async function waitForFile(path, timeout, error) {
   throw new Error(error);
 }
 
-async function waitForActiveLookout() {
+async function waitForActiveWatch() {
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {
-    if (activeLookouts.size > 0) return;
+    if (activeWatches.size > 0) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error("OpenCode did not re-arm a lookout before shutdown");
+  throw new Error("OpenCode did not re-arm a watch before shutdown");
 }
 
 const context = vm.createContext({ spawn, readFile, console, setTimeout, clearTimeout });
@@ -116,12 +116,12 @@ const result = await Promise.race([
   new Promise((resolve) => { timeout = setTimeout(() => resolve({ timeout: true }), 20000); }),
 ]);
 clearTimeout(timeout);
-await waitForActiveLookout();
-const shutdownHadLookout = activeLookouts.size > 0;
+await waitForActiveWatch();
+const shutdownHadWatch = activeWatches.size > 0;
 disposing = true;
 await plugin.dispose();
 const allChildrenRetired = spawnedPids.every((pid) => closedPids.has(pid));
-process.stdout.write(JSON.stringify({ result, promptCalls, promptTargets, composerDraft: composerDraft.text, settlementCodes, settlementAttempts, watchFailures, retiredChildren, shutdownHadLookout, allChildrenRetired }) + "\n");
-if (!result.complete || promptCalls !== 3 || promptTargets.some((target) => target !== "busy-session") || composerDraft.text !== "half-typed User draft" || settlementCodes.length < 3 || settlementAttempts.length !== 3 || watchFailures.length !== 0 || !retiredChildren || !shutdownHadLookout || !allChildrenRetired) {
+process.stdout.write(JSON.stringify({ result, promptCalls, promptTargets, composerDraft: composerDraft.text, settlementCodes, settlementAttempts, watchFailures, retiredChildren, shutdownHadWatch, allChildrenRetired }) + "\n");
+if (!result.complete || promptCalls !== 3 || promptTargets.some((target) => target !== "busy-session") || composerDraft.text !== "half-typed User draft" || settlementCodes.length < 3 || settlementAttempts.length !== 3 || watchFailures.length !== 0 || !retiredChildren || !shutdownHadWatch || !allChildrenRetired) {
   throw new Error("OpenCode did not observe and deliver the batch collected during the earlier busy turn");
 }

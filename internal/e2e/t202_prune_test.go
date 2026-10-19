@@ -17,18 +17,18 @@ import (
 )
 
 // Pause the real prune CLI after its Task snapshot, without changing Git results.
-func TestPruneRechecksScratchAfterConcurrentRide(t *testing.T) {
+func TestPruneRechecksScratchAfterConcurrentStart(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	ctx := context.Background()
 	brief := filepath.Join(f.root, "first.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
-	barrierMount := filepath.Join(f.home, "remuda", "shop", "mount-999")
-	gitTest(t, f.env, f.repo, "worktree", "add", "--detach", barrierMount, "main")
-	if _, err := f.db.ExecContext(ctx, "INSERT INTO mounts(project_id,n,path,state) VALUES(?,999,?,'broken')", f.project.ID, barrierMount); err != nil {
+	f.startAndComplete(t, brief, "t1")
+	barrierSandbox := filepath.Join(f.home, "pool", "shop", "sandbox-999")
+	gitTest(t, f.env, f.repo, "worktree", "add", "--detach", barrierSandbox, "main")
+	if _, err := f.db.ExecContext(ctx, "INSERT INTO mounts(project_id,n,path,state) VALUES(?,999,?,'broken')", f.project.ID, barrierSandbox); err != nil {
 		t.Fatal(err)
 	}
 	scratch := filepath.Join(f.home, "scratch", "shop", "t2")
@@ -40,7 +40,7 @@ func TestPruneRechecksScratchAfterConcurrentRide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent = []byte(strings.Replace(string(agent), "printf 'worker change %s\\n'", "printf 'active Rider cache\\n' > \"$TMPDIR/active-cache\"\n    printf 'worker change %s\\n'", 1))
+	agent = []byte(strings.Replace(string(agent), "printf 'worker change %s\\n'", "printf 'active Worker cache\\n' > \"$TMPDIR/active-cache\"\n    printf 'worker change %s\\n'", 1))
 	if err := os.WriteFile(agentPath, agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestPruneRechecksScratchAfterConcurrentRide(t *testing.T) {
 	marker := filepath.Join(f.root, "prune-loaded-tasks")
 	resume := marker + ".continue"
 	shim := "#!/bin/sh\n" +
-		"target=" + shellQuote(barrierMount) + "\n" +
+		"target=" + shellQuote(barrierSandbox) + "\n" +
 		"marker=" + shellQuote(marker) + "\n" +
 		"resume=" + shellQuote(resume) + "\n" +
 		"target_match=0\nexpect_path=0\nstatus=0\n" +
@@ -69,7 +69,7 @@ func TestPruneRechecksScratchAfterConcurrentRide(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	prune := exec.Command(f.binary, "remuda", "prune", "--yes")
+	prune := exec.Command(f.binary, "pool", "prune", "--yes")
 	prune.Dir, prune.Env = f.repo, setEnv(f.leadEnv, "PATH", shimDir+":"+t202EnvValue(f.leadEnv, "PATH"))
 	output := filepath.Join(f.root, "prune-output")
 	out, err := os.Create(output)
@@ -91,21 +91,21 @@ func TestPruneRechecksScratchAfterConcurrentRide(t *testing.T) {
 		t.Fatalf("prune did not reach its post-Task-snapshot barrier: %s", contents)
 	}
 	secondBrief := filepath.Join(f.root, "second.md")
-	if err := os.WriteFile(secondBrief, []byte("---\ntype: ship\ntitle: Concurrent Rider\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(secondBrief, []byte("---\ntype: change\ntitle: Concurrent Worker\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, f.binary, f.repo, f.leadEnv, "ride", "--brief", secondBrief, "--name", "concurrent-rider")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", secondBrief, "--name", "concurrent-worker")
 	var active store.Task
 	if !waitForCondition(15*time.Second, func() bool {
 		active, err = f.db.Task(ctx, f.project.ID, "t2")
 		_, statErr := os.Stat(filepath.Join(scratch, "active-cache"))
 		return err == nil && active.State == store.StateWorking && statErr == nil
 	}) {
-		t.Fatalf("new Rider did not use scratch: %#v %v", active, err)
+		t.Fatalf("new Worker did not use scratch: %#v %v", active, err)
 	}
-	mount, err := f.db.MountByTask(ctx, active.ID)
-	if err != nil || mount.State != "held" {
-		t.Fatalf("active Rider's Mount: %#v %v", mount, err)
+	sandbox, err := f.db.SandboxByTask(ctx, active.ID)
+	if err != nil || sandbox.State != "held" {
+		t.Fatalf("active Worker's Sandbox: %#v %v", sandbox, err)
 	}
 	if err := os.WriteFile(resume, []byte("resume"), 0o600); err != nil {
 		t.Fatal(err)
@@ -118,15 +118,15 @@ func TestPruneRechecksScratchAfterConcurrentRide(t *testing.T) {
 	if strings.Contains(string(contents), filepath.Join(f.home, "scratch", "shop", "t2")) {
 		t.Errorf("prune listed active Task t2 scratch as reclaimable: %s", contents)
 	}
-	if cache, err := os.ReadFile(filepath.Join(scratch, "active-cache")); err != nil || string(cache) != "active Rider cache\n" {
-		t.Errorf("concurrent Rider's active TMPDIR data changed: %q %v; prune=%s", cache, err, contents)
+	if cache, err := os.ReadFile(filepath.Join(scratch, "active-cache")); err != nil || string(cache) != "active Worker cache\n" {
+		t.Errorf("concurrent Worker's active TMPDIR data changed: %q %v; prune=%s", cache, err, contents)
 	}
 	current, err := f.db.Task(ctx, f.project.ID, "t2")
 	if err != nil || current.State != store.StateWorking {
 		t.Errorf("unexpected active Task state %#v %v", current, err)
 	}
 	if got := gitTest(t, f.env, active.WorktreePath, "show", "HEAD:e2e-worker-t2.txt"); got != "worker change t2\n" {
-		t.Errorf("active Rider work changed: %q", got)
+		t.Errorf("active Worker work changed: %q", got)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestPruneReclaimsOrphanOpenCacheStorage(t *testing.T) {
 	if err := os.MkdirAll(otherTaskScratch, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	otherTaskID, err := f.db.CreateTask(context.Background(), f.project.ID, store.Task{Seq: 998, Type: "scout", Title: "Active other Task"})
+	otherTaskID, err := f.db.CreateTask(context.Background(), f.project.ID, store.Task{Seq: 998, Type: "research", Title: "Active other Task"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestPruneReclaimsOrphanOpenCacheStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherChild := startScratchCacheHolder(t, f.env, otherTaskScratch, otherCache, filepath.Join(f.root, "other-process-ready"), "4")
-	dry := runPosse(t, f.binary, f.repo, f.leadEnv, "remuda", "prune")
+	dry := runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune")
 	if !strings.Contains(dry, "t999") || !strings.Contains(dry, "65536") {
 		t.Fatalf("orphan cache missing from prune: %s", dry)
 	}
@@ -180,7 +180,7 @@ func TestPruneReclaimsOrphanOpenCacheStorage(t *testing.T) {
 	if err != nil || otherTask.State != store.StateReported {
 		t.Fatalf("foreign process Task state before prune = %#v, %v", otherTask, err)
 	}
-	applyOutput := runPosse(t, f.binary, f.repo, f.leadEnv, "remuda", "prune", "--yes")
+	applyOutput := runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune", "--yes")
 	if strings.Contains(applyOutput, "t998") {
 		t.Fatalf("prune listed active other Task scratch: %s", applyOutput)
 	}
@@ -204,7 +204,7 @@ func TestPruneReclaimsOrphanOpenCacheStorage(t *testing.T) {
 			t.Errorf("prune changed process in %s: %s -> %s err=%v identity=%q/%q %v stat=%s (%v)", foreign.name, fd, target, err, identityBoot, identityStart, identityErr, stat, statErr)
 		}
 	}
-	runPosse(t, f.binary, f.repo, f.leadEnv, "remuda", "prune", "--yes")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune", "--yes")
 }
 
 func startScratchCacheHolder(t *testing.T, env []string, cwd, cache, ready, fd string) *exec.Cmd {

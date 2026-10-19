@@ -74,7 +74,7 @@ func TestExportTaskScratchSetsTemporaryVariablesInOwnedPane(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(fake.Calls) != 1 || fake.Calls[0].Method != "pane.send_input" || fake.Calls[0].Params["pane_id"] != "w1:p2" {
-		t.Fatalf("scratch environment was not sent to the Rider pane: %#v", fake.Calls)
+		t.Fatalf("scratch environment was not sent to the Worker pane: %#v", fake.Calls)
 	}
 	command, ok := fake.Calls[0].Params["text"].(string)
 	if !ok {

@@ -9,3 +9,16 @@ sql:
         out: internal/store/sqlc
         emit_interface: true
         emit_empty_slices: true
+        rename:
+          project_lookout_poller: ProjectWatchRuntime
+          mount: Sandbox
+          completed_rider_busy: CompletedWorkerBusy
+          landing_mode: MergeMode
+          landed_ref: MergedRef
+          autonomy_land: AutonomyMerge
+          mount_id: SandboxID
+          ship_task_id: ChangeTaskID
+          lookout_pane_id: WatchPaneID
+          lookout_retry_at: WatchRetryAt
+          lookout_failed_starts: WatchFailedStarts
+          lookout_notice_raised: WatchNoticeRaised

@@ -17,10 +17,10 @@ import (
 func freezeReviewPolicy(t *testing.T, f *reviewVerdictFixture, policy string, version int) {
 	t.Helper()
 	plan, err := taskplan.Resolve(taskplan.Request{
-		Brief:     taskplan.Select("brief", "ship.md", []byte("---\ntype: ship\ntitle: Candidate\ndone_when: checked\n---\n")),
+		Brief:     taskplan.Select("brief", "change.md", []byte("---\ntype: change\ntitle: Candidate\ndone_when: checked\n---\n")),
 		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
 		Launch:    taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
-		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "lead", Land: "auto"},
+		Review:    "none", Delivery: "local", Autonomy: config.Autonomy{Review: "lead", Merge: "auto"},
 		Paths: taskplan.Paths{Scratch: filepath.Join(f.home, "scratch", "shop", "t1"), Output: filepath.Join(f.home, "projects", "shop", "tasks", "t1")},
 	})
 	if err != nil {
@@ -65,7 +65,7 @@ func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 			if (reviewEvidenceStatus(f.task) == "legacy-evidence") != (tc.version == 1) {
 				t.Fatal("wrong evidence status")
 			}
-			if code, out := f.holler(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
+			if code, out := f.signal(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
 				t.Fatalf("verdict: %d %s", code, out)
 			}
 			err = requireSelectedReview(context.Background(), f.db, f.project, cfg, f.task)
@@ -77,7 +77,7 @@ func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 }
 
 func TestWorkspaceSelectedReviewOverridesStayFrozen(t *testing.T) {
-	f := newWorkspaceLandFixture(t, localWorkspaceConfig+"review='local'\n[repositories.backend]\nreview='none'\n[repositories.worker]\nreview='no-mistakes'\n", []string{"backend", "worker"}, []string{"backend"})
+	f := newWorkspaceMergeFixture(t, localWorkspaceConfig+"review='local'\n[repositories.backend]\nreview='none'\n[repositories.worker]\nreview='no-mistakes'\n", []string{"backend", "worker"}, []string{"backend"})
 	ctx := context.Background()
 	task, err := f.db.TaskByID(ctx, f.project.ID, f.task.ID)
 	if err != nil {
@@ -85,13 +85,13 @@ func TestWorkspaceSelectedReviewOverridesStayFrozen(t *testing.T) {
 	}
 	cfg := f.config()
 	plan, err := taskplan.Resolve(taskplan.Request{
-		Brief: taskplan.Select("brief", "workspace.md", []byte("---\ntype: ship\ntitle: Member policy\ndone_when: checked\nrepos: [backend, worker]\n---\n")),
+		Brief: taskplan.Select("brief", "workspace.md", []byte("---\ntype: change\ntitle: Member policy\ndone_when: checked\nrepos: [backend, worker]\n---\n")),
 		Execution: taskplan.Execution{Scope: "workspace", Members: []taskplan.Member{
 			{Name: "backend", Path: "backend", Delivery: "local", Review: cfg.MemberReview("backend"), ReviewSource: "repositories.backend.review"},
 			{Name: "worker", Path: "worker", Delivery: "local", Review: cfg.MemberReview("worker"), ReviewSource: "repositories.worker.review"},
 		}},
 		Launch: taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
-		Review: cfg.Defaults.Review, Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review: cfg.Defaults.Review, Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
 		Paths: taskplan.Paths{Scratch: filepath.Join(f.home, "scratch", "stack", "t1"), Output: filepath.Join(f.home, "projects", "stack", "tasks", "t1")},
 	})
 	if err != nil {
@@ -112,16 +112,16 @@ func TestWorkspaceSelectedReviewOverridesStayFrozen(t *testing.T) {
 	if _, err := config.SetFile(config.ConfigPath(f.home, ""), "repositories.backend.review", "no-mistakes", false); err != nil {
 		t.Fatal(err)
 	}
-	if code := f.run("land", "t1", "--merge", "--user-approved", "Land the selected local member"); code != 0 {
+	if code := f.run("merge", "t1", "--execute", "--user-approved", "Merge the selected local member"); code != 0 {
 		t.Fatalf("frozen member policy refused: %s", f.out.String())
 	}
 }
 
 func TestLocalReviewRecheckedAfterGateAndBeforeMerge(t *testing.T) {
-	for _, boundary := range []string{"gate", "landing"} {
+	for _, boundary := range []string{"gate", "merging"} {
 		t.Run(boundary, func(t *testing.T) {
 			f := newReviewVerdictFixture(t)
-			configText := "[defaults]\nlanding_mode='local'\nreview='local'\nauto_unsaddle='never'\n"
+			configText := "[defaults]\nmerge_mode='local'\nreview='local'\nauto_teardown='never'\n"
 			if boundary == "gate" {
 				// The Gate changes the candidate after the initial evidence check.
 				script := filepath.Join(f.root, "invalidate-review")
@@ -134,20 +134,20 @@ func TestLocalReviewRecheckedAfterGateAndBeforeMerge(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if code, out := f.holler(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
+			if code, out := f.signal(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
 				t.Fatalf("verdict: %d %s", code, out)
 			}
 			before := gitTest(t, f.repo, "rev-parse", "main")
-			if boundary == "landing" {
-				if code, out, _ := f.run("land", "t1"); code != 0 {
-					t.Fatalf("land: %d %s", code, out)
+			if boundary == "merging" {
+				if code, out, _ := f.run("merge", "t1"); code != 0 {
+					t.Fatalf("merge: %d %s", code, out)
 				}
 				// Evidence becomes ineligible even though the branch still equals the gated SHA.
 				if _, err := f.db.NextTaskLaunchWithIdentity(context.Background(), f.task.ID, "reviewer", "model-b", true); err != nil {
 					t.Fatal(err)
 				}
 			}
-			code, out, _ := f.run("land", "t1", "--merge", "--user-approved", "Merge this candidate")
+			code, out, _ := f.run("merge", "t1", "--execute", "--user-approved", "Merge this candidate")
 			if code != 1 || !strings.Contains(out, "review_required") {
 				t.Fatalf("boundary %s: %d %s", boundary, code, out)
 			}
@@ -155,8 +155,8 @@ func TestLocalReviewRecheckedAfterGateAndBeforeMerge(t *testing.T) {
 				t.Fatal("refusal changed target")
 			}
 			task, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
-			if err != nil || task.State == store.StateLanded {
-				t.Fatalf("refusal landed: %#v %v", task, err)
+			if err != nil || task.State == store.StateMerged {
+				t.Fatalf("refusal merged: %#v %v", task, err)
 			}
 		})
 	}

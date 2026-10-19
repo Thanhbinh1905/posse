@@ -8,9 +8,9 @@ import (
 )
 
 func TestWorkspaceScopePreservesScopedPreferencesAndPinnedBase(t *testing.T) {
-	r := request("ship")
+	r := request("change")
 	r.Delivery, r.Review = "pr", "local"
-	r.Brief = taskplan.Select("brief", "scoped-workspace.md", []byte("---\ntype: ship\ntitle: Scoped workspace\ndone_when: checked\nrepos: [api]\nroot_context: read-only\nlanding_mode: local\nreview: none\nbase: release/next\ntarget: release/next\n---\n"))
+	r.Brief = taskplan.Select("brief", "scoped-workspace.md", []byte("---\ntype: change\ntitle: Scoped workspace\ndone_when: checked\nrepos: [api]\nroot_context: read-only\nmerge_mode: local\nreview: none\nbase: release/next\ntarget: release/next\n---\n"))
 	commit := strings.Repeat("a", 40)
 	r.Execution = taskplan.Execution{Scope: "workspace", Members: []taskplan.Member{{
 		Name: "api", Path: "api", Base: "refs/remotes/origin/release/next", BaseCommit: commit, Target: "release/next", Delivery: "local",
@@ -18,7 +18,7 @@ func TestWorkspaceScopePreservesScopedPreferencesAndPinnedBase(t *testing.T) {
 	if _, err := taskplan.Resolve(r); err == nil {
 		t.Fatal("workspace scope bypassed tightening-only preferences")
 	}
-	r.UserChoice = &taskplan.UserChoice{Quote: "  Use local delivery without review for this release Task.  ", Actor: "lead", Source: "ride --user-approved"}
+	r.UserChoice = &taskplan.UserChoice{Quote: "  Use local delivery without review for this release Task.  ", Actor: "lead", Source: "start --user-approved"}
 	plan, err := taskplan.Resolve(r)
 	if err != nil {
 		t.Fatal(err)

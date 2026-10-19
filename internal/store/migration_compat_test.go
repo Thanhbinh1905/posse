@@ -126,9 +126,9 @@ func TestOpenRenumbersLegacyTaskContainmentMigration(t *testing.T) {
 			t.Fatalf("Task containment column %s exists=%d, err=%v", column, exists, err)
 		}
 	}
-	var lookoutTable int
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lookout_pollers')`).Scan(&lookoutTable); err != nil || lookoutTable != 1 {
-		t.Fatalf("Lookout poller table exists=%d, err=%v", lookoutTable, err)
+	var watchTable int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lookout_pollers')`).Scan(&watchTable); err != nil || watchTable != 1 {
+		t.Fatalf("Lookout poller table exists=%d, err=%v", watchTable, err)
 	}
 	sources, err := embeddedMigrations()
 	if err != nil {
@@ -158,7 +158,7 @@ func seedAcceptedReportForMigrationTest(t *testing.T, ctx context.Context, path 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Publication report", Profile: "author", ReportKind: "spec"})
+	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Publication report", Profile: "author", ReportKind: "spec"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func seedAcceptedReportForMigrationTest(t *testing.T, ctx context.Context, path 
 	if err := db.RecordReportBundle(ctx, reportID, digest, manifest); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, reportID, StateReported, StateTornDown, "cli", "Mount released"); err != nil {
+	if err := db.Transition(ctx, reportID, StateReported, StateTornDown, "cli", "Sandbox released"); err != nil {
 		t.Fatal(err)
 	}
 	reviewerID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "review", ReviewsTaskID: reportID, Title: "Independent report review", Profile: "reviewer"})

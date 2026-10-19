@@ -25,7 +25,7 @@ func TestNoticeWakeUsesCanonicalTaskID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 34, Type: "ship", Title: "Improve login", ShortName: "login-cleanup", Branch: "posse/t34"})
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 34, Type: "change", Title: "Improve login", ShortName: "login-cleanup", Branch: "posse/t34"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestNoticeWakeUsesCanonicalTaskID(t *testing.T) {
 	}
 }
 
-func TestLowkeyToggleAndLookoutWakeWithoutRestart(t *testing.T) {
+func TestLowkeyToggleAndWatchWakeWithoutRestart(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
@@ -117,10 +117,10 @@ func TestLowkeyToggleAndLookoutWakeWithoutRestart(t *testing.T) {
 		Lowkey bool   `json:"lowkey"`
 		Wake   string `json:"wake"`
 	}
-	if err := json.Unmarshal([]byte(run("lookout", "--json", "--timeout", "1000")), &wake); err != nil || !wake.Lowkey || !strings.Contains(wake.Wake, "project needs-decision - Choose A or B") || !strings.Contains(wake.Wake, "Notice ids: ") {
+	if err := json.Unmarshal([]byte(run("watch", "--json", "--timeout", "1000")), &wake); err != nil || !wake.Lowkey || !strings.Contains(wake.Wake, "project needs-decision - Choose A or B") || !strings.Contains(wake.Wake, "Notice ids: ") {
 		t.Fatalf("wake: %#v %v", wake, err)
 	}
-	if got := run("lookout", "--ack", stringID(id), "--timeout", "1"); !strings.Contains(got, "timeout") {
+	if got := run("watch", "--ack", stringID(id), "--timeout", "1"); !strings.Contains(got, "timeout") {
 		t.Fatalf("ack and wait: %s", got)
 	}
 	notices, err := db.Notices(context.Background(), project.ID, true)
@@ -133,7 +133,7 @@ func TestLowkeyToggleAndLookoutWakeWithoutRestart(t *testing.T) {
 	if _, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: project.ID, Kind: "pr_opened", Summary: "opened"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := run("lookout", "--json", "--timeout", "1000"); !strings.Contains(got, "[posse | Posse -> Lead project | notice #") || !strings.Contains(got, `"lowkey":false`) {
+	if got := run("watch", "--json", "--timeout", "1000"); !strings.Contains(got, "[posse | Posse -> Lead project | notice #") || !strings.Contains(got, `"lowkey":false`) {
 		t.Fatal(got)
 	}
 	if data, err := os.ReadFile(config.ConfigPath(home, "shop")); err != nil || !strings.Contains(string(data), "lead = false") {

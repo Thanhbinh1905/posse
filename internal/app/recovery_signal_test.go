@@ -40,27 +40,27 @@ func TestRecoveryDoesNotUndoFailedSignalCommittedAfterTaskEnumeration(t *testing
 		t.Fatal(err)
 	}
 	taskID, err := db.CreateTask(ctx, project.ID, store.Task{
-		Seq: 1, Type: "ship", Title: "Failed Signal recovery", Profile: "deep", LandingMode: "local",
+		Seq: 1, Type: "change", Title: "Failed Signal recovery", Profile: "deep", MergeMode: "local",
 		Branch: "posse/t1", BaseRef: "main", HerdrWorkspaceID: "w2", PaneID: "w2:p1", PaneLabel: "posse:shop:t1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Rider ready"); err != nil {
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker ready"); err != nil {
 		t.Fatal(err)
 	}
-	mount, err := db.AcquireMount(ctx, project.ID, taskID, filepath.Join(home, "remuda"))
+	sandbox, err := db.AcquireSandbox(ctx, project.ID, taskID, filepath.Join(home, "pool"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(mount.Path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(sandbox.Path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mount.Path, "main")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandbox.Path, "main")
 	if _, err := db.NextTaskLaunch(ctx, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateTaskLaunch(ctx, taskID, mount.Path, "w2", "w2:p1", "posse:shop:t1", "old-rider"); err != nil {
+	if err := db.UpdateTaskLaunch(ctx, taskID, sandbox.Path, "w2", "w2:p1", "posse:shop:t1", "old-worker"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.UpdateTaskObservation(ctx, taskID, "w2:p1", "w2", "", "", 0, 0, "same-server"); err != nil {
@@ -80,7 +80,7 @@ func TestRecoveryDoesNotUndoFailedSignalCommittedAfterTaskEnumeration(t *testing
 	}
 	adapter.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	adapter.onSecondSnapshot = func() {
-		if state, err := db.RecordWorkerSignal(ctx, before, "failed", "stop this Rider", nil, "task_failed"); err != nil || state != store.StateFailed {
+		if state, err := db.RecordWorkerSignal(ctx, before, "failed", "stop this Worker", nil, "task_failed"); err != nil || state != store.StateFailed {
 			t.Fatalf("record failed Signal: state=%s err=%v", state, err)
 		}
 	}
@@ -92,8 +92,8 @@ func TestRecoveryDoesNotUndoFailedSignalCommittedAfterTaskEnumeration(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.State != store.StateFailed || after.Launches != before.Launches || after.MountID != before.MountID || after.WorktreePath != before.WorktreePath || after.Branch != before.Branch || adapter.CallCount("agent.start") != 1 {
-		t.Fatalf("recovery undid failed Signal: state=%s launches=%d want=%d mount=%d want=%d worktree=%q branch=%q agent_starts=%d", after.State, after.Launches, before.Launches, after.MountID, before.MountID, after.WorktreePath, after.Branch, adapter.CallCount("agent.start"))
+	if after.State != store.StateFailed || after.Launches != before.Launches || after.SandboxID != before.SandboxID || after.WorktreePath != before.WorktreePath || after.Branch != before.Branch || adapter.CallCount("agent.start") != 1 {
+		t.Fatalf("recovery undid failed Signal: state=%s launches=%d want=%d sandbox=%d want=%d worktree=%q branch=%q agent_starts=%d", after.State, after.Launches, before.Launches, after.SandboxID, before.SandboxID, after.WorktreePath, after.Branch, adapter.CallCount("agent.start"))
 	}
 }
 

@@ -18,9 +18,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestHollerCommitsBeforeUnrelatedPreparationFailure(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
-	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET type='scout' WHERE id=?`, fixture.task.ID); err != nil {
+func TestSignalCommitsBeforeUnrelatedPreparationFailure(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET type='research' WHERE id=?`, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.worktree, "report.md"), []byte("Review complete\n"), 0o600); err != nil {
@@ -29,7 +29,7 @@ func TestHollerCommitsBeforeUnrelatedPreparationFailure(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
 	t.Setenv(workerHomeEnv, fixture.home)
 	fixture.service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = errors.New("unrelated snapshot failed")
-	code, out, errOut := fixture.run("holler", "done", "Review complete", "--report", "report.md")
+	code, out, errOut := fixture.run("signal", "done", "Review complete", "--report", "report.md")
 	if code != 0 {
 		t.Fatalf("unrelated preparation rejected Signal: exit=%d output=%s stderr=%s", code, out, errOut)
 	}
@@ -39,8 +39,8 @@ func TestHollerCommitsBeforeUnrelatedPreparationFailure(t *testing.T) {
 	}
 }
 
-func TestHollerOwnTransactionContentionIsRetryable(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+func TestSignalOwnTransactionContentionIsRetryable(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
 	t.Setenv(workerHomeEnv, fixture.home)
 	writer, err := fixture.db.BeginTx(context.Background(), nil)
@@ -66,8 +66,8 @@ func TestHollerOwnTransactionContentionIsRetryable(t *testing.T) {
 	}
 }
 
-func TestLookoutRemainsArmedDuringObservationContention(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+func TestWatchRemainsArmedDuringObservationContention(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	fake := fixture.service.Herdr.(*herdr.Fake)
 	for i := range fake.SnapshotValue.Panes {
 		if fake.SnapshotValue.Panes[i].PaneID != fixture.task.PaneID {
@@ -85,20 +85,20 @@ func TestLookoutRemainsArmedDuringObservationContention(t *testing.T) {
 	released := make(chan error, 1)
 	go func() { time.Sleep(1500 * time.Millisecond); released <- writer.Commit() }()
 	started := time.Now()
-	code, out, errOut := fixture.run("lookout", "--timeout", "10000")
+	code, out, errOut := fixture.run("watch", "--timeout", "10000")
 	if err := <-released; err != nil {
 		t.Fatal(err)
 	}
 	if code != 0 || !bytes.Contains([]byte(out), []byte("Writer released")) {
-		t.Fatalf("Lookout did not recover without restarting: exit=%d output=%s stderr=%s", code, out, errOut)
+		t.Fatalf("Watch did not recover without restarting: exit=%d output=%s stderr=%s", code, out, errOut)
 	}
 	if time.Since(started) < 1500*time.Millisecond {
-		t.Fatal("Lookout returned before writer release")
+		t.Fatal("Watch returned before writer release")
 	}
 }
 
-func TestLookoutLogsAndRetriesMaintenanceContention(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+func TestWatchLogsAndRetriesMaintenanceContention(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	fake := fixture.service.Herdr.(*herdr.Fake)
 	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET updated_at=1 WHERE id=?`, fixture.task.ID); err != nil {
 		t.Fatal(err)
@@ -118,30 +118,30 @@ func TestLookoutLogsAndRetriesMaintenanceContention(t *testing.T) {
 	}()
 
 	started := time.Now()
-	code, out, errOut := fixture.run("lookout", "--timeout", "3000")
+	code, out, errOut := fixture.run("watch", "--timeout", "3000")
 	if err := <-released; err != nil {
 		t.Fatal(err)
 	}
 	if code != 0 {
-		t.Fatalf("Lookout did not finish after writer release: exit=%d output=%s stderr=%s", code, out, errOut)
+		t.Fatalf("Watch did not finish after writer release: exit=%d output=%s stderr=%s", code, out, errOut)
 	}
 	if !store.IsBusy(errors.New(errOut)) {
-		t.Fatalf("Lookout did not expose its deferred contention: %s", errOut)
+		t.Fatalf("Watch did not expose its deferred contention: %s", errOut)
 	}
 	if fake.CallCount("session.snapshot") < 2 {
-		t.Fatalf("Lookout did not retry reconciliation after contention: snapshots=%d", fake.CallCount("session.snapshot"))
+		t.Fatalf("Watch did not retry reconciliation after contention: snapshots=%d", fake.CallCount("session.snapshot"))
 	}
 	updated, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
 	if err != nil || updated.UpdatedAt <= 1 {
-		t.Fatalf("Lookout did not persist maintenance after writer release: updated_at=%d error=%v", updated.UpdatedAt, err)
+		t.Fatalf("Watch did not persist maintenance after writer release: updated_at=%d error=%v", updated.UpdatedAt, err)
 	}
 	if time.Since(started) < 1500*time.Millisecond {
-		t.Fatal("Lookout returned before the contending writer released its lock")
+		t.Fatal("Watch returned before the contending writer released its lock")
 	}
 }
 
 func TestShowDefersTaskStateRaceDuringObservation(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	fixture.service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = store.ErrStateRace
 
 	code, output, errOut := fixture.run("show", "t1")
@@ -150,8 +150,8 @@ func TestShowDefersTaskStateRaceDuringObservation(t *testing.T) {
 	}
 }
 
-func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+func TestListShowsDurableViewDuringObservationContention(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -166,9 +166,9 @@ func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, output, errOut := fixture.run("roster", "--json")
+	code, output, errOut := fixture.run("list", "--json")
 	if code != 0 || strings.Contains(output, "store_busy") || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "Some Task observations were deferred") {
-		t.Fatalf("roster did not show its durable view with a deferral note: exit=%d output=%s stderr=%s", code, output, errOut)
+		t.Fatalf("list did not show its durable view with a deferral note: exit=%d output=%s stderr=%s", code, output, errOut)
 	}
 
 	code, output, errOut = fixture.run("--json")
@@ -186,12 +186,12 @@ func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
 		{name: "lead", args: []string{"lead"}, want: "instructions"},
 		{name: "show", args: []string{"show", "t1"}, want: "t1"},
 		{name: "project show", args: []string{"project", "show"}, want: "shop"},
-		{name: "remuda", args: []string{"remuda"}, want: "mounts"},
+		{name: "pool", args: []string{"pool"}, want: "sandboxes"},
 		{name: "peek", args: []string{"peek", "t1"}, want: "output"},
 	}
 	for _, command := range commands {
 		t.Run(command.name, func(t *testing.T) {
-			fixture := newPRLandingFixture(t, "local", store.StateWorking)
+			fixture := newPRMergeFixture(t, "local", store.StateWorking)
 			project, err := fixture.db.ProjectByID(context.Background(), fixture.project.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -223,10 +223,10 @@ func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
 	}
 }
 
-func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+func TestSignalDoneSurvivesOtherTasksObservationContention(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	ctx := context.Background()
-	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET type='scout', landing_mode='local', updated_at=1 WHERE id=?`, fixture.task.ID); err != nil {
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET type='research', landing_mode='local', updated_at=1 WHERE id=?`, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.worktree, "report.md"), []byte("Task 1 report\n"), 0o600); err != nil {
@@ -241,7 +241,7 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	defer tx.Rollback()
 	for seq := 2; seq <= taskCount; seq++ {
 		result, err := tx.ExecContext(ctx, `INSERT INTO tasks(project_id,seq,type,title,state,landing_mode,worktree_path,pane_id,pane_label,herdr_workspace_id,created_at,updated_at) VALUES(?,?,?,?,'working',?,?,?,?,?,1,1)`,
-			fixture.project.ID, seq, "scout", fmt.Sprintf("Review %d", seq), "local",
+			fixture.project.ID, seq, "research", fmt.Sprintf("Review %d", seq), "local",
 			filepath.Join(fixture.root, fmt.Sprintf("task-%d", seq)), "w3:p1",
 			fmt.Sprintf("posse:shop:t%d", seq), "w3")
 		if err != nil {
@@ -339,7 +339,7 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	}
 	commandDone := make(chan commandResult, 1)
 	go func() {
-		code, out, errOut := fixture.run("holler", "done", "Review complete", "--report", "report.md")
+		code, out, errOut := fixture.run("signal", "done", "Review complete", "--report", "report.md")
 		commandDone <- commandResult{code: code, out: out, err: errOut}
 	}()
 	select {
@@ -362,10 +362,10 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 		t.Fatalf("independent writer failed: %v", err)
 	}
 	if result.code != 0 {
-		t.Fatalf("holler done failed during unrelated Task observation contention: exit=%d output=%s error=%s", result.code, result.out, result.err)
+		t.Fatalf("signal done failed during unrelated Task observation contention: exit=%d output=%s error=%s", result.code, result.out, result.err)
 	}
 	if store.IsBusy(errors.New(result.err)) {
-		t.Fatalf("Rider saw a contention diagnostic after its Signal committed: %s", result.err)
+		t.Fatalf("Worker saw a contention diagnostic after its Signal committed: %s", result.err)
 	}
 
 	updated, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
@@ -382,7 +382,7 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	t.Setenv(workerHomeEnv, "")
 	t.Setenv("HERDR_PANE_ID", "")
 	for pass := 0; pass < 8 && lastObservationAt <= 1; pass++ {
-		if code, out, errOut := fixture.run("roster", "--json"); code != 0 {
+		if code, out, errOut := fixture.run("list", "--json"); code != 0 {
 			var failure axi.Error
 			if err := json.Unmarshal([]byte(out), &failure); err != nil || failure.Code != "store_busy" || !failure.Retryable {
 				t.Fatalf("deferred observations failed after release: exit=%d output=%s stderr=%s", code, out, errOut)

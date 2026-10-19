@@ -16,19 +16,19 @@ import (
 )
 
 type pruneItem struct {
-	kind      string
-	label     string
-	path      string
-	state     string
-	reason    string
-	bytes     int64
-	seq       int
-	sha       string
-	mount     store.Mount
-	files     []string
-	taskID    int64
-	repoRoot  string
-	mountPath string
+	kind        string
+	label       string
+	path        string
+	state       string
+	reason      string
+	bytes       int64
+	seq         int
+	sha         string
+	sandbox     store.Sandbox
+	files       []string
+	taskID      int64
+	repoRoot    string
+	sandboxPath string
 }
 
 func taskScratchPruneItems(ctx context.Context, db *store.DB, home string, project store.Project) ([]pruneItem, error) {
@@ -96,9 +96,9 @@ func taskScratchPruneOwnership(ctx context.Context, db *store.DB, project store.
 	} else if !store.IsNotFound(err) {
 		return "", "", 0, false, err
 	}
-	mount, err := db.MountByTask(ctx, task.ID)
-	if err == nil && mount.State != "idle" && mount.State != "broken" {
-		return string(task.State), "Task still owns a Mount", task.ID, false, nil
+	sandbox, err := db.SandboxByTask(ctx, task.ID)
+	if err == nil && sandbox.State != "idle" && sandbox.State != "broken" {
+		return string(task.State), "Task still owns a Sandbox", task.ID, false, nil
 	}
 	if err != nil && !store.IsNotFound(err) {
 		return "", "", 0, false, err
@@ -108,7 +108,7 @@ func taskScratchPruneOwnership(ctx context.Context, db *store.DB, project store.
 
 func terminalScratchState(state store.State) bool {
 	switch state {
-	case store.StateLanded, store.StateTornDown, store.StateFailed, store.StateLost:
+	case store.StateMerged, store.StateTornDown, store.StateFailed, store.StateLost:
 		return true
 	default:
 		return false
@@ -289,10 +289,10 @@ func removeTaskArtifactFiles(root string, files []string) error {
 	return nil
 }
 
-func landedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string, project store.Project, tasks []store.Task) ([]pruneItem, error) {
+func mergedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string, project store.Project, tasks []store.Task) ([]pruneItem, error) {
 	items := []pruneItem{}
 	for _, task := range tasks {
-		if task.Branch == "" || !strings.HasPrefix(task.Branch, "posse/") || task.State != store.StateLanded && task.State != store.StateTornDown {
+		if task.Branch == "" || !strings.HasPrefix(task.Branch, "posse/") || task.State != store.StateMerged && task.State != store.StateTornDown {
 			continue
 		}
 		blocked, err := taskBranchPruneBlocked(ctx, db, task)
@@ -333,7 +333,7 @@ func landedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 		}
 		targetRef := "refs/heads/" + taskTargetBranch(project, task)
 		var targetErr error
-		if task.LandingMode == "local" {
+		if task.MergeMode == "local" {
 			_, targetErr = gitOutput(ctx, project.Root, "rev-parse", "--verify", targetRef+"^{commit}")
 		} else {
 			targetRef, targetErr = taskTargetRef(ctx, project, task)
@@ -354,10 +354,10 @@ func landedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 		} else {
 			if targetErr == nil {
 				if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", branchRef, targetRef); err == nil {
-					eligible, reason = true, "Task branch is landed"
+					eligible, reason = true, "Task branch is merged"
 				}
 			}
-			if !eligible && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {
+			if !eligible && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
 				observation, observationErr := db.LatestPRObservation(ctx, task.ID)
 				if observationErr != nil && !store.IsNotFound(observationErr) {
 					return nil, observationErr
@@ -389,9 +389,9 @@ func taskBranchPruneBlocked(ctx context.Context, db *store.DB, task store.Task) 
 	} else if !store.IsNotFound(err) {
 		return false, err
 	}
-	mount, err := db.MountByTask(ctx, task.ID)
+	sandbox, err := db.SandboxByTask(ctx, task.ID)
 	if err == nil {
-		return mount.TaskID == task.ID && (mount.State == "held" || mount.State == "releasing" || mount.State == "pruning"), nil
+		return sandbox.TaskID == task.ID && (sandbox.State == "held" || sandbox.State == "releasing" || sandbox.State == "pruning"), nil
 	}
 	if store.IsNotFound(err) {
 		return false, nil
@@ -490,7 +490,7 @@ func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, p
 		memberTask.TargetBranch = repo.TargetBranch
 		targetRef := "refs/heads/" + taskTargetBranch(memberProject, memberTask)
 		var targetErr error
-		if repo.LandingMode == "local" {
+		if repo.MergeMode == "local" {
 			_, targetErr = gitOutput(ctx, root, "rev-parse", "--verify", targetRef+"^{commit}")
 		} else {
 			targetRef, targetErr = taskTargetRef(ctx, memberProject, memberTask)
@@ -516,9 +516,9 @@ func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, p
 				continue
 			}
 			eligible, reason = true, "approved discard tip is captured"
-		} else if repo.State == store.TaskRepoLanded && repo.LandedRef != "" && repo.GatedSHA == sha {
-			if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", sha, repo.LandedRef); err == nil || repo.LandingMode == "pr" || repo.LandingMode == "no-mistakes" {
-				eligible, reason = true, "Task branch is landed"
+		} else if repo.State == store.TaskRepoMerged && repo.MergedRef != "" && repo.GatedSHA == sha {
+			if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", sha, repo.MergedRef); err == nil || repo.MergeMode == "pr" || repo.MergeMode == "no-mistakes" {
+				eligible, reason = true, "Task branch is merged"
 			}
 		}
 		if !eligible {
@@ -629,7 +629,7 @@ func gitReachableBytes(ctx context.Context, root, ref, base string) (int64, erro
 	return total, nil
 }
 
-func staleOwnedWorktreeItems(ctx context.Context, db *store.DB, project store.Project, home string, mounts []store.Mount) ([]pruneItem, error) {
+func staleOwnedWorktreeItems(ctx context.Context, db *store.DB, project store.Project, home string, sandboxes []store.Sandbox) ([]pruneItem, error) {
 	type repository struct {
 		root       string
 		memberPath string
@@ -648,7 +648,7 @@ func staleOwnedWorktreeItems(ctx context.Context, db *store.DB, project store.Pr
 			repositories = append(repositories, repository{root: filepath.Join(project.Root, repo.Path), memberPath: repo.Path})
 		}
 	}
-	managed := filepath.Join(home, "remuda", project.Name)
+	managed := poolProjectPath(home, project.Name)
 	items := []pruneItem{}
 	seen := map[string]bool{}
 	for _, repository := range repositories {
@@ -667,17 +667,17 @@ func staleOwnedWorktreeItems(ctx context.Context, db *store.DB, project store.Pr
 					prunable = true
 				}
 			}
-			if !prunable || path == "" || !safeManagedMountParent(home, project.Name) {
+			if !prunable || path == "" || !safeManagedSandboxParent(home, project.Name) {
 				continue
 			}
-			mountPath := filepath.Clean(path)
+			sandboxPath := filepath.Clean(path)
 			if project.IsWorkspace() {
 				var ok bool
-				mountPath, ok = managedWorkspaceWorktreeMount(managed, path, repository.memberPath)
+				sandboxPath, ok = managedWorkspaceWorktreeSandbox(managed, path, repository.memberPath)
 				if !ok {
 					continue
 				}
-			} else if !managedMountPath(managed, path) {
+			} else if !managedSandboxPath(managed, path) {
 				continue
 			}
 			if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
@@ -688,43 +688,43 @@ func staleOwnedWorktreeItems(ctx context.Context, db *store.DB, project store.Pr
 			}
 			seen[filepath.Clean(path)] = true
 			if project.IsWorkspace() {
-				info, statErr := os.Lstat(mountPath)
+				info, statErr := os.Lstat(sandboxPath)
 				if statErr == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
 					continue
 				} else if statErr != nil && !os.IsNotExist(statErr) {
 					return nil, statErr
 				}
 			}
-			var knownMount store.Mount
-			for _, mount := range mounts {
-				if filepath.Clean(mount.Path) == mountPath {
-					knownMount = mount
+			var knownSandbox store.Sandbox
+			for _, sandbox := range sandboxes {
+				if filepath.Clean(sandbox.Path) == sandboxPath {
+					knownSandbox = sandbox
 					break
 				}
 			}
-			if knownMount.ID != 0 && (knownMount.State == "held" || knownMount.State == "releasing" || knownMount.State == "pruning" || knownMount.TaskID != 0) {
+			if knownSandbox.ID != 0 && (knownSandbox.State == "held" || knownSandbox.State == "releasing" || knownSandbox.State == "pruning" || knownSandbox.TaskID != 0) {
 				continue
 			}
 			items = append(items, pruneItem{
-				kind: "worktree-registration", label: filepath.Base(mountPath), path: filepath.Clean(path),
-				state: "stale", reason: "missing Posse-owned Mount checkout", mount: knownMount,
-				repoRoot: repository.root, mountPath: mountPath,
+				kind: "worktree-registration", label: filepath.Base(sandboxPath), path: filepath.Clean(path),
+				state: "stale", reason: "missing Posse-owned Sandbox checkout", sandbox: knownSandbox,
+				repoRoot: repository.root, sandboxPath: sandboxPath,
 			})
 		}
 	}
 	return items, nil
 }
 
-func managedWorkspaceWorktreeMount(managed, path, memberPath string) (string, bool) {
+func managedWorkspaceWorktreeSandbox(managed, path, memberPath string) (string, bool) {
 	relative, err := filepath.Rel(managed, filepath.Clean(path))
 	if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", false
 	}
 	parts := strings.Split(filepath.Clean(relative), string(filepath.Separator))
-	if len(parts) < 2 || !strings.HasPrefix(parts[0], "mount-") {
+	if len(parts) < 2 {
 		return "", false
 	}
-	if _, err := strconv.Atoi(strings.TrimPrefix(parts[0], "mount-")); err != nil {
+	if _, ok := sandboxDirectoryNumber(parts[0]); !ok {
 		return "", false
 	}
 	if filepath.Clean(filepath.Join(parts[1:]...)) != filepath.Clean(memberPath) {
@@ -733,17 +733,18 @@ func managedWorkspaceWorktreeMount(managed, path, memberPath string) (string, bo
 	return filepath.Join(managed, parts[0]), true
 }
 
-func safeManagedMountPath(home, project, path string) bool {
-	root := filepath.Join(home, "remuda", project)
-	if !managedMountPath(root, path) || !safeManagedMountParent(home, project) {
+func safeManagedSandboxPath(home, project, path string) bool {
+	root := poolProjectPath(home, project)
+	if !managedSandboxPath(root, path) || !safeManagedSandboxParent(home, project) {
 		return false
 	}
 	info, err := os.Lstat(path)
 	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0
 }
 
-func safeManagedMountParent(home, project string) bool {
-	for _, directory := range []string{filepath.Join(home, "remuda"), filepath.Join(home, "remuda", project)} {
+func safeManagedSandboxParent(home, project string) bool {
+	root := poolProjectPath(home, project)
+	for _, directory := range []string{filepath.Dir(root), root} {
 		info, err := os.Lstat(directory)
 		if os.IsNotExist(err) {
 			return true
@@ -755,7 +756,7 @@ func safeManagedMountParent(home, project string) bool {
 	return true
 }
 
-func managedMountPath(root, path string) bool {
+func managedSandboxPath(root, path string) bool {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return false
@@ -769,11 +770,8 @@ func managedMountPath(root, path string) bool {
 		return false
 	}
 	name := filepath.Base(relative)
-	if !strings.HasPrefix(name, "mount-") {
-		return false
-	}
-	_, err = strconv.Atoi(strings.TrimPrefix(name, "mount-"))
-	return err == nil
+	_, ok := sandboxDirectoryNumber(name)
+	return ok
 }
 
 func removeStaleWorktreeRegistration(ctx context.Context, root, path string) error {

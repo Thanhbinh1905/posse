@@ -66,7 +66,7 @@ func newFirstOutcomeFixture(t *testing.T) firstOutcomeFixture {
 	fake.RunOut["integration status"] = []byte("pi: installed\n")
 	fake.RunOut["plugin log list --plugin posse.herdr"] = []byte(`{}`)
 	brief := filepath.Join(root, "brief.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: First outcome\ndone_when: verified\n---\nMake a change.\n"), 0600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: First outcome\ndone_when: verified\n---\nMake a change.\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(repo)
@@ -181,7 +181,7 @@ func TestFirstOutcomeUpReportsNoMistakesReadinessOnRefusal(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(projectConfig), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(projectConfig, []byte("[defaults]\nlanding_mode='no-mistakes'\n"), 0600); err != nil {
+	if err := os.WriteFile(projectConfig, []byte("[defaults]\nmerge_mode='no-mistakes'\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_ENV", "1")
@@ -204,7 +204,7 @@ func TestFirstOutcomeDispatchPrecedence(t *testing.T) {
 		{name: "named Profiles without rules", config: "[profiles.deep]\nkind='codex'\n", source: "implicit: lead kind", expectedProfile: "implicit:pi"},
 		{name: "live Lead overrides default Lead", config: "[lead]\nkind='codex'\n", source: "implicit: lead kind", expectedProfile: "implicit:pi"},
 		{name: "default", config: "[profiles.deep]\nkind='codex'\n[dispatch.default]\nuse='deep'\n", source: "dispatch.default", expectedProfile: "deep"},
-		{name: "single rule", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\ntype='ship'\nuse='deep'\n", source: "type=ship", expectedProfile: "deep"},
+		{name: "single rule", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\ntype='change'\nuse='deep'\n", source: "type=change", expectedProfile: "deep"},
 		{name: "explicit", config: "[profiles.deep]\nkind='codex'\n", profile: "deep", source: "--profile deep", expectedProfile: "deep"},
 		{name: "ambiguous", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\nwhen='hard'\nuse='deep'\n[[dispatch]]\nwhen='easy'\nuse='deep'\n[dispatch.default]\nuse='deep'\n", code: 1},
 		{name: "unmatched configured rule", config: "[profiles.deep]\nkind='codex'\n[[dispatch]]\ntype='review'\nuse='deep'\n", code: 1},
@@ -246,38 +246,38 @@ kind='claude'
 [profiles.codex-sol]
 kind='codex'
 [[dispatch]]
-type='scout'
+type='research'
 use='pi-luna'
 [[dispatch]]
-type='scout'
+type='research'
 when='science-heavy research'
 use='pi-sol'
 [[dispatch]]
-type='scout'
+type='research'
 when='exceptionally technical science research or pi-sol already failed'
 use='claude-opus'
 [[dispatch]]
-type='scout'
+type='research'
 when='plan or design; pi-sol by default'
 use='pi-sol'
 [[dispatch]]
-type='scout'
+type='research'
 when='exceptionally technical plan or design, or pi-sol already failed'
 use='claude-opus'
 [[dispatch]]
-type='ship'
+type='change'
 when='plan or design; pi-sol by default'
 use='pi-sol'
 [[dispatch]]
-type='ship'
+type='change'
 when='exceptionally technical plan or design, or pi-sol already failed'
 use='claude-opus'
 [[dispatch]]
-type='ship'
+type='change'
 when='clear-scope implementation; choose based on load and fit'
 use='pi-luna'
 [[dispatch]]
-type='ship'
+type='change'
 when='clear-scope implementation; choose based on load and fit'
 use='claude-sonnet'
 [[dispatch]]
@@ -298,13 +298,13 @@ use='pi-luna'
 	for _, tc := range []struct {
 		name, taskType, profile, expected string
 	}{
-		{name: "type default", taskType: "scout", expected: "pi-luna"},
-		{name: "conditional selection", taskType: "scout", profile: "pi-sol", expected: "pi-sol"},
-		{name: "alternate explicit selection", taskType: "scout", profile: "claude-opus", expected: "claude-opus"},
-		{name: "ship conditional selection", taskType: "ship", profile: "pi-sol", expected: "pi-sol"},
-		{name: "ship alternate selection", taskType: "ship", profile: "claude-opus", expected: "claude-opus"},
-		{name: "ship Profile choice one", taskType: "ship", profile: "pi-luna", expected: "pi-luna"},
-		{name: "ship Profile choice two", taskType: "ship", profile: "claude-sonnet", expected: "claude-sonnet"},
+		{name: "type default", taskType: "research", expected: "pi-luna"},
+		{name: "conditional selection", taskType: "research", profile: "pi-sol", expected: "pi-sol"},
+		{name: "alternate explicit selection", taskType: "research", profile: "claude-opus", expected: "claude-opus"},
+		{name: "change conditional selection", taskType: "change", profile: "pi-sol", expected: "pi-sol"},
+		{name: "change alternate selection", taskType: "change", profile: "claude-opus", expected: "claude-opus"},
+		{name: "change Profile choice one", taskType: "change", profile: "pi-luna", expected: "pi-luna"},
+		{name: "change Profile choice two", taskType: "change", profile: "claude-sonnet", expected: "claude-sonnet"},
 		{name: "review Profile choice one", taskType: "review", profile: "pi-luna", expected: "pi-luna"},
 		{name: "review Profile choice two", taskType: "review", profile: "claude-sonnet", expected: "claude-sonnet"},
 	} {
@@ -354,14 +354,14 @@ use='pi-luna'
 		t.Fatal(err)
 	}
 	projectConfig := `[[dispatch]]
-type='scout'
+type='research'
 use='pi-luna'
 [[dispatch]]
-type='scout'
+type='research'
 when='science-heavy research'
 use='pi-sol'
 [[dispatch]]
-type='scout'
+type='research'
 when='exceptionally technical research'
 use='claude-opus'
 `
@@ -372,7 +372,7 @@ use='claude-opus'
 	if err := os.WriteFile(projectConfigPath, []byte(projectConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
-	brief := "---\ntype: scout\ntitle: Scout resolver merge\ndone_when: the phase default resolves\n---\nInvestigate dispatch behavior.\n"
+	brief := "---\ntype: research\ntitle: Research resolver merge\ndone_when: the phase default resolves\n---\nInvestigate dispatch behavior.\n"
 	if err := os.WriteFile(f.brief, []byte(brief), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -389,8 +389,8 @@ use='claude-opus'
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("dispatch output is not JSON: %v\n%s", err, output)
 	}
-	if result.TaskType != "scout" || result.Profile != "pi-luna" || result.DispatchRule != "type=scout" {
-		t.Fatalf("merged dispatch resolution = %#v, want scout phase default pi-luna: %s", result, output)
+	if result.TaskType != "research" || result.Profile != "pi-luna" || result.DispatchRule != "type=research" {
+		t.Fatalf("merged dispatch resolution = %#v, want research phase default pi-luna: %s", result, output)
 	}
 }
 
@@ -407,19 +407,19 @@ kind='claude'
 [profiles.codex-sol]
 kind='codex'
 [[dispatch]]
-type='ship'
+type='change'
 when='plan or design; pi-sol by default'
 use='pi-sol'
 [[dispatch]]
-type='ship'
+type='change'
 when='exceptionally technical plan or design, or pi-sol already failed'
 use='claude-opus'
 [[dispatch]]
-type='ship'
+type='change'
 when='clear-scope implementation; choose based on load and fit'
 use='pi-luna'
 [[dispatch]]
-type='ship'
+type='change'
 when='clear-scope implementation; choose based on load and fit'
 use='claude-sonnet'
 [[dispatch]]
@@ -435,11 +435,11 @@ use='pi-luna'
 	output := outcomeCLI(t, f.service, 1, "dispatch", "--brief", f.brief, "--json")
 	for _, candidate := range []string{"pi-sol", "claude-opus", "pi-luna", "claude-sonnet"} {
 		if !strings.Contains(output, candidate) {
-			t.Fatalf("typed ship choices omitted %s: %s", candidate, output)
+			t.Fatalf("typed change choices omitted %s: %s", candidate, output)
 		}
 	}
 	if strings.Contains(output, "codex-sol") || strings.Contains(output, "image work") {
-		t.Fatalf("generic rule competed with typed ship choices: %s", output)
+		t.Fatalf("generic rule competed with typed change choices: %s", output)
 	}
 }
 
@@ -459,16 +459,16 @@ func TestFirstOutcomeDispatchOmitsProfileArguments(t *testing.T) {
 	}
 }
 
-func TestFirstOutcomeImplicitRideRelaunchAndRecovery(t *testing.T) {
+func TestFirstOutcomeImplicitStartRelaunchAndRecovery(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
-	// This fixture has no origin, so Ship delivery must be local.
-	outcomeCLI(t, f.service, 0, "config", "set", "defaults.landing_mode", "local", "--project", "shop")
+	// This fixture has no origin, so Change delivery must be local.
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "local", "--project", "shop")
 	f.fake.BeforeCall = func(method string) {
 		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
 			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})
 		}
 	}
-	output := outcomeCLI(t, f.service, 0, "ride", "--brief", f.brief, "--name", "first-outcome")
+	output := outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "first-outcome")
 	if !strings.Contains(output, "implicit:pi") {
 		t.Fatal(output)
 	}
@@ -479,15 +479,15 @@ func TestFirstOutcomeImplicitRideRelaunchAndRecovery(t *testing.T) {
 	if task.Profile != "implicit:pi" || task.DispatchRule != "implicit: lead kind" || task.State != store.StateWorking {
 		t.Fatalf("Task: %#v", task)
 	}
-	// Changing the Lead and adding rules must not change the already resolved Rider.
+	// Changing the Lead and adding rules must not change the already resolved Worker.
 	outcomeCLI(t, f.service, 0, "config", "set", "lead.kind", "codex")
 	outcomeCLI(t, f.service, 0, "config", "set", "profiles.routing.kind", "codex")
-	outcomeCLI(t, f.service, 0, "config", "set", "dispatch", "[{type='ship', use='routing'}]")
+	outcomeCLI(t, f.service, 0, "config", "set", "dispatch", "[{type='change', use='routing'}]")
 	output = outcomeCLI(t, f.service, 0, "relaunch", "t1")
 	if !strings.Contains(output, "working") {
 		t.Fatal(output)
 	}
-	// Recover a missing Rider pane using the same persisted implicit kind.
+	// Recover a missing Worker pane using the same persisted implicit kind.
 	f.fake.SnapshotValue.Panes = f.fake.SnapshotValue.Panes[:1]
 	outcomeCLI(t, f.service, 0, "relaunch", "t1")
 	for _, call := range f.fake.Calls {
@@ -608,7 +608,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, "no-mistakes-ready"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	outcomeCLI(t, f.service, 0, "config", "set", "defaults.landing_mode", "no-mistakes", "--project", "shop")
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "no-mistakes", "--project", "shop")
 	if err := os.Remove(filepath.Join(f.root, "no-mistakes-ready")); err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +635,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	output := outcomeCLI(t, f.service, 0, "lead")
-	for _, rule := range []string{"Default workflow guidance", "lightest workflow", "one Ship Brief and dispatch it directly", "Scouts, specifications, tickets and separate review Tasks are optional", "consequential questions", "Investigate repository facts before asking the User", "runtime obligations", "explicit yes", "--user-approved", "one-off permission never becomes standing Autonomy", "deliverable", "verification", "permitted effects", "return conditions", "setup and personalization optional", "at most once", "language they write in", "lowkey", "posse preferences set <lead|rider> --file <file>", "Riders cannot write preferences"} {
+	for _, rule := range []string{"Default workflow guidance", "lightest workflow", "one Change Brief and dispatch it directly", "Research Tasks, specifications, tickets and separate review Tasks are optional", "consequential questions", "Investigate repository facts before asking the User", "runtime obligations", "explicit yes", "--user-approved", "one-off permission never becomes standing Autonomy", "deliverable", "verification", "permitted effects", "return conditions", "setup and personalization optional", "at most once", "language they write in", "lowkey", "posse preferences set <lead|worker> --file <file>", "Workers cannot write preferences"} {
 		if !strings.Contains(output, rule) {
 			t.Fatalf("Lead missing %q: %s", rule, output)
 		}

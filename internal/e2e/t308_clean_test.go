@@ -19,11 +19,11 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestTeardownBlockedNoticeNamesForeignMountServer(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	task := f.ride(t, "t1", "Foreign Mount server", "foreign-mount-server")
+func TestTeardownBlockedNoticeNamesForeignSandboxServer(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Foreign Sandbox server", "foreign-sandbox-server")
 	markTaskReported(t, f, task)
-	f.exitRider(t, "t1")
+	f.exitWorker(t, "t1")
 
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -66,7 +66,7 @@ while True:
 		_, err := os.Stat(pidPath)
 		return err == nil
 	}) {
-		t.Fatal("foreign Mount server did not start")
+		t.Fatal("foreign Sandbox server did not start")
 	}
 	pidBytes, err := os.ReadFile(pidPath)
 	if err != nil {
@@ -82,13 +82,13 @@ while True:
 	}
 	processes["foreign-server"] = teardownFixtureProcess{PID: pid, BootID: bootID, StartTime: startTime}
 
-	teardown := exec.Command(f.binary, "unsaddle", "t1")
+	teardown := exec.Command(f.binary, "teardown", "t1")
 	teardown.Dir, teardown.Env = f.repo, f.leadEnv
 	output, teardownErr := teardown.CombinedOutput()
 	if teardownErr == nil {
-		t.Fatalf("Teardown unexpectedly succeeded with foreign Mount server PID %d: %s", pid, output)
+		t.Fatalf("Teardown unexpectedly succeeded with foreign Sandbox server PID %d: %s", pid, output)
 	}
-	if !strings.Contains(string(output), "unsaddle_incomplete") {
+	if !strings.Contains(string(output), "teardown_incomplete") {
 		t.Fatalf("Teardown failure was not reported: %v\n%s", teardownErr, output)
 	}
 	db, err := store.OpenReadOnly(f.home)
@@ -108,10 +108,10 @@ while True:
 	if blocked == nil || !strings.Contains(blocked.Summary, strconv.Itoa(pid)) || !strings.Contains(blocked.Summary, strconv.Itoa(port)) || !strings.Contains(blocked.Summary, "python3") {
 		t.Fatalf("teardown_blocked Notice did not identify PID, command and listening port: %#v", blocked)
 	}
-	mount, mountErr := db.MountByTask(context.Background(), task.ID)
+	sandbox, sandboxErr := db.SandboxByTask(context.Background(), task.ID)
 	_ = db.Close()
-	if mountErr != nil || mount.State != "held" {
-		t.Fatalf("foreign process did not preserve the held Mount: %#v, %v", mount, mountErr)
+	if sandboxErr != nil || sandbox.State != "held" {
+		t.Fatalf("foreign process did not preserve the held Sandbox: %#v, %v", sandbox, sandboxErr)
 	}
 	if !teardownFixtureProcessRunning(processes["foreign-server"]) {
 		t.Fatal("Teardown signalled the foreign process")
@@ -144,29 +144,29 @@ while True:
 }
 
 func TestCleanDryRunAndReclaimsFinishedTask(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	task := f.ride(t, "t1", "Clean finished Task", "clean-finished-task")
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Clean finished Task", "clean-finished-task")
 	scratch := filepath.Join(f.home, "scratch", "shop", fmt.Sprintf("t%d", task.Seq))
 	if err := os.WriteFile(filepath.Join(scratch, "clean-me.tmp"), []byte("task temp data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	markTaskReported(t, f, task)
-	f.exitRider(t, "t1")
+	f.exitWorker(t, "t1")
 
 	var preview struct {
 		DryRun bool `json:"dry_run"`
 		Clean  []struct {
-			Task        string `json:"task"`
-			ScratchSize int64  `json:"scratch_bytes"`
-			MountState  string `json:"mount_state"`
-			Result      string `json:"result"`
+			Task         string `json:"task"`
+			ScratchSize  int64  `json:"scratch_bytes"`
+			SandboxState string `json:"sandbox_state"`
+			Result       string `json:"result"`
 		} `json:"clean"`
 	}
 	output := runPosse(t, f.binary, f.repo, f.leadEnv, "clean", "--dry-run", "--json")
 	if err := json.Unmarshal([]byte(output), &preview); err != nil {
 		t.Fatalf("decode clean dry-run output: %v: %s", err, output)
 	}
-	if !preview.DryRun || len(preview.Clean) != 1 || preview.Clean[0].Task != "t1" || preview.Clean[0].ScratchSize == 0 || preview.Clean[0].MountState != "held" || preview.Clean[0].Result != "dry_run" {
+	if !preview.DryRun || len(preview.Clean) != 1 || preview.Clean[0].Task != "t1" || preview.Clean[0].ScratchSize == 0 || preview.Clean[0].SandboxState != "held" || preview.Clean[0].Result != "dry_run" {
 		t.Fatalf("clean dry run did not describe the finished Task: %#v", preview)
 	}
 	if current := f.task(t, "t1"); current.State != store.StateReported {
@@ -220,14 +220,14 @@ func TestCleanDryRunAndReclaimsFinishedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mounts, err := db.Mounts(context.Background(), f.projectID)
+	sandboxes, err := db.Sandboxes(context.Background(), f.projectID)
 	_ = db.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mount := range mounts {
-		if mount.TaskID == task.ID && mount.State != "idle" {
-			t.Fatalf("Mount after clean = %#v", mount)
+	for _, sandbox := range sandboxes {
+		if sandbox.TaskID == task.ID && sandbox.State != "idle" {
+			t.Fatalf("Sandbox after clean = %#v", sandbox)
 		}
 	}
 }

@@ -21,7 +21,7 @@ func TestDoneSignalRefusesUndeliveredTaskInstructions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Investigate", MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}

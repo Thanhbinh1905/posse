@@ -12,7 +12,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestLookoutExposesAmbiguousNoticeDelivery(t *testing.T) {
+func TestWatchExposesAmbiguousNoticeDelivery(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -44,7 +44,7 @@ func TestLookoutExposesAmbiguousNoticeDelivery(t *testing.T) {
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{ServerStartedAt: "server-generation-1", Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "pi", AgentStatus: "idle"}}}
 	service := testService(home, fake)
-	code, output := runCLI(t, service, "lookout", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
+	code, output := runCLI(t, service, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
 	if code != 0 {
 		t.Fatalf("claim Notice handoff: %s", output)
 	}
@@ -65,11 +65,11 @@ func TestLookoutExposesAmbiguousNoticeDelivery(t *testing.T) {
 		t.Fatalf("handoff result = %+v", batch)
 	}
 
-	code, output = runCLI(t, service, "lookout", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "uncertain", "--receipt-token", batch.Delivery.OwnerToken)
+	code, output = runCLI(t, service, "watch", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "uncertain", "--receipt-token", batch.Delivery.OwnerToken)
 	if code != 0 {
 		t.Fatalf("record ambiguous receipt: %s", output)
 	}
-	code, output = runCLI(t, service, "lookout", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
+	code, output = runCLI(t, service, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
 	if code != 0 || !strings.Contains(output, `"state":"uncertain"`) || !strings.Contains(output, batch.Delivery.BatchID) || !strings.Contains(output, "Inspect that Lead session before retrying") {
 		t.Fatalf("ambiguous receipt was not exposed: code=%d output=%s", code, output)
 	}
@@ -82,11 +82,11 @@ func TestLookoutExposesAmbiguousNoticeDelivery(t *testing.T) {
 	if err != nil || len(notices) != 1 || notices[0].Kind != "notice_delivery_uncertain" {
 		t.Fatalf("uncertainty Notice = %#v, %v", notices, err)
 	}
-	code, output = runCLI(t, service, "lookout", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "rejected")
+	code, output = runCLI(t, service, "watch", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "rejected")
 	if code != 0 {
 		t.Fatalf("explicitly resolve uncertain receipt: %s", output)
 	}
-	code, output = runCLI(t, service, "lookout", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
+	code, output = runCLI(t, service, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
 	if code != 0 {
 		t.Fatalf("retry manually rejected batch: %s", output)
 	}
@@ -107,7 +107,7 @@ func TestLookoutExposesAmbiguousNoticeDelivery(t *testing.T) {
 	}
 }
 
-func TestLookoutReplacementSessionSurfacesPrintedUncertainty(t *testing.T) {
+func TestWatchReplacementSessionSurfacesPrintedUncertainty(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -149,7 +149,7 @@ func TestLookoutReplacementSessionSurfacesPrintedUncertainty(t *testing.T) {
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{ServerStartedAt: "server-generation-2", Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "pi", AgentStatus: "idle"}}}
 	service := testService(home, fake)
-	code, output := runCLI(t, service, "lookout", "--json", "--quiet-routine", "--handoff", "--destination", "pi:new-session")
+	code, output := runCLI(t, service, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:new-session")
 	if code != 0 || !strings.Contains(output, `"state":"uncertain"`) || !strings.Contains(output, delivery.BatchID) || !strings.Contains(output, "pi:old-session") || !strings.Contains(output, strings.Join(int64Strings([]int64{noticeID}), ",")) {
 		t.Fatalf("replacement session did not expose old printed batch uncertainty: code=%d output=%s", code, output)
 	}
@@ -168,7 +168,7 @@ func TestLookoutReplacementSessionSurfacesPrintedUncertainty(t *testing.T) {
 	}
 }
 
-func TestLookoutReceiptResolutionCannotCrossProjects(t *testing.T) {
+func TestWatchReceiptResolutionCannotCrossProjects(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -218,11 +218,11 @@ func TestLookoutReceiptResolutionCannotCrossProjects(t *testing.T) {
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{ServerStartedAt: "server-generation-1", Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "pi", AgentStatus: "idle"}}}
 	service := testService(home, fake)
-	code, output := runCLI(t, service, "lookout", "--json", "--receipt", delivery.DeliveryID, "--receipt-outcome", "accepted")
+	code, output := runCLI(t, service, "watch", "--json", "--receipt", delivery.DeliveryID, "--receipt-outcome", "accepted")
 	if code == 0 {
 		t.Fatalf("tokenless cross-Project resolution succeeded: %s", output)
 	}
-	code, output = runCLI(t, service, "lookout", "--json", "--receipt", delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", "foreign-owner")
+	code, output = runCLI(t, service, "watch", "--json", "--receipt", delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", "foreign-owner")
 	if code == 0 {
 		t.Fatalf("token-backed cross-Project resolution succeeded: %s", output)
 	}

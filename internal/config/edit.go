@@ -12,6 +12,9 @@ import (
 )
 
 func ReadFile(path string) (map[string]any, []byte, error) {
+	if err := migrateVocabularyFile(path); err != nil {
+		return nil, nil, err
+	}
 	contents, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return map[string]any{}, nil, nil
@@ -29,7 +32,7 @@ func ReadFile(path string) (map[string]any, []byte, error) {
 func SetFile(path, key, text string, projectFile bool) (any, error) {
 	spec, ok := Lookup(key)
 	if !ok {
-		return nil, &InvalidError{File: path, Key: key, Reason: "unknown configuration key"}
+		return nil, &InvalidError{File: path, Key: key, Reason: unknownKeyReason(key)}
 	}
 	value, literal, err := parseSetting(key, spec, text, projectFile)
 	if err != nil {
@@ -51,7 +54,7 @@ func SetFile(path, key, text string, projectFile bool) (any, error) {
 
 func UnsetFile(path, key string, projectFile bool) error {
 	if _, ok := Lookup(key); !ok {
-		return &InvalidError{File: path, Key: key, Reason: "unknown configuration key"}
+		return &InvalidError{File: path, Key: key, Reason: unknownKeyReason(key)}
 	}
 	_, original, err := ReadFile(path)
 	if err != nil {

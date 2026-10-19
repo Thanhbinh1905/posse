@@ -61,7 +61,7 @@ func TestPostSignalMixedContentionAndPersistentFailureIsVisible(t *testing.T) {
 		t.Fatalf("first unrelated Task did not complete after transient contention: %d %v", stale, err)
 	}
 	if strings.Contains(output.String(), "SQLITE_BUSY") || strings.Contains(output.String(), "database contention") || !strings.Contains(output.String(), "non-transient review constraint failure") {
-		t.Fatalf("Rider should see persistent maintenance failure without transient contention details: %s", output.String())
+		t.Fatalf("Worker should see persistent maintenance failure without transient contention details: %s", output.String())
 	}
 	stored, err := f.db.TaskByID(context.Background(), f.project.ID, task.ID)
 	if err != nil || stored.State != store.StateFailed {
@@ -69,7 +69,7 @@ func TestPostSignalMixedContentionAndPersistentFailureIsVisible(t *testing.T) {
 	}
 }
 
-func TestRosterSucceedsDuringTransientObservationContention(t *testing.T) {
+func TestListSucceedsDuringTransientObservationContention(t *testing.T) {
 	f, _, _, _, _ := newPostSignalContentionFixtureWithLead(t, false)
 	client := herdr.NewWithEnv("herdr", f.env)
 	snapshot, err := client.Snapshot(context.Background())
@@ -86,13 +86,13 @@ func TestRosterSucceedsDuringTransientObservationContention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker, gate := filepath.Join(f.root, "roster-status"), filepath.Join(f.root, "roster-continue")
-	shim := filepath.Join(f.root, "roster-herdr")
+	marker, gate := filepath.Join(f.root, "list-status"), filepath.Join(f.root, "list-continue")
+	shim := filepath.Join(f.root, "list-herdr")
 	script := "#!/bin/sh\nset -eu\nif [ \"$*\" = 'status server --json' ]; then\n  : > " + shellQuote(marker) + "\n  while [ ! -e " + shellQuote(gate) + " ]; do sleep 0.01; done\nfi\nexec " + shellQuote(realHerdr) + " \"$@\"\n"
 	if err := os.WriteFile(shim, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(f.binary, "roster", "--json")
+	command := exec.Command(f.binary, "list", "--json")
 	command.Dir, command.Env = f.repo, setEnv(f.leadEnv, "HERDR_BIN_PATH", shim)
 	output := &bytes.Buffer{}
 	command.Stdout, command.Stderr = output, output
@@ -103,7 +103,7 @@ func TestRosterSucceedsDuringTransientObservationContention(t *testing.T) {
 	go func() { done <- command.Wait() }()
 	t.Cleanup(func() { _ = command.Process.Kill() })
 	if !waitForCondition(10*time.Second, func() bool { _, err := os.Stat(marker); return err == nil }) {
-		t.Fatal("roster did not reach its isolated Herdr status checkpoint")
+		t.Fatal("list did not reach its isolated Herdr status checkpoint")
 	}
 	writer, err := store.OpenAt(filepath.Join(f.home, "posse.db"))
 	if err != nil {
@@ -137,7 +137,7 @@ func TestRosterSucceedsDuringTransientObservationContention(t *testing.T) {
 		t.Fatal(err)
 	}
 	if commandErr != nil || strings.Contains(output.String(), "store_busy") || !strings.Contains(output.String(), `"tasks"`) {
-		t.Fatalf("roster should keep showing its durable Task view during observation contention: error=%v output=%s", commandErr, output.String())
+		t.Fatalf("list should keep showing its durable Task view during observation contention: error=%v output=%s", commandErr, output.String())
 	}
 }
 
@@ -149,13 +149,13 @@ func newPostSignalContentionFixtureWithLead(t *testing.T, liveLead bool) (*prLif
 	t.Helper()
 	f := newPRLifecycleFixtureWithLead(t, liveLead)
 	t.Cleanup(func() { _ = f.db.Close() })
-	for _, pid := range lookoutPIDs(f.root) {
+	for _, pid := range watchPIDs(f.root) {
 		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 			t.Fatal(err)
 		}
 	}
-	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 0 }) {
-		t.Fatal("fixture Lookout did not stop")
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatal("fixture Watch did not stop")
 	}
 	ctx := context.Background()
 	client := herdr.NewWithEnv("herdr", f.env)
@@ -172,7 +172,7 @@ func newPostSignalContentionFixtureWithLead(t *testing.T, liveLead bool) (*prLif
 		if _, err := client.Run(ctx, "pane", "report-agent", pane.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
 			t.Fatal(err)
 		}
-		id, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: seq, Type: "scout", Title: label, LandingMode: "local", Branch: label, BaseRef: "main", WorktreePath: f.repo, HerdrWorkspaceID: f.project.HerdrWorkspaceID, PaneID: pane.RootPane.PaneID, PaneLabel: label})
+		id, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: seq, Type: "research", Title: label, MergeMode: "local", Branch: label, BaseRef: "main", WorktreePath: f.repo, HerdrWorkspaceID: f.project.HerdrWorkspaceID, PaneID: pane.RootPane.PaneID, PaneLabel: label})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -180,11 +180,11 @@ func newPostSignalContentionFixtureWithLead(t *testing.T, liveLead bool) (*prLif
 			t.Fatal(err)
 		}
 		if seq == 1 {
-			mount, err := f.db.AcquireMount(ctx, f.project.ID, id, filepath.Join(f.home, "remuda"))
+			sandbox, err := f.db.AcquireSandbox(ctx, f.project.ID, id, filepath.Join(f.home, "pool"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			gitTest(t, f.env, f.repo, "worktree", "add", "-b", "posse/review-a29", mount.Path, "main")
+			gitTest(t, f.env, f.repo, "worktree", "add", "-b", "posse/review-a29", sandbox.Path, "main")
 			first, err = f.db.TaskByID(ctx, f.project.ID, id)
 			if err != nil {
 				t.Fatal(err)
@@ -214,7 +214,7 @@ func newPostSignalContentionFixtureWithLead(t *testing.T, liveLead bool) (*prLif
 
 func startPostSignalContention(t *testing.T, f *prLifecycleFixture, task store.Task, env []string, marker, verb string) (*bytes.Buffer, chan error) {
 	t.Helper()
-	command := exec.Command(f.binary, "holler", verb, "post-Signal contention reproduction")
+	command := exec.Command(f.binary, "signal", verb, "post-Signal contention reproduction")
 	command.Env, command.Dir = env, task.WorktreePath
 	output := &bytes.Buffer{}
 	command.Stdout, command.Stderr = output, output

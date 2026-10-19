@@ -65,13 +65,13 @@ func (a *t282StaleLaunchAdapter) Call(ctx context.Context, method string, params
 	return a.Client.Call(ctx, method, params)
 }
 
-func TestStoppedRiderConcurrentReplacementPreservesLifecycleAuthority(t *testing.T) {
+func TestStoppedWorkerConcurrentReplacementPreservesLifecycleAuthority(t *testing.T) {
 	for _, kind := range []string{"codex", "opencode"} {
 		t.Run(kind, func(t *testing.T) {
 			service, client, paneID, root := newT282LifecycleService(t, kind)
 			ctx := context.Background()
 			if _, err := service.startAgent(ctx, map[string]any{
-				"name": "t282-stopped-rider", "kind": kind, "pane_id": paneID, "args": []string{},
+				"name": "t282-stopped-worker", "kind": kind, "pane_id": paneID, "args": []string{},
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -80,7 +80,7 @@ func TestStoppedRiderConcurrentReplacementPreservesLifecycleAuthority(t *testing
 			}
 			group, err := service.paneAgentGroup(ctx, paneID)
 			if err != nil || group <= 1 {
-				t.Fatalf("original Rider missing: group=%d err=%v", group, err)
+				t.Fatalf("original Worker missing: group=%d err=%v", group, err)
 			}
 			if err := syscall.Kill(-group, syscall.SIGTERM); err != nil {
 				t.Fatal(err)
@@ -89,11 +89,11 @@ func TestStoppedRiderConcurrentReplacementPreservesLifecycleAuthority(t *testing
 				current, err := service.paneAgentGroup(ctx, paneID)
 				return err == nil && current == 0
 			}) {
-				t.Fatalf("original Rider did not return the pane to its shell")
+				t.Fatalf("original Worker did not return the pane to its shell")
 			}
 			raw, err := client.Call(ctx, "agent.get", map[string]any{"target": paneID})
 			if err != nil || !strings.Contains(string(raw), `"agent":"`+kind+`"`) {
-				t.Fatalf("stopped Rider did not retain stale authority: %s: %v", raw, err)
+				t.Fatalf("stopped Worker did not retain stale authority: %s: %v", raw, err)
 			}
 
 			agentPath := filepath.Join(root, "bin", kind)

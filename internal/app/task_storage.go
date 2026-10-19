@@ -37,16 +37,16 @@ func taskDiskLeakSummary(home string, project store.Project, tasks []store.Task)
 			sizes = append(sizes, fmt.Sprintf("t%d=%d", task.Seq, bytes))
 		}
 		switch task.State {
-		case store.StateSpawning, store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled, store.StateDone, store.StateLanding:
+		case store.StateSpawning, store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled, store.StateDone, store.StateMerging:
 			continue
 		}
 		processes := taskContainmentProcessDetails(task)
 		if task.WorktreePath != "" {
-			mountProcesses, mountErr := mountTaskProcessDetails(task.WorktreePath)
-			if mountErr == nil {
-				processes = mergeTaskProcessDetails(processes, mountProcesses)
+			sandboxProcesses, sandboxErr := sandboxTaskProcessDetails(task.WorktreePath)
+			if sandboxErr == nil {
+				processes = mergeTaskProcessDetails(processes, sandboxProcesses)
 			} else {
-				problems = append(problems, fmt.Sprintf("t%d process scan: %v", task.Seq, mountErr))
+				problems = append(problems, fmt.Sprintf("t%d process scan: %v", task.Seq, sandboxErr))
 			}
 		}
 		scratchProcesses, scratchErr := taskScratchProcessDetails(home, project, task)
@@ -97,7 +97,7 @@ func projectDiskUsage(home string, project store.Project) (string, error) {
 		path  string
 	}{
 		{label: "scratch", path: filepath.Join(home, "scratch", project.Name)},
-		{label: "Remuda", path: filepath.Join(home, "remuda", project.Name)},
+		{label: "Pool", path: poolProjectPath(home, project.Name)},
 		{label: "Project data", path: filepath.Join(home, "projects", project.Name)},
 	}
 	parts := make([]string, 0, len(paths))

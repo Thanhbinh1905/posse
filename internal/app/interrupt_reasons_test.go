@@ -17,8 +17,8 @@ func TestInterruptReportsRefusalReasons(t *testing.T) {
 		focused                                  bool
 	}{
 		{name: "unsupported kind", kind: "custom", status: "working", wantCode: "interrupt_unsupported_kind"},
-		{name: "blocked Rider", kind: "claude", status: "blocked", wantCode: "worker_blocked"},
-		{name: "focused Rider", kind: "claude", status: "working", focused: true, wantCode: "pane_focused"},
+		{name: "blocked Worker", kind: "claude", status: "blocked", wantCode: "worker_blocked"},
+		{name: "focused Worker", kind: "claude", status: "working", focused: true, wantCode: "pane_focused"},
 		{name: "not working", kind: "claude", status: "idle", wantOutput: "reason: agent_not_working"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,7 +36,7 @@ func TestInterruptReportsRefusalReasons(t *testing.T) {
 				t.Fatal(err)
 			}
 			taskID, err := db.CreateTask(ctx, project.ID, store.Task{
-				Seq: 1, Type: "ship", Title: "Interrupt test", LandingMode: "local",
+				Seq: 1, Type: "change", Title: "Interrupt test", MergeMode: "local",
 				PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo,
 			})
 			if err != nil {

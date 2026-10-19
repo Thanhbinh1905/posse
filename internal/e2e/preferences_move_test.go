@@ -14,7 +14,7 @@ import (
 func TestApprovedLeadPreferencesMove(t *testing.T) {
 	const quote = " Please move these preferences exactly. "
 	const content = "Preserve bytes, spaces  and line endings.\r\n"
-	for _, role := range []string{"lead", "rider"} {
+	for _, role := range []string{"lead", "worker"} {
 		for _, scope := range []string{"user", "project"} {
 			t.Run(role+"/"+scope, func(t *testing.T) {
 				f := newPRLifecycleFixtureWithLead(t, true)
@@ -60,11 +60,11 @@ func TestApprovedLeadPreferencesMove(t *testing.T) {
 		f := newPRLifecycleFixtureWithLead(t, true)
 		defer f.db.Close()
 		root := filepath.Join(f.home, "projects", "shop")
-		legacy := filepath.Join(root, "playbook", "rider.md")
-		target := filepath.Join(root, "preferences", "rider.md")
+		legacy := filepath.Join(root, "playbook", "worker.md")
+		target := filepath.Join(root, "preferences", "worker.md")
 		writeMoveFixtureFile(t, legacy, []byte("legacy bytes\n"))
 		writeMoveFixtureFile(t, target, []byte("canonical bytes\n"))
-		output, err := runLeadPreferenceMove(f, f.repo, "preferences", "move", "rider", "--project", "shop", "--user-approved", quote)
+		output, err := runLeadPreferenceMove(f, f.repo, "preferences", "move", "worker", "--project", "shop", "--user-approved", quote)
 		if err == nil || !strings.Contains(string(output), "preference_destination_exists") {
 			t.Fatalf("existing destination was not refused: err=%v output=%s", err, output)
 		}

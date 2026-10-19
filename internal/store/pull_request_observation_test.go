@@ -27,7 +27,7 @@ func TestPRObservationResetsFailureStreakOnlyWhenAccepted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "PR watch", LandingMode: "pr"})
+			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "PR watch", MergeMode: "pr"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -40,22 +40,22 @@ func TestPRObservationResetsFailureStreakOnlyWhenAccepted(t *testing.T) {
 				}
 			}
 			prURL := "https://github.com/acme/shop/pull/17"
-			if err := db.UpdateTaskLanding(ctx, taskID, prURL, ""); err != nil {
+			if err := db.UpdateTaskMerge(ctx, taskID, prURL, ""); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.SetTaskGatedSHA(ctx, taskID, "gated-sha"); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.Transition(ctx, taskID, StateDone, StateLanding, "cli", "land"); err != nil {
+			if err := db.Transition(ctx, taskID, StateDone, StateMerging, "cli", "merge"); err != nil {
 				t.Fatal(err)
 			}
 			memberRepo := ""
 			if test.workspace {
 				memberRepo = "api"
-				if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: memberRepo, LandingMode: "pr"}}); err != nil {
+				if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: memberRepo, MergeMode: "pr"}}); err != nil {
 					t.Fatal(err)
 				}
-				if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: memberRepo, LandingMode: "pr", State: TaskRepoLanding, GatedSHA: "gated-sha", PRURL: prURL}); err != nil {
+				if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: memberRepo, MergeMode: "pr", State: TaskRepoMerge, GatedSHA: "gated-sha", PRURL: prURL}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -80,16 +80,16 @@ func TestPRObservationResetsFailureStreakOnlyWhenAccepted(t *testing.T) {
 					if err := db.UpdateTaskRepo(ctx, repo[0]); err != nil {
 						t.Fatal(err)
 					}
-				} else if err := db.UpdateTaskLanding(ctx, taskID, observedURL, ""); err != nil {
+				} else if err := db.UpdateTaskMerge(ctx, taskID, observedURL, ""); err != nil {
 					t.Fatal(err)
 				}
 			}
 			observation := PRObservation{ProjectID: project.ID, TaskID: taskID, PRURL: prURL, HeadSHA: "gated-sha", State: "MERGED", MergeCommit: "merge-sha", ObservedAt: 3}
 			var accepted bool
 			if test.workspace {
-				accepted, err = db.RecordMemberPRObservation(ctx, memberRepo, observation, MemberPREffect{RepoState: TaskRepoLanded, LandedRef: "merge-sha"})
+				accepted, err = db.RecordMemberPRObservation(ctx, memberRepo, observation, MemberPREffect{RepoState: TaskRepoMerged, MergedRef: "merge-sha"})
 			} else {
-				accepted, err = db.RecordPRObservation(ctx, observation, PRObservationEffect{TransitionTo: StateLanded, TransitionNote: "merged", LandedRef: "merge-sha"}, task)
+				accepted, err = db.RecordPRObservation(ctx, observation, PRObservationEffect{TransitionTo: StateMerged, TransitionNote: "merged", MergedRef: "merge-sha"}, task)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -112,9 +112,9 @@ func TestPRObservationResetsFailureStreakOnlyWhenAccepted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantState := StateLanded
+			wantState := StateMerged
 			if test.stale {
-				wantState = StateLanding
+				wantState = StateMerging
 			}
 			if current.State != wantState {
 				t.Fatalf("Task state after accepted=%t observation is %q, want %q", accepted, current.State, wantState)

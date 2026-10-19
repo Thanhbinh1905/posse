@@ -14,12 +14,12 @@ import (
 // PR member, leave another changed member local, signal done, then let the Lead
 // gate both. The Project root is not a Git repository.
 func TestWorkspaceWorkerPublishesOnlyItsPRMemberAndLeadGates(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
 	// No live Herdr pane is launched by this fixture; avoid reconciling its
 	// simulated Worker away before the CLI can publish.
 	f.service.Herdr = nil
 	briefPath := filepath.Join(f.home, "projects", "stack", "tasks", "t1", "brief.md")
-	brief := "---\ntype: ship\ntitle: Span members\ndone_when: members changed\nrepos: [worker, e2e-tool]\nticket: worker#12\nrefs: [worker#14]\n---\nChange the members.\n"
+	brief := "---\ntype: change\ntitle: Span members\ndone_when: members changed\nrepos: [worker, e2e-tool]\nticket: worker#12\nrefs: [worker#14]\n---\nChange the members.\n"
 	if err := writeFile(briefPath, []byte(brief)); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ esac
 	if code := f.run("publish", "--repo", "e2e-tool", "Worker summary"); code == 0 {
 		t.Fatalf("local member published: %s", f.out.String())
 	}
-	if code := f.run("holler", "done", "Worker summary"); code == 0 {
+	if code := f.run("signal", "done", "Worker summary"); code == 0 {
 		t.Fatalf("unpublished PR member accepted: %s", f.out.String())
 	}
 	if code := f.run("publish", "--repo", "worker", "Worker summary"); code != 0 || !strings.Contains(f.out.String(), url) {
@@ -87,29 +87,29 @@ esac
 		t.Fatalf("workspace PR target or duplicate-free republish failed: %s (%v)", calls, err)
 	}
 	t.Setenv("POSSE_TEST_GH_SOURCE", "another/worker")
-	if code := f.run("holler", "done", "Worker summary"); code == 0 || !strings.Contains(f.out.String(), "pr_head_mismatch") {
+	if code := f.run("signal", "done", "Worker summary"); code == 0 || !strings.Contains(f.out.String(), "pr_head_mismatch") {
 		t.Fatalf("accepted a fork PR for the member: %d %s", code, f.out.String())
 	}
 	t.Setenv("POSSE_TEST_GH_SOURCE", "acme/worker")
-	if code := f.run("holler", "done", "Worker summary"); code != 0 {
+	if code := f.run("signal", "done", "Worker summary"); code != 0 {
 		t.Fatalf("done: %d %s", code, f.out.String())
 	}
 	t.Setenv("POSSE_WORKER_HOME", "")
 	t.Chdir(f.workspace)
 	t.Setenv("POSSE_TEST_GH_SOURCE", "another/worker")
-	if code := f.run("land", "t1"); code == 0 || !strings.Contains(f.out.String(), "pr_head_mismatch") {
-		t.Fatalf("Land accepted a fork PR: %d %s", code, f.out.String())
+	if code := f.run("merge", "t1"); code == 0 || !strings.Contains(f.out.String(), "pr_head_mismatch") {
+		t.Fatalf("Merge accepted a fork PR: %d %s", code, f.out.String())
 	}
 	if f.state() != store.StateDone {
 		t.Fatalf("invalid PR passed Gate: %s", f.state())
 	}
 	t.Setenv("POSSE_TEST_GH_SOURCE", "acme/worker")
-	if code := f.run("land", "t1"); code != 0 {
-		t.Fatalf("land: %d %s", code, f.out.String())
+	if code := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge: %d %s", code, f.out.String())
 	}
 	repos := f.repos()
-	if repos["worker"].State != store.TaskRepoLanding || repos["worker"].PRURL != url || repos["e2e-tool"].State != store.TaskRepoGated || f.state() != store.StateLanding {
-		t.Fatalf("Land changed the member states: %#v / %s", repos, f.state())
+	if repos["worker"].State != store.TaskRepoMerge || repos["worker"].PRURL != url || repos["e2e-tool"].State != store.TaskRepoGated || f.state() != store.StateMerging {
+		t.Fatalf("Merge changed the member states: %#v / %s", repos, f.state())
 	}
 	calls, err = os.ReadFile(log)
 	if err != nil || strings.Count(string(calls), "pr create") != 1 {
@@ -123,7 +123,7 @@ esac
 	if strings.Contains(string(calls), "Closes #13") || strings.Contains(string(calls), "Closes #14") {
 		t.Fatalf("worker member PR closed a non-canonical issue: %s", calls)
 	}
-	if code := f.run("land", "t1", "--merge"); code == 0 || !strings.Contains(f.out.String(), "land_approval_required") {
+	if code := f.run("merge", "t1", "--execute"); code == 0 || !strings.Contains(f.out.String(), "merge_approval_required") {
 		t.Fatalf("merged without User approval: %d %s", code, f.out.String())
 	}
 }

@@ -18,13 +18,13 @@ import (
 func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "failed-recovery")
-	if _, err := f.addShipTask(t, store.StateWorking); err != nil {
+	if _, err := f.addChangeTask(t, store.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.attachTaskPane(t, "t1", true); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"config", "set", "defaults.recovery_attempts", "2", "--project", f.project.Name}, {"config", "set", "defaults.recovery_backoff", "10ms", "--project", f.project.Name}, {"roster"}} {
+	for _, args := range [][]string{{"config", "set", "defaults.recovery_attempts", "2", "--project", f.project.Name}, {"config", "set", "defaults.recovery_backoff", "10ms", "--project", f.project.Name}, {"list"}} {
 		if code, out := f.run(t, "", args...); code != 0 {
 			t.Fatalf("setup %v: %d %s", args, code, out)
 		}
@@ -75,7 +75,7 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 	waitForRecoveryRequest(t, h.session.requests, "agent.prompt")
 	// Read and Notice commands must not wait for the active recovery claim,
 	// enter its relaunch path, or fail because its prompt-wait is failing.
-	for _, args := range [][]string{{"show", "t1"}, {"ack", "all"}, {"lead"}, {"lookout", "--timeout", "10"}} {
+	for _, args := range [][]string{{"show", "t1"}, {"ack", "all"}, {"lead"}, {"watch", "--timeout", "10"}} {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		read := exec.CommandContext(ctx, h.binary, args...)
 		read.Dir, read.Env = f.repo, f.env
@@ -86,7 +86,7 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 		}
 	}
 	if got := workerStarts(); got != 1 {
-		t.Errorf("inspection started %d Riders, want 1", got)
+		t.Errorf("inspection started %d Workers, want 1", got)
 	}
 	close(gate)
 	select {
@@ -141,7 +141,7 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 	}); err != nil || notices != 1 {
 		t.Fatalf("exhaustion Notice count=%d err=%v", notices, err)
 	}
-	t.Logf("configured bound=2: launches=%d, Rider process groups=%d, exhaustion Notices=%d; inspection succeeded during active prompt-wait", after.Launches-before.Launches, workerStarts(), notices)
+	t.Logf("configured bound=2: launches=%d, Worker process groups=%d, exhaustion Notices=%d; inspection succeeded during active prompt-wait", after.Launches-before.Launches, workerStarts(), notices)
 	// Explicit successful relaunch is the escape hatch, not a plugin event.
 	h.session.mu.Lock()
 	h.session.promptError, h.session.promptGate = nil, nil
@@ -161,13 +161,13 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 func TestAutomaticRecoveryPreservesLateFailedSignal(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "late-failed")
-	if _, err := f.addShipTask(t, store.StateWorking); err != nil {
+	if _, err := f.addChangeTask(t, store.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.attachTaskPane(t, "t1", true); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := f.run(t, "", "roster"); code != 0 {
+	if code, out := f.run(t, "", "list"); code != 0 {
 		t.Fatalf("setup: %d %s", code, out)
 	}
 	gate := make(chan struct{})
@@ -188,7 +188,7 @@ func TestAutomaticRecoveryPreservesLateFailedSignal(t *testing.T) {
 	go func() { done <- command.Wait() }()
 	waitForRecoveryRequest(t, h.session.requests, "agent.prompt")
 	if err := f.openDB(t, func(db *store.DB) error {
-		return db.Transition(context.Background(), f.taskDBID, store.StateWorking, store.StateFailed, "worker", "Rider failed during recovery")
+		return db.Transition(context.Background(), f.taskDBID, store.StateWorking, store.StateFailed, "worker", "Worker failed during recovery")
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestAutomaticRecoveryPreservesLateFailedSignal(t *testing.T) {
 	if err := f.openDB(t, func(db *store.DB) error {
 		task, err := db.Task(context.Background(), f.project.ID, "t1")
 		if err == nil && task.State != store.StateFailed {
-			return fmt.Errorf("automatic recovery revived a failed Rider: %s", task.State)
+			return fmt.Errorf("automatic recovery revived a failed Worker: %s", task.State)
 		}
 		return err
 	}); err != nil {
@@ -215,13 +215,13 @@ func TestAutomaticRecoveryPreservesLateFailedSignal(t *testing.T) {
 func TestExplicitRelaunchSettlesPendingRecovery(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "explicit-pending")
-	if _, err := f.addShipTask(t, store.StateWorking); err != nil {
+	if _, err := f.addChangeTask(t, store.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.attachTaskPane(t, "t1", true); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := f.run(t, "", "roster"); code != 0 {
+	if code, out := f.run(t, "", "list"); code != 0 {
 		t.Fatalf("setup: %d %s", code, out)
 	}
 	h.session.mu.Lock()
@@ -258,19 +258,19 @@ func TestExplicitRelaunchSettlesPendingRecovery(t *testing.T) {
 }
 
 // A second group close can interrupt the first Lead's opening prompt. A
-// waiting hook may then restore the Lead from a snapshot containing Riders
+// waiting hook may then restore the Lead from a snapshot containing Workers
 // that the close subsequently removes. The completed Project claim must not
-// hide those missing Riders from the older group episode.
-func TestRecoveryRepairsRidersFromAnInterruptedGroupEpisode(t *testing.T) {
+// hide those missing Workers from the older group episode.
+func TestRecoveryRepairsWorkersFromAnInterruptedGroupEpisode(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "partial-group-recovery")
-	if _, err := f.addShipTask(t, store.StateWorking); err != nil {
+	if _, err := f.addChangeTask(t, store.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.attachTaskPane(t, "t1", true); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := f.run(t, "", "roster"); code != 0 {
+	if code, out := f.run(t, "", "list"); code != 0 {
 		t.Fatalf("initial reconcile: %d %s", code, out)
 	}
 	var before store.Task
@@ -308,9 +308,9 @@ func TestRecoveryRepairsRidersFromAnInterruptedGroupEpisode(t *testing.T) {
 			return err
 		}
 		state, _ := db.TaskRecovery(context.Background(), before.ID)
-		t.Logf("repaired group Rider: %#v", state)
-		if after.Launches != before.Launches+1 || after.State != store.StateWorking || after.MountID != before.MountID || after.Branch != before.Branch {
-			return fmt.Errorf("missing group Rider was not repaired: before=%#v after=%#v", before, after)
+		t.Logf("repaired group Worker: %#v", state)
+		if after.Launches != before.Launches+1 || after.State != store.StateWorking || after.SandboxID != before.SandboxID || after.Branch != before.Branch {
+			return fmt.Errorf("missing group Worker was not repaired: before=%#v after=%#v", before, after)
 		}
 		return nil
 	}); err != nil {
@@ -318,16 +318,16 @@ func TestRecoveryRepairsRidersFromAnInterruptedGroupEpisode(t *testing.T) {
 	}
 }
 
-func TestRecoveryRetriesMissingRiderMarkedRecoveredInSameGroupEpisode(t *testing.T) {
+func TestRecoveryRetriesMissingWorkerMarkedRecoveredInSameGroupEpisode(t *testing.T) {
 	h := newIntentCLIHarness(t)
-	f := h.newProject(t, "recovered-group-rider-missing")
-	if _, err := f.addShipTask(t, store.StateWorking); err != nil {
+	f := h.newProject(t, "recovered-group-worker-missing")
+	if _, err := f.addChangeTask(t, store.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.attachTaskPane(t, "t1", true); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := f.run(t, "", "roster"); code != 0 {
+	if code, out := f.run(t, "", "list"); code != 0 {
 		t.Fatalf("initial reconcile: %d %s", code, out)
 	}
 	readTask := func() store.Task {
@@ -355,7 +355,7 @@ func TestRecoveryRetriesMissingRiderMarkedRecoveredInSameGroupEpisode(t *testing
 	}
 	// Simulate a second group close before another hook has reconciled the
 	// completed recovery. The server generation and group recovery key remain
-	// unchanged, but the Rider pane is gone.
+	// unchanged, but the Worker pane is gone.
 	h.session.mu.Lock()
 	for paneID, pane := range h.session.panes {
 		if pane.WorkspaceID == f.project.HerdrWorkspaceID || pane.Label == before.PaneLabel {
@@ -382,7 +382,7 @@ func TestRecoveryRetriesMissingRiderMarkedRecoveredInSameGroupEpisode(t *testing
 		t.Fatal(err)
 	}
 	if after.Launches != before.Launches+1 || after.State != store.StateWorking || state.Status != "recovered" || state.Attempts != 2 {
-		t.Fatalf("missing Rider was treated as already recovered: launches %d -> %d, task=%s, recovery=%#v", before.Launches, after.Launches, after.State, state)
+		t.Fatalf("missing Worker was treated as already recovered: launches %d -> %d, task=%s, recovery=%#v", before.Launches, after.Launches, after.State, state)
 	}
 	snapshot, err := h.client.Snapshot(context.Background())
 	if err != nil {
@@ -390,20 +390,20 @@ func TestRecoveryRetriesMissingRiderMarkedRecoveredInSameGroupEpisode(t *testing
 	}
 	pane, found := herdr.FindPane(snapshot.Panes, after.PaneID, after.PaneLabel)
 	if !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped" {
-		t.Fatalf("recovery record says recovered but Rider pane is not live: state=%#v pane=%#v found=%v", state, pane, found)
+		t.Fatalf("recovery record says recovered but Worker pane is not live: state=%#v pane=%#v found=%v", state, pane, found)
 	}
 }
 
 func TestRecoveryCrashConsumesFinalAttempt(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "recovery-crash-budget")
-	if _, err := f.addShipTask(t, store.StateWorking); err != nil {
+	if _, err := f.addChangeTask(t, store.StateWorking); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.attachTaskPane(t, "t1", true); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"config", "set", "defaults.recovery_attempts", "1", "--project", f.project.Name}, {"roster"}} {
+	for _, args := range [][]string{{"config", "set", "defaults.recovery_attempts", "1", "--project", f.project.Name}, {"list"}} {
 		if code, out := f.run(t, "", args...); code != 0 {
 			t.Fatalf("setup: %d %s", code, out)
 		}

@@ -25,10 +25,10 @@ func TestSharedTaskDaemonCommandRecognition(t *testing.T) {
 		{name: "screen server process title", comm: "SCREEN", args: []string{"SCREEN", "-D", "-m"}, want: true},
 		{name: "ordinary ssh client", comm: "ssh", args: []string{"ssh", "host", "true"}},
 		{name: "detached tmux client", comm: "tmux", args: []string{"tmux", "-d", "new-session"}},
-		{name: "Rider Node server", comm: "node", args: []string{"node", "server.js"}},
-		{name: "Rider Vite server", comm: "node", args: []string{"node", "vite"}},
-		{name: "Rider browser", comm: "chrome", args: []string{"chrome", "--user-data-dir=/scratch/task"}},
-		{name: "Rider test helper", comm: "sleep", args: []string{"sleep", "60"}},
+		{name: "Worker Node server", comm: "node", args: []string{"node", "server.js"}},
+		{name: "Worker Vite server", comm: "node", args: []string{"node", "vite"}},
+		{name: "Worker browser", comm: "chrome", args: []string{"chrome", "--user-data-dir=/scratch/task"}},
+		{name: "Worker test helper", comm: "sleep", args: []string{"sleep", "60"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -41,9 +41,9 @@ type TaskSnapshot struct {
 	// ReviewTargets and ReviewVerdict are set for a Review Task only.
 	ReviewTargets []ReviewTarget `toml:"review_targets,omitempty"`
 	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
-	// ReviewReceipts are the no-mistakes receipts that qualified a Ship Task.
+	// ReviewReceipts are the no-mistakes receipts that qualified a Change Task.
 	ReviewReceipts []ReviewReceipt `toml:"review_receipts,omitempty"`
-	// Validation state is owned by a Ship Task and includes its review rounds,
+	// Validation state is owned by a Change Task and includes its review rounds,
 	// finding ledger, carry proofs, dispositions, and fix-round budget.
 	ReviewRounds        []ReviewRound        `toml:"review_rounds,omitempty"`
 	ReviewPatterns      []ReviewPattern      `toml:"review_patterns,omitempty"`
@@ -63,14 +63,14 @@ type projectSnapshot struct {
 
 type projectStateSnapshot struct {
 	CapturedAt           int64                   `toml:"captured_at"`
-	Mounts               []mountSnapshot         `toml:"mounts,omitempty"`
+	Sandboxes            []sandboxSnapshot       `toml:"mounts,omitempty"`
 	ResourceLeases       []resourceLeaseSnapshot `toml:"resource_leases,omitempty"`
 	Decisions            []decisionSnapshot      `toml:"decisions,omitempty"`
 	Notices              []noticeSnapshot        `toml:"notices,omitempty"`
 	DecisionNoticeCursor int64                   `toml:"decision_notice_cursor"`
 }
 
-type mountSnapshot struct {
+type sandboxSnapshot struct {
 	ID         int64  `toml:"id"`
 	ProjectID  int64  `toml:"project_id"`
 	Number     int    `toml:"number"`
@@ -92,7 +92,7 @@ type resourceLeaseSnapshot struct {
 	SourceKey      string `toml:"source_key"`
 	CustodyToken   string `toml:"custody_token"`
 	IntentID       int64  `toml:"intent_id"`
-	MountID        int64  `toml:"mount_id"`
+	SandboxID      int64  `toml:"mount_id"`
 	OwnerPID       int    `toml:"owner_pid"`
 	OwnerBootID    string `toml:"owner_boot_id"`
 	OwnerStartTime string `toml:"owner_start_time"`
@@ -348,7 +348,7 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if snapshot.ReviewReceipts, err = db.ReviewReceipts(ctx, taskID); err != nil {
 		return err
 	}
-	if task.Type == "ship" {
+	if task.Type == "change" {
 		validationState, err := db.validationStateForTask(ctx, taskID)
 		if err != nil {
 			return err
@@ -404,13 +404,13 @@ func (db *DB) PersistProject(ctx context.Context, projectID int64) error {
 }
 
 func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {
-	mounts, err := db.Mounts(ctx, projectID)
+	sandboxes, err := db.Sandboxes(ctx, projectID)
 	if err != nil {
 		return projectStateSnapshot{}, err
 	}
 	state := projectStateSnapshot{CapturedAt: time.Now().UnixNano()}
-	for _, mount := range mounts {
-		state.Mounts = append(state.Mounts, mountSnapshot(mount))
+	for _, sandbox := range sandboxes {
+		state.Sandboxes = append(state.Sandboxes, sandboxSnapshot(sandbox))
 	}
 	leases, err := db.ResourceLeases(ctx, projectID)
 	if err != nil {
@@ -556,6 +556,7 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		if _, err := toml.Decode(string(data), &snapshot); err != nil {
 			return 0, fmt.Errorf("decode %s: %w", path, err)
 		}
+		normalizeProjectSnapshotVocabulary(&snapshot.State)
 		if snapshot.Version != 1 || snapshot.Project.ID == 0 || snapshot.Project.Name == "" || snapshot.State.CapturedAt == 0 {
 			return 0, fmt.Errorf("invalid Project snapshot %s", path)
 		}
@@ -585,6 +586,11 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		var snapshot TaskSnapshot
 		if _, err := toml.Decode(string(data), &snapshot); err != nil {
 			return 0, fmt.Errorf("decode %s: %w", path, err)
+		}
+		snapshot.Task.Type = currentTaskType(snapshot.Task.Type)
+		snapshot.Task.State = State(currentTaskState(string(snapshot.Task.State)))
+		for i := range snapshot.TaskRepos {
+			snapshot.TaskRepos[i].State = currentTaskState(snapshot.TaskRepos[i].State)
 		}
 		if snapshot.Version != 1 || snapshot.Project.ID == 0 || snapshot.Project.Name == "" || snapshot.Task.ID == 0 || snapshot.Task.Seq < 1 || snapshot.Task.ProjectID != snapshot.Project.ID {
 			return 0, fmt.Errorf("invalid Task snapshot %s", path)
@@ -753,13 +759,13 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 		}
 	}
 	for _, snapshot := range snapshots {
-		if snapshot.Task.MountID == 0 {
+		if snapshot.Task.SandboxID == 0 {
 			continue
 		}
 		state := projectStates[snapshot.Project.ID]
 		found := false
-		for _, mount := range state.Mounts {
-			if mount.ID == snapshot.Task.MountID {
+		for _, sandbox := range state.Sandboxes {
+			if sandbox.ID == snapshot.Task.SandboxID {
 				found = true
 				break
 			}
@@ -768,11 +774,11 @@ func (db *DB) RebuildFromSnapshots(ctx context.Context, home string) (int, error
 			continue
 		}
 		number := snapshot.Task.Seq
-		if value, err := strconv.Atoi(strings.TrimPrefix(filepath.Base(snapshot.Task.WorktreePath), "mount-")); err == nil && value > 0 {
+		if value, err := strconv.Atoi(strings.TrimPrefix(strings.TrimPrefix(filepath.Base(snapshot.Task.WorktreePath), "mount-"), "sandbox-")); err == nil && value > 0 {
 			number = value
 		}
-		state.Mounts = append(state.Mounts, mountSnapshot{
-			ID: snapshot.Task.MountID, ProjectID: snapshot.Project.ID, Number: number,
+		state.Sandboxes = append(state.Sandboxes, sandboxSnapshot{
+			ID: snapshot.Task.SandboxID, ProjectID: snapshot.Project.ID, Number: number,
 			Path: snapshot.Task.WorktreePath, State: "held", TaskID: snapshot.Task.ID,
 		})
 		projectStates[snapshot.Project.ID] = state
@@ -817,7 +823,7 @@ func recoverBranchSnapshots(ctx context.Context, project Project, known map[stri
 		}
 		path := worktrees[branch]
 		maxID++
-		task := Task{ID: maxID, ProjectID: project.ID, Seq: sequence, Type: "recovered", Title: "Recovered branch " + branch, State: StateLost, LandingMode: "local", AutonomyReview: "ask", AutonomyLand: "ask", Branch: branch, BaseRef: project.DefaultBranch, WorktreePath: path, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli()}
+		task := Task{ID: maxID, ProjectID: project.ID, Seq: sequence, Type: "recovered", Title: "Recovered branch " + branch, State: StateLost, MergeMode: "local", AutonomyReview: "ask", AutonomyMerge: "ask", Branch: branch, BaseRef: project.DefaultBranch, WorktreePath: path, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli()}
 		recovered = append(recovered, TaskSnapshot{Version: 1, Project: project, Task: task})
 	}
 	return recovered, nil
@@ -881,7 +887,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	}
 	for _, snapshot := range snapshots {
 		task := snapshot.Task
-		if task.ReportKind != "" && (task.Type != "scout" || task.ReportKind != "spec" && task.ReportKind != "tickets") {
+		if task.ReportKind != "" && (task.Type != "research" || task.ReportKind != "spec" && task.ReportKind != "tickets") {
 			return fmt.Errorf("invalid Report kind in snapshot for t%d", task.Seq)
 		}
 		if (task.ReportDigest == "") != (task.ReportManifestJSON == "") || task.ReportDigest != "" && reportManifestDigest(task.ReportManifestJSON) != task.ReportDigest {
@@ -892,7 +898,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			reviewed = task.ReviewsTaskID
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json,report_kind,report_digest,report_manifest_json,containment_mode,containment_path,containment_marker) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.LandedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.MountID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker); err != nil {
+			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.MergedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.SandboxID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker); err != nil {
 			return err
 		}
 		var previous *taskplan.Plan
@@ -977,8 +983,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, round := range snapshot.ReviewRounds {
-			if round.ShipTaskID != 0 && round.ShipTaskID != task.ID {
-				return fmt.Errorf("review round in snapshot for t%d belongs to Task %d", task.Seq, round.ShipTaskID)
+			if round.ChangeTaskID != 0 && round.ChangeTaskID != task.ID {
+				return fmt.Errorf("review round in snapshot for t%d belongs to Task %d", task.Seq, round.ChangeTaskID)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				task.ID, round.Round, round.ReviewTaskID, round.Repository, round.ScopeKind, round.ScopeBaseSHA, round.HeadSHA, round.TargetCommitSHA, round.BaselineTree, round.DeltaSHA256, round.ConflictedPaths, round.Status, nullableText(round.Verdict), round.CreatedAt); err != nil {
@@ -986,8 +992,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, pattern := range snapshot.ReviewPatterns {
-			if pattern.ShipTaskID != 0 && pattern.ShipTaskID != task.ID {
-				return fmt.Errorf("review pattern in snapshot for t%d belongs to Task %d", task.Seq, pattern.ShipTaskID)
+			if pattern.ChangeTaskID != 0 && pattern.ChangeTaskID != task.ID {
+				return fmt.Errorf("review pattern in snapshot for t%d belongs to Task %d", task.Seq, pattern.ChangeTaskID)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_patterns(id,ship_task_id,seq,key,title,rule,root_cause,fix_guidance,merged_into,created_round) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 				pattern.ID, task.ID, pattern.Seq, pattern.Key, pattern.Title, pattern.Rule, pattern.RootCause, pattern.FixGuidance, nullableID(pattern.MergedInto), pattern.CreatedRound); err != nil {
@@ -995,8 +1001,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, finding := range snapshot.ReviewFindings {
-			if finding.ShipTaskID != 0 && finding.ShipTaskID != task.ID {
-				return fmt.Errorf("review finding in snapshot for t%d belongs to Task %d", task.Seq, finding.ShipTaskID)
+			if finding.ChangeTaskID != 0 && finding.ChangeTaskID != task.ID {
+				return fmt.Errorf("review finding in snapshot for t%d belongs to Task %d", task.Seq, finding.ChangeTaskID)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_findings(id,ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state,follow_up_url,inherited_from) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				finding.ID, task.ID, finding.Seq, finding.PatternID, finding.Fingerprint, finding.Round, finding.Repository, finding.Path, finding.Symbol, finding.Excerpt, finding.LineAtReport, finding.HeadSHA, finding.Severity, finding.Origin, finding.InScope, finding.State, finding.FollowUpURL, nullableID(finding.InheritedFrom)); err != nil {
@@ -1010,8 +1016,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, carry := range snapshot.ReviewCarries {
-			if carry.ShipTaskID != 0 && carry.ShipTaskID != task.ID {
-				return fmt.Errorf("review carry in snapshot for t%d belongs to Task %d", task.Seq, carry.ShipTaskID)
+			if carry.ChangeTaskID != 0 && carry.ChangeTaskID != task.ID {
+				return fmt.Errorf("review carry in snapshot for t%d belongs to Task %d", task.Seq, carry.ChangeTaskID)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_carries(ship_task_id,repository,from_head,to_head,target_commit_sha,tree,created_at) VALUES(?,?,?,?,?,?,?)`,
 				task.ID, carry.Repository, carry.FromHead, carry.ToHead, carry.TargetCommitSHA, carry.Tree, carry.CreatedAt); err != nil {
@@ -1019,8 +1025,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, disposition := range snapshot.ReviewDispositions {
-			if disposition.ShipTaskID != 0 && disposition.ShipTaskID != task.ID {
-				return fmt.Errorf("review disposition in snapshot for t%d belongs to Task %d", task.Seq, disposition.ShipTaskID)
+			if disposition.ChangeTaskID != 0 && disposition.ChangeTaskID != task.ID {
+				return fmt.Errorf("review disposition in snapshot for t%d belongs to Task %d", task.Seq, disposition.ChangeTaskID)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(id,ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?,?)`,
 				disposition.ID, task.ID, disposition.HeadSHA, nullableID(disposition.DecisionID), disposition.UserQuote, disposition.At); err != nil {
@@ -1028,8 +1034,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, fixRound := range snapshot.ValidationFixRounds {
-			if fixRound.ShipTaskID != 0 && fixRound.ShipTaskID != task.ID {
-				return fmt.Errorf("validation fix round in snapshot for t%d belongs to Task %d", task.Seq, fixRound.ShipTaskID)
+			if fixRound.ChangeTaskID != 0 && fixRound.ChangeTaskID != task.ID {
+				return fmt.Errorf("validation fix round in snapshot for t%d belongs to Task %d", task.Seq, fixRound.ChangeTaskID)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
 				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt); err != nil {
@@ -1041,7 +1047,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		}
 		for _, review := range snapshot.ReportReviews {
 			reviewerSnapshot, exists := snapshotTasks[review.ReviewTaskID]
-			if review.ReportTaskID != task.ID || task.Type != "scout" || review.ID < 1 || review.ReviewTaskID < 1 || review.ReportDigest == "" || review.ReportDigest != task.ReportDigest || review.ReviewerLaunch < 1 || review.RecordedAt == 0 || review.Verdict != "pass" && review.Verdict != "changes_requested" && review.Verdict != "inconclusive" {
+			if review.ReportTaskID != task.ID || task.Type != "research" || review.ID < 1 || review.ReviewTaskID < 1 || review.ReportDigest == "" || review.ReportDigest != task.ReportDigest || review.ReviewerLaunch < 1 || review.RecordedAt == 0 || review.Verdict != "pass" && review.Verdict != "changes_requested" && review.Verdict != "inconclusive" {
 				return fmt.Errorf("invalid Report review in snapshot for t%d", task.Seq)
 			}
 			if !exists || reviewerSnapshot.Task.ProjectID != task.ProjectID || reviewerSnapshot.Task.Type != "review" || reviewerSnapshot.Task.ReviewsTaskID != task.ID || reviewerSnapshot.Task.Launches < review.ReviewerLaunch {
@@ -1053,7 +1059,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		}
 		if acceptance := snapshot.ReportAcceptance; acceptance != nil {
 			validSource := acceptance.RecordedBy == "user" && acceptance.Provenance == "user-command" || acceptance.RecordedBy == "lead" && acceptance.Provenance == "lead-quote" && strings.TrimSpace(acceptance.UserQuote) != ""
-			if acceptance.ReportTaskID != task.ID || task.Type != "scout" || task.ReportKind != "spec" && task.ReportKind != "tickets" || task.State != StateTornDown || acceptance.ReportDigest == "" || acceptance.ReportDigest != task.ReportDigest || task.ReportManifestJSON == "" || acceptance.AcceptedBy != "user" || !validSource || acceptance.AcceptedAt == 0 {
+			if acceptance.ReportTaskID != task.ID || task.Type != "research" || task.ReportKind != "spec" && task.ReportKind != "tickets" || task.State != StateTornDown || acceptance.ReportDigest == "" || acceptance.ReportDigest != task.ReportDigest || task.ReportManifestJSON == "" || acceptance.AcceptedBy != "user" || !validSource || acceptance.AcceptedAt == 0 {
 				return fmt.Errorf("invalid Report acceptance in snapshot for t%d", task.Seq)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO report_acceptances(report_task_id,report_digest,accepted_by,recorded_by,provenance,user_quote,accepted_at) VALUES(?,?,?,?,?,?,?)`, task.ID, acceptance.ReportDigest, acceptance.AcceptedBy, acceptance.RecordedBy, acceptance.Provenance, acceptance.UserQuote, acceptance.AcceptedAt); err != nil {
@@ -1061,15 +1067,15 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, repo := range snapshot.TaskRepos {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id,repo,worktree_path,base_ref,target_branch,landing_mode,state,gated_sha,pr_url,landed_ref,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, task.ID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.LandingMode, repo.State, repo.GatedSHA, repo.PRURL, repo.LandedRef, task.UpdatedAt); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id,repo,worktree_path,base_ref,target_branch,landing_mode,state,gated_sha,pr_url,landed_ref,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, task.ID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.MergeMode, repo.State, repo.GatedSHA, repo.PRURL, repo.MergedRef, task.UpdatedAt); err != nil {
 				return err
 			}
 		}
 	}
 	for projectID, state := range projectStates {
-		for _, mount := range state.Mounts {
+		for _, sandbox := range state.Sandboxes {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO mounts(id,project_id,n,path,state,task_id,acquired_at,released_at) VALUES(?,?,?,?,?,?,?,?)`,
-				mount.ID, mount.ProjectID, mount.Number, mount.Path, mount.State, nullableID(mount.TaskID), mount.AcquiredAt, mount.ReleasedAt); err != nil {
+				sandbox.ID, sandbox.ProjectID, sandbox.Number, sandbox.Path, sandbox.State, nullableID(sandbox.TaskID), sandbox.AcquiredAt, sandbox.ReleasedAt); err != nil {
 				return err
 			}
 		}
@@ -1078,7 +1084,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				return fmt.Errorf("invalid resource lease in Project %d snapshot", projectID)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO resource_leases(id,resource_type,scope_root,scope_path,owner_project_id,owner_task_id,owner,source_key,custody_token,intent_id,mount_id,owner_pid,owner_boot_id,owner_start_time,custody,acquired_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-				lease.ID, lease.ResourceType, lease.ScopeRoot, lease.ScopePath, lease.OwnerProjectID, nullableID(lease.OwnerTaskID), lease.Owner, lease.SourceKey, lease.CustodyToken, lease.IntentID, nullableID(lease.MountID), lease.OwnerPID, lease.OwnerBootID, lease.OwnerStartTime, lease.Custody, lease.AcquiredAt); err != nil {
+				lease.ID, lease.ResourceType, lease.ScopeRoot, lease.ScopePath, lease.OwnerProjectID, nullableID(lease.OwnerTaskID), lease.Owner, lease.SourceKey, lease.CustodyToken, lease.IntentID, nullableID(lease.SandboxID), lease.OwnerPID, lease.OwnerBootID, lease.OwnerStartTime, lease.Custody, lease.AcquiredAt); err != nil {
 				return err
 			}
 		}

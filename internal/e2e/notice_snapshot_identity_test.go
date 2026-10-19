@@ -21,7 +21,7 @@ func TestNoticeReceiptsSurviveProjectMoveAndRebuild(t *testing.T) {
 	f := newAcknowledgedNoticeFixture(t)
 	ctx := context.Background()
 	if _, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
-		Seq: 1, Type: "scout", Title: "Move recovery snapshot", LandingMode: "local",
+		Seq: 1, Type: "research", Title: "Move recovery snapshot", MergeMode: "local",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -60,9 +60,9 @@ func TestNoticeReceiptRebuildRejectsReusedProjectID(t *testing.T) {
 	ctx := context.Background()
 	oldProject := f.project
 	batch := deliverAndAcceptNotice(t, f)
-	// Notice commands start the hidden Project poller. Stop it before deleting
+	// Notice commands start the hidden Project Watch. Stop it before deleting
 	// the database and snapshot so it cannot recreate the old Project snapshot.
-	stopLiveLookoutPoller(t, f.root)
+	stopLiveWatchRuntime(t, f.root)
 	if err := os.Remove(f.db.ProjectSnapshotPath(oldProject.Name)); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestAcceptedNoticeReceiptSurvivesColdRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, output = f.cli(t, "lookout", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
+	code, output = f.cli(t, "watch", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
 	if code != 0 {
 		t.Fatalf("handoff after cold rebuild: %s", output)
 	}
@@ -200,7 +200,7 @@ func TestNoticeReceiptRebuildAcceptsRenamedProjectSnapshotIdentity(t *testing.T)
 	f := newAcknowledgedNoticeFixture(t)
 	ctx := context.Background()
 	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
-		Seq: 1, Type: "scout", Title: "Rename recovery snapshot", LandingMode: "local",
+		Seq: 1, Type: "research", Title: "Rename recovery snapshot", MergeMode: "local",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +247,7 @@ func TestNoticeReceiptRebuildAcceptsRenamedProjectSnapshotIdentity(t *testing.T)
 
 func deliverAndAcceptNotice(t *testing.T, f *acknowledgedNoticeFixture) noticeHandoffPayload {
 	t.Helper()
-	code, output := f.cli(t, "lookout", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
+	code, output := f.cli(t, "watch", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
 	if code != 0 {
 		t.Fatalf("print Notice handoff: %s", output)
 	}
@@ -255,7 +255,7 @@ func deliverAndAcceptNotice(t *testing.T, f *acknowledgedNoticeFixture) noticeHa
 	if err := json.Unmarshal(output, &batch); err != nil {
 		t.Fatalf("decode Notice handoff %s: %v", output, err)
 	}
-	code, output = f.cli(t, "lookout", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", batch.Delivery.OwnerToken)
+	code, output = f.cli(t, "watch", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", batch.Delivery.OwnerToken)
 	if code != 0 {
 		t.Fatalf("accept Notice handoff: %s", output)
 	}

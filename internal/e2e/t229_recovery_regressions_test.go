@@ -22,7 +22,7 @@ func TestT229RecreatedDatabaseProjectIDCollision(t *testing.T) {
 			_ = f.db.Close()
 		}
 	})
-	originalTaskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "scout", Title: "Original shop Report", LandingMode: "local"})
+	originalTaskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "research", Title: "Original shop Report", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestT229RecreatedDatabaseProjectIDCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 	// This test deletes the database to set up an identity collision. Stop
-	// the fixture's live Lookout first so it cannot race SQLite recreation.
+	// the fixture's live Watch first so it cannot race SQLite recreation.
 	runPosse(t, f.binary, f.repo, f.env, "down")
 	if err := f.db.Close(); err != nil {
 		t.Fatal(err)
@@ -110,14 +110,14 @@ func TestT229LegacyWorkspaceRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "scout", Title: "Old Members", LandingMode: "local"}); err != nil {
+	if _, err := f.db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "research", Title: "Old Members", MergeMode: "local"}); err != nil {
 		t.Fatal(err)
 	}
 	members = append(members, store.ProjectRepo{Name: "web", Path: "web", DefaultBranch: "main", Status: store.RepoActive, OriginHost: "git.example.com"})
 	if err := f.db.SyncProjectRepos(ctx, project.ID, members); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "scout", Title: "New Members", LandingMode: "local"}); err != nil {
+	if _, err := f.db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "research", Title: "New Members", MergeMode: "local"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.db.Close(); err != nil {
@@ -168,11 +168,11 @@ func TestT229SignalSnapshotFailure(t *testing.T) {
 			_ = f.db.Close()
 		}
 	})
-	brief := filepath.Join(f.root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed\n---\nFixture.\n"), 0o600); err != nil {
+	brief := filepath.Join(f.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed\n---\nFixture.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, f.binary, f.repo, f.leadEnv, "ride", "--brief", brief, "--name", "pr-lifecycle-change")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", brief, "--name", "pr-lifecycle-change")
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func TestT229SignalSnapshotFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(taskDir, 0o700)
-	command := exec.Command(f.binary, "holler", "failed", "Snapshot write failure fixture")
+	command := exec.Command(f.binary, "signal", "failed", "Snapshot write failure fixture")
 	command.Dir, command.Env = task.WorktreePath, workerEnv
 	output, signalErr := command.CombinedOutput()
 	after, err := f.db.Task(ctx, f.project.ID, "t1")
@@ -219,7 +219,7 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 					_ = f.db.Close()
 				}
 			})
-			taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "scout", Title: "Before Project move", LandingMode: "local"})
+			taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "research", Title: "Before Project move", MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -245,7 +245,7 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 				t.Fatalf("Project move did not refresh Task snapshot identity: %s", taskSnapshot)
 			}
 			if mode != "existing" {
-				stopBackgroundLookout(t, f)
+				stopBackgroundWatch(t, f)
 				if mode == "deleted-with-valid-sidecars" {
 					for _, suffix := range []string{"-wal", "-shm"} {
 						data, err := os.ReadFile(database + suffix)
@@ -343,11 +343,11 @@ func TestT229RebuildPreservesStoppedProject(t *testing.T) {
 					_ = f.db.Close()
 				}
 			})
-			taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "ship", Title: "Held", LandingMode: "local"})
+			taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "change", Title: "Held", MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := f.db.AcquireMount(ctx, f.project.ID, taskID, filepath.Join(f.home, "remuda", "shop")); err != nil {
+			if _, err := f.db.AcquireSandbox(ctx, f.project.ID, taskID, filepath.Join(f.home, "pool", "shop")); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := f.db.NextLeadLaunch(ctx, f.project.ID); err != nil {

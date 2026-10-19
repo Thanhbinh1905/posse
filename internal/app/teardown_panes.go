@@ -31,7 +31,7 @@ type taskPaneTeardownPlan struct {
 	returnFocusToLead bool
 }
 
-type unsaddleResult struct {
+type teardownResult struct {
 	Panes            teardownPanes
 	BranchRemoved    bool
 	StoppedProcesses []string
@@ -49,18 +49,18 @@ type paneProcessInfo struct {
 	} `json:"foreground_processes"`
 }
 
-func autoUnsaddleMode(cfg config.Config) string {
-	if cfg.Defaults.AutoUnsaddle == "" {
+func autoTeardownMode(cfg config.Config) string {
+	if cfg.Defaults.AutoTeardown == "" {
 		return "finished"
 	}
-	return cfg.Defaults.AutoUnsaddle
+	return cfg.Defaults.AutoTeardown
 }
 
-func shouldAutoUnsaddleLanded(cfg config.Config) bool {
-	return autoUnsaddleMode(cfg) == "finished" || autoUnsaddleMode(cfg) == "landed"
+func shouldAutoTeardownMerged(cfg config.Config) bool {
+	return autoTeardownMode(cfg) == "finished" || autoTeardownMode(cfg) == "merged"
 }
 
-func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
+func (s *Service) autoTeardownMergedTasks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
 	if s.Herdr == nil {
 		return nil
 	}
@@ -69,28 +69,28 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 		return err
 	}
 	for _, task := range tasks {
-		if task.State != store.StateLanded {
+		if task.State != store.StateMerged {
 			continue
 		}
-		mergedPR := task.LandingMode == "pr" || task.LandingMode == "no-mistakes"
+		mergedPR := task.MergeMode == "pr" || task.MergeMode == "no-mistakes"
 		if project.IsWorkspace() {
 			repos, err := db.TaskRepos(ctx, task.ID)
 			if err != nil {
 				return err
 			}
 			for _, repo := range repos {
-				mergedPR = mergedPR || (repo.PRURL != "" && repo.State == store.TaskRepoLanded)
+				mergedPR = mergedPR || (repo.PRURL != "" && repo.State == store.TaskRepoMerged)
 			}
 		}
-		if !shouldAutoUnsaddleLanded(cfg) && !mergedPR {
+		if !shouldAutoTeardownMerged(cfg) && !mergedPR {
 			continue
 		}
-		if _, err := s.unsaddleTask(ctx, db, project, cfg, task, false, ""); err != nil {
+		if _, err := s.teardownTask(ctx, db, project, cfg, task, false, ""); err != nil {
 			var commandError *axi.Error
 			if errors.As(err, &commandError) && commandError.Code == "intent_active" {
 				continue
 			}
-			if noticeErr := s.recordUnsaddleIncomplete(ctx, db, project, task, err); noticeErr != nil {
+			if noticeErr := s.recordTeardownIncomplete(ctx, db, project, task, err); noticeErr != nil {
 				return noticeErr
 			}
 		}
@@ -99,7 +99,7 @@ func (s *Service) autoTeardownLandedTasks(ctx context.Context, db *store.DB, pro
 }
 
 func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Project, task store.Task, observation store.PRObservation) (bool, error) {
-	if observation.PRURL != task.PRURL || observation.HeadSHA == "" || observation.MergeCommit == "" || task.LandedRef != observation.MergeCommit || task.Branch == "" || task.WorktreePath == "" {
+	if observation.PRURL != task.PRURL || observation.HeadSHA == "" || observation.MergeCommit == "" || task.MergedRef != observation.MergeCommit || task.Branch == "" || task.WorktreePath == "" {
 		return false, nil
 	}
 	branchSHA, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+task.Branch)
@@ -131,7 +131,7 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 			}
 		}
 		// Compare against the newest target-branch ancestor of the Task
-		// tip. Other changes that landed on the target after this PR are safe;
+		// tip. Other changes that merged on the target after this PR are safe;
 		// changes made only on the Task branch are not.
 		targetRef, err := taskTargetRef(ctx, project, task)
 		if err != nil {
@@ -156,10 +156,10 @@ func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Proje
 }
 
 // requireNoLiveTaskAgent refuses approved discard while a Task-owned pane has
-// a foreground process. Interrupted discard recovery requires Rider exit;
-// a fresh approved unsaddle retains exact-instance shutdown authority.
+// a foreground process. Interrupted discard recovery requires Worker exit;
+// a fresh approved teardown retains exact-instance shutdown authority.
 func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Project, task store.Task) error {
-	const identityHelp = "Inspect the Rider with `posse peek`, then retry `posse unsaddle <task> --discard --user-approved \"<User's words>\"` to cancel its verified instance"
+	const identityHelp = "Inspect the Worker with `posse peek`, then retry `posse teardown <task> --discard --user-approved \"<User's words>\"` to cancel its verified instance"
 	if s.Herdr == nil {
 		return axi.Failure("discard_agent_identity_unavailable", "cannot verify whether the Task has a live agent", true, identityHelp)
 	}
@@ -170,7 +170,7 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 	tabs := taskTabs(snapshot, project, task)
 	for _, pane := range snapshot.Panes {
 		if pane.Label == task.PaneLabel && pane.Agent != "" && !ownsTaskPane(snapshot, project, task, tabs, pane) {
-			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task-labeled pane belongs to this Rider", true, pane.PaneID, identityHelp)
+			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task-labeled pane belongs to this Worker", true, pane.PaneID, identityHelp)
 		}
 		if !ownsTaskPane(snapshot, project, task, tabs, pane) {
 			continue
@@ -192,7 +192,7 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 		foreground := info.ProcessInfo.ForegroundProcessGroup
 		if foreground > 1 && foreground != info.ProcessInfo.ShellPID {
 			if pane.Agent != "" {
-				return axi.Failure("discard_live_agent", "refusing to discard a Task while its Rider agent is still running", false, "Interrupted discard recovery will not retarget a live Rider. Inspect it, then retry approved unsaddle to retain its exact process instance")
+				return axi.Failure("discard_live_agent", "refusing to discard a Task while its Worker agent is still running", false, "Interrupted discard recovery will not retarget a live Worker. Inspect it, then retry approved teardown to retain its exact process instance")
 			}
 			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task pane's non-shell foreground process has exited", true, pane.PaneID, identityHelp)
 		}
@@ -200,47 +200,47 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 	return nil
 }
 
-// verifyMountForegroundOwnershipWithAuthorization retains exact process
-// handles for Task panes and shell-only panes in the held Mount. CWD discovery
+// verifySandboxForegroundOwnershipWithAuthorization retains exact process
+// handles for Task panes and shell-only panes in the held Sandbox. CWD discovery
 // may detect a process but cannot authorize cleanup. Herdr 0.9.1 has no atomic
 // pane-close precondition, so teardown never closes panes by target ID alone.
-func (s *Service) verifyMountForegroundOwnershipWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, authorization *mountProcessAuthorization) error {
-	mounts, err := db.Mounts(ctx, project.ID)
+func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, authorization *sandboxProcessAuthorization) error {
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
 	if err != nil {
-		return axi.Failure("mount_process_identity_unavailable", "could not verify Mount ownership before releasing it", true, err.Error())
+		return axi.Failure("sandbox_process_identity_unavailable", "could not verify Sandbox ownership before releasing it", true, err.Error())
 	}
-	var heldMount store.Mount
-	for _, mount := range mounts {
-		if mount.ID == task.MountID && mount.TaskID == task.ID && mount.State == "held" {
-			heldMount = mount
+	var heldSandbox store.Sandbox
+	for _, sandbox := range sandboxes {
+		if sandbox.ID == task.SandboxID && sandbox.TaskID == task.ID && sandbox.State == "held" {
+			heldSandbox = sandbox
 			break
 		}
 	}
-	if heldMount.ID == 0 {
+	if heldSandbox.ID == 0 {
 		return nil
 	}
-	if heldMount.Path == "" || task.WorktreePath == "" || !pathInside(task.WorktreePath, heldMount.Path) {
-		return axi.Failure("mount_process_identity_unavailable", "could not match the Task worktree to its held Mount before releasing it", true)
+	if heldSandbox.Path == "" || task.WorktreePath == "" || !pathInside(task.WorktreePath, heldSandbox.Path) {
+		return axi.Failure("sandbox_process_identity_unavailable", "could not match the Task worktree to its held Sandbox before releasing it", true)
 	}
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
-		return axi.Failure("mount_process_identity_unavailable", "could not verify foreground process ownership before releasing the Mount", true, err.Error())
+		return axi.Failure("sandbox_process_identity_unavailable", "could not verify foreground process ownership before releasing the Sandbox", true, err.Error())
 	}
 	tabs := taskTabs(snapshot, project, task)
 	for _, pane := range snapshot.Panes {
-		paneInsideMount := pathInside(pane.CWD, heldMount.Path)
+		paneInsideSandbox := pathInside(pane.CWD, heldSandbox.Path)
 		agentName := snapshotAgentName(snapshot, pane.PaneID)
 		taskPane := ownsTaskPane(snapshot, project, task, tabs, pane)
-		foreignShellPane := paneInsideMount && !taskPane && shellOnlyPaneInMount(snapshot, pane, heldMount.Path)
-		if paneInsideMount && !taskPane && !foreignShellPane {
-			return axi.Failure("mount_process_not_owned", fmt.Sprintf("pane %s in the held Mount is not owned by Task %s", pane.PaneID, taskIDString(task.Seq)), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
+		foreignShellPane := paneInsideSandbox && !taskPane && shellOnlyPaneInSandbox(snapshot, pane, heldSandbox.Path)
+		if paneInsideSandbox && !taskPane && !foreignShellPane {
+			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("pane %s in the held Sandbox is not owned by Task %s", pane.PaneID, taskIDString(task.Seq)), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
 		}
-		if !paneInsideMount && agentName == "" && pane.Agent == "" {
+		if !paneInsideSandbox && agentName == "" && pane.Agent == "" {
 			continue
 		}
-		first, err := s.mountPaneProcessInfo(ctx, pane.PaneID)
+		first, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
 		if err != nil {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not verify processes in Mount pane %s", pane.PaneID), true, err.Error())
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not verify processes in Sandbox pane %s", pane.PaneID), true, err.Error())
 		}
 		foreground := first.ForegroundProcessGroup
 		foregroundPID := foreground
@@ -249,34 +249,34 @@ func (s *Service) verifyMountForegroundOwnershipWithAuthorization(ctx context.Co
 		if expectedAgentName == "" {
 			expectedAgentName = agentName
 		}
-		if !paneInsideMount && foregroundCWD == "" && (agentName != "" || pane.Agent != "") {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("Herdr did not identify the working directory of the foreground process in pane %s", pane.PaneID), true)
+		if !paneInsideSandbox && foregroundCWD == "" && (agentName != "" || pane.Agent != "") {
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("Herdr did not identify the working directory of the foreground process in pane %s", pane.PaneID), true)
 		}
-		if !paneInsideMount && !pathInside(foregroundCWD, heldMount.Path) {
+		if !paneInsideSandbox && !pathInside(foregroundCWD, heldSandbox.Path) {
 			continue
 		}
 		if foreground <= 1 {
-			if pane.Agent != "" || agentName != "" || paneInsideMount {
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("Herdr reports no identifiable foreground process in Mount pane %s", pane.PaneID), true)
+			if pane.Agent != "" || agentName != "" || paneInsideSandbox {
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("Herdr reports no identifiable foreground process in Sandbox pane %s", pane.PaneID), true)
 			}
 			continue
 		}
 		if !foregroundProcessFound {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("Herdr did not identify foreground process group %d in pane %s", foreground, pane.PaneID), true)
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("Herdr did not identify foreground process group %d in pane %s", foreground, pane.PaneID), true)
 		}
 		if foreignShellPane && foreground != first.ShellPID {
-			return axi.Failure("mount_process_not_owned", fmt.Sprintf("pane %s in the held Mount has a foreground process that is not its shell", pane.PaneID), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
+			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("pane %s in the held Sandbox has a foreground process that is not its shell", pane.PaneID), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
 		}
 		if foreground != first.ShellPID && expectedAgentName != "" && (foregroundName == "" || !strings.EqualFold(foregroundName, expectedAgentName)) {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("foreground process %d in Mount pane %s does not match Herdr's agent identity %q", foregroundPID, pane.PaneID, expectedAgentName), true)
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("foreground process %d in Sandbox pane %s does not match Herdr's agent identity %q", foregroundPID, pane.PaneID, expectedAgentName), true)
 		}
 
 		firstBootID, firstStartTime, foregroundIdentityErr := store.ProcessIdentityForPID(foregroundPID)
 		foregroundExited := processGone(foregroundIdentityErr)
 		if foregroundIdentityErr != nil && !foregroundExited {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not bind foreground PID %d to a process start identity", foregroundPID), true, foregroundIdentityErr.Error())
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not bind foreground PID %d to a process start identity", foregroundPID), true, foregroundIdentityErr.Error())
 		}
-		processPIDs := mountPaneProcessIDs(first, heldMount.Path)
+		processPIDs := sandboxPaneProcessIDs(first, heldSandbox.Path)
 		for _, pid := range processPIDs {
 			bootID, startTime, identityErr := store.ProcessIdentityForPID(pid)
 			if identityErr != nil {
@@ -286,7 +286,7 @@ func (s *Service) verifyMountForegroundOwnershipWithAuthorization(ctx context.Co
 					}
 					continue
 				}
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not bind Mount process %d to a process start identity", pid), true, identityErr.Error())
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not bind Sandbox process %d to a process start identity", pid), true, identityErr.Error())
 			}
 			handle, bindErr := authorization.bind(pid)
 			if bindErr != nil {
@@ -296,115 +296,115 @@ func (s *Service) verifyMountForegroundOwnershipWithAuthorization(ctx context.Co
 					}
 					continue
 				}
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not retain the exact Mount process %d for cleanup: %v", pid, bindErr), true, bindErr.Error())
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not retain the exact Sandbox process %d for cleanup: %v", pid, bindErr), true, bindErr.Error())
 			}
 			if handle.Identity() != bootID+"/"+startTime || pid == foregroundPID && handle.Identity() != firstBootID+"/"+firstStartTime {
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("Mount PID %d changed process identity while retaining its cleanup handle", pid), true)
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("Sandbox PID %d changed process identity while retaining its cleanup handle", pid), true)
 			}
 		}
 		if err := authorization.captureDescendants(); err != nil {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not retain Task process descendants in pane %s", pane.PaneID), true, err.Error())
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not retain Task process descendants in pane %s", pane.PaneID), true, err.Error())
 		}
 		currentSnapshot, err := s.snapshot(ctx)
 		if err != nil {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not recheck Herdr ownership for pane %s", pane.PaneID), true, err.Error())
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not recheck Herdr ownership for pane %s", pane.PaneID), true, err.Error())
 		}
 		currentPane, currentFound := snapshotPane(currentSnapshot, pane.PaneID)
 		currentAgentName := snapshotAgentName(currentSnapshot, pane.PaneID)
 		currentTaskPane := currentFound && ownsTaskPane(currentSnapshot, project, task, taskTabs(currentSnapshot, project, task), currentPane)
-		currentForeignShell := currentFound && shellOnlyPaneInMount(currentSnapshot, currentPane, heldMount.Path)
+		currentForeignShell := currentFound && shellOnlyPaneInSandbox(currentSnapshot, currentPane, heldSandbox.Path)
 		currentAgentMatches := currentFound && taskAgentMatchesPane(currentSnapshot, project, task, currentPane)
-		if currentFound && currentAgentName == "" && currentPane.Agent == "" && pathInside(currentPane.CWD, heldMount.Path) {
+		if currentFound && currentAgentName == "" && currentPane.Agent == "" && pathInside(currentPane.CWD, heldSandbox.Path) {
 			currentAgentMatches = true // The Task pane's shell or command is authorized by its exact pane identity.
 		}
 		if !currentFound || foreignShellPane && !currentForeignShell || !foreignShellPane && (!currentTaskPane || !currentAgentMatches) {
-			return axi.Failure("mount_process_not_owned", fmt.Sprintf("foreground process %d in Mount pane %s no longer belongs to Task %s", foreground, pane.PaneID, taskIDString(task.Seq)), false, "Stop or inspect the unrelated agent, preserve its work, then retry Teardown")
+			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("foreground process %d in Sandbox pane %s no longer belongs to Task %s", foreground, pane.PaneID, taskIDString(task.Seq)), false, "Stop or inspect the unrelated agent, preserve its work, then retry Teardown")
 		}
-		second, err := s.mountPaneProcessInfo(ctx, pane.PaneID)
+		second, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
 		if err != nil {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not recheck foreground process identity in pane %s", pane.PaneID), true, err.Error())
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not recheck foreground process identity in pane %s", pane.PaneID), true, err.Error())
 		}
 		if second.ShellPID != first.ShellPID {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("shell process identity changed while verifying pane %s", pane.PaneID), true)
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("shell process identity changed while verifying pane %s", pane.PaneID), true)
 		}
 		if second.ForegroundProcessGroup != foreground && second.ForegroundProcessGroup > 1 {
 			if authorization.handle(second.ForegroundProcessGroup) != nil {
 				if _, err := authorization.verifyIfAlive(second.ForegroundProcessGroup); err != nil {
-					return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not verify changed foreground process in pane %s", pane.PaneID), true, err.Error())
+					return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not verify changed foreground process in pane %s", pane.PaneID), true, err.Error())
 				}
 			} else {
-				alive, err := unretainedMountProcessAlive(second.ForegroundProcessGroup)
+				alive, err := unretainedSandboxProcessAlive(second.ForegroundProcessGroup)
 				if err != nil {
-					return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not verify changed foreground process in pane %s", pane.PaneID), true, err.Error())
+					return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not verify changed foreground process in pane %s", pane.PaneID), true, err.Error())
 				}
 				if alive {
-					return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("unretained foreground process %d appeared while verifying pane %s", second.ForegroundProcessGroup, pane.PaneID), true)
+					return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("unretained foreground process %d appeared while verifying pane %s", second.ForegroundProcessGroup, pane.PaneID), true)
 				}
 			}
 		}
 		// Herdr's foreground list can gain or lose short-lived children between
 		// reads. Only the first read authorizes cleanup; verify those retained
-		// instances here and let the later Mount scan refuse any new live PID.
+		// instances here and let the later Sandbox scan refuse any new live PID.
 		for _, pid := range processPIDs {
 			if _, err := authorization.verifyIfAlive(pid); err != nil {
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not recheck Mount process %d identity", pid), true, err.Error())
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not recheck Sandbox process %d identity", pid), true, err.Error())
 			}
 		}
 		foregroundHandle := authorization.handle(foregroundPID)
 		if foregroundHandle == nil {
 			if !foregroundExited {
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("foreground PID %d has no retained cleanup handle", foregroundPID), true)
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("foreground PID %d has no retained cleanup handle", foregroundPID), true)
 			}
 			if _, _, err := store.ProcessIdentityForPID(foregroundPID); err == nil || !processGone(err) {
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("foreground PID %d could not be proved exited during verification", foregroundPID), true)
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("foreground PID %d could not be proved exited during verification", foregroundPID), true)
 			}
 		} else {
 			if foregroundHandle.Identity() != firstBootID+"/"+firstStartTime {
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("foreground PID %d changed process identity while verifying pane %s", foregroundPID, pane.PaneID), true)
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("foreground PID %d changed process identity while verifying pane %s", foregroundPID, pane.PaneID), true)
 			}
 			if _, err := authorization.verifyIfAlive(foregroundPID); err != nil {
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not recheck process start identity for foreground PID %d", foregroundPID), true, err.Error())
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not recheck process start identity for foreground PID %d", foregroundPID), true, err.Error())
 			}
 		}
 		finalSnapshot, err := s.snapshot(ctx)
 		if err != nil {
-			return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not confirm Herdr ownership for pane %s", pane.PaneID), true, err.Error())
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not confirm Herdr ownership for pane %s", pane.PaneID), true, err.Error())
 		}
 		finalPane, finalFound := snapshotPane(finalSnapshot, pane.PaneID)
 		finalName := snapshotAgentName(finalSnapshot, pane.PaneID)
 		finalTaskPane := finalFound && ownsTaskPane(finalSnapshot, project, task, taskTabs(finalSnapshot, project, task), finalPane)
-		finalForeignShell := finalFound && shellOnlyPaneInMount(finalSnapshot, finalPane, heldMount.Path)
+		finalForeignShell := finalFound && shellOnlyPaneInSandbox(finalSnapshot, finalPane, heldSandbox.Path)
 		if !finalFound || finalName != currentAgentName || finalPane.Agent != currentPane.Agent || foreignShellPane && !finalForeignShell || !foreignShellPane && !finalTaskPane {
-			return axi.Failure("mount_process_not_owned", fmt.Sprintf("foreground process %d in Mount pane %s changed Herdr ownership during verification", foreground, pane.PaneID), false, "Stop or inspect the unrelated agent, preserve its work, then retry Teardown")
+			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("foreground process %d in Sandbox pane %s changed Herdr ownership during verification", foreground, pane.PaneID), false, "Stop or inspect the unrelated agent, preserve its work, then retry Teardown")
 		}
 		for _, pid := range processPIDs {
 			handle := authorization.handle(pid)
 			if handle == nil {
 				continue
 			}
-			groupID, groupErr := mountProcessGroupID(pid)
+			groupID, groupErr := sandboxProcessGroupID(pid)
 			if groupErr != nil {
 				if processGone(groupErr) {
 					continue
 				}
-				return axi.Failure("mount_process_identity_unavailable", fmt.Sprintf("could not verify process group for Mount process %d", pid), true, groupErr.Error())
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not verify process group for Sandbox process %d", pid), true, groupErr.Error())
 			}
 			authorization.retainProcessGroup(groupID, handle)
 		}
-		if processInMount(first.ShellPID, heldMount.Path) && authorization.handle(first.ShellPID) != nil {
+		if processInSandbox(first.ShellPID, heldSandbox.Path) && authorization.handle(first.ShellPID) != nil {
 			expectedPane, shellPID, taskOwnedPane := pane, first.ShellPID, taskPane
 			authorization.setSignalGuard(shellPID, func(signal syscall.Signal) error {
 				if signal != syscall.SIGKILL {
 					return nil
 				}
-				return s.verifyMountShellSignalOwnership(ctx, project, task, heldMount.Path, expectedPane, shellPID, taskOwnedPane, foreignShellPane, authorization)
+				return s.verifySandboxShellSignalOwnership(ctx, project, task, heldSandbox.Path, expectedPane, shellPID, taskOwnedPane, foreignShellPane, authorization)
 			})
 		}
 	}
 	return nil
 }
 
-func (s *Service) verifyMountShellSignalOwnership(ctx context.Context, project store.Project, task store.Task, mountPath string, expectedPane herdr.Pane, shellPID int, taskOwnedPane, foreignShellPane bool, authorization *mountProcessAuthorization) error {
+func (s *Service) verifySandboxShellSignalOwnership(ctx context.Context, project store.Project, task store.Task, sandboxPath string, expectedPane herdr.Pane, shellPID int, taskOwnedPane, foreignShellPane bool, authorization *sandboxProcessAuthorization) error {
 	paneID := expectedPane.PaneID
 	alive, err := authorization.verifyIfAlive(shellPID)
 	if err != nil {
@@ -413,7 +413,7 @@ func (s *Service) verifyMountShellSignalOwnership(ctx context.Context, project s
 	if !alive {
 		return nil
 	}
-	info, err := s.mountPaneProcessInfo(ctx, paneID)
+	info, err := s.sandboxPaneProcessInfo(ctx, paneID)
 	if err != nil {
 		return fmt.Errorf("could not recheck pane %s before signaling its retained shell: %w", paneID, err)
 	}
@@ -425,11 +425,11 @@ func (s *Service) verifyMountShellSignalOwnership(ctx context.Context, project s
 		return fmt.Errorf("could not recheck pane %s ownership before signaling its retained shell: %w", paneID, err)
 	}
 	pane, found := snapshotPane(snapshot, paneID)
-	if !found || pane.WorkspaceID != expectedPane.WorkspaceID || pane.TabID != expectedPane.TabID || pane.Label != expectedPane.Label || !pathInside(pane.CWD, mountPath) {
-		return fmt.Errorf("pane %s no longer matches its proved identity or Mount; preserving its processes", paneID)
+	if !found || pane.WorkspaceID != expectedPane.WorkspaceID || pane.TabID != expectedPane.TabID || pane.Label != expectedPane.Label || !pathInside(pane.CWD, sandboxPath) {
+		return fmt.Errorf("pane %s no longer matches its proved identity or Sandbox; preserving its processes", paneID)
 	}
 	if foreignShellPane {
-		if !shellOnlyPaneInMount(snapshot, pane, mountPath) || info.ForegroundProcessGroup != shellPID {
+		if !shellOnlyPaneInSandbox(snapshot, pane, sandboxPath) || info.ForegroundProcessGroup != shellPID {
 			return fmt.Errorf("shell-only pane %s gained a foreground process or changed ownership; preserving it", paneID)
 		}
 		return nil
@@ -460,7 +460,7 @@ func (s *Service) verifyMountShellSignalOwnership(ctx context.Context, project s
 	}
 	foregroundName, foregroundCWD, found := foregroundProcess(info, foreground)
 	foregroundPID := foreground
-	if !found || !strings.EqualFold(foregroundName, expectedName) || !pathInside(foregroundCWD, mountPath) {
+	if !found || !strings.EqualFold(foregroundName, expectedName) || !pathInside(foregroundCWD, sandboxPath) {
 		return fmt.Errorf("pane %s no longer exposes its Task-owned foreground agent", paneID)
 	}
 	if authorization.handle(foregroundPID) == nil {
@@ -491,7 +491,7 @@ func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project 
 	if !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
 		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task pane before signaling", true)
 	}
-	info, err := s.mountPaneProcessInfo(ctx, pane.PaneID)
+	info, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
 	if err != nil {
 		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task foreground before signaling", true, err.Error())
 	}
@@ -507,7 +507,7 @@ func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project 
 	}
 	name, cwd, processFound := foregroundProcess(info, foreground)
 	if !processFound || !strings.EqualFold(name, pane.Agent) || !pathInside(cwd, task.WorktreePath) {
-		return paneProcessInfo{}, axi.Failure("task_process_not_owned", fmt.Sprintf("in-place Task pane %s has a foreign foreground process that is not the Task's verified Rider; preserving it", pane.PaneID), false, "Stop or inspect the unrelated process, preserve its work, then retry Teardown")
+		return paneProcessInfo{}, axi.Failure("task_process_not_owned", fmt.Sprintf("in-place Task pane %s has a foreign foreground process that is not the Task's verified Worker; preserving it", pane.PaneID), false, "Stop or inspect the unrelated process, preserve its work, then retry Teardown")
 	}
 	return info, nil
 }
@@ -532,17 +532,17 @@ func (s *Service) verifyInPlaceProcessSignalOwnership(ctx context.Context, proje
 	return axi.Failure("task_process_identity_unavailable", fmt.Sprintf("process %d is neither marked for the Task nor the verified in-place pane shell", pid), true)
 }
 
-func shellOnlyPaneInMount(snapshot herdr.Snapshot, pane herdr.Pane, mountPath string) bool {
-	return pane.Agent == "" && snapshotAgentName(snapshot, pane.PaneID) == "" && pathInside(pane.CWD, mountPath)
+func shellOnlyPaneInSandbox(snapshot herdr.Snapshot, pane herdr.Pane, sandboxPath string) bool {
+	return pane.Agent == "" && snapshotAgentName(snapshot, pane.PaneID) == "" && pathInside(pane.CWD, sandboxPath)
 }
 
-func mountPaneProcessIDs(info paneProcessInfo, mountPath string) []int {
+func sandboxPaneProcessIDs(info paneProcessInfo, sandboxPath string) []int {
 	pids := make([]int, 0, len(info.ForegroundProcesses)+1)
-	if processInMount(info.ShellPID, mountPath) {
+	if processInSandbox(info.ShellPID, sandboxPath) {
 		pids = append(pids, info.ShellPID)
 	}
 	for _, process := range info.ForegroundProcesses {
-		if processInMount(process.PID, mountPath) {
+		if processInSandbox(process.PID, sandboxPath) {
 			pids = append(pids, process.PID)
 		}
 	}
@@ -556,7 +556,7 @@ func mountPaneProcessIDs(info paneProcessInfo, mountPath string) []int {
 	return unique
 }
 
-func (s *Service) mountPaneProcessInfo(ctx context.Context, paneID string) (paneProcessInfo, error) {
+func (s *Service) sandboxPaneProcessInfo(ctx context.Context, paneID string) (paneProcessInfo, error) {
 	raw, err := s.herdrCall(ctx, "pane.process_info", map[string]any{"pane_id": paneID})
 	if err != nil {
 		return paneProcessInfo{}, err
@@ -777,8 +777,8 @@ func taskTabs(snapshot herdr.Snapshot, project store.Project, task store.Task) m
 }
 
 // ownsTaskPane reports whether pane is the Task's: it carries the Task's
-// label, or it is an unlabeled pane inside the Mount in one of the Task's
-// tabs. An unlabeled pane elsewhere, even inside the Mount, is not the Task's.
+// label, or it is an unlabeled pane inside the Sandbox in one of the Task's
+// tabs. An unlabeled pane elsewhere, even inside the Sandbox, is not the Task's.
 // A pane running an agent must run one of the Task's launches.
 func ownsTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Task, tabs map[string]bool, pane herdr.Pane) bool {
 	labelMatch := task.PaneLabel != "" && pane.Label == task.PaneLabel
@@ -897,8 +897,8 @@ func missingPaneError(err error) bool {
 	return herdrErr.Code == "pane_not_found" || herdrErr.Code == "tab_not_found" || herdrErr.Code == "workspace_not_found" || herdrErr.Code == "not_found"
 }
 
-func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, step string, cause error) error {
-	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
+func (s *Service) teardownIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, step string, cause error) error {
+	if err := s.recordTeardownIncomplete(ctx, db, project, task, cause); err != nil {
 		return errors.Join(cause, err)
 	}
 	retryable := !errors.Is(cause, store.ErrInvalidApprovedDiscardTransition)
@@ -907,18 +907,18 @@ func (s *Service) unsaddleIncomplete(ctx context.Context, db *store.DB, project 
 	if errors.As(cause, &structured) {
 		help = append(help, structured.Help...)
 	}
-	help = append(help, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+"`")
-	return axi.Failure("unsaddle_incomplete", cause.Error(), retryable, help...)
+	help = append(help, "Repair the failed "+step+" step, then retry `posse teardown "+taskIDString(task.Seq)+"`")
+	return axi.Failure("teardown_incomplete", cause.Error(), retryable, help...)
 }
 
-func (s *Service) unsaddleDiscardIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, step string, cause error) error {
-	if err := s.recordUnsaddleIncomplete(ctx, db, project, task, cause); err != nil {
+func (s *Service) teardownDiscardIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, step string, cause error) error {
+	if err := s.recordTeardownIncomplete(ctx, db, project, task, cause); err != nil {
 		return errors.Join(cause, err)
 	}
-	return axi.Failure("unsaddle_incomplete", cause.Error(), true, "Repair the failed "+step+" step, then retry `posse unsaddle "+taskIDString(task.Seq)+" --discard --user-approved \"<User's original words>\"`")
+	return axi.Failure("teardown_incomplete", cause.Error(), true, "Repair the failed "+step+" step, then retry `posse teardown "+taskIDString(task.Seq)+" --discard --user-approved \"<User's original words>\"`")
 }
 
-func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
+func (s *Service) recordTeardownIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
 	if err := s.recordTeardownBlocked(ctx, db, project, task, cause); err != nil {
 		return err
 	}
@@ -928,14 +928,14 @@ func (s *Service) recordUnsaddleIncomplete(ctx context.Context, db *store.DB, pr
 	}
 	found := false
 	for _, notice := range notices {
-		if notice.TaskID == task.ID && notice.Kind == "unsaddle_incomplete" && notice.AckedAt == 0 && strings.Contains(notice.Summary, cause.Error()) {
+		if notice.TaskID == task.ID && notice.Kind == "teardown_incomplete" && notice.AckedAt == 0 && strings.Contains(notice.Summary, cause.Error()) {
 			found = true
 			break
 		}
 	}
 	if !found {
 		summary := fmt.Sprintf("%s teardown incomplete: %s", taskDisplayName(task), cause)
-		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "unsaddle_incomplete", Summary: summary, DataJSON: `{}`}); err != nil {
+		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "teardown_incomplete", Summary: summary, DataJSON: `{}`}); err != nil {
 			return err
 		}
 	}

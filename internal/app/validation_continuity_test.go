@@ -9,7 +9,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func queueDeliveredValidationFix(t *testing.T, fixture *prLandingFixture) {
+func queueDeliveredValidationFix(t *testing.T, fixture *prMergeFixture) {
 	t.Helper()
 	result, err := fixture.db.QueueValidationFixInstruction(context.Background(), fixture.task.ID, "gate", fixture.headSHA, "gate:continuity", "Fix the failed Gate")
 	if err != nil || !result.Queued {
@@ -21,11 +21,11 @@ func queueDeliveredValidationFix(t *testing.T, fixture *prLandingFixture) {
 }
 
 func TestDoneRefusesTaskHeadThatDoesNotDescendFromAutomaticInstruction(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	queueDeliveredValidationFix(t, fixture)
 	gitTest(t, fixture.worktree, "commit", "--amend", "-m", "rewrite Task history")
 
-	code, output, errOutput := fixture.run("holler", "done", "Finished the fix")
+	code, output, errOutput := fixture.run("signal", "done", "Finished the fix")
 	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
 	notices, noticeErr := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	var doneSignals int
@@ -42,7 +42,7 @@ func TestDoneRefusesTaskHeadThatDoesNotDescendFromAutomaticInstruction(t *testin
 	if code != 1 || !strings.Contains(output, "head_discontinuity") || err != nil || task.State != store.StateWorking || doneSignals != 0 || noticeErr != nil || countNoticeKind(notices, "head_discontinuity") != 1 || !noticeContainsBothHeads {
 		t.Fatalf("rewritten Task head was accepted or not diagnosed: exit=%d output=%s stderr=%s task=%#v done_signals=%d notices=%#v errors=%v/%v", code, output, errOutput, task, doneSignals, notices, err, noticeErr)
 	}
-	if code, output, _ := fixture.run("holler", "done", "Retry after refusal"); code != 1 || !strings.Contains(output, "head_discontinuity") {
+	if code, output, _ := fixture.run("signal", "done", "Retry after refusal"); code != 1 || !strings.Contains(output, "head_discontinuity") {
 		t.Fatalf("repeated discontinuous done was not refused: exit=%d output=%s", code, output)
 	}
 	notices, err = fixture.db.Notices(context.Background(), fixture.project.ID, false)
@@ -52,22 +52,22 @@ func TestDoneRefusesTaskHeadThatDoesNotDescendFromAutomaticInstruction(t *testin
 }
 
 func TestDoneChecksContinuityBeforeValidatingPRHead(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	queueDeliveredValidationFix(t, fixture)
 	gitTest(t, fixture.worktree, "commit", "--amend", "-m", "rewrite Task history")
 
-	code, output, errOutput := fixture.run("holler", "done", "Finished the fix", "--pr", "https://github.com/acme/shop/pull/17")
+	code, output, errOutput := fixture.run("signal", "done", "Finished the fix", "--pr", "https://github.com/acme/shop/pull/17")
 	if code != 1 || !strings.Contains(output, "head_discontinuity") || strings.Contains(output, "pr_head_mismatch") {
 		t.Fatalf("PR validation hid head discontinuity: exit=%d output=%s stderr=%s", code, output, errOutput)
 	}
 }
 
 func TestDoneAcceptsTaskHeadThatDescendsFromAutomaticInstruction(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	queueDeliveredValidationFix(t, fixture)
 	gitTest(t, fixture.worktree, "commit", "--allow-empty", "-m", "fix the Gate")
 
-	code, output, errOutput := fixture.run("holler", "done", "Finished the fix")
+	code, output, errOutput := fixture.run("signal", "done", "Finished the fix")
 	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
 	if code != 0 || !strings.Contains(output, "state: done") || err != nil || task.State != store.StateDone {
 		t.Fatalf("descendant Task head was refused: exit=%d output=%s stderr=%s task=%#v err=%v", code, output, errOutput, task, err)
@@ -75,7 +75,7 @@ func TestDoneAcceptsTaskHeadThatDescendsFromAutomaticInstruction(t *testing.T) {
 }
 
 func TestGateAndCIFailuresForOneHeadDeliverAsOneInstruction(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	ctx := context.Background()
 	gate, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "gate", fixture.headSHA, "gate:1", "Gate command failed with exit 1")
 	if err != nil || !gate.Queued {

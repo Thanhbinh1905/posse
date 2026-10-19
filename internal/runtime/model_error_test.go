@@ -161,7 +161,7 @@ func TestResolvedModelErrorAllowsOrdinaryIdleNotice(t *testing.T) {
 	if err != nil || !observed {
 		t.Fatalf("record model-error episode: observed=%t err=%v", observed, err)
 	}
-	if _, err := db.FinishModelErrorEpisode(ctx, task.ID, episode.Episode, "resolved", "Rider turn completed successfully", nil, time.Now().UnixMilli()); err != nil {
+	if _, err := db.FinishModelErrorEpisode(ctx, task.ID, episode.Episode, "resolved", "Worker turn completed successfully", nil, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	pane := herdr.Pane{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "pi", AgentStatus: "idle"}

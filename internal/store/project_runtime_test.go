@@ -11,52 +11,52 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-func TestLookoutPollerHeartbeatAndFailureNoticeEpisode(t *testing.T) {
+func TestWatchRuntimeHeartbeatAndFailureNoticeEpisode(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	project, err := db.CreateProject(ctx, "poller", t.TempDir(), "main")
+	project, err := db.CreateProject(ctx, "watch", t.TempDir(), "main")
 	if err != nil {
 		t.Fatal(err)
 	}
-	poller := LookoutPoller{PID: 123, Token: "episode-one", StartedAt: 100, HeartbeatAt: 101, ExecutablePath: "/usr/bin/posse", ExecutableDevice: 7, ExecutableInode: 11}
-	if err := db.SetLookoutPoller(ctx, project.ID, poller); err != nil {
+	watch := WatchRuntime{PID: 123, Token: "episode-one", StartedAt: 100, HeartbeatAt: 101, ExecutablePath: "/usr/bin/posse", ExecutableDevice: 7, ExecutableInode: 11}
+	if err := db.SetWatchRuntime(ctx, project.ID, watch); err != nil {
 		t.Fatal(err)
 	}
-	got, err := db.LookoutPoller(ctx, project.ID)
-	if err != nil || got != poller {
-		t.Fatalf("Lookout poller = %#v, want %#v: %v", got, poller, err)
+	got, err := db.WatchRuntime(ctx, project.ID)
+	if err != nil || got != watch {
+		t.Fatalf("Watch runtime = %#v, want %#v: %v", got, watch, err)
 	}
-	raised, err := db.RaiseLookoutPollerFailure(ctx, project.ID, poller.Token, "Lookout poller heartbeat is stale", 102)
+	raised, err := db.RaiseWatchRuntimeFailure(ctx, project.ID, watch.Token, "Watch runtime heartbeat is stale", 102)
 	if err != nil || !raised {
 		t.Fatalf("first stale episode notice = %v, %v", raised, err)
 	}
-	raised, err = db.RaiseLookoutPollerFailure(ctx, project.ID, poller.Token, "duplicate stale poller", 103)
+	raised, err = db.RaiseWatchRuntimeFailure(ctx, project.ID, watch.Token, "duplicate stale watch", 103)
 	if err != nil || raised {
 		t.Fatalf("duplicate stale episode notice = %v, %v", raised, err)
 	}
 	notices, err := db.Notices(ctx, project.ID, false)
-	if err != nil || len(notices) != 1 || notices[0].Kind != "pr_watch_failing" || notices[0].Summary != "Lookout poller heartbeat is stale" {
+	if err != nil || len(notices) != 1 || notices[0].Kind != "pr_watch_failing" || notices[0].Summary != "Watch runtime heartbeat is stale" {
 		t.Fatalf("stale episode Notices = %#v, %v", notices, err)
 	}
-	if ok, err := db.HeartbeatLookoutPoller(ctx, project.ID, poller.PID, poller.Token, 104); err != nil || !ok {
+	if ok, err := db.HeartbeatWatchRuntime(ctx, project.ID, watch.PID, watch.Token, 104); err != nil || !ok {
 		t.Fatalf("recovery heartbeat = %v, %v", ok, err)
 	}
-	if raised, err := db.RaiseLookoutPollerFailure(ctx, project.ID, poller.Token, "second stale episode", 105); err != nil || !raised {
+	if raised, err := db.RaiseWatchRuntimeFailure(ctx, project.ID, watch.Token, "second stale episode", 105); err != nil || !raised {
 		t.Fatalf("second stale episode notice = %v, %v", raised, err)
 	}
-	if err := db.ClearLookoutPoller(ctx, project.ID, poller.PID, poller.Token); err != nil {
+	if err := db.ClearWatchRuntime(ctx, project.ID, watch.PID, watch.Token); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := db.LookoutPoller(ctx, project.ID); err != nil || got != (LookoutPoller{}) {
-		t.Fatalf("cleared Lookout poller = %#v, %v", got, err)
+	if got, err := db.WatchRuntime(ctx, project.ID); err != nil || got != (WatchRuntime{}) {
+		t.Fatalf("cleared Watch runtime = %#v, %v", got, err)
 	}
 }
 
-func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t *testing.T) {
+func TestRememberProjectServerStartedAtFillsGenerationAlongsideWatchRecovery(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
 	if err != nil {
@@ -67,8 +67,8 @@ func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	lookout := LookoutRecovery{PaneID: "w1:p2", RetryAt: 123456, FailedStarts: 2, NoticeRaised: true}
-	if err := db.SetLookoutRecovery(ctx, project.ID, lookout); err != nil {
+	watch := WatchRecovery{PaneID: "w1:p2", RetryAt: 123456, FailedStarts: 2, NoticeRaised: true}
+	if err := db.SetWatchRecovery(ctx, project.ID, watch); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "server-1"); err != nil {
@@ -78,9 +78,9 @@ func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t
 	if err != nil || generation != "server-1" {
 		t.Fatalf("remembered Project generation = %q, want server-1: %v", generation, err)
 	}
-	gotLookout, err := db.LookoutRecovery(ctx, project.ID)
-	if err != nil || gotLookout != lookout {
-		t.Fatalf("remembering Project generation changed Lookout recovery: %#v, want %#v: %v", gotLookout, lookout, err)
+	gotWatch, err := db.WatchRecovery(ctx, project.ID)
+	if err != nil || gotWatch != watch {
+		t.Fatalf("remembering Project generation changed Watch recovery: %#v, want %#v: %v", gotWatch, watch, err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "server-2"); err != nil {
 		t.Fatal(err)
@@ -199,7 +199,7 @@ func TestUnchangedTaskObservationDoesNotWaitForWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Observation"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Observation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestChangedTaskObservationIsPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Observation"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Observation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestTaskObservationConditionalUpdatePreservesConcurrentObservation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Observation"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Observation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestProjectObservationConditionalUpdatePreservesConcurrentLead(t *testing.T
 	}
 }
 
-func TestLookoutRecoveryPersistsAcrossStoreReopen(t *testing.T) {
+func TestWatchRecoveryPersistsAcrossStoreReopen(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -404,8 +404,8 @@ func TestLookoutRecoveryPersistsAcrossStoreReopen(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	want := LookoutRecovery{PaneID: "w1:p2", RetryAt: 123456, FailedStarts: 4, NoticeRaised: true}
-	if err := db.SetLookoutRecovery(ctx, project.ID, want); err != nil {
+	want := WatchRecovery{PaneID: "w1:p2", RetryAt: 123456, FailedStarts: 4, NoticeRaised: true}
+	if err := db.SetWatchRecovery(ctx, project.ID, want); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -418,21 +418,21 @@ func TestLookoutRecoveryPersistsAcrossStoreReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	got, err := db.LookoutRecovery(ctx, project.ID)
+	got, err := db.WatchRecovery(ctx, project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("reopened Lookout recovery = %#v, want %#v", got, want)
+		t.Fatalf("reopened Watch recovery = %#v, want %#v", got, want)
 	}
-	if err := db.ResetLookoutRecovery(ctx, project.ID); err != nil {
+	if err := db.ResetWatchRecovery(ctx, project.ID); err != nil {
 		t.Fatal(err)
 	}
-	got, err = db.LookoutRecovery(ctx, project.ID)
+	got, err = db.WatchRecovery(ctx, project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != (LookoutRecovery{}) {
-		t.Fatalf("reset Lookout recovery = %#v, want empty state", got)
+	if got != (WatchRecovery{}) {
+		t.Fatalf("reset Watch recovery = %#v, want empty state", got)
 	}
 }

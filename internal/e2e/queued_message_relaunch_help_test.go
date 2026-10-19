@@ -28,10 +28,10 @@ case "$PWD/" in
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     while [ ! -e "$POSSE_E2E_SIGNAL_GATE/t1" ]; do sleep 0.02; done
     if [ "$(cat "$POSSE_E2E_SIGNAL_GATE/t1")" = failed ]; then
-      "$POSSE_E2E_POSSE_BIN" holler failed 'Controlled failure without idling' >> "$POSSE_TEST_ROOT/scout.log" 2>&1
+      "$POSSE_E2E_POSSE_BIN" signal failed 'Controlled failure without idling' >> "$POSSE_TEST_ROOT/research.log" 2>&1
     fi
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
-    while IFS= read -r instruction; do printf '%s\n' "$instruction" >> "$POSSE_TEST_ROOT/scout.log"; done
+    while IFS= read -r instruction; do printf '%s\n' "$instruction" >> "$POSSE_TEST_ROOT/research.log"; done
     ;;
   *)
     while IFS= read -r line; do :; done
@@ -44,12 +44,12 @@ esac
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "defaults.auto_recover", "false"); !strings.Contains(output, "auto_recover") {
 		t.Fatalf("could not disable automatic recovery: %s", output)
 	}
-	brief := filepath.Join(fixture.root, "scout.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: scout\ntitle: Relaunched message help\ndone_when: report.md is complete\n---\nWrite a concise Report.\n"), 0o600); err != nil {
+	brief := filepath.Join(fixture.root, "research.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: research\ntitle: Relaunched message help\ndone_when: report.md is complete\n---\nWrite a concise Report.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "relaunched-message-help"); !strings.Contains(output, "t1") {
-		t.Fatalf("ride did not return t1: %s", output)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "relaunched-message-help"); !strings.Contains(output, "t1") {
+		t.Fatalf("start did not return t1: %s", output)
 	}
 	fixture.waitTaskState(t, "t1", store.StateWorking)
 	task := fixture.mustTask(t, "t1")
@@ -71,7 +71,7 @@ esac
 		t.Fatal(err)
 	}
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "relaunch", "t1"); !strings.Contains(output, "working") {
-		t.Fatalf("relaunch did not resume the Scout: %s", output)
+		t.Fatalf("relaunch did not resume the Research: %s", output)
 	}
 	fixture.waitTaskState(t, "t1", store.StateWorking)
 	task = fixture.mustTask(t, "t1")
@@ -79,11 +79,11 @@ esac
 
 	client := herdr.NewWithEnv("herdr", fixture.env)
 	if _, err := client.Run(context.Background(), "pane", "report-agent", task.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
-		t.Fatalf("mark replacement Scout working: %v", err)
+		t.Fatalf("mark replacement Research working: %v", err)
 	}
 	waitForRelaunchHelpAgentStatus(t, fixture, task.PaneID, "working")
 
-	const queuedBody = "T180 instruction queued for the replacement Scout"
+	const queuedBody = "T180 instruction queued for the replacement Research"
 	queuedMessageID := queueRelaunchHelpMessage(t, fixture, task.ID, queuedBody)
 	show := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	for _, expected := range []string{
@@ -96,18 +96,18 @@ esac
 		"instruction: " + queuedBody,
 		"status: queued",
 		"Undeliverable instructions are not retried automatically; resend each with `posse send t1 <message>`",
-		"Queued instructions will be delivered when the Rider is ready and unfocused",
+		"Queued instructions will be delivered when the Worker is ready and unfocused",
 	} {
 		if !strings.Contains(show, expected) {
 			t.Fatalf("posse show omitted %q: %s", expected, show)
 		}
 	}
-	scoutLog, err := os.ReadFile(filepath.Join(fixture.root, "scout.log"))
+	researchLog, err := os.ReadFile(filepath.Join(fixture.root, "research.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(scoutLog), undeliverableBody) {
-		t.Fatalf("replacement Scout received the old undeliverable instruction: %s", scoutLog)
+	if strings.Contains(string(researchLog), undeliverableBody) {
+		t.Fatalf("replacement Research received the old undeliverable instruction: %s", researchLog)
 	}
 	for _, message := range []struct {
 		id     int64

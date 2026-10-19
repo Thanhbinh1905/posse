@@ -46,16 +46,16 @@ func workspaceRootBaselinePath(home string, project store.Project, task store.Ta
 	return filepath.Join(home, "projects", project.Name, ".workspace-root-baselines", taskIDString(task.Seq)+".json")
 }
 
-func writeWorkspaceRootBaseline(ctx context.Context, home string, project store.Project, task store.Task, mountRoot string, targets []taskMember, rootContext string) error {
+func writeWorkspaceRootBaseline(ctx context.Context, home string, project store.Project, task store.Task, sandboxRoot string, targets []taskMember, rootContext string) error {
 	members, err := workspaceMemberPaths(targets)
 	if err != nil {
 		return err
 	}
-	files, err := workspaceRootFileStatesMode(mountRoot, members, rootContext != "legacy")
+	files, err := workspaceRootFileStatesMode(sandboxRoot, members, rootContext != "legacy")
 	if err != nil {
 		return err
 	}
-	memberRefs, err := workspaceMemberBaselineRefs(ctx, mountRoot, targets)
+	memberRefs, err := workspaceMemberBaselineRefs(ctx, sandboxRoot, targets)
 	if err != nil {
 		return err
 	}
@@ -66,10 +66,10 @@ func writeWorkspaceRootBaseline(ctx context.Context, home string, project store.
 	return writeFile(workspaceRootBaselinePath(home, project, task), data)
 }
 
-func workspaceMemberBaselineRefs(ctx context.Context, mountRoot string, targets []taskMember) (map[string]string, error) {
+func workspaceMemberBaselineRefs(ctx context.Context, sandboxRoot string, targets []taskMember) (map[string]string, error) {
 	refs := make(map[string]string, len(targets))
 	for _, target := range targets {
-		worktree := filepath.Join(mountRoot, target.Path)
+		worktree := filepath.Join(sandboxRoot, target.Path)
 		_, err := os.Stat(filepath.Join(worktree, ".git"))
 		if os.IsNotExist(err) {
 			refs[target.Path] = ""
@@ -150,10 +150,10 @@ func reportAttachmentGitArgs(baseRef string) [][]string {
 	)
 }
 
-// preserveReportAttachments saves the Rider's non-ignored, unlanded files at
-// their worktree-relative paths next to report.md before the Mount is reset.
+// preserveReportAttachments saves the Worker's non-ignored, unmerged files at
+// their worktree-relative paths next to report.md before the Sandbox is reset.
 // Workspace Members are enumerated repository by repository, and shared-root
-// files are compared with the prelaunch Mount snapshot. A retry may encounter
+// files are compared with the prelaunch Sandbox snapshot. A retry may encounter
 // the same saved files but never removes or replaces them.
 func preserveReportAttachments(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
 	if task.WorktreePath == "" {
@@ -163,7 +163,7 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 	workspaceMembers := map[string]bool{}
 	workspaceBaseline := workspaceRootBaseline{}
 	if project.IsWorkspace() {
-		targets, err := workspaceMountTargets(ctx, db, project)
+		targets, err := workspaceSandboxTargets(ctx, db, project)
 		if err != nil {
 			return err
 		}
@@ -294,23 +294,23 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 }
 
 // workspaceRootReportAttachments finds new or changed files in a workspace
-// Mount relative to the copy captured before the Rider started. Files inside
+// Sandbox relative to the copy captured before the Worker started. Files inside
 // nested repositories come from Git's tracked and non-ignored file listing.
-func workspaceRootReportAttachments(ctx context.Context, mountRoot string, members map[string]bool, baseline workspaceRootBaseline) (map[string]reportAttachmentSource, error) {
-	if err := validateWorkspaceMountRoot(mountRoot); err != nil {
+func workspaceRootReportAttachments(ctx context.Context, sandboxRoot string, members map[string]bool, baseline workspaceRootBaseline) (map[string]reportAttachmentSource, error) {
+	if err := validateWorkspaceSandboxRoot(sandboxRoot); err != nil {
 		return nil, err
 	}
-	mountRoot, err := filepath.EvalSymlinks(mountRoot)
+	sandboxRoot, err := filepath.EvalSymlinks(sandboxRoot)
 	if err != nil {
 		return nil, err
 	}
 	var rootFiles []string
 	var repositories []reportAttachmentRepository
-	err = filepath.WalkDir(mountRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(sandboxRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		relative, err := filepath.Rel(mountRoot, path)
+		relative, err := filepath.Rel(sandboxRoot, path)
 		if err != nil || relative == "." {
 			return err
 		}
@@ -368,7 +368,7 @@ func workspaceRootReportAttachments(ctx context.Context, mountRoot string, membe
 		if insideRepository {
 			continue
 		}
-		if err := addIfChanged(relative, mountRoot, relative); err != nil {
+		if err := addIfChanged(relative, sandboxRoot, relative); err != nil {
 			return nil, err
 		}
 	}
@@ -470,7 +470,7 @@ func workspaceRootFileStatesMode(root string, members map[string]bool, includeCo
 }
 
 func validateWorkspaceRootContext(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, rootContext string) error {
-	if err := validateWorkspaceMountRoot(task.WorktreePath); err != nil {
+	if err := validateWorkspaceSandboxRoot(task.WorktreePath); err != nil {
 		return err
 	}
 	if rootContext == "legacy" || rootContext == "" {
@@ -480,7 +480,7 @@ func validateWorkspaceRootContext(ctx context.Context, db *store.DB, home string
 	if err != nil {
 		return err
 	}
-	targets, err := workspaceMountTargets(ctx, db, project)
+	targets, err := workspaceSandboxTargets(ctx, db, project)
 	if err != nil {
 		return err
 	}
@@ -597,7 +597,7 @@ func safeAttachmentDestination(root, path string) error {
 	return nil
 }
 
-// saveExplicitAttachment includes ignored evidence named by a Rider on its done Signal.
+// saveExplicitAttachment includes ignored evidence named by a Worker on its done Signal.
 func saveExplicitAttachment(task store.Task, home string, project store.Project, supplied string) error {
 	root, err := filepath.Abs(task.WorktreePath)
 	if err != nil {
@@ -609,7 +609,7 @@ func saveExplicitAttachment(task store.Task, home string, project store.Project,
 	}
 	relative, err := filepath.Rel(root, path)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || relative == ".git" || strings.HasPrefix(relative, ".git"+string(os.PathSeparator)) {
-		return fmt.Errorf("attachment must stay inside the Rider's Mount")
+		return fmt.Errorf("attachment must stay inside the Worker's Sandbox")
 	}
 	destination := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq))
 	return filepath.WalkDir(path, func(source string, entry os.DirEntry, err error) error {

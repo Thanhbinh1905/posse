@@ -11,7 +11,7 @@ import (
 )
 
 func TestRetitleValidatesAndPersistsConventionalPRTitle(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	for _, invalid := range []string{"Not conventional", "fix:", "Fix(publish): capitalized type", "fix(publish): line one\nline two"} {
 		code, output, stderr := fixture.run("retitle", "t1", invalid)
 		if code == 0 || !strings.Contains(output+stderr, "pr_title_invalid") {
@@ -46,8 +46,8 @@ func TestRetitleValidatesAndPersistsConventionalPRTitle(t *testing.T) {
 	}
 }
 
-func TestRetitleRefusesNonPRShipTask(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+func TestRetitleRefusesNonPRChangeTask(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	code, output, stderr := fixture.run("retitle", "t1", "fix(publish): update the title")
 	if code == 0 || !strings.Contains(output+stderr, "retitle_refused") {
 		t.Fatalf("retitle of local Task was not refused: code=%d output=%s stderr=%s", code, output, stderr)

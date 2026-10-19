@@ -159,7 +159,7 @@ func TestLaunchPromptReturnsNonStallErrorsWithoutRetry(t *testing.T) {
 	}
 }
 
-type rideFixture struct {
+type startFixture struct {
 	fake    *herdr.Fake
 	service *Service
 	home    string
@@ -168,7 +168,7 @@ type rideFixture struct {
 	project store.Project
 }
 
-func newRideFixture(t *testing.T) rideFixture {
+func newStartFixture(t *testing.T) startFixture {
 	t.Helper()
 	fastLaunchRetries(t)
 	ctx := context.Background()
@@ -179,12 +179,12 @@ func newRideFixture(t *testing.T) rideFixture {
 	if err := os.MkdirAll(filepath.Join(home, "projects", "shop"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	globalConfig := "[defaults]\nlanding_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"
+	globalConfig := "[defaults]\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(globalConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	briefPath := filepath.Join(root, "brief.md")
-	if err := os.WriteFile(briefPath, []byte("---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\n---\nCreate a committed file.\n"), 0o600); err != nil {
+	if err := os.WriteFile(briefPath, []byte("---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\n---\nCreate a committed file.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db, err := store.Open(home)
@@ -206,19 +206,19 @@ func newRideFixture(t *testing.T) rideFixture {
 	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t2","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p2","tab_id":"w1:t2"}}`)
 	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	t.Chdir(repo)
-	return rideFixture{fake: fake, service: testService(home, fake), home: home, repo: repo, brief: briefPath, project: project}
+	return startFixture{fake: fake, service: testService(home, fake), home: home, repo: repo, brief: briefPath, project: project}
 }
 
-func (f rideFixture) ride(t *testing.T) (int, string) {
+func (f startFixture) start(t *testing.T) (int, string) {
 	t.Helper()
 	output := &bytes.Buffer{}
 	cli := f.service.CLI()
 	cli.Out, cli.ErrOut = output, output
-	code := cli.Run([]string{"ride", "--brief", f.brief, "--name", "launch-probe"})
+	code := cli.Run([]string{"start", "--brief", f.brief, "--name", "launch-probe"})
 	return code, output.String()
 }
 
-func (f rideFixture) onlyTask(t *testing.T) (store.Task, []store.Notice) {
+func (f startFixture) onlyTask(t *testing.T) (store.Task, []store.Notice) {
 	t.Helper()
 	db, err := store.Open(f.home)
 	if err != nil {
@@ -236,18 +236,18 @@ func (f rideFixture) onlyTask(t *testing.T) (store.Task, []store.Notice) {
 	return tasks[0], notices
 }
 
-func TestRideRejectsMultipleClosingIssuesBeforeAcquiringMount(t *testing.T) {
-	fixture := newRideFixture(t)
-	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nissues: [12, 13]\n---\nCreate a committed file.\n"
+func TestStartRejectsMultipleClosingIssuesBeforeAcquiringSandbox(t *testing.T) {
+	fixture := newStartFixture(t)
+	brief := "---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\nissues: [12, 13]\n---\nCreate a committed file.\n"
 	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, output := fixture.ride(t)
+	code, output := fixture.start(t)
 	if code == 0 || !strings.Contains(output, "issues") || !strings.Contains(output, "only one closing issue") {
-		t.Fatalf("ride accepted multiple closing issues: code=%d output=%s", code, output)
+		t.Fatalf("start accepted multiple closing issues: code=%d output=%s", code, output)
 	}
 	if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
-		t.Fatalf("invalid Brief acquired Rider resources: calls=%#v", fixture.fake.Calls)
+		t.Fatalf("invalid Brief acquired Worker resources: calls=%#v", fixture.fake.Calls)
 	}
 	db, err := store.Open(fixture.home)
 	if err != nil {
@@ -257,14 +257,14 @@ func TestRideRejectsMultipleClosingIssuesBeforeAcquiringMount(t *testing.T) {
 	if tasks, err := db.Tasks(context.Background(), fixture.project.ID, true); err != nil || len(tasks) != 0 {
 		t.Fatalf("invalid Brief created Tasks: %#v, %v", tasks, err)
 	}
-	if mounts, err := db.Mounts(context.Background(), fixture.project.ID); err != nil || len(mounts) != 0 {
-		t.Fatalf("invalid Brief acquired Mounts: %#v, %v", mounts, err)
+	if sandboxes, err := db.Sandboxes(context.Background(), fixture.project.ID); err != nil || len(sandboxes) != 0 {
+		t.Fatalf("invalid Brief acquired Sandboxes: %#v, %v", sandboxes, err)
 	}
 }
 
 func TestCodexLaunchCarriesBriefWithoutTypingIntoFocusedComposer(t *testing.T) {
-	fixture := newRideFixture(t)
-	cfg := "[defaults]\nlanding_mode = \"local\"\n\n[profiles.codex]\nkind = \"codex\"\n\n[dispatch.default]\nuse = \"codex\"\n"
+	fixture := newStartFixture(t)
+	cfg := "[defaults]\nmerge_mode = \"local\"\n\n[profiles.codex]\nkind = \"codex\"\n\n[dispatch.default]\nuse = \"codex\"\n"
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestCodexLaunchCarriesBriefWithoutTypingIntoFocusedComposer(t *testing.T) {
 			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
 		}
 	}
-	if code, output := fixture.ride(t); code != 0 || !strings.Contains(output, "state: working") {
+	if code, output := fixture.start(t); code != 0 || !strings.Contains(output, "state: working") {
 		t.Fatalf("codex launch: %d %s", code, output)
 	}
 	if fixture.fake.CallCount("agent.prompt") != 0 {
@@ -291,8 +291,8 @@ func TestCodexLaunchCarriesBriefWithoutTypingIntoFocusedComposer(t *testing.T) {
 	}
 }
 
-func TestRideFocusedDuringLaunchRemainsSpawning(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestStartFocusedDuringLaunchRemainsSpawning(t *testing.T) {
+	fixture := newStartFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
 			fixture.fake.SnapshotValue.FocusedPaneID = "fake:child:p1"
@@ -300,15 +300,15 @@ func TestRideFocusedDuringLaunchRemainsSpawning(t *testing.T) {
 			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
 		}
 	}
-	code, output := fixture.ride(t)
+	code, output := fixture.start(t)
 	task, notices := fixture.onlyTask(t)
 	if code != 0 || task.State != store.StateSpawning || len(notices) != 0 {
-		t.Fatalf("focused ride code=%d output=%s task=%#v notices=%#v", code, output, task, notices)
+		t.Fatalf("focused start code=%d output=%s task=%#v notices=%#v", code, output, task, notices)
 	}
 }
 
 func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T) {
-	fixture := newRideFixture(t)
+	fixture := newStartFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
 			fixture.fake.SnapshotValue.FocusedPaneID = "fake:child:p1"
@@ -316,8 +316,8 @@ func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T)
 			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
 		}
 	}
-	if code, output := fixture.ride(t); code != 0 {
-		t.Fatalf("ride: %d %s", code, output)
+	if code, output := fixture.start(t); code != 0 {
+		t.Fatalf("start: %d %s", code, output)
 	}
 	db, err := store.Open(fixture.home)
 	if err != nil {
@@ -354,13 +354,13 @@ func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T)
 	}
 }
 
-func TestRideFailsTaskWhenLaunchPromptIsNeverPickedUp(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestStartFailsTaskWhenLaunchPromptIsNeverPickedUp(t *testing.T) {
+	fixture := newStartFixture(t)
 	for range launchPromptAttempts {
 		fixture.fake.ErrorQueue["agent.prompt"] = append(fixture.fake.ErrorQueue["agent.prompt"], stalled())
 	}
-	if code, output := fixture.ride(t); code != 1 || !strings.Contains(output, "prompt_not_delivered") {
-		t.Fatalf("ride with a dropped launch prompt code=%d output=%s", code, output)
+	if code, output := fixture.start(t); code != 1 || !strings.Contains(output, "prompt_not_delivered") {
+		t.Fatalf("start with a dropped launch prompt code=%d output=%s", code, output)
 	}
 	task, notices := fixture.onlyTask(t)
 	if task.State != store.StateFailed {
@@ -371,17 +371,17 @@ func TestRideFailsTaskWhenLaunchPromptIsNeverPickedUp(t *testing.T) {
 	}
 }
 
-func TestFailedLaunchBeforeBriefDeliveryCanRelaunchOnSameMount(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestFailedLaunchBeforeBriefDeliveryCanRelaunchOnSameSandbox(t *testing.T) {
+	fixture := newStartFixture(t)
 	for range launchPromptAttempts {
 		fixture.fake.ErrorQueue["agent.prompt"] = append(fixture.fake.ErrorQueue["agent.prompt"], stalled())
 	}
-	if code, output := fixture.ride(t); code != 1 || !strings.Contains(output, "prompt_not_delivered") {
-		t.Fatalf("ride: %d %s", code, output)
+	if code, output := fixture.start(t); code != 1 || !strings.Contains(output, "prompt_not_delivered") {
+		t.Fatalf("start: %d %s", code, output)
 	}
 	before, _ := fixture.onlyTask(t)
-	if before.State != store.StateFailed || before.MountID == 0 {
-		t.Fatalf("failed launch lost its Mount: %#v", before)
+	if before.State != store.StateFailed || before.SandboxID == 0 {
+		t.Fatalf("failed launch lost its Sandbox: %#v", before)
 	}
 	db, err := store.Open(fixture.home)
 	if err != nil {
@@ -402,16 +402,16 @@ func TestFailedLaunchBeforeBriefDeliveryCanRelaunchOnSameMount(t *testing.T) {
 		t.Fatalf("relaunch failed Task: %v", err)
 	}
 	after, err := db.TaskByID(context.Background(), fixture.project.ID, before.ID)
-	if err != nil || after.State != store.StateWorking || after.MountID != before.MountID || after.WorktreePath != before.WorktreePath || result.Pane == "" {
-		t.Fatalf("relaunch did not keep the Task Mount: before=%#v after=%#v result=%#v err=%v", before, after, result, err)
+	if err != nil || after.State != store.StateWorking || after.SandboxID != before.SandboxID || after.WorktreePath != before.WorktreePath || result.Pane == "" {
+		t.Fatalf("relaunch did not keep the Task Sandbox: before=%#v after=%#v result=%#v err=%v", before, after, result, err)
 	}
 }
 
-func TestRideWaitsForNewMountShellBeforeStartingAgent(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestStartWaitsForNewSandboxShellBeforeStartingAgent(t *testing.T) {
+	fixture := newStartFixture(t)
 	fixture.fake.ErrorQueue["agent.start"] = []error{paneBusy(), paneBusy(), nil}
-	if code, output := fixture.ride(t); code != 0 || !strings.Contains(output, "state: working") {
-		t.Fatalf("ride into a starting shell code=%d output=%s", code, output)
+	if code, output := fixture.start(t); code != 0 || !strings.Contains(output, "state: working") {
+		t.Fatalf("start into a starting shell code=%d output=%s", code, output)
 	}
 	if got := fixture.fake.CallCount("agent.start"); got != 3 {
 		t.Fatalf("agent.start calls = %d, want 3", got)
@@ -421,18 +421,18 @@ func TestRideWaitsForNewMountShellBeforeStartingAgent(t *testing.T) {
 	}
 }
 
-func TestRideFailsTaskWhenNewMountShellNeverBecomesAvailable(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestStartFailsTaskWhenNewSandboxShellNeverBecomesAvailable(t *testing.T) {
+	fixture := newStartFixture(t)
 	fixture.fake.Errors["agent.start"] = paneBusy()
-	if code, output := fixture.ride(t); code != 1 || !strings.Contains(output, "agent_pane_busy") {
-		t.Fatalf("ride into a busy pane code=%d output=%s", code, output)
+	if code, output := fixture.start(t); code != 1 || !strings.Contains(output, "agent_pane_busy") {
+		t.Fatalf("start into a busy pane code=%d output=%s", code, output)
 	}
 	if got := fixture.fake.CallCount("agent.start"); got < 2 {
 		t.Fatalf("agent.start calls = %d, want retries", got)
 	}
 	task, notices := fixture.onlyTask(t)
-	if task.State != store.StateFailed || task.MountID == 0 {
-		t.Fatalf("Task after a persistently busy pane lost its relaunchable Mount = %#v", task)
+	if task.State != store.StateFailed || task.SandboxID == 0 {
+		t.Fatalf("Task after a persistently busy pane lost its relaunchable Sandbox = %#v", task)
 	}
 	if len(notices) != 1 || notices[0].Kind != "task_failed" {
 		t.Fatalf("Lead was not told about the busy pane: %#v", notices)

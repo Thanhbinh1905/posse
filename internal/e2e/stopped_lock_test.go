@@ -18,7 +18,7 @@ import (
 )
 
 func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
-	for _, kind := range []string{"mount", "fetch"} {
+	for _, kind := range []string{"sandbox", "fetch"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newPRLifecycleFixtureWithLead(t, true)
 			defer f.db.Close()
@@ -40,9 +40,9 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 				if err := f.db.RecordCheckoutAttempt(context.Background(), f.project.ID, time.Now().UnixMilli()); err != nil {
 					t.Fatalf("defer background checkout sync: %v", err)
 				}
-				// Stop the poll-only Lookout before checking lock availability; it
+				// Stop the poll-only Watch before checking lock availability; it
 				// can race the synthetic fresh checkout and reacquire sync afterward.
-				stopBackgroundLookout(t, f)
+				stopBackgroundWatch(t, f)
 				// Let any sync already in progress finish before holding only the
 				// fetch lock; a one-time free-lock check cannot prevent a new poll.
 				syncLock := filepath.Join(f.repo, ".git", "posse-sync.lock")
@@ -58,7 +58,7 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 				}
 			}
 			// STOP only after acquisition, removing the original test's timing
-			// window. The child retains the same kernel lock as a paused Lookout.
+			// window. The child retains the same kernel lock as a paused Watch.
 			owner := newE2ELockOwner("lock-owner", path, f.env)
 			ready, err := owner.StdoutPipe()
 			if err != nil {
@@ -117,7 +117,7 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 				}
 			}
 			// A user command can first wait for the sync lock held by the
-			// Lookout, then for the fetch lock; both waits are independently
+			// Watch, then for the fetch lock; both waits are independently
 			// bounded at three seconds. Keep margin below the 10-second watchdog.
 			if elapsed := time.Since(started); elapsed > 7*time.Second {
 				t.Fatalf("lock wait exceeded bound: %s", elapsed)

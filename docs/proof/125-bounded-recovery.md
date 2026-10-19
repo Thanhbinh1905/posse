@@ -1,4 +1,4 @@
-# Issue #125: bounded Rider recovery
+# Issue #125: bounded Worker recovery
 
 ## Isolation
 
@@ -24,16 +24,16 @@ Failed project recovery restored the previous recovery generation, leaving every
 `TestFailedRecoveryBoundWithRealHerdr` uses the real isolated Herdr server. Its fake harness remains idle after every recovery prompt, causing Herdr's actual prompt-wait timeout:
 
 ```text
-configured bound=2, launches=2, Rider process starts=2, exhaustion Notices=1
+configured bound=2, launches=2, Worker process starts=2, exhaustion Notices=1
 last error: the agent did not start working after 4 prompt attempts:
 call Herdr method agent.wait: timed out waiting for agent status
 ```
 
-`TestFailedRecoveryIsBoundedUnderPluginEvents` holds prompt-wait open while `show`, `ack`, `lead` and `lookout` run. Each succeeds within its two-second command deadline. Repeated plugin events, Notice acknowledgement and another Herdr generation leave the exhausted budget unchanged. Successful explicit relaunch resets it. `TestExplicitRelaunchSettlesPendingRecovery` also verifies that a successful explicit launch during backoff settles the pending generation without another automatic launch. `TestAutomaticRecoveryPreservesLateFailedSignal` verifies that recovery does not overwrite a Rider's failed Signal received during prompt delivery.
+`TestFailedRecoveryIsBoundedUnderPluginEvents` holds prompt-wait open while `show`, `ack`, `lead` and `watch` run. Each succeeds within its two-second command deadline. Repeated plugin events, Notice acknowledgement and another Herdr generation leave the exhausted budget unchanged. Successful explicit relaunch resets it. `TestExplicitRelaunchSettlesPendingRecovery` also verifies that a successful explicit launch during backoff settles the pending generation without another automatic launch. `TestAutomaticRecoveryPreservesLateFailedSignal` verifies that recovery does not overwrite a Worker's failed Signal received during prompt delivery.
 
-`TestRecoveryCrashConsumesFinalAttempt` exits immediately after agent startup. Later events raise one exhaustion Notice without starting another Rider. Store tests cover concurrent claims, persisted backoff, reopening the database and generation changes. Backoff tests cover doubling and the one-minute cap. The full suite exposed a second group close during the Lead's opening prompt: a completed Lead-only recovery claim could hide missing Riders from the older group episode. `TestRecoveryRepairsRidersFromAnInterruptedGroupEpisode` locks down that case and passes in under a second. The existing real-Herdr group-close regression passed three consecutive runs without weakening its assertions.
+`TestRecoveryCrashConsumesFinalAttempt` exits immediately after agent startup. Later events raise one exhaustion Notice without starting another Worker. Store tests cover concurrent claims, persisted backoff, reopening the database and generation changes. Backoff tests cover doubling and the one-minute cap. The full suite exposed a second group close during the Lead's opening prompt: a completed Lead-only recovery claim could hide missing Workers from the older group episode. `TestRecoveryRepairsRidersFromAnInterruptedGroupEpisode` locks down that case and passes in under a second. The existing real-Herdr group-close regression passed three consecutive runs without weakening its assertions.
 
-The full suite also exposed a test-fixture race, not a recovery failure: the fake Rider completed its queued instruction before the test sampled the first completion's Notice. The failure showed two legitimate `task_done` Notices, while the assertion expected exactly one at that stage. Fixture gates now separate the first completion, idle report and queued completion; the original exact-count and second-completion assertions remain intact. Failure diagnostics reopen the database instead of reading a closed handle.
+The full suite also exposed a test-fixture race, not a recovery failure: the fake Worker completed its queued instruction before the test sampled the first completion's Notice. The failure showed two legitimate `task_done` Notices, while the assertion expected exactly one at that stage. Fixture gates now separate the first completion, idle report and queued completion; the original exact-count and second-completion assertions remain intact. Failure diagnostics reopen the database instead of reading a closed handle.
 
 ## Verification
 
@@ -46,6 +46,6 @@ The full suite also exposed a test-fixture race, not a recovery failure: the fak
 
 ## Risk and rollback
 
-Automatic recovery now stops after the configured budget (default three attempts). An exhausted Rider requires inspection and an explicit successful `posse relaunch`; its Mount, branch and final process are retained. Inspection and Notice commands no longer relaunch Riders implicitly.
+Automatic recovery now stops after the configured budget (default three attempts). An exhausted Worker requires inspection and an explicit successful `posse relaunch`; its Sandbox, branch and final process are retained. Inspection and Notice commands no longer relaunch Workers implicitly.
 
 Migration 24 adds recovery state. A rollback build must retain this additive migration, or the User must restore a pre-upgrade database backup before using a build that supports only schema 23. Do not downgrade or drop state in a live database.

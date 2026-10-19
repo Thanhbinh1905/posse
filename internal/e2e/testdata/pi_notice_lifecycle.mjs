@@ -49,12 +49,12 @@ const healthMessages = [];
 const uncertaintyMessages = [];
 const noticeQueue = [];
 const noticeWaiters = [];
-let failLookoutSpawns = 0;
-let failedLookoutAttempts = 0;
+let failWatchSpawns = 0;
+let failedWatchAttempts = 0;
 let failSendNotices = 0;
-let activeLookouts = 0;
-let maxActiveLookouts = 0;
-let lookoutStarts = 0;
+let activeWatches = 0;
+let maxActiveWatches = 0;
+let watchStarts = 0;
 let delayNextKill;
 let releaseDelayedKill;
 let currentSession = "initial-session";
@@ -64,17 +64,17 @@ function updateState(destination, stage = "") {
   destinations.push(destination);
   stateWrite = stateWrite.then(() => writeFile(statePath, JSON.stringify({
     session: destination.slice("pi:".length),
-    activeLookouts,
+    activeWatches,
     stage,
   })));
   return stateWrite;
 }
 
 function spawn(command, args, options) {
-  const isHandoff = args[0] === "lookout" && args.includes("--handoff");
-  if (isHandoff && failLookoutSpawns > 0) {
-    failLookoutSpawns--;
-    failedLookoutAttempts++;
+  const isHandoff = args[0] === "watch" && args.includes("--handoff");
+  if (isHandoff && failWatchSpawns > 0) {
+    failWatchSpawns--;
+    failedWatchAttempts++;
     const failed = new EventEmitter();
     failed.stdout = new PassThrough();
     failed.kill = () => true;
@@ -88,9 +88,9 @@ function spawn(command, args, options) {
   const outcomeIndex = args.indexOf("--receipt-outcome");
   if (isHandoff) {
     const destination = args[args.indexOf("--destination") + 1];
-    activeLookouts++;
-    maxActiveLookouts = Math.max(maxActiveLookouts, activeLookouts);
-    lookoutStarts++;
+    activeWatches++;
+    maxActiveWatches = Math.max(maxActiveWatches, activeWatches);
+    watchStarts++;
     updateState(destination);
   }
   if (outcomeIndex >= 0) {
@@ -113,7 +113,7 @@ function spawn(command, args, options) {
         return (event, listener) => {
           if (event === "close") {
             target.once(event, (...eventArgs) => {
-              activeLookouts--;
+              activeWatches--;
               listener(...eventArgs);
             });
             return wrapped;
@@ -214,7 +214,7 @@ toolRow.markExecutionStarted();
 if (toolRow.render().length !== 0) throw new Error("lowkey left a tool row visible");
 transcript.updateContent({ role: "assistant", content: [{ type: "text", text: "final response" }] }, true);
 if (transcript.visibleContent[0]?.text !== "final response") throw new Error("lowkey hid the final response after a tool");
-await waitFor(() => activeLookouts === 1);
+await waitFor(() => activeWatches === 1);
 for (const [reason, session] of [
   ["reload", "initial-session"],
   ["new", "new-session"],
@@ -225,33 +225,33 @@ for (const [reason, session] of [
   delayNextKill = true;
   await instance.handlers.get("session_shutdown")({ type: "session_shutdown", reason });
   instance = await startSession(reason, session);
-  if (!releaseDelayedKill) throw new Error(`session ${reason} did not stop its previous lookout`);
+  if (!releaseDelayedKill) throw new Error(`session ${reason} did not stop its previous watch`);
   const release = releaseDelayedKill;
   releaseDelayedKill = undefined;
   release();
-  await waitFor(() => activeLookouts === 1 && destinations.at(-1) === `pi:${session}`);
+  await waitFor(() => activeWatches === 1 && destinations.at(-1) === `pi:${session}`);
 }
 
 await updateState(`pi:${currentSession}`, "ready-first-notice");
-const lifecycleStarts = lookoutStarts;
+const lifecycleStarts = watchStarts;
 const message = await nextNotice();
 if (message.display !== false) throw new Error("lowkey Notice was visible in the transcript");
 instance.handlers.get("agent_start")({ type: "agent_start" }, { ui });
 entries.push({ type: "custom_message", customType: message.customType, details: message.details });
 instance.handlers.get("agent_settled")({ type: "agent_settled", aborted: false }, { ui, isIdle: () => true });
 await waitFor(() => outcomes.includes("accepted"));
-await waitFor(() => lookoutStarts > lifecycleStarts);
-const rearmedLookouts = lookoutStarts - lifecycleStarts;
+await waitFor(() => watchStarts > lifecycleStarts);
+const rearmedWatches = watchStarts - lifecycleStarts;
 failSendNotices = 1;
 await updateState(`pi:${currentSession}`, "ready-send-failure");
 const retryMessage = await nextNotice();
 if (retryMessage.display !== false) throw new Error("lowkey retry Notice was visible in the transcript");
 instance.handlers.get("agent_start")({ type: "agent_start" }, { ui });
 entries.push({ type: "custom_message", customType: retryMessage.customType, details: retryMessage.details });
-const beforeRetryRearm = lookoutStarts;
+const beforeRetryRearm = watchStarts;
 instance.handlers.get("agent_settled")({ type: "agent_settled", aborted: false }, { ui, isIdle: () => true });
 await waitFor(() => outcomes.filter((outcome) => outcome === "accepted").length >= 2);
-await waitFor(() => lookoutStarts > beforeRetryRearm);
+await waitFor(() => watchStarts > beforeRetryRearm);
 const retryAttempts = attemptedNoticeMessages.filter((attempt) => attempt.details.ids[0] === retryMessage.details.ids[0]);
 const retryKeptStableID = retryAttempts.length === 2 && retryAttempts[0].details.delivery_id === retryAttempts[1].details.delivery_id && retryAttempts[0].details.batch_id === retryAttempts[1].details.batch_id;
 if (!retryKeptStableID) throw new Error("known rejected send did not retry the stable batch ID");
@@ -278,22 +278,22 @@ const replacementUncertaintyKeptIDs = uncertainty.details.delivery_id === replac
 if (!replacementPendingRetained || !replacementUncertaintyKeptIDs) throw new Error("unconsumed replacement batch lost its recoverable receipt IDs");
 await instance.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
 reasons.push("quit");
-await waitFor(() => activeLookouts === 0);
+await waitFor(() => activeWatches === 0);
 
-failLookoutSpawns = 5;
+failWatchSpawns = 5;
 const failureInstance = await startSession("startup", "failure-session");
 await waitFor(() => healthMessages.length === 1);
 await new Promise((resolve) => setTimeout(resolve, 50));
-if (failedLookoutAttempts !== 5 || healthMessages.length !== 1) {
-  throw new Error(`lookout failure episode attempts=${failedLookoutAttempts} notices=${healthMessages.length}`);
+if (failedWatchAttempts !== 5 || healthMessages.length !== 1) {
+  throw new Error(`watch failure episode attempts=${failedWatchAttempts} notices=${healthMessages.length}`);
 }
 await failureInstance.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
 
 process.stdout.write(JSON.stringify({
   reasons,
   destinations,
-  maxActiveLookouts,
-  autoRearmedLookouts: rearmedLookouts,
+  maxActiveWatches,
+  autoRearmedWatches: rearmedWatches,
   deliveredNoticeIDs: message.details.ids,
   sendFailureNoticeIDs: retryMessage.details.ids,
   sendFailureAttempts: retryAttempts.length,
@@ -303,7 +303,7 @@ process.stdout.write(JSON.stringify({
   replacementBatchID,
   replacementPendingRetained,
   replacementUncertaintyIDs,
-  failedLookoutAttempts,
+  failedWatchAttempts,
   healthEpisodes: healthMessages.length,
 }) + "\n");
 clearInterval(keepAlive);

@@ -35,7 +35,7 @@ func e2eProcessInTaskCgroup(pid int, path string) bool {
 }
 
 func TestTeardownStopsDetachedTaskServer(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -68,18 +68,18 @@ while True:
 
 	processes := map[string]teardownFixtureProcess{}
 	t.Cleanup(func() { cleanupTeardownFixtureProcesses(t, f.root, []string{"detached-server"}, processes) })
-	task := f.ride(t, "t1", "Detached Rider server", "detached-rider-server")
+	task := f.start(t, "t1", "Detached Worker server", "detached-worker-server")
 	if !waitForCondition(10*time.Second, func() bool {
 		_, err := os.Stat(filepath.Join(f.root, "detached-server.ready"))
 		return err == nil
 	}) {
-		t.Fatal("Rider's detached server did not start")
+		t.Fatal("Worker's detached server did not start")
 	}
 	if !waitForCondition(5*time.Second, func() bool {
 		_, err := os.Stat(filepath.Join(f.root, "task-environment"))
 		return err == nil
 	}) {
-		t.Fatal("fake Rider did not record its Task environment")
+		t.Fatal("fake Worker did not record its Task environment")
 	}
 	environment, err := os.ReadFile(filepath.Join(f.root, "task-environment"))
 	if err != nil {
@@ -88,7 +88,7 @@ while True:
 	values := strings.Split(strings.TrimSpace(string(environment)), "\t")
 	expectedScratch := filepath.Join(f.home, "scratch", "shop", fmt.Sprintf("t%d", task.Seq))
 	if len(values) != 6 || values[0] != expectedScratch || values[1] != expectedScratch || values[2] != expectedScratch || values[3] != expectedScratch || values[4] != expectedScratch || values[5] != task.ContainmentMarker {
-		t.Fatalf("Rider Task environment = %#v, Task = %#v; want every temp variable set to %s and the recorded marker", values, task, expectedScratch)
+		t.Fatalf("Worker Task environment = %#v, Task = %#v; want every temp variable set to %s and the recorded marker", values, task, expectedScratch)
 	}
 	if task.ContainmentMarker == "" {
 		t.Fatalf("Task process containment identity = %#v", task)
@@ -118,12 +118,12 @@ while True:
 		_ = connection.Close()
 	}
 	if filepath.Clean(processCWD(pid)) != "/" {
-		t.Fatalf("detached server kept a Mount working directory: %q", processCWD(pid))
+		t.Fatalf("detached server kept a Sandbox working directory: %q", processCWD(pid))
 	}
 
 	markTaskReported(t, f, task)
-	f.exitRider(t, "t1")
-	output := runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t1")
+	f.exitWorker(t, "t1")
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1")
 	if !strings.Contains(output, "torn-down") {
 		t.Fatalf("Teardown failed: %s", output)
 	}
@@ -133,7 +133,7 @@ while True:
 	connection, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
 	if err == nil {
 		_ = connection.Close()
-		t.Fatalf("Teardown left the Rider's detached server listening on port %d", port)
+		t.Fatalf("Teardown left the Worker's detached server listening on port %d", port)
 	}
 	if current := f.task(t, "t1"); current.State != store.StateTornDown {
 		t.Fatalf("Task after Teardown = %s", current.State)
@@ -141,8 +141,8 @@ while True:
 }
 
 func TestTeardownPreservesDetachedSSHControlMaster(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	task := f.ride(t, "t1", "Detached SSH ControlMaster", "ssh-control-master")
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Detached SSH ControlMaster", "ssh-control-master")
 	pidPath := filepath.Join(f.root, "ssh-control-master.pid")
 	childPIDPath := filepath.Join(f.root, "ssh-control-child.pid")
 	masterScriptPath := filepath.Join(f.root, "ssh-control-master.sh")
@@ -262,13 +262,13 @@ exec -a "ssh -M -S $2" bash -c 'sleep 300 & echo $! > "$1"; wait' e2e-control-ch
 		t.Fatalf("detached ControlMaster %d did not survive its shell tab", pid)
 	}
 	markTaskReported(t, f, task)
-	f.exitRider(t, "t1")
-	unsaddle := exec.Command(f.binary, "unsaddle", "t1")
-	unsaddle.Dir, unsaddle.Env = f.repo, f.leadEnv
-	outputBytes, unsaddleErr := unsaddle.CombinedOutput()
+	f.exitWorker(t, "t1")
+	teardown := exec.Command(f.binary, "teardown", "t1")
+	teardown.Dir, teardown.Env = f.repo, f.leadEnv
+	outputBytes, teardownErr := teardown.CombinedOutput()
 	output := string(outputBytes)
-	if unsaddleErr == nil || !strings.Contains(output, "preserving detached shared daemon") || !strings.Contains(output, strconv.Itoa(pid)) {
-		t.Fatalf("Teardown did not report the preserved ControlMaster: err=%v output=%s", unsaddleErr, output)
+	if teardownErr == nil || !strings.Contains(output, "preserving detached shared daemon") || !strings.Contains(output, strconv.Itoa(pid)) {
+		t.Fatalf("Teardown did not report the preserved ControlMaster: err=%v output=%s", teardownErr, output)
 	}
 	if !teardownFixtureProcessRunning(master) {
 		t.Fatalf("Teardown signalled detached ControlMaster PID %d", pid)
@@ -301,7 +301,7 @@ exec -a "ssh -M -S $2" bash -c 'sleep 300 & echo $! > "$1"; wait' e2e-control-ch
 	if !waitForCondition(5*time.Second, func() bool { return !teardownFixtureProcessRunning(master) }) {
 		t.Fatalf("test-owned ControlMaster %d did not exit", pid)
 	}
-	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
 		t.Fatalf("Teardown did not finish after the shared daemon exited: %s", output)
 	}
 	if current := f.task(t, "t1"); current.State != store.StateTornDown {
@@ -313,9 +313,9 @@ exec -a "ssh -M -S $2" bash -c 'sleep 300 & echo $! > "$1"; wait' e2e-control-ch
 }
 
 func TestTeardownStopsProcessStartedThroughHerdrServer(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	task := f.ride(t, "t1", "Herdr server process", "herdr-server-process")
-	lockPath := filepath.Join(f.root, "posse.db.mount-lock")
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Herdr server process", "herdr-server-process")
+	lockPath := filepath.Join(f.root, "posse.db.sandbox-lock")
 	readyPath := filepath.Join(f.root, "herdr-lock-owner.ready")
 	pidPath := filepath.Join(f.root, "herdr-lock-owner.pid")
 	var owner teardownFixtureProcess
@@ -362,7 +362,7 @@ func TestTeardownStopsProcessStartedThroughHerdrServer(t *testing.T) {
 	}
 	owner = teardownFixtureProcess{PID: pid, BootID: bootID, StartTime: startTime}
 	if filepath.Clean(processCWD(pid)) != filepath.Clean(task.WorktreePath) {
-		t.Fatalf("Herdr-launched lock owner cwd = %q, want isolated Task Mount %q", processCWD(pid), task.WorktreePath)
+		t.Fatalf("Herdr-launched lock owner cwd = %q, want isolated Task Sandbox %q", processCWD(pid), task.WorktreePath)
 	}
 	environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
 	if err != nil || !strings.Contains(string(environ), "POSSE_TASK_ID="+task.ContainmentMarker) {
@@ -378,8 +378,8 @@ func TestTeardownStopsProcessStartedThroughHerdrServer(t *testing.T) {
 		t.Fatalf("Herdr lock owner %d did not survive its shell tab", pid)
 	}
 	markTaskReported(t, f, task)
-	f.exitRider(t, "t1")
-	output := runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t1")
+	f.exitWorker(t, "t1")
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1")
 	if !strings.Contains(output, "torn-down") {
 		t.Fatalf("Teardown failed for Herdr-launched process %d: %s", pid, output)
 	}

@@ -13,7 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestQueuedMessageBlocksScoutDoneUntilInstructionApplied(t *testing.T) {
+func TestQueuedMessageBlocksResearchDoneUntilInstructionApplied(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 
@@ -25,10 +25,10 @@ case "$PWD/" in
     IFS= read -r prompt || exit 0
     launch_path=${prompt#Read }
     launch_path=${launch_path% and follow it.}
-    printf 'Initial Scout report.\n' > report.md
+    printf 'Initial Research report.\n' > report.md
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     while [ ! -e "$POSSE_E2E_SIGNAL_GATE/t1" ]; do sleep 0.02; done
-    if "$POSSE_E2E_POSSE_BIN" holler done 'Isolated Scout report ready' --report report.md >> "$POSSE_TEST_ROOT/scout.log" 2>&1; then
+    if "$POSSE_E2E_POSSE_BIN" signal done 'Isolated Research report ready' --report report.md >> "$POSSE_TEST_ROOT/research.log" 2>&1; then
       printf 'accepted\n' > "$POSSE_TEST_ROOT/first-done-result"
     else
       printf 'incomplete\n' > "$POSSE_TEST_ROOT/first-done-result"
@@ -37,13 +37,13 @@ case "$PWD/" in
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     instruction=
     while IFS= read -r line; do
-      printf '%s\n' "$line" >> "$POSSE_TEST_ROOT/scout.log"
+      printf '%s\n' "$line" >> "$POSSE_TEST_ROOT/research.log"
       case "$line" in *'Please include the missing caveat before reporting done.'*) instruction=$line; break ;; esac
     done
     [ -n "$instruction" ] || exit 0
-    printf 'Isolated Scout report. Applied instruction: %s\n' "$instruction" > report.md
+    printf 'Isolated Research report. Applied instruction: %s\n' "$instruction" > report.md
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-    "$POSSE_E2E_POSSE_BIN" holler done 'Isolated Scout report ready' --report report.md >> "$POSSE_TEST_ROOT/scout.log" 2>&1
+    "$POSSE_E2E_POSSE_BIN" signal done 'Isolated Research report ready' --report report.md >> "$POSSE_TEST_ROOT/research.log" 2>&1
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     ;;
   *)
@@ -54,19 +54,19 @@ esac
 	if err := os.WriteFile(filepath.Join(fixture.root, "bin", "claude"), []byte(fakeAgent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	brief := filepath.Join(fixture.root, "scout.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: scout\ntitle: Queued completion\ndone_when: report.md includes the queued caveat\n---\nWrite a concise Report.\n"), 0o600); err != nil {
+	brief := filepath.Join(fixture.root, "research.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: research\ntitle: Queued completion\ndone_when: report.md includes the queued caveat\n---\nWrite a concise Report.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "queued-completion"); !strings.Contains(output, "t1") {
-		t.Fatalf("ride did not return t1: %s", output)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "queued-completion"); !strings.Contains(output, "t1") {
+		t.Fatalf("start did not return t1: %s", output)
 	}
 	if !waitForCondition(15*time.Second, func() bool {
 		task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
 		return err == nil && task.State == store.StateWorking
 	}) {
 		task, _ := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-		t.Fatalf("Scout did not reach working: %#v", task)
+		t.Fatalf("Research did not reach working: %#v", task)
 	}
 
 	const instruction = "Please include the missing caveat before reporting done."
@@ -88,7 +88,7 @@ esac
 	}) {
 		message, _ := fixture.db.MessageByID(context.Background(), message.ID)
 		task, _ := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-		log, _ := os.ReadFile(filepath.Join(fixture.root, "scout.log"))
+		log, _ := os.ReadFile(filepath.Join(fixture.root, "research.log"))
 		t.Fatalf("queued instruction was not delivered after the incomplete done Signal: task=%#v message=%#v log=%s", task, message, log)
 	}
 	if !waitForCondition(15*time.Second, func() bool {
@@ -96,8 +96,8 @@ esac
 		return err == nil && task.State == store.StateReported
 	}) {
 		task, _ := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-		log, _ := os.ReadFile(filepath.Join(fixture.root, "scout.log"))
-		t.Fatalf("Scout did not report after applying the instruction: task=%#v log=%s", task, log)
+		log, _ := os.ReadFile(filepath.Join(fixture.root, "research.log"))
+		t.Fatalf("Research did not report after applying the instruction: task=%#v log=%s", task, log)
 	}
 
 	firstDone, err := os.ReadFile(filepath.Join(fixture.root, "first-done-result"))
@@ -107,12 +107,12 @@ esac
 	if _, err := os.Stat(filepath.Join(fixture.root, "first-report-copied")); !os.IsNotExist(err) {
 		t.Fatalf("incomplete done Signal copied its Report before retrying: %v", err)
 	}
-	log, err := os.ReadFile(filepath.Join(fixture.root, "scout.log"))
+	log, err := os.ReadFile(filepath.Join(fixture.root, "research.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(log), "queued_instructions_pending") || !strings.Contains(string(log), "was not recorded") || !strings.Contains(string(log), instruction) {
-		t.Fatalf("Rider did not see the incomplete Signal and queued instruction: %s", log)
+		t.Fatalf("Worker did not see the incomplete Signal and queued instruction: %s", log)
 	}
 	message, err = fixture.db.MessageByID(context.Background(), message.ID)
 	if err != nil || message.Status != "delivered" {
@@ -132,7 +132,7 @@ esac
 	}
 	for _, notice := range notices {
 		if notice.TaskID == message.TaskID && notice.Kind == "queued_message_undeliverable" {
-			t.Fatalf("queued message became undeliverable despite the Rider retrying done: %#v", notice)
+			t.Fatalf("queued message became undeliverable despite the Worker retrying done: %#v", notice)
 		}
 	}
 }

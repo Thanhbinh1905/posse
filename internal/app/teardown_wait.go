@@ -8,8 +8,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// A second CLI must not display a half-torn-down landed Task while another
-// process owns its unsaddle intent. Wait for its outcome or report progress.
+// A second CLI must not display a half-torn-down merged Task while another
+// process owns its teardown intent. Wait for its outcome or report progress.
 func waitForActiveTeardowns(ctx context.Context, db *store.DB, projectID int64) error {
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
@@ -22,14 +22,14 @@ func waitForActiveTeardowns(ctx context.Context, db *store.DB, projectID int64) 
 		}
 		active := false
 		for _, intent := range intents {
-			if intent.Command != "unsaddle" {
+			if intent.Command != "teardown" {
 				continue
 			}
 			task, err := db.TaskByID(ctx, projectID, intent.TaskID)
 			if err != nil {
 				return err
 			}
-			if task.State == store.StateLanded {
+			if task.State == store.StateMerged {
 				active = true
 				break
 			}

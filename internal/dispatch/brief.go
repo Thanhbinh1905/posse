@@ -14,7 +14,7 @@ type Brief struct {
 	Type           string
 	Title          string
 	DoneWhen       string
-	LandingMode    string
+	MergeMode      string
 	Execution      string
 	Paths          []string
 	Review         string
@@ -26,7 +26,7 @@ type Brief struct {
 	ReviewOf       string
 	ReportKind     string
 	AutonomyReview string
-	AutonomyLand   string
+	AutonomyMerge  string
 	// Repos names the workspace members the Task works on; empty for a repo Project.
 	Repos       []string
 	RootContext string
@@ -69,7 +69,7 @@ func ParseBriefText(contents string) (Brief, error) {
 	return parseBriefText(contents, false)
 }
 
-// ParseHistoricalBriefText reads stored Briefs without applying the new Ship ticket
+// ParseHistoricalBriefText reads stored Briefs without applying the new Change ticket
 // cardinality rule, so existing Tasks retain their original issue references.
 func ParseHistoricalBriefText(contents string) (Brief, error) {
 	return parseBriefText(contents, true)
@@ -105,7 +105,37 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
-		if !oneOf(key, "type", "title", "done_when", "landing_mode", "execution", "paths", "review", "review_rounds", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
+		if key == "landing_mode" {
+			if !allowHistoricalMultiIssue {
+				return Brief{}, &BriefError{Field: key, Reason: "was removed; use merge_mode"}
+			}
+			key = "merge_mode"
+		}
+		if key == "type" {
+			replacement := ""
+			switch unquote(value) {
+			case "ship":
+				replacement = "change"
+			case "scout":
+				replacement = "research"
+			}
+			if replacement != "" {
+				if !allowHistoricalMultiIssue {
+					return Brief{}, &BriefError{Field: "type", Reason: unquote(value) + " was removed; use " + replacement}
+				}
+				value = replacement
+			}
+		}
+		if key == "execution" && unquote(value) == "mount" {
+			if !allowHistoricalMultiIssue {
+				return Brief{}, &BriefError{Field: key, Reason: "mount was removed; use sandbox"}
+			}
+			value = "sandbox"
+		}
+		if key == "autonomy" && allowHistoricalMultiIssue {
+			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
+		}
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "review_rounds", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -117,7 +147,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		Type:        unquote(values["type"]),
 		Title:       unquote(values["title"]),
 		DoneWhen:    unquote(values["done_when"]),
-		LandingMode: unquote(values["landing_mode"]),
+		MergeMode:   unquote(values["merge_mode"]),
 		Execution:   unquote(values["execution"]),
 		Review:      unquote(values["review"]),
 		ReviewOf:    unquote(values["review_of"]),
@@ -187,17 +217,17 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		}
 		brief.Refs = refs
 	}
-	if brief.Ticket != nil && brief.Type != "ship" {
-		return Brief{}, &BriefError{Field: "ticket", Reason: "is valid only for a Ship Task"}
+	if brief.Ticket != nil && brief.Type != "change" {
+		return Brief{}, &BriefError{Field: "ticket", Reason: "is valid only for a Change Task"}
 	}
-	if brief.Type == "ship" && len(brief.Issues) > 1 && !allowHistoricalMultiIssue {
-		return Brief{}, &BriefError{Field: "issues", Reason: "a Ship Brief may identify only one closing issue; use ticket: <issue>"}
+	if brief.Type == "change" && len(brief.Issues) > 1 && !allowHistoricalMultiIssue {
+		return Brief{}, &BriefError{Field: "issues", Reason: "a Change Brief may identify only one closing issue; use ticket: <issue>"}
 	}
 	if brief.Ticket != nil && len(brief.Issues) > 0 {
 		if len(brief.Issues) != 1 || brief.Issues[0] != *brief.Ticket {
 			return Brief{}, &BriefError{Field: "issues", Reason: "must contain only the same single issue as ticket:"}
 		}
-	} else if brief.Type == "ship" && brief.Ticket == nil && len(brief.Issues) == 1 {
+	} else if brief.Type == "change" && brief.Ticket == nil && len(brief.Issues) == 1 {
 		ticket := brief.Issues[0]
 		brief.Ticket = &ticket
 	}
@@ -219,23 +249,23 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		if err != nil {
 			return Brief{}, err
 		}
-		brief.AutonomyLand = autonomy.Land
+		brief.AutonomyMerge = autonomy.Merge
 		brief.AutonomyReview = autonomy.Review
 	}
 	if brief.Type == "" {
 		return Brief{}, &BriefError{Field: "type", Reason: "is required"}
 	}
-	if !oneOf(brief.Type, "ship", "scout", "review") {
-		return Brief{}, &BriefError{Field: "type", Reason: "must be ship, scout or review"}
+	if !oneOf(brief.Type, "change", "research", "review") {
+		return Brief{}, &BriefError{Field: "type", Reason: "must be change, research or review"}
 	}
-	if brief.Type != "ship" && (brief.Base != "" || len(brief.BaseByRepo) > 0) {
-		return Brief{}, &BriefError{Field: "base", Reason: "is valid only for a Ship Task"}
+	if brief.Type != "change" && (brief.Base != "" || len(brief.BaseByRepo) > 0) {
+		return Brief{}, &BriefError{Field: "base", Reason: "is valid only for a Change Task"}
 	}
-	if brief.Type != "ship" && (brief.Target != "" || len(brief.TargetByRepo) > 0) {
-		return Brief{}, &BriefError{Field: "target", Reason: "is valid only for a Ship Task"}
+	if brief.Type != "change" && (brief.Target != "" || len(brief.TargetByRepo) > 0) {
+		return Brief{}, &BriefError{Field: "target", Reason: "is valid only for a Change Task"}
 	}
-	if brief.ReviewRounds > 0 && brief.Type != "ship" {
-		return Brief{}, &BriefError{Field: "review_rounds", Reason: "is valid only for a Ship Task"}
+	if brief.ReviewRounds > 0 && brief.Type != "change" {
+		return Brief{}, &BriefError{Field: "review_rounds", Reason: "is valid only for a Change Task"}
 	}
 	if brief.Title == "" {
 		return Brief{}, &BriefError{Field: "title", Reason: "is required"}
@@ -243,8 +273,8 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	if brief.DoneWhen == "" {
 		return Brief{}, &BriefError{Field: "done_when", Reason: "is required"}
 	}
-	if brief.Execution != "" && !oneOf(brief.Execution, "mount", "in-place") {
-		return Brief{}, &BriefError{Field: "execution", Reason: "must be mount or in-place"}
+	if brief.Execution != "" && !oneOf(brief.Execution, "sandbox", "in-place") {
+		return Brief{}, &BriefError{Field: "execution", Reason: "must be sandbox or in-place"}
 	}
 	if len(brief.Paths) > 0 && brief.Execution != "in-place" {
 		return Brief{}, &BriefError{Field: "paths", Reason: "is valid only with execution: in-place"}
@@ -252,12 +282,12 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	if brief.Execution == "in-place" && len(brief.Paths) == 0 {
 		return Brief{}, &BriefError{Field: "paths", Reason: "must list at least one directory-relative path for in-place execution"}
 	}
-	if brief.LandingMode != "" && !oneOf(brief.LandingMode, "local", "pr", "no-mistakes") {
-		return Brief{}, &BriefError{Field: "landing_mode", Reason: "must be local, pr or no-mistakes"}
+	if brief.MergeMode != "" && !oneOf(brief.MergeMode, "local", "pr", "no-mistakes") {
+		return Brief{}, &BriefError{Field: "merge_mode", Reason: "must be local, pr or no-mistakes"}
 	}
 	if brief.ReportKind != "" {
-		if brief.Type != "scout" {
-			return Brief{}, &BriefError{Field: "report_kind", Reason: "is valid only for a Scout Task"}
+		if brief.Type != "research" {
+			return Brief{}, &BriefError{Field: "report_kind", Reason: "is valid only for a Research Task"}
 		}
 		if !oneOf(brief.ReportKind, "spec", "tickets") {
 			return Brief{}, &BriefError{Field: "report_kind", Reason: "must be spec or tickets"}
@@ -473,7 +503,7 @@ func stripTrailingComment(value string) string {
 	return strings.TrimSpace(value)
 }
 
-type briefAutonomy struct{ Review, Land string }
+type briefAutonomy struct{ Review, Merge string }
 
 func parseAutonomy(raw string) (briefAutonomy, error) {
 	raw = strings.TrimSpace(raw)
@@ -494,7 +524,7 @@ func parseAutonomy(raw string) (briefAutonomy, error) {
 		}
 		return result, nil
 	}
-	return briefAutonomy{}, &BriefError{Field: "autonomy", Reason: "must be an inline map such as { land: ask }"}
+	return briefAutonomy{}, &BriefError{Field: "autonomy", Reason: "must be an inline map such as { merge: ask }"}
 }
 
 func setAutonomy(result *briefAutonomy, key, value string) error {
@@ -508,13 +538,15 @@ func setAutonomy(result *briefAutonomy, key, value string) error {
 		}
 		result.Review = value
 	case "land":
-		if result.Land != "" {
-			return &BriefError{Field: "autonomy.land", Reason: "field is repeated"}
+		return &BriefError{Field: "autonomy.land", Reason: "was removed; use autonomy.merge"}
+	case "merge":
+		if result.Merge != "" {
+			return &BriefError{Field: "autonomy.merge", Reason: "field is repeated"}
 		}
 		if !oneOf(value, "ask", "auto") {
-			return &BriefError{Field: "autonomy.land", Reason: "must be ask or auto"}
+			return &BriefError{Field: "autonomy.merge", Reason: "must be ask or auto"}
 		}
-		result.Land = value
+		result.Merge = value
 	default:
 		return &BriefError{Field: "autonomy." + key, Reason: "unknown Autonomy field"}
 	}
@@ -529,17 +561,17 @@ func ValidateTightening(brief Brief, mode string, autonomy config.Autonomy) (str
 // lighter delivery, never additional review-decision or merge authority.
 func ResolveDelivery(brief Brief, mode string, autonomy config.Autonomy, userChoice bool) (string, config.Autonomy, error) {
 	resultMode := mode
-	if brief.LandingMode != "" {
-		if !userChoice && landingRank(brief.LandingMode) < landingRank(mode) {
-			return "", config.Autonomy{}, &BriefError{Field: "landing_mode", Reason: "cannot loosen the Project Landing Mode"}
+	if brief.MergeMode != "" {
+		if !userChoice && mergeRank(brief.MergeMode) < mergeRank(mode) {
+			return "", config.Autonomy{}, &BriefError{Field: "merge_mode", Reason: "cannot loosen the Project Merge Mode"}
 		}
-		resultMode = brief.LandingMode
+		resultMode = brief.MergeMode
 	}
 	if autonomy.Review == "" {
 		autonomy.Review = "ask"
 	}
-	if autonomy.Land == "" {
-		autonomy.Land = "ask"
+	if autonomy.Merge == "" {
+		autonomy.Merge = "ask"
 	}
 	if brief.AutonomyReview != "" {
 		if reviewRank(brief.AutonomyReview) > reviewRank(autonomy.Review) {
@@ -547,11 +579,11 @@ func ResolveDelivery(brief Brief, mode string, autonomy config.Autonomy, userCho
 		}
 		autonomy.Review = brief.AutonomyReview
 	}
-	if brief.AutonomyLand != "" {
-		if landRank(brief.AutonomyLand) > landRank(autonomy.Land) {
-			return "", config.Autonomy{}, &BriefError{Field: "autonomy.land", Reason: "cannot grant more Autonomy than the Project"}
+	if brief.AutonomyMerge != "" {
+		if autonomyMergeRank(brief.AutonomyMerge) > autonomyMergeRank(autonomy.Merge) {
+			return "", config.Autonomy{}, &BriefError{Field: "autonomy.merge", Reason: "cannot grant more Autonomy than the Project"}
 		}
-		autonomy.Land = brief.AutonomyLand
+		autonomy.Merge = brief.AutonomyMerge
 	}
 	return resultMode, autonomy, nil
 }
@@ -573,7 +605,7 @@ func ResolveReview(requested, current string, userChoice bool) (string, error) {
 	return requested, nil
 }
 
-func landingRank(value string) int {
+func mergeRank(value string) int {
 	switch value {
 	case "local":
 		return 0
@@ -593,7 +625,7 @@ func reviewRank(value string) int {
 	return 0
 }
 
-func landRank(value string) int {
+func autonomyMergeRank(value string) int {
 	if value == "auto" {
 		return 1
 	}

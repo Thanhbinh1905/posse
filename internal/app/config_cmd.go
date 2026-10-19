@@ -92,7 +92,7 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if key == "defaults.landing_mode" && parsed.Positionals[1] == "no-mistakes" {
+	if key == "defaults.merge_mode" && parsed.Positionals[1] == "no-mistakes" {
 		root := ""
 		if projectName != "" {
 			project, err := s.projectByName(ctx.Context, db, projectName)
@@ -111,6 +111,9 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 		}
 	}
 	path := config.ConfigPath(home, projectName)
+	if _, _, err := config.ReadFile(path); err != nil {
+		return configError(err)
+	}
 	original, originalMode, originalExists, err := configSnapshot(path)
 	if err != nil {
 		return err
@@ -169,6 +172,9 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 		return err
 	}
 	path := config.ConfigPath(home, projectName)
+	if _, _, err := config.ReadFile(path); err != nil {
+		return configError(err)
+	}
 	original, originalMode, originalExists, err := configSnapshot(path)
 	if err != nil {
 		return err

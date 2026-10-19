@@ -31,7 +31,7 @@ func TestRecoverRebuildMovesCorruptDatabaseAside(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local"}); err != nil {
+	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "research", Title: "Snapshot", MergeMode: "local"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -74,7 +74,7 @@ func TestRecoverRebuildMovesCorruptDatabaseAside(t *testing.T) {
 	}
 }
 
-func TestRecoverRebuildWithHeldMountAndAcknowledgedDecisionNotices(t *testing.T) {
+func TestRecoverRebuildWithHeldSandboxAndAcknowledgedDecisionNotices(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -88,53 +88,53 @@ func TestRecoverRebuildWithHeldMountAndAcknowledgedDecisionNotices(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	shipID, err := db.CreateTask(ctx, project.ID, store.Task{
-		Seq: 1, Type: "ship", ShortName: "ship", Title: "Ship with a held Mount", LandingMode: "pr",
-		Branch: "posse/ship", PRURL: "https://example.test/pr/1",
+	changeID, err := db.CreateTask(ctx, project.ID, store.Task{
+		Seq: 1, Type: "change", ShortName: "change", Title: "Change with a held Sandbox", MergeMode: "pr",
+		Branch: "posse/change", PRURL: "https://example.test/pr/1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, shipID, store.StateSpawning, store.StateWorking, "cli", "Rider started"); err != nil {
+	if err := db.Transition(ctx, changeID, store.StateSpawning, store.StateWorking, "cli", "Worker started"); err != nil {
 		t.Fatal(err)
 	}
-	mount, err := db.AcquireMount(ctx, project.ID, shipID, filepath.Join(home, "remuda", "shop"))
+	sandbox, err := db.AcquireSandbox(ctx, project.ID, changeID, filepath.Join(home, "pool", "shop"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	scoutID, err := db.CreateTask(ctx, project.ID, store.Task{
-		Seq: 2, Type: "scout", ShortName: "scout", Title: "Scout report", LandingMode: "local",
+	researchID, err := db.CreateTask(ctx, project.ID, store.Task{
+		Seq: 2, Type: "research", ShortName: "research", Title: "Research report", MergeMode: "local",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, scoutID, store.StateSpawning, store.StateWorking, "cli", "Rider started"); err != nil {
+	if err := db.Transition(ctx, researchID, store.StateSpawning, store.StateWorking, "cli", "Worker started"); err != nil {
 		t.Fatal(err)
 	}
 	reportPath := filepath.Join(home, "projects", project.Name, "tasks", "t2", "report.md")
 	if err := os.WriteFile(reportPath, []byte("# Findings\n\nThe Project is healthy.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	scout, err := db.TaskByID(ctx, project.ID, scoutID)
+	research, err := db.TaskByID(ctx, project.ID, researchID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := db.RecordWorkerSignal(ctx, scout, "done", "Report ready", nil, "task_done")
+	state, err := db.RecordWorkerSignal(ctx, research, "done", "Report ready", nil, "task_done")
 	if err != nil || state != store.StateReported {
-		t.Fatalf("Scout done Signal state = %q, %v", state, err)
+		t.Fatalf("Research done Signal state = %q, %v", state, err)
 	}
 	decision, err := db.RaiseDecision(ctx, store.DecisionRequest{
-		ProjectID: project.ID, TaskID: shipID, Origin: "recover-rebuild-e2e", Kind: "rider_question",
-		Question: "Should the Ship continue?", Options: []string{"continue", "stop"},
+		ProjectID: project.ID, TaskID: changeID, Origin: "recover-rebuild-e2e", Kind: "worker_question",
+		Question: "Should the Change continue?", Options: []string{"continue", "stop"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "continue", "Continue the Ship."); err != nil {
+	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "continue", "Continue the Change."); err != nil {
 		t.Fatal(err)
 	}
 	noticeID, err := db.CreateNotice(ctx, store.Notice{
-		ProjectID: project.ID, TaskID: scoutID, Kind: "report_ready", Summary: "Scout report is ready",
+		ProjectID: project.ID, TaskID: researchID, Kind: "report_ready", Summary: "Research report is ready",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -191,20 +191,20 @@ func TestRecoverRebuildWithHeldMountAndAcknowledgedDecisionNotices(t *testing.T)
 		if err != nil || restoredProject.Root != repo {
 			t.Fatalf("rebuilt Project = %#v, %v", restoredProject, err)
 		}
-		restoredShip, err := rebuilt.Task(ctx, project.ID, "t1")
-		if err != nil || restoredShip.PRURL != "https://example.test/pr/1" || restoredShip.MountID != mount.ID {
-			t.Fatalf("rebuilt Ship lost its PR or held Mount reference: %#v, %v", restoredShip, err)
+		restoredChange, err := rebuilt.Task(ctx, project.ID, "t1")
+		if err != nil || restoredChange.PRURL != "https://example.test/pr/1" || restoredChange.SandboxID != sandbox.ID {
+			t.Fatalf("rebuilt Change lost its PR or held Sandbox reference: %#v, %v", restoredChange, err)
 		}
-		restoredMount, err := rebuilt.MountByTask(ctx, shipID)
-		if err != nil || restoredMount.State != "held" || restoredMount.Path != mount.Path {
-			t.Fatalf("rebuilt held Mount = %#v, %v", restoredMount, err)
+		restoredSandbox, err := rebuilt.SandboxByTask(ctx, changeID)
+		if err != nil || restoredSandbox.State != "held" || restoredSandbox.Path != sandbox.Path {
+			t.Fatalf("rebuilt held Sandbox = %#v, %v", restoredSandbox, err)
 		}
-		restoredScout, err := rebuilt.Task(ctx, project.ID, "t2")
-		if err != nil || restoredScout.State != store.StateReported {
-			t.Fatalf("rebuilt Scout = %#v, %v", restoredScout, err)
+		restoredResearch, err := rebuilt.Task(ctx, project.ID, "t2")
+		if err != nil || restoredResearch.State != store.StateReported {
+			t.Fatalf("rebuilt Research = %#v, %v", restoredResearch, err)
 		}
 		if _, err := os.Stat(reportPath); err != nil {
-			t.Fatalf("Scout Report was lost: %v", err)
+			t.Fatalf("Research Report was lost: %v", err)
 		}
 		restoredDecision, err := rebuilt.Decisions(ctx, project.ID, false)
 		if err != nil || len(restoredDecision) != 1 || restoredDecision[0].Answer != "continue" {
@@ -228,7 +228,7 @@ func TestRecoverRebuildWithHeldMountAndAcknowledgedDecisionNotices(t *testing.T)
 			t.Fatalf("Decision Notice cursor = %d, %v; want %d", restoredCursor, err, lastNoticeID)
 		}
 	}
-	assertRosterWorks := func() {
+	assertListWorks := func() {
 		output.Reset()
 		errorsOut.Reset()
 		cli := service.CLI()
@@ -238,7 +238,7 @@ func TestRecoverRebuildWithHeldMountAndAcknowledgedDecisionNotices(t *testing.T)
 		}
 	}
 	assertRestored()
-	assertRosterWorks()
+	assertListWorks()
 
 	if err := os.Remove(filepath.Join(home, "posse.db")); err != nil {
 		t.Fatal(err)
@@ -251,7 +251,7 @@ func TestRecoverRebuildWithHeldMountAndAcknowledgedDecisionNotices(t *testing.T)
 		t.Fatalf("recover --rebuild after deleting posse.db failed: code=%d out=%s err=%s", code, output, errorsOut)
 	}
 	assertRestored()
-	assertRosterWorks()
+	assertListWorks()
 }
 
 func TestRecoverRebuildFailureKeepsBeforeRebuildBackup(t *testing.T) {
@@ -268,7 +268,7 @@ func TestRecoverRebuildFailureKeepsBeforeRebuildBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "scout", Title: "Original state", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "research", Title: "Original state", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,17 +404,17 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 		t.Fatalf("restarted Claude Lead omitted its default bypass argument: %#v", fake.Calls)
 	}
 	assertLeadMetadataCall(t, fake, "w1:p1", "claude")
-	// Hidden poller startup is independent of Herdr tab creation and must not
+	// Hidden watch startup is independent of Herdr tab creation and must not
 	// strand the newly launched prompt-kind Lead.
 	before := fake.CallCount("agent.prompt")
 	if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
 		t.Fatal(err)
 	}
 	if fake.CallCount("agent.prompt") <= before {
-		t.Fatal("Lookout supervision suppressed the Lead launch prompt")
+		t.Fatal("Watch supervision suppressed the Lead launch prompt")
 	}
 	if fake.CallCount("tab.create") != 0 {
-		t.Fatal("Lead recovery opened a visible Lookout tab")
+		t.Fatal("Lead recovery opened a visible Watch tab")
 	}
 }
 
@@ -678,7 +678,7 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskID, err := db.CreateTask(ctx, project.ID, store.Task{
-		Seq: 1, Type: "ship", Title: "Recovery", Profile: "deep", LandingMode: "local",
+		Seq: 1, Type: "change", Title: "Recovery", Profile: "deep", MergeMode: "local",
 		Branch: "posse/t1", BaseRef: "main", HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:shop:t1",
 	})
 	if err != nil {
@@ -687,19 +687,19 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker ready"); err != nil {
 		t.Fatal(err)
 	}
-	mount, err := db.AcquireMount(ctx, project.ID, taskID, filepath.Join(home, "projects", "shop", "remuda"))
+	sandbox, err := db.AcquireSandbox(ctx, project.ID, taskID, filepath.Join(home, "projects", "shop", "pool"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(mount.Path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(sandbox.Path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mount.Path, "main")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandbox.Path, "main")
 	launch, err := db.NextTaskLaunch(ctx, taskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateTaskLaunch(ctx, taskID, mount.Path, "w1", "w1:p2", "posse:shop:t1", "posse-shop-t1-"+strconv.Itoa(launch)); err != nil {
+	if err := db.UpdateTaskLaunch(ctx, taskID, sandbox.Path, "w1", "w1:p2", "posse:shop:t1", "posse-shop-t1-"+strconv.Itoa(launch)); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.UpdateTaskObservation(ctx, taskID, "w1:p2", "w1", "", "", 0, 0, "old-generation"); err != nil {
@@ -714,7 +714,7 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 	}
 
 	lead := herdr.Pane{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "claude", AgentStatus: "working"}
-	worker := herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: before.PaneLabel, CWD: mount.Path, Agent: "claude", AgentStatus: "working"}
+	worker := herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: before.PaneLabel, CWD: sandbox.Path, Agent: "claude", AgentStatus: "working"}
 	// The pre-hook reconcile sees the Worker missing, recover --all initially
 	// sees it present, and the claim-time refresh sees it missing again. The
 	// next snapshot reports the Lead shell after stopLeadAgent.
@@ -751,8 +751,8 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.State != store.StateWorking || after.Launches != before.Launches+1 || after.AgentName == before.AgentName || after.MountID != before.MountID || after.WorktreePath != before.WorktreePath || after.Branch != before.Branch {
-		t.Fatalf("startup recovery did not relaunch Worker on the same Mount and branch: before=%#v after=%#v", before, after)
+	if after.State != store.StateWorking || after.Launches != before.Launches+1 || after.AgentName == before.AgentName || after.SandboxID != before.SandboxID || after.WorktreePath != before.WorktreePath || after.Branch != before.Branch {
+		t.Fatalf("startup recovery did not relaunch Worker on the same Sandbox and branch: before=%#v after=%#v", before, after)
 	}
 	generation, err = db.ProjectServerStartedAt(ctx, project.ID)
 	if err != nil || generation != "new-generation" {

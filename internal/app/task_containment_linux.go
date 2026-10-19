@@ -114,7 +114,7 @@ func taskProcessHasExcludedAncestor(pid int, excluded map[int]bool) (bool, error
 			return false, fmt.Errorf("process ancestry loop at PID %d", current)
 		}
 		seen[current] = true
-		parent, err := mountProcessParentID(current)
+		parent, err := sandboxProcessParentID(current)
 		if processGone(err) {
 			return false, nil
 		}
@@ -129,8 +129,8 @@ func taskProcessHasExcludedAncestor(pid int, excluded map[int]bool) (bool, error
 	return false, fmt.Errorf("process ancestry for PID %d exceeded 1024 parents", pid)
 }
 
-func mountTaskProcessDetails(path string) ([]taskProcessDetail, error) {
-	pids, err := mountProcessIDs(path)
+func sandboxTaskProcessDetails(path string) ([]taskProcessDetail, error) {
+	pids, err := sandboxProcessIDs(path)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ func processHasTaskMarker(pid int, marker string) bool {
 }
 
 func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, excluded map[int]bool, paneShellPID int) ([]taskProcessDetail, error) {
-	handles := map[int]*mountProcessHandle{}
+	handles := map[int]*sandboxProcessHandle{}
 	terminated := map[int]bool{}
 	defer func() {
 		for _, handle := range handles {
@@ -225,7 +225,7 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 			if !paneShell && !processHasTaskMarker(pid, marker) {
 				continue
 			}
-			handle, err := openMountProcessHandle(pid)
+			handle, err := openSandboxProcessHandle(pid)
 			if err != nil {
 				if processGone(err) || !paneShell && !processHasTaskMarker(pid, marker) {
 					continue // The observed instance exited before its pidfd was opened.
@@ -309,7 +309,7 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 	return processDetails(remaining), fmt.Errorf("task processes survived marker shutdown: %v", remaining)
 }
 
-func forgetStalePaneShellProcess(pid, paneShellPID int, marker string, handles map[int]*mountProcessHandle, terminated map[int]bool, err error) bool {
+func forgetStalePaneShellProcess(pid, paneShellPID int, marker string, handles map[int]*sandboxProcessHandle, terminated map[int]bool, err error) bool {
 	if pid != paneShellPID || paneShellPID <= 1 || processHasTaskMarker(pid, marker) || !errors.Is(err, errPaneShellNotRecorded) {
 		return false
 	}
@@ -344,7 +344,7 @@ func uniqueProcessIDs(pids []int) []int {
 	return unique
 }
 
-func taskProcessSignalOrder(handles map[int]*mountProcessHandle, paneShellPID int) []int {
+func taskProcessSignalOrder(handles map[int]*sandboxProcessHandle, paneShellPID int) []int {
 	pids := make([]int, 0, len(handles))
 	for pid := range handles {
 		pids = append(pids, pid)

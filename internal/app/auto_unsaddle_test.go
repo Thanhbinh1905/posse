@@ -12,8 +12,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestAckAutoUnsaddlesReportedTaskOnlyForFinishedPolicy(t *testing.T) {
-	for _, policy := range []string{"finished", "landed", "never"} {
+func TestAckAutoTeardownsReportedTaskOnlyForFinishedPolicy(t *testing.T) {
+	for _, policy := range []string{"finished", "merged", "never"} {
 		t.Run(policy, func(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
@@ -23,7 +23,7 @@ func TestAckAutoUnsaddlesReportedTaskOnlyForFinishedPolicy(t *testing.T) {
 			if err := os.MkdirAll(home, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nauto_unsaddle = \""+policy+"\"\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nauto_teardown = \""+policy+"\"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			db, err := store.Open(home)
@@ -34,7 +34,7 @@ func TestAckAutoUnsaddlesReportedTaskOnlyForFinishedPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "scout", Title: "Report", LandingMode: "local"})
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "research", Title: "Report", MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -71,10 +71,10 @@ func TestAckAutoUnsaddlesReportedTaskOnlyForFinishedPolicy(t *testing.T) {
 			}
 			if policy == "finished" {
 				if task.State != store.StateTornDown || !strings.Contains(output.String(), "Report") {
-					t.Fatalf("finished policy did not auto-unsaddle the reported Task: state=%s output=%s", task.State, output.String())
+					t.Fatalf("finished policy did not auto-teardown the reported Task: state=%s output=%s", task.State, output.String())
 				}
 			} else if task.State != store.StateReported {
-				t.Fatalf("%s policy auto-unsaddled a reported Task: state=%s", policy, task.State)
+				t.Fatalf("%s policy auto-torn down a reported Task: state=%s", policy, task.State)
 			}
 		})
 	}

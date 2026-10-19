@@ -137,7 +137,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"python inspect environment with stdin", fmt.Sprintf("PYTHONINSPECT=1 python3 -c \"print('herdr')\" <<'PY'\nimport subprocess\nsubprocess.run(['herdr', 'workspace', 'rename', '%s', 'changed'], check=True)\nPY", id), true},
 		{"python inspect environment", "PYTHONINSPECT=1 python3 -c \"print('herdr')\"", true},
 		{"python redirected stdin", "python3 -c \"print('herdr')\" <<'PY'\nprint('post-command input')\nPY", true},
-		{"direct Rider push", "git push origin HEAD", true},
+		{"direct Worker push", "git push origin HEAD", true},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
 		{"type probe", "type herdr", false},
@@ -163,7 +163,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			if tc.blocked && strings.HasPrefix(tc.name, "default socket") && (!strings.Contains(string(output), "default socket reaches the User's Herdr server") || !strings.Contains(string(output), "env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse")) {
 				t.Errorf("refusal omitted the default-socket reason or accepted isolation command: %s", output)
 			}
-			if tc.blocked && strings.HasPrefix(tc.name, "current socket") && !strings.Contains(string(output), "it changes the Herdr session this Rider runs in") {
+			if tc.blocked && strings.HasPrefix(tc.name, "current socket") && !strings.Contains(string(output), "it changes the Herdr session this Worker runs in") {
 				t.Errorf("refusal did not identify the current isolated Herdr socket: %s", output)
 			}
 			runShell := true

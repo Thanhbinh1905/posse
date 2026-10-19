@@ -131,7 +131,7 @@ func TestSendDeliveryPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -215,7 +215,7 @@ func TestSendDeliveryPolicy(t *testing.T) {
 					continue
 				}
 				text, _ := call.Params["text"].(string)
-				if !strings.HasPrefix(text, "[posse | Lead -> Rider t1 | instruction #") {
+				if !strings.HasPrefix(text, "[posse | Lead -> Worker t1 | instruction #") {
 					t.Fatalf("raw instruction: %q", text)
 				}
 				var decoded string
@@ -249,7 +249,7 @@ func TestSendInterruptDefinitePromptRejectionRestoresRedirectAheadOfQueue(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -359,7 +359,7 @@ func TestPiInterruptUsesOnlyVisibleCompactionIndicator(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -418,7 +418,7 @@ func TestInterruptReservationRenewalPreventsBackgroundOvertake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestActiveSubmissionLeaseRefreshPreventsConcurrentDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +619,7 @@ func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -709,7 +709,7 @@ func TestSendReturnsTypedErrorForSQLiteStorageFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 		{name: "accepted", wantState: "delivered", wantReason: "steered", headWaitForIdle: true, wantPromptCalls: 1},
 		{name: "rejected", wantState: "queued", wantReason: "compacting", rejectPrompt: true, headWaitForIdle: true, wantPromptCalls: 1},
 		{name: "earlier steerable message pending", wantState: "queued", wantReason: "earlier_message_pending", rejectPrompt: true, wantPromptCalls: 2},
-		{name: "earlier --queue message blocks focused Rider", wantState: "queued", wantReason: "earlier_message_pending", headWaitForIdle: true, focused: true, wantBlocker: true},
+		{name: "earlier --queue message blocks focused Worker", wantState: "queued", wantReason: "earlier_message_pending", headWaitForIdle: true, focused: true, wantBlocker: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -785,7 +785,7 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -847,7 +847,7 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 	}
 }
 
-func TestSendReopensDoneShipTaskBeforeImmediateSignal(t *testing.T) {
+func TestSendReopensDoneChangeTaskBeforeImmediateSignal(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -864,7 +864,7 @@ func TestSendReopensDoneShipTaskBeforeImmediateSignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", Branch: "posse/t1", BaseRef: "main"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", Branch: "posse/t1", BaseRef: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -905,7 +905,7 @@ func TestSendReopensDoneShipTaskBeforeImmediateSignal(t *testing.T) {
 		}
 	}
 	if code := cli.Run([]string{"send", "t1", "Fix the gate failure"}); code != 0 || !strings.Contains(output.String(), "delivered") {
-		t.Fatalf("send did not deliver to a done Ship Task: code=%d output=%s", code, output.String())
+		t.Fatalf("send did not deliver to a done Change Task: code=%d output=%s", code, output.String())
 	}
 	if fake.CallCount("agent.prompt") != 1 {
 		t.Fatalf("Worker prompt calls = %d", fake.CallCount("agent.prompt"))

@@ -194,7 +194,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	if found && pane.Agent != "" {
 		status = pane.AgentStatus
 	}
-	resumed, err := db.ObserveCompletedRider(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, now)
+	resumed, err := db.ObserveCompletedWorker(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, now)
 	if err != nil {
 		return nil, observationFailure(err)
 	}
@@ -204,17 +204,17 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		task.IdleSince = 0
 	}
 	if !found {
-		if task.State == store.StateDone || task.State == store.StateLanding {
+		if task.State == store.StateDone || task.State == store.StateMerging {
 			return nil, db.CreateWorkerExitedNotice(ctx, task, now)
 		}
-		groupedRider := !project.IsWorkspace() && project.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != project.HerdrWorkspaceID
+		groupedWorker := !project.IsWorkspace() && project.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != project.HerdrWorkspaceID
 		restartPending := task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
 		absentSince := task.AgentAbsentSince
 		if absentSince == 0 {
 			absentSince = now.UnixMilli()
 		}
-		if (!groupedRider && !restartPending) || now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
-			err := markLost(ctx, db, task, "Rider pane and label are absent from the Herdr snapshot", now, &notices)
+		if (!groupedWorker && !restartPending) || now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
+			err := markLost(ctx, db, task, "Worker pane and label are absent from the Herdr snapshot", now, &notices)
 			return notices, err
 		}
 		return nil, observationFailure(db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, sessionref.Sanitize("", task.AgentSession), task.AgentSessionKind, absentSince, 0, task.AgentServerStartedAt))
@@ -239,10 +239,10 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		}
 		resumePending := hasRecordedSession(task.AgentSession) && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
 		if !resumePending && now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
-			if task.State == store.StateDone || task.State == store.StateLanding {
+			if task.State == store.StateDone || task.State == store.StateMerging {
 				return nil, db.CreateWorkerExitedNotice(ctx, task, now)
 			}
-			err := markLost(ctx, db, task, "Rider has been absent for two minutes", now, &notices)
+			err := markLost(ctx, db, task, "Worker has been absent for two minutes", now, &notices)
 			return notices, err
 		}
 	} else {
@@ -302,7 +302,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		}
 	}
 	if task.State == store.StateWorking && pane.AgentStatus == "blocked" {
-		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateBlocked, "herdr", "Herdr reports Rider blocked"); err != nil {
+		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateBlocked, "herdr", "Herdr reports Worker blocked"); err != nil {
 			return notices, err
 		}
 		notice, err := createNotice(ctx, db, project.ID, task.ID, "worker_blocked", task.Title+" is blocked", now)
@@ -311,7 +311,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		}
 		notices = append(notices, notice)
 	} else if task.State == store.StateBlocked && pane.AgentStatus != "blocked" && agentPresent {
-		if err := db.Transition(ctx, task.ID, store.StateBlocked, store.StateWorking, "herdr", "Herdr reports Rider unblocked"); err != nil {
+		if err := db.Transition(ctx, task.ID, store.StateBlocked, store.StateWorking, "herdr", "Herdr reports Worker unblocked"); err != nil {
 			return notices, err
 		}
 	}
@@ -345,7 +345,7 @@ func markLost(ctx context.Context, db *store.DB, task store.Task, reason string,
 	if err := db.Transition(ctx, task.ID, task.State, store.StateLost, "cli", reason); err != nil {
 		return err
 	}
-	notice, err := createNotice(ctx, db, task.ProjectID, task.ID, "task_lost", task.Title+" lost its Rider", now)
+	notice, err := createNotice(ctx, db, task.ProjectID, task.ID, "task_lost", task.Title+" lost its Worker", now)
 	if err != nil {
 		return err
 	}

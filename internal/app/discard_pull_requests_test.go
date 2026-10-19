@@ -12,7 +12,7 @@ import (
 )
 
 func TestWorkspaceDiscardClosesEveryRecordedMemberPR(t *testing.T) {
-	f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"backend", "worker"}, []string{"backend", "worker"})
+	f := newWorkspaceMergeFixture(t, localWorkspaceConfig, []string{"backend", "worker"}, []string{"backend", "worker"})
 	ctx := context.Background()
 	urls := map[string]string{
 		"backend": "https://github.com/acme/backend/pull/11",
@@ -32,8 +32,8 @@ func TestWorkspaceDiscardClosesEveryRecordedMemberPR(t *testing.T) {
 		gitTest(t, target.Root, "remote", "set-url", "origin", remoteURL)
 		repo.GatedSHA = strings.TrimSpace(gitTest(t, repo.WorktreePath, "rev-parse", "HEAD"))
 		repo.PRURL = urls[repo.Repo]
-		repo.LandingMode = "pr"
-		repo.State = store.TaskRepoLanding
+		repo.MergeMode = "pr"
+		repo.State = store.TaskRepoMerge
 		heads[repo.Repo] = repo.GatedSHA
 		if err := f.db.UpdateTaskRepo(ctx, repo); err != nil {
 			t.Fatal(err)
@@ -107,7 +107,7 @@ esac
 }
 
 func TestDiscardClosesRecordedGitLabMergeRequest(t *testing.T) {
-	f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"backend"}, []string{"backend"})
+	f := newWorkspaceMergeFixture(t, localWorkspaceConfig, []string{"backend"}, []string{"backend"})
 	ctx := context.Background()
 	repos, err := f.db.TaskRepos(ctx, f.task.ID)
 	if err != nil || len(repos) != 1 {
@@ -121,8 +121,8 @@ func TestDiscardClosesRecordedGitLabMergeRequest(t *testing.T) {
 	gitTest(t, target.Root, "remote", "set-url", "origin", "https://gitlab.com/acme/backend.git")
 	repo.GatedSHA = strings.TrimSpace(gitTest(t, repo.WorktreePath, "rev-parse", "HEAD"))
 	repo.PRURL = "https://gitlab.com/acme/backend/-/merge_requests/7"
-	repo.LandingMode = "pr"
-	repo.State = store.TaskRepoLanding
+	repo.MergeMode = "pr"
+	repo.State = store.TaskRepoMerge
 	if err := f.db.UpdateTaskRepo(ctx, repo); err != nil {
 		t.Fatal(err)
 	}

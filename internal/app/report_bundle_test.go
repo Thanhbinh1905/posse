@@ -91,7 +91,7 @@ func TestExplicitReportAttachmentRejectsMissingAndEscapingPaths(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "escape.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveExplicitAttachment(task, home, project, "escape.txt"); err == nil || !strings.Contains(err.Error(), "stay inside the Rider's worktree") {
+	if err := saveExplicitAttachment(task, home, project, "escape.txt"); err == nil || !strings.Contains(err.Error(), "stay inside the Worker's worktree") {
 		t.Fatalf("escaping explicit attachment error = %v", err)
 	}
 }
@@ -135,14 +135,14 @@ func TestAcceptPublicationReportRequiresUserApprovalAndIndependentReview(t *test
 	}
 }
 
-func TestOrdinaryScoutReportDoesNotRequireAcceptance(t *testing.T) {
+func TestOrdinaryResearchReportDoesNotRequireAcceptance(t *testing.T) {
 	fixture := newPublicationReportFixture(t, "")
 	t.Setenv("HERDR_ENV", "")
 	t.Setenv("HERDR_PANE_ID", "")
 	t.Chdir(fixture.project.Root)
 	code, output := runCLI(t, fixture.service, "accept", "t1")
 	if code != 1 || !strings.Contains(output, "report_acceptance_not_required") {
-		t.Fatalf("ordinary Scout acceptance response = code %d: %s", code, output)
+		t.Fatalf("ordinary Research acceptance response = code %d: %s", code, output)
 	}
 	if err := fixture.db.SetProjectLead(context.Background(), fixture.project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestOrdinaryScoutReportDoesNotRequireAcceptance(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
 	code, output = runCLI(t, fixture.service, "show", "t1")
 	if code != 0 || !strings.Contains(output, fixture.task.ReportDigest) {
-		t.Fatalf("ordinary Scout Report is not readable without acceptance: code %d: %s", code, output)
+		t.Fatalf("ordinary Research Report is not readable without acceptance: code %d: %s", code, output)
 	}
 }
 
@@ -182,7 +182,7 @@ func newPublicationReportFixture(t *testing.T, reportKind string) publicationRep
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "scout", Title: "Publication report", Profile: "author", ReportKind: reportKind, AutonomyReview: "lead"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "research", Title: "Publication report", Profile: "author", ReportKind: reportKind, AutonomyReview: "lead"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func newPublicationReportFixture(t *testing.T, reportKind string) publicationRep
 	if err := finalizeReportBundle(ctx, db, home, project, task); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, taskID, store.StateReported, store.StateTornDown, "cli", "Mount released"); err != nil {
+	if err := db.Transition(ctx, taskID, store.StateReported, store.StateTornDown, "cli", "Sandbox released"); err != nil {
 		t.Fatal(err)
 	}
 	task, err = db.TaskByID(ctx, project.ID, taskID)

@@ -17,7 +17,7 @@ func TestNeedsDecisionSignalCancelsActiveModelErrorNudgeAtomically(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Recover", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Recover", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestIdenticalFailedTurnAfterSubmittedNudgeConsumesNextAttempt(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Recover", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Recover", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestExpiredModelErrorNudgeIsInterruptedWithSpecificNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Recover", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Recover", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestModelErrorEpisodeDeduplicatesAndBoundsConcurrentNudges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Recover", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Recover", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}

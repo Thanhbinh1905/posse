@@ -18,8 +18,8 @@ func TestSweepOrphanPanesDryRunThenClose(t *testing.T) {
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
 	posseHome := filepath.Join(root, "posse")
-	mount := filepath.Join(root, "orphan-mount")
-	if err := os.MkdirAll(mount, 0o700); err != nil {
+	sandbox := filepath.Join(root, "orphan-sandbox")
+	if err := os.MkdirAll(sandbox, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	db, err := store.Open(posseHome)
@@ -33,7 +33,7 @@ func TestSweepOrphanPanesDryRunThenClose(t *testing.T) {
 	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state) VALUES(?,1,?,'idle')`, project.ID, mount); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state) VALUES(?,1,?,'idle')`, project.ID, sandbox); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -41,15 +41,15 @@ func TestSweepOrphanPanesDryRunThenClose(t *testing.T) {
 	}
 	fake := &changingSnapshotAdapter{Fake: herdr.NewFake(), snapshot: herdr.Snapshot{Panes: []herdr.Pane{
 		{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "working"},
-		{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t99", CWD: mount},
+		{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t99", CWD: sandbox},
 	}}}
 	service := testService(posseHome, fake)
 	t.Chdir(repo)
 	var output bytes.Buffer
 	cli := service.CLI()
 	cli.Out = &output
-	if code := cli.Run([]string{"sweep"}); code != 0 || !strings.Contains(output.String(), "dry_run: true") || !strings.Contains(output.String(), "w2:p1") {
-		t.Fatalf("sweep dry run did not list the orphan: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"pool", "prune"}); code != 0 || !strings.Contains(output.String(), "dry_run: true") || !strings.Contains(output.String(), "w2:p1") {
+		t.Fatalf("pool prune dry run did not list the orphan: code=%d output=%s", code, output.String())
 	}
 	if fake.CallCount("pane.close") != 0 {
 		t.Fatalf("dry run closed an orphan pane: %#v", fake.Calls)
@@ -73,34 +73,34 @@ func TestSweepOrphanPanesDryRunThenClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	output.Reset()
-	if code := cli.Run([]string{"sweep", "--yes"}); code != 0 || !strings.Contains(output.String(), "w2:p1") {
-		t.Fatalf("sweep --yes failed to close the orphan: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"pool", "prune", "--yes"}); code != 0 || !strings.Contains(output.String(), "w2:p1") {
+		t.Fatalf("pool prune --yes failed to close the orphan: code=%d output=%s", code, output.String())
 	}
 	if fake.CallCount("pane.close") != 1 {
-		t.Fatalf("sweep --yes closed unexpected panes: %#v", fake.Calls)
+		t.Fatalf("pool prune --yes closed unexpected panes: %#v", fake.Calls)
 	}
 	for _, pane := range fake.currentSnapshot().Panes {
 		if pane.PaneID == "w2:p1" || pane.Label == "posse:shop:t99" {
-			t.Fatalf("orphan remains after sweep: %#v", pane)
+			t.Fatalf("orphan remains after pool prune: %#v", pane)
 		}
 	}
 }
 
 func TestTaskPaneCwdOwnershipResolvesSymlinks(t *testing.T) {
 	root := t.TempDir()
-	mount := filepath.Join(root, "mount")
-	if err := os.MkdirAll(filepath.Join(mount, "nested"), 0o700); err != nil {
+	sandbox := filepath.Join(root, "sandbox")
+	if err := os.MkdirAll(filepath.Join(sandbox, "nested"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	alias := filepath.Join(root, "mount-alias")
-	if err := os.Symlink(mount, alias); err != nil {
+	alias := filepath.Join(root, "sandbox-alias")
+	if err := os.Symlink(sandbox, alias); err != nil {
 		t.Fatal(err)
 	}
 	project := store.Project{Name: "shop"}
-	task := store.Task{Seq: 4, WorktreePath: mount, HerdrWorkspaceID: "w2", PaneLabel: "posse:shop:t4"}
+	task := store.Task{Seq: 4, WorktreePath: sandbox, HerdrWorkspaceID: "w2", PaneLabel: "posse:shop:t4"}
 	pane := herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", TabID: "w2:t1", CWD: filepath.Join(alias, "nested")}
 	if !ownsTaskPane(herdr.Snapshot{}, project, task, map[string]bool{"w2:t1": true}, pane) {
-		t.Fatal("symlinked cwd inside the Task Mount was not recognized")
+		t.Fatal("symlinked cwd inside the Task Sandbox was not recognized")
 	}
 	if ownsTaskPane(herdr.Snapshot{}, project, task, map[string]bool{"w2:t2": true}, pane) {
 		t.Fatal("an unlabeled pane outside the Task's tab was claimed by its cwd")
@@ -122,7 +122,7 @@ func TestTornDownForeignPaneCreatesNoticeWithoutBlockingProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	label := "posse:shop:t1"
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "scout", Title: "Torn down", LandingMode: "local", HerdrWorkspaceID: "w2", PaneID: "w2:p1", PaneLabel: label})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "research", Title: "Torn down", MergeMode: "local", HerdrWorkspaceID: "w2", PaneID: "w2:p1", PaneLabel: label})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,8 +139,8 @@ func TestTornDownForeignPaneCreatesNoticeWithoutBlockingProject(t *testing.T) {
 		t.Fatalf("foreign pane Notice blocked Project reconciliation: %v", err)
 	}
 	notices, err := db.Notices(ctx, project.ID, false)
-	if err != nil || len(notices) != 1 || notices[0].Kind != "unsaddle_incomplete" {
-		t.Fatalf("teardown did not leave one unsaddle_incomplete Notice: %#v, %v", notices, err)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "teardown_incomplete" {
+		t.Fatalf("teardown did not leave one teardown_incomplete Notice: %#v, %v", notices, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

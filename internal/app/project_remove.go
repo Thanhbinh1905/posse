@@ -10,7 +10,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// projectRemove unregisters a Project that never had a Task or a Mount, such as
+// projectRemove unregisters a Project that never had a Task or a Sandbox, such as
 // one registered by mistake. It is a dry run without --yes.
 func (s *Service) projectRemove(ctx *axi.Context, args []string) error {
 	parsed, err := parseArgs("project remove", args, map[string]flagSpec{"yes": {boolean: true}})
@@ -32,12 +32,12 @@ func (s *Service) projectRemove(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	tasks, mounts, err := db.ProjectContents(ctx.Context, project.ID)
+	tasks, sandboxes, err := db.ProjectContents(ctx.Context, project.ID)
 	if err != nil {
 		return err
 	}
-	if tasks != 0 || mounts != 0 {
-		return projectNotEmpty(project, tasks, mounts)
+	if tasks != 0 || sandboxes != 0 {
+		return projectNotEmpty(project, tasks, sandboxes)
 	}
 	if s.Herdr != nil && (project.LeadPaneID != "" || project.LeadLabel != "") {
 		snapshot, snapshotErr := s.Herdr.Snapshot(ctx.Context)
@@ -65,7 +65,7 @@ func (s *Service) projectRemove(ctx *axi.Context, args []string) error {
 	}
 	if err := db.DeleteEmptyProject(ctx.Context, project.ID); err != nil {
 		if errors.Is(err, store.ErrProjectNotEmpty) {
-			return projectNotEmpty(project, tasks, mounts)
+			return projectNotEmpty(project, tasks, sandboxes)
 		}
 		if errors.Is(err, store.ErrProjectReferenced) {
 			return axi.Failure("project_has_dependents", fmt.Sprintf("Project %s has related records that prevent removal", project.Name), false, "Inspect and remove related records before retrying")
@@ -86,8 +86,8 @@ func (s *Service) projectRemove(ctx *axi.Context, args []string) error {
 	})
 }
 
-func projectNotEmpty(project store.Project, tasks, mounts int) error {
+func projectNotEmpty(project store.Project, tasks, sandboxes int) error {
 	return axi.Failure("project_not_empty",
-		fmt.Sprintf("Project %s has %d Tasks and %d Mounts; only a Project without either can be removed", project.Name, tasks, mounts),
+		fmt.Sprintf("Project %s has %d Tasks and %d Sandboxes; only a Project without either can be removed", project.Name, tasks, sandboxes),
 		false, "A Project with Task history stays registered; use `posse project move` if its repository moved")
 }

@@ -86,7 +86,7 @@ FROM model_error_episodes WHERE task_id=?`, taskID).Scan(
 		}
 		episode.Fingerprint = fingerprint
 		episode.UpdatedAt = now
-		if err := insertModelErrorSignal(ctx, tx, episode, "model_error_detected", "Recognized a model error at the end of a Rider turn", nil, now); err != nil {
+		if err := insertModelErrorSignal(ctx, tx, episode, "model_error_detected", "Recognized a model error at the end of a Worker turn", nil, now); err != nil {
 			return ModelErrorEpisode{}, false, err
 		}
 		return episode, true, tx.Commit()
@@ -112,7 +112,7 @@ ON CONFLICT(task_id) DO UPDATE SET episode=excluded.episode,launch=excluded.laun
 		taskID, episode.Episode, launch, agent, kind, fingerprint, now, now); err != nil {
 		return ModelErrorEpisode{}, false, err
 	}
-	if err := insertModelErrorSignal(ctx, tx, episode, "model_error_detected", "Recognized a model error at the end of a Rider turn", nil, now); err != nil {
+	if err := insertModelErrorSignal(ctx, tx, episode, "model_error_detected", "Recognized a model error at the end of a Worker turn", nil, now); err != nil {
 		return ModelErrorEpisode{}, false, err
 	}
 	return episode, true, tx.Commit()
@@ -219,7 +219,7 @@ func (db *DB) CompleteModelErrorNudge(ctx context.Context, taskID int64, episode
 }
 
 // MarkModelErrorTurnStarted opens the next failed-turn slot only after the
-// harness has reported that the Rider resumed work following a nudge.
+// harness has reported that the Worker resumed work following a nudge.
 func (db *DB) MarkModelErrorTurnStarted(ctx context.Context, taskID, launch int64, now int64) error {
 	if now == 0 {
 		now = time.Now().UnixMilli()

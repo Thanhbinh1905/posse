@@ -48,7 +48,7 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\npr_poll = \"1ms\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\npr_poll = \"1ms\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -147,8 +147,8 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 		t.Fatal(err)
 	}
 	project.HerdrWorkspaceID = workspace.Workspace.WorkspaceID
-	if output := runPosse(t, binary, workspaceRoot, env, "lookout", "--repair"); !strings.Contains(output, "state: running") {
-		t.Fatalf("start supervised hidden Lookout poller: %s", output)
+	if output := runPosse(t, binary, workspaceRoot, env, "watch", "--repair"); !strings.Contains(output, "state: running") {
+		t.Fatalf("start supervised hidden Watch runtime: %s", output)
 	}
 
 	if !waitForCondition(12*time.Second, func() bool {
@@ -160,7 +160,7 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 		}
 		return true
 	}) {
-		t.Fatal("Lookout did not attempt to fetch both workspace Members")
+		t.Fatal("Watch did not attempt to fetch both workspace Members")
 	}
 	for _, member := range members {
 		state, err := db.ProjectRepoWatchState(ctx, project.ID, member.Name)

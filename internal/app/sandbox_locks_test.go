@@ -1,0 +1,656 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/thanhbinh1905/posse/internal/store"
+)
+
+func TestHeldSandboxLockSurvivesReconcileAndUnlocksOnRelease(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Lock", MergeMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason, err := sandboxLockReason(ctx, repo, sandbox.Path)
+	if err != nil || reason != "posse: held by t1" {
+		t.Fatalf("held lock = %q %v", reason, err)
+	}
+	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "unlock", sandbox.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	reason, err = sandboxLockReason(ctx, repo, sandbox.Path)
+	if err != nil || reason != "posse: held by t1" {
+		t.Fatalf("reconciled lock = %q %v", reason, err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseSandbox(ctx, db, project, task, "warm", false); err != nil {
+		t.Fatal(err)
+	}
+	reason, err = sandboxLockReason(ctx, repo, sandbox.Path)
+	if err != nil || reason != "" {
+		t.Fatalf("released lock = %q %v", reason, err)
+	}
+	// Simulate a crash that left the former Task's lock on an idle Sandbox.
+	id2, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "change", Title: "Reuse", MergeMode: "local", Branch: "posse/t2", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.TaskByID(ctx, project.ID, id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "lock", "--reason", "posse: held by t1", sandbox.Path); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := acquireSandbox(ctx, db, project, second, home, "warm", nil)
+	if err != nil || reused.ID != sandbox.ID {
+		t.Fatalf("stale Posse lock blocked reuse: %#v %v", reused, err)
+	}
+	if reason, err = sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "posse: held by t2" {
+		t.Fatalf("reused lock = %q %v", reason, err)
+	}
+	second, err = db.TaskByID(ctx, project.ID, id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseSandbox(ctx, db, project, second, "warm", true); err != nil {
+		t.Fatal(err)
+	}
+	if reason, err = sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "" {
+		t.Fatalf("discard lock = %q %v", reason, err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "lock", "--reason", "foreign owner", sandbox.Path); err != nil {
+		t.Fatal(err)
+	}
+	id3, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 3, Type: "change", Title: "Foreign", MergeMode: "local", Branch: "posse/t3", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := db.TaskByID(ctx, project.ID, id3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireSandbox(ctx, db, project, third, home, "warm", nil); err == nil {
+		t.Fatal("acquire replaced a foreign lock")
+	}
+	if reason, err = sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "foreign owner" {
+		t.Fatalf("foreign lock changed: %q %v", reason, err)
+	}
+}
+
+func TestReconcileCannotRelockDuringRelease(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Race", MergeMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	reconciled := make(chan error, 1)
+	go func() {
+		<-started
+		reconciled <- ensureHeldSandboxLocks(ctx, db, project)
+	}()
+	err = withSandboxStateLock(ctx, db, func() error {
+		if err := resetSandbox(ctx, sandbox.Path, project, "warm"); err != nil {
+			return err
+		}
+		if err := db.BeginSandboxRelease(ctx, sandbox.ID, task.ID); err != nil {
+			return err
+		}
+		if err := unlockSandbox(ctx, repo, sandbox.Path); err != nil {
+			return err
+		}
+		close(started)
+		// Reconcile begins while Git is unlocked but Sandbox is not reusable.
+		time.Sleep(50 * time.Millisecond)
+		return db.FinishSandboxRelease(ctx, sandbox.ID, task.ID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reconciled; err != nil {
+		t.Fatal(err)
+	}
+	if reason, err := sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "" {
+		t.Fatalf("reconcile relocked idle Sandbox: %q, %v", reason, err)
+	}
+}
+
+func TestBrokenSandboxUnlocksAndAcquireReplacesOnlyStalePosseLock(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeTask := func(seq int) store.Task {
+		t.Helper()
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "change", Title: "Reuse", MergeMode: "local", Branch: fmt.Sprintf("posse/t%d", seq), BaseRef: "main"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := db.TaskByID(ctx, project.ID, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	first := makeTask(1)
+	sandbox, err := acquireSandbox(ctx, db, project, first, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := breakSandbox(ctx, db, project, first, sandbox, "test broken checkout"); err != nil {
+		t.Fatal(err)
+	}
+	if reason, err := sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "" {
+		t.Fatalf("broken Sandbox lock = %q, %v", reason, err)
+	}
+	// Simulate a crash after an ownership transition but before Git unlock.
+	second := makeTask(2)
+	idle, err := db.AcquireSandbox(ctx, project.ID, second.ID, filepath.Join(home, "pool", project.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idle.Path == sandbox.Path {
+		t.Fatal("broken Sandbox was reused")
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "add", "--detach", idle.Path, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "lock", "--reason", "posse: held by t1", idle.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockClaimedSandbox(ctx, db, project, idle, second); err != nil {
+		t.Fatal(err)
+	}
+	if reason, err := sandboxLockReason(ctx, repo, idle.Path); err != nil || reason != "posse: held by t2" {
+		t.Fatalf("reclaimed lock = %q, %v", reason, err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "unlock", idle.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "lock", "--reason", "foreign owner", idle.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockClaimedSandbox(ctx, db, project, idle, second); err == nil {
+		t.Fatal("foreign lock was replaced")
+	}
+	if reason, err := sandboxLockReason(ctx, repo, idle.Path); err != nil || reason != "foreign owner" {
+		t.Fatalf("foreign lock changed: %q, %v", reason, err)
+	}
+}
+
+func TestMissingHeldSandboxRaisesNoticeWithoutRecreatingCheckout(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Missing", MergeMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "remove", "--force", "--force", sandbox.Path); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(sandbox.Path); !os.IsNotExist(err) {
+		t.Fatalf("missing Sandbox was recreated: %v", err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, notice := range notices {
+		if notice.Kind == "sandbox_missing" && strings.Contains(notice.Summary, "t1") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("missing Sandbox Notices = %#v", notices)
+	}
+}
+
+func TestFailedTaskHeldSandboxIsRelockedByReconcile(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Failed launch", MergeMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, store.StateSpawning, store.StateFailed, "cli", "launch failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "unlock", sandbox.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	reason, err := sandboxLockReason(ctx, repo, sandbox.Path)
+	if err != nil || reason != "posse: held by t1" {
+		t.Fatalf("failed Task's held Sandbox lock = %q, %v", reason, err)
+	}
+	if _, err := gitOutput(ctx, repo, "worktree", "remove", "--force", "--force", sandbox.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, notice := range notices {
+		if notice.TaskID == id && notice.Kind == "sandbox_missing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("failed Task's missing Sandbox Notice absent: %#v", notices)
+	}
+}
+
+func TestSandboxIsLockedBeforeAcquireCanExposeHeldCheckout(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Lock timing", MergeMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseSandbox(ctx, db, project, task, "warm", false); err != nil {
+		t.Fatal(err)
+	}
+	id, err = db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "change", Title: "Lock reuse timing", MergeMode: "local", Branch: "posse/t2", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := filepath.Join(root, "before-lock"), filepath.Join(root, "release-lock")
+	shim := fmt.Sprintf("#!/bin/sh\nif [ \"$3\" = worktree ] && [ \"$4\" = lock ]; then\n  : > %s\n  while [ ! -e %s ]; do sleep 0.01; done\nfi\nexec %s \"$@\"\n", shellQuote(entered), shellQuote(release), shellQuote(realGit))
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	done := make(chan error, 1)
+	go func() { _, err := acquireSandbox(ctx, db, project, task, home, "warm", nil); done <- err }()
+	completed := false
+	defer func() {
+		_ = os.WriteFile(release, nil, 0600)
+		if !completed {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("acquire ended before git worktree lock: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("acquire did not reach git worktree lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].ID != first.ID || sandboxes[0].State != "idle" {
+		t.Fatalf("checkout became held before lock command: %+v, %v", sandboxes, err)
+	}
+	reason, err := sandboxLockReason(ctx, repo, first.Path)
+	if err != nil || reason != "" {
+		t.Fatalf("idle checkout before lock command = %q, %v", reason, err)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	completed = true
+	sandbox, err := db.SandboxByTask(ctx, task.ID)
+	if err != nil || sandbox.State != "held" {
+		t.Fatalf("acquire did not finish: %+v %v", sandbox, err)
+	}
+	if reason, err := sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "posse: held by t2" {
+		t.Fatalf("held checkout after acquire lock = %q, %v", reason, err)
+	}
+}
+
+func TestReleaseSnapshotFailureDoesNotRelockIdleSandbox(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Release snapshot", MergeMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotDir := filepath.Dir(db.TaskSnapshotPath(project.Name, task.Seq))
+	if err := os.Chmod(snapshotDir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(snapshotDir, 0700)
+	if _, err := releaseSandbox(ctx, db, project, task, "warm", false); err == nil {
+		t.Fatal("expected snapshot persistence failure after release commit")
+	}
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "idle" {
+		t.Fatalf("Sandbox after committed release = %+v, %v", sandboxes, err)
+	}
+	reason, err := sandboxLockReason(ctx, repo, sandbox.Path)
+	if err != nil || reason != "" {
+		t.Fatalf("idle Sandbox retained lock %q, %v", reason, err)
+	}
+}
+
+func TestInterruptedReleasingSandboxCompletesWithoutExposingHeldWork(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Interrupted release", MergeMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resetSandbox(ctx, sandbox.Path, project, "warm"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BeginSandboxRelease(ctx, sandbox.ID, id); err != nil {
+		t.Fatal(err)
+	}
+	if reason, err := sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "posse: held by t1" {
+		t.Fatalf("releasing checkout should remain locked until unlock: %q %v", reason, err)
+	}
+	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "idle" {
+		t.Fatalf("releasing Sandbox not recovered: %+v %v", sandboxes, err)
+	}
+	if reason, err := sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "" {
+		t.Fatalf("recovered release retained Git lock: %q %v", reason, err)
+	}
+}
+
+// A single-force UI removal during Git unlock can only reach a cleaned,
+// non-reusable releasing checkout, never one still held by an active Task.
+func TestReleaseDoesNotExposeHeldCheckoutAfterGitUnlock(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Release window", MergeMode: "local", Branch: "posse/t1", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := filepath.Join(root, "after-unlock"), filepath.Join(root, "release-unlock")
+	shim := fmt.Sprintf("#!/bin/sh\n%s \"$@\" || exit $?\nif [ \"$3\" = worktree ] && [ \"$4\" = unlock ]; then\n  : > %s\n  while [ ! -e %s ]; do sleep 0.01; done\nfi\n", shellQuote(realGit), shellQuote(entered), shellQuote(release))
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	done := make(chan error, 1)
+	go func() { _, err := releaseSandbox(ctx, db, project, task, "warm", false); done <- err }()
+	defer func() {
+		_ = os.WriteFile(release, nil, 0o600)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("release ended before Git unlock: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("release did not reach Git unlock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "releasing" || sandboxes[0].TaskID != task.ID {
+		t.Fatalf("Sandbox still held during unlock window: %+v, %v", sandboxes, err)
+	}
+	dirty, statusErr := gitOutput(ctx, sandbox.Path, "status", "--porcelain")
+	if statusErr != nil || strings.TrimSpace(dirty) != "" {
+		t.Fatalf("releasing checkout still contains Task work: %s %v", dirty, statusErr)
+	}
+	if reason, err := sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "" {
+		t.Fatalf("expected observable held checkout without lock, got %q, %v", reason, err)
+	}
+	// Herdr may remove a releasing checkout; recovery will not mistake it
+	// for missing unmerged work or reuse it while release is incomplete.
+	if _, err := gitOutput(ctx, repo, "worktree", "remove", "--force", sandbox.Path); err != nil {
+		t.Fatalf("single-force removal of the cleaned Sandbox failed: %v", err)
+	}
+}

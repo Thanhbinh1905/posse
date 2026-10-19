@@ -12,7 +12,7 @@ import (
 type Querier interface {
 	AckAllNotices(ctx context.Context, arg AckAllNoticesParams) (sql.Result, error)
 	AckNotice(ctx context.Context, arg AckNoticeParams) (sql.Result, error)
-	AcquireIdleMount(ctx context.Context, arg AcquireIdleMountParams) (sql.Result, error)
+	AcquireIdleSandbox(ctx context.Context, arg AcquireIdleSandboxParams) (sql.Result, error)
 	ActiveWorkerCount(ctx context.Context, projectID int64) (int64, error)
 	AllResourceLeases(ctx context.Context) ([]AllResourceLeasesRow, error)
 	AllTasks(ctx context.Context, projectID int64) ([]Task, error)
@@ -20,25 +20,25 @@ type Querier interface {
 	AllocateTaskLaunch(ctx context.Context, arg AllocateTaskLaunchParams) (int64, error)
 	AllocateTaskSequence(ctx context.Context, projectID int64) (int64, error)
 	BindPRBodyMarker(ctx context.Context, arg BindPRBodyMarkerParams) (sql.Result, error)
-	BreakMount(ctx context.Context, arg BreakMountParams) error
+	BreakSandbox(ctx context.Context, arg BreakSandboxParams) error
 	ClearDownProjectLead(ctx context.Context, id int64) error
-	ClearGatedSHALandingToDone(ctx context.Context, id int64) error
+	ClearGatedSHAMergeToDone(ctx context.Context, id int64) error
 	ClearProjectLead(ctx context.Context, id int64) error
 	ClearTaskGatedSHA(ctx context.Context, arg ClearTaskGatedSHAParams) error
 	ClearWorkspaceToken(ctx context.Context, projectID int64) error
 	CountApproval(ctx context.Context, arg CountApprovalParams) (int64, error)
 	CountResourceLeasesByIntent(ctx context.Context, intentID int64) (int64, error)
-	DeleteMount(ctx context.Context, arg DeleteMountParams) (sql.Result, error)
 	DeleteResourceLease(ctx context.Context, arg DeleteResourceLeaseParams) (sql.Result, error)
-	DeleteResourceLeaseByMount(ctx context.Context, mountID sql.NullInt64) error
+	DeleteResourceLeaseBySandbox(ctx context.Context, mountID sql.NullInt64) error
 	DeleteResourceLeasesByIntent(ctx context.Context, intentID int64) error
+	DeleteSandbox(ctx context.Context, arg DeleteSandboxParams) (sql.Result, error)
 	InsertApproval(ctx context.Context, arg InsertApprovalParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	InsertLeadStartClaim(ctx context.Context, arg InsertLeadStartClaimParams) (sql.Result, error)
-	InsertMount(ctx context.Context, arg InsertMountParams) (sql.Result, error)
 	InsertNotice(ctx context.Context, arg InsertNoticeParams) (sql.Result, error)
 	InsertProject(ctx context.Context, arg InsertProjectParams) (sql.Result, error)
 	InsertResourceLease(ctx context.Context, arg InsertResourceLeaseParams) (sql.Result, error)
+	InsertSandbox(ctx context.Context, arg InsertSandboxParams) (sql.Result, error)
 	InsertSignal(ctx context.Context, arg InsertSignalParams) (sql.Result, error)
 	InsertTask(ctx context.Context, arg InsertTaskParams) (sql.Result, error)
 	InsertTransition(ctx context.Context, arg InsertTransitionParams) error
@@ -49,11 +49,8 @@ type Querier interface {
 	MarkNoticeDelivered(ctx context.Context, arg MarkNoticeDeliveredParams) error
 	MarkProjectDown(ctx context.Context, arg MarkProjectDownParams) error
 	MarkResourceLeaseForRecovery(ctx context.Context, arg MarkResourceLeaseForRecoveryParams) (sql.Result, error)
-	MountByTask(ctx context.Context, taskID sql.NullInt64) (Mount, error)
-	MountResourceOwners(ctx context.Context) ([]MountResourceOwnersRow, error)
-	Mounts(ctx context.Context, projectID int64) ([]Mount, error)
 	MoveProject(ctx context.Context, arg MoveProjectParams) error
-	NextMountNumber(ctx context.Context, projectID int64) (int64, error)
+	NextSandboxNumber(ctx context.Context, projectID int64) (int64, error)
 	NextTaskSeq(ctx context.Context, projectID int64) (int64, error)
 	Notices(ctx context.Context, projectID int64) ([]NoticesRow, error)
 	OldestQueuedMessage(ctx context.Context, taskID int64) (OldestQueuedMessageRow, error)
@@ -70,14 +67,17 @@ type Querier interface {
 	RecordNoticeNotification(ctx context.Context, arg RecordNoticeNotificationParams) error
 	RefreshLeadStartClaim(ctx context.Context, arg RefreshLeadStartClaimParams) (sql.Result, error)
 	ReleaseLeadStart(ctx context.Context, projectID int64) error
-	ReleaseMount(ctx context.Context, arg ReleaseMountParams) error
+	ReleaseSandbox(ctx context.Context, arg ReleaseSandboxParams) error
 	ResetProgress(ctx context.Context, arg ResetProgressParams) error
 	ResetTaskProgress(ctx context.Context, arg ResetTaskProgressParams) error
 	ResourceLeaseBySource(ctx context.Context, sourceKey string) (ResourceLeaseBySourceRow, error)
 	ResourceLeasesByIntent(ctx context.Context, intentID int64) ([]ResourceLeasesByIntentRow, error)
 	ResourceLeasesByProject(ctx context.Context, ownerProjectID int64) ([]ResourceLeasesByProjectRow, error)
 	ResourceLeasesByScope(ctx context.Context, arg ResourceLeasesByScopeParams) ([]ResourceLeasesByScopeRow, error)
-	ResourceMountLeases(ctx context.Context) ([]ResourceMountLeasesRow, error)
+	ResourceSandboxLeases(ctx context.Context) ([]ResourceSandboxLeasesRow, error)
+	SandboxByTask(ctx context.Context, taskID sql.NullInt64) (Sandbox, error)
+	SandboxResourceOwners(ctx context.Context) ([]SandboxResourceOwnersRow, error)
+	Sandboxes(ctx context.Context, projectID int64) ([]Sandbox, error)
 	SetProjectLead(ctx context.Context, arg SetProjectLeadParams) error
 	SetTaskContainment(ctx context.Context, arg SetTaskContainmentParams) error
 	SetTaskGatedSHA(ctx context.Context, arg SetTaskGatedSHAParams) error
@@ -95,10 +95,10 @@ type Querier interface {
 	UndeliveredNotices(ctx context.Context, projectID int64) ([]UndeliveredNoticesRow, error)
 	UpdateProgress(ctx context.Context, arg UpdateProgressParams) error
 	UpdateProjectObservation(ctx context.Context, arg UpdateProjectObservationParams) error
-	UpdateTaskLanding(ctx context.Context, arg UpdateTaskLandingParams) error
 	UpdateTaskLaunch(ctx context.Context, arg UpdateTaskLaunchParams) error
-	UpdateTaskMount(ctx context.Context, arg UpdateTaskMountParams) error
+	UpdateTaskMerge(ctx context.Context, arg UpdateTaskMergeParams) error
 	UpdateTaskObservation(ctx context.Context, arg UpdateTaskObservationParams) error
+	UpdateTaskSandbox(ctx context.Context, arg UpdateTaskSandboxParams) error
 	UpdateTaskState(ctx context.Context, arg UpdateTaskStateParams) (sql.Result, error)
 	UpdateTaskWorkspace(ctx context.Context, arg UpdateTaskWorkspaceParams) error
 	UpsertPRBodyMarker(ctx context.Context, arg UpsertPRBodyMarkerParams) error

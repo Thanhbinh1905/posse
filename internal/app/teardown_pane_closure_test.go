@@ -11,7 +11,7 @@ import (
 )
 
 func TestTeardownRefusesSurvivingPaneWithoutConditionalClose(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{
 		{PaneID: "w1:p1", WorkspaceID: "w1", Label: fixture.project.LeadLabel, Agent: "claude"},

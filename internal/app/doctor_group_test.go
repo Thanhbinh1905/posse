@@ -29,7 +29,7 @@ func TestDoctorWarnsWhenAnotherRepositoryPrimaryCanCloseTheLeadGroup(t *testing.
 	lead.Worktree.RepoKey = "same-repository"
 	other := herdr.Workspace{WorkspaceID: "w2", Label: "notes"}
 	other.Worktree.RepoKey = lead.Worktree.RepoKey
-	child := herdr.Workspace{WorkspaceID: "w3", Label: "rider"}
+	child := herdr.Workspace{WorkspaceID: "w3", Label: "worker"}
 	child.Worktree.RepoKey = lead.Worktree.RepoKey
 	child.Worktree.IsLinkedWorktree = true
 	fake := herdr.NewFake()
@@ -42,6 +42,6 @@ func TestDoctorWarnsWhenAnotherRepositoryPrimaryCanCloseTheLeadGroup(t *testing.
 		t.Fatalf("doctor failed: %d %s", code, &output)
 	}
 	if !strings.Contains(output.String(), "Herdr group shop") || !strings.Contains(output.String(), "w2") || strings.Contains(output.String(), "another primary workspace w3") {
-		t.Fatalf("doctor missed the other primary or warned on a Rider child: %s", &output)
+		t.Fatalf("doctor missed the other primary or warned on a Worker child: %s", &output)
 	}
 }

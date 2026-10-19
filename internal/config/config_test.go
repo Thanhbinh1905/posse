@@ -11,12 +11,12 @@ import (
 func TestLoadMergesProjectOverridesAndPrependsDispatchRules(t *testing.T) {
 	home := t.TempDir()
 	global := `[identity.lead]
-name = "Sheriff"
+name = "Lead"
 language = "vi"
 
 [defaults]
 max_workers = 5
-landing_mode = "pr"
+merge_mode = "pr"
 gate = ["go test ./..."]
 
 [profiles.deep]
@@ -33,14 +33,14 @@ use = "deep"
 [dispatch.default]
 use = "deep"
 `
-	project := `landing_mode = "no-mistakes"
+	project := `merge_mode = "no-mistakes"
 gate = ["go test ./...", "go vet ./..."]
 
 [autonomy]
 yolo = true
 
 [[dispatch]]
-type = "ship"
+type = "change"
 use = "fast"
 `
 	writeConfig(t, filepath.Join(home, "config.toml"), global)
@@ -49,19 +49,19 @@ use = "fast"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Defaults.MaxWorkers != 5 || cfg.Defaults.LandingMode != "no-mistakes" || len(cfg.Defaults.Gate) != 2 {
+	if cfg.Defaults.MaxWorkers != 5 || cfg.Defaults.MergeMode != "no-mistakes" || len(cfg.Defaults.Gate) != 2 {
 		t.Fatalf("merged defaults = %#v", cfg.Defaults)
 	}
-	if cfg.Identity.Lead.Name != "Sheriff" || cfg.Identity.Lead.Language != "vi" {
+	if cfg.Identity.Lead.Name != "Lead" || cfg.Identity.Lead.Language != "vi" {
 		t.Fatalf("merged Identity = %#v", cfg.Identity.Lead)
 	}
-	if len(cfg.Dispatch) != 2 || cfg.Dispatch[0].Type != "ship" || cfg.Dispatch[1].Type != "review" {
+	if len(cfg.Dispatch) != 2 || cfg.Dispatch[0].Type != "change" || cfg.Dispatch[1].Type != "review" {
 		t.Fatalf("Dispatch Rules = %#v", cfg.Dispatch)
 	}
 	if cfg.DispatchDefault.Use != "deep" {
 		t.Fatalf("default Profile = %q", cfg.DispatchDefault.Use)
 	}
-	if cfg.Autonomy.Review != "lead" || cfg.Autonomy.Land != "auto" {
+	if cfg.Autonomy.Review != "lead" || cfg.Autonomy.Merge != "auto" {
 		t.Fatalf("yolo expansion = %#v", cfg.Autonomy)
 	}
 	if cfg.Kinds["claude"].Prepare != "claude-trust" || cfg.Kinds["codex"].AutoApproveArgs[0] != "--dangerously-bypass-approvals-and-sandbox" {
@@ -103,7 +103,7 @@ func TestLeadDeliveryDefaultsByKind(t *testing.T) {
 		systemPrompt    []string
 		leadAutoApprove bool
 	}{
-		"claude":   {NoticeDeliveryLookout, []string{"--append-system-prompt-file", "{file}"}, true},
+		"claude":   {NoticeDeliveryWatch, []string{"--append-system-prompt-file", "{file}"}, true},
 		"codex":    {NoticeDeliveryCodexQueue, []string{"-c", "developer_instructions={text}"}, true},
 		"pi":       {NoticeDeliveryPiExtension, []string{"--append-system-prompt", "{file}"}, false},
 		"opencode": {NoticeDeliveryOpenCodePlugin, nil, true},
@@ -153,13 +153,13 @@ func TestLeadAutoApproveCanBeDisabledInConfig(t *testing.T) {
 	}
 }
 
-func TestLookoutDeliveryRequiresBackgroundCommands(t *testing.T) {
+func TestWatchDeliveryRequiresBackgroundCommands(t *testing.T) {
 	home := t.TempDir()
-	writeConfig(t, filepath.Join(home, "config.toml"), "[kinds.codex]\nnotice_delivery = \"lookout\"\n")
+	writeConfig(t, filepath.Join(home, "config.toml"), "[kinds.codex]\nnotice_delivery = \"watch\"\n")
 	_, err := Load(home, "")
 	invalid, ok := err.(*InvalidError)
 	if !ok || invalid.Key != "kinds.codex.notice_delivery" || !strings.Contains(invalid.Reason, "background_commands") {
-		t.Fatalf("expected lookout without background_commands to be rejected, got %v", err)
+		t.Fatalf("expected watch without background_commands to be rejected, got %v", err)
 	}
 }
 
@@ -258,7 +258,7 @@ func TestGlobalAutonomyIsRejected(t *testing.T) {
 func TestLoadRejectsUnknownAndInvalidKeys(t *testing.T) {
 	for _, tc := range []struct{ contents, key string }{
 		{"[defaults]\nmax_workers=0\n", "defaults.max_workers"},
-		{"[defaults]\nlanding_mode='unsafe'\n", "defaults.landing_mode"},
+		{"[defaults]\nmerge_mode='unsafe'\n", "defaults.merge_mode"},
 		{"[defaults]\nunknown=true\n", "defaults.unknown"},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
@@ -333,16 +333,16 @@ func TestDispatchInheritanceAndDisabledKindDefaults(t *testing.T) {
 
 func TestKeepIdleAllowsZeroButRejectsNegativeAndBudgetsStayPositive(t *testing.T) {
 	home := t.TempDir()
-	writeConfig(t, filepath.Join(home, "config.toml"), "[remuda]\nkeep_idle = 0\n")
+	writeConfig(t, filepath.Join(home, "config.toml"), "[pool]\nkeep_idle = 0\n")
 	cfg, err := Load(home, "")
-	if err != nil || cfg.Remuda.KeepIdle != 0 {
-		t.Fatalf("keep_idle=0 config = %#v, %v", cfg.Remuda, err)
+	if err != nil || cfg.Pool.KeepIdle != 0 {
+		t.Fatalf("keep_idle=0 config = %#v, %v", cfg.Pool, err)
 	}
 	for _, testCase := range []struct {
 		key   string
 		value int
 	}{
-		{key: "remuda.keep_idle", value: -1},
+		{key: "pool.keep_idle", value: -1},
 		{key: "defaults.max_workers", value: 0},
 		{key: "defaults.recovery_attempts", value: 0},
 	} {
@@ -369,12 +369,12 @@ func TestDispatchDefaultOnly(t *testing.T) {
 func TestWorkerIdentityAcceptsLegacyDisplayPrefix(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "config.toml")
-	writeConfig(t, path, "[identity.worker]\ndisplay_prefix = \"rider\"\n")
+	writeConfig(t, path, "[identity.worker]\ndisplay_prefix = \"worker\"\n")
 	cfg, err := Load(home, "shop")
-	if err != nil || cfg.Identity.Worker.DisplayPrefix != "rider" {
+	if err != nil || cfg.Identity.Worker.DisplayPrefix != "worker" {
 		t.Fatalf("display_prefix config = %#v, %v", cfg.Identity.Worker, err)
 	}
-	writeConfig(t, path, "[identity.worker]\nname_prefix = \"rider\"\n")
+	writeConfig(t, path, "[identity.worker]\nname_prefix = \"worker\"\n")
 	_, err = Load(home, "shop")
 	invalid, ok := err.(*InvalidError)
 	if !ok || invalid.File != path || !strings.Contains(invalid.Key, "name_prefix") {

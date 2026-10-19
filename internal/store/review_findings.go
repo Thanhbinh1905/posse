@@ -93,7 +93,7 @@ func (db *DB) ReviewRoundForTask(ctx context.Context, reviewTaskID int64) ([]Rev
 	var rounds []ReviewRound
 	for rows.Next() {
 		var round ReviewRound
-		if err := rows.Scan(&round.ShipTaskID, &round.Round, &round.ReviewTaskID, &round.Repository, &round.ScopeKind, &round.ScopeBaseSHA, &round.HeadSHA, &round.TargetCommitSHA, &round.BaselineTree, &round.DeltaSHA256, &round.ConflictedPaths, &round.Status, &round.Verdict, &round.CreatedAt); err != nil {
+		if err := rows.Scan(&round.ChangeTaskID, &round.Round, &round.ReviewTaskID, &round.Repository, &round.ScopeKind, &round.ScopeBaseSHA, &round.HeadSHA, &round.TargetCommitSHA, &round.BaselineTree, &round.DeltaSHA256, &round.ConflictedPaths, &round.Status, &round.Verdict, &round.CreatedAt); err != nil {
 			return nil, err
 		}
 		rounds = append(rounds, round)
@@ -166,18 +166,18 @@ func validReviewFindingInput(input ReviewFindingsInput) error {
 	return nil
 }
 
-func recordReviewFindingsTx(ctx context.Context, tx *writeTx, shipTaskID, reviewTaskID int64, input ReviewFindingsInput) (reviewFindingsResult, error) {
+func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, reviewTaskID int64, input ReviewFindingsInput) (reviewFindingsResult, error) {
 	result := reviewFindingsResult{BySeverity: map[string]int{}}
 	if err := validReviewFindingInput(input); err != nil {
 		return result, err
 	}
 	var round int
-	if err := tx.QueryRowContext(ctx, `SELECT round FROM review_rounds WHERE ship_task_id=? AND review_task_id=? LIMIT 1`, shipTaskID, reviewTaskID).Scan(&round); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT round FROM review_rounds WHERE ship_task_id=? AND review_task_id=? LIMIT 1`, changeTaskID, reviewTaskID).Scan(&round); err != nil {
 		return result, err
 	}
 	result.Round = round
 
-	ledgerRows, err := tx.QueryContext(ctx, `SELECT id,seq,fingerprint,state,severity,origin,in_scope FROM review_findings WHERE ship_task_id=? ORDER BY seq`, shipTaskID)
+	ledgerRows, err := tx.QueryContext(ctx, `SELECT id,seq,fingerprint,state,severity,origin,in_scope FROM review_findings WHERE ship_task_id=? ORDER BY seq`, changeTaskID)
 	if err != nil {
 		return result, err
 	}
@@ -263,17 +263,17 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, shipTaskID, review
 			patternID, found := patternIDs[key]
 			if !found {
 				var existing int64
-				err := tx.QueryRowContext(ctx, `SELECT id FROM review_patterns WHERE ship_task_id=? AND key=?`, shipTaskID, key).Scan(&existing)
+				err := tx.QueryRowContext(ctx, `SELECT id FROM review_patterns WHERE ship_task_id=? AND key=?`, changeTaskID, key).Scan(&existing)
 				if err != nil && !errors.Is(err, sql.ErrNoRows) {
 					return result, err
 				}
 				if errors.Is(err, sql.ErrNoRows) {
 					var seq int
-					if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM review_patterns WHERE ship_task_id=?`, shipTaskID).Scan(&seq); err != nil {
+					if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM review_patterns WHERE ship_task_id=?`, changeTaskID).Scan(&seq); err != nil {
 						return result, err
 					}
 					inserted, err := tx.ExecContext(ctx, `INSERT INTO review_patterns(ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(?,?,?,?,?,?,?,?)`,
-						shipTaskID, seq, key, pattern.Title, pattern.Rule, pattern.RootCause, pattern.FixGuidance, round)
+						changeTaskID, seq, key, pattern.Title, pattern.Rule, pattern.RootCause, pattern.FixGuidance, round)
 					if err != nil {
 						return result, err
 					}
@@ -287,7 +287,7 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, shipTaskID, review
 				patternIDs[key] = patternID
 			}
 			var seq int
-			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM review_findings WHERE ship_task_id=?`, shipTaskID).Scan(&seq); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM review_findings WHERE ship_task_id=?`, changeTaskID).Scan(&seq); err != nil {
 				return result, err
 			}
 			initialState := "open"
@@ -296,7 +296,7 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, shipTaskID, review
 				return result, err
 			}
 			resultInsert, err := tx.ExecContext(ctx, `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-				shipTaskID, seq, patternID, fingerprint, round, finding.Repository, finding.Path, finding.Symbol, strings.TrimSpace(finding.Excerpt), finding.Line,
+				changeTaskID, seq, patternID, fingerprint, round, finding.Repository, finding.Path, finding.Symbol, strings.TrimSpace(finding.Excerpt), finding.Line,
 				head, severity, origin, finding.InScope, initialState)
 			if err != nil {
 				return result, err
@@ -319,10 +319,10 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, shipTaskID, review
 		}
 	}
 
-	if err := resolveClaimedFindingsTx(ctx, tx, shipTaskID, round, ledgerBySequence, input.Resolutions); err != nil {
+	if err := resolveClaimedFindingsTx(ctx, tx, changeTaskID, round, ledgerBySequence, input.Resolutions); err != nil {
 		return result, err
 	}
-	blocking, err := hasBlockingReviewFindingTx(ctx, tx, shipTaskID, input.BlockAt)
+	blocking, err := hasBlockingReviewFindingTx(ctx, tx, changeTaskID, input.BlockAt)
 	if err != nil {
 		return result, err
 	}
@@ -338,7 +338,7 @@ func appendReviewFindingEventTx(ctx context.Context, tx *writeTx, findingID int6
 	return err
 }
 
-func resolveClaimedFindingsTx(ctx context.Context, tx *writeTx, shipTaskID int64, round int, ledger map[int]reviewFindingLedgerRow, resolutions []ReviewFindingResolutionInput) error {
+func resolveClaimedFindingsTx(ctx context.Context, tx *writeTx, changeTaskID int64, round int, ledger map[int]reviewFindingLedgerRow, resolutions []ReviewFindingResolutionInput) error {
 	claimed := map[int]bool{}
 	for _, row := range ledger {
 		if row.State == "fix_claimed" {
@@ -376,7 +376,7 @@ func resolveClaimedFindingsTx(ctx context.Context, tx *writeTx, shipTaskID int64
 		if err := appendReviewFindingEventTx(ctx, tx, row.ID, round, event, "reviewer", note); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE review_findings SET state=? WHERE id=? AND ship_task_id=?`, state, row.ID, shipTaskID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE review_findings SET state=? WHERE id=? AND ship_task_id=?`, state, row.ID, changeTaskID); err != nil {
 			return err
 		}
 		row.State = state
@@ -385,9 +385,9 @@ func resolveClaimedFindingsTx(ctx context.Context, tx *writeTx, shipTaskID int64
 	return nil
 }
 
-func hasBlockingReviewFindingTx(ctx context.Context, tx *writeTx, shipTaskID int64, blockAt string) (bool, error) {
+func hasBlockingReviewFindingTx(ctx context.Context, tx *writeTx, changeTaskID int64, blockAt string) (bool, error) {
 	threshold := map[string]int{"P0": 0, "P1": 1, "P2": 2}[blockAt]
-	rows, err := tx.QueryContext(ctx, `SELECT state,severity,origin,in_scope FROM review_findings WHERE ship_task_id=?`, shipTaskID)
+	rows, err := tx.QueryContext(ctx, `SELECT state,severity,origin,in_scope FROM review_findings WHERE ship_task_id=?`, changeTaskID)
 	if err != nil {
 		return false, err
 	}
@@ -412,7 +412,7 @@ func hasBlockingReviewFindingTx(ctx context.Context, tx *writeTx, shipTaskID int
 	return false, rows.Err()
 }
 
-func insertReviewRoundNoticesTx(ctx context.Context, tx *writeTx, projectID, shipTaskID int64, shipTitle string, result reviewFindingsResult, verdict string) error {
+func insertReviewRoundNoticesTx(ctx context.Context, tx *writeTx, projectID, changeTaskID int64, changeTitle string, result reviewFindingsResult, verdict string) error {
 	data := map[string]any{
 		"round": result.Round, "verdict": verdict, "new_patterns": result.NewPatterns,
 		"new_findings": result.NewFindings, "suppressed_repeats": result.SuppressedRepeat,
@@ -425,8 +425,8 @@ func insertReviewRoundNoticesTx(ctx context.Context, tx *writeTx, projectID, shi
 	if err != nil {
 		return err
 	}
-	summary := fmt.Sprintf("%s: Review Round %d recorded %s; %d repeated finding(s) suppressed, %d out-of-scope finding(s)", shipTitle, result.Round, verdict, result.SuppressedRepeat, result.OutOfScope)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,'review_round_done',?,?,?)`, projectID, shipTaskID, summary, string(encoded), time.Now().UnixMilli()); err != nil {
+	summary := fmt.Sprintf("%s: Review Round %d recorded %s; %d repeated finding(s) suppressed, %d out-of-scope finding(s)", changeTitle, result.Round, verdict, result.SuppressedRepeat, result.OutOfScope)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,'review_round_done',?,?,?)`, projectID, changeTaskID, summary, string(encoded), time.Now().UnixMilli()); err != nil {
 		return err
 	}
 	if len(result.Regressed) > 0 {
@@ -434,8 +434,8 @@ func insertReviewRoundNoticesTx(ctx context.Context, tx *writeTx, projectID, shi
 		if err != nil {
 			return err
 		}
-		regressionSummary := fmt.Sprintf("%s: Review Round %d reintroduced fixed finding(s) %s", shipTitle, result.Round, strings.Join(result.Regressed, ", "))
-		if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,'review_regression',?,?,?)`, projectID, shipTaskID, regressionSummary, string(regressionData), time.Now().UnixMilli()); err != nil {
+		regressionSummary := fmt.Sprintf("%s: Review Round %d reintroduced fixed finding(s) %s", changeTitle, result.Round, strings.Join(result.Regressed, ", "))
+		if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,'review_regression',?,?,?)`, projectID, changeTaskID, regressionSummary, string(regressionData), time.Now().UnixMilli()); err != nil {
 			return err
 		}
 	}

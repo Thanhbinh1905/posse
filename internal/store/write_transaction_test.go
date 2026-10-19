@@ -18,7 +18,7 @@ func TestDeadlineBoundedWritesRestoreBusyTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Bounded write", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Bounded write", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}

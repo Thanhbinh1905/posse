@@ -12,13 +12,13 @@ import (
 )
 
 func TestInvalidURLDecisionIsIndependentPerTask(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
 	url := "https://github.com/acme/shop/issues/17"
 	first := f.task
 	first.PRURL = url
-	if err := f.db.UpdateTaskLanding(ctx, first.ID, url, ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, first.ID, url, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := raiseInvalidPRDecision(ctx, f.db, f.project, first); err != nil {
@@ -31,11 +31,11 @@ func TestInvalidURLDecisionIsIndependentPerTask(t *testing.T) {
 	if _, err := f.db.AnswerDecision(ctx, f.project.ID, decisions[0].ID, "reopen-relaunch", "Use a PR URL"); err != nil {
 		t.Fatal(err)
 	}
-	secondID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 2, Type: "ship", Title: "second", State: store.StateSpawning, LandingMode: "pr", Branch: "posse/second", BaseRef: "main"})
+	secondID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 2, Type: "change", Title: "second", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/second", BaseRef: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.UpdateTaskLanding(ctx, secondID, url, ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, secondID, url, ""); err != nil {
 		t.Fatal(err)
 	}
 	second, err := f.db.TaskByID(ctx, f.project.ID, secondID)
@@ -63,11 +63,11 @@ func TestGuardBlocksLiteralNestedGitPush(t *testing.T) {
 	}
 }
 
-func TestConcurrentPollersClaimOnePRPollPerInterval(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+func TestConcurrentWatchsClaimOnePRPollPerInterval(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	script, err := os.ReadFile(filepath.Join(f.bin, "gh"))
@@ -104,6 +104,6 @@ func TestConcurrentPollersClaimOnePRPollPerInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := strings.Count(string(log), "api graphql"); got != 1 {
-		t.Fatalf("two pollers made %d GraphQL calls within default 2m interval", got)
+		t.Fatalf("two watches made %d GraphQL calls within default 2m interval", got)
 	}
 }

@@ -29,7 +29,7 @@ type acknowledgedNoticeFixture struct {
 
 func newAcknowledgedNoticeFixture(t *testing.T) *acknowledgedNoticeFixture {
 	t.Helper()
-	// Leave room for herdr-client.sock under the Rider's longer scratch path.
+	// Leave room for herdr-client.sock under the Worker's longer scratch path.
 	root := newFixtureRoot(t, fixturePrefix("notice-ack-"))
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
@@ -100,7 +100,7 @@ func (f *acknowledgedNoticeFixture) crashAfterAck(t *testing.T) noticeHandoffPay
 	batchPath := filepath.Join(f.root, "ack-batch.json")
 	script := `#!/bin/sh
 set -eu
-"$NOTICE_ACK_BIN" lookout --json --handoff --destination "$NOTICE_ACK_DESTINATION" > "$NOTICE_ACK_BATCH"
+"$NOTICE_ACK_BIN" watch --json --handoff --destination "$NOTICE_ACK_DESTINATION" > "$NOTICE_ACK_BATCH"
 "$NOTICE_ACK_BIN" ack "$NOTICE_ACK_ID" --json
 kill -KILL $$
 `
@@ -145,8 +145,8 @@ func TestAcknowledgedPrintedNoticeRecoversAfterCrashAndRebuild(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newAcknowledgedNoticeFixture(t)
 			first := f.crashAfterAck(t)
-			if poller, err := f.db.LookoutPoller(context.Background(), f.project.ID); err != nil || poller.PID != 0 {
-				t.Fatalf("Notice acknowledgement unexpectedly started a Project poller: %+v %v", poller, err)
+			if watch, err := f.db.WatchRuntime(context.Background(), f.project.ID); err != nil || watch.PID != 0 {
+				t.Fatalf("Notice acknowledgement unexpectedly started a Project watch: %+v %v", watch, err)
 			}
 			if rebuild {
 				if _, err := f.db.RebuildFromSnapshots(context.Background(), f.home); err != nil {
@@ -168,7 +168,7 @@ func TestAcknowledgedPrintedNoticeRecoversAfterCrashAndRebuild(t *testing.T) {
 			if _, err := f.db.ExecContext(context.Background(), `UPDATE notice_delivery_receipts SET lease_until=0 WHERE delivery_id=?`, first.Delivery.DeliveryID); err != nil {
 				t.Fatal(err)
 			}
-			code, output := f.cli(t, "lookout", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
+			code, output := f.cli(t, "watch", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
 			if code != 0 {
 				t.Fatalf("same-session receipt recovery after ack: %s", output)
 			}
@@ -179,7 +179,7 @@ func TestAcknowledgedPrintedNoticeRecoversAfterCrashAndRebuild(t *testing.T) {
 			if retry.Delivery.DeliveryID != first.Delivery.DeliveryID || retry.Delivery.BatchID != first.Delivery.BatchID || retry.Delivery.OwnerToken == first.Delivery.OwnerToken || len(retry.Notices) != 1 || retry.Notices[0].ID != f.noticeID {
 				t.Fatalf("recovery changed or merged the acknowledged batch: first=%+v retry=%+v", first, retry)
 			}
-			code, output = f.cli(t, "lookout", "--json", "--receipt", retry.Delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", retry.Delivery.OwnerToken)
+			code, output = f.cli(t, "watch", "--json", "--receipt", retry.Delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", retry.Delivery.OwnerToken)
 			if code != 0 {
 				t.Fatalf("accept recovered receipt: %s", output)
 			}
@@ -187,7 +187,7 @@ func TestAcknowledgedPrintedNoticeRecoversAfterCrashAndRebuild(t *testing.T) {
 			if err != nil || notices[0].DeliveredAt == 0 || notices[0].AckedAt == 0 {
 				t.Fatalf("receipt recovery lost handled acknowledgment: %+v err=%v", notices, err)
 			}
-			nextCode, nextOutput := f.cli(t, "lookout", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
+			nextCode, nextOutput := f.cli(t, "watch", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
 			if nextCode != 0 {
 				t.Fatalf("later Notice did not reach receiver: %s", nextOutput)
 			}
@@ -327,13 +327,13 @@ func TestOpenCodeQueuesNoticeBatchDuringBusyTurn(t *testing.T) {
 		SettlementAttempts []string `json:"settlementAttempts"`
 		WatchFailures      []int    `json:"watchFailures"`
 		RetiredChildren    bool     `json:"retiredChildren"`
-		ShutdownHadLookout bool     `json:"shutdownHadLookout"`
+		ShutdownHadWatch   bool     `json:"shutdownHadWatch"`
 		AllChildrenRetired bool     `json:"allChildrenRetired"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("decode busy-batch adapter output %q: %v", stdout.String(), err)
 	}
-	if result.PromptCalls != 3 || len(result.SettlementCodes) < 3 || len(result.SettlementAttempts) != 3 || len(result.WatchFailures) != 0 || !result.RetiredChildren || !result.ShutdownHadLookout || !result.AllChildrenRetired {
+	if result.PromptCalls != 3 || len(result.SettlementCodes) < 3 || len(result.SettlementAttempts) != 3 || len(result.WatchFailures) != 0 || !result.RetiredChildren || !result.ShutdownHadWatch || !result.AllChildrenRetired {
 		t.Fatalf("OpenCode busy-batch result = %+v stderr=%s", result, stderr.String())
 	}
 	for _, outcome := range result.SettlementAttempts {

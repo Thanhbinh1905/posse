@@ -18,7 +18,7 @@ import (
 func (s *Service) MigrationGate(path string, pending []int64, forced bool) error {
 	home := filepath.Dir(path)
 	if s.workerCaller(context.Background(), home) {
-		return &store.SchemaError{Code: "migration_refused", Message: fmt.Sprintf("a Rider cannot migrate the posse home %s (pending migrations %v)", home, pending),
+		return &store.SchemaError{Code: "migration_refused", Message: fmt.Sprintf("a Worker cannot migrate the posse home %s (pending migrations %v)", home, pending),
 			Help: "Retry after the Lead or the User runs any posse command, which migrates the database"}
 	}
 	if forced {

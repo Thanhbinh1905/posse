@@ -21,7 +21,7 @@ type Manager struct {
 func NewManager(db *store.DB) *Manager { return &Manager{DB: db} }
 
 func (m *Manager) AcquirePath(ctx context.Context, path string, request store.ResourceLeaseRequest) (store.ResourceLease, error) {
-	if err := m.EnsureMountLeases(ctx); err != nil {
+	if err := m.EnsureSandboxLeases(ctx); err != nil {
 		return store.ResourceLease{}, err
 	}
 	canonical, err := CanonicalPath(path)
@@ -34,7 +34,7 @@ func (m *Manager) AcquirePath(ctx context.Context, path string, request store.Re
 	return m.DB.AcquireResourceLease(ctx, request)
 }
 
-func (m *Manager) EnsureMountPath(ctx context.Context, path string, request store.ResourceLeaseRequest) (store.ResourceLease, error) {
+func (m *Manager) EnsureSandboxPath(ctx context.Context, path string, request store.ResourceLeaseRequest) (store.ResourceLease, error) {
 	canonical, err := CanonicalPath(path)
 	if err != nil {
 		return store.ResourceLease{}, err
@@ -42,7 +42,7 @@ func (m *Manager) EnsureMountPath(ctx context.Context, path string, request stor
 	request.ResourceType = store.ResourcePath
 	request.ScopeRoot = ""
 	request.ScopePath = canonical
-	return m.DB.EnsureMountResourceLease(ctx, request)
+	return m.DB.EnsureSandboxResourceLease(ctx, request)
 }
 
 func (m *Manager) AcquireGitRef(ctx context.Context, repository, ref string, request store.ResourceLeaseRequest) (store.ResourceLease, error) {
@@ -59,39 +59,39 @@ func (m *Manager) AcquireGitRef(ctx context.Context, repository, ref string, req
 	return m.DB.AcquireResourceLease(ctx, request)
 }
 
-func (m *Manager) EnsureMountLeases(ctx context.Context) error {
-	mounts, err := m.DB.MountResourceOwners(ctx)
+func (m *Manager) EnsureSandboxLeases(ctx context.Context) error {
+	sandboxes, err := m.DB.SandboxResourceOwners(ctx)
 	if err != nil {
 		return err
 	}
-	active := make(map[int64]bool, len(mounts))
-	for _, mount := range mounts {
-		active[mount.ID] = true
-		owner := fmt.Sprintf("%s mount-%d", mount.ProjectName, mount.Number)
-		if mount.TaskSeq > 0 {
-			owner += fmt.Sprintf(" (t%d)", mount.TaskSeq)
+	active := make(map[int64]bool, len(sandboxes))
+	for _, sandbox := range sandboxes {
+		active[sandbox.ID] = true
+		owner := fmt.Sprintf("%s sandbox-%d", sandbox.ProjectName, sandbox.Number)
+		if sandbox.TaskSeq > 0 {
+			owner += fmt.Sprintf(" (t%d)", sandbox.TaskSeq)
 		}
-		if mount.State == "broken" {
+		if sandbox.State == "broken" {
 			owner += " (quarantined)"
 		}
-		_, err := m.EnsureMountPath(ctx, mount.Path, store.ResourceLeaseRequest{
-			OwnerProjectID: mount.ProjectID,
-			OwnerTaskID:    mount.TaskID,
+		_, err := m.EnsureSandboxPath(ctx, sandbox.Path, store.ResourceLeaseRequest{
+			OwnerProjectID: sandbox.ProjectID,
+			OwnerTaskID:    sandbox.TaskID,
 			Owner:          owner,
-			SourceKey:      fmt.Sprintf("mount:%d", mount.ID),
-			MountID:        mount.ID,
+			SourceKey:      fmt.Sprintf("sandbox:%d", sandbox.ID),
+			SandboxID:      sandbox.ID,
 		})
 		if err != nil {
 			return err
 		}
 	}
-	leases, err := m.DB.ResourceMountLeases(ctx)
+	leases, err := m.DB.ResourceSandboxLeases(ctx)
 	if err != nil {
 		return err
 	}
 	for _, lease := range leases {
-		if !active[lease.MountID] {
-			if err := m.DB.ReleaseMountResourceLease(ctx, lease.MountID); err != nil {
+		if !active[lease.SandboxID] {
+			if err := m.DB.ReleaseSandboxResourceLease(ctx, lease.SandboxID); err != nil {
 				return err
 			}
 		}

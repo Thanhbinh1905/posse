@@ -74,6 +74,6 @@ func taskOwnedProcessDetails(pids []int) []taskProcessDetail {
 	return result
 }
 
-func mountTaskProcessDetails(string) ([]taskProcessDetail, error) {
-	return nil, fmt.Errorf("Mount process diagnostics are unavailable on this platform")
+func sandboxTaskProcessDetails(string) ([]taskProcessDetail, error) {
+	return nil, fmt.Errorf("Sandbox process diagnostics are unavailable on this platform")
 }

@@ -47,7 +47,7 @@ type ResourceLease struct {
 	SourceKey      string
 	CustodyToken   string
 	IntentID       int64
-	MountID        int64
+	SandboxID      int64
 	OwnerPID       int
 	OwnerBootID    string
 	OwnerStartTime string
@@ -71,7 +71,7 @@ type ResourceLeaseRequest struct {
 	Owner          string
 	SourceKey      string
 	IntentID       int64
-	MountID        int64
+	SandboxID      int64
 }
 
 func (db *DB) AcquireResourceLease(ctx context.Context, request ResourceLeaseRequest) (ResourceLease, error) {
@@ -85,16 +85,16 @@ func (db *DB) AcquireResourceLease(ctx context.Context, request ResourceLeaseReq
 	return db.claimResourceLease(ctx, request, token, false)
 }
 
-// EnsureMountResourceLease migrates and refreshes legacy Mount ownership into
+// EnsureSandboxResourceLease migrates and refreshes legacy Sandbox ownership into
 // the shared lease table. Its stable source key makes reconciliation idempotent.
-func (db *DB) EnsureMountResourceLease(ctx context.Context, request ResourceLeaseRequest) (ResourceLease, error) {
-	if request.MountID == 0 {
-		return ResourceLease{}, fmt.Errorf("Mount resource lease requires a Mount id")
+func (db *DB) EnsureSandboxResourceLease(ctx context.Context, request ResourceLeaseRequest) (ResourceLease, error) {
+	if request.SandboxID == 0 {
+		return ResourceLease{}, fmt.Errorf("sandbox resource lease requires a Sandbox id")
 	}
 	if err := validateResourceLeaseRequest(request); err != nil {
 		return ResourceLease{}, err
 	}
-	token := fmt.Sprintf("mount:%d", request.MountID)
+	token := fmt.Sprintf("sandbox:%d", request.SandboxID)
 	return db.claimResourceLease(ctx, request, token, true)
 }
 
@@ -120,7 +120,7 @@ func (db *DB) claimResourceLease(ctx context.Context, request ResourceLeaseReque
 	}
 	if existing, lookupErr := queries.ResourceLeaseBySource(ctx, request.SourceKey); lookupErr == nil {
 		lease := resourceLeaseFromSource(existing)
-		if !ensure || lease.ResourceType != request.ResourceType || lease.ScopeRoot != request.ScopeRoot || lease.ScopePath != request.ScopePath || lease.OwnerProjectID != request.OwnerProjectID || lease.MountID != request.MountID {
+		if !ensure || lease.ResourceType != request.ResourceType || lease.ScopeRoot != request.ScopeRoot || lease.ScopePath != request.ScopePath || lease.OwnerProjectID != request.OwnerProjectID || lease.SandboxID != request.SandboxID {
 			return ResourceLease{}, &ResourceLeaseConflict{Lease: lease}
 		}
 		if err := tx.Commit(); err != nil {
@@ -145,7 +145,7 @@ func (db *DB) claimResourceLease(ctx context.Context, request ResourceLeaseReque
 		ResourceType: request.ResourceType, ScopeRoot: request.ScopeRoot, ScopePath: request.ScopePath,
 		OwnerProjectID: request.OwnerProjectID, NULLIF: request.OwnerTaskID, Owner: request.Owner,
 		SourceKey: request.SourceKey, CustodyToken: token, IntentID: request.IntentID,
-		NULLIF_2: request.MountID, OwnerPid: int64(pid), OwnerBootID: bootID,
+		NULLIF_2: request.SandboxID, OwnerPid: int64(pid), OwnerBootID: bootID,
 		OwnerStartTime: startTime, Custody: ResourceCustodyHeld, AcquiredAt: now,
 	})
 	if err != nil {
@@ -161,7 +161,7 @@ func (db *DB) claimResourceLease(ctx context.Context, request ResourceLeaseReque
 	lease := ResourceLease{
 		ID: id, ResourceType: request.ResourceType, ScopeRoot: request.ScopeRoot, ScopePath: request.ScopePath,
 		OwnerProjectID: request.OwnerProjectID, OwnerTaskID: request.OwnerTaskID, Owner: request.Owner,
-		SourceKey: request.SourceKey, CustodyToken: token, IntentID: request.IntentID, MountID: request.MountID,
+		SourceKey: request.SourceKey, CustodyToken: token, IntentID: request.IntentID, SandboxID: request.SandboxID,
 		OwnerPID: pid, OwnerBootID: bootID, OwnerStartTime: startTime, Custody: ResourceCustodyHeld, AcquiredAt: now,
 	}
 	if err := db.PersistProject(ctx, request.OwnerProjectID); err != nil {
@@ -186,7 +186,7 @@ func validateResourceLeaseRequest(request ResourceLeaseRequest) error {
 	if request.ResourceType == ResourceGitRef && (filepath.Clean(request.ScopeRoot) != request.ScopeRoot || strings.HasPrefix(request.ScopePath, "/") || strings.Contains(request.ScopePath, "\\")) {
 		return fmt.Errorf("git ref resource scope must use a canonical common directory and relative ref")
 	}
-	if request.OwnerTaskID < 0 || request.IntentID < 0 || request.MountID < 0 {
+	if request.OwnerTaskID < 0 || request.IntentID < 0 || request.SandboxID < 0 {
 		return fmt.Errorf("resource owner identifiers cannot be negative")
 	}
 	return nil
@@ -364,7 +364,7 @@ func (db *DB) AllResourceLeases(ctx context.Context) ([]ResourceLease, error) {
 	for _, row := range rows {
 		leases = append(leases, ResourceLease{ID: row.ID, ResourceType: row.ResourceType, ScopeRoot: row.ScopeRoot, ScopePath: row.ScopePath,
 			OwnerProjectID: row.OwnerProjectID, OwnerTaskID: row.OwnerTaskID, Owner: row.Owner, SourceKey: row.SourceKey,
-			CustodyToken: row.CustodyToken, IntentID: row.IntentID, MountID: row.MountID, OwnerPID: int(row.OwnerPid),
+			CustodyToken: row.CustodyToken, IntentID: row.IntentID, SandboxID: row.SandboxID, OwnerPID: int(row.OwnerPid),
 			OwnerBootID: row.OwnerBootID, OwnerStartTime: row.OwnerStartTime, Custody: row.Custody, AcquiredAt: row.AcquiredAt})
 	}
 	return leases, nil
@@ -374,7 +374,7 @@ func (db *DB) resourceLeaseByID(ctx context.Context, id int64) (ResourceLease, e
 	var lease ResourceLease
 	err := db.QueryRowContext(ctx, `SELECT id,resource_type,scope_root,scope_path,owner_project_id,COALESCE(owner_task_id,0),owner,source_key,custody_token,intent_id,COALESCE(mount_id,0),owner_pid,owner_boot_id,owner_start_time,custody,acquired_at FROM resource_leases WHERE id=?`, id).Scan(
 		&lease.ID, &lease.ResourceType, &lease.ScopeRoot, &lease.ScopePath, &lease.OwnerProjectID, &lease.OwnerTaskID,
-		&lease.Owner, &lease.SourceKey, &lease.CustodyToken, &lease.IntentID, &lease.MountID, &lease.OwnerPID,
+		&lease.Owner, &lease.SourceKey, &lease.CustodyToken, &lease.IntentID, &lease.SandboxID, &lease.OwnerPID,
 		&lease.OwnerBootID, &lease.OwnerStartTime, &lease.Custody, &lease.AcquiredAt,
 	)
 	return lease, err
@@ -383,28 +383,28 @@ func (db *DB) resourceLeaseByID(ctx context.Context, id int64) (ResourceLease, e
 func resourceLeaseFromSource(row dbgen.ResourceLeaseBySourceRow) ResourceLease {
 	return ResourceLease{ID: row.ID, ResourceType: row.ResourceType, ScopeRoot: row.ScopeRoot, ScopePath: row.ScopePath,
 		OwnerProjectID: row.OwnerProjectID, OwnerTaskID: row.OwnerTaskID, Owner: row.Owner, SourceKey: row.SourceKey,
-		CustodyToken: row.CustodyToken, IntentID: row.IntentID, MountID: row.MountID, OwnerPID: int(row.OwnerPid),
+		CustodyToken: row.CustodyToken, IntentID: row.IntentID, SandboxID: row.SandboxID, OwnerPID: int(row.OwnerPid),
 		OwnerBootID: row.OwnerBootID, OwnerStartTime: row.OwnerStartTime, Custody: row.Custody, AcquiredAt: row.AcquiredAt}
 }
 
 func resourceLeaseFromScope(row dbgen.ResourceLeasesByScopeRow) ResourceLease {
 	return ResourceLease{ID: row.ID, ResourceType: row.ResourceType, ScopeRoot: row.ScopeRoot, ScopePath: row.ScopePath,
 		OwnerProjectID: row.OwnerProjectID, OwnerTaskID: row.OwnerTaskID, Owner: row.Owner, SourceKey: row.SourceKey,
-		CustodyToken: row.CustodyToken, IntentID: row.IntentID, MountID: row.MountID, OwnerPID: int(row.OwnerPid),
+		CustodyToken: row.CustodyToken, IntentID: row.IntentID, SandboxID: row.SandboxID, OwnerPID: int(row.OwnerPid),
 		OwnerBootID: row.OwnerBootID, OwnerStartTime: row.OwnerStartTime, Custody: row.Custody, AcquiredAt: row.AcquiredAt}
 }
 
 func resourceLeaseFromProject(row dbgen.ResourceLeasesByProjectRow) ResourceLease {
 	return ResourceLease{ID: row.ID, ResourceType: row.ResourceType, ScopeRoot: row.ScopeRoot, ScopePath: row.ScopePath,
 		OwnerProjectID: row.OwnerProjectID, OwnerTaskID: row.OwnerTaskID, Owner: row.Owner, SourceKey: row.SourceKey,
-		CustodyToken: row.CustodyToken, IntentID: row.IntentID, MountID: row.MountID, OwnerPID: int(row.OwnerPid),
+		CustodyToken: row.CustodyToken, IntentID: row.IntentID, SandboxID: row.SandboxID, OwnerPID: int(row.OwnerPid),
 		OwnerBootID: row.OwnerBootID, OwnerStartTime: row.OwnerStartTime, Custody: row.Custody, AcquiredAt: row.AcquiredAt}
 }
 
 func resourceLeaseFromIntent(row dbgen.ResourceLeasesByIntentRow) ResourceLease {
 	return ResourceLease{ID: row.ID, ResourceType: row.ResourceType, ScopeRoot: row.ScopeRoot, ScopePath: row.ScopePath,
 		OwnerProjectID: row.OwnerProjectID, OwnerTaskID: row.OwnerTaskID, Owner: row.Owner, SourceKey: row.SourceKey,
-		CustodyToken: row.CustodyToken, IntentID: row.IntentID, MountID: row.MountID, OwnerPID: int(row.OwnerPid),
+		CustodyToken: row.CustodyToken, IntentID: row.IntentID, SandboxID: row.SandboxID, OwnerPID: int(row.OwnerPid),
 		OwnerBootID: row.OwnerBootID, OwnerStartTime: row.OwnerStartTime, Custody: row.Custody, AcquiredAt: row.AcquiredAt}
 }
 

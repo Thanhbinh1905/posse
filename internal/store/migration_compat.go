@@ -372,7 +372,7 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 }
 
 // normalizeLegacyTaskContainmentMigration moves the Task containment migration
-// from version 53 to 54 because main now uses version 53 for Lookout pollers.
+// from version 53 to 54 because main now uses version 53 for Watch runtimes.
 func (db *DB) normalizeLegacyTaskContainmentMigration(ctx context.Context) error {
 	var hasGoose int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='goose_db_version')`).Scan(&hasGoose); err != nil {
@@ -381,7 +381,7 @@ func (db *DB) normalizeLegacyTaskContainmentMigration(ctx context.Context) error
 	if hasGoose == 0 {
 		return nil
 	}
-	var applied, hasMode, hasPath, hasMarker, hasLookoutTable int
+	var applied, hasMode, hasPath, hasMarker, hasWatchTable int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, legacyTaskContainmentMigrationVersion).Scan(&applied); err != nil {
 		return err
 	}
@@ -392,13 +392,13 @@ func (db *DB) normalizeLegacyTaskContainmentMigration(ctx context.Context) error
 		{`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='containment_mode')`, &hasMode},
 		{`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='containment_path')`, &hasPath},
 		{`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='containment_marker')`, &hasMarker},
-		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lookout_pollers')`, &hasLookoutTable},
+		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lookout_pollers')`, &hasWatchTable},
 	} {
 		if err := db.QueryRowContext(ctx, check.query).Scan(check.value); err != nil {
 			return err
 		}
 	}
-	if applied == 0 || hasMode == 0 || hasPath == 0 || hasMarker == 0 || hasLookoutTable != 0 {
+	if applied == 0 || hasMode == 0 || hasPath == 0 || hasMarker == 0 || hasWatchTable != 0 {
 		return nil
 	}
 	var hasChecksums int

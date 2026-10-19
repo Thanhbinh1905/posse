@@ -105,7 +105,7 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
 	// Installed-binary fixtures need a path outside /tmp, but must still
-	// honor a Rider's non-/tmp scratch directory when one is supplied.
+	// honor a Worker's non-/tmp scratch directory when one is supplied.
 	if temporary := os.TempDir(); parent == "/var/tmp" && temporary != "/tmp" && !strings.HasPrefix(temporary, "/tmp/") {
 		parent = temporary
 	}
@@ -166,7 +166,7 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		// server stops. Wait for fixture processes to exit before removing
 		// their database, or a late backup write can race RemoveAll.
 		if runtime.GOOS == "linux" {
-			stopFixtureLookoutPollers(root)
+			stopFixtureWatchRuntimes(root)
 			servers, err := fixtureHerdrServerProcesses(root)
 			if err != nil {
 				t.Errorf("inspect isolated Herdr servers for %s: %v", root, err)

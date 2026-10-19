@@ -53,20 +53,20 @@ func (db *DB) ReserveCIRerunRequests(ctx context.Context, projectID, taskID int6
 		return false, err
 	}
 	defer tx.Rollback()
-	var state, taskType, landingMode, gatedSHA, currentPR string
+	var state, taskType, mergeMode, gatedSHA, currentPR string
 	query := `SELECT state,type,landing_mode,gated_sha,pr_url FROM tasks WHERE id=? AND project_id=?`
 	args := []any{taskID, projectID}
 	if member != "" {
 		query = `SELECT t.state,t.type,r.landing_mode,r.gated_sha,r.pr_url FROM tasks t JOIN task_repos r ON r.task_id=t.id WHERE t.id=? AND t.project_id=? AND r.repo=?`
 		args = append(args, member)
 	}
-	if err := tx.QueryRowContext(ctx, query, args...).Scan(&state, &taskType, &landingMode, &gatedSHA, &currentPR); err != nil {
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&state, &taskType, &mergeMode, &gatedSHA, &currentPR); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
 	}
-	if taskType != "ship" || landingMode != "pr" || currentPR != prURL || gatedSHA != headSHA || (state != string(StateDone) && state != string(StateLanding)) {
+	if taskType != "change" || mergeMode != "pr" || currentPR != prURL || gatedSHA != headSHA || (state != string(StateDone) && state != string(StateMerging)) {
 		return false, nil
 	}
 
@@ -126,7 +126,7 @@ func (db *DB) ReserveCIRerunRequests(ctx context.Context, projectID, taskID int6
 }
 
 // QueueCIFixInstruction records a CI fix round if the gated PR head and frozen
-// per-Task budget still match, and queues or extends its Rider message atomically.
+// per-Task budget still match, and queues or extends its Worker message atomically.
 func (db *DB) QueueCIFixInstruction(ctx context.Context, taskID int64, expectedBaseHead, prURL, dedupeKey, body, member string, maxFixRounds int) (QueueValidationFixResult, error) {
 	if taskID < 1 || !validCommitSHA(expectedBaseHead) || strings.TrimSpace(prURL) == "" || strings.TrimSpace(dedupeKey) == "" || strings.TrimSpace(body) == "" || maxFixRounds < 0 {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid CI fix instruction or budget")
@@ -137,19 +137,19 @@ func (db *DB) QueueCIFixInstruction(ctx context.Context, taskID int64, expectedB
 	}
 	defer tx.Rollback()
 
-	var state, taskType, landingMode, gatedSHA, currentPR string
-	if err := tx.QueryRowContext(ctx, `SELECT state,type,landing_mode,gated_sha,pr_url FROM tasks WHERE id=?`, taskID).Scan(&state, &taskType, &landingMode, &gatedSHA, &currentPR); err != nil {
+	var state, taskType, mergeMode, gatedSHA, currentPR string
+	if err := tx.QueryRowContext(ctx, `SELECT state,type,landing_mode,gated_sha,pr_url FROM tasks WHERE id=?`, taskID).Scan(&state, &taskType, &mergeMode, &gatedSHA, &currentPR); err != nil {
 		return QueueValidationFixResult{}, err
 	}
-	if taskType != "ship" || !taskAcceptsInstruction(State(state), taskType) {
+	if taskType != "change" || !taskAcceptsInstruction(State(state), taskType) {
 		return QueueValidationFixResult{}, ErrStateRace
 	}
 	if member != "" {
-		if err := tx.QueryRowContext(ctx, `SELECT landing_mode,gated_sha,pr_url FROM task_repos WHERE task_id=? AND repo=?`, taskID, member).Scan(&landingMode, &gatedSHA, &currentPR); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT landing_mode,gated_sha,pr_url FROM task_repos WHERE task_id=? AND repo=?`, taskID, member).Scan(&mergeMode, &gatedSHA, &currentPR); err != nil {
 			return QueueValidationFixResult{}, ErrStaleValidationHead
 		}
 	}
-	if landingMode != "pr" || currentPR != prURL || gatedSHA != expectedBaseHead {
+	if mergeMode != "pr" || currentPR != prURL || gatedSHA != expectedBaseHead {
 		return QueueValidationFixResult{}, ErrStaleValidationHead
 	}
 
@@ -254,10 +254,10 @@ func (db *DB) CreateValidationNoticeOnce(ctx context.Context, notice Notice, prU
 	if createdAt == 0 {
 		createdAt = time.Now().UnixMilli()
 	}
-	gateCheck := `EXISTS (SELECT 1 FROM tasks t WHERE t.id=? AND t.project_id=? AND t.type='ship' AND t.landing_mode='pr' AND t.pr_url=? AND t.gated_sha=? AND t.state IN ('done','landing'))`
+	gateCheck := `EXISTS (SELECT 1 FROM tasks t WHERE t.id=? AND t.project_id=? AND t.type='change' AND t.landing_mode='pr' AND t.pr_url=? AND t.gated_sha=? AND t.state IN ('done','merging'))`
 	gateArgs := []any{notice.TaskID, notice.ProjectID, prURL, headSHA}
 	if memberName != "" {
-		gateCheck = `EXISTS (SELECT 1 FROM tasks t JOIN task_repos r ON r.task_id=t.id WHERE t.id=? AND t.project_id=? AND t.type='ship' AND t.state IN ('done','landing') AND r.repo=? AND r.landing_mode='pr' AND r.pr_url=? AND r.gated_sha=?)`
+		gateCheck = `EXISTS (SELECT 1 FROM tasks t JOIN task_repos r ON r.task_id=t.id WHERE t.id=? AND t.project_id=? AND t.type='change' AND t.state IN ('done','merging') AND r.repo=? AND r.landing_mode='pr' AND r.pr_url=? AND r.gated_sha=?)`
 		gateArgs = []any{notice.TaskID, notice.ProjectID, memberName, prURL, headSHA}
 	}
 	query := `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) SELECT ?,?,?,?,?,? WHERE ` + gateCheck + ` AND NOT EXISTS (SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=? AND json_valid(data_json) AND json_extract(data_json,'$.head_sha')=? AND json_extract(data_json,'$.check_set')=?)`

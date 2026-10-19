@@ -276,7 +276,7 @@ func TestLeadComposerRetainsWorkspaceAndAnsweredDecisionGuidance(t *testing.T) {
 		"Read shared workspace-root files such as CLAUDE.md and docs/",
 		"posse project scan` after the User adds or removes a repository",
 		"posse apply <decision>` to relaunch or discard",
-		"posse ride --from-leftover <decision>",
+		"posse start --from-orphan <decision>",
 		"Never perform these actions before the User answers",
 	} {
 		if !strings.Contains(composed.Text, rule) {
@@ -409,7 +409,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 
 	claude := launch("claude")
 	plugin := filepath.Join(home, "projects", "shop", "lead-claude-lowkey")
-	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lookout")}) || claude.TypedPrompt != "" ||
+	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-watch")}) || claude.TypedPrompt != "" ||
 		claude.Env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] != "1" || claude.Env["POSSE_LOWKEY_CONFIG"] != config.ConfigPath(home, "shop") ||
 		claude.Env["POSSE_LOWKEY_GLOBAL_CONFIG"] != config.ConfigPath(home, "") || claude.Env["POSSE_LOWKEY_NOTICES_DIR"] != claudeNoticeDirectory(home, "shop") {
 		t.Fatalf("claude launch = %#v", claude)
@@ -443,8 +443,8 @@ func TestLeadLaunchByKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	quoted, _ := json.Marshal(executable)
-	if !strings.Contains(string(contents), "const posse = "+string(quoted)+";") || !strings.Contains(string(contents), `["lookout", "--json", "--quiet-routine", "--handoff"`) || !strings.Contains(string(contents), "wake = result.wake") || !strings.Contains(string(contents), `customType: "posse-notices"`) || !strings.Contains(string(contents), `origin: "posse"`) || !strings.Contains(string(contents), `triggerTurn: true`) || !strings.Contains(string(contents), `sessionHasReceipt(delivery)`) || !strings.Contains(string(contents), `pi.registerCommand("lowkey"`) || !strings.Contains(string(contents), `AssistantMessageComponent.prototype.updateContent`) || !strings.Contains(string(contents), `ui?.setHiddenThinkingLabel(active ? "" : undefined)`) {
-		t.Fatalf("pi extension does not run this posse binary's lookout:\n%s", contents)
+	if !strings.Contains(string(contents), "const posse = "+string(quoted)+";") || !strings.Contains(string(contents), `["watch", "--json", "--quiet-routine", "--handoff"`) || !strings.Contains(string(contents), "wake = result.wake") || !strings.Contains(string(contents), `customType: "posse-notices"`) || !strings.Contains(string(contents), `origin: "posse"`) || !strings.Contains(string(contents), `triggerTurn: true`) || !strings.Contains(string(contents), `sessionHasReceipt(delivery)`) || !strings.Contains(string(contents), `pi.registerCommand("lowkey"`) || !strings.Contains(string(contents), `AssistantMessageComponent.prototype.updateContent`) || !strings.Contains(string(contents), `ui?.setHiddenThinkingLabel(active ? "" : undefined)`) {
+		t.Fatalf("pi extension does not run this posse binary's watch:\n%s", contents)
 	}
 	for _, frame := range []string{"░░▒▓", "░▒▓█", "▒▓█▓", "▓█▓▒", "█▓▒░", "▓▒░░"} {
 		if !strings.Contains(string(contents), frame) {
@@ -632,7 +632,7 @@ func TestOpenCodeLeadLaunchAndPluginConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	quoted, _ := json.Marshal(executable)
-	for _, part := range []string{"const posse = " + string(quoted), "experimental.chat.system.transform", "output.system.push(instructions)", `"lookout", "--json", "--quiet-routine", "--handoff"`, "client.session.prompt(", "client.session.messages(", "Posse batch receipt:", "priorSession", "--receipt-outcome", "event.type === \"session.idle\""} {
+	for _, part := range []string{"const posse = " + string(quoted), "experimental.chat.system.transform", "output.system.push(instructions)", `"watch", "--json", "--quiet-routine", "--handoff"`, "client.session.prompt(", "client.session.messages(", "Posse batch receipt:", "priorSession", "--receipt-outcome", "event.type === \"session.idle\""} {
 		if !strings.Contains(string(contents), part) {
 			t.Fatalf("OpenCode plugin missing %q", part)
 		}
@@ -806,7 +806,7 @@ func TestWaitLeadStartedAcceptsABusyStart(t *testing.T) {
 func TestIdentityTextLabelsSetFieldsOnly(t *testing.T) {
 	for identity, want := range map[config.IdentityRole]string{
 		{Name: "Lead", Language: "en"}: "name: Lead; language: en",
-		{Name: "Sheriff", Persona: "Direct, brief.", Language: "vi", AddressUser: "anh"}: "name: Sheriff; persona: Direct, brief.; language: vi; address_user: anh",
+		{Name: "Lead", Persona: "Direct, brief.", Language: "vi", AddressUser: "anh"}: "name: Lead; persona: Direct, brief.; language: vi; address_user: anh",
 		{}: "none",
 	} {
 		if got := identityText(identity); got != want {
@@ -817,7 +817,7 @@ func TestIdentityTextLabelsSetFieldsOnly(t *testing.T) {
 
 func TestNoticeRulesForbidPollingForEveryDelivery(t *testing.T) {
 	for delivery, wake := range map[string]string{
-		config.NoticeDeliveryLookout:        "End your turn and let the Stop hook wake you.",
+		config.NoticeDeliveryWatch:          "End your turn and let the Stop hook wake you.",
 		config.NoticeDeliveryCodexQueue:     "End your turn and let that message wake you.",
 		config.NoticeDeliveryPiExtension:    "End your turn and let that message wake you.",
 		config.NoticeDeliveryOpenCodePlugin: "End your turn and let that message wake you.",
@@ -827,8 +827,8 @@ func TestNoticeRulesForbidPollingForEveryDelivery(t *testing.T) {
 		if !strings.Contains(rule, noPollRule) || !strings.Contains(rule, wake) {
 			t.Errorf("%s Notice rule = %q", delivery, rule)
 		}
-		if delivery == config.NoticeDeliveryLookout && !strings.Contains(rule, "A stopped hook does not restart itself; the next normal Stop owns the next wait.") {
-			t.Errorf("Claude Lead lookout restart rule = %q", rule)
+		if delivery == config.NoticeDeliveryWatch && !strings.Contains(rule, "A stopped hook does not restart itself; the next normal Stop owns the next wait.") {
+			t.Errorf("Claude Lead watch restart rule = %q", rule)
 		}
 	}
 }
@@ -837,7 +837,7 @@ func TestWorkerWaitRulesByKind(t *testing.T) {
 	background := workerWaitRules(config.Kind{BackgroundCommands: true})
 	foreground := workerWaitRules(config.Kind{})
 	const backgroundRule = "Run long commands (full test suites, e2e, builds) as background commands and never poll them"
-	const ciRule = "Do not wait for PR CI after `posse holler done`; posse watches the PR and the Lead sends fix instructions."
+	const ciRule = "Do not wait for PR CI after `posse signal done`; posse watches the PR and the Lead sends fix instructions."
 	if !strings.Contains(background, backgroundRule) || !strings.Contains(background, ciRule) {
 		t.Fatalf("background Worker rules = %q", background)
 	}

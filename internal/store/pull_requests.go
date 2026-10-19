@@ -38,7 +38,7 @@ type PRObservationEffect struct {
 	Notices        []Notice
 	TransitionTo   State
 	TransitionNote string
-	LandedRef      string
+	MergedRef      string
 }
 
 func (db *DB) ProjectWatchState(ctx context.Context, projectID int64) (ProjectWatchState, error) {
@@ -52,7 +52,7 @@ func (db *DB) ProjectWatchState(ctx context.Context, projectID int64) (ProjectWa
 }
 
 // ClaimPRPoll reserves a Project poll before any forge call. SQLite serializes
-// the conditional update across the Lead and Lookout processes. The token
+// the conditional update across the Lead and Watch processes. The token
 // prevents an old owner releasing a successor's lease after expiry.
 func (db *DB) ClaimPRPoll(ctx context.Context, projectID int64, now time.Time, interval time.Duration, force bool) (string, error) {
 	stamp := now.UnixMilli()
@@ -127,7 +127,7 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 			}
 			return 0, err
 		}
-		if currentPRURL != prURL || state == StateLanded || state == StateTornDown || state == StateReported {
+		if currentPRURL != prURL || state == StateMerged || state == StateTornDown || state == StateReported {
 			return 0, nil
 		}
 	} else {
@@ -139,7 +139,7 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 			}
 			return 0, err
 		}
-		if currentPRURL != prURL || repoState == TaskRepoLanded || taskState == StateLanded || taskState == StateTornDown || taskState == StateReported {
+		if currentPRURL != prURL || repoState == TaskRepoMerged || taskState == StateMerged || taskState == StateTornDown || taskState == StateReported {
 			return 0, nil
 		}
 	}
@@ -491,7 +491,7 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 		return false, err
 	}
 	// Reject a poll whose Task changed while the forge request was in flight.
-	// An old PR must never Land a Task now following a different PR or head.
+	// An old PR must never Merge a Task now following a different PR or head.
 	var current Task
 	if err := tx.QueryRowContext(ctx, `SELECT state, pr_url, gated_sha FROM tasks WHERE id=? AND project_id=?`, observation.TaskID, observation.ProjectID).Scan(&current.State, &current.PRURL, &current.GatedSHA); err != nil {
 		return false, err
@@ -508,14 +508,14 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 			return false, err
 		}
 	}
-	allowChangedEffects := !unchanged || effect.TransitionTo == StateLanded && transitions[current.State][StateLanded]
+	allowChangedEffects := !unchanged || effect.TransitionTo == StateMerged && transitions[current.State][StateMerged]
 	for _, notice := range effect.Notices {
-		if !allowChangedEffects && notice.Kind != "land_ready" {
+		if !allowChangedEffects && notice.Kind != "merge_ready" {
 			continue
 		}
-		if notice.Kind == "land_ready" {
+		if notice.Kind == "merge_ready" {
 			var exists bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='land_ready' AND json_extract(data_json,'$.url')=? AND json_extract(data_json,'$.head_sha')=?)`, notice.ProjectID, notice.TaskID, observation.PRURL, observation.HeadSHA).Scan(&exists); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='merge_ready' AND json_extract(data_json,'$.url')=? AND json_extract(data_json,'$.head_sha')=?)`, notice.ProjectID, notice.TaskID, observation.PRURL, observation.HeadSHA).Scan(&exists); err != nil {
 				return false, err
 			}
 			if exists {
@@ -529,9 +529,9 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	transitioned := false
 	if effect.TransitionTo != "" {
 		state := current.State
-		if transitions[state][effect.TransitionTo] && (effect.TransitionTo == StateLanded || state == StateLanding) {
-			if effect.LandedRef != "" {
-				if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, effect.LandedRef, time.Now().UnixMilli(), observation.TaskID); err != nil {
+		if transitions[state][effect.TransitionTo] && (effect.TransitionTo == StateMerged || state == StateMerging) {
+			if effect.MergedRef != "" {
+				if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, effect.MergedRef, time.Now().UnixMilli(), observation.TaskID); err != nil {
 					return false, err
 				}
 			}

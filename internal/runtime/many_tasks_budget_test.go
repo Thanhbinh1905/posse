@@ -20,7 +20,7 @@ func TestReviewRunBudgetWithManyContendedTasks(t *testing.T) {
 	for seq := 2; seq <= 16; seq++ {
 		paneID := fmt.Sprintf("w1:p%d", seq)
 		label := fmt.Sprintf("posse:shop:t%d", seq)
-		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "ship", Title: fmt.Sprintf("Task %d", seq), LandingMode: "local", WorktreePath: filepath.Join(t.TempDir(), fmt.Sprintf("task-%d", seq)), PaneID: paneID, PaneLabel: label, HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyLand: "ask"})
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "change", Title: fmt.Sprintf("Task %d", seq), MergeMode: "local", WorktreePath: filepath.Join(t.TempDir(), fmt.Sprintf("task-%d", seq)), PaneID: paneID, PaneLabel: label, HerdrWorkspaceID: "w1", AutonomyReview: "ask", AutonomyMerge: "ask"})
 		if err != nil {
 			t.Fatal(err)
 		}

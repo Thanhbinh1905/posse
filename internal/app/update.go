@@ -129,7 +129,7 @@ func newerVersion(current, latest string) bool {
 	return x > a || x == a && (y > b || y == b && z > c)
 }
 func (s *Service) update(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("update", args, map[string]flagSpec{"check": {boolean: true}, "version": {}, "force": {boolean: true}, "stop-lookouts": {boolean: true}})
+	parsed, err := parseArgs("update", args, map[string]flagSpec{"check": {boolean: true}, "version": {}, "force": {boolean: true}, "stop-watches": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -143,8 +143,8 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 	if parsed.Bool("force") && parsed.Bool("check") {
 		return axi.Usage("--force cannot be combined with --check")
 	}
-	if parsed.Bool("stop-lookouts") && parsed.Bool("check") {
-		return axi.Usage("--stop-lookouts cannot be combined with --check")
+	if parsed.Bool("stop-watches") && parsed.Bool("check") {
+		return axi.Usage("--stop-watches cannot be combined with --check")
 	}
 	home, err := s.homePath()
 	if err != nil {
@@ -155,15 +155,15 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 			return err
 		}
 	}
-	lookouts, err := s.runningLookouts(ctx.Context, home)
+	watches, err := s.runningWatches(ctx.Context, home)
 	if err != nil {
-		return axi.Failure("lookout_discovery_failed", err.Error(), false, "Check process-table access and run `posse update --check` again")
+		return axi.Failure("watch_discovery_failed", err.Error(), false, "Check process-table access and run `posse update --check` again")
 	}
 	release, err := s.fetchRelease(ctx.Context, tag)
 	if err != nil {
 		message := err.Error()
-		if parsed.Bool("check") && len(lookouts) > 0 {
-			message += "; running lookouts: " + formatLookoutProcesses(lookouts)
+		if parsed.Bool("check") && len(watches) > 0 {
+			message += "; running watches: " + formatWatchProcesses(watches)
 		}
 		return axi.Failure("release_unavailable", message, true, "Retry when GitHub is reachable")
 	}
@@ -174,27 +174,27 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 			}
 		}
 		help := []any{updateInstallHelp}
-		if len(lookouts) > 0 {
-			help = append(help, "Running Lookouts re-exec automatically after an update; pass `--stop-lookouts` only to force-stop them")
+		if len(watches) > 0 {
+			help = append(help, "Running Watches re-exec automatically after an update; pass `--stop-watches` only to force-stop them")
 		}
-		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "lookouts", Value: lookoutRows(lookouts, false)}, {Key: "help", Value: help}})
+		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "watches", Value: watchRows(watches, false)}, {Key: "help", Value: help}})
 	}
 	if tag == "" && s.currentVersion() != "dev" && !newerVersion(s.currentVersion(), release.Tag) {
 		return axi.Failure("already_current", "no newer release is available", false, "Use `posse update --version vX.Y.Z` to select a release")
 	}
 	var installed updateInstallResult
-	var stopped []lookoutProcess
-	if err := s.installRelease(ctx.Context, release, parsed.Bool("force"), parsed.Bool("stop-lookouts"), &installed, &stopped); err != nil {
+	var stopped []watchProcess
+	if err := s.installRelease(ctx.Context, release, parsed.Bool("force"), parsed.Bool("stop-watches"), &installed, &stopped); err != nil {
 		return err
 	}
-	result := axi.Object{{Key: "installed", Value: release.Tag}, {Key: "binary", Value: installed.binary}, {Key: "backup", Value: installed.backup}, {Key: "stopped_lookouts", Value: lookoutRows(stopped, true)}, {Key: "reexec_lookouts", Value: lookoutRows(installed.reexecLookouts, true)}, {Key: "help", Value: []any{"Run `posse doctor` to verify the update"}}}
+	result := axi.Object{{Key: "installed", Value: release.Tag}, {Key: "binary", Value: installed.binary}, {Key: "backup", Value: installed.backup}, {Key: "stopped_watches", Value: watchRows(stopped, true)}, {Key: "reexec_watches", Value: watchRows(installed.reexecWatches, true)}, {Key: "help", Value: []any{"Run `posse doctor` to verify the update"}}}
 	if installed.reexecWarning != "" {
-		result = append(result, axi.Field{Key: "lookout_reexec_warning", Value: installed.reexecWarning})
+		result = append(result, axi.Field{Key: "watch_reexec_warning", Value: installed.reexecWarning})
 	}
 	return ctx.Print(result)
 }
 
-func lookoutRows(processes []lookoutProcess, includeRestart bool) []axi.Object {
+func watchRows(processes []watchProcess, includeRestart bool) []axi.Object {
 	rows := make([]axi.Object, 0, len(processes))
 	for _, process := range processes {
 		row := axi.Object{
@@ -203,9 +203,9 @@ func lookoutRows(processes []lookoutProcess, includeRestart bool) []axi.Object {
 			{Key: "kind", Value: process.Kind},
 		}
 		if includeRestart {
-			restart := "The Lead restarts its background Lookout on its next wake"
+			restart := "The Lead restarts its background Watch on its next wake"
 			if process.PollOnly {
-				restart = "The Project poller re-execs this process after installation, or the next posse command repairs it"
+				restart = "The Project watch re-execs this process after installation, or the next posse command repairs it"
 			} else if process.StopHook {
 				restart = "The next Claude Stop hook owns the next bounded Notice wait"
 			} else if process.QuietRoutine {
@@ -223,7 +223,7 @@ func lookoutRows(processes []lookoutProcess, includeRestart bool) []axi.Object {
 
 func (s *Service) requireUserUpdateCaller(ctx context.Context, home string) error {
 	if os.Getenv(workerHomeEnv) != "" || s.workerCaller(ctx, home) {
-		return axi.Failure("worker_forbidden", "a Rider cannot update its own posse home", false)
+		return axi.Failure("worker_forbidden", "a Worker cannot update its own posse home", false)
 	}
 	if s.herdrContext == nil || !s.herdrContext() {
 		return nil
@@ -244,7 +244,7 @@ func (s *Service) requireUserUpdateCaller(ctx context.Context, home string) erro
 	if db != nil {
 		defer db.Close()
 		if _, err := db.TaskByPane(ctx, paneID); err == nil {
-			return axi.Failure("update_from_turn", "a Rider pane cannot install a Posse update", false, updateInstallHelp)
+			return axi.Failure("update_from_turn", "a Worker pane cannot install a Posse update", false, updateInstallHelp)
 		} else if !store.IsNotFound(err) {
 			return axi.Failure("update_pane_unknown", "posse cannot verify the pane's role", false, updateInstallHelp)
 		}
@@ -276,11 +276,11 @@ func (s *Service) requireUserUpdateCaller(ctx context.Context, home string) erro
 // by an interactive shell's `up` prompt.
 type updateInstallResult struct {
 	binary, backup string
-	reexecLookouts []lookoutProcess
+	reexecWatches  []watchProcess
 	reexecWarning  string
 }
 
-func (s *Service) installRelease(ctx context.Context, release githubRelease, force, stopLookouts bool, installed *updateInstallResult, stopped *[]lookoutProcess) error {
+func (s *Service) installRelease(ctx context.Context, release githubRelease, force, stopWatches bool, installed *updateInstallResult, stopped *[]watchProcess) error {
 	home, err := s.homePath()
 	if err != nil {
 		return err
@@ -288,9 +288,9 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 	if err := s.requireUserUpdateCaller(ctx, home); err != nil {
 		return err
 	}
-	lookouts, err := s.runningLookouts(ctx, home)
+	watches, err := s.runningWatches(ctx, home)
 	if err != nil {
-		return axi.Failure("lookout_discovery_failed", err.Error(), false, "Check process-table access and run `posse update --check` again")
+		return axi.Failure("watch_discovery_failed", err.Error(), false, "Check process-table access and run `posse update --check` again")
 	}
 	manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName))
 	if err != nil {
@@ -406,14 +406,14 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 	} else if !errors.Is(dbErr, os.ErrNotExist) {
 		return dbErr
 	}
-	if stopLookouts {
-		current, err := s.runningLookouts(ctx, home)
+	if stopWatches {
+		current, err := s.runningWatches(ctx, home)
 		if err != nil {
-			return axi.Failure("lookout_discovery_failed", err.Error(), false, "Check process-table access and retry the update")
+			return axi.Failure("watch_discovery_failed", err.Error(), false, "Check process-table access and retry the update")
 		}
-		stoppedProcesses, err := stopLookoutProcesses(ctx, home, current)
+		stoppedProcesses, err := stopWatchProcesses(ctx, home, current)
 		if err != nil {
-			return axi.Failure("lookout_stop_failed", err.Error(), false, "Inspect the listed process IDs before retrying")
+			return axi.Failure("watch_stop_failed", err.Error(), false, "Inspect the listed process IDs before retrying")
 		}
 		*stopped = stoppedProcesses
 	}
@@ -430,11 +430,11 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 		return axi.Failure("setup_failed", fmt.Sprintf("installed %s but setup failed: %s", release.Tag, strings.TrimSpace(string(output))), false, "Run `posse setup` after resolving the reported problem")
 	}
 	installed.binary, installed.backup = destination, backup
-	if !stopLookouts && len(lookouts) > 0 {
-		if err := requestLookoutReexec(home, lookouts); err != nil {
+	if !stopWatches && len(watches) > 0 {
+		if err := requestWatchReexec(home, watches); err != nil {
 			installed.reexecWarning = err.Error()
 		} else {
-			installed.reexecLookouts = lookouts
+			installed.reexecWatches = watches
 		}
 	}
 	return nil
@@ -495,7 +495,7 @@ func (s *Service) updatePreflight(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if s.workerCaller(ctx.Context, home) {
-		return axi.Failure("worker_forbidden", "a Rider cannot update its home", false)
+		return axi.Failure("worker_forbidden", "a Worker cannot update its home", false)
 	}
 	db, err := store.OpenReadOnly(home)
 	if errors.Is(err, os.ErrNotExist) {

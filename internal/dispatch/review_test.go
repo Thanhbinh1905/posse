@@ -7,7 +7,7 @@ import (
 
 func TestReviewPolicyBriefSelectionAndMigration(t *testing.T) {
 	for _, policy := range []string{"none", "local", "no-mistakes", "always", "on_risk", "never"} {
-		text := "---\ntype: ship\ntitle: Policy\ndone_when: checked\nreview: " + policy + "\n---\n"
+		text := "---\ntype: change\ntitle: Policy\ndone_when: checked\nreview: " + policy + "\n---\n"
 		brief, err := ParseBriefText(text)
 		legacy := policy == "always" || policy == "on_risk" || policy == "never"
 		if legacy {
@@ -23,8 +23,8 @@ func TestReviewPolicyBriefSelectionAndMigration(t *testing.T) {
 	}
 }
 
-func TestBriefReviewRoundsAreShipOnlyAndBounded(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: ship\ntitle: Limited review\ndone_when: checked\nreview_rounds: 2\n---\n")
+func TestBriefReviewRoundsAreChangeOnlyAndBounded(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Limited review\ndone_when: checked\nreview_rounds: 2\n---\n")
 	if err != nil || brief.ReviewRounds != 2 {
 		t.Fatalf("review_rounds parse = %#v, %v", brief, err)
 	}
@@ -35,10 +35,10 @@ func TestBriefReviewRoundsAreShipOnlyAndBounded(t *testing.T) {
 		{"zero", "review_rounds: 0"},
 		{"above hard cap", "review_rounds: 4"},
 		{"non-integer", "review_rounds: two"},
-		{"non-Ship", "type: scout\nreview_rounds: 2"},
+		{"non-Change", "type: research\nreview_rounds: 2"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			body := "type: ship\n"
+			body := "type: change\n"
 			if strings.HasPrefix(testCase.text, "type:") {
 				body = ""
 			}

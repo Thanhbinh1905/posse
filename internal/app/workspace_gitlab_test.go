@@ -12,9 +12,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestWorkspaceGitLabMemberLandsOnlyAfterEveryMember(t *testing.T) {
+func TestWorkspaceGitLabMemberMergesOnlyAfterEveryMember(t *testing.T) {
 	t.Setenv("POSSE_TEST_GLAB_BASE_BRANCH", "staging")
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n\n[repositories.worker]\nforge = \"gitlab\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n\n[repositories.worker]\nforge = \"gitlab\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
 	fake, ok := f.service.Herdr.(*herdr.Fake)
 	if !ok {
 		t.Fatal("fixture does not use the fake Herdr adapter")
@@ -90,41 +90,41 @@ esac
 	if err != nil || strings.Count(string(calls), "mr create") != 1 || !strings.Contains(string(calls), "--target-branch staging") {
 		t.Fatalf("workspace MR target or duplicate-free republish failed: %s (%v)", calls, err)
 	}
-	if code := f.run("holler", "done", "Worker summary"); code != 0 {
+	if code := f.run("signal", "done", "Worker summary"); code != 0 {
 		t.Fatalf("done: %d %s", code, f.out.String())
 	}
 	t.Setenv("POSSE_WORKER_HOME", "")
 	t.Chdir(f.workspace)
 	f.service.Herdr = fake
-	if code := f.run("land", "t1"); code != 0 {
+	if code := f.run("merge", "t1"); code != 0 {
 		t.Fatalf("open MR: %d %s", code, f.out.String())
 	}
-	if f.repos()["worker"].State != store.TaskRepoLanding {
+	if f.repos()["worker"].State != store.TaskRepoMerge {
 		t.Fatalf("worker MR not open: %#v", f.repos())
 	}
-	if code := f.run("land", "t1", "--merge", "--user-approved", "merge both"); code != 0 {
+	if code := f.run("merge", "t1", "--execute", "--user-approved", "merge both"); code != 0 {
 		t.Fatalf("merge members: %d %s", code, f.out.String())
 	}
-	if f.state() != store.StateLanding || f.repos()["e2e-tool"].State != store.TaskRepoLanded {
-		t.Fatalf("premature Land: %s %#v", f.state(), f.repos())
+	if f.state() != store.StateMerging || f.repos()["e2e-tool"].State != store.TaskRepoMerged {
+		t.Fatalf("premature Merge: %s %#v", f.state(), f.repos())
 	}
 	if err := f.service.pollWorkspacePullRequests(context.Background(), f.db, f.project, f.config(), true); err != nil {
 		t.Fatal(err)
 	}
-	if f.state() != store.StateLanding {
-		t.Fatalf("running pipeline Landed: %s", f.state())
+	if f.state() != store.StateMerging {
+		t.Fatalf("running pipeline Merged: %s", f.state())
 	}
 	gitTest(t, memberWorktree, "push", "origin", "HEAD:refs/heads/staging")
 	writeMR("merged", "success")
 	if err := f.service.pollWorkspacePullRequests(context.Background(), f.db, f.project, f.config(), true); err != nil {
 		t.Fatal(err)
 	}
-	if f.state() != store.StateLanded || f.repos()["worker"].LandedRef != head || f.repos()["worker"].TargetBranch != "staging" {
-		t.Fatalf("merged MR not Landed against staging: %s %#v", f.state(), f.repos())
+	if f.state() != store.StateMerged || f.repos()["worker"].MergedRef != head || f.repos()["worker"].TargetBranch != "staging" {
+		t.Fatalf("merged MR not Merged against staging: %s %#v", f.state(), f.repos())
 	}
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-stack-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
-	if err := f.service.autoTeardownLandedTasks(context.Background(), f.db, f.project, f.config()); err != nil {
+	if err := f.service.autoTeardownMergedTasks(context.Background(), f.db, f.project, f.config()); err != nil {
 		t.Fatalf("teardown merged workspace Task: %v", err)
 	}
 	if f.state() != store.StateTornDown {

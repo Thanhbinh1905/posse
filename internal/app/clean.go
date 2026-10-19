@@ -13,9 +13,9 @@ import (
 type cleanTaskItem struct {
 	project      store.Project
 	task         store.Task
-	mount        store.Mount
+	sandbox      store.Sandbox
 	scratchBytes int64
-	mountBytes   int64
+	sandboxBytes int64
 }
 
 func (s *Service) clean(ctx *axi.Context, args []string) error {
@@ -86,19 +86,19 @@ func (s *Service) clean(ctx *axi.Context, args []string) error {
 				return err
 			}
 			scratchHasProcesses := len(scratchProcesses) > 0
-			mount, mountErr := db.MountByTask(ctx.Context, task.ID)
-			if mountErr == nil {
-				item.mount = mount
-				if (mount.State == "held" || mount.State == "releasing") && safeManagedMountPath(home, project.Name, mount.Path) {
-					item.mountBytes, err = pathBytes(mount.Path)
+			sandbox, sandboxErr := db.SandboxByTask(ctx.Context, task.ID)
+			if sandboxErr == nil {
+				item.sandbox = sandbox
+				if (sandbox.State == "held" || sandbox.State == "releasing") && safeManagedSandboxPath(home, project.Name, sandbox.Path) {
+					item.sandboxBytes, err = pathBytes(sandbox.Path)
 					if err != nil {
 						return err
 					}
 				}
-			} else if !store.IsNotFound(mountErr) {
-				return mountErr
+			} else if !store.IsNotFound(sandboxErr) {
+				return sandboxErr
 			}
-			if task.State != store.StateTornDown || scratchBytes > 0 || scratchHasProcesses || len(taskContainmentProcessDetails(task)) > 0 || (item.mount.State == "held" || item.mount.State == "releasing") {
+			if task.State != store.StateTornDown || scratchBytes > 0 || scratchHasProcesses || len(taskContainmentProcessDetails(task)) > 0 || (item.sandbox.State == "held" || item.sandbox.State == "releasing") {
 				items = append(items, item)
 			}
 		}
@@ -111,23 +111,23 @@ func (s *Service) clean(ctx *axi.Context, args []string) error {
 			processes = mergeTaskProcessDetails(processes, scratchProcesses)
 		}
 		if item.task.WorktreePath != "" {
-			mountProcesses, mountErr := mountTaskProcessDetails(item.task.WorktreePath)
-			if mountErr == nil {
-				processes = mergeTaskProcessDetails(processes, mountProcesses)
+			sandboxProcesses, sandboxErr := sandboxTaskProcessDetails(item.task.WorktreePath)
+			if sandboxErr == nil {
+				processes = mergeTaskProcessDetails(processes, sandboxProcesses)
 			}
 		}
 		processRows := make([]any, 0, len(processes))
 		for _, process := range processes {
 			processRows = append(processRows, map[string]any{"pid": process.PID, "command": process.Command, "ports": process.Ports})
 		}
-		mountBytes := int64(0)
-		if (item.mount.State == "held" || item.mount.State == "releasing") && safeManagedMountPath(home, item.project.Name, item.mount.Path) {
-			mountBytes = item.mountBytes
+		sandboxBytes := int64(0)
+		if (item.sandbox.State == "held" || item.sandbox.State == "releasing") && safeManagedSandboxPath(home, item.project.Name, item.sandbox.Path) {
+			sandboxBytes = item.sandboxBytes
 		}
 		rows = append(rows, map[string]any{
 			"project": item.project.Name, "task": taskIDString(item.task.Seq), "title": item.task.Title,
-			"state": item.task.State, "scratch_bytes": item.scratchBytes, "mount_bytes": mountBytes,
-			"mount_state": item.mount.State, "processes": processRows,
+			"state": item.task.State, "scratch_bytes": item.scratchBytes, "sandbox_bytes": sandboxBytes,
+			"sandbox_state": item.sandbox.State, "processes": processRows,
 			"result": map[bool]string{true: "pending", false: "dry_run"}[parsed.Bool("yes")],
 		})
 	}
@@ -135,13 +135,13 @@ func (s *Service) clean(ctx *axi.Context, args []string) error {
 	if parsed.Bool("yes") {
 		for index, item := range items {
 			if item.task.State == store.StateTornDown {
-				err = s.cleanTornDownTask(ctx.Context, db, home, item.project, item.task, item.mount)
+				err = s.cleanTornDownTask(ctx.Context, db, home, item.project, item.task, item.sandbox)
 			} else {
 				cfg, configErr := config.Load(home, item.project.Name)
 				if configErr != nil {
 					err = configError(configErr)
 				} else {
-					_, err = s.unsaddleTask(ctx.Context, db, item.project, cfg, item.task, false, "")
+					_, err = s.teardownTask(ctx.Context, db, item.project, cfg, item.task, false, "")
 				}
 			}
 			row := rows[index].(map[string]any)
@@ -157,27 +157,27 @@ func (s *Service) clean(ctx *axi.Context, args []string) error {
 			}
 		}
 	}
-	help := "Run `posse clean --yes` to unsaddle finished Tasks, stop their recorded processes, and reclaim their Task scratch and held Mounts"
+	help := "Run `posse clean --yes` to tear down finished Tasks, stop their recorded processes, and reclaim their Task scratch and held Sandboxes"
 	return ctx.Print(axi.Object{{Key: "clean", Value: rows}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{help}}})
 }
 
 func cleanableTaskState(state store.State) bool {
-	return state == store.StateReported || state == store.StateLanded || state == store.StateTornDown
+	return state == store.StateReported || state == store.StateMerged || state == store.StateTornDown
 }
 
-func (s *Service) cleanTornDownTask(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, mount store.Mount) error {
+func (s *Service) cleanTornDownTask(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, sandbox store.Sandbox) error {
 	if _, err := stopTaskProcessContainment(ctx, task); err != nil {
 		return err
 	}
-	if mount.ID != 0 && mount.TaskID == task.ID && (mount.State == "held" || mount.State == "releasing") {
+	if sandbox.ID != 0 && sandbox.TaskID == task.ID && (sandbox.State == "held" || sandbox.State == "releasing") {
 		cfg, err := config.Load(home, project.Name)
 		if err != nil {
 			return configError(err)
 		}
-		if !safeManagedMountPath(home, project.Name, mount.Path) || filepath.Clean(task.WorktreePath) != filepath.Clean(mount.Path) {
-			return fmt.Errorf("refuse to clean Task %s Mount without a validated path", taskIDString(task.Seq))
+		if !safeManagedSandboxPath(home, project.Name, sandbox.Path) || filepath.Clean(task.WorktreePath) != filepath.Clean(sandbox.Path) {
+			return fmt.Errorf("refuse to clean Task %s Sandbox without a validated path", taskIDString(task.Seq))
 		}
-		if _, err := s.releaseMountWithAuthorization(ctx, db, project, task, cfg.Remuda.Clean, false, nil); err != nil {
+		if _, err := s.releaseSandboxWithAuthorization(ctx, db, project, task, cfg.Pool.Clean, false, nil); err != nil {
 			return err
 		}
 	}

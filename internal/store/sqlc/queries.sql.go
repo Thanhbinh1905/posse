@@ -49,21 +49,21 @@ func (q *Queries) AckNotice(ctx context.Context, arg AckNoticeParams) (sql.Resul
 	return q.db.ExecContext(ctx, ackNotice, arg.AckedAt, arg.ID, arg.ProjectID)
 }
 
-const acquireIdleMount = `-- name: AcquireIdleMount :execresult
+const acquireIdleSandbox = `-- name: AcquireIdleSandbox :execresult
 UPDATE mounts SET state = 'held', task_id = ?, acquired_at = ?, released_at = 0
 WHERE mounts.id = (
   SELECT candidate.id FROM mounts candidate WHERE candidate.project_id = ? AND candidate.state = 'idle' ORDER BY candidate.n LIMIT 1
 ) AND mounts.state = 'idle'
 `
 
-type AcquireIdleMountParams struct {
+type AcquireIdleSandboxParams struct {
 	TaskID     sql.NullInt64
 	AcquiredAt int64
 	ProjectID  int64
 }
 
-func (q *Queries) AcquireIdleMount(ctx context.Context, arg AcquireIdleMountParams) (sql.Result, error) {
-	return q.db.ExecContext(ctx, acquireIdleMount, arg.TaskID, arg.AcquiredAt, arg.ProjectID)
+func (q *Queries) AcquireIdleSandbox(ctx context.Context, arg AcquireIdleSandboxParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, acquireIdleSandbox, arg.TaskID, arg.AcquiredAt, arg.ProjectID)
 }
 
 const activeWorkerCount = `-- name: ActiveWorkerCount :one
@@ -96,7 +96,7 @@ type AllResourceLeasesRow struct {
 	SourceKey      string
 	CustodyToken   string
 	IntentID       int64
-	MountID        int64
+	SandboxID      int64
 	OwnerPid       int64
 	OwnerBootID    string
 	OwnerStartTime string
@@ -124,7 +124,7 @@ func (q *Queries) AllResourceLeases(ctx context.Context) ([]AllResourceLeasesRow
 			&i.SourceKey,
 			&i.CustodyToken,
 			&i.IntentID,
-			&i.MountID,
+			&i.SandboxID,
 			&i.OwnerPid,
 			&i.OwnerBootID,
 			&i.OwnerStartTime,
@@ -167,9 +167,9 @@ func (q *Queries) AllTasks(ctx context.Context, projectID int64) ([]Task, error)
 			&i.State,
 			&i.Profile,
 			&i.DispatchRule,
-			&i.LandingMode,
+			&i.MergeMode,
 			&i.AutonomyReview,
-			&i.AutonomyLand,
+			&i.AutonomyMerge,
 			&i.Branch,
 			&i.BaseRef,
 			&i.WorktreePath,
@@ -179,14 +179,14 @@ func (q *Queries) AllTasks(ctx context.Context, projectID int64) ([]Task, error)
 			&i.AgentName,
 			&i.AgentSession,
 			&i.PrUrl,
-			&i.LandedRef,
+			&i.MergedRef,
 			&i.LastOutputHash,
 			&i.LastWorktreeHash,
 			&i.LastProgressAt,
 			&i.AgentAbsentSince,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.MountID,
+			&i.SandboxID,
 			&i.Launches,
 			&i.GatedSha,
 			&i.AgentServerStartedAt,
@@ -279,17 +279,17 @@ func (q *Queries) BindPRBodyMarker(ctx context.Context, arg BindPRBodyMarkerPara
 	)
 }
 
-const breakMount = `-- name: BreakMount :exec
+const breakSandbox = `-- name: BreakSandbox :exec
 UPDATE mounts SET state = 'broken', task_id = NULL, released_at = ? WHERE id = ?
 `
 
-type BreakMountParams struct {
+type BreakSandboxParams struct {
 	ReleasedAt int64
 	ID         int64
 }
 
-func (q *Queries) BreakMount(ctx context.Context, arg BreakMountParams) error {
-	_, err := q.db.ExecContext(ctx, breakMount, arg.ReleasedAt, arg.ID)
+func (q *Queries) BreakSandbox(ctx context.Context, arg BreakSandboxParams) error {
+	_, err := q.db.ExecContext(ctx, breakSandbox, arg.ReleasedAt, arg.ID)
 	return err
 }
 
@@ -302,12 +302,12 @@ func (q *Queries) ClearDownProjectLead(ctx context.Context, id int64) error {
 	return err
 }
 
-const clearGatedSHALandingToDone = `-- name: ClearGatedSHALandingToDone :exec
+const clearGatedSHAMergeToDone = `-- name: ClearGatedSHAMergeToDone :exec
 UPDATE tasks SET gated_sha = '' WHERE id = ? AND state = 'done'
 `
 
-func (q *Queries) ClearGatedSHALandingToDone(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, clearGatedSHALandingToDone, id)
+func (q *Queries) ClearGatedSHAMergeToDone(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, clearGatedSHAMergeToDone, id)
 	return err
 }
 
@@ -371,19 +371,6 @@ func (q *Queries) CountResourceLeasesByIntent(ctx context.Context, intentID int6
 	return count, err
 }
 
-const deleteMount = `-- name: DeleteMount :execresult
-DELETE FROM mounts WHERE id = ? AND project_id = ? AND state IN ('idle', 'broken')
-`
-
-type DeleteMountParams struct {
-	ID        int64
-	ProjectID int64
-}
-
-func (q *Queries) DeleteMount(ctx context.Context, arg DeleteMountParams) (sql.Result, error) {
-	return q.db.ExecContext(ctx, deleteMount, arg.ID, arg.ProjectID)
-}
-
 const deleteResourceLease = `-- name: DeleteResourceLease :execresult
 DELETE FROM resource_leases WHERE id = ? AND custody_token = ?
 `
@@ -397,12 +384,12 @@ func (q *Queries) DeleteResourceLease(ctx context.Context, arg DeleteResourceLea
 	return q.db.ExecContext(ctx, deleteResourceLease, arg.ID, arg.CustodyToken)
 }
 
-const deleteResourceLeaseByMount = `-- name: DeleteResourceLeaseByMount :exec
+const deleteResourceLeaseBySandbox = `-- name: DeleteResourceLeaseBySandbox :exec
 DELETE FROM resource_leases WHERE mount_id = ?
 `
 
-func (q *Queries) DeleteResourceLeaseByMount(ctx context.Context, mountID sql.NullInt64) error {
-	_, err := q.db.ExecContext(ctx, deleteResourceLeaseByMount, mountID)
+func (q *Queries) DeleteResourceLeaseBySandbox(ctx context.Context, mountID sql.NullInt64) error {
+	_, err := q.db.ExecContext(ctx, deleteResourceLeaseBySandbox, mountID)
 	return err
 }
 
@@ -413,6 +400,19 @@ DELETE FROM resource_leases WHERE intent_id = ?
 func (q *Queries) DeleteResourceLeasesByIntent(ctx context.Context, intentID int64) error {
 	_, err := q.db.ExecContext(ctx, deleteResourceLeasesByIntent, intentID)
 	return err
+}
+
+const deleteSandbox = `-- name: DeleteSandbox :execresult
+DELETE FROM mounts WHERE id = ? AND project_id = ? AND state IN ('idle', 'broken')
+`
+
+type DeleteSandboxParams struct {
+	ID        int64
+	ProjectID int64
+}
+
+func (q *Queries) DeleteSandbox(ctx context.Context, arg DeleteSandboxParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, deleteSandbox, arg.ID, arg.ProjectID)
 }
 
 const insertApproval = `-- name: InsertApproval :exec
@@ -470,31 +470,6 @@ type InsertLeadStartClaimParams struct {
 
 func (q *Queries) InsertLeadStartClaim(ctx context.Context, arg InsertLeadStartClaimParams) (sql.Result, error) {
 	return q.db.ExecContext(ctx, insertLeadStartClaim, arg.ProjectID, arg.ClaimedAt)
-}
-
-const insertMount = `-- name: InsertMount :execresult
-INSERT INTO mounts(project_id, n, path, state, task_id, acquired_at, released_at)
-VALUES (?, ?, ?, ?, ?, ?, 0)
-`
-
-type InsertMountParams struct {
-	ProjectID  int64
-	N          int64
-	Path       string
-	State      string
-	TaskID     sql.NullInt64
-	AcquiredAt int64
-}
-
-func (q *Queries) InsertMount(ctx context.Context, arg InsertMountParams) (sql.Result, error) {
-	return q.db.ExecContext(ctx, insertMount,
-		arg.ProjectID,
-		arg.N,
-		arg.Path,
-		arg.State,
-		arg.TaskID,
-		arg.AcquiredAt,
-	)
 }
 
 const insertNotice = `-- name: InsertNotice :execresult
@@ -592,6 +567,31 @@ func (q *Queries) InsertResourceLease(ctx context.Context, arg InsertResourceLea
 	)
 }
 
+const insertSandbox = `-- name: InsertSandbox :execresult
+INSERT INTO mounts(project_id, n, path, state, task_id, acquired_at, released_at)
+VALUES (?, ?, ?, ?, ?, ?, 0)
+`
+
+type InsertSandboxParams struct {
+	ProjectID  int64
+	N          int64
+	Path       string
+	State      string
+	TaskID     sql.NullInt64
+	AcquiredAt int64
+}
+
+func (q *Queries) InsertSandbox(ctx context.Context, arg InsertSandboxParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertSandbox,
+		arg.ProjectID,
+		arg.N,
+		arg.Path,
+		arg.State,
+		arg.TaskID,
+		arg.AcquiredAt,
+	)
+}
+
 const insertSignal = `-- name: InsertSignal :execresult
 INSERT INTO signals(task_id, verb, note, data_json, at) VALUES (?, ?, ?, ?, ?)
 `
@@ -636,9 +636,9 @@ type InsertTaskParams struct {
 	State             string
 	Profile           string
 	DispatchRule      string
-	LandingMode       string
+	MergeMode         string
 	AutonomyReview    string
-	AutonomyLand      string
+	AutonomyMerge     string
 	Branch            string
 	BaseRef           string
 	TargetBranch      string
@@ -650,7 +650,7 @@ type InsertTaskParams struct {
 	AgentSession      string
 	AgentSessionKind  string
 	PrUrl             string
-	LandedRef         string
+	MergedRef         string
 	LastOutputHash    string
 	LastWorktreeHash  string
 	LastProgressAt    int64
@@ -677,9 +677,9 @@ func (q *Queries) InsertTask(ctx context.Context, arg InsertTaskParams) (sql.Res
 		arg.State,
 		arg.Profile,
 		arg.DispatchRule,
-		arg.LandingMode,
+		arg.MergeMode,
 		arg.AutonomyReview,
-		arg.AutonomyLand,
+		arg.AutonomyMerge,
 		arg.Branch,
 		arg.BaseRef,
 		arg.TargetBranch,
@@ -691,7 +691,7 @@ func (q *Queries) InsertTask(ctx context.Context, arg InsertTaskParams) (sql.Res
 		arg.AgentSession,
 		arg.AgentSessionKind,
 		arg.PrUrl,
-		arg.LandedRef,
+		arg.MergedRef,
 		arg.LastOutputHash,
 		arg.LastWorktreeHash,
 		arg.LastProgressAt,
@@ -757,7 +757,7 @@ func (q *Queries) LastNoticeNotification(ctx context.Context, projectID int64) (
 
 const liveTasks = `-- name: LiveTasks :many
 SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker FROM tasks
-WHERE project_id = ? AND state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled', 'done', 'landing') ORDER BY seq
+WHERE project_id = ? AND state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled', 'done', 'merging') ORDER BY seq
 `
 
 func (q *Queries) LiveTasks(ctx context.Context, projectID int64) ([]Task, error) {
@@ -779,9 +779,9 @@ func (q *Queries) LiveTasks(ctx context.Context, projectID int64) ([]Task, error
 			&i.State,
 			&i.Profile,
 			&i.DispatchRule,
-			&i.LandingMode,
+			&i.MergeMode,
 			&i.AutonomyReview,
-			&i.AutonomyLand,
+			&i.AutonomyMerge,
 			&i.Branch,
 			&i.BaseRef,
 			&i.WorktreePath,
@@ -791,14 +791,14 @@ func (q *Queries) LiveTasks(ctx context.Context, projectID int64) ([]Task, error
 			&i.AgentName,
 			&i.AgentSession,
 			&i.PrUrl,
-			&i.LandedRef,
+			&i.MergedRef,
 			&i.LastOutputHash,
 			&i.LastWorktreeHash,
 			&i.LastProgressAt,
 			&i.AgentAbsentSince,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.MountID,
+			&i.SandboxID,
 			&i.Launches,
 			&i.GatedSha,
 			&i.AgentServerStartedAt,
@@ -885,113 +885,6 @@ func (q *Queries) MarkResourceLeaseForRecovery(ctx context.Context, arg MarkReso
 	return q.db.ExecContext(ctx, markResourceLeaseForRecovery, arg.ID, arg.CustodyToken)
 }
 
-const mountByTask = `-- name: MountByTask :one
-SELECT id, project_id, n, path, state, task_id, acquired_at, released_at FROM mounts WHERE task_id = ?
-`
-
-func (q *Queries) MountByTask(ctx context.Context, taskID sql.NullInt64) (Mount, error) {
-	row := q.db.QueryRowContext(ctx, mountByTask, taskID)
-	var i Mount
-	err := row.Scan(
-		&i.ID,
-		&i.ProjectID,
-		&i.N,
-		&i.Path,
-		&i.State,
-		&i.TaskID,
-		&i.AcquiredAt,
-		&i.ReleasedAt,
-	)
-	return i, err
-}
-
-const mountResourceOwners = `-- name: MountResourceOwners :many
-SELECT m.id, m.project_id, p.name, m.n, m.path, m.state,
-       COALESCE(m.task_id, 0), COALESCE(t.seq, 0)
-FROM mounts m JOIN projects p ON p.id = m.project_id
-LEFT JOIN tasks t ON t.id = m.task_id
-WHERE m.state != 'idle' ORDER BY m.project_id, m.n
-`
-
-type MountResourceOwnersRow struct {
-	ID        int64
-	ProjectID int64
-	Name      string
-	N         int64
-	Path      string
-	State     string
-	TaskID    int64
-	Seq       int64
-}
-
-func (q *Queries) MountResourceOwners(ctx context.Context) ([]MountResourceOwnersRow, error) {
-	rows, err := q.db.QueryContext(ctx, mountResourceOwners)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []MountResourceOwnersRow{}
-	for rows.Next() {
-		var i MountResourceOwnersRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.ProjectID,
-			&i.Name,
-			&i.N,
-			&i.Path,
-			&i.State,
-			&i.TaskID,
-			&i.Seq,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const mounts = `-- name: Mounts :many
-SELECT id, project_id, n, path, state, task_id, acquired_at, released_at FROM mounts WHERE project_id = ? ORDER BY n
-`
-
-func (q *Queries) Mounts(ctx context.Context, projectID int64) ([]Mount, error) {
-	rows, err := q.db.QueryContext(ctx, mounts, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []Mount{}
-	for rows.Next() {
-		var i Mount
-		if err := rows.Scan(
-			&i.ID,
-			&i.ProjectID,
-			&i.N,
-			&i.Path,
-			&i.State,
-			&i.TaskID,
-			&i.AcquiredAt,
-			&i.ReleasedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const moveProject = `-- name: MoveProject :exec
 UPDATE projects SET root = ?, default_branch = ?, status = 'active', last_activity_at = ? WHERE id = ?
 `
@@ -1013,12 +906,12 @@ func (q *Queries) MoveProject(ctx context.Context, arg MoveProjectParams) error 
 	return err
 }
 
-const nextMountNumber = `-- name: NextMountNumber :one
+const nextSandboxNumber = `-- name: NextSandboxNumber :one
 SELECT COALESCE(MAX(n), 0) + 1 FROM mounts WHERE project_id = ?
 `
 
-func (q *Queries) NextMountNumber(ctx context.Context, projectID int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, nextMountNumber, projectID)
+func (q *Queries) NextSandboxNumber(ctx context.Context, projectID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, nextSandboxNumber, projectID)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -1432,18 +1325,18 @@ func (q *Queries) ReleaseLeadStart(ctx context.Context, projectID int64) error {
 	return err
 }
 
-const releaseMount = `-- name: ReleaseMount :exec
+const releaseSandbox = `-- name: ReleaseSandbox :exec
 UPDATE mounts SET state = 'idle', task_id = NULL, released_at = ? WHERE id = ? AND task_id = ? AND state = 'held'
 `
 
-type ReleaseMountParams struct {
+type ReleaseSandboxParams struct {
 	ReleasedAt int64
 	ID         int64
 	TaskID     sql.NullInt64
 }
 
-func (q *Queries) ReleaseMount(ctx context.Context, arg ReleaseMountParams) error {
-	_, err := q.db.ExecContext(ctx, releaseMount, arg.ReleasedAt, arg.ID, arg.TaskID)
+func (q *Queries) ReleaseSandbox(ctx context.Context, arg ReleaseSandboxParams) error {
+	_, err := q.db.ExecContext(ctx, releaseSandbox, arg.ReleasedAt, arg.ID, arg.TaskID)
 	return err
 }
 
@@ -1495,7 +1388,7 @@ type ResourceLeaseBySourceRow struct {
 	SourceKey      string
 	CustodyToken   string
 	IntentID       int64
-	MountID        int64
+	SandboxID      int64
 	OwnerPid       int64
 	OwnerBootID    string
 	OwnerStartTime string
@@ -1517,7 +1410,7 @@ func (q *Queries) ResourceLeaseBySource(ctx context.Context, sourceKey string) (
 		&i.SourceKey,
 		&i.CustodyToken,
 		&i.IntentID,
-		&i.MountID,
+		&i.SandboxID,
 		&i.OwnerPid,
 		&i.OwnerBootID,
 		&i.OwnerStartTime,
@@ -1545,7 +1438,7 @@ type ResourceLeasesByIntentRow struct {
 	SourceKey      string
 	CustodyToken   string
 	IntentID       int64
-	MountID        int64
+	SandboxID      int64
 	OwnerPid       int64
 	OwnerBootID    string
 	OwnerStartTime string
@@ -1573,7 +1466,7 @@ func (q *Queries) ResourceLeasesByIntent(ctx context.Context, intentID int64) ([
 			&i.SourceKey,
 			&i.CustodyToken,
 			&i.IntentID,
-			&i.MountID,
+			&i.SandboxID,
 			&i.OwnerPid,
 			&i.OwnerBootID,
 			&i.OwnerStartTime,
@@ -1611,7 +1504,7 @@ type ResourceLeasesByProjectRow struct {
 	SourceKey      string
 	CustodyToken   string
 	IntentID       int64
-	MountID        int64
+	SandboxID      int64
 	OwnerPid       int64
 	OwnerBootID    string
 	OwnerStartTime string
@@ -1639,7 +1532,7 @@ func (q *Queries) ResourceLeasesByProject(ctx context.Context, ownerProjectID in
 			&i.SourceKey,
 			&i.CustodyToken,
 			&i.IntentID,
-			&i.MountID,
+			&i.SandboxID,
 			&i.OwnerPid,
 			&i.OwnerBootID,
 			&i.OwnerStartTime,
@@ -1682,7 +1575,7 @@ type ResourceLeasesByScopeRow struct {
 	SourceKey      string
 	CustodyToken   string
 	IntentID       int64
-	MountID        int64
+	SandboxID      int64
 	OwnerPid       int64
 	OwnerBootID    string
 	OwnerStartTime string
@@ -1710,7 +1603,7 @@ func (q *Queries) ResourceLeasesByScope(ctx context.Context, arg ResourceLeasesB
 			&i.SourceKey,
 			&i.CustodyToken,
 			&i.IntentID,
-			&i.MountID,
+			&i.SandboxID,
 			&i.OwnerPid,
 			&i.OwnerBootID,
 			&i.OwnerStartTime,
@@ -1730,25 +1623,132 @@ func (q *Queries) ResourceLeasesByScope(ctx context.Context, arg ResourceLeasesB
 	return items, nil
 }
 
-const resourceMountLeases = `-- name: ResourceMountLeases :many
+const resourceSandboxLeases = `-- name: ResourceSandboxLeases :many
 SELECT id, mount_id FROM resource_leases WHERE mount_id IS NOT NULL ORDER BY id
 `
 
-type ResourceMountLeasesRow struct {
-	ID      int64
-	MountID sql.NullInt64
+type ResourceSandboxLeasesRow struct {
+	ID        int64
+	SandboxID sql.NullInt64
 }
 
-func (q *Queries) ResourceMountLeases(ctx context.Context) ([]ResourceMountLeasesRow, error) {
-	rows, err := q.db.QueryContext(ctx, resourceMountLeases)
+func (q *Queries) ResourceSandboxLeases(ctx context.Context) ([]ResourceSandboxLeasesRow, error) {
+	rows, err := q.db.QueryContext(ctx, resourceSandboxLeases)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ResourceMountLeasesRow{}
+	items := []ResourceSandboxLeasesRow{}
 	for rows.Next() {
-		var i ResourceMountLeasesRow
-		if err := rows.Scan(&i.ID, &i.MountID); err != nil {
+		var i ResourceSandboxLeasesRow
+		if err := rows.Scan(&i.ID, &i.SandboxID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sandboxByTask = `-- name: SandboxByTask :one
+SELECT id, project_id, n, path, state, task_id, acquired_at, released_at FROM mounts WHERE task_id = ?
+`
+
+func (q *Queries) SandboxByTask(ctx context.Context, taskID sql.NullInt64) (Sandbox, error) {
+	row := q.db.QueryRowContext(ctx, sandboxByTask, taskID)
+	var i Sandbox
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.N,
+		&i.Path,
+		&i.State,
+		&i.TaskID,
+		&i.AcquiredAt,
+		&i.ReleasedAt,
+	)
+	return i, err
+}
+
+const sandboxResourceOwners = `-- name: SandboxResourceOwners :many
+SELECT m.id, m.project_id, p.name, m.n, m.path, m.state,
+       COALESCE(m.task_id, 0), COALESCE(t.seq, 0)
+FROM mounts m JOIN projects p ON p.id = m.project_id
+LEFT JOIN tasks t ON t.id = m.task_id
+WHERE m.state != 'idle' ORDER BY m.project_id, m.n
+`
+
+type SandboxResourceOwnersRow struct {
+	ID        int64
+	ProjectID int64
+	Name      string
+	N         int64
+	Path      string
+	State     string
+	TaskID    int64
+	Seq       int64
+}
+
+func (q *Queries) SandboxResourceOwners(ctx context.Context) ([]SandboxResourceOwnersRow, error) {
+	rows, err := q.db.QueryContext(ctx, sandboxResourceOwners)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SandboxResourceOwnersRow{}
+	for rows.Next() {
+		var i SandboxResourceOwnersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Name,
+			&i.N,
+			&i.Path,
+			&i.State,
+			&i.TaskID,
+			&i.Seq,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sandboxes = `-- name: Sandboxes :many
+SELECT id, project_id, n, path, state, task_id, acquired_at, released_at FROM mounts WHERE project_id = ? ORDER BY n
+`
+
+func (q *Queries) Sandboxes(ctx context.Context, projectID int64) ([]Sandbox, error) {
+	rows, err := q.db.QueryContext(ctx, sandboxes, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Sandbox{}
+	for rows.Next() {
+		var i Sandbox
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.N,
+			&i.Path,
+			&i.State,
+			&i.TaskID,
+			&i.AcquiredAt,
+			&i.ReleasedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1862,9 +1862,9 @@ func (q *Queries) StallTasks(ctx context.Context, projectID int64) ([]Task, erro
 			&i.State,
 			&i.Profile,
 			&i.DispatchRule,
-			&i.LandingMode,
+			&i.MergeMode,
 			&i.AutonomyReview,
-			&i.AutonomyLand,
+			&i.AutonomyMerge,
 			&i.Branch,
 			&i.BaseRef,
 			&i.WorktreePath,
@@ -1874,14 +1874,14 @@ func (q *Queries) StallTasks(ctx context.Context, projectID int64) ([]Task, erro
 			&i.AgentName,
 			&i.AgentSession,
 			&i.PrUrl,
-			&i.LandedRef,
+			&i.MergedRef,
 			&i.LastOutputHash,
 			&i.LastWorktreeHash,
 			&i.LastProgressAt,
 			&i.AgentAbsentSince,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.MountID,
+			&i.SandboxID,
 			&i.Launches,
 			&i.GatedSha,
 			&i.AgentServerStartedAt,
@@ -1936,9 +1936,9 @@ func (q *Queries) Task(ctx context.Context, arg TaskParams) (Task, error) {
 		&i.State,
 		&i.Profile,
 		&i.DispatchRule,
-		&i.LandingMode,
+		&i.MergeMode,
 		&i.AutonomyReview,
-		&i.AutonomyLand,
+		&i.AutonomyMerge,
 		&i.Branch,
 		&i.BaseRef,
 		&i.WorktreePath,
@@ -1948,14 +1948,14 @@ func (q *Queries) Task(ctx context.Context, arg TaskParams) (Task, error) {
 		&i.AgentName,
 		&i.AgentSession,
 		&i.PrUrl,
-		&i.LandedRef,
+		&i.MergedRef,
 		&i.LastOutputHash,
 		&i.LastWorktreeHash,
 		&i.LastProgressAt,
 		&i.AgentAbsentSince,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.MountID,
+		&i.SandboxID,
 		&i.Launches,
 		&i.GatedSha,
 		&i.AgentServerStartedAt,
@@ -1998,9 +1998,9 @@ func (q *Queries) TaskByID(ctx context.Context, arg TaskByIDParams) (Task, error
 		&i.State,
 		&i.Profile,
 		&i.DispatchRule,
-		&i.LandingMode,
+		&i.MergeMode,
 		&i.AutonomyReview,
-		&i.AutonomyLand,
+		&i.AutonomyMerge,
 		&i.Branch,
 		&i.BaseRef,
 		&i.WorktreePath,
@@ -2010,14 +2010,14 @@ func (q *Queries) TaskByID(ctx context.Context, arg TaskByIDParams) (Task, error
 		&i.AgentName,
 		&i.AgentSession,
 		&i.PrUrl,
-		&i.LandedRef,
+		&i.MergedRef,
 		&i.LastOutputHash,
 		&i.LastWorktreeHash,
 		&i.LastProgressAt,
 		&i.AgentAbsentSince,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.MountID,
+		&i.SandboxID,
 		&i.Launches,
 		&i.GatedSha,
 		&i.AgentServerStartedAt,
@@ -2055,9 +2055,9 @@ func (q *Queries) TaskByPane(ctx context.Context, paneID string) (Task, error) {
 		&i.State,
 		&i.Profile,
 		&i.DispatchRule,
-		&i.LandingMode,
+		&i.MergeMode,
 		&i.AutonomyReview,
-		&i.AutonomyLand,
+		&i.AutonomyMerge,
 		&i.Branch,
 		&i.BaseRef,
 		&i.WorktreePath,
@@ -2067,14 +2067,14 @@ func (q *Queries) TaskByPane(ctx context.Context, paneID string) (Task, error) {
 		&i.AgentName,
 		&i.AgentSession,
 		&i.PrUrl,
-		&i.LandedRef,
+		&i.MergedRef,
 		&i.LastOutputHash,
 		&i.LastWorktreeHash,
 		&i.LastProgressAt,
 		&i.AgentAbsentSince,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.MountID,
+		&i.SandboxID,
 		&i.Launches,
 		&i.GatedSha,
 		&i.AgentServerStartedAt,
@@ -2112,9 +2112,9 @@ func (q *Queries) TaskByWorktree(ctx context.Context, worktreePath string) (Task
 		&i.State,
 		&i.Profile,
 		&i.DispatchRule,
-		&i.LandingMode,
+		&i.MergeMode,
 		&i.AutonomyReview,
-		&i.AutonomyLand,
+		&i.AutonomyMerge,
 		&i.Branch,
 		&i.BaseRef,
 		&i.WorktreePath,
@@ -2124,14 +2124,14 @@ func (q *Queries) TaskByWorktree(ctx context.Context, worktreePath string) (Task
 		&i.AgentName,
 		&i.AgentSession,
 		&i.PrUrl,
-		&i.LandedRef,
+		&i.MergedRef,
 		&i.LastOutputHash,
 		&i.LastWorktreeHash,
 		&i.LastProgressAt,
 		&i.AgentAbsentSince,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.MountID,
+		&i.SandboxID,
 		&i.Launches,
 		&i.GatedSha,
 		&i.AgentServerStartedAt,
@@ -2245,7 +2245,7 @@ func (q *Queries) TaskTransitions(ctx context.Context, arg TaskTransitionsParams
 
 const tasks = `-- name: Tasks :many
 SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker FROM tasks
-WHERE project_id = ? AND state NOT IN ('landed', 'reported', 'torn-down') ORDER BY seq
+WHERE project_id = ? AND state NOT IN ('merged', 'reported', 'torn-down') ORDER BY seq
 `
 
 func (q *Queries) Tasks(ctx context.Context, projectID int64) ([]Task, error) {
@@ -2267,9 +2267,9 @@ func (q *Queries) Tasks(ctx context.Context, projectID int64) ([]Task, error) {
 			&i.State,
 			&i.Profile,
 			&i.DispatchRule,
-			&i.LandingMode,
+			&i.MergeMode,
 			&i.AutonomyReview,
-			&i.AutonomyLand,
+			&i.AutonomyMerge,
 			&i.Branch,
 			&i.BaseRef,
 			&i.WorktreePath,
@@ -2279,14 +2279,14 @@ func (q *Queries) Tasks(ctx context.Context, projectID int64) ([]Task, error) {
 			&i.AgentName,
 			&i.AgentSession,
 			&i.PrUrl,
-			&i.LandedRef,
+			&i.MergedRef,
 			&i.LastOutputHash,
 			&i.LastWorktreeHash,
 			&i.LastProgressAt,
 			&i.AgentAbsentSince,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.MountID,
+			&i.SandboxID,
 			&i.Launches,
 			&i.GatedSha,
 			&i.AgentServerStartedAt,
@@ -2441,27 +2441,6 @@ func (q *Queries) UpdateProjectObservation(ctx context.Context, arg UpdateProjec
 	return err
 }
 
-const updateTaskLanding = `-- name: UpdateTaskLanding :exec
-UPDATE tasks SET pr_url = ?, landed_ref = ?, updated_at = ? WHERE id = ?
-`
-
-type UpdateTaskLandingParams struct {
-	PrUrl     string
-	LandedRef string
-	UpdatedAt int64
-	ID        int64
-}
-
-func (q *Queries) UpdateTaskLanding(ctx context.Context, arg UpdateTaskLandingParams) error {
-	_, err := q.db.ExecContext(ctx, updateTaskLanding,
-		arg.PrUrl,
-		arg.LandedRef,
-		arg.UpdatedAt,
-		arg.ID,
-	)
-	return err
-}
-
 const updateTaskLaunch = `-- name: UpdateTaskLaunch :exec
 UPDATE tasks SET worktree_path = ?, herdr_workspace_id = ?, pane_id = ?, pane_label = ?,
     agent_name = ?, updated_at = ? WHERE id = ?
@@ -2490,21 +2469,21 @@ func (q *Queries) UpdateTaskLaunch(ctx context.Context, arg UpdateTaskLaunchPara
 	return err
 }
 
-const updateTaskMount = `-- name: UpdateTaskMount :exec
-UPDATE tasks SET mount_id = ?, worktree_path = ?, updated_at = ? WHERE id = ?
+const updateTaskMerge = `-- name: UpdateTaskMerge :exec
+UPDATE tasks SET pr_url = ?, landed_ref = ?, updated_at = ? WHERE id = ?
 `
 
-type UpdateTaskMountParams struct {
-	MountID      sql.NullInt64
-	WorktreePath string
-	UpdatedAt    int64
-	ID           int64
+type UpdateTaskMergeParams struct {
+	PrUrl     string
+	MergedRef string
+	UpdatedAt int64
+	ID        int64
 }
 
-func (q *Queries) UpdateTaskMount(ctx context.Context, arg UpdateTaskMountParams) error {
-	_, err := q.db.ExecContext(ctx, updateTaskMount,
-		arg.MountID,
-		arg.WorktreePath,
+func (q *Queries) UpdateTaskMerge(ctx context.Context, arg UpdateTaskMergeParams) error {
+	_, err := q.db.ExecContext(ctx, updateTaskMerge,
+		arg.PrUrl,
+		arg.MergedRef,
 		arg.UpdatedAt,
 		arg.ID,
 	)
@@ -2556,6 +2535,27 @@ func (q *Queries) UpdateTaskObservation(ctx context.Context, arg UpdateTaskObser
 		arg.AgentAbsentSince_2,
 		arg.AgentServerStartedAt_2,
 		arg.IdleSince_2,
+	)
+	return err
+}
+
+const updateTaskSandbox = `-- name: UpdateTaskSandbox :exec
+UPDATE tasks SET mount_id = ?, worktree_path = ?, updated_at = ? WHERE id = ?
+`
+
+type UpdateTaskSandboxParams struct {
+	SandboxID    sql.NullInt64
+	WorktreePath string
+	UpdatedAt    int64
+	ID           int64
+}
+
+func (q *Queries) UpdateTaskSandbox(ctx context.Context, arg UpdateTaskSandboxParams) error {
+	_, err := q.db.ExecContext(ctx, updateTaskSandbox,
+		arg.SandboxID,
+		arg.WorktreePath,
+		arg.UpdatedAt,
+		arg.ID,
 	)
 	return err
 }

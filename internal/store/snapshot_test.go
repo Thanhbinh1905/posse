@@ -24,7 +24,7 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local", AgentSession: `{"session_id":"pi-session"}`, AgentSessionKind: "pi"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Snapshot", MergeMode: "local", AgentSession: `{"session_id":"pi-session"}`, AgentSessionKind: "pi"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestRebuildPreservesWorkspaceMemberOriginHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Snapshot", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestTaskLaunchIdentitiesPersistAndRebuildWithoutLosingProfileChanges(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Author", ShortName: "author", Profile: "author", Branch: "posse/author", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Author", ShortName: "author", Profile: "author", Branch: "posse/author", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestRebuildKeepsMissingLaunchIdentityHistoryUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Legacy", ShortName: "legacy", Profile: "legacy", Branch: "posse/legacy", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Legacy", ShortName: "legacy", Profile: "legacy", Branch: "posse/legacy", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestRebuildCreatesVACUUMBackupBeforeReplacingState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Snapshot", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestBackupDailyRetentionPreservesPreRebuildBackups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local"}); err != nil {
+	if _, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Snapshot", MergeMode: "local"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -353,7 +353,7 @@ func TestBackupDailyReclaimsStaleLock(t *testing.T) {
 	}
 }
 
-func TestRebuildClearsMountIntentAndRuntimeForeignKeys(t *testing.T) {
+func TestRebuildClearsSandboxIntentAndRuntimeForeignKeys(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -364,21 +364,21 @@ func TestRebuildClearsMountIntentAndRuntimeForeignKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Snapshot", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Snapshot", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	prURL := "https://github.com/acme/shop/pull/1"
-	if err := db.UpdateTaskLanding(ctx, taskID, prURL, ""); err != nil {
+	if err := db.UpdateTaskMerge(ctx, taskID, prURL, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, 1, "offline", "watch failed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, filepath.Join(home, "mount"), taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, filepath.Join(home, "sandbox"), taskID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO intents(project_id,task_id,command,step,updated_at) VALUES(?,?,'ride','done:task.create',1)`, project.ID, taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO intents(project_id,task_id,command,step,updated_at) VALUES(?,?,'start','done:task.create',1)`, project.ID, taskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO project_runtime(project_id,server_started_at) VALUES(?,'generation-1')`, project.ID); err != nil {

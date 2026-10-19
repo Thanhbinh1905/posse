@@ -15,27 +15,27 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestTimedOutWatcherGitReadDoesNotLockWorktreeOrFailLookout(t *testing.T) {
+func TestTimedOutWatcherGitReadDoesNotLockWorktreeOrFailWatch(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
-	stopBackgroundLookout(t, f)
+	stopBackgroundWatch(t, f)
 
-	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\npr_poll = \"1ms\"\nstall_after = \"30m\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\npr_poll = \"1ms\"\nstall_after = \"30m\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	brief := filepath.Join(f.root, "watcher-rider.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Watcher timeout fixture\ndone_when: test ends\n---\nWait for the test.\n"), 0o600); err != nil {
+	brief := filepath.Join(f.root, "watcher-worker.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Watcher timeout fixture\ndone_when: test ends\n---\nWait for the test.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output := f.runRideWithStoreBusyRetry(t, brief, "watcher-timeout-fixture"); !strings.Contains(output, "t1") {
-		t.Fatalf("ride did not create t1: %s", output)
+	if output := f.runStartWithStoreBusyRetry(t, brief, "watcher-timeout-fixture"); !strings.Contains(output, "t1") {
+		t.Fatalf("start did not create t1: %s", output)
 	}
 	task := f.mustTask(t, "t1")
 	if !waitForCondition(10*time.Second, func() bool {
 		_, err := os.Stat(filepath.Join(f.root, "worker-ready-t1"))
 		return err == nil
 	}) {
-		t.Fatal("fixture Rider did not reach its working turn")
+		t.Fatal("fixture Worker did not reach its working turn")
 	}
 
 	realGit, err := exec.LookPath("git")
@@ -82,21 +82,21 @@ func TestTimedOutWatcherGitReadDoesNotLockWorktreeOrFailLookout(t *testing.T) {
 	if err := f.db.MarkNoticesDelivered(context.Background(), f.project.ID, []int64{noticeID}, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(f.binary, "lookout", "--ack", strconv.FormatInt(noticeID, 10), "--timeout", "3500")
+	command := exec.Command(f.binary, "watch", "--ack", strconv.FormatInt(noticeID, 10), "--timeout", "3500")
 	command.Dir, command.Env = f.repo, f.leadEnv
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("isolated Lookout failed: %v\n%s", err, output)
+		t.Fatalf("isolated Watch failed: %v\n%s", err, output)
 	}
 	if _, err := os.Stat(statusStarted); err != nil {
-		t.Fatalf("watcher did not read the Rider worktree status: %v\n%s", err, output)
+		t.Fatalf("watcher did not read the Worker worktree status: %v\n%s", err, output)
 	}
 	if data, err := os.ReadFile(statusLog); err != nil || !strings.Contains(string(data), "optional_locks=1") {
 		t.Fatalf("watcher status invocation did not disable optional locks: %q %v", data, err)
 	}
 	lockPath, err := exec.Command(realGit, "-C", task.WorktreePath, "rev-parse", "--git-path", "index.lock").Output()
 	if err != nil {
-		t.Fatalf("resolve Rider index lock path: %v", err)
+		t.Fatalf("resolve Worker index lock path: %v", err)
 	}
 	if _, err := os.Stat(strings.TrimSpace(string(lockPath))); !os.IsNotExist(err) {
 		t.Fatalf("timed-out watcher left index.lock: stat error=%v", err)

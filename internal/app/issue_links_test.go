@@ -11,12 +11,12 @@ import (
 )
 
 func TestDispatchWarnsForMissingAndClosedLinkedIssues(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
-	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"never\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"), 0o600); err != nil {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	briefPath := filepath.Join(fixture.root, "linked-issues.md")
-	brief := "---\ntype: ship\ntitle: Fix linked issues\ndone_when: dispatch warns about issue state\nticket: 12\nrefs: [13]\n---\nWork on the linked issues.\n"
+	brief := "---\ntype: change\ntitle: Fix linked issues\ndone_when: dispatch warns about issue state\nticket: 12\nrefs: [13]\n---\nWork on the linked issues.\n"
 	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -32,12 +32,12 @@ func TestDispatchWarnsForMissingAndClosedLinkedIssues(t *testing.T) {
 }
 
 func TestDispatchRejectsMultipleClosingIssues(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
-	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"never\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"), 0o600); err != nil {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	briefPath := filepath.Join(fixture.root, "multiple-issues.md")
-	brief := "---\ntype: ship\ntitle: Reject multiple issues\ndone_when: dispatch enforces one ticket\nissues: [12, 16]\n---\nDo the work.\n"
+	brief := "---\ntype: change\ntitle: Reject multiple issues\ndone_when: dispatch enforces one ticket\nissues: [12, 16]\n---\nDo the work.\n"
 	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +47,14 @@ func TestDispatchRejectsMultipleClosingIssues(t *testing.T) {
 	}
 }
 
-func TestShowAndFullRosterDisplayIssueLinks(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+func TestShowAndFullListDisplayIssueLinks(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	briefPath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
-	brief := "---\ntype: ship\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12, 16]\nrefs: [18]\n---\nE2E intent\n"
+	brief := "---\ntype: change\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12, 16]\nrefs: [18]\n---\nE2E intent\n"
 	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"show", "t1"}, {"roster", "--full"}} {
+	for _, args := range [][]string{{"show", "t1"}, {"list", "--full"}} {
 		code, output, stderr := fixture.run(args...)
 		if code != 0 {
 			t.Fatalf("%v: %d %s %s", args, code, output, stderr)
@@ -67,22 +67,22 @@ func TestShowAndFullRosterDisplayIssueLinks(t *testing.T) {
 	}
 }
 
-func TestIssueReferenceScopeMatchesProjectAndShipMembers(t *testing.T) {
+func TestIssueReferenceScopeMatchesProjectAndChangeMembers(t *testing.T) {
 	workspace := store.Project{Kind: store.ProjectKindWorkspace}
 	targets := []repoTarget{{Name: "worker"}, {Name: "api"}}
-	brief, err := dispatch.ParseBriefText("---\ntype: ship\ntitle: Update issues\ndone_when: issue scope is valid\nrepos: [worker]\nticket: worker#12\n---\nUpdate the member.\n")
+	brief, err := dispatch.ParseBriefText("---\ntype: change\ntitle: Update issues\ndone_when: issue scope is valid\nrepos: [worker]\nticket: worker#12\n---\nUpdate the member.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := validateBriefIssueReferences(workspace, brief, targets); err != nil {
 		t.Fatalf("valid workspace reference was rejected: %v", err)
 	}
-	if err := validateShipIssueTargets(brief, []repoTarget{{Name: "api"}}); err == nil {
-		t.Fatal("Ship Brief linked an issue in a member without a PR")
+	if err := validateChangeIssueTargets(brief, []repoTarget{{Name: "api"}}); err == nil {
+		t.Fatal("Change Brief linked an issue in a member without a PR")
 	}
-	brief.Type = "scout"
-	if err := validateShipIssueTargets(brief, nil); err != nil {
-		t.Fatalf("non-Ship Brief was restricted to its task members: %v", err)
+	brief.Type = "research"
+	if err := validateChangeIssueTargets(brief, nil); err != nil {
+		t.Fatalf("non-Change Brief was restricted to its task members: %v", err)
 	}
 	if err := validateBriefIssueReferences(store.Project{}, brief, targets); err == nil {
 		t.Fatal("repository Project accepted a workspace member reference")
@@ -90,7 +90,7 @@ func TestIssueReferenceScopeMatchesProjectAndShipMembers(t *testing.T) {
 }
 
 func TestHistoricalMultiIssueLinksAreRestoredWhenAdoptingRequest(t *testing.T) {
-	brief, err := dispatch.ParseHistoricalBriefText("---\ntype: ship\ntitle: Historical workspace issues\ndone_when: old Task compatibility\nissues: [worker#12, api#14]\nrefs: [worker#16, api#18]\n---\n")
+	brief, err := dispatch.ParseHistoricalBriefText("---\ntype: change\ntitle: Historical workspace issues\ndone_when: old Task compatibility\nissues: [worker#12, api#14]\nrefs: [worker#16, api#18]\n---\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestHistoricalMultiIssueLinksAreRestoredWhenAdoptingRequest(t *testing.T) {
 }
 
 func TestWorkspacePRIssueLinksUseMemberIssueNumbers(t *testing.T) {
-	brief, err := dispatch.ParseBriefText("---\ntype: ship\ntitle: Update workspace issues\ndone_when: member links are scoped\nticket: worker#12\nrepos: [worker, api]\nrefs: [worker#16]\n---\nUpdate the workspace.\n")
+	brief, err := dispatch.ParseBriefText("---\ntype: change\ntitle: Update workspace issues\ndone_when: member links are scoped\nticket: worker#12\nrepos: [worker, api]\nrefs: [worker#16]\n---\nUpdate the workspace.\n")
 	if err != nil {
 		t.Fatal(err)
 	}

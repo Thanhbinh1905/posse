@@ -14,14 +14,14 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// shipCandidateTargets resolves the commits a Ship Task currently offers for
-// landing: its branch tip in the Project repository, or in each changed Member
+// shipCandidateTargets resolves the commits a Change Task currently offers for
+// merging: its branch tip in the Project repository, or in each changed Member
 // of a workspace.
-func shipCandidateTargets(ctx context.Context, db *store.DB, project store.Project, ship store.Task) ([]store.ReviewTarget, error) {
-	if ship.Branch == "" {
-		return nil, fmt.Errorf("task %s has no branch", taskIDString(ship.Seq))
+func changeCandidateTargets(ctx context.Context, db *store.DB, project store.Project, change store.Task) ([]store.ReviewTarget, error) {
+	if change.Branch == "" {
+		return nil, fmt.Errorf("task %s has no branch", taskIDString(change.Seq))
 	}
-	ref := "refs/heads/" + ship.Branch
+	ref := "refs/heads/" + change.Branch
 	if !project.IsWorkspace() {
 		sha, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", ref+"^{commit}")
 		if err != nil {
@@ -37,7 +37,7 @@ func shipCandidateTargets(ctx context.Context, db *store.DB, project store.Proje
 	for _, member := range members {
 		paths[member.Name] = filepath.Join(project.Root, member.Path)
 	}
-	repos, err := db.TaskRepos(ctx, ship.ID)
+	repos, err := db.TaskRepos(ctx, change.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func shipCandidateTargets(ctx context.Context, db *store.DB, project store.Proje
 		}
 		root, found := paths[repo.Repo]
 		if !found {
-			return nil, fmt.Errorf("member %s of task %s is not in the workspace", repo.Repo, taskIDString(ship.Seq))
+			return nil, fmt.Errorf("member %s of task %s is not in the workspace", repo.Repo, taskIDString(change.Seq))
 		}
 		sha, err := gitOutput(ctx, root, "rev-parse", "--verify", ref+"^{commit}")
 		if err != nil {
@@ -57,16 +57,16 @@ func shipCandidateTargets(ctx context.Context, db *store.DB, project store.Proje
 		targets = append(targets, store.ReviewTarget{Repository: repo.Repo, Commit: sha})
 	}
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("task %s has no changed repository", taskIDString(ship.Seq))
+		return nil, fmt.Errorf("task %s has no changed repository", taskIDString(change.Seq))
 	}
 	return targets, nil
 }
 
-// reviewableShip refuses a Ship Task that has not completed. Only a completed
+// reviewableChange refuses a Change Task that has not completed. Only a completed
 // candidate has a revision that can be pinned.
-func reviewableShip(ship store.Task) error {
-	if ship.State != store.StateDone && ship.State != store.StateLanding {
-		return axi.Failure("review_target_incomplete", fmt.Sprintf("Ship Task %s is %s; a Review Task targets a completed Ship revision", taskIDString(ship.Seq), ship.State), false, "Wait until the Ship Task is done, then dispatch the Review")
+func reviewableChange(change store.Task) error {
+	if change.State != store.StateDone && change.State != store.StateMerging {
+		return axi.Failure("review_target_incomplete", fmt.Sprintf("Change Task %s is %s; a Review Task targets a completed Change revision", taskIDString(change.Seq), change.State), false, "Wait until the Change Task is done, then dispatch the Review")
 	}
 	return nil
 }
@@ -116,52 +116,52 @@ func shortSHA(sha string) string {
 
 // reviewVerdictQualifies applies the Reviewer identity rule to a recorded
 // verdict: the Reviewer launch that produced it must still differ from every
-// author launch of the Ship Task.
-func reviewVerdictQualifies(ctx context.Context, db *store.DB, ship store.Task) (func(store.ReviewVerdict) bool, error) {
-	launches, err := db.TaskLaunchIdentities(ctx, ship.ID)
+// author launch of the Change Task.
+func reviewVerdictQualifies(ctx context.Context, db *store.DB, change store.Task) (func(store.ReviewVerdict) bool, error) {
+	launches, err := db.TaskLaunchIdentities(ctx, change.ID)
 	if err != nil {
 		return nil, err
 	}
-	known := ship.Launches > 0 && launchHistoryComplete(ship, launches)
+	known := change.Launches > 0 && launchHistoryComplete(change, launches)
 	return func(verdict store.ReviewVerdict) bool {
 		return compareReviewIdentity(launches, known, verdict.Reviewer).Eligible
 	}, nil
 }
 
-// currentReviewPass reports the pass verdict, if any, that qualifies the Ship
+// currentReviewPass reports the pass verdict, if any, that qualifies the Change
 // Task's present candidate for local review.
-func currentReviewPass(ctx context.Context, db *store.DB, project store.Project, ship store.Task) (store.ReviewVerdict, bool, error) {
-	candidate, err := shipCandidateTargets(ctx, db, project, ship)
+func currentReviewPass(ctx context.Context, db *store.DB, project store.Project, change store.Task) (store.ReviewVerdict, bool, error) {
+	candidate, err := changeCandidateTargets(ctx, db, project, change)
 	if err != nil {
 		// A candidate that cannot be resolved has no current pass.
 		return store.ReviewVerdict{}, false, nil
 	}
-	return reviewPassFor(ctx, db, ship, candidate)
+	return reviewPassFor(ctx, db, change, candidate)
 }
 
-func reviewPassFor(ctx context.Context, db *store.DB, ship store.Task, candidate []store.ReviewTarget) (store.ReviewVerdict, bool, error) {
-	qualifies, err := reviewVerdictQualifies(ctx, db, ship)
+func reviewPassFor(ctx context.Context, db *store.DB, change store.Task, candidate []store.ReviewTarget) (store.ReviewVerdict, bool, error) {
+	qualifies, err := reviewVerdictQualifies(ctx, db, change)
 	if err != nil {
 		return store.ReviewVerdict{}, false, err
 	}
-	return db.CurrentReviewPass(ctx, ship.ID, candidate, qualifies)
+	return db.CurrentReviewPass(ctx, change.ID, candidate, qualifies)
 }
 
 // requireReviewPass requires a D01 pass of the exact candidate: commit when
 // given, otherwise the current Task branch tips.
-func requireReviewPass(ctx context.Context, db *store.DB, project store.Project, ship store.Task, commit string) error {
+func requireReviewPass(ctx context.Context, db *store.DB, project store.Project, change store.Task, commit string) error {
 	var ok bool
 	var err error
 	if commit == "" {
-		_, ok, err = currentReviewPass(ctx, db, project, ship)
+		_, ok, err = currentReviewPass(ctx, db, project, change)
 	} else {
-		_, ok, err = reviewPassFor(ctx, db, ship, []store.ReviewTarget{{Repository: project.Name, Commit: commit}})
+		_, ok, err = reviewPassFor(ctx, db, change, []store.ReviewTarget{{Repository: project.Name, Commit: commit}})
 	}
 	if err != nil {
 		return err
 	}
 	if !ok {
-		id := taskIDString(ship.Seq)
+		id := taskIDString(change.Seq)
 		revision := "its current revision"
 		if commit != "" {
 			revision = "candidate " + shortSHA(commit)
@@ -178,7 +178,7 @@ func requireSelectedReview(ctx context.Context, db *store.DB, project store.Proj
 }
 
 // requireSelectedReviewAt binds the selected evidence to commit, the exact
-// pull request head a Posse merge will land. An empty commit uses the Task
+// pull request head a Posse merge will merge. An empty commit uses the Task
 // branch tip, which is the candidate of local integration.
 func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit string) error {
 	policies, err := selectedReviewPolicies(ctx, db, project, cfg, task)
@@ -238,7 +238,7 @@ func selectedReviewPolicies(ctx context.Context, db *store.DB, project store.Pro
 	}
 	var policies []string
 	for _, repo := range repos {
-		if repo.State == store.TaskRepoLanded {
+		if repo.State == store.TaskRepoMerged {
 			continue
 		}
 		ahead, err := commitsAhead(ctx, repo.WorktreePath, repo.BaseRef, "refs/heads/"+task.Branch)

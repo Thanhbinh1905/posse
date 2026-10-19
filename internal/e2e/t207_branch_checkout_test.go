@@ -13,16 +13,16 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// Only command timing is changed. The Rider, Landing and prune use the real CLI.
+// Only command timing is changed. The Worker, Merge and prune use the real CLI.
 func TestPrunePreservesBranchCheckedOutAfterFinalCheck(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
-	brief := filepath.Join(f.root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
+	brief := filepath.Join(f.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
+	f.startAndComplete(t, brief, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merged, task.GatedSHA)
@@ -33,9 +33,9 @@ func TestPrunePreservesBranchCheckedOutAfterFinalCheck(t *testing.T) {
 	}
 	ref := "refs/heads/" + task.Branch
 	gitTest(t, f.env, f.repo, "update-ref", ref, task.GatedSHA)
-	dry := runPosse(t, f.binary, f.repo, f.leadEnv, "remuda", "prune")
+	dry := runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune")
 	if !strings.Contains(dry, task.Branch) {
-		t.Fatalf("safe leftover branch was not planned: %s", dry)
+		t.Fatalf("safe orphan branch was not planned: %s", dry)
 	}
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -51,7 +51,7 @@ func TestPrunePreservesBranchCheckedOutAfterFinalCheck(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	prune := exec.Command(f.binary, "remuda", "prune", "--yes")
+	prune := exec.Command(f.binary, "pool", "prune", "--yes")
 	prune.Dir, prune.Env = f.repo, setEnv(f.leadEnv, "PATH", shimDir+":"+t202EnvValue(f.leadEnv, "PATH"))
 	output := filepath.Join(f.root, "branch-prune-output")
 	out, err := os.Create(output)
@@ -72,7 +72,7 @@ func TestPrunePreservesBranchCheckedOutAfterFinalCheck(t *testing.T) {
 		contents, _ := os.ReadFile(output)
 		t.Fatalf("prune did not reach deletion after its final checks: %s", contents)
 	}
-	// Ordinary Git checkout does not participate in Posse's Mount-state lock.
+	// Ordinary Git checkout does not participate in Posse's Sandbox-state lock.
 	foreign := filepath.Join(f.root, "foreign-worktree")
 	gitTest(t, f.env, f.repo, "worktree", "add", foreign, task.Branch)
 	if err := os.WriteFile(filepath.Join(foreign, "uncommitted-foreign-work.txt"), []byte("foreign work must survive\n"), 0o600); err != nil {

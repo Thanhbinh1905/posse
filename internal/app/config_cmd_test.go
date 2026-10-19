@@ -55,7 +55,7 @@ func TestConfigUserOnlyBoundaryForPaneRoles(t *testing.T) {
 	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	workerID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "scout", Title: "Config", State: store.StateSpawning, LandingMode: "local", PaneID: "w1:p2"})
+	workerID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "research", Title: "Config", State: store.StateSpawning, MergeMode: "local", PaneID: "w1:p2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestConfigUserOnlyBoundaryForPaneRoles(t *testing.T) {
 		t.Fatalf("Lead could not change a shared setting: %s %s", output, errorsOut)
 	}
 	output.Reset()
-	if code := cli.Run([]string{"config", "set", "autonomy.land", `"auto"`, "--project", "shop"}); code != 1 || !strings.Contains(output.String()+errorsOut.String(), "user_only") {
+	if code := cli.Run([]string{"config", "set", "autonomy.merge", `"auto"`, "--project", "shop"}); code != 1 || !strings.Contains(output.String()+errorsOut.String(), "user_only") {
 		t.Fatalf("Lead was allowed to change a User-only setting: code=%d out=%s err=%s", code, output, errorsOut)
 	}
 	output.Reset()
@@ -122,7 +122,7 @@ func TestConfigUserOnlyApprovalIsRecordedForLeadOnly(t *testing.T) {
 	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "scout", Title: "Config", State: store.StateSpawning, LandingMode: "local", PaneID: "w1:p2"}); err != nil {
+	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "research", Title: "Config", State: store.StateSpawning, MergeMode: "local", PaneID: "w1:p2"}); err != nil {
 		t.Fatal(err)
 	}
 	service := testService(home, herdr.NewFake())
@@ -228,7 +228,7 @@ func TestConfigSetWarnsWhenSelectingNoMistakesPolicies(t *testing.T) {
 	cli.Out, cli.ErrOut = output, errorsOut
 	t.Chdir(repo)
 	installReadyNoMistakes(t)
-	for _, key := range []string{"defaults.landing_mode", "repositories.api.landing_mode", "defaults.review", "repositories.api.review"} {
+	for _, key := range []string{"defaults.merge_mode", "repositories.api.merge_mode", "defaults.review", "repositories.api.review"} {
 		output.Reset()
 		errorsOut.Reset()
 		if code := cli.Run([]string{"config", "set", key, "no-mistakes", "--project", "shop"}); code != 0 || !strings.Contains(output.String()+errorsOut.String(), "deprecated") {
@@ -281,7 +281,7 @@ func TestNextTaskSequenceIgnoresBranchNamesAndSkipsTaskDirectories(t *testing.T)
 	if err := os.MkdirAll(filepath.Join(home, "projects", "shop", "tasks", "t1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, sequence, err := createTaskWithSequence(context.Background(), db, project, home, store.Task{Type: "scout", Title: "Sequence", ShortName: "sequence", LandingMode: "local"})
+	_, sequence, err := createTaskWithSequence(context.Background(), db, project, home, store.Task{Type: "research", Title: "Sequence", ShortName: "sequence", MergeMode: "local"})
 	if err != nil || sequence != 2 {
 		t.Fatalf("next safe sequence = %d, %v; want 2", sequence, err)
 	}
@@ -300,7 +300,7 @@ func TestReadAndSignalContinueWhenHerdrIsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "scout", Title: "Offline", LandingMode: "local", PaneID: "w1:p2"})
+	taskID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "research", Title: "Offline", MergeMode: "local", PaneID: "w1:p2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,12 +318,12 @@ func TestReadAndSignalContinueWhenHerdrIsDown(t *testing.T) {
 	cli.Out, cli.ErrOut = output, errorsOut
 	t.Chdir(repo)
 	t.Setenv("HERDR_PANE_ID", "")
-	if code := cli.Run([]string{"roster"}); code != 0 {
+	if code := cli.Run([]string{"list"}); code != 0 {
 		t.Fatalf("read-only list failed while Herdr was down: code=%d out=%s err=%s", code, output, errorsOut)
 	}
 	output.Reset()
 	t.Setenv("HERDR_PANE_ID", "w1:p2")
-	if code := cli.Run([]string{"holler", "needs-decision", "blocked offline"}); code != 0 {
+	if code := cli.Run([]string{"signal", "needs-decision", "blocked offline"}); code != 0 {
 		t.Fatalf("Worker Signal failed while Herdr was down: code=%d out=%s err=%s", code, output, errorsOut)
 	}
 	db, err = store.Open(home)
@@ -357,7 +357,7 @@ func TestContextPrintsOnlyForRecordedPane(t *testing.T) {
 	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "scout", Title: "Worker context", LandingMode: "local", PaneID: "w1:p2"}); err != nil {
+	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "research", Title: "Worker context", MergeMode: "local", PaneID: "w1:p2"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -400,7 +400,7 @@ func TestConfigSchemaRunsThroughCLIInToonAndJSON(t *testing.T) {
 	if code := cli.Run([]string{"config", "schema"}); code != 0 {
 		t.Fatalf("config schema TOON exit=%d stdout=%q stderr=%q", code, output, errorsOut)
 	}
-	if !strings.Contains(output.String(), "notice_delivery") || !strings.Contains(output.String(), "claude: lookout") || !strings.Contains(output.String(), "codex: codex-queue") {
+	if !strings.Contains(output.String(), "notice_delivery") || !strings.Contains(output.String(), "claude: watch") || !strings.Contains(output.String(), "codex: codex-queue") {
 		t.Fatalf("config schema TOON omitted typed map default: %s", output)
 	}
 	output.Reset()
@@ -421,7 +421,7 @@ func TestConfigSchemaRunsThroughCLIInToonAndJSON(t *testing.T) {
 	for _, row := range decoded.Keys {
 		userOnly[row.Key] = row.UserOnly
 	}
-	for key, want := range map[string]bool{"defaults.gate": true, "review_loop.max_rounds": true, "gate_loop.max_fix_rounds": true, "ci_loop.max_fix_rounds": true, "remuda.setup": true, "kinds.<kind>.lead_auto_approve": true, "autonomy.yolo": true, "autonomy.review": true, "autonomy.land": true, "defaults.landing_mode": false} {
+	for key, want := range map[string]bool{"defaults.gate": true, "review_loop.max_rounds": true, "gate_loop.max_fix_rounds": true, "ci_loop.max_fix_rounds": true, "pool.setup": true, "kinds.<kind>.lead_auto_approve": true, "autonomy.yolo": true, "autonomy.review": true, "autonomy.merge": true, "defaults.merge_mode": false} {
 		if userOnly[key] != want {
 			t.Fatalf("config schema user_only for %s = %v, want %v", key, userOnly[key], want)
 		}
@@ -431,7 +431,7 @@ func TestConfigSchemaRunsThroughCLIInToonAndJSON(t *testing.T) {
 			continue
 		}
 		var defaults map[string]string
-		if err := json.Unmarshal(row.Default, &defaults); err != nil || defaults["claude"] != "lookout" || defaults["pi"] != "pi-extension" || defaults["opencode"] != "opencode-plugin" {
+		if err := json.Unmarshal(row.Default, &defaults); err != nil || defaults["claude"] != "watch" || defaults["pi"] != "pi-extension" || defaults["opencode"] != "opencode-plugin" {
 			t.Fatalf("notice_delivery JSON default = %s, %v", row.Default, err)
 		}
 		return
@@ -490,13 +490,13 @@ func TestContextDoesNotCallRecordedButMissingLeadLive(t *testing.T) {
 	}
 }
 
-func TestRecoverRebuildIsUserOnlyAndFindsOrphanedMounts(t *testing.T) {
+func TestRecoverRebuildIsUserOnlyAndFindsOrphanedSandboxes(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	worktree := filepath.Join(root, "orphan-mount")
+	worktree := filepath.Join(root, "orphan-sandbox")
 	gitTest(t, repo, "worktree", "add", "-b", "posse/t2", worktree, "main")
 	home := filepath.Join(root, "posse")
 	db, err := store.Open(home)
@@ -510,7 +510,7 @@ func TestRecoverRebuildIsUserOnlyAndFindsOrphanedMounts(t *testing.T) {
 	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "scout", Title: "Saved", LandingMode: "local"})
+	taskID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "research", Title: "Saved", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,6 +550,6 @@ func TestRecoverRebuildIsUserOnlyAndFindsOrphanedMounts(t *testing.T) {
 	}
 	orphan, err := db.Task(context.Background(), project.ID, "t2")
 	if err != nil || orphan.State != store.StateLost || orphan.Branch != "posse/t2" || filepath.Clean(orphan.WorktreePath) != filepath.Clean(worktree) {
-		t.Fatalf("orphaned Mount was not recovered: %#v, %v", orphan, err)
+		t.Fatalf("orphaned Sandbox was not recovered: %#v, %v", orphan, err)
 	}
 }

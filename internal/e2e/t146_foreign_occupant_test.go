@@ -17,7 +17,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// Drive the real isolated Herdr server with a foreign Rider-pane occupant and
+// Drive the real isolated Herdr server with a foreign Worker-pane occupant and
 // a working Lead, so the test deterministically skips notice prompt delivery.
 type t146ReadinessAdapter struct {
 	*herdr.Client
@@ -34,15 +34,15 @@ func (a *t146ReadinessAdapter) Call(ctx context.Context, method string, params m
 }
 
 func TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	ctx := context.Background()
-	task := f.ride(t, "t1", "Foreign occupant", "foreign-occupant")
+	task := f.start(t, "t1", "Foreign occupant", "foreign-occupant")
 	f.fail(t, "t1")
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, noticeErr := db.CreateNotice(ctx, store.Notice{ProjectID: f.projectID, TaskID: task.ID, Kind: "worker_failed", Summary: "Rider failed", DataJSON: `{}`})
+	_, noticeErr := db.CreateNotice(ctx, store.Notice{ProjectID: f.projectID, TaskID: task.ID, Kind: "worker_failed", Summary: "Worker failed", DataJSON: `{}`})
 	_ = db.Close()
 	if noticeErr != nil {
 		t.Fatal(noticeErr)
@@ -67,7 +67,7 @@ func TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard(t *testing.T) {
 		}
 		return false
 	}) {
-		t.Fatal("original Rider did not return to its shell")
+		t.Fatal("original Worker did not return to its shell")
 	}
 	if _, err := f.client.Call(ctx, "pane.rename", map[string]any{"pane_id": task.PaneID, "label": "foreign-agent"}); err != nil {
 		t.Fatal(err)
@@ -121,11 +121,11 @@ func TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard(t *testing.T) {
 	cli := service.CLI()
 	var output bytes.Buffer
 	cli.Out, cli.ErrOut = &output, &output
-	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
+	code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved this discard"})
 	if adapter.failures != 0 {
 		t.Fatalf("working Lead unexpectedly received a notice prompt: failures=%d exit=%d output=%s", adapter.failures, code, output.String())
 	}
-	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") {
+	if code == 0 || !strings.Contains(output.String(), "teardown_incomplete") {
 		t.Fatalf("unproven foreign foreground process was not refused with a typed Teardown error: exit=%d output=%s", code, output.String())
 	}
 	contents, fileErr := os.ReadFile(work)
@@ -149,8 +149,8 @@ func TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard(t *testing.T) {
 	if err != nil || updated.State != store.StateFailed {
 		t.Fatalf("Task after refused Teardown = %#v, %v", updated, err)
 	}
-	mounts, err := db.Mounts(ctx, f.projectID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "held" {
-		t.Fatalf("Mount after refused Teardown = %#v, %v", mounts, err)
+	sandboxes, err := db.Sandboxes(ctx, f.projectID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "held" {
+		t.Fatalf("Sandbox after refused Teardown = %#v, %v", sandboxes, err)
 	}
 }

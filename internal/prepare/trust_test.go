@@ -93,7 +93,7 @@ func TestClaudeTrustDoesNotCarryRecordedImportDecline(t *testing.T) {
 	}
 }
 
-func TestClaudeTrustNeverOverwritesRecordedFalseOrMountImportAnswers(t *testing.T) {
+func TestClaudeTrustNeverOverwritesRecordedFalseOrSandboxImportAnswers(t *testing.T) {
 	project, worktree := gitProjectAndWorktree(t)
 	configDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
@@ -116,12 +116,12 @@ func TestClaudeTrustNeverOverwritesRecordedFalseOrMountImportAnswers(t *testing.
 		t.Fatal(err)
 	}
 	primary := result.Projects[project]
-	mount := result.Projects[worktree]
-	if string(primary["hasTrustDialogAccepted"]) != "false" || string(mount["hasTrustDialogAccepted"]) != "false" {
+	sandbox := result.Projects[worktree]
+	if string(primary["hasTrustDialogAccepted"]) != "false" || string(sandbox["hasTrustDialogAccepted"]) != "false" {
 		t.Fatalf("recorded trust decisions were overwritten: %s", data)
 	}
-	if string(mount["hasClaudeMdExternalIncludesApproved"]) != "false" || string(mount["hasClaudeMdExternalIncludesWarningShown"]) != "true" {
-		t.Fatalf("Mount import answers were overwritten: %s", data)
+	if string(sandbox["hasClaudeMdExternalIncludesApproved"]) != "false" || string(sandbox["hasClaudeMdExternalIncludesWarningShown"]) != "true" {
+		t.Fatalf("Sandbox import answers were overwritten: %s", data)
 	}
 }
 
@@ -178,7 +178,7 @@ func TestCodexTrustAppendsWithoutReencodingCommentsOrKeyOrder(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	worktree := filepath.Join(t.TempDir(), "mount with \"quotes\"")
+	worktree := filepath.Join(t.TempDir(), "sandbox with \"quotes\"")
 	if err := CodexTrust(worktree); err != nil {
 		t.Fatal(err)
 	}

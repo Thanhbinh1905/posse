@@ -119,7 +119,7 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			env = setEnv(env, "POSSE_TEST_ROOT", root)
 			env = setEnv(env, "POSSE_E2E_CAPTURE_FILE", capture)
 			env = setEnv(env, "POSSE_E2E_SKILL_READS", skillReads)
-			env = setEnv(env, "POSSE_E2E_WORKTREES", filepath.Join(root, "posse", "remuda"))
+			env = setEnv(env, "POSSE_E2E_WORKTREES", filepath.Join(root, "posse", "pool"))
 			env = setEnv(env, "POSSE_E2E_RELEASE", release)
 			env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+"/usr/local/bin:/usr/bin:/bin")
 			env = setEnv(env, "GIT_AUTHOR_NAME", "Posse E2E")
@@ -137,7 +137,7 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			repo := filepath.Join(root, "repo")
 			remote := filepath.Join(root, "remote.git")
 			initRepository(t, repo, remote, env)
-			config := "[lead]\nkind = \"" + kind + "\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\nmax_workers = 2\n\n[remuda]\nkeep_idle = 1\n\n[profiles.worker]\nkind = \"" + kind + "\"\n\n[dispatch.default]\nuse = \"worker\"\n"
+			config := "[lead]\nkind = \"" + kind + "\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 2\n\n[pool]\nkeep_idle = 1\n\n[profiles.worker]\nkind = \"" + kind + "\"\n\n[dispatch.default]\nuse = \"worker\"\n"
 			if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(config), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -175,23 +175,23 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			leadEnv := setEnv(env, "HERDR_ENV", "1")
 			leadEnv = setEnv(leadEnv, "HERDR_PANE_ID", project.LeadPaneID)
 			leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
-			brief := filepath.Join(root, "ship.md")
-			if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Launch skills\ndone_when: injected skills are readable\n---\nVerify launch skill injection.\n"), 0o600); err != nil {
+			brief := filepath.Join(root, "change.md")
+			if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Launch skills\ndone_when: injected skills are readable\n---\nVerify launch skill injection.\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			command := exec.Command(binary, "ride", "--brief", brief, "--name", "launch-skills")
+			command := exec.Command(binary, "start", "--brief", brief, "--name", "launch-skills")
 			command.Dir, command.Env = repo, leadEnv
-			output, rideErr := command.CombinedOutput()
-			if rideErr != nil || !strings.Contains(string(output), "working") {
+			output, startErr := command.CombinedOutput()
+			if startErr != nil || !strings.Contains(string(output), "working") {
 				snapshot, _ := client.Snapshot(context.Background())
 				reportLog, _ := os.ReadFile(filepath.Join(root, "report-agent.log"))
 				argsLog, _ := os.ReadFile(capture)
 				failedTask, _ := db.Task(context.Background(), project.ID, "t1")
-				t.Fatalf("start %s Rider: err=%v output=%s task=%#v snapshot=%#v reports=%s args=%s", kind, rideErr, output, failedTask, snapshot, reportLog, argsLog)
+				t.Fatalf("start %s Worker: err=%v output=%s task=%#v snapshot=%#v reports=%s args=%s", kind, startErr, output, failedTask, snapshot, reportLog, argsLog)
 			}
 			task, err := db.Task(context.Background(), project.ID, "t1")
 			if err != nil {
-				t.Fatalf("read launched Rider Task: %v", err)
+				t.Fatalf("read launched Worker Task: %v", err)
 			}
 			argsContents, err := os.ReadFile(capture)
 			if err != nil {
@@ -208,7 +208,7 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 				}
 			case "pi":
 				if strings.Count(string(argsContents), "--skill") < 4 {
-					t.Fatalf("Pi Lead/Rider args omitted skill paths: %s", argsContents)
+					t.Fatalf("Pi Lead/Worker args omitted skill paths: %s", argsContents)
 				}
 			}
 			contents, err := os.ReadFile(skillReads)
@@ -221,7 +221,7 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 				filepath.Join(task.WorktreePath, ".agents"), filepath.Join(task.WorktreePath, ".claude"), filepath.Join(task.WorktreePath, ".pi"), filepath.Join(task.WorktreePath, ".codex"),
 			} {
 				if _, err := os.Lstat(path); !os.IsNotExist(err) {
-					t.Fatalf("%s launch created a global, Project or Mount skill path %s: %v", kind, path, err)
+					t.Fatalf("%s launch created a global, Project or Sandbox skill path %s: %v", kind, path, err)
 				}
 			}
 			unrelatedEnv := setEnv(env, "POSSE_E2E_CAPTURE_FILE", unrelatedCapture)

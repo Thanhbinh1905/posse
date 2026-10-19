@@ -11,7 +11,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// down stops the Project's Lead and Lookout. The Project stays registered,
+// down stops the Project's Lead and Watch. The Project stays registered,
 // but nothing restarts it until the User runs `posse up` in its folder.
 func (s *Service) down(ctx *axi.Context, args []string) error {
 	parsed, err := parseArgs("down", args, map[string]flagSpec{})
@@ -32,7 +32,7 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	}
 	actor := s.configCaller(ctx.Context, db)
 	if actor.role == "worker" || actor.role == "agent" {
-		return axi.Failure("user_only", "posse down cannot run from a Rider or agent context", false, "Run `posse down` from a User shell in the Project folder")
+		return axi.Failure("user_only", "posse down cannot run from a Worker or agent context", false, "Run `posse down` from a User shell in the Project folder")
 	}
 	if task, taskErr := taskForPath(ctx.Context, db, dir); taskErr == nil {
 		plan, planErr := task.AdmittedPlan()
@@ -40,7 +40,7 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 			return admittedPlanFailure(planErr)
 		}
 		if plan == nil || plan.Execution.Mode != "in-place" {
-			return axi.Failure("user_only", "posse down cannot run inside a Rider Mount", false, "Run `posse down` in the Project folder")
+			return axi.Failure("user_only", "posse down cannot run inside a Worker Sandbox", false, "Run `posse down` in the Project folder")
 		}
 	} else if !store.IsNotFound(taskErr) {
 		return taskErr
@@ -74,7 +74,7 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		for _, task := range tasks {
 			names = append(names, taskIDString(task.Seq)+" ("+string(task.State)+")")
 		}
-		return axi.Failure("tasks_open", fmt.Sprintf("Project %s still has running Tasks: %s", project.Name, strings.Join(names, ", ")), false, "Finish or unsaddle them first; `posse roster` shows them")
+		return axi.Failure("tasks_open", fmt.Sprintf("Project %s still has running Tasks: %s", project.Name, strings.Join(names, ", ")), false, "Finish or teardown them first; `posse list` shows them")
 	}
 	if s.Herdr == nil {
 		return axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
@@ -95,7 +95,7 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	var closed, kept []string
 	for _, pane := range snapshot.Panes {
 		isLead := pane.Label == leadLabel || project.LeadPaneID != "" && pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID
-		if !isLead && pane.Label != lookoutTabLabel(project) {
+		if !isLead && pane.Label != watchTabLabel(project) {
 			continue
 		}
 		if isLead && pane.Agent != "" {
@@ -119,41 +119,41 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		}
 		closed = append(closed, pane.PaneID)
 	}
-	processes, err := s.runningLookouts(ctx.Context, home)
+	processes, err := s.runningWatches(ctx.Context, home)
 	if err != nil {
 		return err
 	}
-	var owned, pollers, leadLookouts []lookoutProcess
+	var owned, watches, leadWatches []watchProcess
 	for _, process := range processes {
 		if !processBelongsToProject(process, project) {
 			continue
 		}
 		owned = append(owned, process)
 		if process.PollOnly {
-			pollers = append(pollers, process)
+			watches = append(watches, process)
 		} else {
-			leadLookouts = append(leadLookouts, process)
+			leadWatches = append(leadWatches, process)
 		}
 	}
-	if remaining, err := stopLookoutProcesses(ctx.Context, home, leadLookouts); err != nil {
+	if remaining, err := stopWatchProcesses(ctx.Context, home, leadWatches); err != nil {
 		return err
-	} else if !allLookoutsStopped(remaining) {
-		return axi.Failure("lookout_stop_failed", "a Lookout of Project "+project.Name+" is still running", true, "Retry `posse down`")
+	} else if !allWatchesStopped(remaining) {
+		return axi.Failure("watch_stop_failed", "a Watch of Project "+project.Name+" is still running", true, "Retry `posse down`")
 	}
-	for _, poller := range pollers {
-		if err := stopStoredLookoutPoller(ctx.Context, home, poller); err != nil {
-			return axi.Failure("lookout_stop_failed", "the Project poller is still completing maintenance", true, "Retry `posse down` after it stops")
+	for _, watch := range watches {
+		if err := stopStoredWatchRuntime(ctx.Context, home, watch); err != nil {
+			return axi.Failure("watch_stop_failed", "the Project watch is still completing maintenance", true, "Retry `posse down` after it stops")
 		}
 	}
-	if !allLookoutsStopped(owned) {
-		return axi.Failure("lookout_stop_failed", "a Lookout of Project "+project.Name+" is still running", true, "Retry `posse down`")
+	if !allWatchesStopped(owned) {
+		return axi.Failure("watch_stop_failed", "a Watch of Project "+project.Name+" is still running", true, "Retry `posse down`")
 	}
-	poller, err := db.LookoutPoller(ctx.Context, project.ID)
+	watch, err := db.WatchRuntime(ctx.Context, project.ID)
 	if err != nil {
 		return err
 	}
-	if poller.PID > 0 {
-		if err := db.ClearLookoutPoller(ctx.Context, project.ID, poller.PID, poller.Token); err != nil {
+	if watch.PID > 0 {
+		if err := db.ClearWatchRuntime(ctx.Context, project.ID, watch.PID, watch.Token); err != nil {
 			return err
 		}
 	}

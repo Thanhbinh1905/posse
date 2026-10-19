@@ -156,7 +156,7 @@ func TestNoMistakesReceiptQualifiesExactHeadAndIsRecordedOnce(t *testing.T) {
 	}
 	// A local pass is not a pipeline receipt.
 	stubNoMistakesReceipt(t, func(string) (string, error) { return "", errors.New("exit status 1: unknown flag: --head") })
-	if code, out := f.holler(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
+	if code, out := f.signal(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
 		t.Fatalf("verdict: %d %s", code, out)
 	}
 	requireFailureCode(t, requireSelectedReviewAt(ctx, f.db, f.project, config.Config{}, f.task, f.headSHA), "review_receipt_unsupported")
@@ -165,7 +165,7 @@ func TestNoMistakesReceiptQualifiesExactHeadAndIsRecordedOnce(t *testing.T) {
 func TestLocalReviewBindsToExplicitPullRequestHead(t *testing.T) {
 	f := newReviewVerdictFixture(t)
 	freezeReviewPolicy(t, f, "local", taskplan.Version)
-	if code, out := f.holler(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
+	if code, out := f.signal(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
 		t.Fatalf("verdict: %d %s", code, out)
 	}
 	ctx := context.Background()
@@ -187,7 +187,7 @@ func TestMergedPullRequestWithoutEvidenceIsPolicyViolation(t *testing.T) {
 	if verdicts, err := f.db.ReviewVerdictsFor(context.Background(), f.task.ID); err != nil || len(verdicts) != 0 {
 		t.Fatalf("violation fabricated a verdict: %#v %v", verdicts, err)
 	}
-	if code, out := f.holler(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
+	if code, out := f.signal(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
 		t.Fatalf("verdict: %d %s", code, out)
 	}
 	if _, violated := reviewPolicyViolation(context.Background(), f.db, f.project, config.Config{}, f.task, merged); violated {

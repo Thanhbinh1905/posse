@@ -20,7 +20,7 @@ func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) 
 	if !ok {
 		return taskplan.Launch{}, axi.Failure("config_invalid", "Task Profile uses unknown agent kind "+resolution.Resolved.Kind, false)
 	}
-	// Lead-only launch and delivery settings are not inputs to a Rider contract.
+	// Lead-only launch and delivery settings are not inputs to a Worker contract.
 	kind = config.Kind{AutoApproveArgs: kind.AutoApproveArgs, ModelArgs: kind.ModelArgs, EffortArgs: kind.EffortArgs, ResumeArgs: kind.ResumeArgs,
 		Prepare: kind.Prepare, BackgroundCommands: kind.BackgroundCommands, Steer: kind.Steer, InterruptKeys: kind.InterruptKeys}
 	args := workerAgentArgs(resolution.Resolved, kind, "")
@@ -43,7 +43,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
-	execution := taskplan.Execution{Mode: "mount", Scope: project.Kind, Base: task.BaseRef, Target: task.TargetBranch, RootContext: brief.RootContext}
+	execution := taskplan.Execution{Mode: "sandbox", Scope: project.Kind, Base: task.BaseRef, Target: task.TargetBranch, RootContext: brief.RootContext}
 	if project.IsDirectory() {
 		execution.Mode, execution.Scope, execution.Base, execution.Target = "in-place", store.ProjectKindDirectory, "", ""
 	}
@@ -60,7 +60,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		}
 	}
 	for _, member := range members {
-		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.LandingMode, Gate: memberGates(cfg, member.Name), Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
+		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.MergeMode, Gate: memberGates(cfg, member.Name), Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
 		if cfg.Repositories[member.Name].Review != "" {
 			selected.ReviewSource = "repositories." + member.Name + ".review"
 		}
@@ -72,7 +72,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		}
 		execution.Members = append(execution.Members, selected)
 	}
-	preferences, err := preferenceSources(home, project, "rider")
+	preferences, err := preferenceSources(home, project, "worker")
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
@@ -100,21 +100,21 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
-	delivery := cfg.Defaults.LandingMode
+	delivery := cfg.Defaults.MergeMode
 	review := cfg.Defaults.Review
 	if project.IsDirectory() {
 		delivery = "local"
 		review = "none"
 	}
 	if project.IsWorkspace() {
-		delivery = task.LandingMode
+		delivery = task.MergeMode
 	}
 	return taskplan.Resolve(taskplan.Request{Brief: taskplan.Select("brief", source, briefData), Inputs: inputs, Execution: execution, Launch: launch,
 		Review: review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
 		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		Gate:  cfg.Defaults.Gate, ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, Gate: cfg.GateLoop, CI: cfg.CILoop},
-		MergeMethod: cfg.Defaults.MergeMethod, Remuda: config.Remuda{Clean: cfg.Remuda.Clean, Setup: cfg.Remuda.Setup}})
+		MergeMethod: cfg.Defaults.MergeMethod, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup}})
 }
 
 // Restore files absent after a crash from the admitted inputs, never from
@@ -151,10 +151,10 @@ func restoreAdmittedLaunchFiles(project store.Project, task store.Task, plan *ta
 	}
 	var members []taskMember
 	for _, member := range plan.Execution.Members {
-		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, LandingMode: member.Delivery})
+		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, MergeMode: member.Delivery})
 	}
 	contents := workerProtocol(project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext, plan.ProseLanguage) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
-	contents = appendPreferenceInstructions(contents, "rider", planPreferences(plan))
+	contents = appendPreferenceInstructions(contents, "worker", planPreferences(plan))
 	return writeFile(launchPath, []byte(contents))
 }
 
@@ -172,7 +172,7 @@ func planPreferences(plan *taskplan.Plan) []preferenceSource {
 // migrating store, prepare a Project, inspect Herdr or poll a forge.
 func (s *Service) status(ctx *axi.Context, args []string) error {
 	if len(args) != 0 {
-		return axi.Usage("status takes no Task id; a Rider may inspect only its own status")
+		return axi.Usage("status takes no Task id; a Worker may inspect only its own status")
 	}
 	home, err := s.homePath()
 	if err != nil {
@@ -188,7 +188,7 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 		if store.IsBusy(err) {
 			return err
 		}
-		return axi.Failure("worker_task_unknown", "cannot find this Rider's Task", false, "Run `posse status` from the Rider's pane or Mount")
+		return axi.Failure("worker_task_unknown", "cannot find this Worker's Task", false, "Run `posse status` from the Worker's pane or Sandbox")
 	}
 	plan, err := task.AdmittedPlan()
 	if err != nil {

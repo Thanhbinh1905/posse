@@ -348,7 +348,7 @@ func gitlabObservationWithChecks(ctx context.Context, forge repositoryForge, tas
 	if includeChecks && mr.HeadPipeline != nil {
 		switch mr.HeadPipeline.Status {
 		case "success":
-			// Mergeability still controls land_ready below.
+			// Mergeability still controls merge_ready below.
 		case "running", "pending", "created", "waiting_for_resource", "preparing", "manual", "scheduled":
 			checks.State = "PENDING"
 		case "failed", "canceled", "cancelled", "skipped":

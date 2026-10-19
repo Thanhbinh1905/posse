@@ -43,7 +43,7 @@ func compareReviewIdentity(authorLaunches []store.TaskLaunchIdentity, authorHist
 		reasons = append(reasons, "the Review Task has no determinable configured model")
 	}
 	if !authorHistoryKnown {
-		reasons = append(reasons, "the Ship Task launch-identity history is incomplete")
+		reasons = append(reasons, "the Change Task launch-identity history is incomplete")
 	}
 	for _, launch := range authorLaunches {
 		if launch.Profile == "" {
@@ -96,7 +96,7 @@ func reviewIdentityFailure(author store.Task, authorLaunches []store.TaskLaunchI
 func reviewRelaunchIdentityFailure(author store.Task, authorLaunches []store.TaskLaunchIdentity, authorHistoryKnown bool, reviewer store.Task, reviewerLaunches []store.TaskLaunchIdentity, reviewerHistoryKnown bool, current store.TaskLaunchIdentity, launchRefusal ...string) error {
 	var reasons []string
 	if !authorHistoryKnown {
-		reasons = append(reasons, "the Ship Task launch-identity history is incomplete")
+		reasons = append(reasons, "the Change Task launch-identity history is incomplete")
 	}
 	if !reviewerHistoryKnown {
 		reasons = append(reasons, "the existing Review Task launch-identity history is incomplete; a fresh Review Task/session is required")
@@ -142,7 +142,7 @@ func reviewIdentityHistoryResult(author store.Task, authorLaunches []store.TaskL
 	comparisons := make([]any, 0, len(reviewerLaunches))
 	var reasons []string
 	if !authorHistoryKnown {
-		reasons = append(reasons, "the Ship Task launch-identity history is incomplete")
+		reasons = append(reasons, "the Change Task launch-identity history is incomplete")
 	}
 	if !reviewerHistoryKnown {
 		reasons = append(reasons, "the Review Task launch-identity history is incomplete")

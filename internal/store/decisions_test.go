@@ -23,11 +23,11 @@ func TestDecisionOnceWithAtomicAnswerAndNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "A", LandingMode: "local"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := DecisionRequest{ProjectID: project.ID, TaskID: id, Origin: "notice:42", Kind: "rider_question", Question: "Land A?", Options: []string{"land", "wait"}}
+	request := DecisionRequest{ProjectID: project.ID, TaskID: id, Origin: "notice:42", Kind: "worker_question", Question: "Merge A?", Options: []string{"merge", "wait"}}
 	decision, err := db.RaiseDecision(ctx, request)
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestDecisionOnceWithAtomicAnswerAndNotice(t *testing.T) {
 		t.Fatal("origin reused for a different question")
 	}
 	changed = request
-	changed.Kind = "leftover"
+	changed.Kind = "orphan"
 	if _, err := db.RaiseDecision(ctx, changed); err == nil {
 		t.Fatal("origin reused for a different kind")
 	}
@@ -55,16 +55,16 @@ func TestDecisionOnceWithAtomicAnswerAndNotice(t *testing.T) {
 	if _, err := db.RaiseDecision(ctx, changed); err == nil {
 		t.Fatal("unknown Decision kind accepted")
 	}
-	if _, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: other.ID, TaskID: id, Origin: "cross", Kind: "rider_question", Question: "A?", Options: []string{"yes", "no"}}); err == nil {
+	if _, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: other.ID, TaskID: id, Origin: "cross", Kind: "worker_question", Question: "A?", Options: []string{"yes", "no"}}); err == nil {
 		t.Fatal("cross-Project Task accepted")
 	}
-	if _, err := db.AnswerDecision(ctx, other.ID, decision.ID, "land", "yes"); !errors.Is(err, ErrNotFound) {
+	if _, err := db.AnswerDecision(ctx, other.ID, decision.ID, "merge", "yes"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-Project answer: %v", err)
 	}
 	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "invalid", "yes"); err == nil {
 		t.Fatal("invalid option accepted")
 	}
-	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "land", ""); err == nil {
+	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "merge", ""); err == nil {
 		t.Fatal("empty quote accepted")
 	}
 	var wg sync.WaitGroup
@@ -74,7 +74,7 @@ func TestDecisionOnceWithAtomicAnswerAndNotice(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := db.AnswerDecision(ctx, project.ID, decision.ID, "land", "User said land")
+			_, err := db.AnswerDecision(ctx, project.ID, decision.ID, "merge", "User said merge")
 			if err == nil {
 				mu.Lock()
 				successes++
@@ -87,7 +87,7 @@ func TestDecisionOnceWithAtomicAnswerAndNotice(t *testing.T) {
 		t.Fatalf("answered %d times", successes)
 	}
 	answered, err := db.Decision(ctx, project.ID, decision.ID)
-	if err != nil || answered.Answer != "land" || answered.UserQuote != "User said land" || answered.AnsweredAt < answered.CreatedAt {
+	if err != nil || answered.Answer != "merge" || answered.UserQuote != "User said merge" || answered.AnsweredAt < answered.CreatedAt {
 		t.Fatalf("bad answer: %#v %v", answered, err)
 	}
 	pending, err := db.Decisions(ctx, project.ID, true)
@@ -98,7 +98,7 @@ func TestDecisionOnceWithAtomicAnswerAndNotice(t *testing.T) {
 	if err != nil || len(notices) != 1 || notices[0].Kind != "decision_answered" {
 		t.Fatalf("answer Notices: %#v %v", notices, err)
 	}
-	for _, kind := range []string{"leftover", "pr_closed", "review", "land_ready"} {
+	for _, kind := range []string{"orphan", "pr_closed", "review", "merge_ready"} {
 		d, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: id, Origin: "opaque-" + kind, Kind: kind, Question: "What next?", Options: []string{"yes", "no"}})
 		if err != nil || d.Kind != kind {
 			t.Fatalf("explicit kind %q lost or inferred from origin: %#v %v", kind, d, err)

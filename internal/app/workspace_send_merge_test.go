@@ -11,8 +11,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestWorkspaceSendRefreshesMergedMemberBeforePromptingRider(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n[repositories.worker]\nforge = \"github\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
+func TestWorkspaceSendRefreshesMergedMemberBeforePromptingWorker(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n[repositories.worker]\nforge = \"github\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
 	bin := filepath.Join(f.root, "bin")
 	_ = os.MkdirAll(bin, 0o700)
 	viewPath := filepath.Join(f.root, "gh-view.json")
@@ -40,7 +40,7 @@ func TestWorkspaceSendRefreshesMergedMemberBeforePromptingRider(t *testing.T) {
 	if code := f.run("send", "t1", "Add another fix"); code == 0 || !strings.Contains(f.out.String(), "pr_merged") {
 		t.Fatalf("send did not refuse a merged Member PR: code=%d output=%s", code, f.out.String())
 	}
-	if state := f.state(); state != store.StateLanded && state != store.StateTornDown {
-		t.Fatalf("merged Member was not Landed: %s", state)
+	if state := f.state(); state != store.StateMerged && state != store.StateTornDown {
+		t.Fatalf("merged Member was not Merged: %s", state)
 	}
 }

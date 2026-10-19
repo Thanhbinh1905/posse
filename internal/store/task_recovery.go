@@ -83,7 +83,7 @@ func (db *DB) FinishTaskRecovery(ctx context.Context, task Task, ownerPID, limit
 		return err
 	}
 	if nextStatus == "exhausted" {
-		summary := fmt.Sprintf("%s: automatic Rider recovery stopped after %d attempts; run posse relaunch t%d after inspecting the pane", task.Title, attempts, task.Seq)
+		summary := fmt.Sprintf("%s: automatic Worker recovery stopped after %d attempts; run posse relaunch t%d after inspecting the pane", task.Title, attempts, task.Seq)
 		data, _ := json.Marshal(map[string]string{"error": cause})
 		if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,'recovery_failed',?,?,?)`, task.ProjectID, task.ID, summary, string(data), time.Now().UnixMilli()); err != nil {
 			return err
@@ -124,7 +124,7 @@ func (db *DB) SettleTaskRecovery(ctx context.Context, taskID int64, expected Tas
 }
 
 // RetryRecoveredTask reopens a completed episode only after its caller verifies
-// that the recovered Rider pane is no longer live in the same generation.
+// that the recovered Worker pane is no longer live in the same generation.
 func (db *DB) RetryRecoveredTask(ctx context.Context, taskID int64, generation string) (bool, error) {
 	result, err := db.ExecContext(ctx, `UPDATE task_recovery SET status='pending',next_attempt_at=0 WHERE task_id=? AND generation=? AND owner_pid=0 AND status='recovered'`, taskID, generation)
 	if err != nil {

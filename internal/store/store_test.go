@@ -120,7 +120,7 @@ func TestPreexistingQueuedMessagesRetainWaitForIdle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(context.Background(), project.ID, Task{Seq: 1, Type: "ship", Title: "Old", LandingMode: "local"})
+	id, err := db.CreateTask(context.Background(), project.ID, Task{Seq: 1, Type: "change", Title: "Old", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestStateTransitionsAreCompareAndSetAndAudited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", AutonomyReview: "ask", AutonomyLand: "ask"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", AutonomyReview: "ask", AutonomyMerge: "ask"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := []State{StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost, StateReported, StateLanded}
+	allowed := []State{StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateMerging, StateFailed, StateLost, StateReported, StateMerged}
 	for index, state := range allowed {
 		t.Run(string(state), func(t *testing.T) {
 			if !IsApprovedDiscardSourceState(state) {
@@ -199,7 +199,7 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 			if err := validateTransitionSource(state, StateTornDown, "user"); err != nil {
 				t.Fatalf("approved transition source rejected for %s: %v", state, err)
 			}
-			id, err := db.CreateTask(ctx, project.ID, Task{Seq: index + 1, Type: "scout", Title: string(state), LandingMode: "local"})
+			id, err := db.CreateTask(ctx, project.ID, Task{Seq: index + 1, Type: "research", Title: string(state), MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -216,9 +216,9 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 				err = db.Transition(ctx, id, StateWorking, state, "herdr", "blocked")
 			case StateDone:
 				err = db.Transition(ctx, id, StateWorking, state, "worker", "done")
-			case StateLanding:
+			case StateMerging:
 				if err = db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err == nil {
-					err = db.Transition(ctx, id, StateDone, state, "cli", "landing")
+					err = db.Transition(ctx, id, StateDone, state, "cli", "merging")
 				}
 			case StateFailed:
 				err = db.Transition(ctx, id, StateWorking, state, "worker", "failed")
@@ -230,23 +230,23 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 				if err = db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err == nil {
 					err = db.Transition(ctx, id, StateDone, state, "cli", "reported")
 				}
-			case StateLanded:
+			case StateMerged:
 				if err = db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err == nil {
-					err = db.Transition(ctx, id, StateDone, StateLanding, "cli", "landing")
+					err = db.Transition(ctx, id, StateDone, StateMerging, "cli", "merging")
 				}
 				if err == nil {
-					err = db.Transition(ctx, id, StateLanding, state, "cli", "landed")
+					err = db.Transition(ctx, id, StateMerging, state, "cli", "merged")
 				}
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if state == StateReported || state == StateLanded {
+			if state == StateReported || state == StateMerged {
 				if err := validateTransitionSource(state, StateTornDown, "cli"); err != nil {
 					t.Fatalf("ordinary completion source rejected for %s: %v", state, err)
 				}
 			} else if err := validateTransitionSource(state, StateTornDown, "cli"); err == nil {
-				t.Fatalf("ordinary teardown source accepted from unlanded %s", state)
+				t.Fatalf("ordinary teardown source accepted from unmerged %s", state)
 			}
 			if err := db.Transition(ctx, id, state, StateTornDown, "user", "discarded without recording approval"); err == nil {
 				t.Fatalf("Transition bypassed approval from %s", state)
@@ -254,10 +254,10 @@ func TestApprovedDiscardSourceStatesUseOnePredicate(t *testing.T) {
 			if err := db.RecordApproval(ctx, id, "discard", "User approved discard"); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.TransitionWithApproval(ctx, id, state, StateTornDown, "user", "discarded", "land", "User approved discard"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
+			if err := db.TransitionWithApproval(ctx, id, state, StateTornDown, "user", "discarded", "merge", "User approved discard"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
 				t.Fatalf("TransitionWithApproval accepted non-discard action from %s: %v", state, err)
 			}
-			if err := db.TransitionAfterApproval(ctx, id, state, StateTornDown, "user", "discarded", "land"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
+			if err := db.TransitionAfterApproval(ctx, id, state, StateTornDown, "user", "discarded", "merge"); !errors.Is(err, ErrInvalidApprovedDiscardTransition) {
 				t.Fatalf("TransitionAfterApproval accepted non-discard action from %s: %v", state, err)
 			}
 			if err := db.TransitionAfterApproval(ctx, id, state, StateTornDown, "user", "discarded", "discard"); err != nil {
@@ -302,29 +302,29 @@ func TestTerminalTaskTransitionsMakeQueuedMessagesUndeliverable(t *testing.T) {
 		followUp string
 		finish   func(int64) error
 	}{
-		{name: "reported", taskType: "scout", followUp: "Create a new Ship Task", finish: func(id int64) error {
+		{name: "reported", taskType: "research", followUp: "Create a new Change Task", finish: func(id int64) error {
 			if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
 				return err
 			}
 			return db.Transition(ctx, id, StateDone, StateReported, "cli", "report copied")
 		}},
-		{name: "failed", taskType: "ship", followUp: "posse relaunch t2", finish: func(id int64) error {
+		{name: "failed", taskType: "change", followUp: "posse relaunch t2", finish: func(id int64) error {
 			return db.Transition(ctx, id, StateWorking, StateFailed, "worker", "failed")
 		}},
-		{name: "lost", taskType: "ship", followUp: "posse relaunch t3", finish: func(id int64) error {
-			return db.Transition(ctx, id, StateWorking, StateLost, "cli", "Rider disappeared")
+		{name: "lost", taskType: "change", followUp: "posse relaunch t3", finish: func(id int64) error {
+			return db.Transition(ctx, id, StateWorking, StateLost, "cli", "Worker disappeared")
 		}},
-		{name: "landed", taskType: "ship", followUp: "Create a new Ship Task", finish: func(id int64) error {
+		{name: "merged", taskType: "change", followUp: "Create a new Change Task", finish: func(id int64) error {
 			if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
 				return err
 			}
-			if err := db.Transition(ctx, id, StateDone, StateLanding, "cli", "Gate passed"); err != nil {
+			if err := db.Transition(ctx, id, StateDone, StateMerging, "cli", "Gate passed"); err != nil {
 				return err
 			}
-			return db.Transition(ctx, id, StateLanding, StateLanded, "cli", "merged")
+			return db.Transition(ctx, id, StateMerging, StateMerged, "cli", "merged")
 		}},
-		{name: "torn-down", taskType: "ship", followUp: "Create a new Ship Task", finish: func(id int64) error {
-			if err := db.Transition(ctx, id, StateWorking, StateStalled, "cli", "Rider stalled"); err != nil {
+		{name: "torn-down", taskType: "change", followUp: "Create a new Change Task", finish: func(id int64) error {
+			if err := db.Transition(ctx, id, StateWorking, StateStalled, "cli", "Worker stalled"); err != nil {
 				return err
 			}
 			return db.TransitionWithApproval(ctx, id, StateStalled, StateTornDown, "user", "discard", "discard", "User approved discard")
@@ -333,11 +333,11 @@ func TestTerminalTaskTransitionsMakeQueuedMessagesUndeliverable(t *testing.T) {
 
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			id, err := db.CreateTask(ctx, project.ID, Task{Seq: index + 1, Type: test.taskType, Title: test.name, LandingMode: "local"})
+			id, err := db.CreateTask(ctx, project.ID, Task{Seq: index + 1, Type: test.taskType, Title: test.name, MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "Rider ready"); err != nil {
+			if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "Worker ready"); err != nil {
 				t.Fatal(err)
 			}
 			messageID, err := db.QueueMessage(ctx, id, "queued before "+test.name, true)
@@ -661,7 +661,7 @@ func TestConfigApprovalMoveMigrationPreservesExistingApprovals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RecordConfigApproval(ctx, project.ID, "autonomy.land", "set", "auto", "Use automatic Landing"); err != nil {
+	if err := db.RecordConfigApproval(ctx, project.ID, "autonomy.merge", "set", "auto", "Use automatic Merge"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RecordConfigApproval(ctx, project.ID, "autonomy.review", "unset", "", "Clear review Autonomy"); err != nil {
@@ -720,7 +720,7 @@ func TestConfigApprovalMoveMigrationPreservesExistingApprovals(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(approvals) != 2 || approvals[0].projectID != project.ID || approvals[0].key != "autonomy.land" || approvals[0].action != "set" || approvals[0].value.String != "auto" || !approvals[0].value.Valid || approvals[0].quote != "Use automatic Landing" || approvals[1].projectID != project.ID || approvals[1].key != "autonomy.review" || approvals[1].action != "unset" || approvals[1].value.Valid || approvals[1].quote != "Clear review Autonomy" {
+	if len(approvals) != 2 || approvals[0].projectID != project.ID || approvals[0].key != "autonomy.merge" || approvals[0].action != "set" || approvals[0].value.String != "auto" || !approvals[0].value.Valid || approvals[0].quote != "Use automatic Merge" || approvals[1].projectID != project.ID || approvals[1].key != "autonomy.review" || approvals[1].action != "unset" || approvals[1].value.Valid || approvals[1].quote != "Clear review Autonomy" {
 		t.Fatalf("historical approvals after migration = %#v", approvals)
 	}
 	if err := db.RecordConfigApproval(ctx, project.ID, "preferences.lead", "move", filepath.Join("/home", "preferences", "lead.md"), "Move my Lead preferences"); err != nil {
@@ -739,11 +739,11 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Legacy report", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Legacy report", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "Rider ready"); err != nil {
+	if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "Worker ready"); err != nil {
 		t.Fatal(err)
 	}
 	messageID, err := db.QueueMessage(ctx, taskID, "legacy queued instruction", true)
@@ -836,7 +836,7 @@ func TestMigrationMakesLegacyMessageClaimsNonRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -870,7 +870,7 @@ func TestMigrationMakesLegacyMessageClaimsNonRetryable(t *testing.T) {
 	if err != nil || len(submissions) != 1 || submissions[0].ID != messageID {
 		t.Fatalf("legacy submission was not found for recovery: %#v, %v", submissions, err)
 	}
-	created, err := db.CreateMessageDeliveryUncertainNotice(ctx, project.ID, taskID, messageID, "message #1 may not have reached Rider t1", message.Body)
+	created, err := db.CreateMessageDeliveryUncertainNotice(ctx, project.ID, taskID, messageID, "message #1 may not have reached Worker t1", message.Body)
 	if err != nil || !created {
 		t.Fatalf("legacy submission Notice was not created: created=%t err=%v", created, err)
 	}
@@ -891,7 +891,7 @@ func TestMigrationMakesLegacyMessageClaimsNonRetryable(t *testing.T) {
 	}
 }
 
-func TestPendingLandReadyDecisionMigrationAddsDiscard(t *testing.T) {
+func TestPendingMergeReadyDecisionMigrationAddsDiscard(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -902,23 +902,26 @@ func TestPendingLandReadyDecisionMigrationAddsDiscard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "ready to Land", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "ready to Merge", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, transition := range []struct {
 		from, to State
 		source   string
-	}{{StateSpawning, StateWorking, "cli"}, {StateWorking, StateDone, "worker"}, {StateDone, StateLanding, "cli"}} {
+	}{{StateSpawning, StateWorking, "cli"}, {StateWorking, StateDone, "worker"}, {StateDone, StateMerging, "cli"}} {
 		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "notice:1", Kind: "land_ready", Question: "Land the Task?", Options: []string{"land", "wait"}})
+	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "notice:1", Kind: "merge_ready", Question: "Merge the Task?", Options: []string{"merge", "wait"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id=52`); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE decisions SET kind='land_ready',options_json='["land","wait"]' WHERE id=?`, decision.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id IN (52,55)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -927,15 +930,15 @@ func TestPendingLandReadyDecisionMigrationAddsDiscard(t *testing.T) {
 
 	db, err = Open(home)
 	if err != nil {
-		t.Fatalf("apply land_ready option migration: %v", err)
+		t.Fatalf("apply merge_ready option migration: %v", err)
 	}
 	defer db.Close()
 	migrated, err := db.Decision(ctx, project.ID, decision.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(migrated.Options, ","); got != "land,wait,discard" {
-		t.Fatalf("migrated land_ready options = %q", got)
+	if got := strings.Join(migrated.Options, ","); got != "merge,wait,discard" {
+		t.Fatalf("migrated merge_ready options = %q", got)
 	}
 }
 
@@ -1028,7 +1031,7 @@ func TestTaskShortNamePersistsThroughDatabaseAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", ShortName: "worker-tree", LandingMode: "local", TargetBranch: "staging"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Fix", ShortName: "worker-tree", MergeMode: "local", TargetBranch: "staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1113,14 +1116,14 @@ func TestIntentProgressIsOwnedAndClaimedWithCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "intent", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "intent", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, project.ID, taskID, "ride", "mount.acquire", `{}`, 1001); err != nil {
+	if err := db.StartIntent(ctx, project.ID, taskID, "start", "sandbox.acquire", `{}`, 1001); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, project.ID, taskID, "ride", "pane.open", `{}`, 1002); !errors.Is(err, ErrIntentOwned) {
+	if err := db.StartIntent(ctx, project.ID, taskID, "start", "pane.open", `{}`, 1002); !errors.Is(err, ErrIntentOwned) {
 		t.Fatalf("second process started an owned intent: %v", err)
 	}
 	intent, err := db.IntentByTask(ctx, taskID)
@@ -1155,11 +1158,11 @@ func TestIntentStoresProcessBootAndStartIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "identity", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "identity", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, project.ID, taskID, "ride", "started", `{}`, os.Getpid()); err != nil {
+	if err := db.StartIntent(ctx, project.ID, taskID, "start", "started", `{}`, os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	intent, err := db.IntentByTask(ctx, taskID)
@@ -1185,7 +1188,7 @@ func TestIntentStoresProcessBootAndStartIdentity(t *testing.T) {
 	}
 }
 
-func TestUnlandedTeardownRequiresRecordedUserApproval(t *testing.T) {
+func TestUnmergedTeardownRequiresRecordedUserApproval(t *testing.T) {
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -1196,7 +1199,7 @@ func TestUnlandedTeardownRequiresRecordedUserApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1209,7 +1212,7 @@ func TestUnlandedTeardownRequiresRecordedUserApproval(t *testing.T) {
 		}
 	}
 	if err := db.Transition(ctx, id, StateFailed, StateTornDown, "user", "discard"); err == nil {
-		t.Fatal("unlanded Task was torn down without an approval record")
+		t.Fatal("unmerged Task was torn down without an approval record")
 	}
 	if err := db.TransitionWithApproval(ctx, id, StateFailed, StateTornDown, "user", "discard", "discard", "Please discard this failed Task"); err != nil {
 		t.Fatal(err)
@@ -1237,7 +1240,7 @@ func TestSignalFromStalledReturnsToWorkingBeforeApplyingTheSignal(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1285,7 +1288,7 @@ func TestTaskLookupUsesCanonicalPublicIDAndExcludesTornDownPane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 5, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p5", PaneLabel: "posse:shop:t5"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 5, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p5", PaneLabel: "posse:shop:t5"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1301,13 +1304,13 @@ func TestTaskLookupUsesCanonicalPublicIDAndExcludesTornDownPane(t *testing.T) {
 	if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, id, StateDone, StateLanding, "cli", "gate passed"); err != nil {
+	if err := db.Transition(ctx, id, StateDone, StateMerging, "cli", "gate passed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, id, StateLanding, StateLanded, "cli", "landed"); err != nil {
+	if err := db.Transition(ctx, id, StateMerging, StateMerged, "cli", "merged"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, id, StateLanded, StateTornDown, "cli", "released"); err != nil {
+	if err := db.Transition(ctx, id, StateMerged, StateTornDown, "cli", "released"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.TaskByPane(ctx, "w2:p5"); !IsNotFound(err) {
@@ -1326,7 +1329,7 @@ func TestWorkerSignalAndNoticeRollBackTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1434,10 +1437,10 @@ func TestTaskSequenceRejectsReusedBranchWithoutCreatingTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	occupied := func(int) (bool, error) { return false, nil }
-	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name", Branch: "posse/reused-ref"}, occupied); err != nil {
+	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", ShortName: "same-name", Branch: "posse/reused-ref"}, occupied); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name", Branch: "posse/reused-ref"}, occupied); !errors.Is(err, ErrTaskBranchExists) {
+	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", ShortName: "same-name", Branch: "posse/reused-ref"}, occupied); !errors.Is(err, ErrTaskBranchExists) {
 		t.Fatalf("reused Task branch error = %v", err)
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
@@ -1458,14 +1461,14 @@ func TestTaskBranchIsBoundToAllocatedSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	occupied := func(int) (bool, error) { return false, nil }
-	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name", Branch: "posse/t2"}, occupied); !errors.Is(err, ErrTaskBranchSequenceMismatch) {
+	if _, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", ShortName: "same-name", Branch: "posse/t2"}, occupied); !errors.Is(err, ErrTaskBranchSequenceMismatch) {
 		t.Fatalf("branch for another sequence was admitted: %v", err)
 	}
-	firstID, firstSeq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name"}, occupied)
+	firstID, firstSeq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", ShortName: "same-name"}, occupied)
 	if err != nil || firstSeq != 1 {
 		t.Fatalf("first Task branch allocation = %d, %v", firstSeq, err)
 	}
-	secondID, secondSeq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", ShortName: "same-name"}, occupied)
+	secondID, secondSeq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", ShortName: "same-name"}, occupied)
 	if err != nil || secondSeq != 2 {
 		t.Fatalf("second Task branch allocation = %d, %v", secondSeq, err)
 	}
@@ -1505,7 +1508,7 @@ func TestConcurrentTaskSequenceAllocationSerializesAndBothTasksSucceed(t *testin
 	for index, db := range []*DB{first, second} {
 		go func(db *DB, index int) {
 			<-start
-			_, sequence, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "ship", Title: fmt.Sprintf("Concurrent %d", index), ShortName: fmt.Sprintf("concurrent-%d", index)}, func(int) (bool, error) {
+			_, sequence, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: fmt.Sprintf("Concurrent %d", index), ShortName: fmt.Sprintf("concurrent-%d", index)}, func(int) (bool, error) {
 				return false, nil
 			})
 			results <- result{sequence: sequence, err: err}

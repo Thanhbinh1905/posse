@@ -909,7 +909,7 @@ func (s *Service) applySetup(ctx context.Context, home, manifestPath string, man
 		manifest.PiGuardDirs = appendUniqueStrings(manifest.PiGuardDirs, createdDirs...)
 		made, err := installManagedFile(path, contents, manifest.PiGuardHash, 0o600)
 		if err != nil {
-			return changed, axi.Failure("setup_path_conflict", "cannot install the pi Rider guard", false, err.Error())
+			return changed, axi.Failure("setup_path_conflict", "cannot install the pi Worker guard", false, err.Error())
 		}
 		manifest.PiGuardPath, manifest.PiGuardHash = path, fileHash(contents)
 		if made {

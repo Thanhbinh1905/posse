@@ -85,7 +85,7 @@ func (s *Service) typeIntoBeforeWithSubmissionGate(ctx context.Context, paneID, 
 			return axi.Failure("pane_focused", "refusing to type into a focused pane", false, "Unfocus the pane, then retry")
 		}
 		if pane.AgentStatus == "blocked" {
-			return axi.Failure("agent_blocked", "refusing to type into a blocked agent", false, "Inspect the Rider dialog before retrying")
+			return axi.Failure("agent_blocked", "refusing to type into a blocked agent", false, "Inspect the Worker dialog before retrying")
 		}
 	}
 	if allowed != nil {
@@ -130,7 +130,7 @@ func (s *Service) startAgent(ctx context.Context, params map[string]any) (json.R
 			return started, err
 		}
 		if time.Now().After(deadline) {
-			return nil, axi.Failure("agent_pane_busy", failure.Message, true, "Wait for the Rider pane's shell to become available, then retry")
+			return nil, axi.Failure("agent_pane_busy", failure.Message, true, "Wait for the Worker pane's shell to become available, then retry")
 		}
 		select {
 		case <-ctx.Done():
@@ -325,7 +325,7 @@ func (s *Service) stopPaneAgent(ctx context.Context, paneID string, expectedAgen
 }
 
 func agentStopPaneChanged(paneID string) error {
-	return axi.Failure("agent_stop_failed", fmt.Sprintf("the foreground process in pane %s changed while stopping the Rider", paneID), true, "Preserve the replacement agent, then retry")
+	return axi.Failure("agent_stop_failed", fmt.Sprintf("the foreground process in pane %s changed while stopping the Worker", paneID), true, "Preserve the replacement agent, then retry")
 }
 
 func (s *Service) paneHasAgentAuthority(ctx context.Context, paneID string) bool {

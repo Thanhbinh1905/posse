@@ -17,9 +17,9 @@ func TestLeadOnlyCommandsRequireRecordedLeadPaneAndProjectCheckout(t *testing.T)
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
-	mountPath := filepath.Join(root, "mount")
+	sandboxPath := filepath.Join(root, "sandbox")
 	initRepo(t, repo)
-	gitTest(t, repo, "worktree", "add", "-b", "posse/mount-test", mountPath, "main")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/sandbox-test", sandboxPath, "main")
 	home := filepath.Join(root, "posse")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
@@ -40,7 +40,7 @@ func TestLeadOnlyCommandsRequireRecordedLeadPaneAndProjectCheckout(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state) VALUES(?,1,?,'held')`, project.ID, mountPath); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state) VALUES(?,1,?,'held')`, project.ID, sandboxPath); err != nil {
 		t.Fatal(err)
 	}
 	service := testService(home, nil)
@@ -57,10 +57,10 @@ func TestLeadOnlyCommandsRequireRecordedLeadPaneAndProjectCheckout(t *testing.T)
 	if err := service.requireLead(ctx, db, project); err != nil {
 		t.Fatalf("recorded Lead pane was refused in the Project checkout: %v", err)
 	}
-	t.Chdir(mountPath)
+	t.Chdir(sandboxPath)
 	var failure *axi.Error
 	if err := service.requireLead(ctx, db, project); !errors.As(err, &failure) || failure.Code != "lead_only" {
-		t.Fatalf("recorded Lead pane bypassed the Mount cwd restriction: %v", err)
+		t.Fatalf("recorded Lead pane bypassed the Sandbox cwd restriction: %v", err)
 	}
 }
 
@@ -98,7 +98,7 @@ func TestLeadInstructionsCheckRoleAndConfigSetKeepsShellSettingsUserOnly(t *test
 		t.Fatalf("Lead instructions bypassed pane check: code=%d output=%s", code, output.String())
 	}
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
-	for _, setting := range []struct{ key, value string }{{"defaults.gate", "[]"}, {"remuda.setup", "[]"}, {"kinds.claude.lead_auto_approve", "false"}} {
+	for _, setting := range []struct{ key, value string }{{"defaults.gate", "[]"}, {"pool.setup", "[]"}, {"kinds.claude.lead_auto_approve", "false"}} {
 		output.Reset()
 		if code := cli.Run([]string{"config", "set", setting.key, setting.value, "--project", "shop"}); code != 1 || !strings.Contains(output.String(), "user_only") {
 			t.Errorf("config set %s was not User-only: code=%d output=%s", setting.key, code, output.String())
@@ -106,12 +106,12 @@ func TestLeadInstructionsCheckRoleAndConfigSetKeepsShellSettingsUserOnly(t *test
 	}
 }
 
-func TestLeadOnlyRejectsMountSymlinksAndAnyHerdrEnvironment(t *testing.T) {
+func TestLeadOnlyRejectsSandboxSymlinksAndAnyHerdrEnvironment(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
-	worktree := filepath.Join(root, "mount")
-	alias := filepath.Join(root, "mount-alias")
+	worktree := filepath.Join(root, "sandbox")
+	alias := filepath.Join(root, "sandbox-alias")
 	initRepo(t, repo)
 	gitTest(t, repo, "worktree", "add", "--detach", worktree, "main")
 	if err := os.Symlink(worktree, alias); err != nil {
@@ -148,7 +148,7 @@ func TestLeadOnlyRejectsMountSymlinksAndAnyHerdrEnvironment(t *testing.T) {
 	t.Chdir(alias)
 	var failure *axi.Error
 	if err := service.requireLead(ctx, db, project); !errors.As(err, &failure) || failure.Code != "lead_only" {
-		t.Fatalf("symlinked Mount cwd bypassed Lead restriction without Herdr environment: %v", err)
+		t.Fatalf("symlinked Sandbox cwd bypassed Lead restriction without Herdr environment: %v", err)
 	}
 	t.Chdir(repo)
 	t.Setenv("HERDR_CUSTOM_CONTEXT", "1")

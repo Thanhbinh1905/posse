@@ -34,15 +34,15 @@ func TestMergedLowerTaskRetargetsUpperPRAndRecordsChangeOnce(t *testing.T) {
 			name = "accepts a forge-retargeted upper PR"
 		}
 		t.Run(name, func(t *testing.T) {
-			fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+			fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 			ctx := context.Background()
 			lower := fixture.task
 			lower.TargetBranch = "staging"
 			const upperBranch = "posse/t2"
 			const upperURL = "https://github.com/acme/shop/pull/18"
 			upperID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
-				Seq: 2, Type: "ship", Title: "Upper Task", State: store.StateSpawning,
-				LandingMode: "pr", Branch: upperBranch, BaseRef: "refs/remotes/origin/posse/t1",
+				Seq: 2, Type: "change", Title: "Upper Task", State: store.StateSpawning,
+				MergeMode: "pr", Branch: upperBranch, BaseRef: "refs/remotes/origin/posse/t1",
 				TargetBranch: lower.Branch, PRURL: upperURL,
 			})
 			if err != nil {

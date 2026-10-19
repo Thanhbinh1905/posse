@@ -75,7 +75,7 @@ func TestSetFileRejectsTOMLTableInjection(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	payload := "8\n[remuda]\nsetup = \"enabled\""
+	payload := "8\n[pool]\nsetup = \"enabled\""
 	if _, err := SetFile(path, "defaults.max_workers", payload, false); err == nil {
 		t.Fatal("SetFile accepted an extra TOML table in the value")
 	}
@@ -90,11 +90,11 @@ func TestSetFileRejectsTOMLTableInjection(t *testing.T) {
 
 func TestSetDispatchArrayTables(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	original := "# retain\n[defaults]\nmax_workers = 4\n\n[[dispatch]]\ntype = \"scout\"\nuse = \"old\"\n\n[identity.lead]\nname = \"Guide\"\n"
+	original := "# retain\n[defaults]\nmax_workers = 4\n\n[[dispatch]]\ntype = \"research\"\nuse = \"old\"\n\n[identity.lead]\nname = \"Guide\"\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SetFile(path, "dispatch", `[{type = "ship", use = "new"}]`, true); err != nil {
+	if _, err := SetFile(path, "dispatch", `[{type = "change", use = "new"}]`, true); err != nil {
 		t.Fatal(err)
 	}
 	values, _, err := ReadFile(path)
@@ -111,7 +111,7 @@ func TestSetDispatchArrayTables(t *testing.T) {
 			}
 		}
 	}
-	if len(dispatch) != 1 || dispatch[0]["type"] != "ship" || dispatch[0]["use"] != "new" {
+	if len(dispatch) != 1 || dispatch[0]["type"] != "change" || dispatch[0]["use"] != "new" {
 		t.Fatalf("dispatch = %#v", dispatch)
 	}
 	if err := UnsetFile(path, "dispatch", true); err != nil {
@@ -128,7 +128,7 @@ func TestSetDispatchArrayTables(t *testing.T) {
 
 func TestSetDispatchRejectsFieldsItCannotWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	for _, literal := range []string{`[{when = {type = "ship"}, use = "deep"}]`, `[{type = "ship", use = "deep", model = "x"}]`} {
+	for _, literal := range []string{`[{when = {type = "change"}, use = "deep"}]`, `[{type = "change", use = "deep", model = "x"}]`} {
 		if _, err := SetFile(path, "dispatch", literal, false); err == nil {
 			t.Errorf("SetFile accepted dispatch rule %s", literal)
 		}
@@ -139,7 +139,7 @@ func TestSetDispatchRejectsFieldsItCannotWrite(t *testing.T) {
 }
 
 func TestSchemaDrivesUserOnlyAndNewKeys(t *testing.T) {
-	for _, key := range []string{"defaults.gate", "review_loop.enabled", "review_loop.max_rounds", "review_loop.block_at", "review_loop.auto_start", "review_loop.docs", "review_loop.guidance", "gate_loop.max_fix_rounds", "ci_loop.max_fix_rounds", "ci_loop.rerun_cancelled", "remuda.setup", "kinds.claude.lead_auto_approve", "autonomy.review", "autonomy.land", "autonomy.yolo"} {
+	for _, key := range []string{"defaults.gate", "review_loop.enabled", "review_loop.max_rounds", "review_loop.block_at", "review_loop.auto_start", "review_loop.docs", "review_loop.guidance", "gate_loop.max_fix_rounds", "ci_loop.max_fix_rounds", "ci_loop.rerun_cancelled", "pool.setup", "kinds.claude.lead_auto_approve", "autonomy.review", "autonomy.merge", "autonomy.yolo"} {
 		if !IsUserOnly(key) {
 			t.Errorf("%s is not User-only", key)
 		}

@@ -19,7 +19,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestMountCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
+func TestSandboxCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 	root := t.TempDir()
 	leader := exec.Command("sleep", "60")
 	leader.Dir = root
@@ -27,7 +27,7 @@ func TestMountCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 	if err := leader.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer stopMountProcess(t, leader)
+	defer stopSandboxProcess(t, leader)
 
 	marker := filepath.Join(root, "was-signaled")
 	child := exec.Command("sh", "-c", "trap 'touch "+marker+"' TERM; sleep 0.05")
@@ -36,10 +36,10 @@ func TestMountCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer stopMountProcess(t, child)
+	defer stopSandboxProcess(t, child)
 	deadline := time.Now().Add(time.Second)
 	for {
-		pids, err := mountProcessIDs(root)
+		pids, err := sandboxProcessIDs(root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -47,19 +47,19 @@ func TestMountCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("Mount processes did not start: %v", pids)
+			t.Fatalf("Sandbox processes did not start: %v", pids)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	authorization := newMountProcessAuthorization()
+	authorization := newSandboxProcessAuthorization()
 	defer authorization.Close()
 	handle, err := authorization.bind(leader.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	authorization.retainProcessGroup(leader.Process.Pid, handle)
-	stopped, err := stopMountProcessesAuthorized(root, authorization)
+	stopped, err := stopSandboxProcessesAuthorized(root, authorization)
 	if err != nil {
 		t.Fatalf("cleanup did not wait for the short-lived group member: %v", err)
 	}
@@ -69,14 +69,14 @@ func TestMountCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unretained process received a signal: stat marker=%v", err)
 	}
-	if pids, err := mountProcessIDs(root); err != nil || len(pids) != 0 {
-		t.Fatalf("Mount processes remain after their natural exit: pids=%v err=%v", pids, err)
+	if pids, err := sandboxProcessIDs(root); err != nil || len(pids) != 0 {
+		t.Fatalf("Sandbox processes remain after their natural exit: pids=%v err=%v", pids, err)
 	}
 }
 
-func TestReportedCodexScoutAcceptsNamelessAgentWithRecordedSession(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
-	attachPRFixtureMount(t, fixture)
+func TestReportedCodexResearchAcceptsNamelessAgentWithRecordedSession(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	attachPRFixtureSandbox(t, fixture)
 	ctx := context.Background()
 	const sessionID = "01a1425b-3893-75f3-8310-79ae9e6f9b49"
 	if err := fixture.db.UpdateTaskLaunch(ctx, fixture.task.ID, fixture.worktree, "w2", "w2:p1", "posse:shop:t1", agentName("shop", 1, 1)); err != nil {
@@ -90,8 +90,8 @@ func TestReportedCodexScoutAcceptsNamelessAgentWithRecordedSession(t *testing.T)
 		t.Fatal(err)
 	}
 
-	shell := startMountProcess(t, fixture.worktree)
-	agent := startMountProcess(t, fixture.worktree)
+	shell := startSandboxProcess(t, fixture.worktree)
+	agent := startSandboxProcess(t, fixture.worktree)
 	pane := herdr.Pane{
 		PaneID:       task.PaneID,
 		WorkspaceID:  task.HerdrWorkspaceID,
@@ -108,7 +108,7 @@ func TestReportedCodexScoutAcceptsNamelessAgentWithRecordedSession(t *testing.T)
 		},
 		Agents: []herdr.Agent{{PaneID: pane.PaneID, Agent: "codex", SessionID: sessionID}},
 	}
-	adapter := &scoutProcessChurnAdapter{
+	adapter := &researchProcessChurnAdapter{
 		Fake:             fixture.service.Herdr.(*herdr.Fake),
 		snapshot:         snapshot,
 		shellPID:         shell.Process.Pid,
@@ -118,10 +118,10 @@ func TestReportedCodexScoutAcceptsNamelessAgentWithRecordedSession(t *testing.T)
 		agentProcessName: "codex",
 	}
 	fixture.service.Herdr = adapter
-	authorization := newMountProcessAuthorization()
+	authorization := newSandboxProcessAuthorization()
 	defer authorization.Close()
-	if err := fixture.service.verifyMountForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
-		t.Fatalf("same-session nameless Codex Rider was refused teardown ownership: %v", err)
+	if err := fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
+		t.Fatalf("same-session nameless Codex Worker was refused teardown ownership: %v", err)
 	}
 	if authorization.handle(agent.Process.Pid) == nil {
 		t.Fatal("exact Codex process was not retained after ownership verification")
@@ -129,25 +129,25 @@ func TestReportedCodexScoutAcceptsNamelessAgentWithRecordedSession(t *testing.T)
 
 	adapter.snapshot.Agents[0].SessionID = "replacement-session"
 	adapter.processCalls = 0
-	replacementAuthorization := newMountProcessAuthorization()
-	err = fixture.service.verifyMountForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, replacementAuthorization)
+	replacementAuthorization := newSandboxProcessAuthorization()
+	err = fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, replacementAuthorization)
 	replacementAuthorization.Close()
 	if err == nil || !strings.Contains(err.Error(), "not owned") {
 		t.Fatalf("replacement session was not refused: %v", err)
 	}
 }
 
-func TestReportedScoutAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
-	mount := attachPRFixtureMount(t, fixture)
+func TestReportedResearchAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	sandbox := attachPRFixtureSandbox(t, fixture)
 	ctx := context.Background()
-	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET type='scout' WHERE id=?`, fixture.task.ID); err != nil {
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET type='research' WHERE id=?`, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.UpdateTaskLaunch(ctx, fixture.task.ID, fixture.worktree, "w2", "w2:p1", "posse:shop:t1", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateDone, "worker", "Scout finished"); err != nil {
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateDone, "worker", "Research finished"); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateReported, "cli", "Report saved"); err != nil {
@@ -157,13 +157,13 @@ func TestReportedScoutAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.State != store.StateReported || task.MountID != mount.ID {
-		t.Fatalf("fixture is not an ordinary reported Scout with a held Mount: task=%#v mount=%#v", task, mount)
+	if task.State != store.StateReported || task.SandboxID != sandbox.ID {
+		t.Fatalf("fixture is not an ordinary reported Research with a held Sandbox: task=%#v sandbox=%#v", task, sandbox)
 	}
 
-	shell := startMountProcess(t, fixture.worktree)
-	agent := startMountProcess(t, fixture.worktree)
-	transient := startMountProcess(t, fixture.worktree)
+	shell := startSandboxProcess(t, fixture.worktree)
+	agent := startSandboxProcess(t, fixture.worktree)
+	transient := startSandboxProcess(t, fixture.worktree)
 	snapshot := herdr.Snapshot{
 		Panes: []herdr.Pane{
 			{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude"},
@@ -171,7 +171,7 @@ func TestReportedScoutAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.
 		},
 		Agents: []herdr.Agent{{Name: agentName("shop", task.Seq, 1), PaneID: task.PaneID, Kind: "claude"}},
 	}
-	adapter := &scoutProcessChurnAdapter{
+	adapter := &researchProcessChurnAdapter{
 		Fake:         fixture.service.Herdr.(*herdr.Fake),
 		snapshot:     snapshot,
 		shellPID:     shell.Process.Pid,
@@ -181,10 +181,10 @@ func TestReportedScoutAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.
 		leadCWD:      fixture.repo,
 	}
 	fixture.service.Herdr = adapter
-	authorization := newMountProcessAuthorization()
+	authorization := newSandboxProcessAuthorization()
 	defer authorization.Close()
-	if err := fixture.service.verifyMountForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
-		t.Fatalf("ordinary Scout ownership verification rejected a transient child: %v", err)
+	if err := fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
+		t.Fatalf("ordinary Research ownership verification rejected a transient child: %v", err)
 	}
 	if authorization.handle(transient.Process.Pid) != nil {
 		t.Fatal("transient child was added to the retained cleanup authorization")
@@ -192,16 +192,16 @@ func TestReportedScoutAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.
 
 	adapter.secondForegroundGroup = shell.Process.Pid
 	adapter.processCalls = 0
-	foregroundChurnAuthorization := newMountProcessAuthorization()
-	if err := fixture.service.verifyMountForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, foregroundChurnAuthorization); err != nil {
+	foregroundChurnAuthorization := newSandboxProcessAuthorization()
+	if err := fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, foregroundChurnAuthorization); err != nil {
 		foregroundChurnAuthorization.Close()
 		t.Fatalf("ordinary foreground switch to an already-retained shell was refused: %v", err)
 	}
 	foregroundChurnAuthorization.Close()
 	adapter.secondForegroundGroup = transient.Process.Pid
 	adapter.processCalls = 0
-	foreignForegroundAuthorization := newMountProcessAuthorization()
-	err = fixture.service.verifyMountForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, foreignForegroundAuthorization)
+	foreignForegroundAuthorization := newSandboxProcessAuthorization()
+	err = fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, foreignForegroundAuthorization)
 	foreignForegroundAuthorization.Close()
 	if err == nil || !strings.Contains(err.Error(), "unretained foreground process") {
 		t.Fatalf("unretained foreground replacement was not refused: %v", err)
@@ -209,7 +209,7 @@ func TestReportedScoutAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.
 	adapter.secondForegroundGroup = 0
 	adapter.processCalls = 0
 
-	if _, err := stopMountProcessesAuthorized(fixture.worktree, authorization); err == nil || !strings.Contains(err.Error(), "unverified process") {
+	if _, err := stopSandboxProcessesAuthorized(fixture.worktree, authorization); err == nil || !strings.Contains(err.Error(), "unverified process") {
 		t.Fatalf("live unretained child cleanup error = %v, want fail-closed unverified-process refusal", err)
 	}
 	for name, command := range map[string]*exec.Cmd{"shell": shell, "agent": agent, "transient": transient} {
@@ -218,19 +218,19 @@ func TestReportedScoutAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.
 		}
 	}
 
-	stopMountProcess(t, transient)
-	stopped, err := stopMountProcessesAuthorized(fixture.worktree, authorization)
+	stopSandboxProcess(t, transient)
+	stopped, err := stopSandboxProcessesAuthorized(fixture.worktree, authorization)
 	if err != nil {
 		t.Fatalf("cleanup after the transient child exited: %v", err)
 	}
 	if len(stopped) != 2 {
 		t.Fatalf("stopped process labels = %v, want the two retained pane processes", stopped)
 	}
-	stopMountProcess(t, shell)
-	stopMountProcess(t, agent)
+	stopSandboxProcess(t, shell)
+	stopSandboxProcess(t, agent)
 }
 
-type scoutProcessChurnAdapter struct {
+type researchProcessChurnAdapter struct {
 	*herdr.Fake
 	snapshot              herdr.Snapshot
 	shellPID              int
@@ -243,11 +243,11 @@ type scoutProcessChurnAdapter struct {
 	processCalls          int
 }
 
-func (adapter *scoutProcessChurnAdapter) Snapshot(context.Context) (herdr.Snapshot, error) {
+func (adapter *researchProcessChurnAdapter) Snapshot(context.Context) (herdr.Snapshot, error) {
 	return adapter.snapshot, nil
 }
 
-func (adapter *scoutProcessChurnAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+func (adapter *researchProcessChurnAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	if method != "pane.process_info" {
 		return adapter.Fake.Call(ctx, method, params)
 	}
@@ -279,7 +279,7 @@ func (adapter *scoutProcessChurnAdapter) Call(ctx context.Context, method string
 	}})
 }
 
-func startMountProcess(t *testing.T, worktree string) *exec.Cmd {
+func startSandboxProcess(t *testing.T, worktree string) *exec.Cmd {
 	t.Helper()
 	command := exec.Command("sleep", "60")
 	command.Dir = worktree
@@ -287,11 +287,11 @@ func startMountProcess(t *testing.T, worktree string) *exec.Cmd {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { stopMountProcess(t, command) })
+	t.Cleanup(func() { stopSandboxProcess(t, command) })
 	return command
 }
 
-func stopMountProcess(t *testing.T, command *exec.Cmd) {
+func stopSandboxProcess(t *testing.T, command *exec.Cmd) {
 	t.Helper()
 	if command == nil || command.Process == nil {
 		return

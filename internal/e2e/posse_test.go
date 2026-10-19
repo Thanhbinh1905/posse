@@ -41,11 +41,11 @@ func TestPosseInPlaceDirectoryProjects(t *testing.T) {
 set -eu
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.e2e --agent claude --state idle >/dev/null 2>&1
 IFS= read -r prompt || exit 0
-[ "$PWD" = "$POSSE_E2E_DIRECTORY" ] || { echo "unexpected Rider directory: $PWD" >> "$POSSE_E2E_AGENT_LOG"; exit 1; }
+[ "$PWD" = "$POSSE_E2E_DIRECTORY" ] || { echo "unexpected Worker directory: $PWD" >> "$POSSE_E2E_AGENT_LOG"; exit 1; }
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.e2e --agent claude --state working >/dev/null 2>&1
 while [ ! -e "$POSSE_E2E_SIGNAL_GATE" ]; do sleep 0.05; done
 printf 'in-place E2E change\n' > src/created.txt
-posse holler done 'E2E changed the approved directory without a commit' >> "$POSSE_E2E_AGENT_LOG" 2>&1 || { echo 'done signal failed' >> "$POSSE_E2E_AGENT_LOG"; exit 1; }
+posse signal done 'E2E changed the approved directory without a commit' >> "$POSSE_E2E_AGENT_LOG" 2>&1 || { echo 'done signal failed' >> "$POSSE_E2E_AGENT_LOG"; exit 1; }
 if [ -n "${POSSE_E2E_UNMARKED_CGROUP_CHILD_GATE:-}" ]; then
   while [ ! -e "$POSSE_E2E_UNMARKED_CGROUP_CHILD_GATE" ]; do sleep 0.05; done
   IFS= read -r cgroup_child_mode < "$POSSE_E2E_UNMARKED_CGROUP_CHILD_GATE"
@@ -122,11 +122,11 @@ while IFS= read -r line; do :; done
 					t.Fatal(err)
 				}
 			}
-			autoUnsaddle := "never"
+			autoTeardown := "never"
 			if foreignForeground {
-				autoUnsaddle = "finished"
+				autoTeardown = "finished"
 			}
-			configText := fmt.Sprintf("[defaults]\nlanding_mode = \"pr\"\ngate = [\"test -f src/created.txt\"]\nauto_unsaddle = %q\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n", autoUnsaddle)
+			configText := fmt.Sprintf("[defaults]\nmerge_mode = \"pr\"\ngate = [\"test -f src/created.txt\"]\nauto_teardown = %q\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n", autoTeardown)
 			if err := os.MkdirAll(filepath.Join(caseRoot, "posse"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -163,13 +163,13 @@ while IFS= read -r line; do :; done
 			leadEnv := setEnv(setEnv(env, "HERDR_ENV", "1"), "HERDR_PANE_ID", workspace.RootPane.PaneID)
 			leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
 			brief := filepath.Join(caseRoot, "brief.md")
-			briefText := "---\ntype: ship\ntitle: Add local E2E file\ndone_when: approved check passes\nexecution: in-place\npaths: [src]\n---\nCreate the file.\n"
+			briefText := "---\ntype: change\ntitle: Add local E2E file\ndone_when: approved check passes\nexecution: in-place\npaths: [src]\n---\nCreate the file.\n"
 			if err := os.WriteFile(brief, []byte(briefText), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			output := runPosse(t, binary, directory, leadEnv, "ride", "--brief", brief, "--name", "add-local-e2e", "--user-approved", "I approve edits under src")
+			output := runPosse(t, binary, directory, leadEnv, "start", "--brief", brief, "--name", "add-local-e2e", "--user-approved", "I approve edits under src")
 			if !strings.Contains(output, "state: working") {
-				t.Fatalf("ride did not start: %s", output)
+				t.Fatalf("start did not start: %s", output)
 			}
 			if unmarkedCgroupChild {
 				stateDB, err := store.OpenReadOnly(home)
@@ -179,7 +179,7 @@ while IFS= read -r line; do :; done
 				startedTask, taskErr := stateDB.Task(context.Background(), project.ID, "t1")
 				closeErr := stateDB.Close()
 				if taskErr != nil || closeErr != nil {
-					t.Fatalf("read cgroup mode before releasing fake Rider: task=%#v err=%v/%v", startedTask, taskErr, closeErr)
+					t.Fatalf("read cgroup mode before releasing fake Worker: task=%#v err=%v/%v", startedTask, taskErr, closeErr)
 				}
 				mode := "skip"
 				if startedTask.ContainmentMode == "cgroup" {
@@ -202,14 +202,14 @@ while IFS= read -r line; do :; done
 				return err == nil && len(tasks) == 1 && tasks[0].State == store.StateReported
 			}) {
 				log, _ := os.ReadFile(filepath.Join(caseRoot, "agent.log"))
-				t.Fatalf("Rider did not complete: %s", log)
+				t.Fatalf("Worker did not complete: %s", log)
 			}
 			db, err = store.Open(home)
 			if err != nil {
 				t.Fatal(err)
 			}
 			tasks, err := db.Tasks(context.Background(), project.ID, true)
-			if err != nil || len(tasks) != 1 || tasks[0].State != store.StateReported || tasks[0].Branch != "" || tasks[0].MountID != 0 {
+			if err != nil || len(tasks) != 1 || tasks[0].State != store.StateReported || tasks[0].Branch != "" || tasks[0].SandboxID != 0 {
 				t.Fatalf("completed in-place Task = %#v, %v", tasks, err)
 			}
 			task := tasks[0]
@@ -235,14 +235,14 @@ while IFS= read -r line; do :; done
 			}
 			paneID := task.PaneID
 			if paneID == "" {
-				t.Fatal("in-place Task has no Rider pane")
+				t.Fatal("in-place Task has no Worker pane")
 			}
 			if unmarkedCgroupChild && task.ContainmentMode != "cgroup" {
 				if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": paneID}); err != nil {
-					t.Fatalf("close Rider pane before skipping unavailable cgroup case: %v", err)
+					t.Fatalf("close Worker pane before skipping unavailable cgroup case: %v", err)
 				}
-				if output := runPosse(t, binary, directory, leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
-					t.Fatalf("clean up marker-mode Rider before skipping cgroup case: %s", output)
+				if output := runPosse(t, binary, directory, leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
+					t.Fatalf("clean up marker-mode Worker before skipping cgroup case: %s", output)
 				}
 				t.Skip("Task cgroup mode is unavailable in this environment")
 			}
@@ -332,16 +332,16 @@ while IFS= read -r line; do :; done
 				}) {
 					t.Fatal("foreign vim process did not become the in-place pane foreground")
 				}
-				unsaddleArgs := []string{"unsaddle", "t1"}
+				teardownArgs := []string{"teardown", "t1"}
 				if taskDoneNoticeID != 0 {
-					unsaddleArgs = []string{"ack", strconv.FormatInt(taskDoneNoticeID, 10)}
+					teardownArgs = []string{"ack", strconv.FormatInt(taskDoneNoticeID, 10)}
 				}
-				unsaddle := exec.Command(binary, unsaddleArgs...)
-				unsaddle.Dir, unsaddle.Env = directory, leadEnv
-				outputBytes, unsaddleErr := unsaddle.CombinedOutput()
+				teardown := exec.Command(binary, teardownArgs...)
+				teardown.Dir, teardown.Env = directory, leadEnv
+				outputBytes, teardownErr := teardown.CombinedOutput()
 				output := string(outputBytes)
-				if unsaddleErr == nil || !strings.Contains(output, "unsaddle_incomplete") || !strings.Contains(output, "foreign foreground process") {
-					t.Fatalf("Teardown did not refuse the foreign pane foreground: err=%v output=%s", unsaddleErr, output)
+				if teardownErr == nil || !strings.Contains(output, "teardown_incomplete") || !strings.Contains(output, "foreign foreground process") {
+					t.Fatalf("Teardown did not refuse the foreign pane foreground: err=%v output=%s", teardownErr, output)
 				}
 				bootID, startTime, err := store.ProcessIdentityForPID(foreignPID)
 				if err != nil || bootID != foreignBootID || startTime != foreignStartTime {
@@ -383,7 +383,7 @@ while IFS= read -r line; do :; done
 				}) {
 					t.Fatal("pane did not return to its shell after stopping the test-owned foreground")
 				}
-				if output := runPosse(t, binary, directory, leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
+				if output := runPosse(t, binary, directory, leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
 					t.Fatalf("Teardown did not finish after the foreign process exited: %s", output)
 				}
 				db, err = store.Open(home)
@@ -399,11 +399,11 @@ while IFS= read -r line; do :; done
 			}
 			if !unmarkedCgroupChild {
 				if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": paneID}); err != nil {
-					t.Fatalf("close the completed Rider pane before normal Teardown: %v", err)
+					t.Fatalf("close the completed Worker pane before normal Teardown: %v", err)
 				}
 			}
-			if output := runPosse(t, binary, directory, leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
-				t.Fatalf("unsaddle did not finish: %s", output)
+			if output := runPosse(t, binary, directory, leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
+				t.Fatalf("teardown did not finish: %s", output)
 			}
 			if unmarkedCgroupChild && !waitForCondition(5*time.Second, func() bool { return !teardownFixtureProcessRunning(unmarkedChild) }) {
 				t.Fatalf("Teardown left env -i Task cgroup process %d running", unmarkedChild.PID)
@@ -424,7 +424,7 @@ while IFS= read -r line; do :; done
 	}
 }
 
-func TestPosseSpawnNoticeLandTeardownAndRecovery(t *testing.T) {
+func TestPosseSpawnNoticeMergeTeardownAndRecovery(t *testing.T) {
 	root := newFixtureRoot(t, herdr.TestRootName())
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
@@ -446,7 +446,7 @@ func TestPosseSpawnNoticeLandTeardownAndRecovery(t *testing.T) {
 	if err := os.WriteFile(stableBinary, binaryContents, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	worktrees := filepath.Join(root, "posse", "remuda")
+	worktrees := filepath.Join(root, "posse", "pool")
 	if err := os.MkdirAll(filepath.Join(root, "worker-signal-gates"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestPosseSpawnNoticeLandTeardownAndRecovery(t *testing.T) {
 	    # A relaunched Worker finds its change already committed and keeps running like a real agent.
 	    git diff --cached --quiet || git commit -m "worker change $task_id" >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'git commit failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
 	    while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id" ]; do sleep 0.05; done
-	    posse holler done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'posse holler failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
+	    posse signal done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'posse signal failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
 	    if [ "$task_id" = t1 ]; then
 	      while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id-idle" ]; do sleep 0.05; done
 	    fi
@@ -506,7 +506,7 @@ func TestPosseSpawnNoticeLandTeardownAndRecovery(t *testing.T) {
 	      case "$line" in
 	        *'Queue after the current turn'*)
 	          while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id-queued" ]; do sleep 0.05; done
-	          posse holler done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1
+	          posse signal done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1
 	          ;;
 	      esac
 	    done
@@ -571,21 +571,21 @@ esac
 	if err := os.WriteFile(filepath.Join(root, "codex", "hooks.json"), []byte(codexHooks), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\nmax_workers = 4\n\n[remuda]\nkeep_idle = 1\n\n[profiles.deep]\nkind = \"claude\"\nmodel = \"sonnet\"\neffort = \"high\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 4\n\n[pool]\nkeep_idle = 1\n\n[profiles.deep]\nkind = \"claude\"\nmodel = \"sonnet\"\neffort = \"high\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, playbook := range []struct{ path, content string }{
+	for _, preferences := range []struct{ path, content string }{
 		{"playbook/lead.md", "User lead marker: discuss the workflow before dispatch.\n"},
-		{"playbook/rider.md", "User rider marker: verify from the User layer.\n"},
+		{"playbook/worker.md", "User worker marker: verify from the User layer.\n"},
 		{"projects/shop/playbook/lead.md", "Project lead marker: apply the Project workflow.\n"},
-		{"projects/shop/playbook/rider.md", "Project rider marker: verify from the Project layer.\n"},
+		{"projects/shop/playbook/worker.md", "Project worker marker: verify from the Project layer.\n"},
 	} {
-		path := filepath.Join(root, "posse", playbook.path)
+		path := filepath.Join(root, "posse", preferences.path)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte(playbook.content), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(preferences.content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -758,11 +758,11 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err := lowkeyDB.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if got := runPosse(t, posseBinary, repo, leadEnv, "lookout", "--timeout", "1000"); !strings.Contains(got, "needs-decision - Pick a direction") || !strings.Contains(got, "lowkey: true") {
+	if got := runPosse(t, posseBinary, repo, leadEnv, "watch", "--timeout", "1000"); !strings.Contains(got, "needs-decision - Pick a direction") || !strings.Contains(got, "lowkey: true") {
 		t.Fatalf("running Lead did not receive Notice text and rule: %s", got)
 	}
-	if got := runPosse(t, posseBinary, repo, leadEnv, "lookout", "--ack", strconv.FormatInt(lowkeyNotice, 10), "--timeout", "1"); !strings.Contains(got, "timeout") {
-		t.Fatalf("combined ack and lookout did not wait: %s", got)
+	if got := runPosse(t, posseBinary, repo, leadEnv, "watch", "--ack", strconv.FormatInt(lowkeyNotice, 10), "--timeout", "1"); !strings.Contains(got, "timeout") {
+		t.Fatalf("combined ack and watch did not wait: %s", got)
 	}
 	if got := runPosse(t, posseBinary, repo, leadEnv, "lowkey", "off"); !strings.Contains(got, "lowkey: off") {
 		t.Fatalf("isolated Lead did not disable lowkey mode: %s", got)
@@ -771,33 +771,33 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	userLeadIndex := strings.Index(leadInstructions, "User lead marker")
 	projectLeadIndex := strings.Index(leadInstructions, "Project lead marker")
 	if userLeadIndex < 0 || projectLeadIndex <= userLeadIndex {
-		t.Fatalf("posse lead omitted or misordered layered Lead Playbooks: %s", leadInstructions)
+		t.Fatalf("posse lead omitted or misordered layered Lead preferences: %s", leadInstructions)
 	}
 	leadPromptFile, err := os.ReadFile(filepath.Join(home, "projects", "shop", "lead.md"))
 	if err != nil || !strings.Contains(string(leadPromptFile), "User lead marker") || !strings.Contains(string(leadPromptFile), "Project lead marker") {
-		t.Fatalf("Lead startup instructions omitted its layered Playbook: %s, %v", leadPromptFile, err)
+		t.Fatalf("Lead startup instructions omitted its layered preferences: %s, %v", leadPromptFile, err)
 	}
 	if err := os.WriteFile(filepath.Join(home, "projects", "shop", "playbook", "lead.md"), []byte("Updated Project lead marker.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	updatedLeadInstructions := runPosse(t, posseBinary, repo, leadEnv, "lead")
 	if !strings.Contains(updatedLeadInstructions, "Updated Project lead marker") || strings.Contains(updatedLeadInstructions, "Project lead marker: apply") {
-		t.Fatalf("posse lead did not reload the current Playbook: %s", updatedLeadInstructions)
+		t.Fatalf("posse lead did not reload the current preferences: %s", updatedLeadInstructions)
 	}
-	playbookOutput := runPosse(t, posseBinary, repo, leadEnv, "playbook", "show")
-	if !strings.Contains(playbookOutput, "User rider marker") || !strings.Contains(playbookOutput, "Project rider marker") || strings.Index(playbookOutput, "User rider marker") >= strings.Index(playbookOutput, "Project rider marker") {
-		t.Fatalf("playbook show omitted or misordered effective sources: %s", playbookOutput)
+	playbookOutput := runPosse(t, posseBinary, repo, leadEnv, "preferences", "show")
+	if !strings.Contains(playbookOutput, "User worker marker") || !strings.Contains(playbookOutput, "Project worker marker") || strings.Index(playbookOutput, "User worker marker") >= strings.Index(playbookOutput, "Project worker marker") {
+		t.Fatalf("preferences show omitted or misordered effective sources: %s", playbookOutput)
 	}
-	pathOutput := runPosse(t, posseBinary, repo, leadEnv, "playbook", "path", "rider")
-	if !strings.Contains(pathOutput, filepath.Join(home, "playbook", "rider.md")) || !strings.Contains(pathOutput, filepath.Join(home, "projects", "shop", "playbook", "rider.md")) {
-		t.Fatalf("playbook path omitted its User or Project source: %s", pathOutput)
+	pathOutput := runPosse(t, posseBinary, repo, leadEnv, "preferences", "path", "worker")
+	if !strings.Contains(pathOutput, filepath.Join(home, "playbook", "worker.md")) || !strings.Contains(pathOutput, filepath.Join(home, "projects", "shop", "playbook", "worker.md")) {
+		t.Fatalf("preferences path omitted its User or Project source: %s", pathOutput)
 	}
-	brief := filepath.Join(root, "ship.md")
-	briefText := "---\ntype: ship\ntitle: E2E change\ndone_when: commit exists\n---\nCreate one committed file.\n"
+	brief := filepath.Join(root, "change.md")
+	briefText := "---\ntype: change\ntitle: E2E change\ndone_when: commit exists\n---\nCreate one committed file.\n"
 	if err := os.WriteFile(brief, []byte(briefText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	spawnCommand := exec.Command(posseBinary, "ride", "--brief", brief, "--name", "e2e-change")
+	spawnCommand := exec.Command(posseBinary, "start", "--brief", brief, "--name", "e2e-change")
 	spawnCommand.Dir = repo
 	spawnCommand.Env = leadEnv
 	spawnOutput, spawnErr := spawnCommand.CombinedOutput()
@@ -805,10 +805,10 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		status, statusErr := client.Status(context.Background())
 		pluginLogs, logErr := client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.herdr", "limit": 10})
 		workerOutput, _ := os.ReadFile(workerLog)
-		t.Fatalf("posse ride failed: %v %s; status=%#v %v; logs=%s %v; worker=%s", spawnErr, spawnOutput, status, statusErr, pluginLogs, logErr, workerOutput)
+		t.Fatalf("posse start failed: %v %s; status=%#v %v; logs=%s %v; worker=%s", spawnErr, spawnOutput, status, statusErr, pluginLogs, logErr, workerOutput)
 	}
 	if !strings.Contains(string(spawnOutput), "t1") {
-		t.Fatalf("posse ride returned no Task id: %s", spawnOutput)
+		t.Fatalf("posse start returned no Task id: %s", spawnOutput)
 	}
 	if !waitForCondition(20*time.Second, func() bool {
 		pending, openErr := store.Open(home)
@@ -901,7 +901,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveredLaunch, err := os.ReadFile(launchRead)
-	if err != nil || !bytes.Equal(generatedLaunch, deliveredLaunch) || !strings.Contains(string(deliveredLaunch), "Write Briefs, `posse send` instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence in English in a neutral voice.") || !strings.Contains(string(deliveredLaunch), "posse holler done") || !strings.Contains(string(deliveredLaunch), "as background commands and never poll them") || !strings.Contains(string(deliveredLaunch), "Do not wait for PR CI") || !strings.Contains(string(deliveredLaunch), "never touch panes, tabs or workspaces you did not create") || !strings.Contains(string(deliveredLaunch), "User rider marker") || strings.Index(string(deliveredLaunch), "Project rider marker") <= strings.Index(string(deliveredLaunch), "User rider marker") || strings.Contains(string(deliveredLaunch), "User lead marker") {
+	if err != nil || !bytes.Equal(generatedLaunch, deliveredLaunch) || !strings.Contains(string(deliveredLaunch), "Write Briefs, `posse send` instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence in English in a neutral voice.") || !strings.Contains(string(deliveredLaunch), "posse signal done") || !strings.Contains(string(deliveredLaunch), "as background commands and never poll them") || !strings.Contains(string(deliveredLaunch), "Do not wait for PR CI") || !strings.Contains(string(deliveredLaunch), "never touch panes, tabs or workspaces you did not create") || !strings.Contains(string(deliveredLaunch), "User worker marker") || strings.Index(string(deliveredLaunch), "Project worker marker") <= strings.Index(string(deliveredLaunch), "User worker marker") || strings.Contains(string(deliveredLaunch), "User lead marker") {
 		t.Fatalf("Worker did not receive the generated launch.md contract: err=%v generated=%q delivered=%q", err, generatedLaunch, deliveredLaunch)
 	}
 	workerArgs, err := os.ReadFile(workerArgsLog)
@@ -914,7 +914,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 	leadArgs, err := os.ReadFile(leadArgsLog)
 	if err != nil || !strings.Contains(string(leadArgs), "--plugin-dir "+bundleRoots[0]) || !strings.Contains(string(workerArgs), "--plugin-dir "+bundleRoots[0]) {
-		t.Fatalf("Claude Lead and Rider were not given the isolated plugin snapshot: lead=%q worker=%q err=%v", leadArgs, workerArgs, err)
+		t.Fatalf("Claude Lead and Worker were not given the isolated plugin snapshot: lead=%q worker=%q err=%v", leadArgs, workerArgs, err)
 	}
 	for _, name := range []string{"posse", "posse-setup"} {
 		path := filepath.Join(bundleRoots[0], "skills", name, "SKILL.md")
@@ -1025,7 +1025,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 	if !waitForCondition(15*time.Second, func() bool {
 		contents, err := os.ReadFile(workerLog)
-		return err == nil && strings.Count(string(contents), "[posse | Lead -> Rider t1 | instruction #") == 2 && strings.Contains(string(contents), `body: "Queue after the current turn"`)
+		return err == nil && strings.Count(string(contents), "[posse | Lead -> Worker t1 | instruction #") == 2 && strings.Contains(string(contents), `body: "Queue after the current turn"`)
 	}) {
 		contents, err := os.ReadFile(workerLog)
 		t.Fatalf("Worker steer/queued instruction envelopes missing: %q %v", contents, err)
@@ -1050,36 +1050,36 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 	workerScratch := filepath.Join(home, "scratch", "shop", "t1")
 	if contents, err := os.ReadFile(filepath.Join(workerScratch, "e2e-t1.tmp")); err != nil || string(contents) != "temporary fixture\n" {
-		t.Fatalf("Rider temporary fixture was not written to its Posse scratch: %q %v", contents, err)
+		t.Fatalf("Worker temporary fixture was not written to its Posse scratch: %q %v", contents, err)
 	}
 	if contents, err := os.ReadFile(filepath.Join(workerScratch, "go-test-t1")); err != nil || string(contents) != "go test used Task scratch" {
-		t.Fatalf("Rider go test did not use its Posse scratch: %q %v", contents, err)
+		t.Fatalf("Worker go test did not use its Posse scratch: %q %v", contents, err)
 	}
-	if output := runPosse(t, posseBinary, repo, leadEnv, "land", "t1", "--merge", "--user-approved", "User approved the local merge"); !strings.Contains(output, "landed") {
-		t.Fatalf("local land failed: %s", output)
+	if output := runPosse(t, posseBinary, repo, leadEnv, "merge", "t1", "--execute", "--user-approved", "User approved the local merge"); !strings.Contains(output, "merged") {
+		t.Fatalf("local merge failed: %s", output)
 	}
 	if output := runPosse(t, posseBinary, repo, leadEnv, "ack", "all"); !strings.Contains(output, "acknowledged") {
-		t.Fatalf("could not acknowledge the first Task's Notices before the next Lookout check: %s", output)
+		t.Fatalf("could not acknowledge the first Task's Notices before the next Watch check: %s", output)
 	}
 	if got, err := gitCommand(env, repo, "show", "main:e2e-worker-t1.txt"); err != nil || strings.TrimSpace(got) != "worker change t1" {
 		t.Fatalf("Worker change was not merged: %q %v", got, err)
 	}
-	mountPath := task.WorktreePath
-	if err := os.WriteFile(filepath.Join(mountPath, "README.md"), []byte("dirty tracked edit\n"), 0o600); err != nil {
+	sandboxPath := task.WorktreePath
+	if err := os.WriteFile(filepath.Join(sandboxPath, "README.md"), []byte("dirty tracked edit\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(mountPath, "untracked.marker"), []byte("remove me\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(sandboxPath, "untracked.marker"), []byte("remove me\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(mountPath, "node_modules"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(sandboxPath, "node_modules"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(mountPath, "node_modules", "marker"), []byte("keep me\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(sandboxPath, "node_modules", "marker"), []byte("keep me\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	leadArgsBeforeTeardownRestart, _ := os.ReadFile(leadArgsLog)
-	crashEnv := setEnv(leadEnv, "POSSE_INTENT_CRASH_AT", "unsaddle:before:scratch.remove")
-	crash := exec.Command(posseBinary, "unsaddle", "t1")
+	crashEnv := setEnv(leadEnv, "POSSE_INTENT_CRASH_AT", "teardown:before:scratch.remove")
+	crash := exec.Command(posseBinary, "teardown", "t1")
 	crash.Dir, crash.Env = repo, crashEnv
 	crashOutput, crashErr := crash.CombinedOutput()
 	crashExit, crashed := crashErr.(*exec.ExitError)
@@ -1113,7 +1113,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			}
 		}
 	}
-	runPosse(t, posseBinary, repo, leadEnv, "roster")
+	runPosse(t, posseBinary, repo, leadEnv, "list")
 	if !waitForCondition(30*time.Second, func() bool {
 		observer, openErr := store.OpenReadOnly(home)
 		if openErr != nil {
@@ -1156,20 +1156,20 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("Lead-restart Teardown kept Task scratch: %v", err)
 	}
 	if output, err := exec.Command("git", "-C", repo, "show-ref", "--verify", "refs/heads/"+task.Branch).CombinedOutput(); err == nil {
-		t.Fatalf("Teardown kept landed Task branch %s: %s", task.Branch, output)
+		t.Fatalf("Teardown kept merged Task branch %s: %s", task.Branch, output)
 	}
-	if got, err := os.ReadFile(filepath.Join(mountPath, "README.md")); err != nil || string(got) != "fixture\n" {
+	if got, err := os.ReadFile(filepath.Join(sandboxPath, "README.md")); err != nil || string(got) != "fixture\n" {
 		t.Fatalf("Teardown kept a tracked edit: %q %v", got, err)
 	}
-	if _, err := os.Stat(filepath.Join(mountPath, "untracked.marker")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(sandboxPath, "untracked.marker")); !os.IsNotExist(err) {
 		t.Fatalf("Teardown kept an untracked file: %v", err)
 	}
-	if got, err := os.ReadFile(filepath.Join(mountPath, "node_modules", "marker")); err != nil || string(got) != "keep me\n" {
+	if got, err := os.ReadFile(filepath.Join(sandboxPath, "node_modules", "marker")); err != nil || string(got) != "keep me\n" {
 		t.Fatalf("warm cleanup lost the ignored marker: %q %v", got, err)
 	}
 	assertWorkerSleepsStopped(t, sleepPIDs)
 	// The deliberate restart can leave a generic recovery Notice. A long
-	// teardown can also outlast Lookout's bounded wait and leave a retryable
+	// teardown can also outlast Watch's bounded wait and leave a retryable
 	// teardown-in-progress Notice. Drain only those known transient Notices
 	// before checking the next Worker's completion delivery.
 	recoveryDB, err := store.OpenReadOnly(home)
@@ -1186,10 +1186,10 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		case "recovery":
 		case "pr_watch_failing":
 			if !strings.Contains(notice.Summary, "active Task Teardown: Task Teardown is in progress") {
-				t.Fatalf("unexpected Lookout failure before the next Rider: %#v", notice)
+				t.Fatalf("unexpected Watch failure before the next Worker: %#v", notice)
 			}
 		default:
-			t.Fatalf("unexpected undelivered Notice before the next Rider: %#v", notice)
+			t.Fatalf("unexpected undelivered Notice before the next Worker: %#v", notice)
 		}
 	}
 	if len(pendingNotices) != 0 {
@@ -1198,65 +1198,65 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		}
 	}
 
-	// The next Task reuses the same clean Mount, including its ignored cache.
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: E2E second change\ndone_when: second commit exists\n---\nCreate one more committed file.\n"), 0o600); err != nil {
+	// The next Task reuses the same clean Sandbox, including its ignored cache.
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: E2E second change\ndone_when: second commit exists\n---\nCreate one more committed file.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	secondOutput := runPosse(t, posseBinary, repo, leadEnv, "ride", "--brief", brief, "--name", "e2e-second-change")
+	secondOutput := runPosse(t, posseBinary, repo, leadEnv, "start", "--brief", brief, "--name", "e2e-second-change")
 	if !strings.Contains(secondOutput, "t2") {
-		t.Fatalf("second ride returned no t2 Task: %s", secondOutput)
+		t.Fatalf("second start returned no t2 Task: %s", secondOutput)
 	}
 	db, err = store.Open(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	secondTask, err := db.Task(context.Background(), project.ID, "t2")
-	if err != nil || secondTask.MountID != task.MountID || secondTask.WorktreePath != mountPath {
-		t.Fatalf("second Task did not reuse Mount 1: first=%#v second=%#v err=%v", task, secondTask, err)
+	if err != nil || secondTask.SandboxID != task.SandboxID || secondTask.WorktreePath != sandboxPath {
+		t.Fatalf("second Task did not reuse Sandbox 1: first=%#v second=%#v err=%v", task, secondTask, err)
 	}
-	if got, err := os.ReadFile(filepath.Join(mountPath, "node_modules", "marker")); err != nil || string(got) != "keep me\n" {
+	if got, err := os.ReadFile(filepath.Join(sandboxPath, "node_modules", "marker")); err != nil || string(got) != "keep me\n" {
 		t.Fatalf("second Task did not retain the ignored marker: %q %v", got, err)
 	}
 	if _, err := client.Call(context.Background(), "agent.focus", map[string]any{"target": project.LeadPaneID}); err != nil {
 		t.Fatalf("focus Lead before second Worker Signal: %v", err)
 	}
-	leadBeforeLookout, _ := os.ReadFile(leadLog)
-	leadPromptCount := strings.Count(string(leadBeforeLookout), "[posse | Posse -> Lead ")
-	lookoutEnv := setEnv(env, "HERDR_ENV", "1")
-	lookoutEnv = setEnv(lookoutEnv, "HERDR_PANE_ID", project.LeadPaneID)
-	lookoutEnv = setEnv(lookoutEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
-	lookout := exec.Command(posseBinary, "lookout", "--timeout", "60000")
-	lookout.Dir = repo
-	lookout.Env = lookoutEnv
-	var lookoutOutput bytes.Buffer
-	lookout.Stdout, lookout.Stderr = &lookoutOutput, &lookoutOutput
-	if err := lookout.Start(); err != nil {
+	leadBeforeWatch, _ := os.ReadFile(leadLog)
+	leadPromptCount := strings.Count(string(leadBeforeWatch), "[posse | Posse -> Lead ")
+	watchEnv := setEnv(env, "HERDR_ENV", "1")
+	watchEnv = setEnv(watchEnv, "HERDR_PANE_ID", project.LeadPaneID)
+	watchEnv = setEnv(watchEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+	watch := exec.Command(posseBinary, "watch", "--timeout", "60000")
+	watch.Dir = repo
+	watch.Env = watchEnv
+	var watchOutput bytes.Buffer
+	watch.Stdout, watch.Stderr = &watchOutput, &watchOutput
+	if err := watch.Start(); err != nil {
 		t.Fatal(err)
 	}
-	lookoutDone := make(chan error, 1)
-	go func() { lookoutDone <- lookout.Wait() }()
+	watchDone := make(chan error, 1)
+	go func() { watchDone <- watch.Wait() }()
 	if err := os.WriteFile(filepath.Join(signalGateDir, "t2"), []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case err := <-lookoutDone:
+	case err := <-watchDone:
 		if err != nil {
-			t.Fatalf("background lookout failed: %v output=%s", err, lookoutOutput.String())
+			t.Fatalf("background watch failed: %v output=%s", err, watchOutput.String())
 		}
 	case <-time.After(75 * time.Second):
-		_ = lookout.Process.Kill()
-		<-lookoutDone
-		t.Fatalf("background lookout did not return the Worker's Notice: %s", lookoutOutput.String())
+		_ = watch.Process.Kill()
+		<-watchDone
+		t.Fatalf("background watch did not return the Worker's Notice: %s", watchOutput.String())
 	}
-	if !strings.Contains(lookoutOutput.String(), "E2E worker committed the change") {
+	if !strings.Contains(watchOutput.String(), "E2E worker committed the change") {
 		currentTask, taskErr := db.Task(context.Background(), project.ID, "t2")
 		pending, noticeErr := db.UndeliveredNotices(context.Background(), project.ID)
 		worker, _ := os.ReadFile(workerLog)
-		t.Fatalf("background lookout omitted the Worker completion digest: output=%s task=%#v taskErr=%v pending=%#v noticeErr=%v workerLog=%q", lookoutOutput.String(), currentTask, taskErr, pending, noticeErr, worker)
+		t.Fatalf("background watch omitted the Worker completion digest: output=%s task=%#v taskErr=%v pending=%#v noticeErr=%v workerLog=%q", watchOutput.String(), currentTask, taskErr, pending, noticeErr, worker)
 	}
-	leadAfterLookout, _ := os.ReadFile(leadLog)
-	if strings.Count(string(leadAfterLookout), "[posse | Posse -> Lead ") != leadPromptCount {
-		t.Fatalf("focused Lead received typed input while lookout returned: before=%q after=%q", leadBeforeLookout, leadAfterLookout)
+	leadAfterWatch, _ := os.ReadFile(leadLog)
+	if strings.Count(string(leadAfterWatch), "[posse | Posse -> Lead ") != leadPromptCount {
+		t.Fatalf("focused Lead received typed input while watch returned: before=%q after=%q", leadBeforeWatch, leadAfterWatch)
 	}
 	if !waitForCondition(60*time.Second, func() bool {
 		current, taskErr := db.Task(context.Background(), project.ID, "t2")
@@ -1268,16 +1268,16 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 	secondScratch := filepath.Join(home, "scratch", "shop", "t2")
 	if contents, err := os.ReadFile(filepath.Join(secondScratch, "go-test-t2")); err != nil || string(contents) != "go test used Task scratch" {
-		t.Fatalf("second Rider go test did not use its Posse scratch: %q %v", contents, err)
+		t.Fatalf("second Worker go test did not use its Posse scratch: %q %v", contents, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, posseBinary, repo, env, "config", "set", "defaults.auto_unsaddle", "finished", "--project", "shop"); !strings.Contains(output, "finished") {
-		t.Fatalf("could not enable automatic Teardown for the E2E landing case: %s", output)
+	if output := runPosse(t, posseBinary, repo, env, "config", "set", "defaults.auto_teardown", "finished", "--project", "shop"); !strings.Contains(output, "finished") {
+		t.Fatalf("could not enable automatic Teardown for the E2E merging case: %s", output)
 	}
-	if output := runPosse(t, posseBinary, repo, leadEnv, "land", "t2", "--merge", "--user-approved", "User approved the second local merge"); !strings.Contains(output, "landed") {
-		t.Fatalf("second local land failed: %s", output)
+	if output := runPosse(t, posseBinary, repo, leadEnv, "merge", "t2", "--execute", "--user-approved", "User approved the second local merge"); !strings.Contains(output, "merged") {
+		t.Fatalf("second local merge failed: %s", output)
 	}
 	db, err = store.Open(home)
 	if err != nil {
@@ -1285,25 +1285,25 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 	secondTask, err = db.Task(context.Background(), project.ID, "t2")
 	if err != nil || secondTask.State != store.StateTornDown {
-		t.Fatalf("land --merge did not auto-unsaddle the landed Task: %#v, %v", secondTask, err)
+		t.Fatalf("merge --execute did not auto-teardown the merged Task: %#v, %v", secondTask, err)
 	}
 	postTeardownSnapshot, snapshotErr := client.Snapshot(context.Background())
 	if snapshotErr != nil {
 		t.Fatalf("snapshot after t2 teardown: %v", snapshotErr)
 	}
 	for _, pane := range postTeardownSnapshot.Panes {
-		if pane.Label == secondTask.PaneLabel || pane.CWD == mountPath {
+		if pane.Label == secondTask.PaneLabel || pane.CWD == sandboxPath {
 			processInfo, _ := client.Run(context.Background(), "pane", "process-info", pane.PaneID)
-			t.Fatalf("t2 teardown left a Mount pane: pane=%#v processInfo=%s workspaces=%#v", pane, processInfo, postTeardownSnapshot.Workspaces)
+			t.Fatalf("t2 teardown left a Sandbox pane: pane=%#v processInfo=%s workspaces=%#v", pane, processInfo, postTeardownSnapshot.Workspaces)
 		}
 	}
 	for _, workspace := range postTeardownSnapshot.Workspaces {
-		if workspace.Worktree.CheckoutPath == mountPath || workspace.Root == mountPath {
+		if workspace.Worktree.CheckoutPath == sandboxPath || workspace.Root == sandboxPath {
 			t.Fatalf("t2 teardown left its Herdr workspace registered: %#v panes=%#v", workspace, postTeardownSnapshot.Panes)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(home, "scratch", "shop", "t2")); !os.IsNotExist(err) {
-		t.Fatalf("Land Teardown kept Task scratch: %v", err)
+		t.Fatalf("Merge Teardown kept Task scratch: %v", err)
 	}
 	expiredBundle := filepath.Join(home, "projects", "shop", "tasks", "t2", "discard", "approved-tip.bundle")
 	if err := os.MkdirAll(filepath.Dir(expiredBundle), 0o700); err != nil {
@@ -1317,24 +1317,24 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if output, err := exec.Command("git", "-C", repo, "show-ref", "--verify", "refs/heads/"+secondTask.Branch).CombinedOutput(); err == nil {
-		t.Fatalf("Land Teardown kept landed Task branch %s: %s", secondTask.Branch, output)
+		t.Fatalf("Merge Teardown kept merged Task branch %s: %s", secondTask.Branch, output)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	assertWorkerSleepsStopped(t, sleepPIDs)
 
-	// Pruning keeps the configured idle Mount and lists only the extra Mount and orphan scratch.
-	extraMount := filepath.Join(root, "posse", "remuda", "shop", "mount-2")
-	if err := os.MkdirAll(filepath.Dir(extraMount), 0o700); err != nil {
+	// Pruning keeps the configured idle Sandbox and lists only the extra Sandbox and orphan scratch.
+	extraSandbox := filepath.Join(root, "posse", "pool", "shop", "sandbox-2")
+	if err := os.MkdirAll(filepath.Dir(extraSandbox), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, env, repo, "worktree", "add", "--detach", extraMount, "main")
+	gitTest(t, env, repo, "worktree", "add", "--detach", extraSandbox, "main")
 	db, err = store.Open(home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(), `INSERT INTO mounts(project_id,n,path,state) VALUES(?,2,?,'idle')`, project.ID, extraMount); err != nil {
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO mounts(project_id,n,path,state) VALUES(?,2,?,'idle')`, project.ID, extraSandbox); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -1347,23 +1347,23 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(orphanScratch, "temp"), []byte("1234"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pruneDryRun := runPosse(t, posseBinary, repo, leadEnv, "remuda", "prune")
+	pruneDryRun := runPosse(t, posseBinary, repo, leadEnv, "pool", "prune")
 	artifactRow := fmt.Sprintf("t2,artifacts,%s,Task artifacts exceeded retention,%d,torn-down", filepath.Join(home, "projects", "shop", "tasks", "t2"), len(bundleContents))
-	if !strings.Contains(pruneDryRun, "mount-2") || !strings.Contains(pruneDryRun, "t999,scratch,") || !strings.Contains(pruneDryRun, "Task no longer exists,4,orphan") || !strings.Contains(pruneDryRun, artifactRow) || !strings.Contains(pruneDryRun, "dry_run: true") || !strings.Contains(pruneDryRun, "prune[3]") {
-		t.Fatalf("prune dry run did not list exactly the extra Mount, orphan scratch and expired discard bundle with sizes: %s", pruneDryRun)
+	if !strings.Contains(pruneDryRun, "sandbox-2") || !strings.Contains(pruneDryRun, "t999,scratch,") || !strings.Contains(pruneDryRun, "Task no longer exists,4,orphan") || !strings.Contains(pruneDryRun, artifactRow) || !strings.Contains(pruneDryRun, "dry_run: true") || !strings.Contains(pruneDryRun, "prune[3]") {
+		t.Fatalf("prune dry run did not list exactly the extra Sandbox, orphan scratch and expired discard bundle with sizes: %s", pruneDryRun)
 	}
-	if _, err := os.Stat(extraMount); err != nil {
-		t.Fatalf("dry run removed the extra Mount: %v", err)
+	if _, err := os.Stat(extraSandbox); err != nil {
+		t.Fatalf("dry run removed the extra Sandbox: %v", err)
 	}
 	if _, err := os.Stat(orphanScratch); err != nil {
 		t.Fatalf("dry run removed orphan scratch: %v", err)
 	}
-	pruneOutput := runPosse(t, posseBinary, repo, leadEnv, "remuda", "prune", "--yes")
-	if !strings.Contains(pruneOutput, "mount-2") || !strings.Contains(pruneOutput, "t999,scratch,") || !strings.Contains(pruneOutput, "t2,artifacts,") {
-		t.Fatalf("prune --yes did not report the reclaimable Mount, scratch and expired bundle: %s", pruneOutput)
+	pruneOutput := runPosse(t, posseBinary, repo, leadEnv, "pool", "prune", "--yes")
+	if !strings.Contains(pruneOutput, "sandbox-2") || !strings.Contains(pruneOutput, "t999,scratch,") || !strings.Contains(pruneOutput, "t2,artifacts,") {
+		t.Fatalf("prune --yes did not report the reclaimable Sandbox, scratch and expired bundle: %s", pruneOutput)
 	}
-	if _, err := os.Stat(extraMount); !os.IsNotExist(err) {
-		t.Fatalf("prune --yes kept the extra Mount: %v", err)
+	if _, err := os.Stat(extraSandbox); !os.IsNotExist(err) {
+		t.Fatalf("prune --yes kept the extra Sandbox: %v", err)
 	}
 	if _, err := os.Stat(orphanScratch); !os.IsNotExist(err) {
 		t.Fatalf("prune --yes kept orphan scratch: %v", err)
@@ -1371,14 +1371,14 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if _, err := os.Stat(expiredBundle); !os.IsNotExist(err) {
 		t.Fatalf("prune --yes kept expired discard bundle: %v", err)
 	}
-	if output := runPosse(t, posseBinary, repo, leadEnv, "remuda", "prune", "--yes"); strings.Contains(output, "kind:") {
+	if output := runPosse(t, posseBinary, repo, leadEnv, "pool", "prune", "--yes"); strings.Contains(output, "kind:") {
 		t.Fatalf("repeated prune was not idempotent: %s", output)
 	}
-	if _, err := os.Stat(mountPath); err != nil {
-		t.Fatalf("prune removed the retained Mount: %v", err)
+	if _, err := os.Stat(sandboxPath); err != nil {
+		t.Fatalf("prune removed the retained Sandbox: %v", err)
 	}
-	if got, err := os.ReadFile(filepath.Join(mountPath, "node_modules", "marker")); err != nil || string(got) != "keep me\n" {
-		t.Fatalf("prune changed the retained Mount: %q %v", got, err)
+	if got, err := os.ReadFile(filepath.Join(sandboxPath, "node_modules", "marker")); err != nil || string(got) != "keep me\n" {
+		t.Fatalf("prune changed the retained Sandbox: %q %v", got, err)
 	}
 	oldLeadPaneID := project.LeadPaneID
 	recoveryCaller, err := createTab(client, project.HerdrWorkspaceID, repo, "recovery-caller")
@@ -1420,7 +1420,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 
 	// A focused Lead must receive a desktop notification, never typed input.
-	// Its background Lookout may claim the Notice even while the pane is focused.
+	// Its background Watch may claim the Notice even while the pane is focused.
 	db, err = store.Open(home)
 	if err != nil {
 		t.Fatal(err)
@@ -1445,10 +1445,10 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Force the overlap that used to make the pending-Notice assertion flaky:
-	// Lookout delivery is valid while the Lead is focused, but typed delivery is not.
-	lookoutEnv = setEnv(lookoutEnv, "HERDR_PANE_ID", project.LeadPaneID)
-	if output := runPosse(t, posseBinary, repo, lookoutEnv, "lookout", "--timeout", "3000"); !strings.Contains(output, "focused guard check") {
-		t.Fatalf("focused Lead's Lookout did not receive the Notice: %s", output)
+	// Watch delivery is valid while the Lead is focused, but typed delivery is not.
+	watchEnv = setEnv(watchEnv, "HERDR_PANE_ID", project.LeadPaneID)
+	if output := runPosse(t, posseBinary, repo, watchEnv, "watch", "--timeout", "3000"); !strings.Contains(output, "focused guard check") {
+		t.Fatalf("focused Lead's Watch did not receive the Notice: %s", output)
 	}
 	focusedEnv := setEnv(env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane_focused","data":{"pane_id":%q}}`, project.LeadPaneID))
 	runPosse(t, posseBinary, repo, focusedEnv, "_ingest")
@@ -1466,7 +1466,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 	for _, notice := range undelivered {
 		if notice.Summary == "focused guard check" {
-			t.Fatalf("Lookout did not mark the focused Lead Notice delivered: %#v", undelivered)
+			t.Fatalf("Watch did not mark the focused Lead Notice delivered: %#v", undelivered)
 		}
 	}
 	if err := db.Close(); err != nil {
@@ -1490,10 +1490,10 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Recovery worker\ndone_when: recovery is verified\n---\nKeep working until the recovery E2E resumes you.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Recovery worker\ndone_when: recovery is verified\n---\nKeep working until the recovery E2E resumes you.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, posseBinary, repo, leadEnv, "ride", "--brief", brief, "--name", "recovery-worker"); !strings.Contains(output, "t3") {
+	if output := runPosse(t, posseBinary, repo, leadEnv, "start", "--brief", brief, "--name", "recovery-worker"); !strings.Contains(output, "t3") {
 		t.Fatalf("recovery Worker did not start: %s", output)
 	}
 	db, err = store.Open(home)
@@ -1505,23 +1505,23 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if intents, intentErr := db.Intents(context.Background(), project.ID); intentErr != nil || len(intents) != 0 {
-		t.Fatalf("successful ride left unfinished command intents: %#v, %v", intents, intentErr)
+		t.Fatalf("successful start left unfinished command intents: %#v, %v", intents, intentErr)
 	}
-	if thirdTask.MountID == 0 || thirdTask.WorktreePath == "" || thirdTask.Branch == "" {
-		t.Fatalf("recovery Worker has no held Mount and branch: %#v", thirdTask)
+	if thirdTask.SandboxID == 0 || thirdTask.WorktreePath == "" || thirdTask.Branch == "" {
+		t.Fatalf("recovery Worker has no held Sandbox and branch: %#v", thirdTask)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	thirdLaunchPath := filepath.Join(home, "projects", "shop", "tasks", "t3", "launch.md")
 	thirdLaunchSnapshot, err := os.ReadFile(thirdLaunchPath)
-	if err != nil || !strings.Contains(string(thirdLaunchSnapshot), "User rider marker") || !strings.Contains(string(thirdLaunchSnapshot), "Project rider marker") {
-		t.Fatalf("recovery Rider did not receive a layered Playbook snapshot: %s, %v", thirdLaunchSnapshot, err)
+	if err != nil || !strings.Contains(string(thirdLaunchSnapshot), "User worker marker") || !strings.Contains(string(thirdLaunchSnapshot), "Project worker marker") {
+		t.Fatalf("recovery Worker did not receive a layered preferences snapshot: %s, %v", thirdLaunchSnapshot, err)
 	}
-	if err := os.WriteFile(filepath.Join(home, "playbook", "rider.md"), []byte("Updated User rider instructions.\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "playbook", "worker.md"), []byte("Updated User worker instructions.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, "projects", "shop", "playbook", "rider.md"), []byte("Updated Project rider instructions.\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "projects", "shop", "playbook", "worker.md"), []byte("Updated Project worker instructions.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if !waitForCondition(30*time.Second, func() bool {
@@ -1573,7 +1573,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	var restoredTornDownPane *herdr.Pane
 	for index := range afterRestart.Panes {
 		pane := &afterRestart.Panes[index]
-		if pane.Label == secondTask.PaneLabel && pane.CWD == mountPath {
+		if pane.Label == secondTask.PaneLabel && pane.CWD == sandboxPath {
 			restoredTornDownPane = pane
 			break
 		}
@@ -1606,7 +1606,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			}
 			defer recoveryDB.Close()
 			recovery, recoveryErr := recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
-			return recoveryErr == nil && recovery.Status == "pending" && recovery.Attempts > 0 && recovery.LastError == "another Herdr workspace already holds this Mount"
+			return recoveryErr == nil && recovery.Status == "pending" && recovery.Attempts > 0 && recovery.LastError == "another Herdr workspace already holds this Sandbox"
 		}) {
 			t.Fatal("startup recovery did not fail closed on the restored torn-down Task workspace")
 		}
@@ -1619,7 +1619,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 				return false
 			}
 			for _, workspace := range snapshot.Workspaces {
-				if workspace.Worktree.CheckoutPath == mountPath || workspace.Root == mountPath {
+				if workspace.Worktree.CheckoutPath == sandboxPath || workspace.Root == sandboxPath {
 					return false
 				}
 			}
@@ -1639,7 +1639,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			t.Fatal("startup recovery retry backoff did not elapse after the stale fixture workspace was removed")
 		}
 		if output := runPosse(t, posseBinary, repo, leadEnv, "recover", "--all"); !strings.Contains(output, "restarted: 2") {
-			t.Fatalf("explicit recovery after removing the fixture's stale shell did not restart the Rider and Lead: %s", output)
+			t.Fatalf("explicit recovery after removing the fixture's stale shell did not restart the Worker and Lead: %s", output)
 		}
 		if leadAlreadyLiveBeforeRestart {
 			recoveryDB, openErr := store.Open(home)
@@ -1651,10 +1651,10 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			lookoutEnv = setEnv(lookoutEnv, "HERDR_PANE_ID", project.LeadPaneID)
-			lookoutEnv = setEnv(lookoutEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
-			if output := runPosse(t, posseBinary, repo, lookoutEnv, "lookout", "--timeout", "3000"); !strings.Contains(output, "recovery-worker") {
-				t.Fatalf("live Lead's Lookout did not deliver the deferred recovery Notice: %s", output)
+			watchEnv = setEnv(watchEnv, "HERDR_PANE_ID", project.LeadPaneID)
+			watchEnv = setEnv(watchEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+			if output := runPosse(t, posseBinary, repo, watchEnv, "watch", "--timeout", "3000"); !strings.Contains(output, "recovery-worker") {
+				t.Fatalf("live Lead's Watch did not deliver the deferred recovery Notice: %s", output)
 			}
 		}
 	}
@@ -1689,7 +1689,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		leadRestarted := strings.Count(string(leadArgsNow), "start ") > leadStartsBefore && strings.Count(string(leadPromptsNow), "[posse | Posse -> Lead ") > leadPromptCountBefore
 		return generation == afterRestart.ServerStartedAt &&
 			currentTask.State == store.StateWorking && currentTask.Launches > thirdTask.Launches && currentTask.AgentName != thirdTask.AgentName &&
-			currentTask.MountID == thirdTask.MountID && currentTask.WorktreePath == thirdTask.WorktreePath && currentTask.Branch == thirdTask.Branch &&
+			currentTask.SandboxID == thirdTask.SandboxID && currentTask.WorktreePath == thirdTask.WorktreePath && currentTask.Branch == thirdTask.Branch &&
 			recoveryNotices == 1 && strings.Count(string(workerArgsNow), "start ") > workerStartsBefore &&
 			(leadAlreadyLiveBeforeRestart || leadRestarted)
 	}) {
@@ -1726,11 +1726,11 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("reconcile delayed pre-restart event: %v", err)
 	}
 	recovered, err := db.Task(context.Background(), project.ID, "t3")
-	if err != nil || recovered.State != store.StateWorking || recovered.MountID != thirdTask.MountID || recovered.WorktreePath != thirdTask.WorktreePath || recovered.Branch != thirdTask.Branch || recovered.AgentName == thirdTask.AgentName {
+	if err != nil || recovered.State != store.StateWorking || recovered.SandboxID != thirdTask.SandboxID || recovered.WorktreePath != thirdTask.WorktreePath || recovered.Branch != thirdTask.Branch || recovered.AgentName == thirdTask.AgentName {
 		transitions, _ := db.TaskTransitions(context.Background(), recovered.ID, 10)
 		reconcileSnapshot, snapshotErr := client.Snapshot(context.Background())
 		pluginLogs, pluginLogsErr := client.Run(context.Background(), "plugin", "log", "list", "--plugin", "posse.herdr")
-		t.Fatalf("Worker was not relaunched on its original Mount and branch: before=%#v after=%#v transitions=%#v snapshot=%#v snapshotErr=%v recovery=%s err=%v pluginLogs=%s pluginLogsErr=%v", thirdTask, recovered, transitions, reconcileSnapshot, snapshotErr, recoveryOutput, err, pluginLogs, pluginLogsErr)
+		t.Fatalf("Worker was not relaunched on its original Sandbox and branch: before=%#v after=%#v transitions=%#v snapshot=%#v snapshotErr=%v recovery=%s err=%v pluginLogs=%s pluginLogsErr=%v", thirdTask, recovered, transitions, reconcileSnapshot, snapshotErr, recoveryOutput, err, pluginLogs, pluginLogsErr)
 	}
 	var recoverySnapshot herdr.Snapshot
 	if !waitForCondition(5*time.Second, func() bool {
@@ -1772,8 +1772,8 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("recovery digest Notice count = %d, want one: %#v; recovery=%s", recoveryNotices, notices, recoveryOutput)
 	}
 	recoveredLaunchSnapshot, err := os.ReadFile(thirdLaunchPath)
-	if err != nil || !bytes.Equal(recoveredLaunchSnapshot, thirdLaunchSnapshot) || strings.Contains(string(recoveredLaunchSnapshot), "Updated User rider instructions") || strings.Contains(string(recoveredLaunchSnapshot), "Updated Project rider instructions") {
-		t.Fatalf("Rider Playbook snapshot changed during relaunch: before=%q after=%q err=%v", thirdLaunchSnapshot, recoveredLaunchSnapshot, err)
+	if err != nil || !bytes.Equal(recoveredLaunchSnapshot, thirdLaunchSnapshot) || strings.Contains(string(recoveredLaunchSnapshot), "Updated User worker instructions") || strings.Contains(string(recoveredLaunchSnapshot), "Updated Project worker instructions") {
+		t.Fatalf("Worker preferences snapshot changed during relaunch: before=%q after=%q err=%v", thirdLaunchSnapshot, recoveredLaunchSnapshot, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -1792,7 +1792,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("restarted Lead did not receive the recovery Notice: before=%q after=%q", leadPromptsBefore, leadPromptsAfter)
 	}
 
-	// A missing Rider becomes lost, then an approved discard removes its scratch and branch.
+	// A missing Worker becomes lost, then an approved discard removes its scratch and branch.
 	sleepPIDsBeforeLostTask, err := os.ReadFile(sleepPIDs)
 	if err != nil {
 		t.Fatal(err)
@@ -1811,11 +1811,11 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	lostBrief := filepath.Join(root, "lost-discard.md")
-	if err := os.WriteFile(lostBrief, []byte("---\ntype: ship\ntitle: E2E lost discard\ndone_when: approved discard removes the Task\n---\nCreate a change that will be discarded.\n"), 0o600); err != nil {
+	if err := os.WriteFile(lostBrief, []byte("---\ntype: change\ntitle: E2E lost discard\ndone_when: approved discard removes the Task\n---\nCreate a change that will be discarded.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, posseBinary, repo, leadEnv, "ride", "--brief", lostBrief, "--name", "e2e-lost-discard"); !strings.Contains(output, "t4") {
-		t.Fatalf("lost-discard Rider did not start: %s", output)
+	if output := runPosse(t, posseBinary, repo, leadEnv, "start", "--brief", lostBrief, "--name", "e2e-lost-discard"); !strings.Contains(output, "t4") {
+		t.Fatalf("lost-discard Worker did not start: %s", output)
 	}
 	db, err = store.Open(home)
 	if err != nil {
@@ -1832,7 +1832,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		_, statErr := os.Stat(filepath.Join(lostTask.WorktreePath, "e2e-worker-t4.txt"))
 		return statErr == nil
 	}) {
-		t.Fatal("lost-discard Rider did not write its unlanded change")
+		t.Fatal("lost-discard Worker did not write its unmerged change")
 	}
 	lostScratch := filepath.Join(home, "scratch", "shop", "t4")
 	if err := os.WriteFile(filepath.Join(lostScratch, "discard.tmp"), []byte("remove on approved discard"), 0o600); err != nil {
@@ -1850,19 +1850,19 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		}
 	}
 	if lostTabID == "" {
-		t.Fatalf("lost-discard Rider pane has no tab in snapshot: %#v", snapshot.Panes)
+		t.Fatalf("lost-discard Worker pane has no tab in snapshot: %#v", snapshot.Panes)
 	}
 	if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": lostTabID}); err != nil {
-		t.Fatalf("close lost-discard Rider tab: %v", err)
+		t.Fatalf("close lost-discard Worker tab: %v", err)
 	}
-	runPosse(t, posseBinary, repo, leadEnv, "roster")
+	runPosse(t, posseBinary, repo, leadEnv, "list")
 	db, err = store.Open(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dead, err := db.Task(context.Background(), project.ID, "t4")
 	if err != nil || dead.State != store.StateWorking || dead.AgentAbsentSince == 0 {
-		t.Fatalf("missing Rider did not enter the absence grace period: %#v, %v", dead, err)
+		t.Fatalf("missing Worker did not enter the absence grace period: %#v, %v", dead, err)
 	}
 	// Advance the isolated Task's observation past the two-minute grace rather than waiting in real time.
 	if err := db.UpdateTaskObservation(context.Background(), dead.ID, dead.PaneID, dead.HerdrWorkspaceID, dead.AgentSession, dead.AgentSessionKind, time.Now().Add(-3*time.Minute).UnixMilli(), dead.IdleSince, dead.AgentServerStartedAt); err != nil {
@@ -1871,30 +1871,30 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, posseBinary, repo, leadEnv, "roster")
+	runPosse(t, posseBinary, repo, leadEnv, "list")
 	db, err = store.Open(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dead, err = db.Task(context.Background(), project.ID, "t4")
 	if err != nil || dead.State != store.StateLost || dead.WorktreePath != lostTask.WorktreePath {
-		t.Fatalf("missing Rider did not become lost safely: %#v, %v", dead, err)
+		t.Fatalf("missing Worker did not become lost safely: %#v, %v", dead, err)
 	}
 	discardTip := strings.TrimSpace(gitTest(t, env, repo, "rev-parse", "refs/heads/"+dead.Branch))
-	mounts, err := db.Mounts(context.Background(), project.ID)
+	sandboxes, err := db.Sandboxes(context.Background(), project.ID)
 	heldByLostTask := false
-	for _, mount := range mounts {
-		if mount.TaskID == dead.ID && mount.State == "held" {
+	for _, sandbox := range sandboxes {
+		if sandbox.TaskID == dead.ID && sandbox.State == "held" {
 			heldByLostTask = true
 		}
 	}
 	if err != nil || !heldByLostTask {
-		t.Fatalf("lost Task did not retain its held Mount for review: %#v, %v", mounts, err)
+		t.Fatalf("lost Task did not retain its held Sandbox for review: %#v, %v", sandboxes, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, posseBinary, repo, leadEnv, "unsaddle", "t4", "--discard", "--user-approved", "User approved discard of the lost Rider"); !strings.Contains(output, "torn-down") {
+	if output := runPosse(t, posseBinary, repo, leadEnv, "teardown", "t4", "--discard", "--user-approved", "User approved discard of the lost Worker"); !strings.Contains(output, "torn-down") {
 		t.Fatalf("approved lost-Task discard failed: %s", output)
 	}
 	if _, err := os.Stat(lostScratch); !os.IsNotExist(err) {
@@ -2147,14 +2147,14 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 	if workspace.Label != task.ShortName || workspace.Worktree.CheckoutPath != task.WorktreePath || !workspace.Worktree.IsLinkedWorktree ||
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
-		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_name"] != task.ShortName || pane.Tokens["posse_mount"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.Branch ||
+		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_name"] != task.ShortName || pane.Tokens["posse_sandbox"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.Branch ||
 		tab.Label == task.ShortName {
 		t.Fatalf("isolated Worker sidebar/cwd mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
 	}
 }
 
-// assertWorkerIsolation checks the Worker guard and Mount identity. The group
-// close replay runs in TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup.
+// assertWorkerIsolation checks the Worker guard and Sandbox identity. The group
+// close replay runs in TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup.
 func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home, repo, root string, callerEnv []string, projectID int64, leadPaneID string) {
 	t.Helper()
 	db, err := store.Open(home)
@@ -2192,15 +2192,15 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 		if err := json.Unmarshal(raw, &info); err != nil || info.ProcessInfo.ShellPID == 0 {
 			t.Fatalf("Worker pane process info: %s %v", raw, err)
 		}
-		// Herdr's worktree.open does not accept per-pane env; the Mount cwd
-		// and labeled pane identify this Rider to Posse's Worker mode.
+		// Herdr's worktree.open does not accept per-pane env; the Sandbox cwd
+		// and labeled pane identify this Worker to Posse's Worker mode.
 	}
 
 	workerEnv := setEnv(callerEnv, "HERDR_PANE_ID", task.PaneID)
 	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
 	workerEnv = setEnv(workerEnv, "HERDR_SOCKET_PATH", herdr.SocketPath(callerEnv))
 	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", home)
-	for _, args := range [][]string{{"project", "add", "--name", "stray"}, {"ride", "--brief", filepath.Join(root, "ship.md")}, {"config", "set", "defaults.max_workers", "2"}, {"roster"}} {
+	for _, args := range [][]string{{"project", "add", "--name", "stray"}, {"start", "--brief", filepath.Join(root, "change.md")}, {"config", "set", "defaults.max_workers", "2"}, {"list"}} {
 		command := exec.Command(posseBinary, args...)
 		command.Dir = repo
 		command.Env = workerEnv
@@ -2209,16 +2209,16 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 			t.Fatalf("Worker ran `posse %s` against its home: err=%v output=%s", strings.Join(args, " "), err, output)
 		}
 	}
-	// The review's bypass: drop the marker and the pane id, leave the Mount. An
+	// The review's bypass: drop the marker and the pane id, leave the Sandbox. An
 	// ancestor (the agent, here the outer sh) still carries the marker or still
-	// runs inside the Mount, and /proc shows it.
-	bypass := "cd / && env -u POSSE_WORKER_HOME -u HERDR_PANE_ID " + shellQuote(posseBinary) + " config set defaults.auto_unsaddle never; true"
+	// runs inside the Sandbox, and /proc shows it.
+	bypass := "cd / && env -u POSSE_WORKER_HOME -u HERDR_PANE_ID " + shellQuote(posseBinary) + " config set defaults.auto_teardown never; true"
 	for _, ancestor := range []struct {
 		name string
 		env  []string
 	}{
 		{"marker", workerEnv},
-		{"mount", setEnv(setEnv(workerEnv, "POSSE_WORKER_HOME", ""), "HERDR_PANE_ID", "")},
+		{"sandbox", setEnv(setEnv(workerEnv, "POSSE_WORKER_HOME", ""), "HERDR_PANE_ID", "")},
 	} {
 		command := exec.Command("sh", "-c", "sh -c "+shellQuote(bypass)+"; true")
 		command.Dir = task.WorktreePath
@@ -2429,7 +2429,7 @@ func assertNewWorkerSleepsStopped(t *testing.T, pidFile string, previous []byte)
 	}
 	all, before := strings.Fields(string(contents)), strings.Fields(string(previous))
 	if len(all) <= len(before) {
-		t.Fatalf("lost Task did not start a leftover sleep process: before=%q after=%q", previous, contents)
+		t.Fatalf("lost Task did not start a orphan sleep process: before=%q after=%q", previous, contents)
 	}
 	assertWorkerSleepProcessesStopped(t, []byte(strings.Join(all[len(before):], "\n")))
 }
@@ -2445,7 +2445,7 @@ func assertWorkerSleepProcessesStopped(t *testing.T, contents []byte) {
 		pids = append(pids, pid)
 	}
 	if len(pids) == 0 {
-		t.Fatal("fake Worker did not start a leftover sleep process")
+		t.Fatal("fake Worker did not start a orphan sleep process")
 	}
 	if !waitForCondition(30*time.Second, func() bool {
 		for _, pid := range pids {
@@ -2461,7 +2461,7 @@ func assertWorkerSleepProcessesStopped(t *testing.T, contents []byte) {
 		}
 		return true
 	}) {
-		t.Fatalf("leftover Worker sleep processes are still running: %s", contents)
+		t.Fatalf("orphan Worker sleep processes are still running: %s", contents)
 	}
 }
 

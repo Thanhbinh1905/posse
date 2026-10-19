@@ -32,7 +32,7 @@ func TestWorkspaceTaskStartsFromAnotherPublishedTaskBranch(t *testing.T) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nlanding_mode = \"local\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db, err := store.Open(home)
@@ -58,7 +58,7 @@ func TestWorkspaceTaskStartsFromAnotherPublishedTaskBranch(t *testing.T) {
 	}
 	service := testService(home, herdr.NewFake())
 	brief := dispatch.Brief{
-		Type: "ship", Repos: []string{"worker"},
+		Type: "change", Repos: []string{"worker"},
 		BaseByRepo:   map[string]string{"worker": "posse/lower"},
 		TargetByRepo: map[string]string{"worker": "staging"},
 	}
@@ -69,7 +69,7 @@ func TestWorkspaceTaskStartsFromAnotherPublishedTaskBranch(t *testing.T) {
 	if len(members) != 1 || members[0].BaseRef != "refs/remotes/origin/posse/lower" || members[0].TargetBranch != "staging" {
 		t.Fatalf("stacked member branch plan = %+v", members)
 	}
-	taskID, _, err := createTaskWithSequence(ctx, db, project, home, store.Task{Type: "ship", Title: "Upper Task", ShortName: "upper-task", LandingMode: "local"})
+	taskID, _, err := createTaskWithSequence(ctx, db, project, home, store.Task{Type: "change", Title: "Upper Task", ShortName: "upper-task", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestWorkspaceTaskStartsFromAnotherPublishedTaskBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.acquireWorkspaceMount(ctx, db, project, task, members, home, "warm", nil, "legacy"); err != nil {
+	if _, err := service.acquireWorkspaceSandbox(ctx, db, project, task, members, home, "warm", nil, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	task, err = db.TaskByID(ctx, project.ID, taskID)

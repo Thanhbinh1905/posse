@@ -15,8 +15,8 @@ func staleProjectRootReason(root, home string) string {
 	if err == nil && !info.IsDir() {
 		return "Project root is not a directory: " + root
 	}
-	if insideRemudaMount(home, resolvedRoot) {
-		return "Project root is inside a Remuda Mount: " + root
+	if insidePoolSandbox(home, resolvedRoot) {
+		return "Project root is inside a Pool Sandbox: " + root
 	}
 	if pathWithin(doctorResolvedPath(os.TempDir()), resolvedRoot) {
 		return "Project root is under a temporary directory: " + root
@@ -24,14 +24,21 @@ func staleProjectRootReason(root, home string) string {
 	return ""
 }
 
-func insideRemudaMount(home, root string) bool {
-	remudaRoot := doctorResolvedPath(filepath.Join(home, "remuda"))
-	relative, err := filepath.Rel(remudaRoot, root)
-	if err != nil {
-		return false
+func insidePoolSandbox(home, root string) bool {
+	for _, directory := range []string{"pool", "remuda"} {
+		poolRoot := doctorResolvedPath(filepath.Join(home, directory))
+		relative, err := filepath.Rel(poolRoot, root)
+		if err != nil {
+			continue
+		}
+		parts := strings.Split(relative, string(filepath.Separator))
+		if len(parts) >= 2 && parts[0] != ".." {
+			if _, ok := sandboxDirectoryNumber(parts[1]); ok {
+				return true
+			}
+		}
 	}
-	parts := strings.Split(relative, string(filepath.Separator))
-	return len(parts) >= 2 && parts[0] != ".." && strings.HasPrefix(parts[1], "mount-")
+	return false
 }
 
 func doctorResolvedPath(path string) string {

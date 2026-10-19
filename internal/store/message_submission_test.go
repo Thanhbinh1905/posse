@@ -23,7 +23,7 @@ func TestMessageSubmissionAndTaskReopenAreAtomic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local"})
+			id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,7 +82,7 @@ func TestQueueMessageOnceAfterCompletionIsIdempotentAndAllowsLaterRetry(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "pr"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestMessageClaimIsExclusivePerTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Investigate", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestConcurrentMessageClaimsRemainExclusive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Investigate", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestExpiredUncertainSubmissionAllowsFreshClaimsWithoutReplayingOriginal(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Investigate", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestRejectedInterruptRedirectStaysAheadOfQueuedMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Investigate", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestInterruptReservationExpiresWithoutReplayingRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Investigate", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Investigate", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}

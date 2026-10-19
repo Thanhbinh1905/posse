@@ -47,7 +47,7 @@ if [ "$1" = "--version" ]; then echo 'claude 0.0.0'; exit 0; fi
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 while IFS= read -r line; do
  printf '%s\n' "$line" >> "$POSSE_TEST_ROOT/prompts.log"
- case "$PWD/" in "$POSSE_HOME/remuda/"*) herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1 & ;; esac
+ case "$PWD/" in "$POSSE_HOME/pool/"*) herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1 & ;; esac
 done
 `
 	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(agent), 0700); err != nil {
@@ -148,7 +148,7 @@ done
 	if leadResult.Instructions != string(startupInstructions) {
 		t.Fatalf("startup and posse lead instructions differ:\nstartup:\n%s\nlead:\n%s", startupInstructions, leadResult.Instructions)
 	}
-	for _, want := range []string{"one Ship Brief and dispatch it directly", "Scouts, specifications, tickets and separate review Tasks are optional", "## Runtime obligations", "Never edit the Project repository", "In-place execution is available only for explicitly registered Directory Projects", "This is a status update, not another approval step"} {
+	for _, want := range []string{"one Change Brief and dispatch it directly", "Research Tasks, specifications, tickets and separate review Tasks are optional", "## Runtime obligations", "Never edit the Project repository", "In-place execution is available only for explicitly registered Directory Projects", "This is a status update, not another approval step"} {
 		if !strings.Contains(leadResult.Instructions, want) {
 			t.Fatalf("composed instructions omit %q: %s", want, leadResult.Instructions)
 		}
@@ -166,23 +166,23 @@ done
 	if !strings.Contains(leadResult.Instructions, preferenceText) || !strings.Contains(leadResult.Instructions, "## Runtime obligations") || !strings.Contains(leadResult.Instructions, "Never edit the Project repository") {
 		t.Fatalf("Project preferences did not affect guidance while retaining runtime obligations: %s", leadResult.Instructions)
 	}
-	riderPreferences := filepath.Join(root, "rider-preferences.md")
-	const originalRiderPreferences = "Original Rider preferences.\n"
-	if err := os.WriteFile(riderPreferences, []byte(originalRiderPreferences), 0600); err != nil {
+	workerPreferences := filepath.Join(root, "worker-preferences.md")
+	const originalWorkerPreferences = "Original Worker preferences.\n"
+	if err := os.WriteFile(workerPreferences, []byte(originalWorkerPreferences), 0600); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, binary, repo, env, "preferences", "set", "rider", "--file", riderPreferences, "--project", "shop")
-	brief := filepath.Join(root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: First change\ndone_when: change verified\n---\nMake a change.\n"), 0600); err != nil {
+	runPosse(t, binary, repo, env, "preferences", "set", "worker", "--file", workerPreferences, "--project", "shop")
+	brief := filepath.Join(root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: First change\ndone_when: change verified\n---\nMake a change.\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	output := runPosse(t, binary, repo, leadEnv, "dispatch", "--brief", brief)
 	if !strings.Contains(output, "implicit: lead kind") || !strings.Contains(output, "claude") {
 		t.Fatalf("dispatch: %s", output)
 	}
-	output = runPosse(t, binary, repo, leadEnv, "ride", "--brief", brief, "--name", "first-change")
+	output = runPosse(t, binary, repo, leadEnv, "start", "--brief", brief, "--name", "first-change")
 	if !strings.Contains(output, "working") {
-		t.Fatalf("ride: %s", output)
+		t.Fatalf("start: %s", output)
 	}
 	task, err := db.Task(context.Background(), project.ID, "t1")
 	if err != nil || task.State != store.StateWorking || !strings.Contains(task.Profile, "claude") {
@@ -190,18 +190,18 @@ done
 	}
 	launchPath := filepath.Join(root, "posse", "projects", "shop", "tasks", "t1", "launch.md")
 	launchSnapshot, err := os.ReadFile(launchPath)
-	if err != nil || !strings.Contains(string(launchSnapshot), originalRiderPreferences) {
-		t.Fatalf("Rider launch omitted its admitted preferences: %s, %v", launchSnapshot, err)
+	if err != nil || !strings.Contains(string(launchSnapshot), originalWorkerPreferences) {
+		t.Fatalf("Worker launch omitted its admitted preferences: %s, %v", launchSnapshot, err)
 	}
-	const updatedRiderPreferences = "Updated Rider preferences for future Tasks.\n"
-	if err := os.WriteFile(riderPreferences, []byte(updatedRiderPreferences), 0600); err != nil {
+	const updatedWorkerPreferences = "Updated Worker preferences for future Tasks.\n"
+	if err := os.WriteFile(workerPreferences, []byte(updatedWorkerPreferences), 0600); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, binary, repo, env, "preferences", "set", "rider", "--file", riderPreferences, "--project", "shop")
+	runPosse(t, binary, repo, env, "preferences", "set", "worker", "--file", workerPreferences, "--project", "shop")
 	runPosse(t, binary, repo, leadEnv, "relaunch", "t1")
 	afterUpdate, err := os.ReadFile(launchPath)
-	if err != nil || string(afterUpdate) != string(launchSnapshot) || strings.Contains(string(afterUpdate), updatedRiderPreferences) {
-		t.Fatalf("editing preferences changed an existing Rider snapshot during relaunch: before=%q after=%q err=%v", launchSnapshot, afterUpdate, err)
+	if err != nil || string(afterUpdate) != string(launchSnapshot) || strings.Contains(string(afterUpdate), updatedWorkerPreferences) {
+		t.Fatalf("editing preferences changed an existing Worker snapshot during relaunch: before=%q after=%q err=%v", launchSnapshot, afterUpdate, err)
 	}
 	for _, path := range []string{filepath.Join(root, "posse", "config.toml"), filepath.Join(root, "posse", "projects", "shop", "config.toml")} {
 		content, err := os.ReadFile(path)

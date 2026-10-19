@@ -19,7 +19,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestPiExtensionSessionReplacementOwnsOneLookoutGeneration(t *testing.T) {
+func TestPiExtensionSessionReplacementOwnsOneWatchGeneration(t *testing.T) {
 	root := newFixtureRoot(t, fixturePrefix("pi-"))
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
@@ -96,7 +96,7 @@ func TestPiExtensionSessionReplacementOwnsOneLookoutGeneration(t *testing.T) {
 			return false
 		}
 		var state piLifecycleState
-		return json.Unmarshal(data, &state) == nil && state.Session == "fork-session" && state.Stage == "ready-first-notice" && state.ActiveLookouts == 1
+		return json.Unmarshal(data, &state) == nil && state.Session == "fork-session" && state.Stage == "ready-first-notice" && state.ActiveWatches == 1
 	}) {
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		<-done
@@ -118,7 +118,7 @@ func TestPiExtensionSessionReplacementOwnsOneLookoutGeneration(t *testing.T) {
 			return false
 		}
 		var state piLifecycleState
-		return json.Unmarshal(data, &state) == nil && state.Stage == "ready-send-failure" && state.ActiveLookouts == 1
+		return json.Unmarshal(data, &state) == nil && state.Stage == "ready-send-failure" && state.ActiveWatches == 1
 	}) {
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		<-done
@@ -135,7 +135,7 @@ func TestPiExtensionSessionReplacementOwnsOneLookoutGeneration(t *testing.T) {
 			return false
 		}
 		var state piLifecycleState
-		return json.Unmarshal(data, &state) == nil && state.Stage == "ready-replacement" && state.ActiveLookouts == 1
+		return json.Unmarshal(data, &state) == nil && state.Stage == "ready-replacement" && state.ActiveWatches == 1
 	}) {
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		<-done
@@ -161,8 +161,8 @@ func TestPiExtensionSessionReplacementOwnsOneLookoutGeneration(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(output.String())), &result); err != nil {
 		t.Fatalf("decode Pi lifecycle result %q: %v", output.String(), err)
 	}
-	if result.MaxActiveLookouts != 1 {
-		t.Fatalf("session replacements overlapped lookout generations: maximum active=%d destinations=%v", result.MaxActiveLookouts, result.Destinations)
+	if result.MaxActiveWatches != 1 {
+		t.Fatalf("session replacements overlapped watch generations: maximum active=%d destinations=%v", result.MaxActiveWatches, result.Destinations)
 	}
 	if !reflect.DeepEqual(result.Reasons, []string{"reload", "new", "resume", "fork", "new", "quit"}) {
 		t.Fatalf("Pi session lifecycle reasons = %v", result.Reasons)
@@ -178,14 +178,14 @@ func TestPiExtensionSessionReplacementOwnsOneLookoutGeneration(t *testing.T) {
 	if err != nil || actionable[0].DeliveredAt == 0 {
 		t.Fatalf("actionable batch was not accepted after session lifecycle: %#v, %v", actionable, err)
 	}
-	if result.AutoRearmedLookouts < 1 {
+	if result.AutoRearmedWatches < 1 {
 		t.Fatalf("Pi extension did not auto-rearm after the ordinary Notice wake: %#v", result)
 	}
 	if !reflect.DeepEqual(result.SendFailureNoticeIDs, []int64{sendFailureID}) || result.SendFailureAttempts != 2 || !result.SendFailureKeptStableID {
 		t.Fatalf("known send failure did not retry the same batch by ID: notice=%d result=%#v", sendFailureID, result)
 	}
-	if result.FailedLookoutAttempts != 5 || result.HealthEpisodes != 1 {
-		t.Fatalf("lookout spawn failure retries/health episode = %d/%d, want 5/1", result.FailedLookoutAttempts, result.HealthEpisodes)
+	if result.FailedWatchAttempts != 5 || result.HealthEpisodes != 1 {
+		t.Fatalf("watch spawn failure retries/health episode = %d/%d, want 5/1", result.FailedWatchAttempts, result.HealthEpisodes)
 	}
 	if !reflect.DeepEqual(result.ReplacementNoticeIDs, []int64{replacementID}) || !reflect.DeepEqual(result.ReplacementUncertaintyIDs, []int64{replacementID}) || !result.ReplacementPendingRetained || result.ReplacementDeliveryID == "" || result.ReplacementBatchID == "" {
 		t.Fatalf("accepted-but-unconsumed replacement lost recoverable IDs: notice=%d result=%#v", replacementID, result)
@@ -201,16 +201,16 @@ func TestPiExtensionSessionReplacementOwnsOneLookoutGeneration(t *testing.T) {
 }
 
 type piLifecycleState struct {
-	Session        string `json:"session"`
-	ActiveLookouts int    `json:"activeLookouts"`
-	Stage          string `json:"stage"`
+	Session       string `json:"session"`
+	ActiveWatches int    `json:"activeWatches"`
+	Stage         string `json:"stage"`
 }
 
 type piLifecycleResult struct {
 	Reasons                    []string `json:"reasons"`
 	Destinations               []string `json:"destinations"`
-	MaxActiveLookouts          int      `json:"maxActiveLookouts"`
-	AutoRearmedLookouts        int      `json:"autoRearmedLookouts"`
+	MaxActiveWatches           int      `json:"maxActiveWatches"`
+	AutoRearmedWatches         int      `json:"autoRearmedWatches"`
 	DeliveredNoticeIDs         []int64  `json:"deliveredNoticeIDs"`
 	SendFailureNoticeIDs       []int64  `json:"sendFailureNoticeIDs"`
 	SendFailureAttempts        int      `json:"sendFailureAttempts"`
@@ -220,6 +220,6 @@ type piLifecycleResult struct {
 	ReplacementBatchID         string   `json:"replacementBatchID"`
 	ReplacementPendingRetained bool     `json:"replacementPendingRetained"`
 	ReplacementUncertaintyIDs  []int64  `json:"replacementUncertaintyIDs"`
-	FailedLookoutAttempts      int      `json:"failedLookoutAttempts"`
+	FailedWatchAttempts        int      `json:"failedWatchAttempts"`
 	HealthEpisodes             int      `json:"healthEpisodes"`
 }

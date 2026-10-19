@@ -15,26 +15,26 @@ import (
 )
 
 func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
-	fixture := newRiderTabsFixture(t)
-	ship := fixture.ride(t, "t1", "Signal Findings", "signal-findings")
-	shipScratch := filepath.Join(fixture.home, "scratch", "shop", "t1")
-	otherShip := fixture.ride(t, "t2", "Signal Findings Security", "signal-findings-security")
-	otherShipScratch := filepath.Join(fixture.home, "scratch", "shop", "t2")
-	if err := os.MkdirAll(otherShipScratch, 0o700); err != nil {
+	fixture := newWorkerTabsFixture(t)
+	change := fixture.start(t, "t1", "Signal Findings", "signal-findings")
+	changeScratch := filepath.Join(fixture.home, "scratch", "shop", "t1")
+	otherChange := fixture.start(t, "t2", "Signal Findings Security", "signal-findings-security")
+	otherChangeScratch := filepath.Join(fixture.home, "scratch", "shop", "t2")
+	if err := os.MkdirAll(otherChangeScratch, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(fixture.root, "outside.md")
 	if err := os.WriteFile(outside, []byte("outside evidence\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(shipScratch, "foreign-findings.md"), []byte("foreign findings\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(changeScratch, "foreign-findings.md"), []byte("foreign findings\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(otherShipScratch, "findings-symlink.md")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(otherChangeScratch, "findings-symlink.md")); err != nil {
 		t.Fatal(err)
 	}
 
-	riderEnv := func(task store.Task) []string {
+	workerEnv := func(task store.Task) []string {
 		env := setEnv(fixture.env, "HERDR_ENV", "1")
 		env = setEnv(env, "HERDR_PANE_ID", task.PaneID)
 		return setEnv(env, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
@@ -42,7 +42,7 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 	runSignalAt := func(task store.Task, dir string, args ...string) (int, string) {
 		t.Helper()
 		command := exec.Command(fixture.binary, args...)
-		command.Dir, command.Env = dir, riderEnv(task)
+		command.Dir, command.Env = dir, workerEnv(task)
 		output, err := command.CombinedOutput()
 		if err == nil {
 			return 0, string(output)
@@ -50,7 +50,7 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		if exit, ok := err.(*exec.ExitError); ok {
 			return exit.ExitCode(), string(output)
 		}
-		t.Fatalf("run Rider Signal: %v", err)
+		t.Fatalf("run Worker Signal: %v", err)
 		return 1, string(output)
 	}
 	runSignal := func(task store.Task, args ...string) (int, string) {
@@ -58,17 +58,17 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 	}
 	assertRejected := func(task store.Task, flag, path string) {
 		t.Helper()
-		code, output := runSignal(task, "holler", "needs-decision", "Need review", flag, path)
+		code, output := runSignal(task, "signal", "needs-decision", "Need review", flag, path)
 		taskScratch := filepath.Join(fixture.home, "scratch", "shop", "t"+strconv.Itoa(task.Seq))
 		if code == 0 || !strings.Contains(output, "signal_invalid") || !strings.Contains(output, "Signal files must be inside") || !strings.Contains(output, task.WorktreePath) || !strings.Contains(output, taskScratch) {
 			t.Fatalf("foreign %s path was not refused with both allowed locations: code=%d output=%s", flag, code, output)
 		}
 	}
 
-	if err := os.WriteFile(filepath.Join(shipScratch, "findings.md"), []byte("task findings\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(changeScratch, "findings.md"), []byte("task findings\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runSignal(ship, "holler", "needs-decision", "Need review", "--findings", filepath.Join(shipScratch, "findings.md")); code != 0 {
+	if code, output := runSignal(change, "signal", "needs-decision", "Need review", "--findings", filepath.Join(changeScratch, "findings.md")); code != 0 {
 		t.Fatalf("own Task scratch --findings failed: code=%d output=%s", code, output)
 	}
 	if !waitForCondition(10*time.Second, func() bool {
@@ -77,37 +77,37 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 	}) {
 		t.Fatal("accepted findings file was not copied into the Task record")
 	}
-	assertRejected(otherShip, "--findings", filepath.Join(shipScratch, "foreign-findings.md"))
-	assertRejected(otherShip, "--findings", filepath.Join(otherShipScratch, "findings-symlink.md"))
-	assertRejected(otherShip, "--findings", outside)
+	assertRejected(otherChange, "--findings", filepath.Join(changeScratch, "foreign-findings.md"))
+	assertRejected(otherChange, "--findings", filepath.Join(otherChangeScratch, "findings-symlink.md"))
+	assertRejected(otherChange, "--findings", outside)
 
-	scoutBrief := filepath.Join(fixture.root, "scout.md")
-	brief := "---\ntype: scout\ntitle: Scout Signals\ndone_when: the report is recorded\n---\nInspect the Project.\n"
-	if err := os.WriteFile(scoutBrief, []byte(brief), 0o600); err != nil {
+	researchBrief := filepath.Join(fixture.root, "research.md")
+	brief := "---\ntype: research\ntitle: Research Signals\ndone_when: the report is recorded\n---\nInspect the Project.\n"
+	if err := os.WriteFile(researchBrief, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", scoutBrief, "--name", "scout-signals"); !strings.Contains(output, "t3") {
-		t.Fatalf("Scout ride did not return t3: %s", output)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", researchBrief, "--name", "research-signals"); !strings.Contains(output, "t3") {
+		t.Fatalf("Research start did not return t3: %s", output)
 	}
 	fixture.waitState(t, "t3", store.StateWorking)
-	scout := fixture.task(t, "t3")
-	scoutScratch := filepath.Join(fixture.home, "scratch", "shop", "t3")
-	if err := os.WriteFile(filepath.Join(shipScratch, "foreign-report.md"), []byte("foreign report\n"), 0o600); err != nil {
+	research := fixture.task(t, "t3")
+	researchScratch := filepath.Join(fixture.home, "scratch", "shop", "t3")
+	if err := os.WriteFile(filepath.Join(changeScratch, "foreign-report.md"), []byte("foreign report\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(scoutScratch, "report-symlink.md")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(researchScratch, "report-symlink.md")); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{filepath.Join(shipScratch, "foreign-report.md"), filepath.Join(scoutScratch, "report-symlink.md"), outside} {
-		code, output := runSignal(scout, "holler", "done", "Scout complete", "--report", path)
-		if code == 0 || !strings.Contains(output, "signal_invalid") || !strings.Contains(output, scout.WorktreePath) || !strings.Contains(output, scoutScratch) {
+	for _, path := range []string{filepath.Join(changeScratch, "foreign-report.md"), filepath.Join(researchScratch, "report-symlink.md"), outside} {
+		code, output := runSignal(research, "signal", "done", "Research complete", "--report", path)
+		if code == 0 || !strings.Contains(output, "signal_invalid") || !strings.Contains(output, research.WorktreePath) || !strings.Contains(output, researchScratch) {
 			t.Fatalf("foreign --report path was not refused with both allowed locations: code=%d output=%s", code, output)
 		}
 	}
-	if err := os.Mkdir(filepath.Join(scout.WorktreePath, "nested"), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(research.WorktreePath, "nested"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scout.WorktreePath, "report.md"), []byte("Task report\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(research.WorktreePath, "report.md"), []byte("Task report\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	launch, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t3", "launch.md"))
@@ -116,11 +116,11 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 	}
 	for _, want := range []string{filepath.Join(fixture.home, "scratch", "shop", "t3"), "--findings", "--report"} {
 		if !strings.Contains(string(launch), want) {
-			t.Errorf("Rider protocol omitted %q:\n%s", want, launch)
+			t.Errorf("Worker protocol omitted %q:\n%s", want, launch)
 		}
 	}
-	if code, output := runSignalAt(scout, filepath.Join(scout.WorktreePath, "nested"), "holler", "done", "Scout complete", "--report", "report.md"); code != 0 {
-		t.Fatalf("worktree-relative --report from a Rider subdirectory failed: code=%d output=%s", code, output)
+	if code, output := runSignalAt(research, filepath.Join(research.WorktreePath, "nested"), "signal", "done", "Research complete", "--report", "report.md"); code != 0 {
+		t.Fatalf("worktree-relative --report from a Worker subdirectory failed: code=%d output=%s", code, output)
 	}
 	if !waitForCondition(10*time.Second, func() bool {
 		contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t3", "report.md"))
@@ -129,4 +129,21 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		t.Fatal("accepted report file was not copied into the Task record")
 	}
 	fixture.waitState(t, "t3", store.StateReported)
+
+	// Keep the own-scratch done Report coverage as well as the subdirectory
+	// worktree-relative Report case above. Reports belong to Research/Review.
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", researchBrief, "--name", "research-scratch-report")
+	fixture.waitState(t, "t4", store.StateWorking)
+	scratchResearch := fixture.task(t, "t4")
+	report := filepath.Join(fixture.home, "scratch", "shop", "t4", "report.md")
+	if err := os.WriteFile(report, []byte("Scratch report\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runSignal(scratchResearch, "signal", "done", "Research complete", "--report", report); code != 0 {
+		t.Fatalf("own Task scratch done --report failed: code=%d output=%s", code, output)
+	}
+	fixture.waitState(t, "t4", store.StateReported)
+	if contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t4", "report.md")); err != nil || string(contents) != "Scratch report\n" {
+		t.Fatalf("own Task scratch done Report was not copied: %q %v", contents, err)
+	}
 }

@@ -27,7 +27,7 @@ func (s *Service) acceptReport(ctx *axi.Context, args []string) error {
 	}
 	role := s.configCallerRole(ctx.Context, db)
 	if role == "worker" {
-		return axi.Failure("user_only", "a Rider cannot accept a Report", false)
+		return axi.Failure("user_only", "a Worker cannot accept a Report", false)
 	}
 	if role == "lead" {
 		if err := s.requireLead(ctx.Context, db, project); err != nil {
@@ -41,11 +41,11 @@ func (s *Service) acceptReport(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if task.Type != "scout" || task.ReportKind != "spec" && task.ReportKind != "tickets" {
-		return axi.Failure("report_acceptance_not_required", "only a Scout Task marked report_kind spec or tickets uses Report acceptance", false)
+	if task.Type != "research" || task.ReportKind != "spec" && task.ReportKind != "tickets" {
+		return axi.Failure("report_acceptance_not_required", "only a Research Task marked report_kind spec or tickets uses Report acceptance", false)
 	}
 	if task.State != store.StateTornDown {
-		return axi.Failure("report_bundle_not_finalized", "acceptance requires the Report bundle finalized by Teardown", false, "Run `posse unsaddle "+taskIDString(task.Seq)+"` to preserve and seal the Report first")
+		return axi.Failure("report_bundle_not_finalized", "acceptance requires the Report bundle finalized by Teardown", false, "Run `posse teardown "+taskIDString(task.Seq)+"` to preserve and seal the Report first")
 	}
 	if err := verifyReportBundle(home, project, task); err != nil {
 		return axi.Failure("report_bundle_invalid", err.Error(), false, "Restore the exact Report and attachment bytes, then inspect `posse show "+taskIDString(task.Seq)+"`")

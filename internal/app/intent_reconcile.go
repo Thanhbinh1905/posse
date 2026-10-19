@@ -19,15 +19,15 @@ func (s *Service) reconcileIntents(ctx context.Context, db *store.DB, project st
 	return s.reconcileIntentsMode(ctx, db, project, cfg, snapshot, true, true)
 }
 
-// The hidden poller only resumes deferred PR creation after the Lead is running.
+// The hidden watch only resumes deferred PR creation after the Lead is running.
 // Other interrupted commands belong to their CLI boundary, not passive polling.
-func (s *Service) reconcilePollerIntents(ctx context.Context, db *store.DB, project store.Project) error {
+func (s *Service) reconcileWatchIntents(ctx context.Context, db *store.DB, project store.Project) error {
 	intents, err := db.Intents(ctx, project.ID)
 	if err != nil {
 		return err
 	}
 	for _, intent := range intents {
-		if intent.Command != "land --open-pr" || intentProcessAlive(intent) {
+		if intent.Command != "merge --open-pr" || intentProcessAlive(intent) {
 			continue
 		}
 		task, err := db.TaskByID(ctx, project.ID, intent.TaskID)
@@ -64,10 +64,10 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 		return err
 	}
 	for _, intent := range intents {
-		if !allowNetwork && intent.Command == "land --open-pr" {
+		if !allowNetwork && intent.Command == "merge --open-pr" {
 			continue
 		}
-		if intentProcessAlive(intent) || !allowLaunch && (intent.Command == "relaunch" || intent.Command == "ride") {
+		if intentProcessAlive(intent) || !allowLaunch && (intent.Command == "relaunch" || intent.Command == "start") {
 			continue
 		}
 		if intent.Command == "relaunch" {
@@ -96,15 +96,15 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 		}
 		intent.ProcessID = os.Getpid()
 		switch intent.Command {
-		case "ride":
-			err = s.recoverRideIntent(ctx, db, project, cfg, task, intent, snapshot)
-		case "land --open-pr":
+		case "start":
+			err = s.recoverStartIntent(ctx, db, project, cfg, task, intent, snapshot)
+		case "merge --open-pr":
 			err = s.recoverOpenPullRequestIntent(ctx, db, project, task, intent)
-		case "land --merge":
-			err = s.recoverLandIntent(ctx, db, project, cfg, task, intent)
-		case workspaceLandIntent:
-			err = s.recoverWorkspaceLandIntent(ctx, db, project, task, intent)
-		case "unsaddle":
+		case "merge --execute":
+			err = s.recoverMergeIntent(ctx, db, project, cfg, task, intent)
+		case workspaceMergeIntent:
+			err = s.recoverWorkspaceMergeIntent(ctx, db, project, task, intent)
+		case "teardown":
 			if task.State == store.StateTornDown {
 				err = db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 			} else {
@@ -123,18 +123,18 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 						}
 						if err == nil && strings.TrimSpace(quote) == "" {
 							err = fmt.Errorf("discard recovery has no recorded User approval quote")
-						} else if err == nil && payload.Rider == nil {
+						} else if err == nil && payload.Worker == nil {
 							// Legacy or pre-binding crashes have no retained stop authority.
 							err = s.requireNoLiveTaskAgent(ctx, project, task)
 						}
 						if err == nil {
-							_, err = s.unsaddleTask(ctx, db, project, cfg, task, true, quote)
+							_, err = s.teardownTask(ctx, db, project, cfg, task, true, quote)
 						}
 					}
-				} else if task.State != store.StateLanded && task.State != store.StateReported {
+				} else if task.State != store.StateMerged && task.State != store.StateReported {
 					err = fmt.Errorf("completion teardown recovery refused Task in state %s", task.State)
 				} else {
-					_, err = s.unsaddleTask(ctx, db, project, cfg, task, false, "")
+					_, err = s.teardownTask(ctx, db, project, cfg, task, false, "")
 				}
 			}
 		case "relaunch":
@@ -159,7 +159,7 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 }
 
 func (s *Service) recoverOpenPullRequestIntent(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent) error {
-	if task.LandingMode != "pr" || task.GatedSHA == "" || task.Branch == "" {
+	if task.MergeMode != "pr" || task.GatedSHA == "" || task.Branch == "" {
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	}
 	output, err := runOutputStep(ctx, db, intent, "pr.recover_lookup", project.Root, "gh", "pr", "list", "--state", "open", "--base", taskTargetBranch(project, task), "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5")
@@ -179,11 +179,11 @@ func (s *Service) recoverOpenPullRequestIntent(ctx context.Context, db *store.DB
 	if err := validatePullRequestOrigin(ctx, project.Root, prURL); err != nil {
 		return err
 	}
-	if err := db.UpdateTaskLanding(ctx, task.ID, prURL, ""); err != nil {
+	if err := db.UpdateTaskMerge(ctx, task.ID, prURL, ""); err != nil {
 		return err
 	}
 	if task.State == store.StateDone {
-		if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "Recovered the open pull request for the gated Task branch"); err != nil {
+		if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "Recovered the open pull request for the gated Task branch"); err != nil {
 			return err
 		}
 	}
@@ -207,19 +207,19 @@ func (s *Service) recordIntentStuck(ctx context.Context, db *store.DB, project s
 	return err
 }
 
-func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, snapshot herdr.Snapshot) error {
+func (s *Service) recoverStartIntent(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, snapshot herdr.Snapshot) error {
 	if task.State != store.StateSpawning {
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	}
 	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 	if !found {
-		if err := s.failSpawn(ctx, db, project, task.ID, task.Title, "ride was interrupted before a Rider pane appeared"); err != nil {
+		if err := s.failSpawn(ctx, db, project, task.ID, task.Title, "start was interrupted before a Worker pane appeared"); err != nil {
 			return err
 		}
 		return nil
 	}
 	if pane.Agent == "" {
-		if err := s.failSpawn(ctx, db, project, task.ID, task.Title, "ride was interrupted before its Rider started"); err != nil {
+		if err := s.failSpawn(ctx, db, project, task.ID, task.Title, "start was interrupted before its Worker started"); err != nil {
 			return err
 		}
 		return nil
@@ -231,7 +231,7 @@ func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project s
 		}
 		launchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "launch.md")
 		if _, err := os.Stat(launchPath); err != nil {
-			if failErr := s.failSpawn(ctx, db, project, task.ID, task.Title, "ride was interrupted before launch.md was written"); failErr != nil {
+			if failErr := s.failSpawn(ctx, db, project, task.ID, task.Title, "start was interrupted before launch.md was written"); failErr != nil {
 				return failErr
 			}
 			return nil
@@ -241,7 +241,7 @@ func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project s
 			if errors.As(err, &focused) && focused.Code == "pane_focused" {
 				return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 			}
-			if failErr := s.failSpawn(ctx, db, project, task.ID, task.Title, "interrupted ride could not resume its Rider: "+err.Error()); failErr != nil {
+			if failErr := s.failSpawn(ctx, db, project, task.ID, task.Title, "interrupted start could not resume its Worker: "+err.Error()); failErr != nil {
 				return failErr
 			}
 			return nil
@@ -250,31 +250,31 @@ func (s *Service) recoverRideIntent(ctx context.Context, db *store.DB, project s
 	if err := s.refreshWorkerDisplay(ctx, db, project, task.ID, taskKind(cfg, task)); err != nil {
 		return err
 	}
-	if err := db.Transition(ctx, task.ID, store.StateSpawning, store.StateWorking, "cli", "Recovered an interrupted ride after the Rider started"); err != nil && err != store.ErrStateRace {
+	if err := db.Transition(ctx, task.ID, store.StateSpawning, store.StateWorking, "cli", "Recovered an interrupted start after the Worker started"); err != nil && err != store.ErrStateRace {
 		return err
 	}
 	s.relabelProjectTabs(ctx, db, project)
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 }
 
-func (s *Service) recoverLandIntent(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent) error {
+func (s *Service) recoverMergeIntent(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent) error {
 	finish := func(evidence string) error {
 		if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, evidence); err != nil {
 			return err
 		}
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	}
-	if task.State == store.StateTornDown || task.State == store.StateLanded {
+	if task.State == store.StateTornDown || task.State == store.StateMerged {
 		return finish("verified Task is already terminal")
 	}
 	if task.State == store.StateDone {
 		return finish("verified Task is done and no local merge is pending")
 	}
-	if task.State != store.StateLanding {
-		return finish("verified Task is not in local landing state")
+	if task.State != store.StateMerging {
+		return finish("verified Task is not in local merging state")
 	}
-	if task.LandingMode == "pr" || task.LandingMode == "no-mistakes" {
-		return finish("verified remote landing has no local Git ref effect")
+	if task.MergeMode == "pr" || task.MergeMode == "no-mistakes" {
+		return finish("verified remote merging has no local Git ref effect")
 	}
 	merged := false
 	if task.GatedSHA != "" {
@@ -283,31 +283,31 @@ func (s *Service) recoverLandIntent(ctx context.Context, db *store.DB, project s
 		merged = err == nil
 	}
 	if !merged {
-		if err := db.Transition(ctx, task.ID, store.StateLanding, store.StateDone, "cli", "Interrupted Land did not complete its merge"); err != nil {
+		if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateDone, "cli", "Interrupted Merge did not complete its merge"); err != nil {
 			return err
 		}
 		if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
 			return err
 		}
-		return finish("re-read target ref and confirmed the interrupted local merge did not land")
+		return finish("re-read target ref and confirmed the interrupted local merge did not merge")
 	}
-	landedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, task))
+	mergedRef, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+taskTargetBranch(project, task))
 	if err != nil {
 		return err
 	}
-	if err := db.UpdateTaskLanding(ctx, task.ID, task.PRURL, landedRef); err != nil {
+	if err := db.UpdateTaskMerge(ctx, task.ID, task.PRURL, mergedRef); err != nil {
 		return err
 	}
-	if err := db.Transition(ctx, task.ID, store.StateLanding, store.StateLanded, "cli", "Local fast-forward completed at "+landedRef); err != nil {
+	if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateMerged, "cli", "Local fast-forward completed at "+mergedRef); err != nil {
 		return err
 	}
-	task.State = store.StateLanded
-	task.LandedRef = landedRef
-	if err := finish("re-read target ref and recorded the interrupted local merge as landed"); err != nil {
+	task.State = store.StateMerged
+	task.MergedRef = mergedRef
+	if err := finish("re-read target ref and recorded the interrupted local merge as merged"); err != nil {
 		return err
 	}
-	if shouldAutoUnsaddleLanded(cfg) {
-		_, err = s.unsaddleTask(ctx, db, project, cfg, task, false, "")
+	if shouldAutoTeardownMerged(cfg) {
+		_, err = s.teardownTask(ctx, db, project, cfg, task, false, "")
 		return err
 	}
 	return nil

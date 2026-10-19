@@ -19,7 +19,7 @@ const workerHomeEnv = "POSSE_WORKER_HOME"
 var workerCommands = map[string]bool{
 	"brief":         true,
 	"status":        true,
-	"holler":        true,
+	"signal":        true,
 	"publish":       true,
 	"_context":      true,
 	"config schema": true,
@@ -60,18 +60,18 @@ func (s *Service) refuseWorker(ctx context.Context, command string) error {
 		name += " " + command
 	}
 	return axi.Failure("worker_forbidden",
-		"`"+name+"` cannot run from a Rider against the posse home "+home+"; Riders may run only `posse brief`, `posse status`, `posse holler`, `posse publish` and `posse config show|schema` there",
+		"`"+name+"` cannot run from a Worker against the posse home "+home+"; Workers may run only `posse brief`, `posse status`, `posse signal`, `posse publish` and `posse config show|schema` there",
 		false,
 		"Experiment with posse under a temporary POSSE_HOME and an isolated Herdr server",
-		"Report what the Lead should do with `posse holler needs-decision`")
+		"Report what the Lead should do with `posse signal needs-decision`")
 }
 
 // workerCaller reports whether this process runs on behalf of a Worker of
 // home. It is a Worker when it, or any process it descends from, carries
 // POSSE_WORKER_HOME for home in its environment or runs inside one of home's
-// Mounts, or when its HERDR_PANE_ID is a Task's pane. Ancestors are read from
+// Sandboxes, or when its HERDR_PANE_ID is a Task's pane. Ancestors are read from
 // /proc, so `env -u`, `cd` or a subshell cannot shed the identity: the agent
-// process itself keeps the marker it was started with and its Mount cwd.
+// process itself keeps the marker it was started with and its Sandbox cwd.
 func (s *Service) workerCaller(ctx context.Context, home string) bool {
 	if value := os.Getenv(workerHomeEnv); value != "" && samePath(value, home) {
 		return true
@@ -98,37 +98,37 @@ func (s *Service) workerCaller(ctx context.Context, home string) bool {
 			}
 		}
 	}
-	mounts := homeMounts(ctx, db)
-	if cwd, err := os.Getwd(); err == nil && insideAny(cwd, mounts) {
+	sandboxes := homeSandboxes(ctx, db)
+	if cwd, err := os.Getwd(); err == nil && insideAny(cwd, sandboxes) {
 		return true
 	}
 	for _, process := range ancestors {
-		if process.cwd != "" && insideAny(process.cwd, mounts) {
+		if process.cwd != "" && insideAny(process.cwd, sandboxes) {
 			return true
 		}
 	}
 	return false
 }
 
-// cwdInsideMount reports whether the working directory is inside any Mount.
-func cwdInsideMount(ctx context.Context, db *store.DB) bool {
+// cwdInsideSandbox reports whether the working directory is inside any Sandbox.
+func cwdInsideSandbox(ctx context.Context, db *store.DB) bool {
 	cwd, err := os.Getwd()
-	return err == nil && insideAny(cwd, homeMounts(ctx, db))
+	return err == nil && insideAny(cwd, homeSandboxes(ctx, db))
 }
 
-func homeMounts(ctx context.Context, db *store.DB) []string {
+func homeSandboxes(ctx context.Context, db *store.DB) []string {
 	projects, err := db.Projects(ctx)
 	if err != nil {
 		return nil
 	}
 	paths := []string{}
 	for _, project := range projects {
-		mounts, err := db.Mounts(ctx, project.ID)
+		sandboxes, err := db.Sandboxes(ctx, project.ID)
 		if err != nil {
 			continue
 		}
-		for _, mount := range mounts {
-			paths = append(paths, mount.Path)
+		for _, sandbox := range sandboxes {
+			paths = append(paths, sandbox.Path)
 		}
 	}
 	return paths

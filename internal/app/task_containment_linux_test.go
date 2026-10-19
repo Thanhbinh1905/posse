@@ -106,7 +106,7 @@ func TestTaskProcessContainmentPreservesDetachedSSHControlMaster(t *testing.T) {
 			return
 		}
 		for _, pid := range pids {
-			handle, err := openMountProcessHandle(pid)
+			handle, err := openSandboxProcessHandle(pid)
 			if err != nil {
 				continue
 			}
@@ -147,7 +147,7 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 	if err != nil || pid <= 1 {
 		t.Fatalf("ControlMaster PID = %q: %v", pidBytes, err)
 	}
-	handle, err := openMountProcessHandle(pid)
+	handle, err := openSandboxProcessHandle(pid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,9 +171,9 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 	if !processHasTaskMarker(pid, marker) {
 		t.Fatalf("detached ControlMaster PID %d lost its inherited Task marker", pid)
 	}
-	parent, err := mountProcessParentID(pid)
+	parent, err := sandboxProcessParentID(pid)
 	if err != nil || parent > 1 && processHasTaskMarker(parent, marker) {
-		t.Fatalf("ControlMaster PID %d still appears to have a Rider parent %d: %v", pid, parent, err)
+		t.Fatalf("ControlMaster PID %d still appears to have a Worker parent %d: %v", pid, parent, err)
 	}
 
 	ordinary := exec.Command("sleep", "300")
@@ -188,7 +188,7 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 			_ = ordinary.Wait()
 		}
 	}()
-	ordinaryHandle, err := openMountProcessHandle(ordinary.Process.Pid)
+	ordinaryHandle, err := openSandboxProcessHandle(ordinary.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestInPlaceContainmentPreservesForeignForegroundProcess(t *testing.T) {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	handle, err := openMountProcessHandle(command.Process.Pid)
+	handle, err := openSandboxProcessHandle(command.Process.Pid)
 	if err != nil {
 		_ = command.Process.Kill()
 		_ = command.Wait()
@@ -389,7 +389,7 @@ func TestTaskContainmentSkipsReusedPaneShellPID(t *testing.T) {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	handle, err := openMountProcessHandle(command.Process.Pid)
+	handle, err := openSandboxProcessHandle(command.Process.Pid)
 	if err != nil {
 		_ = command.Process.Kill()
 		_ = command.Wait()

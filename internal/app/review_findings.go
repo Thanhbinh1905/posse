@@ -418,13 +418,13 @@ func reviewRoundForSignal(ctx context.Context, db *store.DB, home string, projec
 			return nil, nil, axi.Failure("review_findings_invalid", "Review Round is not admitted", false)
 		}
 	}
-	ship, err := db.TaskByID(ctx, project.ID, review.ReviewsTaskID)
+	change, err := db.TaskByID(ctx, project.ID, review.ReviewsTaskID)
 	if err != nil {
 		return nil, nil, err
 	}
-	plan, err := ship.AdmittedPlan()
+	plan, err := change.AdmittedPlan()
 	if err != nil || plan == nil || plan.ValidationLoops == nil || !plan.ValidationLoops.Review.Enabled {
-		return nil, nil, axi.Failure("review_findings_invalid", "Ship Task has no enabled, frozen Review Loop", false)
+		return nil, nil, axi.Failure("review_findings_invalid", "Change Task has no enabled, frozen Review Loop", false)
 	}
 	contents, err := readSignalFile(home, project, review, supplied)
 	if err != nil {
@@ -453,10 +453,10 @@ func resolveSignalFile(home string, project store.Project, task store.Task, supp
 	}
 	validatedScratchRoot, err := validatedTaskScratchRoot(home, project, task)
 	if err != nil {
-		return "", nil, fmt.Errorf("invalid Task scratch directory %s; Signal files must be inside the Rider's worktree (%s) or this Task's scratch directory: %w", scratchRoot, worktreeRoot, err)
+		return "", nil, fmt.Errorf("invalid Task scratch directory %s; Signal files must be inside the Worker's worktree (%s) or this Task's scratch directory: %w", scratchRoot, worktreeRoot, err)
 	}
 	allowedRoots := []string{worktreeRoot, validatedScratchRoot}
-	allowedLocations := fmt.Sprintf("the Rider's worktree (%s) or this Task's scratch directory (%s)", worktreeRoot, scratchRoot)
+	allowedLocations := fmt.Sprintf("the Worker's worktree (%s) or this Task's scratch directory (%s)", worktreeRoot, scratchRoot)
 	filePath := supplied
 	if !filepath.IsAbs(filePath) {
 		filePath = filepath.Join(worktreeRoot, filePath)

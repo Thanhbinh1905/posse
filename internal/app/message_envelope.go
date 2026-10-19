@@ -20,7 +20,7 @@ func deliveryEnvelope(from, to, task, purpose, ids, body string) string {
 }
 
 func workerInstruction(task store.Task, message store.Message) string {
-	return deliveryEnvelope("Lead", "Rider", taskIDString(task.Seq), "instruction", fmt.Sprint(message.ID), message.Body)
+	return deliveryEnvelope("Lead", "Worker", taskIDString(task.Seq), "instruction", fmt.Sprint(message.ID), message.Body)
 }
 
 func noticeEnvelope(notices []store.Notice, tasks []string, body string) string {

@@ -25,8 +25,8 @@ func reviewIdentityFixture(t *testing.T) *prLifecycleFixture {
 	fixture := newPRLifecycleFixture(t)
 	t.Cleanup(func() { _ = fixture.db.Close() })
 	for _, setting := range [][2]string{
-		{"defaults.landing_mode", "local"},
-		{"defaults.auto_unsaddle", "never"},
+		{"defaults.merge_mode", "local"},
+		{"defaults.auto_teardown", "never"},
 		{"defaults.max_workers", "20"},
 		{"profiles.author.kind", "claude"},
 		{"profiles.author.model", "model-a"},
@@ -43,7 +43,7 @@ func reviewIdentityFixture(t *testing.T) *prLifecycleFixture {
 		script := "#!/bin/sh\n" +
 			"printf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$POSSE_TEST_ROOT/review-identity-args.log\"\n" +
 			"if herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state idle >/dev/null 2>&1; then printf '%s\\t%s\\n' \"$HERDR_PANE_ID\" \"$PWD\" >> \"$POSSE_TEST_ROOT/review-identity-ready.log\"; fi\n" +
-			"while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state working >/dev/null 2>&1; done\n"
+			"while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state working >/dev/null 2>&1; : > \"$POSSE_TEST_ROOT/review-working-$HERDR_PANE_ID\"; done\n"
 		if err := os.WriteFile(filepath.Join(fixture.root, "bin", kind), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -69,9 +69,9 @@ func waitForReviewIdentityAgent(t *testing.T, fixture *prLifecycleFixture, paneI
 	}
 }
 
-func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, profile, reviewOf string) (int, string) {
+func startReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, profile, reviewOf string) (int, string) {
 	t.Helper()
-	taskType := "ship"
+	taskType := "change"
 	if reviewOf != "" {
 		taskType = "review"
 	}
@@ -80,8 +80,8 @@ func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, pr
 	text := fmt.Sprintf("---\ntype: %s\ntitle: %s\ndone_when: checked\n", taskType, title)
 	if reviewOf != "" {
 		text += "review_of: " + reviewOf + "\n"
-		// Review admission pins a completed Ship revision.
-		result, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE seq=? AND type='ship' AND state='working'`, strings.TrimPrefix(reviewOf, "t"))
+		// Review admission pins a completed Change revision.
+		result, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE seq=? AND type='change' AND state='working'`, strings.TrimPrefix(reviewOf, "t"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +92,7 @@ func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, pr
 		if changed != 0 {
 			// Restore only the working author temporarily completed by this helper.
 			defer func() {
-				_, _ = fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE seq=? AND type='ship' AND state='done'`, strings.TrimPrefix(reviewOf, "t"))
+				_, _ = fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE seq=? AND type='change' AND state='done'`, strings.TrimPrefix(reviewOf, "t"))
 			}()
 		}
 	}
@@ -100,7 +100,7 @@ func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, pr
 	if err := os.WriteFile(brief, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return runReviewIdentityCLI(t, fixture, "ride", "--brief", brief, "--name", name, "--profile", profile)
+	return runReviewIdentityCLI(t, fixture, "start", "--brief", brief, "--name", name, "--profile", profile)
 }
 
 func runReviewIdentityCLI(t *testing.T, fixture *prLifecycleFixture, args ...string) (int, string) {
@@ -129,11 +129,11 @@ func TestReviewRejectsExplicitAuthorSessionResume(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
 	const session = "99e0a111-1ad9-4010-a1a1-1e2944973bce"
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.args", `["--session-id","`+session+`"]`)
-	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.args", `["--resume","`+session+`"]`)
-	code, output := rideReviewIdentityTask(t, fixture, "Resumed author review", "reviewer", "t1")
+	code, output := startReviewIdentityTask(t, fixture, "Resumed author review", "reviewer", "t1")
 	if code == 0 {
 		runReviewIdentityCLI(t, fixture, "show", "t2", "--full")
 		args, _ := os.ReadFile(filepath.Join(fixture.root, "review-identity-args.log"))
@@ -158,14 +158,14 @@ func TestReviewRejectsAttachedSessionSelectors(t *testing.T) {
 			if test.kind != "claude" {
 				runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", test.kind)
 			}
-			if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+			if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 				t.Fatalf("author spawn: code=%d %s", code, output)
 			}
 			setReviewIdentityProfileArgs(t, fixture, "reviewer", test.args)
-			code, output := rideReviewIdentityTask(t, fixture, "Rejected attached", "reviewer", "t1")
+			code, output := startReviewIdentityTask(t, fixture, "Rejected attached", "reviewer", "t1")
 			requireReviewIdentityRefusal(t, code, output)
 			setReviewIdentityProfileArgs(t, fixture, "reviewer", nil)
-			if code, output := rideReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
+			if code, output := startReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
 				t.Fatalf("initial independent review: code=%d %s", code, output)
 			}
 			setReviewIdentityProfileArgs(t, fixture, "reviewer", test.args)
@@ -177,12 +177,12 @@ func TestReviewRejectsAttachedSessionSelectors(t *testing.T) {
 
 func TestReviewResumeTemplateRejectsSecondSessionSelector(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
-	stopBackgroundLookout(t, fixture)
+	stopBackgroundWatch(t, fixture)
 	const authorSession = "99e0a111-1ad9-4010-a1a1-1e2944973bce"
-	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
-	if code, output := rideReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
 		t.Fatalf("initial independent review: code=%d %s", code, output)
 	}
 	review := fixture.mustTask(t, "t2")
@@ -203,16 +203,16 @@ func TestReviewResumeTemplateRejectsSecondSessionSelector(t *testing.T) {
 
 func TestReviewRejectsAttachedCodexModelConfig(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
-	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-c","model=\"{model}\""]`)
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
 	setReviewIdentityProfileArgs(t, fixture, "reviewer", []string{`-cmodel="model-a"`})
-	code, output := rideReviewIdentityTask(t, fixture, "Attached config review", "reviewer", "t1")
+	code, output := startReviewIdentityTask(t, fixture, "Attached config review", "reviewer", "t1")
 	requireReviewIdentityRefusal(t, code, output)
 	setReviewIdentityProfileArgs(t, fixture, "reviewer", nil)
-	if code, output := rideReviewIdentityTask(t, fixture, "Independent codex", "reviewer", "t1"); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Independent codex", "reviewer", "t1"); code != 0 {
 		t.Fatalf("initial independent review: code=%d %s", code, output)
 	}
 	setReviewIdentityProfileArgs(t, fixture, "reviewer", []string{`-cmodel="model-a"`})
@@ -222,8 +222,8 @@ func TestReviewRejectsAttachedCodexModelConfig(t *testing.T) {
 
 func TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
-	stopBackgroundLookout(t, fixture)
-	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+	stopBackgroundWatch(t, fixture)
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
 	author := fixture.mustTask(t, "t1")
@@ -241,7 +241,7 @@ func TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown(t *testing.T) {
 		t.Fatalf("author relaunch identity = %#v, err=%v; want launch 2 model unknown", identities, err)
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", "model-b")
-	code, output := rideReviewIdentityTask(t, fixture, "Resumed model review", "reviewer", "t1")
+	code, output := startReviewIdentityTask(t, fixture, "Resumed model review", "reviewer", "t1")
 	requireReviewIdentityRefusal(t, code, output)
 }
 
@@ -259,13 +259,13 @@ func setReviewIdentityProfileArgs(t *testing.T, fixture *prLifecycleFixture, pro
 
 func TestReviewRejectsQuotedSameModelOverride(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
-	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-c","model=\"{model}\""]`)
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.args", `["-c","model=\"model-a\""]`)
-	code, output := rideReviewIdentityTask(t, fixture, "Same model review", "reviewer", "t1")
+	code, output := startReviewIdentityTask(t, fixture, "Same model review", "reviewer", "t1")
 	if code == 0 {
 		runReviewIdentityCLI(t, fixture, "show", "t2", "--full")
 		reviewer := fixture.mustTask(t, "t2")
@@ -282,12 +282,12 @@ func TestReviewRejectsQuotedSameModelOverride(t *testing.T) {
 
 func TestReviewRejectsMalformedModelAliasOverride(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
-	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.args", `["--model"]`)
-	code, output := rideReviewIdentityTask(t, fixture, "Ambiguous alias review", "reviewer", "t1")
+	code, output := startReviewIdentityTask(t, fixture, "Ambiguous alias review", "reviewer", "t1")
 	if code == 0 {
 		runReviewIdentityCLI(t, fixture, "show", "t2", "--full")
 		args, _ := os.ReadFile(filepath.Join(fixture.root, "review-identity-args.log"))
@@ -309,14 +309,14 @@ func TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch(t *testing.T) 
 			fixture := reviewIdentityFixture(t)
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.kind", "codex")
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
-			if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+			if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 				t.Fatalf("author spawn: code=%d %s", code, output)
 			}
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", "model-c")
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", test.args)
 
-			code, output := rideReviewIdentityTask(t, fixture, "Case-variant spawn", "reviewer", "t1")
+			code, output := startReviewIdentityTask(t, fixture, "Case-variant spawn", "reviewer", "t1")
 			requireReviewIdentityRefusal(t, code, output)
 			tasks, err := fixture.db.Tasks(context.Background(), fixture.project.ID, true)
 			if err != nil || len(tasks) != 1 {
@@ -326,7 +326,7 @@ func TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch(t *testing.T) 
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-c","model=\"{model}\""]`)
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.effort_args", `["-c","model_reasoning_effort={effort}"]`)
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.effort", "high")
-			if code, output := rideReviewIdentityTask(t, fixture, "Independent reviewer", "reviewer", "t1"); code != 0 {
+			if code, output := startReviewIdentityTask(t, fixture, "Independent reviewer", "reviewer", "t1"); code != 0 {
 				t.Fatalf("valid Codex Review spawn: code=%d %s", code, output)
 			}
 			reviewer := fixture.mustTask(t, "t2")
@@ -351,10 +351,10 @@ func TestReviewRejectsCodexProfileSelectorAtSpawnAndRelaunch(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.kind", "codex")
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
-	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
-	if code, output := rideReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
 		t.Fatalf("independent review spawn: code=%d %s", code, output)
 	}
 
@@ -370,7 +370,7 @@ func TestReviewRejectsCodexProfileSelectorAtSpawnAndRelaunch(t *testing.T) {
 
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", `"<profile>"`)
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-palt"]`)
-	code, output := rideReviewIdentityTask(t, fixture, "Profile-marker spawn", "reviewer", "t1")
+	code, output := startReviewIdentityTask(t, fixture, "Profile-marker spawn", "reviewer", "t1")
 	if code != 1 || !strings.Contains(output, "review_identity_ineligible") {
 		t.Errorf("Review spawn with unresolved Codex profile selector was admitted: code=%d\n%s", code, output)
 	}
@@ -408,7 +408,7 @@ func TestReviewRejectsCodexTOMLModelLiteralAndCommentsAtSpawnAndRelaunch(t *test
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.kind", "codex")
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
-			if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+			if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 				t.Fatalf("author spawn: code=%d %s", code, output)
 			}
 
@@ -422,7 +422,7 @@ func TestReviewRejectsCodexTOMLModelLiteralAndCommentsAtSpawnAndRelaunch(t *test
 				t.Fatal(err)
 			}
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", string(modelArgs))
-			code, output := rideReviewIdentityTask(t, fixture, "Rejected TOML Review", "reviewer", "t1")
+			code, output := startReviewIdentityTask(t, fixture, "Rejected TOML Review", "reviewer", "t1")
 			requireReviewIdentityRefusal(t, code, output)
 			tasks, err := fixture.db.Tasks(context.Background(), fixture.project.ID, true)
 			if err != nil || len(tasks) != 1 {
@@ -431,7 +431,7 @@ func TestReviewRejectsCodexTOMLModelLiteralAndCommentsAtSpawnAndRelaunch(t *test
 
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", `"model-c"`)
 			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
-			if code, output := rideReviewIdentityTask(t, fixture, "Independent reviewer", "reviewer", "t1"); code != 0 {
+			if code, output := startReviewIdentityTask(t, fixture, "Independent reviewer", "reviewer", "t1"); code != 0 {
 				t.Fatalf("independent review spawn: code=%d %s", code, output)
 			}
 			reviewer := fixture.mustTask(t, "t2")

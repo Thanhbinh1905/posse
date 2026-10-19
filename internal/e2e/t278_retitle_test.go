@@ -15,12 +15,12 @@ func TestRetitleThenPublishKeepsTheConventionalPRTitle(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 
-	brief := filepath.Join(fixture.root, "ship.md")
+	brief := filepath.Join(fixture.root, "change.md")
 	initialTitle := "PR lifecycle change"
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: "+initialTitle+"\ndone_when: committed change exists\n---\nCreate a committed change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: "+initialTitle+"\ndone_when: committed change exists\n---\nCreate a committed change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "pr-lifecycle-change")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "pr-lifecycle-change")
 	task := fixture.mustTask(t, "t1")
 	if !waitForCondition(15*time.Second, func() bool {
 		count := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-list", "--count", task.BaseRef+".."+task.Branch))

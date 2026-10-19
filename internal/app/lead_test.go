@@ -93,7 +93,7 @@ func TestConcurrentUpStartsAtMostOneLead(t *testing.T) {
 		t.Fatalf("Lead startup failed: %s", created.output)
 	}
 	if got := fake.CallCount("tab.create"); got != 0 {
-		t.Fatalf("concurrent up created %d tabs for a hidden Lookout, want none", got)
+		t.Fatalf("concurrent up created %d tabs for a hidden Watch, want none", got)
 	}
 	if got := fake.CallCount("agent.start"); got != 0 {
 		t.Fatalf("concurrent up invoked Herdr agent.start %d times", got)
@@ -103,7 +103,7 @@ func TestConcurrentUpStartsAtMostOneLead(t *testing.T) {
 	if err != nil || len(skillRoots) != 1 {
 		t.Fatalf("skill snapshot roots = %q, %v", skillRoots, err)
 	}
-	wantArgs := []string{"--dangerously-skip-permissions", "--append-system-prompt-file", filepath.Join(home, "projects", "shop", "lead.md"), "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lookout"), "--profile-extra", "--model=opus", "--effort", "high"}
+	wantArgs := []string{"--dangerously-skip-permissions", "--append-system-prompt-file", filepath.Join(home, "projects", "shop", "lead.md"), "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-watch"), "--profile-extra", "--model=opus", "--effort", "high"}
 	if service.pendingLead == nil || service.pendingLead.PaneID != "w1:p1" || !equalStrings(service.pendingLead.Args, wantArgs) {
 		t.Fatalf("pending Lead launch = %#v, want pane w1:p1 and args %#v", service.pendingLead, wantArgs)
 	}
@@ -257,7 +257,7 @@ func TestUpSchedulesProfileLeadPromptWithoutSystemPromptWhenNoticesArePending(t 
 	if err != nil || len(skillRoots) != 1 {
 		t.Fatalf("skill snapshot roots = %q, %v", skillRoots, err)
 	}
-	if service.pendingLead == nil || !service.pendingLead.NeedsPrompt || !equalStrings(service.pendingLead.Args, []string{"--dangerously-skip-permissions", "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lookout"), "--profile-arg", "--model", "sonnet"}) {
+	if service.pendingLead == nil || !service.pendingLead.NeedsPrompt || !equalStrings(service.pendingLead.Args, []string{"--dangerously-skip-permissions", "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-watch"), "--profile-arg", "--model", "sonnet"}) {
 		t.Fatalf("profile Lead startup did not preserve its arguments and prompt requirement: %#v", service.pendingLead)
 	}
 	if fake.CallCount("agent.prompt") != 0 {
@@ -647,7 +647,7 @@ func TestLeadInstructionsReportNoticesProactivelyByKind(t *testing.T) {
 			if code := cli.Run([]string{"lead"}); code != 0 {
 				t.Fatalf("posse lead failed: %s", output.String())
 			}
-			for _, phrase := range []string{"When Posse delivers a Notice", "Run `posse`", "handle every Notice", "tell the User the outcome in your own words without waiting to be asked", "supervise Riders", "--name <short>", "then run `posse ack", "The optional Brief fields `ticket:` and `refs:` are available for forge issue links", "`ticket:` names the one issue a Ship Task closes", "`issues: [<one issue>]` is accepted as the same ticket", "`refs:` adds non-closing references", "qualify the ticket and each reference with its member name as `member#number`", "ticket: worker#12", "posse send <task> --interrupt <message>", "delivers the redirect before queued messages", "posse interrupt <task>", "posse unsend <message-id>", "refuses once delivery is claimed or submitting"} {
+			for _, phrase := range []string{"When Posse delivers a Notice", "Run `posse`", "handle every Notice", "tell the User the outcome in your own words without waiting to be asked", "supervise Workers", "--name <short>", "then run `posse ack", "The optional Brief fields `ticket:` and `refs:` are available for forge issue links", "`ticket:` names the one issue a Change Task closes", "`issues: [<one issue>]` is accepted as the same ticket", "`refs:` adds non-closing references", "qualify the ticket and each reference with its member name as `member#number`", "ticket: worker#12", "posse send <task> --interrupt <message>", "delivers the redirect before queued messages", "posse interrupt <task>", "posse unsend <message-id>", "refuses once delivery is claimed or submitting"} {
 				if !strings.Contains(output.String(), phrase) {
 					t.Fatalf("Lead instructions omitted %q: %s", phrase, output.String())
 				}
@@ -658,8 +658,8 @@ func TestLeadInstructionsReportNoticesProactivelyByKind(t *testing.T) {
 			if !strings.Contains(output.String(), rule) {
 				t.Fatalf("%s Lead instructions omitted its Notice rule %q: %s", kind, rule, output.String())
 			}
-			if kind != "claude" && !strings.Contains(output.String(), "Do not run `posse lookout`") {
-				t.Fatalf("%s Lead was not told to skip `posse lookout`: %s", kind, output.String())
+			if kind != "claude" && !strings.Contains(output.String(), "Do not run `posse watch`") {
+				t.Fatalf("%s Lead was not told to skip `posse watch`: %s", kind, output.String())
 			}
 		})
 	}
@@ -722,13 +722,13 @@ func (a *blockedLeadStartAdapter) Call(ctx context.Context, method string, param
 }
 
 func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
-	brief := dispatch.Brief{Type: "ship", DoneWhen: "tests pass"}
+	brief := dispatch.Brief{Type: "change", DoneWhen: "tests pass"}
 	project := store.Project{Name: "shop"}
-	local := workerProtocol(project, store.Task{Seq: 1, Type: "ship", LandingMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
-	pr := workerProtocol(project, store.Task{Seq: 2, Type: "ship", LandingMode: "pr"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t2", "none", "English")
-	noMistakes := workerProtocol(project, store.Task{Seq: 3, Type: "ship", LandingMode: "no-mistakes"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none", "English")
-	workspace := workerProtocol(store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "ship"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t4", "none", "English")
-	if !strings.Contains(local, "Never git push or open a PR") || !strings.Contains(local, "Use the Posse-owned Task scratch directory `/home/user/.posse/scratch/shop/t1`") || !strings.Contains(local, "Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`/home/user/.posse/scratch/shop/t1`)") || !strings.Contains(local, "Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches") {
+	local := workerProtocol(project, store.Task{Seq: 1, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
+	pr := workerProtocol(project, store.Task{Seq: 2, Type: "change", MergeMode: "pr"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t2", "none", "English")
+	noMistakes := workerProtocol(project, store.Task{Seq: 3, Type: "change", MergeMode: "no-mistakes"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none", "English")
+	workspace := workerProtocol(store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "change"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t4", "none", "English")
+	if !strings.Contains(local, "Never git push or open a PR") || !strings.Contains(local, "Use the Posse-owned Task scratch directory `/home/user/.posse/scratch/shop/t1`") || !strings.Contains(local, "Files passed to `--findings` and `--report` may be in this Worker's worktree or this Task's scratch directory (`/home/user/.posse/scratch/shop/t1`)") || !strings.Contains(local, "Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches") {
 		t.Fatalf("normal Worker protocol does not ban push: %s", local)
 	}
 	if !strings.Contains(pr, `posse publish "<summary>" [--verify "<command> -> <result>"] [--proof "<markdown>"] [--risk "<markdown>"]`) || !strings.Contains(pr, "screenshots/images") || !strings.Contains(pr, "test/log evidence") || !strings.Contains(pr, "risk plus rollback") || !strings.Contains(pr, "--pr <url>") || !strings.Contains(pr, "Never push directly") || !strings.Contains(pr, "or merge") {

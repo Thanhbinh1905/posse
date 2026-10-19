@@ -24,7 +24,7 @@ type projectSummary struct {
 	Mode          string              `json:"mode"`
 	Autonomy      string              `json:"autonomy"`
 	Lead          string              `json:"lead"`
-	Lookout       string              `json:"lookout"`
+	Watch         string              `json:"watch"`
 	OpenTasks     int                 `json:"open_tasks"`
 	Tasks         []activeTaskSummary `json:"tasks,omitempty"`
 	OpenNotices   int                 `json:"open_notices"`
@@ -136,7 +136,7 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 		summary := summarizeProject(project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project))
 		home, homeErr := s.homePath()
 		if homeErr == nil {
-			summary.Lookout = s.lookoutPollerSummary(ctx.Context, db, home, project)
+			summary.Watch = s.watchRuntimeSummary(ctx.Context, db, home, project)
 		}
 		summaries = append(summaries, summary)
 	}
@@ -150,7 +150,7 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 	}
 	return ctx.Print(addUpdateHelp(axi.Object{
 		{Key: "projects", Value: summaries},
-		{Key: "help", Value: []any{"Run `posse up` inside a Project to start its Lead", "Run `posse roster --all` to see each Project's Tasks"}},
+		{Key: "help", Value: []any{"Run `posse up` inside a Project to start its Lead", "Run `posse list --all` to see each Project's Tasks"}},
 	}, update))
 }
 
@@ -203,7 +203,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	}
 	result := axi.Object{
 		{Key: "project", Value: summarizeHomeProject(project, cfg, s.leadStatus(ctx.Context, project))},
-		{Key: "lookout", Value: s.lookoutPollerRow(ctx.Context, db, home, project)},
+		{Key: "watch", Value: s.watchRuntimeRow(ctx.Context, db, home, project)},
 	}
 	if project.IsWorkspace() {
 		targets, err := s.projectTargets(ctx.Context, db, project)
@@ -235,7 +235,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		if err != nil {
 			return err
 		}
-		result = axi.Object{{Key: "project", Value: project.Name}, {Key: "lookout", Value: s.lookoutPollerRow(ctx.Context, db, home, project)}, {Key: "tasks", Value: active}, {Key: "needs_you", Value: attention}, {Key: "undelivered_notices", Value: len(pending)}, {Key: "next_action", Value: help[0]}}
+		result = axi.Object{{Key: "project", Value: project.Name}, {Key: "watch", Value: s.watchRuntimeRow(ctx.Context, db, home, project)}, {Key: "tasks", Value: active}, {Key: "needs_you", Value: attention}, {Key: "undelivered_notices", Value: len(pending)}, {Key: "next_action", Value: help[0]}}
 	}
 	update, _ := s.availableUpdate(ctx.Context, db, &project)
 	rule := reportingRule(cfg.Lowkey.Lead)
@@ -263,22 +263,22 @@ func summarizeHomeProject(project store.Project, cfg config.Config, leadStatus s
 	if autonomy.Review == "" {
 		autonomy.Review = "ask"
 	}
-	if autonomy.Land == "" {
-		autonomy.Land = "ask"
+	if autonomy.Merge == "" {
+		autonomy.Merge = "ask"
 	}
 	if leadStatus == "" {
 		leadStatus = "missing"
 	}
 	return axi.Row{
 		{Key: "name", Value: project.Name},
-		{Key: "mode", Value: projectLandingMode(project, cfg)},
-		{Key: "autonomy", Value: "review=" + autonomy.Review + " land=" + autonomy.Land},
+		{Key: "mode", Value: projectMergeMode(project, cfg)},
+		{Key: "autonomy", Value: "review=" + autonomy.Review + " merge=" + autonomy.Merge},
 		{Key: "lead", Value: leadStatus},
 	}
 }
 
 func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice) []any {
-	var show, land, recovery string
+	var show, merge, recovery string
 	for _, task := range tasks {
 		if show == "" && (task.State == store.StateNeedsDecision || task.State == store.StateBlocked) {
 			show = taskCLIName(task)
@@ -286,8 +286,8 @@ func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice)
 		if recovery == "" && taskNeedsUser(task) {
 			recovery = taskCLIName(task)
 		}
-		if land == "" && task.Type == "ship" && (task.State == store.StateDone || task.State == store.StateLanding) {
-			land = taskCLIName(task)
+		if merge == "" && task.Type == "change" && (task.State == store.StateDone || task.State == store.StateMerging) {
+			merge = taskCLIName(task)
 		}
 	}
 	if show == "" {
@@ -308,14 +308,14 @@ func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice)
 			help = append(help, "Run `posse show "+show+"` to inspect this Task")
 		}
 	} else if project.IsDirectory() {
-		help = append(help, "Run `posse ride --brief <file> --name <short> --user-approved \"<User's words>\"` with `execution: in-place` and selected `paths:` to delegate a Task")
+		help = append(help, "Run `posse start --brief <file> --name <short> --user-approved \"<User's words>\"` with `execution: in-place` and selected `paths:` to delegate a Task")
 	} else {
-		help = append(help, "Run `posse ride --brief <file> [--name <short>]` to delegate a Task")
+		help = append(help, "Run `posse start --brief <file> [--name <short>]` to delegate a Task")
 	}
-	if land != "" {
-		help = append(help, "Run `posse land "+land+"` to Land this completed Ship Task")
+	if merge != "" {
+		help = append(help, "Run `posse merge "+merge+"` to Merge this completed Change Task")
 	} else {
-		help = append(help, "Run `posse roster` to inspect Rider progress")
+		help = append(help, "Run `posse list` to inspect Worker progress")
 	}
 	if len(notices) > 0 {
 		ids := make([]string, len(notices))
@@ -324,9 +324,9 @@ func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice)
 		}
 		help = append(help, "Run `posse ack "+strings.Join(ids, ",")+"` after handling these Notices")
 	} else if project.IsDirectory() {
-		help = append(help, "Run `posse remuda` to inspect active path leases")
+		help = append(help, "Run `posse pool` to inspect active path leases")
 	} else {
-		help = append(help, "Run `posse remuda` to inspect released Mounts")
+		help = append(help, "Run `posse pool` to inspect released Sandboxes")
 	}
 	return help
 }
@@ -343,8 +343,8 @@ func summarizeProject(project store.Project, cfg config.Config, tasks []store.Ta
 	if autonomy.Review == "" {
 		autonomy.Review = "ask"
 	}
-	if autonomy.Land == "" {
-		autonomy.Land = "ask"
+	if autonomy.Merge == "" {
+		autonomy.Merge = "ask"
 	}
 	lead := leadStatus
 	if lead == "" {
@@ -354,16 +354,16 @@ func summarizeProject(project store.Project, cfg config.Config, tasks []store.Ta
 	for _, task := range tasks {
 		rows = append(rows, activeTaskSummary{ID: project.Name + "/" + taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State)})
 	}
-	return projectSummary{Name: project.Name, Mode: projectLandingMode(project, cfg), Autonomy: "review=" + autonomy.Review + " land=" + autonomy.Land, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
+	return projectSummary{Name: project.Name, Mode: projectMergeMode(project, cfg), Autonomy: "review=" + autonomy.Review + " merge=" + autonomy.Merge, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
 }
 
 func (s *Service) ls(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("roster", args, map[string]flagSpec{"all": {boolean: true}, "full": {boolean: true}})
+	parsed, err := parseArgs("list", args, map[string]flagSpec{"all": {boolean: true}, "full": {boolean: true}})
 	if err != nil {
 		return err
 	}
 	if len(parsed.Positionals) != 0 {
-		return axi.Usage("roster does not take positional arguments")
+		return axi.Usage("list does not take positional arguments")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -404,7 +404,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 		if len(rows) == 0 {
 			return ctx.Print(axi.Object{{Key: "projects", Value: []any{}}, {Key: "state", Value: "No Projects registered"}, {Key: "help", Value: []any{"Run `posse up` inside a Herdr pane to register the first Project"}}})
 		}
-		return ctx.Print(axi.Object{{Key: "projects", Value: rows}, {Key: "help", Value: []any{"Run `posse up` inside a Project to start its Lead", "Run `posse roster` to inspect Project Tasks"}}})
+		return ctx.Print(axi.Object{{Key: "projects", Value: rows}, {Key: "help", Value: []any{"Run `posse up` inside a Project to start its Lead", "Run `posse list` to inspect Project Tasks"}}})
 	}
 	project, err := s.projectForCWD(ctx.Context, db)
 	if err != nil {
@@ -445,7 +445,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
-		return ctx.Print(axi.Object{{Key: "tasks", Value: []any{}}, {Key: "state", Value: "0 open Tasks"}, {Key: "help", Value: []any{"Run `posse ride --brief <file> [--name <short>]` to delegate a Task"}}})
+		return ctx.Print(axi.Object{{Key: "tasks", Value: []any{}}, {Key: "state", Value: "0 open Tasks"}, {Key: "help", Value: []any{"Run `posse start --brief <file> [--name <short>]` to delegate a Task"}}})
 	}
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: rows}, {Key: "help", Value: []any{"Run `posse show " + taskCLIName(tasks[0]) + "` to inspect a Task"}}})
 }
@@ -456,7 +456,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if len(parsed.Positionals) != 1 {
-		return axi.Usage("show requires one Task id", "Run `posse roster` to list Tasks")
+		return axi.Usage("show requires one Task id", "Run `posse list` to list Tasks")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -498,7 +498,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			view["plan"] = plan
 		}
 	}
-	if task.Type == "scout" {
+	if task.Type == "research" {
 		view["report_digest"] = task.ReportDigest
 		if task.ReportKind != "" {
 			view["report_kind"] = task.ReportKind
@@ -525,7 +525,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		reviewerHistoryKnown := launchHistoryComplete(task, reviewerLaunches)
 		if task.ReviewsTaskID == 0 {
-			view["review_identity"] = map[string]any{"review_task": id, "eligible": false, "reason": "Review Task has no recorded Ship Task", "review_history_known": reviewerHistoryKnown, "review_launches": identityViews(reviewerLaunches)}
+			view["review_identity"] = map[string]any{"review_task": id, "eligible": false, "reason": "Review Task has no recorded Change Task", "review_history_known": reviewerHistoryKnown, "review_launches": identityViews(reviewerLaunches)}
 		} else {
 			author, err := db.TaskByID(ctx.Context, project.ID, task.ReviewsTaskID)
 			if err != nil {
@@ -550,7 +550,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			return err
 		}
 	}
-	if task.Type == "ship" {
+	if task.Type == "change" {
 		receipts, err := db.ReviewReceipts(ctx.Context, task.ID)
 		if err != nil {
 			return err
@@ -592,7 +592,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if len(refs) > 0 {
 		view["refs"] = refs
 	}
-	if task.Type != "ship" {
+	if task.Type != "change" {
 		home, err := s.homePath()
 		if err != nil {
 			return err
@@ -617,7 +617,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		rows := make([]any, 0, len(repos))
 		for _, repo := range repos {
-			row := axi.Object{{Key: "repo", Value: repo.Repo}, {Key: "mode", Value: repo.LandingMode}, {Key: "state", Value: repo.State}, {Key: "pr_url", Value: repo.PRURL}, {Key: "pr_state", Value: ""}, {Key: "target_branch", Value: repo.TargetBranch}}
+			row := axi.Object{{Key: "repo", Value: repo.Repo}, {Key: "mode", Value: repo.MergeMode}, {Key: "state", Value: repo.State}, {Key: "pr_url", Value: repo.PRURL}, {Key: "pr_state", Value: ""}, {Key: "target_branch", Value: repo.TargetBranch}}
 			if repo.PRURL != "" {
 				if observation, err := db.LatestMemberPRObservation(ctx.Context, task.ID, repo.Repo); err == nil {
 					row[4].Value = observation.State
@@ -630,7 +630,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["repos"] = rows
 	}
 	commandName := taskCLIName(task)
-	help := []any{"Run `posse peek " + commandName + "` to read recent Rider output"}
+	help := []any{"Run `posse peek " + commandName + "` to read recent Worker output"}
 	if modelEpisode.Status != "" && modelEpisode.Status != "resolved" {
 		help = append(help, "Inspect `model_error_recovery` and its Task signals in `posse show "+commandName+" --full`")
 	}
@@ -664,25 +664,25 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		switch task.State {
 		case store.StateFailed, store.StateLost:
 			help = append(help, "Relaunch with `posse relaunch "+commandName+"`, then resend each undeliverable instruction with `posse send "+commandName+" <message>`")
-		case store.StateReported, store.StateLanded, store.StateTornDown:
-			help = append(help, "Create a new Ship Task, then resend each undeliverable instruction with `posse send <task> <message>`")
+		case store.StateReported, store.StateMerged, store.StateTornDown:
+			help = append(help, "Create a new Change Task, then resend each undeliverable instruction with `posse send <task> <message>`")
 		default:
 			if hasUndeliverableMessages {
 				help = append(help, "Undeliverable instructions are not retried automatically; resend each with `posse send "+commandName+" <message>`")
 			}
 			if hasQueuedMessages {
-				help = append(help, "Queued instructions will be delivered when the Rider is ready and unfocused")
+				help = append(help, "Queued instructions will be delivered when the Worker is ready and unfocused")
 			}
 		}
 		if hasHistoricalMessages {
 			help = append(help, "Undeliverable and withdrawn messages are history, not pending deliveries; they do not block new sends when this Task accepts instructions")
 		}
 	}
-	if task.Type == "ship" && task.State == store.StateDone {
-		help = append(help, "Run `posse land "+commandName+"` to run the Gate")
+	if task.Type == "change" && task.State == store.StateDone {
+		help = append(help, "Run `posse merge "+commandName+"` to run the Gate")
 	}
 	if task.State == store.StateNeedsDecision || task.State == store.StateBlocked {
-		help = append(help, "Run `posse send "+commandName+" <message>` to answer or steer this Rider")
+		help = append(help, "Run `posse send "+commandName+" <message>` to answer or steer this Worker")
 	}
 	if parsed.Bool("full") {
 		uncertainMessages, err := db.UncertainTaskMessages(ctx.Context, project.ID, task.ID, currentTime()-deliveryClaimTimeout.Milliseconds())
@@ -767,8 +767,8 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["launch_identities"] = identityViews(launchIdentities)
 		view["launch_identity_history_known"] = launchHistoryComplete(task, launchIdentities)
 		view["dispatch_rule"] = task.DispatchRule
-		view["landing_mode"] = task.LandingMode
-		if task.Type == "ship" && !project.IsWorkspace() && !project.IsDirectory() {
+		view["merge_mode"] = task.MergeMode
+		if task.Type == "change" && !project.IsWorkspace() && !project.IsDirectory() {
 			view["target_branch"] = taskTargetBranch(project, task)
 		}
 		if task.Branch != "" && task.Branch != store.TaskBranchName(task.Seq) {

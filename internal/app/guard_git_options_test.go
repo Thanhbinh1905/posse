@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestRiderGitGuardAcceptsDocumentedReadOptions(t *testing.T) {
+func TestWorkerGitGuardAcceptsDocumentedReadOptions(t *testing.T) {
 	scope, _ := guardFixture(t)
 	for _, command := range []string{"git -P log", "git -p log", "git --no-optional-locks status", "git --no-replace-objects log", "git --literal-pathspecs log", "git --exec-path", "git -C . -P diff", "git -C $(pwd) diff"} {
 		if refused, reason := guardCommand(command, scope); refused {
@@ -16,7 +16,7 @@ func TestRiderGitGuardAcceptsDocumentedReadOptions(t *testing.T) {
 	}
 }
 
-func TestRiderGitGuardBlocksRemoteWritesThroughAliasesAndPlumbing(t *testing.T) {
+func TestWorkerGitGuardBlocksRemoteWritesThroughAliasesAndPlumbing(t *testing.T) {
 	scope, _ := guardFixture(t)
 	repo := t.TempDir()
 	scope.cwd = repo

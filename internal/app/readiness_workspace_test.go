@@ -23,7 +23,7 @@ func TestFirstOutcomeWorkspaceReadinessUsesEffectiveMemberPolicies(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Chdir(workspace)
-	// Members without an origin Land locally, not through the Project's default pr mode.
+	// Members without an origin Merge locally, not through the Project's default pr mode.
 	outcomeCLI(t, f.service, 0, "config", "set", "defaults.gate", "['true']", "--project", "stack", "--user-approved", "Use the fixture Gate")
 	outcomeCLI(t, f.service, 0, "config", "set", "repositories.worker.gate", "[]", "--project", "stack", "--user-approved", "No Gate for worker")
 	check := func(wantGate, wantForge bool) {
@@ -57,7 +57,7 @@ func TestFirstOutcomeWorkspaceReadinessUsesEffectiveMemberPolicies(t *testing.T)
 		}
 	}
 	check(true, false)
-	outcomeCLI(t, f.service, 0, "config", "set", "repositories.backend.landing_mode", "pr", "--project", "stack")
+	outcomeCLI(t, f.service, 0, "config", "set", "repositories.backend.merge_mode", "pr", "--project", "stack")
 	check(true, true)
 	outcomeCLI(t, f.service, 0, "config", "unset", "repositories.worker.gate", "--project", "stack", "--user-approved", "Inherit the Project Gate")
 	check(false, true)
