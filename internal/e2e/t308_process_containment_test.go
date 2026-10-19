@@ -247,24 +247,6 @@ func TestTeardownPreservesDetachedSSHControlMaster(t *testing.T) {
 	if current := f.task(t, "t1"); current.State != store.StateTornDown {
 		t.Fatalf("Task after retry = %s", current.State)
 	}
-	if _, err := f.client.Call(context.Background(), "pane.close", map[string]any{"pane_id": f.leadPaneID}); err != nil {
-		t.Fatalf("close the test Lead pane after Teardown: %v", err)
-	}
-	if !waitForCondition(10*time.Second, func() bool {
-		processes, err := fixtureProcessDetails(f.root)
-		if err != nil {
-			return false
-		}
-		for _, process := range processes {
-			if strings.Contains(process, "_finalize-lead") {
-				return false
-			}
-		}
-		return true
-	}) {
-		processes, _ := fixtureProcessDetails(f.root)
-		t.Fatalf("isolated Lead finalizer did not exit after the fixture pane closed: %v", processes)
-	}
 }
 
 func TestTeardownStopsProcessStartedThroughHerdrServer(t *testing.T) {

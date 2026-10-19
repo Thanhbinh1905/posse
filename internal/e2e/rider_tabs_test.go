@@ -579,12 +579,35 @@ esac
 	if project.HerdrWorkspaceID != lead.Workspace.WorkspaceID || project.LeadPaneID != lead.RootPane.PaneID {
 		t.Fatalf("Lead did not start in the calling pane: %#v", project)
 	}
-	return &riderTabsFixture{
+	fixture := &riderTabsFixture{
 		root: root, repo: repo, home: home, binary: binary, env: env,
 		leadEnv: callerEnv, client: client, server: server,
 		userBefore: userBefore, userAfter: userAfter, userTab: userTab,
 		leadWorkspaceID: lead.Workspace.WorkspaceID, leadPaneID: lead.RootPane.PaneID, projectID: project.ID,
 	}
+	// Cancel a startup finalizer before stopping Herdr. Once the isolated server
+	// stops, its snapshot calls can otherwise stay alive until their 30s timeout.
+	t.Cleanup(func() {
+		if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": fixture.leadPaneID}); err != nil {
+			return
+		}
+		if !waitForCondition(2*time.Second, func() bool {
+			processes, err := fixtureProcessDetails(root)
+			if err != nil {
+				return false
+			}
+			for _, process := range processes {
+				if strings.Contains(process, "_finalize-lead") {
+					return false
+				}
+			}
+			return true
+		}) {
+			processes, _ := fixtureProcessDetails(root)
+			t.Errorf("isolated Lead finalizer remained after closing its pane: %v", processes)
+		}
+	})
+	return fixture
 }
 
 // assertRenderedSidebar attaches a real desktop client to the isolated server.
