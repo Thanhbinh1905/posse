@@ -2558,19 +2558,23 @@ func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, w
 		// A prior database update may have committed before its snapshot write failed.
 		return db.PersistTask(ctx, taskID)
 	}
-	params := dbgen.UpdateTaskObservationParams{
-		PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentSessionKind: agentSessionKind,
-		AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince,
-		UpdatedAt: time.Now().UnixMilli(), ID: taskID,
-		PaneID_2: paneID, HerdrWorkspaceID_2: workspaceID, AgentSession_2: agentSession, AgentSessionKind_2: agentSessionKind,
-		AgentAbsentSince_2: agentAbsentSince, AgentServerStartedAt_2: agentServerStartedAt, IdleSince_2: idleSince,
-	}
-	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
-		return dbgen.New(conn).UpdateTaskObservation(ctx, params)
-	}); err != nil {
+	if err := db.writeTaskObservation(ctx, taskID, paneID, workspaceID, agentSession, agentSessionKind, agentAbsentSince, idleSince, agentServerStartedAt, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("write Task observation: %w", err)
 	}
 	return db.PersistTask(ctx, taskID)
+}
+
+func (db *DB) writeTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string, updatedAt int64) error {
+	params := dbgen.UpdateTaskObservationParams{
+		PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentSessionKind: agentSessionKind,
+		AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince,
+		UpdatedAt: updatedAt, ID: taskID,
+		PaneID_2: paneID, HerdrWorkspaceID_2: workspaceID, AgentSession_2: agentSession, AgentSessionKind_2: agentSessionKind,
+		AgentAbsentSince_2: agentAbsentSince, AgentServerStartedAt_2: agentServerStartedAt, IdleSince_2: idleSince,
+	}
+	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+		return dbgen.New(conn).UpdateTaskObservation(ctx, params)
+	})
 }
 
 func (db *DB) taskObservationMatches(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) (bool, error) {
@@ -2596,16 +2600,20 @@ func (db *DB) UpdateProjectObservation(ctx context.Context, project Project, pan
 	if err != nil || unchanged {
 		return err
 	}
+	if err := db.writeProjectObservation(ctx, project, paneID, workspaceID, absentSince); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, project.ID)
+}
+
+func (db *DB) writeProjectObservation(ctx context.Context, project Project, paneID, workspaceID string, absentSince int64) error {
 	params := dbgen.UpdateProjectObservationParams{
 		PaneID: paneID, WorkspaceID: workspaceID, LeadAbsentSince: absentSince, ProjectID: project.ID,
 		ExpectedLeadPaneID: project.LeadPaneID, ExpectedWorkspaceID: project.HerdrWorkspaceID, ExpectedLeadLabel: project.LeadLabel,
 	}
-	if err := db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateProjectObservation(ctx, params)
-	}); err != nil {
-		return err
-	}
-	return db.PersistProject(ctx, project.ID)
+	})
 }
 
 func (db *DB) projectObservationMatches(ctx context.Context, projectID int64, paneID, workspaceID string, absentSince int64) (bool, error) {

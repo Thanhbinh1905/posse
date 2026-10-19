@@ -162,6 +162,9 @@ func TestListShowsDurableViewDuringObservationContention(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(context.Background(), `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, fixture.project.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	code, output, errOut := fixture.run("list", "--json")
 	if code != 0 || strings.Contains(output, "store_busy") || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "Some Task observations were deferred") {
@@ -171,6 +174,52 @@ func TestListShowsDurableViewDuringObservationContention(t *testing.T) {
 	code, output, errOut = fixture.run("--json")
 	if code != 0 || strings.Contains(output, "store_busy") || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "Project observations were deferred") {
 		t.Fatalf("dashboard did not show its durable Project view with a deferral note: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+}
+
+func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
+	commands := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "lead", args: []string{"lead"}, want: "instructions"},
+		{name: "show", args: []string{"show", "t1"}, want: "t1"},
+		{name: "project show", args: []string{"project", "show"}, want: "shop"},
+		{name: "pool", args: []string{"pool"}, want: "sandboxes"},
+		{name: "peek", args: []string{"peek", "t1"}, want: "output"},
+	}
+	for _, command := range commands {
+		t.Run(command.name, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "local", store.StateWorking)
+			project, err := fixture.db.ProjectByID(context.Background(), fixture.project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if command.name == "peek" {
+				fixture.service.Herdr.(*herdr.Fake).Results["pane.read"] = []byte(`{"text":"worker output"}`)
+			}
+			t.Setenv("HERDR_PANE_ID", project.LeadPaneID)
+			t.Setenv("HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+			writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			tx, err := writer.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.ExecContext(context.Background(), `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, fixture.project.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			code, output, errOut := fixture.run(command.args...)
+			if code != 0 || !strings.Contains(output, command.want) || !strings.Contains(errOut, "Project observations were deferred") || strings.Contains(output+errOut, "store_busy") {
+				t.Fatalf("%s did not return its durable view during observation contention: exit=%d output=%s stderr=%s", command.name, code, output, errOut)
+			}
+		})
 	}
 }
 
