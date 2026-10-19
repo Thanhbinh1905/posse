@@ -238,12 +238,11 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 				return prefixFailure(repo.Repo, err)
 			}
 		}
-		if err := s.runIntentStep(ctx, db, intent, "gate.run:"+repo.Repo, func() error { return runMemberGates(ctx, memberGates(cfg, repo.Repo), repo.WorktreePath) }); err != nil {
-			_, noticeErr := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "gate_failed", Summary: gated.Title + ": " + truncate(err.Error(), 240), DataJSON: marshalJSON(map[string]any{"repo": repo.Repo})})
-			if noticeErr != nil {
-				return noticeErr
+		if gateErr := s.runIntentStep(ctx, db, intent, "gate.run:"+repo.Repo, func() error { return runMemberGates(ctx, memberGates(cfg, repo.Repo), repo.WorktreePath) }); gateErr != nil {
+			if err := recordGateFailure(ctx, db, project, gated, gatedSHA, repo.Repo, gateErr); err != nil {
+				return err
 			}
-			return axi.Failure("gate_failed", repo.Repo+": "+err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
+			return axi.Failure("gate_failed", repo.Repo+": "+gateErr.Error(), false, gateFailureHelp(gated))
 		}
 		if current, err := gitOutput(ctx, repo.WorktreePath, "rev-parse", "refs/heads/"+task.Branch); err != nil {
 			return memberFailure(repo.Repo, err)
@@ -503,7 +502,7 @@ func runMemberGates(ctx context.Context, gates []string, worktree string) error 
 	for _, gate := range gates {
 		output, err := commandOutput(ctx, worktree, gate)
 		if err != nil {
-			return fmt.Errorf("gate %q failed: %s", gate, truncate(strings.TrimSpace(output), 1200))
+			return newGateCommandFailure(gate, output, err)
 		}
 	}
 	return nil
