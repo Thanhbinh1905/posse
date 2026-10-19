@@ -13,6 +13,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+const transientMountProcessExitGrace = 2 * time.Second
+
 func (s *Service) releaseMountWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, clean string, approvedDiscard bool, authorization *mountProcessAuthorization) ([]string, error) {
 	mounts, err := db.Mounts(ctx, project.ID)
 	if err != nil {
@@ -237,7 +239,7 @@ func verifyMountProcessSet(root string, handles, transients map[int]*mountProces
 }
 
 func waitForMountProcessExit(pid int, root string, handle *mountProcessHandle) error {
-	deadline := time.Now().Add(300 * time.Millisecond)
+	deadline := time.Now().Add(transientMountProcessExitGrace)
 	for {
 		alive, err := verifyMountProcessHandleIfAlive(pid, handle)
 		if err != nil {
