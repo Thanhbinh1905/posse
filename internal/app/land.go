@@ -152,16 +152,15 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		task.GatedSHA = gatedSHA
-		if err := runLandStep("gate.run", func() error { return runGates(ctx.Context, cfg, task) }); err != nil {
-			_, noticeErr := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "gate_failed", Summary: task.Title + ": " + truncate(err.Error(), 240), DataJSON: `{}`})
-			if noticeErr != nil {
-				return noticeErr
+		if gateErr := runLandStep("gate.run", func() error { return runGates(ctx.Context, cfg, task) }); gateErr != nil {
+			if err := recordGateFailure(ctx.Context, db, project, task, gatedSHA, "", gateErr); err != nil {
+				return err
 			}
 			if finishErr := finishLandIntent(); finishErr != nil {
 				return finishErr
 			}
 			_ = s.deliverNotices(ctx.Context, db, project)
-			return axi.Failure("gate_failed", err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
+			return axi.Failure("gate_failed", gateErr.Error(), false, gateFailureHelp(task))
 		}
 		if started, err := s.maybeAutoStartReviewRound(ctx, db, home, project, task); err != nil {
 			return err
@@ -357,7 +356,7 @@ func runGates(ctx context.Context, cfg config.Config, task store.Task) error {
 	for _, gate := range cfg.Defaults.Gate {
 		output, err := commandOutput(ctx, task.WorktreePath, gate)
 		if err != nil {
-			return fmt.Errorf("gate %q failed: %s", gate, truncate(strings.TrimSpace(output), 1200))
+			return newGateCommandFailure(gate, output, err)
 		}
 	}
 	return nil

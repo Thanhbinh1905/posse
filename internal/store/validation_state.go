@@ -112,9 +112,12 @@ type ValidationFixRound struct {
 
 // QueueValidationFixResult describes whether an automatic instruction was added.
 type QueueValidationFixResult struct {
-	MessageID int64
-	Queued    bool
-	Coalesced bool
+	MessageID  int64
+	Seq        int
+	RoundsUsed int
+	Queued     bool
+	Coalesced  bool
+	Exhausted  bool
 }
 
 // ValidationContinuitySnapshot binds a done Signal to the current fix rounds.
@@ -129,6 +132,19 @@ var ErrValidationHeadsChanged = errors.New("validation fix instructions changed 
 // QueueValidationFixInstruction records a fix round and queues or extends the
 // unsent validation message for the same head in one transaction.
 func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string) (QueueValidationFixResult, error) {
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, nil)
+}
+
+// QueueValidationFixInstructionWithinBudget records a fix round only while its
+// per-kind budget remains. The budget check and insertion share one transaction.
+func (db *DB) QueueValidationFixInstructionWithinBudget(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string, maxRounds int) (QueueValidationFixResult, error) {
+	if maxRounds < 0 {
+		return QueueValidationFixResult{}, fmt.Errorf("validation fix round budget cannot be negative")
+	}
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, &maxRounds)
+}
+
+func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string, maxRounds *int) (QueueValidationFixResult, error) {
 	if taskID < 1 || (kind != "gate" && kind != "ci" && kind != "review" && kind != "freshness") {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix task or kind")
 	}
@@ -157,21 +173,30 @@ func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, k
 
 	var existingMessageID int64
 	var existingExpected string
-	err = tx.QueryRowContext(ctx, `SELECT expected_base_head,message_id FROM validation_fix_rounds WHERE ship_task_id=? AND kind=? AND dedupe_key=?`, taskID, kind, dedupeKey).Scan(&existingExpected, &existingMessageID)
+	var existingSeq int
+	err = tx.QueryRowContext(ctx, `SELECT expected_base_head,message_id,seq FROM validation_fix_rounds WHERE ship_task_id=? AND kind=? AND dedupe_key=?`, taskID, kind, dedupeKey).Scan(&existingExpected, &existingMessageID, &existingSeq)
 	if err == nil {
 		if existingExpected != expectedBaseHead {
 			return QueueValidationFixResult{}, fmt.Errorf("validation fix dedupe key %q was reused for another head", dedupeKey)
 		}
-		return QueueValidationFixResult{MessageID: existingMessageID}, nil
+		var roundsUsed int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind=?`, taskID, kind).Scan(&roundsUsed); err != nil {
+			return QueueValidationFixResult{}, err
+		}
+		return QueueValidationFixResult{MessageID: existingMessageID, Seq: existingSeq, RoundsUsed: roundsUsed}, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return QueueValidationFixResult{}, err
 	}
 
-	var seq int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM validation_fix_rounds WHERE ship_task_id=? AND kind=?`, taskID, kind).Scan(&seq); err != nil {
+	var roundsUsed, lastSeq int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(seq),0) FROM validation_fix_rounds WHERE ship_task_id=? AND kind=?`, taskID, kind).Scan(&roundsUsed, &lastSeq); err != nil {
 		return QueueValidationFixResult{}, err
 	}
+	if maxRounds != nil && roundsUsed >= *maxRounds {
+		return QueueValidationFixResult{RoundsUsed: roundsUsed, Exhausted: true}, nil
+	}
+	seq := lastSeq + 1
 	var messageID int64
 	var coalesced bool
 	var existingBody string
@@ -223,7 +248,7 @@ func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, k
 	if err := db.PersistTask(ctx, taskID); err != nil {
 		return QueueValidationFixResult{}, err
 	}
-	return QueueValidationFixResult{MessageID: messageID, Queued: true, Coalesced: coalesced}, nil
+	return QueueValidationFixResult{MessageID: messageID, Seq: seq, RoundsUsed: roundsUsed + 1, Queued: true, Coalesced: coalesced}, nil
 }
 
 // ValidationContinuitySnapshot returns the heads named by automatic

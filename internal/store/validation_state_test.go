@@ -235,6 +235,75 @@ func TestQueueValidationFixCoalescesKindsForOneHead(t *testing.T) {
 	}
 }
 
+func TestValidationFixBudgetIsEnforcedAndIdempotent(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	first, err := f.db.QueueValidationFixInstructionWithinBudget(f.ctx, f.ship, "gate", reviewShaA, "gate:first", "First Gate failure", 2)
+	if err != nil || !first.Queued || first.Exhausted || first.Seq != 1 || first.RoundsUsed != 1 {
+		t.Fatalf("first budgeted Gate round = %#v, %v", first, err)
+	}
+	duplicate, err := f.db.QueueValidationFixInstructionWithinBudget(f.ctx, f.ship, "gate", reviewShaA, "gate:first", "Repeated observation", 2)
+	if err != nil || duplicate.Queued || duplicate.Exhausted || duplicate.MessageID != first.MessageID {
+		t.Fatalf("duplicate budgeted Gate round = %#v, %v", duplicate, err)
+	}
+	second, err := f.db.QueueValidationFixInstructionWithinBudget(f.ctx, f.ship, "gate", reviewShaA, "gate:second", "Second Gate failure", 2)
+	if err != nil || !second.Queued || second.Exhausted || second.Seq != 2 || second.RoundsUsed != 2 || second.MessageID != first.MessageID {
+		t.Fatalf("second budgeted Gate round = %#v, %v", second, err)
+	}
+	exhausted, err := f.db.QueueValidationFixInstructionWithinBudget(f.ctx, f.ship, "gate", reviewShaA, "gate:third", "Third Gate failure", 2)
+	if err != nil || exhausted.Queued || !exhausted.Exhausted || exhausted.RoundsUsed != 2 {
+		t.Fatalf("exhausted Gate budget = %#v, %v", exhausted, err)
+	}
+	var rounds, messages int
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='gate'`, f.ship).Scan(&rounds); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM messages WHERE task_id=?`, f.ship).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if rounds != 2 || messages != 1 {
+		t.Fatalf("budgeted rounds/messages = %d/%d, want 2/1", rounds, messages)
+	}
+}
+
+func TestConcurrentValidationFixBudgetCannotBeExceeded(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	type response struct {
+		result QueueValidationFixResult
+		err    error
+	}
+	responses := make(chan response, 2)
+	var workers sync.WaitGroup
+	for _, key := range []string{"gate:budget-a", "gate:budget-b"} {
+		workers.Add(1)
+		go func(key string) {
+			defer workers.Done()
+			result, err := f.db.QueueValidationFixInstructionWithinBudget(f.ctx, f.ship, "gate", reviewShaA, key, key, 1)
+			responses <- response{result: result, err: err}
+		}(key)
+	}
+	workers.Wait()
+	close(responses)
+	queued, exhausted := 0, 0
+	for result := range responses {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.result.Queued {
+			queued++
+		}
+		if result.result.Exhausted {
+			exhausted++
+		}
+	}
+	var rounds int
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='gate'`, f.ship).Scan(&rounds); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 1 || exhausted != 1 || rounds != 1 {
+		t.Fatalf("concurrent budget results queued=%d exhausted=%d rounds=%d, want 1/1/1", queued, exhausted, rounds)
+	}
+}
+
 func TestConcurrentValidationFixesForOneHeadShareAQueuedMessage(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	type response struct {
