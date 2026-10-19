@@ -120,6 +120,17 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 // Restore files absent after a crash from the admitted inputs, never from
 // mutable Brief, preferences or Profile sources. Existing launch text is kept.
 func restoreAdmittedLaunchFiles(project store.Project, task store.Task, plan *taskplan.Plan) error {
+	roundFiles := make(map[string][]byte)
+	for _, input := range plan.Inputs {
+		if input.Role == "review-round-file" {
+			roundFiles[input.Source] = input.Bytes
+		}
+	}
+	if len(roundFiles) > 0 {
+		if err := writeReviewRoundFiles(plan.Paths.Output, roundFiles); err != nil {
+			return err
+		}
+	}
 	briefPath := filepath.Join(plan.Paths.Output, "brief.md")
 	if _, err := os.Stat(briefPath); os.IsNotExist(err) {
 		if err := writeFile(briefPath, plan.Inputs[0].Bytes); err != nil {
