@@ -43,7 +43,18 @@ func lookoutPIDs(root string) []int {
 		if err != nil {
 			continue
 		}
-		cmdline, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		processRoot := filepath.Join("/proc", entry.Name())
+		stat, err := os.ReadFile(filepath.Join(processRoot, "stat"))
+		if err != nil {
+			continue // The process exited between ReadDir and inspection.
+		}
+		if closeParen := strings.LastIndexByte(string(stat), ')'); closeParen >= 0 {
+			fields := strings.Fields(string(stat[closeParen+1:]))
+			if len(fields) > 0 && fields[0] == "Z" {
+				continue // An exited zombie is not a running Lookout.
+			}
+		}
+		cmdline, _ := os.ReadFile(filepath.Join(processRoot, "cmdline"))
 		if !strings.Contains(string(cmdline), "--poll-only") {
 			continue
 		}
