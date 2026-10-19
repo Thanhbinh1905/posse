@@ -1703,6 +1703,7 @@ case "$PWD/" in
     "$POSSE_E2E_POSSE_BIN" publish "Worker committed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
     "$POSSE_E2E_POSSE_BIN" holler done "Worker committed $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
+    : > "$POSSE_TEST_ROOT/worker-idle-$task_id"
     while IFS= read -r instruction; do
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
       while [ -e "$POSSE_TEST_ROOT/pause-fix-commit" ]; do sleep 0.02; done
@@ -2021,6 +2022,15 @@ func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID s
 		t.Fatal(err)
 	}
 	fixture.waitTaskState(t, taskID, store.StateDone)
+	// The done Signal is persisted before the fake Rider's final Herdr status
+	// update completes. Wait so teardown tests do not race that Mount child.
+	idleMarker := filepath.Join(fixture.root, "worker-idle-"+taskID)
+	if !waitForCondition(10*time.Second, func() bool {
+		_, err := os.Stat(idleMarker)
+		return err == nil
+	}) {
+		t.Fatalf("fake Rider %s did not finish its post-signal idle report", taskID)
+	}
 	return fixture.mustTask(t, taskID)
 }
 
