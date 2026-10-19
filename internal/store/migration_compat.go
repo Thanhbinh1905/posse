@@ -21,6 +21,9 @@ const (
 	publishedReportBundleMigrationVersion       = 46
 	latestPublishedReportBundleMigrationVersion = 47
 	reportBundleMigrationVersion                = 48
+	legacyTaskContainmentMigrationVersion       = 53
+	taskContainmentMigrationVersion             = 54
+	taskContainmentMigrationChecksum            = "80f7ce98b714a0d7c2852e843fd6008312fd84c5047cd0999ef7ad845a19a955"
 	legacyReportBundleMigrationChecksum         = "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
 )
 
@@ -363,6 +366,117 @@ func (db *DB) normalizeLegacyReportBundleMigration(ctx context.Context) error {
 			return err
 		}
 	} else if _, err := tx.ExecContext(ctx, `INSERT INTO posse_migration_checksums(version,sha256) VALUES(?,?)`, reportBundleMigrationVersion, currentChecksum); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// normalizeLegacyTaskContainmentMigration moves the Task containment migration
+// from version 53 to 54 because main now uses version 53 for Watch runtimes.
+func (db *DB) normalizeLegacyTaskContainmentMigration(ctx context.Context) error {
+	var hasGoose int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='goose_db_version')`).Scan(&hasGoose); err != nil {
+		return err
+	}
+	if hasGoose == 0 {
+		return nil
+	}
+	var applied, hasMode, hasPath, hasMarker, hasWatchTable int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, legacyTaskContainmentMigrationVersion).Scan(&applied); err != nil {
+		return err
+	}
+	for _, check := range []struct {
+		query string
+		value *int
+	}{
+		{`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='containment_mode')`, &hasMode},
+		{`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='containment_path')`, &hasPath},
+		{`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='containment_marker')`, &hasMarker},
+		{`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lookout_pollers')`, &hasWatchTable},
+	} {
+		if err := db.QueryRowContext(ctx, check.query).Scan(check.value); err != nil {
+			return err
+		}
+	}
+	if applied == 0 || hasMode == 0 || hasPath == 0 || hasMarker == 0 || hasWatchTable != 0 {
+		return nil
+	}
+	var hasChecksums int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='posse_migration_checksums')`).Scan(&hasChecksums); err != nil {
+		return err
+	}
+	checksumPresent := false
+	if hasChecksums != 0 {
+		var recorded sql.NullString
+		err := db.QueryRowContext(ctx, `SELECT sha256 FROM posse_migration_checksums WHERE version=?`, legacyTaskContainmentMigrationVersion).Scan(&recorded)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if recorded.Valid {
+			if recorded.String != taskContainmentMigrationChecksum {
+				return nil
+			}
+			checksumPresent = true
+		}
+	}
+	sources, err := embeddedMigrations()
+	if err != nil {
+		return err
+	}
+	currentChecksum := ""
+	for _, source := range sources {
+		if source.version == taskContainmentMigrationVersion {
+			currentChecksum = source.checksum
+			break
+		}
+	}
+	if currentChecksum == "" || currentChecksum != taskContainmentMigrationChecksum {
+		return fmt.Errorf("task containment migration version %d is missing or differs from its published version", taskContainmentMigrationVersion)
+	}
+	var alreadyMoved int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=?)`, taskContainmentMigrationVersion).Scan(&alreadyMoved); err != nil {
+		return err
+	}
+	if alreadyMoved != 0 {
+		return nil
+	}
+	if hasChecksums != 0 {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM posse_migration_checksums WHERE version=?)`, taskContainmentMigrationVersion).Scan(&alreadyMoved); err != nil {
+			return err
+		}
+		if alreadyMoved != 0 {
+			return nil
+		}
+	}
+	if MigrationGate != nil {
+		if err := MigrationGate(db.Path, []int64{legacyTaskContainmentMigrationVersion}, os.Getenv(ForceMigrationEnv) == "1"); err != nil {
+			return err
+		}
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS posse_migration_checksums (version INTEGER PRIMARY KEY, sha256 TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE goose_db_version SET version_id=? WHERE version_id=? AND is_applied=1`, taskContainmentMigrationVersion, legacyTaskContainmentMigrationVersion)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("normalize legacy Task containment migration: updated %d applied Goose rows, want 1", changed)
+	}
+	if checksumPresent {
+		if _, err := tx.ExecContext(ctx, `UPDATE posse_migration_checksums SET version=?,sha256=? WHERE version=?`, taskContainmentMigrationVersion, currentChecksum, legacyTaskContainmentMigrationVersion); err != nil {
+			return err
+		}
+	} else if _, err := tx.ExecContext(ctx, `INSERT INTO posse_migration_checksums(version,sha256) VALUES(?,?)`, taskContainmentMigrationVersion, currentChecksum); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -126,13 +126,13 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 			rows[index]["applied"] = true
 		}
 	}
-	var orphans axi.Object
+	var orphanPanes axi.Object
 	if pruneErr == nil {
-		orphans, pruneErr = s.pruneOrphanPanes(ctx, db, project, parsed.Bool("yes"))
+		orphanPanes, pruneErr = s.pruneOrphanPanes(ctx, db, project, parsed.Bool("yes"))
 	}
 	result := axi.Object{{Key: "project", Value: project.Name}, {Key: "prune", Value: rows}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{"Run `posse pool prune --yes` to remove these safe, Posse-owned items"}}}
-	for _, field := range orphans {
-		if field.Key == "orphans" || field.Key == "closed_panes" {
+	for _, field := range orphanPanes {
+		if field.Key == "orphan_panes" || field.Key == "closed_panes" {
 			result = append(result, field)
 		}
 	}
@@ -152,7 +152,7 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 
 func (s *Service) applyScratchPruneItem(ctx context.Context, db *store.DB, home string, project store.Project, item pruneItem) error {
 	err := withSandboxStateLock(ctx, db, func() error {
-		_, reason, taskID, eligible, err := taskScratchPruneOwnerchange(ctx, db, project, item.seq)
+		_, reason, taskID, eligible, err := taskScratchPruneOwnership(ctx, db, project, item.seq)
 		if err != nil {
 			return err
 		}
@@ -1060,6 +1060,7 @@ type ownedProcessRoot struct {
 	path               string
 	includeOpenFiles   bool
 	includeMappedFiles bool
+	excluded           map[int]bool
 }
 
 type ownedProcess struct {
@@ -1068,6 +1069,9 @@ type ownedProcess struct {
 }
 
 func verifyNoTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
+	if processes := taskContainmentProcessDetails(task); len(processes) > 0 {
+		return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, fmt.Sprint(processes), "No process was stopped or signalled. Inspect the Sandbox and scratch processes, then retry discard")
+	}
 	roots, err := taskOwnedProcessRoots(ctx, db, home, project, task)
 	if err != nil {
 		return err
@@ -1453,6 +1457,13 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 	procRoot := filepath.Join("/proc", strconv.Itoa(pid))
 	if cwd, err := os.Readlink(filepath.Join(procRoot, "cwd")); err == nil {
 		for _, root := range roots {
+			excluded, err := ownedProcessRootExcludesPID(pid, root)
+			if err != nil {
+				return true, false
+			}
+			if excluded {
+				continue
+			}
 			if processPathInsideRoot(cwd, root.path) {
 				references = true
 				break
@@ -1460,7 +1471,11 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 		}
 	}
 	for _, root := range roots {
-		if !root.includeOpenFiles {
+		excluded, err := ownedProcessRootExcludesPID(pid, root)
+		if err != nil {
+			return true, false
+		}
+		if excluded || !root.includeOpenFiles {
 			continue
 		}
 		entries, err := os.ReadDir(filepath.Join(procRoot, "fd"))
@@ -1476,7 +1491,11 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 		}
 	}
 	for _, root := range roots {
-		if !root.includeMappedFiles {
+		excluded, err := ownedProcessRootExcludesPID(pid, root)
+		if err != nil {
+			return true, false
+		}
+		if excluded || !root.includeMappedFiles {
 			continue
 		}
 		maps, err := os.ReadFile(filepath.Join(procRoot, "maps"))
@@ -1492,6 +1511,13 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 		}
 	}
 	return references, fileReference
+}
+
+func ownedProcessRootExcludesPID(pid int, root ownedProcessRoot) (bool, error) {
+	if len(root.excluded) == 0 {
+		return false, nil
+	}
+	return taskProcessHasExcludedAncestor(pid, root.excluded)
 }
 
 func procMapPath(line string) string {

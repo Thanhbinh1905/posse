@@ -25,7 +25,7 @@ func TestPruneRechecksScratchAfterConcurrentStart(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	barrierSandbox := filepath.Join(f.home, "pool", "shop", "sandbox-999")
 	gitTest(t, f.env, f.repo, "worktree", "add", "--detach", barrierSandbox, "main")
 	if _, err := f.db.ExecContext(ctx, "INSERT INTO mounts(project_id,n,path,state) VALUES(?,999,?,'broken')", f.project.ID, barrierSandbox); err != nil {

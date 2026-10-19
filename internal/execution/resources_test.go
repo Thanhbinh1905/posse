@@ -164,10 +164,10 @@ func TestPathLeaseIsAtomicAcrossConcurrentProjects(t *testing.T) {
 	}
 }
 
-func TestLegacySandboxOwnerchangeBecomesAPathLease(t *testing.T) {
+func TestLegacySandboxOwnershipBecomesAPathLease(t *testing.T) {
 	ctx := context.Background()
 	db, projectA, projectB := resourceDB(t)
-	taskID, err := db.CreateTask(ctx, projectA.ID, store.Task{Seq: 1, Type: "change", Title: "Mounted writer"})
+	taskID, err := db.CreateTask(ctx, projectA.ID, store.Task{Seq: 1, Type: "change", Title: "Sandbox writer"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -126,6 +126,9 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 	}()
 	if merge {
 		if task.State != store.StateDone && task.State != store.StateMerging {
+			if err := workingPRBehindFailure(ctx, db, project, task); err != nil {
+				return err
+			}
 			return axi.Failure("merge_refused", "Task must be done or merging before Merge", false)
 		}
 		if task.AutonomyMerge != "auto" && userQuote == "" {

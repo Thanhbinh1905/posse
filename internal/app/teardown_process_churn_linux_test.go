@@ -120,7 +120,7 @@ func TestReportedCodexResearchAcceptsNamelessAgentWithRecordedSession(t *testing
 	fixture.service.Herdr = adapter
 	authorization := newSandboxProcessAuthorization()
 	defer authorization.Close()
-	if err := fixture.service.verifySandboxForegroundOwnerchangeWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
+	if err := fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
 		t.Fatalf("same-session nameless Codex Worker was refused teardown ownership: %v", err)
 	}
 	if authorization.handle(agent.Process.Pid) == nil {
@@ -130,7 +130,7 @@ func TestReportedCodexResearchAcceptsNamelessAgentWithRecordedSession(t *testing
 	adapter.snapshot.Agents[0].SessionID = "replacement-session"
 	adapter.processCalls = 0
 	replacementAuthorization := newSandboxProcessAuthorization()
-	err = fixture.service.verifySandboxForegroundOwnerchangeWithAuthorization(ctx, fixture.db, fixture.project, task, replacementAuthorization)
+	err = fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, replacementAuthorization)
 	replacementAuthorization.Close()
 	if err == nil || !strings.Contains(err.Error(), "not owned") {
 		t.Fatalf("replacement session was not refused: %v", err)
@@ -183,7 +183,7 @@ func TestReportedResearchAllowsTransientPaneProcessWithoutAuthorizingIt(t *testi
 	fixture.service.Herdr = adapter
 	authorization := newSandboxProcessAuthorization()
 	defer authorization.Close()
-	if err := fixture.service.verifySandboxForegroundOwnerchangeWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
+	if err := fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
 		t.Fatalf("ordinary Research ownership verification rejected a transient child: %v", err)
 	}
 	if authorization.handle(transient.Process.Pid) != nil {
@@ -193,7 +193,7 @@ func TestReportedResearchAllowsTransientPaneProcessWithoutAuthorizingIt(t *testi
 	adapter.secondForegroundGroup = shell.Process.Pid
 	adapter.processCalls = 0
 	foregroundChurnAuthorization := newSandboxProcessAuthorization()
-	if err := fixture.service.verifySandboxForegroundOwnerchangeWithAuthorization(ctx, fixture.db, fixture.project, task, foregroundChurnAuthorization); err != nil {
+	if err := fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, foregroundChurnAuthorization); err != nil {
 		foregroundChurnAuthorization.Close()
 		t.Fatalf("ordinary foreground switch to an already-retained shell was refused: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestReportedResearchAllowsTransientPaneProcessWithoutAuthorizingIt(t *testi
 	adapter.secondForegroundGroup = transient.Process.Pid
 	adapter.processCalls = 0
 	foreignForegroundAuthorization := newSandboxProcessAuthorization()
-	err = fixture.service.verifySandboxForegroundOwnerchangeWithAuthorization(ctx, fixture.db, fixture.project, task, foreignForegroundAuthorization)
+	err = fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, foreignForegroundAuthorization)
 	foreignForegroundAuthorization.Close()
 	if err == nil || !strings.Contains(err.Error(), "unretained foreground process") {
 		t.Fatalf("unretained foreground replacement was not refused: %v", err)

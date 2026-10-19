@@ -25,75 +25,25 @@ type watchExecutableIdentity struct {
 }
 
 type watchProcess struct {
-	PID          int
-	Executable   watchExecutableIdentity
-	PaneID       string
-	WorkingDir   string
-	Project      string
-	Kind         string
-	PollOnly     bool
-	QuietRoutine bool
-	StopHook     bool
-	ForceKilled  bool
+	PID            int
+	Executable     watchExecutableIdentity
+	PaneID         string
+	WorkingDir     string
+	Project        string
+	Kind           string
+	PollOnly       bool
+	QuietRoutine   bool
+	StopHook       bool
+	ForceKilled    bool
+	WatchProjectID int64
+	WatchToken     string
+	WatchStartedAt int64
 }
 
 var watchStopGracePeriod = 5 * time.Second
 var watchExecutableVerifier = isPosseExecutable
 
 var watchProcRoot = "/proc"
-
-// Check the process rather than trusting a restored shell pane's label.
-func watchProcessRunning(paneID, home string) bool {
-	if runtime.GOOS == "linux" {
-		return linuxWatchProcessRunning(paneID, home)
-	}
-	processes, err := systemWatchProcesses(home)
-	if err != nil {
-		return false
-	}
-	for _, process := range processes {
-		if process.PaneID == paneID && process.PollOnly {
-			return true
-		}
-	}
-	return false
-}
-
-func linuxWatchProcessRunning(paneID, home string) bool {
-	entries, err := os.ReadDir(watchProcRoot)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-		root := filepath.Join(watchProcRoot, entry.Name())
-		environment, err := os.ReadFile(filepath.Join(root, "environ"))
-		if err != nil {
-			continue
-		}
-		env := parseProcessEnvironment(string(environment))
-		if env["HERDR_PANE_ID"] != paneID || !sameWatchHome(processHome(env), home) {
-			continue
-		}
-		command, err := os.ReadFile(filepath.Join(root, "cmdline"))
-		if err != nil {
-			continue
-		}
-		executable, verified := inspectWatchExecutable(pid)
-		if !verified || !watchExecutableVerifier(executable.Path) {
-			continue
-		}
-		process, found := watchFromArgs(pid, splitProcessArgs(string(command)), env, home)
-		if found && process.PollOnly {
-			process.Executable = executable
-			return true
-		}
-	}
-	return false
-}
 
 func systemWatchProcesses(home string) ([]watchProcess, error) {
 	if runtime.GOOS == "darwin" {
@@ -229,18 +179,39 @@ func watchFromArgs(pid int, args []string, environment map[string]string, home s
 	if len(args) < 2 || (args[1] != "watch" && args[1] != "lookout" && args[1] != "_claude-stop") || !sameWatchHome(processHome(environment), home) {
 		return watchProcess{}, false
 	}
-	process := watchProcess{
-		PID:        pid,
-		PaneID:     environment["HERDR_PANE_ID"],
-		WorkingDir: environment["PWD"],
-		Kind:       "lead",
-		StopHook:   args[1] == "_claude-stop",
+	// Pre-upgrade supervised processes retain their private binding names.
+	// Read them only for custody discovery, never to admit legacy CLI input.
+	binding := func(current, historical string) (string, bool) {
+		value := environment[current]
+		if args[1] != "lookout" || environment[historical] == "" {
+			return value, true
+		}
+		if value != "" && value != environment[historical] {
+			return "", false
+		}
+		return environment[historical], true
 	}
+	projectBinding, projectOK := binding(watchRuntimeProjectEnv, "POSSE_LOOKOUT_PROJECT_ID")
+	tokenBinding, tokenOK := binding(watchRuntimeTokenEnv, "POSSE_LOOKOUT_TOKEN")
+	startedBinding, startedOK := binding(watchRuntimeStartedEnv, "POSSE_LOOKOUT_STARTED_AT")
+	if !projectOK || !tokenOK || !startedOK {
+		return watchProcess{}, false
+	}
+	process := watchProcess{
+		PID:            pid,
+		PaneID:         environment["HERDR_PANE_ID"],
+		WorkingDir:     environment["PWD"],
+		Kind:           "lead",
+		StopHook:       args[1] == "_claude-stop",
+		WatchToken:     tokenBinding,
+		WatchStartedAt: parseProcessInt64(startedBinding),
+	}
+	process.WatchProjectID = parseProcessInt64(projectBinding)
 	for _, arg := range args[2:] {
 		switch arg {
 		case "--poll-only":
 			process.PollOnly = true
-			process.Kind = "watch_tab"
+			process.Kind = "watch"
 		case "--quiet-routine":
 			process.QuietRoutine = true
 		}
@@ -254,6 +225,11 @@ func watchFromArgs(pid int, args []string, environment map[string]string, home s
 func isPosseExecutable(path string) bool {
 	info, err := buildinfo.ReadFile(path)
 	return err == nil && info.Main.Path == "github.com/thanhbinh1905/posse" && info.Path == "github.com/thanhbinh1905/posse/cmd/posse"
+}
+
+func parseProcessInt64(value string) int64 {
+	parsed, _ := strconv.ParseInt(value, 10, 64)
+	return parsed
 }
 
 func processHome(environment map[string]string) string {
@@ -498,6 +474,16 @@ func watchStopReason(home string, pid int) string {
 	marker := watchUpdateStopMarker(home, pid)
 	if err := os.Remove(marker); err == nil {
 		_ = os.Remove(filepath.Dir(marker))
+		return "update"
+	}
+	marker = watchReexecMarker(home, pid)
+	if err := os.Remove(marker); err == nil {
+		_ = os.Remove(filepath.Dir(marker))
+		return "update"
+	}
+	installed, installedOK := currentWatchExecutable(home)
+	running, runningOK := inspectWatchExecutable(pid)
+	if installedOK && runningOK && (installed.Device != running.Device || installed.Inode != running.Inode) {
 		return "update"
 	}
 	return "signal"

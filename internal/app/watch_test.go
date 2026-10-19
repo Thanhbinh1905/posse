@@ -3,19 +3,206 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestLeadWatchReexecsAfterUpdateRequest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("POSSE_HOME", home)
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binary}); err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+	service := testService(home, nil)
+	var gotPath string
+	var gotArgs []string
+	service.reexecUpdate = func(path string, args, _ []string) error {
+		gotPath, gotArgs = path, append([]string(nil), args...)
+		return nil
+	}
+	marker := watchReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &axi.Context{Context: context.Background(), JSON: true, Out: io.Discard, ErrOut: io.Discard}
+	err = service.handleLeadWatchUpdate(ctx, store.Project{ID: 1})
+	if err == nil || !strings.Contains(err.Error(), "re-exec returned unexpectedly") {
+		t.Fatalf("re-exec result = %v, want stub return guard", err)
+	}
+	identity, ok := watchExecutableAt(binary)
+	if !ok {
+		t.Fatal("test executable identity was not verifiable")
+	}
+	if gotPath != identity.Path || len(gotArgs) != len(os.Args) || gotArgs[0] != identity.Path {
+		t.Fatalf("re-exec used path=%q args=%q; want binary=%q args=%q", gotPath, gotArgs, identity.Path, os.Args)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("update marker remained after re-exec request: %v", err)
+	}
+}
+
+func TestClaudeStopUpdateRewakesThroughTheRealHookWithoutReexec(t *testing.T) {
+	db, project, home := newWatchTestProject(t)
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	previousArgs := os.Args
+	os.Args = []string{"posse", "_claude-stop"}
+	t.Cleanup(func() { os.Args = previousArgs })
+	t.Chdir(project.Root)
+	service := testService(home, nil)
+	service.herdrContext = func() bool { return false }
+	marker := watchReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	input := `{"hook_event_name":"Stop","session_id":"session","transcript_path":"unused"}`
+	if code := service.RunClaudeStop(strings.NewReader(input), &output, nil); code != 2 {
+		t.Fatalf("Claude Stop update exit code = %d, want async rewake: %s", code, output.String())
+	}
+	if strings.Contains(output.String(), "EOF") || strings.Contains(output.String(), "wait failed") {
+		t.Fatalf("Claude Stop update attempted to reread consumed stdin: %s", output.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("update marker was not consumed by the hook: %v", err)
+	}
+}
+
+func TestLeadWatchDeliversPendingNoticeBeforeUpdateReexec(t *testing.T) {
+	db, project, home := newWatchTestProject(t)
+	defer db.Close()
+	if _, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: project.ID, Kind: "ci_failed", Summary: "pending before update"}); err != nil {
+		t.Fatal(err)
+	}
+	previousArgs := os.Args
+	os.Args = []string{"posse", "watch"}
+	t.Cleanup(func() { os.Args = previousArgs })
+	t.Chdir(project.Root)
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("HERDR_PANE_ID", "")
+	marker := watchReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reexeced := false
+	service := testService(home, nil)
+	service.herdrContext = func() bool { return false }
+	service.reexecUpdate = func(string, []string, []string) error {
+		reexeced = true
+		return nil
+	}
+	code, output := runCLI(t, service, "watch", "--timeout", "5000")
+	if code != 0 || !strings.Contains(output, "pending before update") {
+		t.Fatalf("pending Notice was not delivered before update: code=%d output=%s", code, output)
+	}
+	if reexeced {
+		t.Fatal("Watch re-execed before delivering its pending Notice")
+	}
+	notices, err := db.Notices(context.Background(), project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notices) != 1 || notices[0].DeliveredAt == 0 || notices[0].AckedAt != 0 {
+		t.Fatalf("pending Notice state after delivery = %#v", notices)
+	}
+}
+
+func TestWatchReexecArgumentsRemoveOneShotDeliveryFlags(t *testing.T) {
+	got := watchReexecArguments([]string{"posse", "watch", "--requeue", "1,2", "--quiet-routine", "--timeout=5000", "--ack=all"})
+	want := []string{"posse", "watch", "--quiet-routine", "--timeout=5000"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("re-exec arguments = %q, want %q", got, want)
+	}
+}
+
+func TestLeadWatchUpdateDoesNotReplayAckAll(t *testing.T) {
+	db, project, home := newWatchTestProject(t)
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "already seen"}); err != nil {
+		t.Fatal(err)
+	}
+	previousArgs := os.Args
+	os.Args = []string{"posse", "watch", "--ack", "all", "--timeout", "5000"}
+	t.Cleanup(func() { os.Args = previousArgs })
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: os.Args[0]}); err != nil {
+		t.Fatal(err)
+	}
+	marker := watchReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reexecArgs []string
+	service := testService(home, nil)
+	service.herdrContext = func() bool { return false }
+	service.reexecUpdate = func(_ string, args, _ []string) error {
+		reexecArgs = append([]string(nil), args...)
+		_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "ci_failed", Summary: "arrived after acknowledgement"})
+		return err
+	}
+	t.Chdir(project.Root)
+	code, output := runCLI(t, service, "watch", "--ack", "all", "--timeout", "5000")
+	if code == 0 || !strings.Contains(output, "re-exec returned unexpectedly") {
+		t.Fatalf("Watch did not reach the update re-exec boundary: code=%d output=%s", code, output)
+	}
+	for _, arg := range reexecArgs {
+		if arg == "--ack" || arg == "all" || strings.HasPrefix(arg, "--ack=") {
+			t.Fatalf("re-exec replayed one-shot acknowledgement arguments: %q", reexecArgs)
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unseen *store.Notice
+	for index := range notices {
+		if notices[index].Summary == "arrived after acknowledgement" {
+			unseen = &notices[index]
+		}
+	}
+	if unseen == nil || unseen.AckedAt != 0 {
+		t.Fatalf("notice created after ack-all was acknowledged: %#v", unseen)
+	}
+}
 
 func TestLeadWatchReportsRestartAfterUpdateSignal(t *testing.T) {
 	root := t.TempDir()

@@ -19,6 +19,41 @@ func (s *Service) reconcileIntents(ctx context.Context, db *store.DB, project st
 	return s.reconcileIntentsMode(ctx, db, project, cfg, snapshot, true, true)
 }
 
+// The hidden watch only resumes deferred PR creation after the Lead is running.
+// Other interrupted commands belong to their CLI boundary, not passive polling.
+func (s *Service) reconcileWatchIntents(ctx context.Context, db *store.DB, project store.Project) error {
+	intents, err := db.Intents(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	for _, intent := range intents {
+		if intent.Command != "merge --open-pr" || intentProcessAlive(intent) {
+			continue
+		}
+		task, err := db.TaskByID(ctx, project.ID, intent.TaskID)
+		if err != nil {
+			return err
+		}
+		claimed, err := db.ClaimIntent(ctx, intent.ID, intent.ProcessID, os.Getpid(), intent.Step)
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			continue
+		}
+		intent.ProcessID = os.Getpid()
+		if err := s.recoverOpenPullRequestIntent(ctx, db, project, task, intent); err != nil {
+			if noticeErr := s.recordIntentStuck(ctx, db, project, task, intent, err); noticeErr != nil {
+				return noticeErr
+			}
+			if finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID); finishErr != nil && finishErr != store.ErrIntentOwned {
+				return finishErr
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot, allowLaunch, allowNetwork bool) error {
 	intents, err := db.Intents(ctx, project.ID)
 	if err != nil {

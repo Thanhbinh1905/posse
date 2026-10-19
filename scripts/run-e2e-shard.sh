@@ -8,10 +8,14 @@ assignments='
 1 Test014MalformedConfigRetainsFilenameAndErrorCode
 1 Test014ProjectShorthandConfigVocabularyUpgrade
 1 TestFailedRecoveryBoundWithRealHerdr
+1 TestE2ELockOwnerCannotOutliveTestProcess
+1 TestTeardownStopsDetachedTaskServer
+1 TestTeardownPreservesDetachedSSHControlMaster
+1 TestTeardownStopsProcessStartedThroughHerdrServer
 1 TestStoppedWorkerPaneCanBeRelaunched
 1 TestProjectCommandDoesNotWaitForeverForStoppedLockOwner
 1 TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch
-1 TestWatchTabPollsAndTearsDownMergedPR
+1 TestWatchRuntimeDiscoversAndTearsDownMergedPR
 1 TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker
 1 TestMergedPRWithIgnoredArtifactStillMerges
 1 TestReviewRejectsQuotedSameModelOverride
@@ -24,6 +28,9 @@ assignments='
 1 TestLeadWatchOwnsNoticeUntilItExits
 1 TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy
 1 TestWatchAckCommitsBeforeUnrelatedTeardown
+1 TestWatchRepairsAfterHerdrAgentEvent
+1 TestConcurrentProjectCommandsStartOneWatch
+1 TestWatchRuntimeIdentityIsStoredInProjectRuntime
 1 TestWatchKeepsWatchingAfterRetryableForgeProbeTimeout
 1 TestTimedOutWatcherGitReadDoesNotLockWorktreeOrFailWatch
 1 TestWatchReportsPersistentForgeProbeFailureAfterThreePolls
@@ -53,7 +60,9 @@ assignments='
 1 TestRealPiInterruptStopsBusyTurnE2E
 1 TestT229RebuildPreservesStoppedProject
 2 Test014LeadAdapterVocabularyHandoffAndReceipt
+2 Test014LookoutReexecReportsReplacement
 2 TestLegacyWorkerTabsAfterWorktreeUpgrade
+2 TestTeardownBlockedNoticeNamesForeignSandboxServer
 2 TestNoticeHandoffSurvivesHarnessCrashAndAvoidsRecordedReplay
 2 TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns
 2 TestObservationWorkloadCountersAreDeterministic
@@ -109,6 +118,7 @@ assignments='
 2 TestWorkspacePublishRetriesAfterTimeoutForUnverifiedPrePushHead
 2 TestWorkspacePublishRemembersUnverifiedPrePushHeadAcrossRestart
 3 TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup
+3 TestCleanDryRunAndReclaimsFinishedTask
 3 TestPublishRetriesAfterTimeoutForUnverifiedPrePushHead
 3 TestWorkspaceResearchTeardownPreservesMemberAndRootAttachments
 3 TestMergedPRSnapshotsUnmergedFollowUp
@@ -123,7 +133,7 @@ assignments='
 3 TestDownKeepsProjectStoppedUntilUp
 3 TestT146RealHerdrForeignAgentInReusedPaneSurvivesDiscard
 3 TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved
-3 TestT175ForeignRestartDuringDiscardOwnerchangeCheckIsPreserved
+3 TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved
 3 TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary
 3 TestTeardownStopsRetainedShellByVerifiedIdentity
 3 TestTeardownPidfdLauncherHelper
@@ -145,7 +155,13 @@ assignments='
 3 TestT242BackoffIsPersistedAndBounded
 3 TestT247RealPiSuccessfulGrepIsNotRetried
 3 TestGroupCloseDuringStartRecoversLeadAndSandbox
-3 TestWatchStartupGraceHonorsTimeoutAndSIGTERM
+3 TestWatchWaitHonorsTimeoutAndSIGTERMWithoutVisibleShell
+3 TestHiddenWatchRuntimeDeliversNoticesWhenLeadHasNoWait
+3 TestWatchDoesNotOpenLoginShellOrVisiblePane
+3 TestWatchRuntimeReexecsAfterBinaryReplacement
+3 TestWatchRuntimeStaleHeartbeatRaisesOneNoticeAndRepairs
+3 TestWatchRuntimeHeartbeatProgressClearsAnApparentStaleReading
+3 TestWatchRepairsDeadWatchesWithoutStaleNotices
 3 TestForgeReadinessUsesCacheInMultiMemberWorkspace
 3 TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls
 3 TestPostSignalMixedContentionAndPersistentFailureIsVisible
@@ -180,12 +196,11 @@ assignments='
 4 TestExternalMergeDuringFollowUpWithMovedTaskBranch
 4 TestWatchRestartsAfterHerdrRestart
 4 TestWatchRepairRestoresHeldProjectWithoutExecutorRecovery
+4 TestUpClosesLegacyVisibleWatchTab
 4 TestReviewRejectsAttachedCodexModelConfig
 4 TestReviewRejectsMalformedModelAliasOverride
-4 TestWatchDoesNotRecreateDuringSlowLoginShellStartup
 4 TestPRCreateCrashRecoveryAdoptsOpenPullRequest
 4 TestExplicitRelaunchSettlesPendingRecovery
-4 TestWatchRecoveryBackoffSurvivesLeadRearm
 4 TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts
 4 TestDownDoesNotSignalUnrelatedExecutableNamedWatch
 4 TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault
@@ -285,6 +300,11 @@ if [ "$#" -ne 1 ]; then
   echo "usage: $0 <1|2|3|4>|--self-test" >&2
   exit 2
 fi
+count=${POSSE_E2E_COUNT:-1}
+case "$count" in
+  ''|*[!0-9]*|0) echo "POSSE_E2E_COUNT must be a positive integer" >&2; exit 2 ;;
+esac
+timeout=${POSSE_E2E_TIMEOUT:-15m}
 shard=$1
 case "$shard" in
   1|2|3|4) ;;
@@ -296,4 +316,4 @@ validate_assignments "$listed" "$assignments"
 pattern=$(printf '%s\n' "$assignments" | awk -v shard="$shard" '$1 == shard { if (count++) printf "|"; printf "%s", $2 } END { print "" }')
 printf 'Running E2E shard %s/4\n' "$shard"
 # Recovery-heavy shards take up to eleven minutes locally; allow bounded runner variance.
-go test -tags=e2e -count=1 -timeout=15m ./internal/e2e -run "^(${pattern})$"
+go test -tags=e2e -count="$count" -timeout="$timeout" ./internal/e2e -run "^(${pattern})$"

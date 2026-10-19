@@ -272,7 +272,7 @@ func TestPermissionTemplatesRequireConsentThroughCLI(t *testing.T) {
 	if output, err := native.CombinedOutput(); err == nil || !strings.Contains(string(output), "user_only") {
 		t.Fatalf("unbound native agent treated as human: %v %s", err, output)
 	}
-	if code, output := rideReviewIdentityTask(t, f, "Native actor", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, f, "Native actor", "author", ""); code != 0 {
 		t.Fatalf("native Worker: %d %s", code, output)
 	}
 	task := f.mustTask(t, "t1")

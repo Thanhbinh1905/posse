@@ -95,13 +95,15 @@ func TestApprovedWorkingDiscardResumesAfterCrash(t *testing.T) {
 			t.Run(step+"/"+phase, func(t *testing.T) {
 				f := newWorkerTabsFixture(t)
 				task := f.start(t, "t1", "Cancel crash recovery", "cancel-crash-recovery")
-				// Exercise explicit retry without a poller concurrently repairing
+				// Exercise explicit retry without a watch concurrently repairing
 				// the same deliberately interrupted intent.
 				db, err := store.Open(f.home)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer db.Close()
+				f.env = setEnv(f.env, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
+				f.leadEnv = setEnv(f.leadEnv, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
 				stopFixtureBackgroundWatch(t, f.root, f.env, db, f.projectID)
 				command := exec.Command(f.binary, "teardown", "t1", "--discard", "--user-approved", "destroy t3 now")
 				command.Dir = f.repo

@@ -87,6 +87,9 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			return err
 		}
+		if err := s.ensureWatchRuntime(ctx, db, home, project); err != nil {
+			fmt.Fprintf(os.Stderr, "Watch supervision for %s failed: %v\n", project.Name, err)
+		}
 		cfg, err := config.Load(home, project.Name)
 		if err != nil {
 			if focusEvent {

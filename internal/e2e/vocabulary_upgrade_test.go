@@ -53,10 +53,10 @@ func Test014ProjectVocabularyUpgradePreservesTasksSandboxesAndOpenPR(t *testing.
 	}
 	// 0.14 has the same published schema. Remove only this release's data
 	// migration receipt, then seed its former values, exactly as an old home.
-	if _, err := f.db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id=53`); err != nil {
+	if _, err := f.db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id=55`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.ExecContext(ctx, `DELETE FROM posse_migration_checksums WHERE version=53`); err != nil {
+	if _, err := f.db.ExecContext(ctx, `DELETE FROM posse_migration_checksums WHERE version=55`); err != nil {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(f.home, "projects", f.project.Name, "config.toml")

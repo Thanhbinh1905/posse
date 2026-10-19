@@ -66,6 +66,32 @@ func Test014LeadAdapterVocabularyHandoffAndReceipt(t *testing.T) {
 	}
 }
 
+// Exercise the actual exec boundary with the argv retained by a pre-upgrade
+// observer. Adapter handoff/receipt acceptance is covered above.
+func Test014LookoutReexecReportsReplacement(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	stopBackgroundWatch(t, f)
+	launcher := filepath.Join(f.root, "legacy-observer-reexec")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nexec "+shellQuote(f.binary)+" lookout \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"--poll-only"}, {"--timeout", "1"}, {"--help"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			command := exec.Command(launcher, args...)
+			command.Dir, command.Env = f.repo, f.leadEnv
+			output, err := command.CombinedOutput()
+			exit, ok := err.(*exec.ExitError)
+			if !ok || exit.ExitCode() != 2 || !strings.Contains(string(output), "posse lookout was removed; use posse watch") || strings.Contains(string(output), "internal_error") {
+				t.Fatalf("legacy re-exec did not report its replacement: %v: %s", err, output)
+			}
+		})
+	}
+	if pids := watchPIDs(f.root); len(pids) != 0 {
+		t.Fatalf("removed observer invocation started a Watch: %v", pids)
+	}
+}
+
 func Test014ProjectShorthandConfigVocabularyUpgrade(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()

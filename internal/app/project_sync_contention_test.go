@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -211,5 +212,65 @@ func TestRepositorySyncSkipsAnInterprocessOverlap(t *testing.T) {
 	result, err := fixture.service.syncRepository(ctx, fixture.db, fixture.project, target, time.Now())
 	if err != nil || result.Status != "skipped" {
 		t.Fatalf("interprocess repository overlap = %+v, %v; want skipped", result, err)
+	}
+}
+
+func TestMergeWaitsForRepositorySyncBeforeAcquiringGitResources(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
+	if err := fixture.db.Transition(context.Background(), fixture.task.ID, store.StateDone, store.StateMerging, "cli", "ready to merge"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task.State = store.StateMerging
+	if err := fixture.db.StartIntent(context.Background(), fixture.project.ID, fixture.task.ID, "merge", "merge", `{}`, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := fixture.db.IntentByTask(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := acquireRepositorySyncLock(context.Background(), fixture.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncLease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
+		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: fixture.project.ID,
+		Owner: "Posse sync " + fixture.project.Name, SourceKey: "test-repository-sync",
+	})
+	if err != nil {
+		_ = owner.Close()
+		t.Fatal(err)
+	}
+
+	mergeDone := make(chan error, 1)
+	go func() {
+		mergeDone <- withIntentGitResources(context.Background(), fixture.db, fixture.project, fixture.task, intent.ID, fixture.repo, []string{"refs/heads/main"}, fixture.repo, func() error { return nil })
+	}()
+	select {
+	case err := <-mergeDone:
+		_ = fixture.db.ReleaseResourceLease(context.Background(), syncLease.ID, syncLease.CustodyToken)
+		_ = unix.Flock(int(owner.Fd()), unix.LOCK_UN)
+		_ = owner.Close()
+		t.Fatalf("merge tried to acquire conflicting resources before repository sync finished: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := fixture.db.ReleaseResourceLease(context.Background(), syncLease.ID, syncLease.CustodyToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(owner.Fd()), unix.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-mergeDone:
+		if err != nil {
+			t.Fatalf("merge resource acquisition after repository sync = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("merge did not continue after repository sync released its lock")
+	}
+	if err := fixture.db.FinishIntent(context.Background(), intent.ID, os.Getpid()); err != nil {
+		t.Fatal(err)
 	}
 }

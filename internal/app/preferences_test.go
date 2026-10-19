@@ -14,7 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func writePlaybook(t *testing.T, home, relative, content string) {
+func writePreferenceFile(t *testing.T, home, relative, content string) {
 	t.Helper()
 	path := filepath.Join(home, relative)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -27,10 +27,10 @@ func writePlaybook(t *testing.T, home, relative, content string) {
 
 func TestPreferenceSourcesLayerUserAndProjectWithLegacyFallbacks(t *testing.T) {
 	home := t.TempDir()
-	writePlaybook(t, home, "playbook/worker.md", "User legacy rules.\n")
-	writePlaybook(t, home, "preferences/worker.md", "User preferences.\n")
-	writePlaybook(t, home, "projects/stack/playbook/worker.md", "Workspace legacy rules.\n")
-	writePlaybook(t, home, "projects/stack/preferences/worker.md", "Workspace preferences.\n")
+	writePreferenceFile(t, home, "playbook/worker.md", "User legacy rules.\n")
+	writePreferenceFile(t, home, "preferences/worker.md", "User preferences.\n")
+	writePreferenceFile(t, home, "projects/stack/playbook/worker.md", "Workspace legacy rules.\n")
+	writePreferenceFile(t, home, "projects/stack/preferences/worker.md", "Workspace preferences.\n")
 	project := store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}
 
 	sources, err := preferenceSources(home, project, "worker")
@@ -70,9 +70,9 @@ func TestPreferenceSourcesLayerUserAndProjectWithLegacyFallbacks(t *testing.T) {
 
 func TestPrepareLeadLaunchUsesOnlyLayeredLeadPreferences(t *testing.T) {
 	home := t.TempDir()
-	writePlaybook(t, home, "playbook/lead.md", "User lead instruction marker.\n")
-	writePlaybook(t, home, "projects/shop/playbook/lead.md", "Project lead instruction marker.\n")
-	writePlaybook(t, home, "playbook/worker.md", "Worker-only instruction marker.\n")
+	writePreferenceFile(t, home, "playbook/lead.md", "User lead instruction marker.\n")
+	writePreferenceFile(t, home, "projects/shop/playbook/lead.md", "Project lead instruction marker.\n")
+	writePreferenceFile(t, home, "playbook/worker.md", "Worker-only instruction marker.\n")
 	cfg, err := config.Load(home, "")
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +95,7 @@ func TestPrepareLeadLaunchUsesOnlyLayeredLeadPreferences(t *testing.T) {
 		t.Fatalf("Lead launch did not preserve role separation and layer order: %s", instructions)
 	}
 	if !strings.Contains(instructions, "Never edit the Project repository") || !strings.Contains(instructions, "Only the User answers Decisions") || !strings.Contains(instructions, "User-only keys") {
-		t.Fatalf("Playbook overrode or omitted non-overridable Lead boundaries: %s", instructions)
+		t.Fatalf("preferences overrode or omitted non-overridable Lead boundaries: %s", instructions)
 	}
 }
 
@@ -114,8 +114,8 @@ func TestPreferencesShowAndPathExposeEffectiveSources(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	writePlaybook(t, home, "playbook/worker.md", "User source marker.\n")
-	writePlaybook(t, home, "projects/shop/playbook/worker.md", "Project source marker.\n")
+	writePreferenceFile(t, home, "playbook/worker.md", "User source marker.\n")
+	writePreferenceFile(t, home, "projects/shop/playbook/worker.md", "Project source marker.\n")
 	t.Chdir(repo)
 	service := testService(home, nil)
 
@@ -123,20 +123,20 @@ func TestPreferencesShowAndPathExposeEffectiveSources(t *testing.T) {
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = &output, &output
 	if code := cli.Run([]string{"preferences", "show", "--json"}); code != 0 {
-		t.Fatalf("playbook show failed: %s", output.String())
+		t.Fatalf("preferences show failed: %s", output.String())
 	}
 	text := output.String()
 	userIndex := strings.Index(text, "User source marker")
 	projectIndex := strings.Index(text, "Project source marker")
 	if userIndex < 0 || projectIndex <= userIndex || !strings.Contains(text, filepath.Join(home, "playbook", "worker.md")) || !strings.Contains(text, filepath.Join(home, "projects", "shop", "playbook", "worker.md")) {
-		t.Fatalf("playbook show omitted effective content or sources: %s", text)
+		t.Fatalf("preferences show omitted effective content or sources: %s", text)
 	}
 
 	output.Reset()
 	cli = service.CLI()
 	cli.Out, cli.ErrOut = &output, &output
 	if code := cli.Run([]string{"preferences", "path", "worker", "--json"}); code != 0 {
-		t.Fatalf("playbook path failed: %s", output.String())
+		t.Fatalf("preferences path failed: %s", output.String())
 	}
 	for _, path := range []string{
 		filepath.Join(home, "playbook", "worker.md"),
@@ -151,7 +151,7 @@ func TestPreferencesShowAndPathExposeEffectiveSources(t *testing.T) {
 }
 
 func TestProjectPreferencesChangeLeadAdviceWithoutRebuilding(t *testing.T) {
-	f := newPlaybookSetFixture(t)
+	f := newPreferenceSetFixture(t)
 	cfg, err := config.Load(f.home, "shop")
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestProjectPreferencesChangeLeadAdviceWithoutRebuilding(t *testing.T) {
 	if err := os.WriteFile(source, []byte(projectGuidance), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runPlaybookSetCLI(t, f.service, 0, "preferences", "set", "lead", "--file", source, "--project", "shop")
+	runPreferenceSetCLI(t, f.service, 0, "preferences", "set", "lead", "--file", source, "--project", "shop")
 	after, err := composeLeadInstructions(f.home, f.project, cfg, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -190,11 +190,11 @@ func TestProjectPreferencesChangeLeadAdviceWithoutRebuilding(t *testing.T) {
 }
 
 func TestRemovedPlaybookCommandLeavesLegacyContentUntouched(t *testing.T) {
-	f := newPlaybookSetFixture(t)
+	f := newPreferenceSetFixture(t)
 	legacy := filepath.Join(f.home, "projects", "shop", "playbook", "worker.md")
-	writePlaybook(t, f.home, "projects/shop/playbook/worker.md", "Keep this legacy content.\n")
+	writePreferenceFile(t, f.home, "projects/shop/playbook/worker.md", "Keep this legacy content.\n")
 	for _, subcommand := range []string{"show", "path", "set"} {
-		output := runPlaybookSetCLI(t, f.service, 2, "playbook", subcommand, "worker", "--project", "shop")
+		output := runPreferenceSetCLI(t, f.service, 2, "playbook", subcommand, "worker", "--project", "shop")
 		if !strings.Contains(output, "was removed; use posse preferences") {
 			t.Fatalf("removed command lacks replacement: %s", output)
 		}
@@ -210,11 +210,11 @@ func TestRemovedPlaybookCommandLeavesLegacyContentUntouched(t *testing.T) {
 }
 
 func TestPreferencesMoveIsExplicitAndNeverOverwrites(t *testing.T) {
-	f := newPlaybookSetFixture(t)
+	f := newPreferenceSetFixture(t)
 	t.Chdir(f.root)
 	legacy := filepath.Join(f.home, "playbook", "lead.md")
-	writePlaybook(t, f.home, "playbook/lead.md", "Legacy User preferences.\n")
-	output := runPlaybookSetCLI(t, f.service, 0, "preferences", "move", "lead")
+	writePreferenceFile(t, f.home, "playbook/lead.md", "Legacy User preferences.\n")
+	output := runPreferenceSetCLI(t, f.service, 0, "preferences", "move", "lead")
 	canonical := filepath.Join(f.home, "preferences", "lead.md")
 	contents, err := os.ReadFile(canonical)
 	if err != nil || string(contents) != "Legacy User preferences.\n" {
@@ -224,11 +224,11 @@ func TestPreferencesMoveIsExplicitAndNeverOverwrites(t *testing.T) {
 		t.Fatalf("legacy path remains after move: %v", err)
 	}
 
-	writePlaybook(t, f.home, "playbook/lead.md", "Second legacy file.\n")
+	writePreferenceFile(t, f.home, "playbook/lead.md", "Second legacy file.\n")
 	if err := os.WriteFile(canonical, []byte("Existing canonical preferences.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output = runPlaybookSetCLI(t, f.service, 1, "preferences", "move", "lead")
+	output = runPreferenceSetCLI(t, f.service, 1, "preferences", "move", "lead")
 	legacyContents, legacyErr := os.ReadFile(legacy)
 	canonicalContents, canonicalErr := os.ReadFile(canonical)
 	if !strings.Contains(output, "preference_destination_exists") || legacyErr != nil || string(legacyContents) != "Second legacy file.\n" || canonicalErr != nil || string(canonicalContents) != "Existing canonical preferences.\n" {
@@ -251,8 +251,8 @@ func TestDoctorWarnsWhenEffectivePreferencesExceedAdvisorySize(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	writePlaybook(t, home, "playbook/worker.md", strings.Repeat("u", 3000))
-	writePlaybook(t, home, "projects/shop/playbook/worker.md", strings.Repeat("p", 1200))
+	writePreferenceFile(t, home, "playbook/worker.md", strings.Repeat("u", 3000))
+	writePreferenceFile(t, home, "projects/shop/playbook/worker.md", strings.Repeat("p", 1200))
 	service := testService(home, nil)
 	var output bytes.Buffer
 	cli := service.CLI()
@@ -279,11 +279,11 @@ func TestDoctorWarnsWhenEffectivePreferencesExceedAdvisorySize(t *testing.T) {
 
 func TestLeadPreferenceDeliveryPreservesMarkdownForEveryKind(t *testing.T) {
 	const quotedMarkdown = "```sh\nprintf 'two  spaces\\n'\n# Explain why verification is needed.\ngo test ./...\n```\n"
-	const userPlaybook = "\n" + quotedMarkdown + "\n  "
+	const userPreferences = "\n" + quotedMarkdown + "\n  "
 	for _, kind := range []string{"claude", "codex", "pi", "opencode"} {
 		t.Run(kind, func(t *testing.T) {
 			home := t.TempDir()
-			writePlaybook(t, home, "playbook/lead.md", userPlaybook)
+			writePreferenceFile(t, home, "playbook/lead.md", userPreferences)
 			cfg, err := config.Load(home, "")
 			if err != nil {
 				t.Fatal(err)
@@ -299,8 +299,8 @@ func TestLeadPreferenceDeliveryPreservesMarkdownForEveryKind(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(instructions), userPlaybook) {
-				t.Fatalf("stored instructions changed the Playbook Markdown: got %q, want exact bytes %q", instructions, userPlaybook)
+			if !strings.Contains(string(instructions), userPreferences) {
+				t.Fatalf("stored instructions changed the preferences Markdown: got %q, want exact bytes %q", instructions, userPreferences)
 			}
 
 			switch kind {
@@ -339,13 +339,13 @@ func TestLeadPreferenceDeliveryPreservesMarkdownForEveryKind(t *testing.T) {
 	}
 }
 
-type playbookSetFixture struct {
+type preferenceSetFixture struct {
 	root, home, repo string
 	project          store.Project
 	service          *Service
 }
 
-func newPlaybookSetFixture(t *testing.T) playbookSetFixture {
+func newPreferenceSetFixture(t *testing.T) preferenceSetFixture {
 	t.Helper()
 	root := t.TempDir()
 	repo, home := filepath.Join(root, "repo"), filepath.Join(root, "posse-home")
@@ -364,10 +364,10 @@ func newPlaybookSetFixture(t *testing.T) playbookSetFixture {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return playbookSetFixture{root: root, home: home, repo: repo, project: project, service: testService(home, nil)}
+	return preferenceSetFixture{root: root, home: home, repo: repo, project: project, service: testService(home, nil)}
 }
 
-func runPlaybookSetCLI(t *testing.T, service *Service, wantCode int, args ...string) string {
+func runPreferenceSetCLI(t *testing.T, service *Service, wantCode int, args ...string) string {
 	t.Helper()
 	var output bytes.Buffer
 	cli := service.CLI()
@@ -379,33 +379,33 @@ func runPlaybookSetCLI(t *testing.T, service *Service, wantCode int, args ...str
 }
 
 func TestPreferencesSetWritesUserAndProjectLayersWithoutQuote(t *testing.T) {
-	f := newPlaybookSetFixture(t)
+	f := newPreferenceSetFixture(t)
 	source := filepath.Join(f.root, "new-lead.md")
 	const userContent = "Ask about the outcome before drafting.  Keep spacing.\n"
 	if err := os.WriteFile(source, []byte(userContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(f.root)
-	output := runPlaybookSetCLI(t, f.service, 0, "preferences", "set", "lead", "--file", source)
+	output := runPreferenceSetCLI(t, f.service, 0, "preferences", "set", "lead", "--file", source)
 	globalPath := filepath.Join(f.home, "preferences", "lead.md")
 	written, err := os.ReadFile(globalPath)
 	if err != nil || string(written) != userContent || !strings.Contains(output, "approval_recorded: false") {
-		t.Fatalf("User Playbook write = %q, err=%v, output=%s", written, err, output)
+		t.Fatalf("User preferences write = %q, err=%v, output=%s", written, err, output)
 	}
 	info, err := os.Stat(globalPath)
 	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("User Playbook permissions = %v, err=%v", info, err)
+		t.Fatalf("User preferences permissions = %v, err=%v", info, err)
 	}
 
 	const projectContent = "Project Worker instructions.\n"
 	if err := os.WriteFile(source, []byte(projectContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runPlaybookSetCLI(t, f.service, 0, "preferences", "set", "worker", "--file", source, "--project", "shop")
+	runPreferenceSetCLI(t, f.service, 0, "preferences", "set", "worker", "--file", source, "--project", "shop")
 	projectPath := filepath.Join(f.home, "projects", "shop", "preferences", "worker.md")
 	written, err = os.ReadFile(projectPath)
 	if err != nil || string(written) != projectContent {
-		t.Fatalf("Project Playbook write = %q, err=%v", written, err)
+		t.Fatalf("Project preferences write = %q, err=%v", written, err)
 	}
 
 	db, err := store.Open(f.home)
@@ -415,12 +415,12 @@ func TestPreferencesSetWritesUserAndProjectLayersWithoutQuote(t *testing.T) {
 	defer db.Close()
 	var approvals int
 	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM config_approvals`).Scan(&approvals); err != nil || approvals != 0 {
-		t.Fatalf("User-shell Playbook writes recorded %d approvals, err=%v", approvals, err)
+		t.Fatalf("User-shell preferences writes recorded %d approvals, err=%v", approvals, err)
 	}
 }
 
 func TestPreferencesSetRequiresAndRecordsLeadConsent(t *testing.T) {
-	f := newPlaybookSetFixture(t)
+	f := newPreferenceSetFixture(t)
 	source := filepath.Join(f.root, "lead.md")
 	if err := os.WriteFile(source, []byte("Approved instructions.\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -435,14 +435,14 @@ func TestPreferencesSetRequiresAndRecordsLeadConsent(t *testing.T) {
 	if err := os.WriteFile(target, []byte("Previous instructions.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output := runPlaybookSetCLI(t, f.service, 1, "preferences", "set", "lead", "--file", source)
+	output := runPreferenceSetCLI(t, f.service, 1, "preferences", "set", "lead", "--file", source)
 	previous, err := os.ReadFile(target)
 	if err != nil || string(previous) != "Previous instructions.\n" || !strings.Contains(output, "user_only") {
-		t.Fatalf("unapproved Lead write changed the Playbook: contents=%q err=%v output=%s", previous, err, output)
+		t.Fatalf("unapproved Lead write changed the preferences: contents=%q err=%v output=%s", previous, err, output)
 	}
 
 	const quote = "Please update the Lead instructions for this Project."
-	output = runPlaybookSetCLI(t, f.service, 0, "preferences", "set", "lead", "--file", source, "--project", "shop", "--user-approved", quote)
+	output = runPreferenceSetCLI(t, f.service, 0, "preferences", "set", "lead", "--file", source, "--project", "shop", "--user-approved", quote)
 	written, err := os.ReadFile(target)
 	if err != nil || string(written) != "Approved instructions.\n" || !strings.Contains(output, "approval_recorded: true") {
 		t.Fatalf("approved Lead write = %q, err=%v, output=%s", written, err, output)
@@ -462,17 +462,17 @@ func TestPreferencesSetRequiresAndRecordsLeadConsent(t *testing.T) {
 }
 
 func TestWorkerCannotWritePreferences(t *testing.T) {
-	f := newPlaybookSetFixture(t)
+	f := newPreferenceSetFixture(t)
 	source := filepath.Join(f.root, "worker.md")
 	if err := os.WriteFile(source, []byte("forbidden\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(f.repo)
 	t.Setenv(workerHomeEnv, f.home)
-	output := runPlaybookSetCLI(t, f.service, 1, "preferences", "set", "worker", "--file", source)
+	output := runPreferenceSetCLI(t, f.service, 1, "preferences", "set", "worker", "--file", source)
 	target := filepath.Join(f.home, "projects", "shop", "preferences", "worker.md")
 	if _, err := os.Stat(target); !os.IsNotExist(err) || !strings.Contains(output, "worker_forbidden") {
-		t.Fatalf("Worker wrote a Playbook: stat err=%v output=%s", err, output)
+		t.Fatalf("Worker wrote a preferences: stat err=%v output=%s", err, output)
 	}
 }
 
@@ -500,17 +500,17 @@ func TestDirectoryLeadInstructionsRequireConsentedPathScopes(t *testing.T) {
 
 func TestPreferenceContentKeepsExistingLeadInstructionLimit(t *testing.T) {
 	home := t.TempDir()
-	writePlaybook(t, home, "playbook/lead.md", strings.Repeat("x", preferenceWarningBytes+100))
+	writePreferenceFile(t, home, "playbook/lead.md", strings.Repeat("x", preferenceWarningBytes+100))
 	cfg, err := config.Load(home, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	service := testService(home, nil)
 	if _, err := service.prepareLeadLaunch(home, store.Project{Name: "shop"}, cfg, "pi"); err != nil {
-		t.Fatalf("Playbook content below the existing Lead startup budget was refused: %v", err)
+		t.Fatalf("preferences content below the existing Lead startup budget was refused: %v", err)
 	}
-	writePlaybook(t, home, "playbook/lead.md", strings.Repeat("x", leadInstructionMaxBytes))
+	writePreferenceFile(t, home, "playbook/lead.md", strings.Repeat("x", leadInstructionMaxBytes))
 	if _, err := service.prepareLeadLaunch(home, store.Project{Name: "shop"}, cfg, "pi"); err == nil || !strings.Contains(err.Error(), "lead_instructions_too_large") && !strings.Contains(err.Error(), "Lead instructions exceed") {
-		t.Fatalf("Playbook content above the existing Lead startup budget was not refused: %v", err)
+		t.Fatalf("preferences content above the existing Lead startup budget was not refused: %v", err)
 	}
 }

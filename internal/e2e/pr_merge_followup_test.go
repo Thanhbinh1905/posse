@@ -9,24 +9,25 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestWatchTabPollsAndTearsDownMergedPR(t *testing.T) {
+func TestWatchRuntimeDiscoversAndTearsDownMergedPR(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	brief := filepath.Join(f.root, "watch-follow-up.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	candidate := f.mustTask(t, "t1")
 	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
-	// No Lead command drives this reconcile. Only the Watch tab polls.
+	// No Lead command drives this reconcile. The hidden Project Watch observes the merge.
 	f.waitTaskState(t, "t1", store.StateTornDown)
 	assertNoValidationFixRound(t, f, "t1", "gate")
 	assertNoValidationFixRound(t, f, "t1", "freshness")
@@ -40,7 +41,7 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	candidate := f.mustTask(t, "t1")
 	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, "untracked.txt"), []byte("orphan"), 0o600); err != nil {
@@ -103,24 +104,17 @@ func TestMergeInterruptsFollowUpAndReleasesWorker(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
-	snapshot, err := client.Snapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("hidden Project watch missing: %v", watchPIDs(f.root))
 	}
-	foundWatch := false
-	for _, pane := range snapshot.Panes {
-		if pane.Label == "posse:shop:watch" && pane.WorkspaceID == f.project.HerdrWorkspaceID {
-			foundWatch = true
-		}
-	}
-	if !foundWatch {
-		t.Fatal("Project Watch tab missing from Lead workspace")
+	if panes := watchPanes(t, client); len(panes) != 0 {
+		t.Fatalf("Project watch opened visible Watch panes: %#v", panes)
 	}
 	brief := filepath.Join(f.root, "follow-up.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	candidate := f.mustTask(t, "t1")
 	f.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.GatedSHA)

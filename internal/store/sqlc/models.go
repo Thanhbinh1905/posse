@@ -229,6 +229,18 @@ type ProjectRuntime struct {
 	WatchNoticeRaised  int64
 }
 
+type ProjectWatchRuntime struct {
+	ProjectID           int64
+	Pid                 int64
+	Token               string
+	StartedAt           int64
+	HeartbeatAt         int64
+	ExecutablePath      string
+	ExecutableDevice    int64
+	ExecutableInode     int64
+	FailureNoticeRaised int64
+}
+
 type ProjectWatchState struct {
 	ProjectID             int64
 	PrPolledAt            int64
@@ -478,6 +490,9 @@ type Task struct {
 	ReportKind           string
 	ReportDigest         string
 	ReportManifestJson   string
+	ContainmentMode      string
+	ContainmentPath      string
+	ContainmentMarker    string
 }
 
 type TaskLaunchIdentity struct {

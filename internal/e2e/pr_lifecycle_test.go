@@ -5,8 +5,10 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -240,7 +242,7 @@ func TestPRMergeLifecycleAndExternalMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first := fixture.rideAndComplete(t, brief, "t1")
+	first := fixture.startAndComplete(t, brief, "t1")
 	if first.PRURL != "https://github.com/acme/shop/pull/17" || first.GatedSHA != "" || first.Branch != "posse/t1" || first.PaneLabel != "posse:shop:t1" || first.AgentName != "posse-shop-t1-1" || first.TargetBranch != "staging" || first.BaseRef != strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/remotes/origin/staging")) {
 		t.Fatalf("Worker did not publish its PR before the Lead's Gate: %#v", first)
 	}
@@ -324,7 +326,7 @@ func TestPRMergeLifecycleAndExternalMerge(t *testing.T) {
 	if err := os.WriteFile(secondBrief, []byte("---\ntype: change\ntitle: External merge change\ndone_when: second committed change exists\n---\nCreate a second committed change for external merge observation.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	secondPublished := fixture.rideAndComplete(t, secondBrief, "t2")
+	secondPublished := fixture.startAndComplete(t, secondBrief, "t2")
 	if secondPublished.PRURL != "https://github.com/acme/shop/pull/18" || secondPublished.GatedSHA != "" || secondPublished.Branch != "posse/t2" {
 		t.Fatalf("second Worker did not publish its own PR: %#v", secondPublished)
 	}
@@ -381,7 +383,7 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCommit one change for queued message crash recovery.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.rideAndComplete(t, brief, "t1")
+	fixture.startAndComplete(t, brief, "t1")
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
 		t.Fatalf("Task did not enter merging: %s", output)
 	}
@@ -525,8 +527,8 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first := fixture.rideAndComplete(t, firstBrief, "t1")
-	second := fixture.rideAndComplete(t, secondBrief, "t2")
+	first := fixture.startAndComplete(t, firstBrief, "t1")
+	second := fixture.startAndComplete(t, secondBrief, "t2")
 	if first.AutonomyMerge != "auto" || second.AutonomyMerge != "auto" {
 		t.Fatalf("Tasks did not inherit automatic Merge autonomy: %q, %q", first.AutonomyMerge, second.AutonomyMerge)
 	}
@@ -560,10 +562,6 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	fixture.writeGraphQL(t, "pr2", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", second.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
-	// Isolate the explicit Merge check from the independent watcher, which can
-	// deliver its own target-sync instruction and reopen t2 first.
-	stopBackgroundWatch(t, fixture)
-
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1", "--execute"); !strings.Contains(output, "merging") {
 		t.Fatalf("first PR did not merge: %s", output)
 	}
@@ -572,6 +570,9 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Keep the supervised watch active and let its stale-target instruction
+	// reopen t2 before checking that Merge preserves the specific refusal.
+	fixture.waitTaskState(t, "t2", store.StateWorking)
 	beforeSecondMerge := fixture.mustTask(t, "t2")
 	command := exec.Command(fixture.binary, "merge", "t2", "--execute")
 	command.Dir, command.Env = fixture.repo, fixture.leadEnv
@@ -587,11 +588,30 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 		afterSecondMerge, taskErr := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
 		transitions, transitionErr := fixture.db.TaskTransitions(context.Background(), second.ID, 30)
 		recovery, recoveryErr := fixture.db.ProjectRecovery(context.Background(), fixture.project.ID)
-		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s\nTask state before/after: %q -> %q (err=%v)\ntransitions: %#v (err=%v)\nproject recovery: %#v (err=%v)", err, output, targetTip, beforeSecondMerge.State, afterSecondMerge.State, taskErr, transitions, transitionErr, recovery, recoveryErr)
+		watch, watchErr := fixture.db.WatchRuntime(context.Background(), fixture.project.ID)
+		messageRows, messageErr := fixture.db.QueryContext(context.Background(), `SELECT id,status,body,created_at,delivered_at FROM messages WHERE task_id=? ORDER BY id`, second.ID)
+		var messages []string
+		if messageErr == nil {
+			defer messageRows.Close()
+			for messageRows.Next() {
+				var id, createdAt int64
+				var status, body string
+				var deliveredAt sql.NullInt64
+				if scanErr := messageRows.Scan(&id, &status, &body, &createdAt, &deliveredAt); scanErr != nil {
+					messages = append(messages, "scan error: "+scanErr.Error())
+					break
+				}
+				messages = append(messages, fmt.Sprintf("id=%d status=%s created=%d delivered=%v body=%q", id, status, createdAt, deliveredAt, body))
+			}
+			if rowsErr := messageRows.Err(); rowsErr != nil {
+				messageErr = rowsErr
+			}
+		}
+		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s\nTask state before/after: %q -> %q (err=%v)\ntransitions: %#v (err=%v)\nproject recovery: %#v (err=%v)\nWatch: %#v (err=%v)\nmessages: %#v (err=%v)", err, output, targetTip, beforeSecondMerge.State, afterSecondMerge.State, taskErr, transitions, transitionErr, recovery, recoveryErr, watch, watchErr, messages, messageErr)
 	}
 	var instruction string
-	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, second.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Merge origin/main") {
-		t.Fatalf("Posse did not queue an actionable target-sync instruction: body=%q err=%v", instruction, err)
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status IN ('queued','claimed','interrupting','submitting','delivered') ORDER BY id DESC LIMIT 1`, second.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Merge origin/main") {
+		t.Fatalf("Posse did not retain an actionable target-sync instruction: body=%q err=%v", instruction, err)
 	}
 	if _, err := os.Stat(fixture.ghMerge); !os.IsNotExist(err) {
 		t.Fatalf("stale PR reached the forge merge command: %v", err)
@@ -609,7 +629,7 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.rideAndComplete(t, brief, "t1")
+	fixture.startAndComplete(t, brief, "t1")
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
 	candidate := fixture.mustTask(t, "t1")
 	if candidate.PRURL != "https://github.com/acme/shop/pull/17" || candidate.GatedSHA == "" {
@@ -692,7 +712,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nObserve a merge despite an inaccessible old PR.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.rideAndComplete(t, brief, "t1")
+	fixture.startAndComplete(t, brief, "t1")
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
 		t.Fatalf("valid PR did not enter merging: %s", output)
 	}
@@ -798,7 +818,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The fixture sets pr_poll=1ms. Its live Watch may legitimately poll
-	// between these CLI calls, so an exact count races the background poller.
+	// between these CLI calls, so an exact count races the background watch.
 	if polls := strings.Count(string(afterPolls), "api graphql") - strings.Count(string(beforePolls), "api graphql"); polls < 3 {
 		t.Fatalf("expected at least one poll per CLI restart, got %d", polls)
 	}
@@ -827,7 +847,7 @@ func TestWorkerExitedDoneTaskWithOpenPRCanBeDiscarded(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a completed Task with a recorded open PR.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	task := fixture.rideAndComplete(t, brief, "t1")
+	task := fixture.startAndComplete(t, brief, "t1")
 	const prURL = "https://github.com/acme/shop/pull/17"
 	if err := fixture.db.UpdateTaskMerge(context.Background(), task.ID, prURL, ""); err != nil {
 		t.Fatal(err)
@@ -1070,7 +1090,7 @@ func prepareDiscardPRTask(t *testing.T, fixture *prLifecycleFixture) store.Task 
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change for approved-discard PR closure.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.rideAndComplete(t, brief, "t1")
+	fixture.startAndComplete(t, brief, "t1")
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
 	task := fixture.mustTask(t, "t1")
 	if task.State != store.StateMerging || task.PRURL == "" || task.GatedSHA == "" {
@@ -1158,7 +1178,7 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 			if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			f.rideAndComplete(t, brief, "t1")
+			f.startAndComplete(t, brief, "t1")
 			runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 			candidate := f.mustTask(t, "t1")
 			f.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.GatedSHA)
@@ -1221,7 +1241,7 @@ func TestMergedPRWithIgnoredArtifactStillMerges(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	candidate := f.mustTask(t, "t1")
 	exclude := filepath.Join(f.root, "exclude")
@@ -1259,7 +1279,7 @@ func TestMergedPRAutoTearsDownEvenWhenAutoTeardownIsNever(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	candidate := f.mustTask(t, "t1")
 	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
@@ -1274,11 +1294,13 @@ func TestMergedPRAutoTearsDownEvenWhenAutoTeardownIsNever(t *testing.T) {
 func TestPRMergeAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
+	// Test direct message delivery without a poll-only Watch racing to claim it.
+	stopBackgroundWatch(t, fixture)
 	brief := filepath.Join(fixture.root, "follow-up.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: follow-up is committed\n---\nAllow follow-up work while the PR is merging.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	published := fixture.rideAndComplete(t, brief, "t1")
+	published := fixture.startAndComplete(t, brief, "t1")
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
 		t.Fatalf("PR did not enter merging: %s", output)
 	}
@@ -1324,7 +1346,7 @@ func TestMergeReadyBeforeMergeDoesNotRaiseLatePROpened(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise the order of PR lifecycle Notices.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	task := fixture.rideAndComplete(t, brief, "t1")
+	task := fixture.startAndComplete(t, brief, "t1")
 	head := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
 	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", head)
 	if !waitForCondition(30*time.Second, func() bool {
@@ -1341,7 +1363,20 @@ func TestMergeReadyBeforeMergeDoesNotRaiseLatePROpened(t *testing.T) {
 	}) {
 		t.Fatal("PR watcher did not raise merge_ready")
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1", "--execute", "--user-approved", "User approved the pull request")
+	var mergeOutput []byte
+	var mergeErr error
+	for attempt := 1; attempt <= 6; attempt++ {
+		command := exec.Command(fixture.binary, "merge", "t1", "--execute", "--user-approved", "User approved the pull request")
+		command.Dir, command.Env = fixture.repo, fixture.leadEnv
+		mergeOutput, mergeErr = command.CombinedOutput()
+		if mergeErr == nil || !strings.Contains(string(mergeOutput), `"pr_merge_busy"`) || !strings.Contains(string(mergeOutput), "another repository sync or pull request merge is in progress") {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+	}
+	if mergeErr != nil {
+		t.Fatalf("retryable Merge contention did not clear: %v\n%s", mergeErr, mergeOutput)
+	}
 
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
@@ -1384,7 +1419,7 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nExercise a stale PR head immediately after a push.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	task := fixture.rideAndComplete(t, brief, "t1")
+	task := fixture.startAndComplete(t, brief, "t1")
 	oldHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Add the publish consistency follow-up.")
@@ -1473,7 +1508,7 @@ func TestWorkerPublishDistinguishesMovedHeadFromLagTimeout(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise unexpected-head and timeout outcomes during publish.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	task := fixture.rideAndComplete(t, brief, "t1")
+	task := fixture.startAndComplete(t, brief, "t1")
 	oldHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
 	if err := os.WriteFile(filepath.Join(fixture.root, "pause-fix-commit"), []byte("hold\n"), 0o600); err != nil {
@@ -1559,31 +1594,15 @@ func TestWorkerPublishDistinguishesMovedHeadFromLagTimeout(t *testing.T) {
 func TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
+	client := herdr.NewWithEnv("herdr", fixture.env)
 	brief := filepath.Join(fixture.root, "deferred-pr-recovery.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR create recovery\ndone_when: committed change exists\n---\nExercise deferred recovery of an interrupted PR creation.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.rideAndCommitLegacy(t, brief, "t1")
+	fixture.startAndCommitLegacy(t, brief, "t1")
 
-	client := herdr.NewWithEnv("herdr", fixture.env)
-	snapshot, err := client.Snapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, pane := range snapshot.Panes {
-		if pane.Label != "posse:shop:watch" || pane.WorkspaceID != fixture.project.HerdrWorkspaceID {
-			continue
-		}
-		if _, err := client.Run(context.Background(), "pane", "send-keys", pane.PaneID, "ctrl+c"); err != nil {
-			t.Fatalf("stop fixture Watch before injecting interrupted intent: %v", err)
-		}
-		if pane.TabID != "" {
-			if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": pane.TabID}); err != nil {
-				t.Fatalf("close fixture Watch tab: %v", err)
-			}
-		}
-		break
-	}
+	// Keep the independent watch from racing the injected interrupted intent.
+	stopBackgroundWatch(t, fixture)
 
 	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "merge --open-pr:after:pr.create")
 	command := exec.Command(fixture.binary, "merge", "t1")
@@ -1690,7 +1709,7 @@ func TestPRCreateCrashRecoveryAdoptsOpenPullRequest(t *testing.T) {
 	// Simulate a Task completed before Workers published their own PRs.
 	// The compatibility path still lets Merge recover a create interrupted
 	// after the forge accepted it but before Posse persisted its URL.
-	fixture.rideAndCommitLegacy(t, brief, "t1")
+	fixture.startAndCommitLegacy(t, brief, "t1")
 	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "merge --open-pr:after:pr.create")
 	command := exec.Command(fixture.binary, "merge", "t1")
 	command.Dir = fixture.repo
@@ -2011,7 +2030,7 @@ esac
 		// This mode calls up outside the pane and has no live Lead to answer
 		// its detached startup finalizer. Stop it now; it otherwise waits 30s
 		// after a Herdr restart and outlives cleanup.
-		runPosse(t, binary, repo, callerEnv, "up", "--name", "shop", "--yes")
+		runPRLifecycleUp(t, binary, repo, callerEnv)
 		stopLeadFinalizers(t, root, binary)
 	}
 	opened, err := store.Open(home)
@@ -2048,6 +2067,26 @@ esac
 		ghTitle: filepath.Join(root, "gh-title.txt"), ghPRClosed: filepath.Join(root, "gh-pr-closed"),
 		ghCloseFail: filepath.Join(root, "gh-close-fail"), db: opened, project: project,
 	}
+}
+
+func runPRLifecycleUp(t *testing.T, binary, repo string, env []string) {
+	t.Helper()
+	for attempt := 1; attempt <= 6; attempt++ {
+		command := exec.Command(binary, "up", "--name", "shop", "--yes")
+		command.Dir, command.Env = repo, env
+		output, err := command.CombinedOutput()
+		if err == nil {
+			return
+		}
+		// Open/migration contention happens before `up` can register a Project;
+		// retry only that explicitly retryable, side-effect-free startup failure.
+		if !strings.Contains(string(output), `"store_busy"`) || !strings.Contains(string(output), "while opening or migrating the database") {
+			t.Fatalf("posse up --name shop --yes: %v\n%s", err, output)
+		}
+		t.Logf("retry posse up after retryable database-open contention (attempt %d/6): %s", attempt, strings.TrimSpace(string(output)))
+		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+	}
+	t.Fatal("posse up remained blocked by retryable database-open contention after six attempts")
 }
 
 func paneForegroundMatches(raw json.RawMessage, want string) bool {
@@ -2169,7 +2208,7 @@ func (fixture *prLifecycleFixture) exitWorker(t *testing.T, taskID string) {
 	}
 }
 
-func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID string) store.Task {
+func (fixture *prLifecycleFixture) startAndComplete(t *testing.T, brief, taskID string) store.Task {
 	t.Helper()
 	name := "pr-lifecycle-change"
 	if taskID == "t2" {
@@ -2226,7 +2265,7 @@ func (fixture *prLifecycleFixture) runStartWithStoreBusyRetry(t *testing.T, brie
 	return ""
 }
 
-func (fixture *prLifecycleFixture) rideAndCommitLegacy(t *testing.T, brief, taskID string) {
+func (fixture *prLifecycleFixture) startAndCommitLegacy(t *testing.T, brief, taskID string) {
 	t.Helper()
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "pr-create-recovery")
 	if !waitForCondition(30*time.Second, func() bool {

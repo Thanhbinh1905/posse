@@ -20,7 +20,7 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 	defer f.db.Close()
 
 	if !waitForCondition(15*time.Second, func() bool { return len(watchPIDs(f.root)) > 0 }) {
-		t.Fatalf("isolated Watch poller did not start: panes=%#v", watchPanes(t, herdr.NewWithEnv("herdr", f.env)))
+		t.Fatalf("isolated Watch runtime did not start: pids=%v", watchPIDs(f.root))
 	}
 
 	client := herdr.NewWithEnv("herdr", f.env)
@@ -114,7 +114,7 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 		}
 	}
 	if got := len(watchPIDs(f.root)); got == 0 {
-		t.Fatal("isolated Watch poller exited during the stress run")
+		t.Fatal("isolated Watch runtime exited during the stress run")
 	}
 	var lastPoll int64
 	if err := f.db.QueryRowContext(ctx, `SELECT pr_polled_at FROM project_watch_state WHERE project_id=?`, f.project.ID).Scan(&lastPoll); err != nil {

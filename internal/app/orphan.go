@@ -8,7 +8,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// snapshotPRLeftover runs after closing the Worker pane and before resetting
+// snapshotPROrphan runs after closing the Worker pane and before resetting
 // the Sandbox. It captures committed and non-ignored uncommitted work without
 // changing the Task branch, and leaves ignored build artifacts out of the tree.
 func snapshotPROrphan(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {

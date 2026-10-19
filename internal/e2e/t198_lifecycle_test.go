@@ -21,11 +21,11 @@ import (
 
 func TestTeardownStopsTaskProcessesAndPruneProtectsHeldBranches(t *testing.T) {
 	for _, mode := range []string{"scratch-child", "local-ordering", "local-held-prune", "failed-discard-ordering"} {
-		t.Run(mode, func(t *testing.T) { runTeardownOwnerchangeLifecycle(t, mode) })
+		t.Run(mode, func(t *testing.T) { runTeardownOwnershipLifecycle(t, mode) })
 	}
 }
 
-func runTeardownOwnerchangeLifecycle(t *testing.T, mode string) {
+func runTeardownOwnershipLifecycle(t *testing.T, mode string) {
 	root := newFixtureRoot(t, fixturePrefix("t178-teardown-"))
 	processNames := []string{}
 	switch mode {
@@ -87,6 +87,7 @@ case "$PWD/" in
    local-*) posse signal done 'Change fixture completed' > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
    *) posse signal done 'Review fixture completed' --report report.md > "$POSSE_TEST_ROOT/signal.log" 2>&1;;
   esac
+  printf 'complete\n' > "$POSSE_TEST_ROOT/signal-finished"
   ;;
  *) printf 'lead started\n' > "$POSSE_TEST_ROOT/lead-started";;
 esac
@@ -180,32 +181,32 @@ while IFS= read -r line; do :; done
 		taskType, expected = "change", store.StateFailed
 	}
 	os.WriteFile(brief, []byte("---\ntype: "+taskType+"\ntitle: Scratch release probe\ndone_when: Report retained and scratch removed\n---\nWrite evidence.\n"), 0600)
-	rideEnv := leadEnv
+	startEnv := leadEnv
 	pauseMarker := filepath.Join(root, "start-before-working")
 	if mode == "failed-discard-ordering" {
 		// Force the CI ordering: the Worker finishes its work while Start has
 		// not yet transitioned the Task out of spawning.
-		rideEnv = setEnv(rideEnv, "POSSE_INTENT_PAUSE_AT", "start:before:task.working")
-		rideEnv = setEnv(rideEnv, "POSSE_INTENT_PAUSE_FILE", pauseMarker)
+		startEnv = setEnv(startEnv, "POSSE_INTENT_PAUSE_AT", "start:before:task.working")
+		startEnv = setEnv(startEnv, "POSSE_INTENT_PAUSE_FILE", pauseMarker)
 	}
-	rideCtx, cancelStart := context.WithTimeout(context.Background(), 45*time.Second)
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancelStart()
-	start := exec.CommandContext(rideCtx, binary, "start", "--brief", brief, "--name", "scratch-release-probe")
-	start.Dir, start.Env, start.WaitDelay = repo, rideEnv, time.Second
-	var rideOutput bytes.Buffer
-	start.Stdout, start.Stderr = &rideOutput, &rideOutput
+	start := exec.CommandContext(startCtx, binary, "start", "--brief", brief, "--name", "scratch-release-probe")
+	start.Dir, start.Env, start.WaitDelay = repo, startEnv, time.Second
+	var startOutput bytes.Buffer
+	start.Stdout, start.Stderr = &startOutput, &startOutput
 	if err := start.Start(); err != nil {
 		t.Fatal(err)
 	}
-	rideDone := make(chan struct{})
-	var rideErr error
+	startDone := make(chan struct{})
+	var startErr error
 	go func() {
-		rideErr = start.Wait()
-		close(rideDone)
+		startErr = start.Wait()
+		close(startDone)
 	}()
 	t.Cleanup(func() {
 		cancelStart()
-		<-rideDone
+		<-startDone
 	})
 	if !waitForCondition(30*time.Second, func() bool { _, err := os.Stat(filepath.Join(root, "worker-ready")); return err == nil }) {
 		t.Fatal("Worker did not finish its test process")
@@ -231,9 +232,9 @@ while IFS= read -r line; do :; done
 			t.Fatal(err)
 		}
 	}
-	<-rideDone
-	if rideErr != nil {
-		t.Fatalf("Start failed: %v %s", rideErr, rideOutput.String())
+	<-startDone
+	if startErr != nil {
+		t.Fatalf("Start failed: %v %s", startErr, startOutput.String())
 	}
 	if !waitForCondition(10*time.Second, func() bool {
 		current, err := db.Task(context.Background(), project.ID, "t1")
@@ -259,13 +260,29 @@ while IFS= read -r line; do :; done
 		t.Fatalf("Worker TMPDIR=%q, want Task scratch %q", workerTmp, wanted)
 	}
 	if mode == "scratch-child" {
+		if !waitForCondition(5*time.Second, func() bool {
+			_, err := os.Stat(filepath.Join(root, "signal-finished"))
+			return err == nil
+		}) {
+			t.Fatal("Worker done command did not finish before stopping the Project Watch")
+		}
 		for _, pid := range watchPIDs(root) {
 			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 				t.Fatal(err)
 			}
 		}
 		if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
-			t.Fatal("fixture Watch did not stop before creating the unrelated Task")
+			t.Fatalf("fixture Watch did not stop before creating the unrelated Task: live PIDs=%v", watchPIDs(root))
+		}
+		// Prevent the active Lead from restarting its poll-only Watch while
+		// the synthetic Task moves through states without a Worker pane.
+		recovery, err := db.WatchRecovery(context.Background(), project.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recovery.RetryAt = time.Now().Add(time.Hour).UnixMilli()
+		if err := db.SetWatchRecovery(context.Background(), project.ID, recovery); err != nil {
+			t.Fatal(err)
 		}
 		otherID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 2, Type: "research", Title: "Other Task"})
 		if err != nil {
@@ -276,7 +293,8 @@ while IFS= read -r line; do :; done
 			source   string
 		}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateReported, "cli"}} {
 			if err := db.Transition(context.Background(), otherID, transition.from, transition.to, transition.source, "isolated other Task fixture"); err != nil {
-				t.Fatal(err)
+				current, readErr := db.TaskByID(context.Background(), project.ID, otherID)
+				t.Fatalf("transition unrelated Task %s -> %s failed: %v; current=%#v lookup=%v", transition.from, transition.to, err, current, readErr)
 			}
 		}
 	}
@@ -300,5 +318,5 @@ while IFS= read -r line; do :; done
 			t.Fatal("failed fake Worker did not exit naturally")
 		}
 	}
-	finishTeardownOwnerchangeLifecycle(t, mode, binary, repo, home, root, env, leadEnv, db, project, task, processes)
+	finishTeardownOwnershipLifecycle(t, mode, binary, repo, home, root, env, leadEnv, db, project, task, processes)
 }

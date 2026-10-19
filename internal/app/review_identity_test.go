@@ -361,7 +361,7 @@ func TestReviewStartRecordsAndShowsDistinctConfiguredIdentities(t *testing.T) {
 	}
 }
 
-func configureReviewIdentityFixture(t *testing.T, fixture rideFixture, reviewerProfile string) {
+func configureReviewIdentityFixture(t *testing.T, fixture startFixture, reviewerProfile string) {
 	t.Helper()
 	configText := "[defaults]\nmerge_mode = \"local\"\n\n[profiles.author]\nkind = \"claude\"\nmodel = \"model-a\"\n\n" + reviewerProfile + "\n[dispatch.default]\nuse = \"author\"\n"
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
@@ -369,7 +369,7 @@ func configureReviewIdentityFixture(t *testing.T, fixture rideFixture, reviewerP
 	}
 }
 
-func seedReviewAuthor(t *testing.T, fixture rideFixture) {
+func seedReviewAuthor(t *testing.T, fixture startFixture) {
 	t.Helper()
 	ctx := context.Background()
 	gitTest(t, fixture.repo, "branch", "posse/author")

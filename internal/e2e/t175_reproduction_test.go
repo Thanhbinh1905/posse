@@ -184,7 +184,7 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 
 // Replaces a Task-named process during the discard ownership check and verifies
 // that the live foreign replacement keeps the Sandbox held.
-func TestT175ForeignRestartDuringDiscardOwnerchangeCheckIsPreserved(t *testing.T) {
+func TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	ctx := context.Background()
 	task := f.start(t, "t1", "Late foreign restart", "late-foreign-restart")

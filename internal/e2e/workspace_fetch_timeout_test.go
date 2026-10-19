@@ -147,19 +147,8 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 		t.Fatal(err)
 	}
 	project.HerdrWorkspaceID = workspace.Workspace.WorkspaceID
-	watch, err := createTab(client, project.HerdrWorkspaceID, workspaceRoot, "posse:stack:watch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Call(ctx, "pane.rename", map[string]any{"pane_id": watch.RootPane.PaneID, "label": "posse:stack:watch"}); err != nil {
-		t.Fatal(err)
-	}
-	watchPaneID := watch.RootPane.PaneID
-	t.Cleanup(func() {
-		_, _ = client.Run(context.Background(), "pane", "send-keys", watchPaneID, "ctrl+c")
-	})
-	if _, err := client.Run(ctx, "pane", "run", watchPaneID, binary+" watch --poll-only"); err != nil {
-		t.Fatalf("start isolated Watch: %v", err)
+	if output := runPosse(t, binary, workspaceRoot, env, "watch", "--repair"); !strings.Contains(output, "state: running") {
+		t.Fatalf("start supervised hidden Watch runtime: %s", output)
 	}
 
 	if !waitForCondition(12*time.Second, func() bool {

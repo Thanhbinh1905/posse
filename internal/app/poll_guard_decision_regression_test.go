@@ -63,7 +63,7 @@ func TestGuardBlocksLiteralNestedGitPush(t *testing.T) {
 	}
 }
 
-func TestConcurrentPollersClaimOnePRPollPerInterval(t *testing.T) {
+func TestConcurrentWatchsClaimOnePRPollPerInterval(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
@@ -104,6 +104,6 @@ func TestConcurrentPollersClaimOnePRPollPerInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := strings.Count(string(log), "api graphql"); got != 1 {
-		t.Fatalf("two pollers made %d GraphQL calls within default 2m interval", got)
+		t.Fatalf("two watches made %d GraphQL calls within default 2m interval", got)
 	}
 }

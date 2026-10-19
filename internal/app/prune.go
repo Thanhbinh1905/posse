@@ -64,7 +64,7 @@ func taskScratchPruneItems(ctx context.Context, db *store.DB, home string, proje
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
-		state, reason, taskID, eligible, err := taskScratchPruneOwnerchange(ctx, db, project, seq)
+		state, reason, taskID, eligible, err := taskScratchPruneOwnership(ctx, db, project, seq)
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +80,7 @@ func taskScratchPruneItems(ctx context.Context, db *store.DB, home string, proje
 	return items, nil
 }
 
-func taskScratchPruneOwnerchange(ctx context.Context, db *store.DB, project store.Project, seq int) (string, string, int64, bool, error) {
+func taskScratchPruneOwnership(ctx context.Context, db *store.DB, project store.Project, seq int) (string, string, int64, bool, error) {
 	task, err := db.Task(ctx, project.ID, taskIDString(seq))
 	if store.IsNotFound(err) {
 		return "orphan", "Task no longer exists", 0, true, nil

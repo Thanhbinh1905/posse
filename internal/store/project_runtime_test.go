@@ -11,6 +11,51 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func TestWatchRuntimeHeartbeatAndFailureNoticeEpisode(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "watch", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch := WatchRuntime{PID: 123, Token: "episode-one", StartedAt: 100, HeartbeatAt: 101, ExecutablePath: "/usr/bin/posse", ExecutableDevice: 7, ExecutableInode: 11}
+	if err := db.SetWatchRuntime(ctx, project.ID, watch); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.WatchRuntime(ctx, project.ID)
+	if err != nil || got != watch {
+		t.Fatalf("Watch runtime = %#v, want %#v: %v", got, watch, err)
+	}
+	raised, err := db.RaiseWatchRuntimeFailure(ctx, project.ID, watch.Token, "Watch runtime heartbeat is stale", 102)
+	if err != nil || !raised {
+		t.Fatalf("first stale episode notice = %v, %v", raised, err)
+	}
+	raised, err = db.RaiseWatchRuntimeFailure(ctx, project.ID, watch.Token, "duplicate stale watch", 103)
+	if err != nil || raised {
+		t.Fatalf("duplicate stale episode notice = %v, %v", raised, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "pr_watch_failing" || notices[0].Summary != "Watch runtime heartbeat is stale" {
+		t.Fatalf("stale episode Notices = %#v, %v", notices, err)
+	}
+	if ok, err := db.HeartbeatWatchRuntime(ctx, project.ID, watch.PID, watch.Token, 104); err != nil || !ok {
+		t.Fatalf("recovery heartbeat = %v, %v", ok, err)
+	}
+	if raised, err := db.RaiseWatchRuntimeFailure(ctx, project.ID, watch.Token, "second stale episode", 105); err != nil || !raised {
+		t.Fatalf("second stale episode notice = %v, %v", raised, err)
+	}
+	if err := db.ClearWatchRuntime(ctx, project.ID, watch.PID, watch.Token); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.WatchRuntime(ctx, project.ID); err != nil || got != (WatchRuntime{}) {
+		t.Fatalf("cleared Watch runtime = %#v, %v", got, err)
+	}
+}
+
 func TestRememberProjectServerStartedAtFillsGenerationAlongsideWatchRecovery(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())

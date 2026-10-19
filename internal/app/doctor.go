@@ -68,8 +68,6 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	}
 	checks := []doctorCheck{}
 	var registeredProjects []store.Project
-	watchStates := make(map[int64]store.WatchRecovery)
-	watchStateErrors := make(map[int64]error)
 	addCheck := func(name, status, detail, action string) {
 		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail, Action: action})
 	}
@@ -84,6 +82,8 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		}
 		addCheck("Posse-owned disk usage", "ok", fmt.Sprintf("%d bytes under %s (scratch, Pool, Project data and state); %s", ownedBytes, home, retention), "")
 	}
+	cacheStatus, cacheDetail, cacheAction := sharedGoCacheDiagnostic(ctx.Context)
+	addCheck("Shared Go build cache", cacheStatus, cacheDetail, cacheAction)
 	if configErr != nil {
 		addCheck("config", "fail", configErr.Error(), "Fix the reported configuration key")
 	} else {
@@ -109,18 +109,37 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("database", "fail", projectsErr.Error(), "Inspect the Posse database")
 		} else {
 			registeredProjects = projects
+			addCheck("database", "ok", "database opened", "")
 			for _, project := range projects {
-				state, stateErr := db.WatchRecovery(ctx.Context, project.ID)
-				if stateErr != nil {
-					watchStateErrors[project.ID] = stateErr
+				if project.IsDown() {
+					continue
+				}
+				check, checkErr := s.watchRuntimeHealth(ctx.Context, db, home, project)
+				if checkErr != nil {
+					addCheck("Project Watch "+project.Name, "warn", "runtime state unavailable: "+checkErr.Error(), "Inspect the Posse database, then rerun `posse doctor`")
 				} else {
-					watchStates[project.ID] = state
+					checks = append(checks, check)
 				}
 			}
-			addCheck("database", "ok", "database opened", "")
 			hosts := map[string]bool{}
 			for _, project := range projects {
 				projectCfg, projectConfigErr := config.Load(home, project.Name)
+				if detail, diskErr := projectDiskUsage(home, project); diskErr != nil {
+					addCheck("Project disk usage "+project.Name, "warn", diskErr.Error(), "Inspect this Project's scratch, Pool and artifact directories")
+				} else {
+					addCheck("Project disk usage "+project.Name, "ok", detail, "")
+				}
+				tasks, tasksErr := db.Tasks(ctx.Context, project.ID, true)
+				if tasksErr != nil {
+					addCheck("Task temp and process leaks "+project.Name, "warn", tasksErr.Error(), "Inspect the Project Tasks and retry `posse doctor`")
+				} else {
+					status, detail := taskDiskLeakSummary(home, project, tasks)
+					action := ""
+					if status != "ok" {
+						action = "Review `posse clean`; use `posse clean --yes` to reclaim eligible finished Tasks"
+					}
+					addCheck("Task temp and process leaks "+project.Name, status, detail, action)
+				}
 				if projectConfigErr == nil {
 					usages, usageErr := noMistakesConfigUsage(ctx.Context, db, project, projectCfg)
 					if usageErr != nil {
@@ -258,17 +277,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 					}
 				}
 			}
-			processes, processErr := systemWatchProcesses(home)
-			for _, project := range registeredProjects {
-				if project.IsDown() {
-					continue
-				}
-				if stateErr := watchStateErrors[project.ID]; stateErr != nil {
-					addCheck("Project Watch "+project.Name, "warn", "runtime state unavailable: "+stateErr.Error(), "Inspect the Posse database, then rerun `posse doctor`")
-					continue
-				}
-				checks = append(checks, projectWatchCheck(project, watchStates[project.ID], snapshot, processes, processErr))
-			}
+
 		}
 		pluginData, pluginErr := s.herdrCall(ctx.Context, "plugin.list", map[string]any{})
 		if pluginErr != nil {

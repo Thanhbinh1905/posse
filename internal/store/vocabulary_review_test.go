@@ -68,7 +68,7 @@ func TestVocabularyMigrationPreservesMemberNamesAndApprovalEvidence(t *testing.T
 		}
 		approvals[id] = want
 	}
-	for _, statement := range []string{`DELETE FROM goose_db_version WHERE version_id=53`, `DELETE FROM posse_migration_checksums WHERE version=53`} {
+	for _, statement := range []string{`DELETE FROM goose_db_version WHERE version_id=55`, `DELETE FROM posse_migration_checksums WHERE version=55`} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			db.Close()
 			t.Fatal(err)

@@ -11,7 +11,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestContendedFileLockIsBoundedRetryableAndDoesNotStealOwnerchange(t *testing.T) {
+func TestContendedFileLockIsBoundedRetryableAndDoesNotStealOwnership(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "owned.lock")
 	owner, err := acquireFileLock(context.Background(), path)
 	if err != nil {

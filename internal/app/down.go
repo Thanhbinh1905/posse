@@ -123,16 +123,39 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	var owned []watchProcess
+	var owned, watches, leadWatches []watchProcess
 	for _, process := range processes {
-		if processBelongsToProject(process, project) {
-			owned = append(owned, process)
+		if !processBelongsToProject(process, project) {
+			continue
+		}
+		owned = append(owned, process)
+		if process.PollOnly {
+			watches = append(watches, process)
+		} else {
+			leadWatches = append(leadWatches, process)
 		}
 	}
-	if remaining, err := stopWatchProcesses(ctx.Context, home, owned); err != nil {
+	if remaining, err := stopWatchProcesses(ctx.Context, home, leadWatches); err != nil {
 		return err
 	} else if !allWatchesStopped(remaining) {
 		return axi.Failure("watch_stop_failed", "a Watch of Project "+project.Name+" is still running", true, "Retry `posse down`")
+	}
+	for _, watch := range watches {
+		if err := stopStoredWatchRuntime(ctx.Context, home, watch); err != nil {
+			return axi.Failure("watch_stop_failed", "the Project watch is still completing maintenance", true, "Retry `posse down` after it stops")
+		}
+	}
+	if !allWatchesStopped(owned) {
+		return axi.Failure("watch_stop_failed", "a Watch of Project "+project.Name+" is still running", true, "Retry `posse down`")
+	}
+	watch, err := db.WatchRuntime(ctx.Context, project.ID)
+	if err != nil {
+		return err
+	}
+	if watch.PID > 0 {
+		if err := db.ClearWatchRuntime(ctx.Context, project.ID, watch.PID, watch.Token); err != nil {
+			return err
+		}
 	}
 	if err := db.ClearDownProjectLead(ctx.Context, project.ID); err != nil {
 		return err

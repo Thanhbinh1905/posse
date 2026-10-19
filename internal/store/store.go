@@ -221,6 +221,12 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	if err := db.normalizeLegacyReportBundleMigration(ctx); err != nil {
 		return err
 	}
+	if err := db.normalizeLegacyVocabularyMigration(ctx); err != nil {
+		return err
+	}
+	if err := db.normalizeLegacyTaskContainmentMigration(ctx); err != nil {
+		return err
+	}
 	sources, err := embeddedMigrations()
 	if err != nil {
 		return err
@@ -670,14 +676,14 @@ type Task struct {
 	Profile        string `toml:"profile"`
 	DispatchRule   string `toml:"dispatch_rule"`
 	PlanJSON       string `toml:"plan_json,omitempty"`
-	MergeMode      string `toml:"landing_mode"`
+	MergeMode      string `toml:"merge_mode"`
 	AutonomyReview string `toml:"autonomy_review"`
-	AutonomyMerge  string `toml:"autonomy_land"`
+	AutonomyMerge  string `toml:"autonomy_merge"`
 	Branch         string `toml:"branch"`
 	BaseRef        string `toml:"base_ref"`
 	TargetBranch   string `toml:"target_branch"`
 	WorktreePath   string `toml:"worktree_path"`
-	SandboxID      int64  `toml:"mount_id"`
+	SandboxID      int64  `toml:"sandbox_id"`
 	Launches       int    `toml:"launches"`
 	// ReviewTargets is read only when a Review Task is created; the store keeps
 	// the bound commits in review_targets.
@@ -693,7 +699,7 @@ type Task struct {
 	IdleSince            int64          `toml:"idle_since"`
 	AgentServerStartedAt string         `toml:"agent_server_started_at"`
 	PRURL                string         `toml:"pr_url"`
-	MergedRef            string         `toml:"landed_ref"`
+	MergedRef            string         `toml:"merged_ref"`
 	LastOutputHash       string         `toml:"last_output_hash"`
 	LastWorktreeHash     string         `toml:"last_worktree_hash"`
 	LastProgressAt       int64          `toml:"last_progress_at"`
@@ -702,6 +708,9 @@ type Task struct {
 	ReportKind           string         `toml:"report_kind,omitempty"`
 	ReportDigest         string         `toml:"report_digest,omitempty"`
 	ReportManifestJSON   string         `toml:"report_manifest_json,omitempty"`
+	ContainmentMode      string         `toml:"containment_mode,omitempty"`
+	ContainmentPath      string         `toml:"containment_path,omitempty"`
+	ContainmentMarker    string         `toml:"containment_marker,omitempty"`
 }
 
 type Sandbox struct {
@@ -2544,7 +2553,21 @@ func taskFromDB(row dbgen.Task) Task {
 		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
 		PRURL: row.PrUrl, MergedRef: row.MergedRef, LastOutputHash: row.LastOutputHash,
 		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
-		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson}
+		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson,
+		ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath, ContainmentMarker: row.ContainmentMarker}
+}
+
+func (db *DB) UpdateTaskContainment(ctx context.Context, taskID int64, mode, path, marker string) error {
+	if mode != "" && mode != "cgroup" && mode != "marker" {
+		return fmt.Errorf("invalid Task containment mode %q", mode)
+	}
+	if marker == "" {
+		return fmt.Errorf("Task containment requires a process marker")
+	}
+	if err := db.queries.SetTaskContainment(ctx, dbgen.SetTaskContainmentParams{ContainmentMode: mode, ContainmentPath: path, ContainmentMarker: marker, UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {

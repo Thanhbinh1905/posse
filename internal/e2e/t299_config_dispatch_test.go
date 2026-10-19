@@ -98,13 +98,13 @@ esac
 	if err := os.WriteFile(filepath.Join(fixture.root, "bin", "claude"), []byte(agent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rideCode, rideOutput := runB05CLI(t, fixture, fixture.leadEnv, "start", "--brief", brief, "--name", "frozen-launch-contract", "--json")
-	if rideCode != 0 {
-		t.Fatalf("start with inherited Lead Profile: code=%d\n%s", rideCode, rideOutput)
+	startCode, startOutput := runB05CLI(t, fixture, fixture.leadEnv, "start", "--brief", brief, "--name", "frozen-launch-contract", "--json")
+	if startCode != 0 {
+		t.Fatalf("start with inherited Lead Profile: code=%d\n%s", startCode, startOutput)
 	}
-	var rideResult b05DispatchResult
-	if err := json.Unmarshal([]byte(rideOutput), &rideResult); err != nil || rideResult.Profile != "author" || rideResult.Model != "model-a" || rideResult.Effort != "high" || !rideResult.ModelKnown {
-		t.Fatalf("start did not show its resolved model identity: result=%#v err=%v output=%s", rideResult, err, rideOutput)
+	var startResult b05DispatchResult
+	if err := json.Unmarshal([]byte(startOutput), &startResult); err != nil || startResult.Profile != "author" || startResult.Model != "model-a" || startResult.Effort != "high" || !startResult.ModelKnown {
+		t.Fatalf("start did not show its resolved model identity: result=%#v err=%v output=%s", startResult, err, startOutput)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.root, "b05-fail-first"), nil, 0o600); err != nil {
 		t.Fatal(err)

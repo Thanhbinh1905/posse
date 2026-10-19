@@ -124,7 +124,7 @@ func testPartialPoolPrune(t *testing.T, mode string) {
 			Message string `json:"message"`
 		} `json:"error"`
 		ClosedPanes []string `json:"closed_panes"`
-		Orphans     []any    `json:"orphans"`
+		OrphanPanes []any    `json:"orphan_panes"`
 	}
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("partial prune must return one structured result: %v %s", err, output)
@@ -132,7 +132,7 @@ func testPartialPoolPrune(t *testing.T, mode string) {
 	if code == 0 || len(result.Prune) != 1 || result.Prune[0].Item != "t99" || !result.Prune[0].Applied || !strings.Contains(result.Error.Message, expected) {
 		t.Fatalf("deleted items were hidden by orphan error: %d %s", code, output)
 	}
-	if mode != "snapshot" && len(result.Orphans) != 1 {
+	if mode != "snapshot" && len(result.OrphanPanes) != 1 {
 		t.Fatalf("partial pane plan was hidden: %s", output)
 	}
 	if mode == "lingering-pane" && (len(result.ClosedPanes) != 1 || result.ClosedPanes[0] != "w2:p1") {
@@ -140,7 +140,7 @@ func testPartialPoolPrune(t *testing.T, mode string) {
 	}
 }
 
-func TestHistoricalOrphanSnapshotReusesLeftoverRef(t *testing.T) {
+func TestHistoricalOrphanSnapshotReusesOrphanRef(t *testing.T) {
 	for _, uncommitted := range []bool{false, true} {
 		name := "committed"
 		if uncommitted {

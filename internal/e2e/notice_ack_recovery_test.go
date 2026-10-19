@@ -145,6 +145,9 @@ func TestAcknowledgedPrintedNoticeRecoversAfterCrashAndRebuild(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newAcknowledgedNoticeFixture(t)
 			first := f.crashAfterAck(t)
+			if watch, err := f.db.WatchRuntime(context.Background(), f.project.ID); err != nil || watch.PID != 0 {
+				t.Fatalf("Notice acknowledgement unexpectedly started a Project watch: %+v %v", watch, err)
+			}
 			if rebuild {
 				if _, err := f.db.RebuildFromSnapshots(context.Background(), f.home); err != nil {
 					t.Fatalf("rebuild after handled ack: %v", err)

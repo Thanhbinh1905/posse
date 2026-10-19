@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +34,7 @@ func watchPanes(t *testing.T, client *herdr.Client) []herdr.Pane {
 	return panes
 }
 
-// lookoutPIDs lists poll-only Watch processes that belong to this fixture.
+// watchPIDs lists hidden poll-only Watch processes that belong to this fixture.
 func watchPIDs(root string) []int {
 	entries, _ := os.ReadDir("/proc")
 	var pids []int
@@ -41,7 +43,18 @@ func watchPIDs(root string) []int {
 		if err != nil {
 			continue
 		}
-		cmdline, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		processRoot := filepath.Join("/proc", entry.Name())
+		stat, err := os.ReadFile(filepath.Join(processRoot, "stat"))
+		if err != nil {
+			continue // The process exited between ReadDir and inspection.
+		}
+		if closeParen := strings.LastIndexByte(string(stat), ')'); closeParen >= 0 {
+			fields := strings.Fields(string(stat[closeParen+1:]))
+			if len(fields) > 0 && fields[0] == "Z" {
+				continue // An exited zombie is not a running Watch.
+			}
+		}
+		cmdline, _ := os.ReadFile(filepath.Join(processRoot, "cmdline"))
 		if !strings.Contains(string(cmdline), "--poll-only") {
 			continue
 		}
@@ -53,137 +66,58 @@ func watchPIDs(root string) []int {
 	return pids
 }
 
-// A dead Watch leaves a labeled tab while Herdr and the Lead stay up.
-// The Lead's ordinary watch tick must restart it without `posse up`.
+func stopFixtureWatchRuntimes(root string) {
+	pids := watchPIDs(root)
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	if waitForCondition(3*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
+		return
+	}
+	for _, pid := range watchPIDs(root) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	_ = waitForCondition(2*time.Second, func() bool { return len(watchPIDs(root)) == 0 })
+}
+
 func TestWatchRestartsAfterProcessExit(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatalf("Watch process not running: %v", watchPIDs(f.root))
+		t.Fatalf("hidden Watch process not running: %v", watchPIDs(f.root))
 	}
-	for _, pid := range watchPIDs(f.root) {
-		_ = exec.Command("kill", "-INT", strconv.Itoa(pid)).Run()
+	before := watchPIDs(f.root)[0]
+	if err := syscall.Kill(before, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
 	}
-	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
-		t.Fatal("Watch did not exit")
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatalf("killed Watch process remains visible: %v", watchPIDs(f.root))
 	}
-	panes := watchPanes(t, client)
-	t.Logf("Watch panes after exit: %d", len(panes))
-	command := exec.Command(f.binary, "watch", "--ack", "all", "--timeout", "10000")
-	command.Dir, command.Env = f.repo, f.leadEnv
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Lead watch: %v %s", err, output)
+	output := runPosse(t, f.binary, f.repo, f.env, "doctor", "--json")
+	if !strings.Contains(output, `"check":"Project Watch shop"`) {
+		t.Fatalf("doctor omitted watch health: %s", output)
 	}
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Errorf("no Watch process after Lead tick; panes labelled Watch=%d", len(watchPanes(t, client)))
+		t.Fatalf("the next Project command did not repair the watch: %v\n%s", watchPIDs(f.root), output)
+	}
+	if panes := watchPanes(t, client); len(panes) != 0 {
+		t.Fatalf("hidden watch opened %d visible Watch panes: %#v", len(panes), panes)
 	}
 }
 
-func TestWatchDoesNotRecreateDuringSlowLoginShellStartup(t *testing.T) {
+func TestWatchDoesNotOpenLoginShellOrVisiblePane(t *testing.T) {
 	f := newPRLifecycleFixtureWithSlowLoginShell(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatalf("Watch process not running: %v", watchPIDs(f.root))
+		t.Fatalf("hidden Project watch did not start: %v", watchPIDs(f.root))
 	}
-
-	marker := filepath.Join(f.root, "slow-login-enabled")
-	starts := filepath.Join(f.root, "slow-login-starts")
-	if err := os.WriteFile(marker, nil, 0o600); err != nil {
-		t.Fatal(err)
+	if panes := watchPanes(t, client); len(panes) != 0 {
+		t.Fatalf("Watch opened visible panes: %#v", panes)
 	}
-
-	panes := watchPanes(t, client)
-	if len(panes) != 1 {
-		t.Fatalf("Watch tabs before close = %d, want 1", len(panes))
-	}
-	for _, pid := range watchPIDs(f.root) {
-		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
-		t.Fatal("initial poll-only process did not stop")
-	}
-	if err := f.db.ResetWatchRecovery(context.Background(), f.project.ID); err != nil {
-		t.Fatal(err)
-	}
-	createdTabs := make(map[string]struct{})
-	stopSampling := make(chan struct{})
-	samplingDone := make(chan struct{})
-	samplingStopped := false
-	stopSampler := func() {
-		if samplingStopped {
-			return
-		}
-		close(stopSampling)
-		<-samplingDone
-		samplingStopped = true
-	}
-	go func() {
-		defer close(samplingDone)
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopSampling:
-				return
-			case <-ticker.C:
-				snapshot, err := client.Snapshot(context.Background())
-				if err != nil {
-					continue
-				}
-				for _, tab := range snapshot.Tabs {
-					if tab.Label == "posse:shop:watch" && tab.TabID != panes[0].TabID {
-						createdTabs[tab.TabID] = struct{}{}
-					}
-				}
-			}
-		}
-	}()
-	defer stopSampler()
-
-	command := exec.Command(f.binary, "watch", "--ack", "all", "--timeout", "3500")
-	command.Dir, command.Env = f.repo, f.leadEnv
-	output := make(chan []byte, 1)
-	commandDone := make(chan error, 1)
-	go func() {
-		result, err := command.CombinedOutput()
-		output <- result
-		commandDone <- err
-	}()
-	if !waitForCondition(5*time.Second, func() bool {
-		state, err := f.db.WatchRecovery(context.Background(), f.project.ID)
-		return err == nil && state.PaneID == panes[0].PaneID && state.RetryAt > time.Now().UnixMilli()
-	}) {
-		t.Fatal("Lead watch did not record its observed startup grace before tab close")
-	}
-	if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": panes[0].TabID}); err != nil {
-		t.Fatalf("close Watch tab: %v", err)
-	}
-	select {
-	case err := <-commandDone:
-		if err != nil {
-			t.Fatalf("Lead watch: %v %s", err, <-output)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Lead watch did not finish its bounded wait")
-	}
-
-	stopSampler()
-	if len(createdTabs) != 1 {
-		t.Fatalf("Watch recovery created %d tabs, want exactly 1; login starts=%d; tab IDs=%v", len(createdTabs), lineCount(starts), createdTabs)
-	}
-	if lineCount(starts) == 0 {
-		t.Fatal("slow login shell profile did not run")
-	}
-	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatalf("Watch process did not stay up: %v", watchPIDs(f.root))
-	}
-	if panes := watchPanes(t, client); len(panes) != 1 {
-		t.Fatalf("Watch tabs after recovery = %d, want 1", len(panes))
+	if starts := lineCount(filepath.Join(f.root, "slow-login-starts")); starts != 0 {
+		t.Fatalf("hidden watch started %d login shells", starts)
 	}
 }
 
@@ -195,8 +129,53 @@ func lineCount(path string) int {
 	return strings.Count(string(contents), "started\n")
 }
 
-// L2: Herdr restarts. Recovery restarts the Lead but must also restore the
-// Watch tab, or nothing polls while the Lead is idle.
+func TestHiddenWatchRuntimeDeliversNoticesWhenLeadHasNoWait(t *testing.T) {
+	f := newPRLifecycleFixtureWithLead(t, true)
+	defer f.db.Close()
+	client := herdr.NewWithEnv("herdr", f.env)
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("hidden Project watch did not start: %v", watchPIDs(f.root))
+	}
+	if _, err := client.Run(context.Background(), "pane", "report-agent", f.project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatalf("mark idle Lead: %v", err)
+	}
+	other, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, "fixture:other")
+	if err != nil {
+		t.Fatalf("create unfocused pane: %v", err)
+	}
+	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": other.RootPane.PaneID}); err != nil {
+		t.Fatalf("unfocus Lead: %v", err)
+	}
+	noticeID, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "Worker finished"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(10*time.Second, func() bool {
+		return noticeDeliveredAt(t, f.db, f.project.ID, noticeID) != 0
+	}) {
+		notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+		t.Fatalf("hidden watch did not deliver a Notice without a Lead-side wait: %#v", notices)
+	}
+	contents, err := os.ReadFile(filepath.Join(f.root, "lead-prompts.log"))
+	if err != nil || !strings.Contains(string(contents), "Worker finished") {
+		t.Fatalf("hidden watch did not wake the idle Lead: %s (%v)", contents, err)
+	}
+}
+
+func noticeDeliveredAt(t *testing.T, db *store.DB, projectID, noticeID int64) int64 {
+	t.Helper()
+	notices, err := db.Notices(context.Background(), projectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.ID == noticeID {
+			return notice.DeliveredAt
+		}
+	}
+	return 0
+}
+
 func TestWatchRestartsAfterHerdrRestart(t *testing.T) {
 	checkWatchRestore(t, false)
 }
@@ -210,21 +189,26 @@ func checkWatchRestore(t *testing.T, clearGeneration bool) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
-	if len(watchPanes(t, client)) != 1 {
-		t.Fatal("Watch tab missing before restart")
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatal("hidden watch missing before Herdr restart")
+	}
+	if len(watchPanes(t, client)) != 0 {
+		t.Fatal("Project has a visible Watch pane before Herdr restart")
 	}
 	if clearGeneration {
-		// The Watch's first tick might not have recorded the server generation
-		// before Herdr exits. Pin that race rather than rely on its timing.
 		if _, err := f.db.ExecContext(context.Background(), `DELETE FROM project_runtime WHERE project_id=?`, f.project.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
-	beforeGeneration, _ := f.db.ProjectServerStartedAt(context.Background(), f.project.ID)
 	if err := client.StopIsolatedServer(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Second)
+	if !waitForCondition(5*time.Second, func() bool {
+		_, err := client.Snapshot(context.Background())
+		return err != nil
+	}) {
+		t.Fatal("isolated Herdr server remained available after stop")
+	}
 	startServer(t, client)
 	env := f.env
 	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"} {
@@ -233,34 +217,17 @@ func checkWatchRestore(t *testing.T, clearGeneration bool) {
 	command := exec.Command(f.binary, "recover", "--all")
 	command.Dir, command.Env = f.repo, env
 	output, err := command.CombinedOutput()
-	t.Logf("recover --all: %v %s", err, output)
-	project, err := f.db.ProjectByName(context.Background(), "shop")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("recover --all after Herdr restart: %v\n%s", err, output)
 	}
-	snapshot, _ := client.Snapshot(context.Background())
-	leadFound := false
-	for _, pane := range snapshot.Panes {
-		if pane.PaneID == project.LeadPaneID {
-			leadFound = true
-		}
+	if !waitForCondition(15*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("hidden watch missing after Herdr restart: %v\n%s", watchPIDs(f.root), output)
 	}
-	t.Logf("Lead pane restored=%v workspace=%s", leadFound, project.HerdrWorkspaceID)
-	if !waitForCondition(15*time.Second, func() bool {
-		return len(watchPanes(t, client)) > 0 && len(watchPIDs(f.root)) > 0
-	}) {
-		for _, pane := range watchPanes(t, client) {
-			visible, readErr := client.Call(context.Background(), "pane.read", map[string]any{"pane_id": pane.PaneID, "source": "visible"})
-			t.Logf("watch pane %s status=%s visible=%q readError=%v", pane.PaneID, pane.AgentStatus, visible, readErr)
-		}
-		afterGeneration, _ := f.db.ProjectServerStartedAt(context.Background(), f.project.ID)
-		t.Errorf("Watch not restored after Herdr restart: panes=%d processes=%d generation=%q -> %q", len(watchPanes(t, client)), len(watchPIDs(f.root)), beforeGeneration, afterGeneration)
+	if panes := watchPanes(t, client); len(panes) != 0 {
+		t.Fatalf("Herdr restart restored %d visible Watch panes: %#v", len(panes), panes)
 	}
-	_ = store.StateMerged
 }
 
-// L3: the Watch tab and ordinary Lead commands both run automatic Teardown.
-// A merged PR must be torn down without a false "teardown incomplete" reason.
 func TestConcurrentWatchTeardownRaisesNoFalseReason(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
@@ -268,7 +235,7 @@ func TestConcurrentWatchTeardownRaisesNoFalseReason(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	candidate := f.mustTask(t, "t1")
 	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
@@ -280,9 +247,302 @@ func TestConcurrentWatchTeardownRaisesNoFalseReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range notices {
-		if n.Kind == "teardown_incomplete" {
-			t.Errorf("state=%s false reason: %s", f.mustTask(t, "t1").State, n.Summary)
+	for _, notice := range notices {
+		if notice.Kind == "teardown_incomplete" {
+			t.Errorf("state=%s false reason: %s", f.mustTask(t, "t1").State, notice.Summary)
 		}
+	}
+}
+
+func TestUpClosesLegacyVisibleWatchTab(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	client := herdr.NewWithEnv("herdr", f.env)
+	if _, err := client.Call(context.Background(), "tab.create", map[string]any{
+		"workspace_id": f.project.HerdrWorkspaceID, "cwd": f.repo, "label": "posse:shop:watch", "focus": false,
+	}); err != nil {
+		t.Fatalf("create legacy Watch tab: %v", err)
+	}
+	command := exec.Command(f.binary, "up", "--name", "shop")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	_, _ = command.CombinedOutput() // A live Lead may make `up` return lead_running after migration.
+	if panes := watchPanes(t, client); len(panes) != 0 {
+		t.Fatalf("legacy Watch tab survived posse up: %#v", panes)
+	}
+}
+
+func TestWatchRuntimeReexecsAfterBinaryReplacement(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch missing before update simulation: %v", watchPIDs(f.root))
+	}
+	pid := watchPIDs(f.root)[0]
+	before, err := f.db.WatchRuntime(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.ReadFile(f.binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := f.binary + ".replacement"
+	if err := os.WriteFile(replacement, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, f.binary); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(f.binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("replacement binary has no file identity")
+	}
+	if !waitForCondition(15*time.Second, func() bool {
+		state, stateErr := f.db.WatchRuntime(context.Background(), f.project.ID)
+		return stateErr == nil && state.PID == pid && state.ExecutableInode == executable.Ino && len(watchPIDs(f.root)) == 1
+	}) {
+		state, _ := f.db.WatchRuntime(context.Background(), f.project.ID)
+		t.Fatalf("watch did not re-exec into the replacement binary: before=%#v after=%#v pids=%v", before, state, watchPIDs(f.root))
+	}
+}
+
+func TestWatchRepairsAfterHerdrAgentEvent(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("initial Project watch missing: %v", watchPIDs(f.root))
+	}
+	if err := syscall.Kill(watchPIDs(f.root)[0], syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatalf("killed watch remains: %v", watchPIDs(f.root))
+	}
+	event, err := json.Marshal(map[string]any{
+		"event": "pane_agent_status_changed",
+		"data":  map[string]string{"pane_id": f.project.LeadPaneID, "workspace_id": f.project.HerdrWorkspaceID, "agent_status": "idle"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := setEnv(f.env, "HERDR_PANE_ID", f.project.LeadPaneID)
+	env = setEnv(env, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
+	env = setEnv(env, "HERDR_PLUGIN_EVENT_JSON", string(event))
+	command := exec.Command(f.binary, "_ingest")
+	command.Dir, command.Env = f.repo, env
+	output, err := command.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "ingested: true") {
+		t.Fatalf("Herdr event ingest failed: %v\n%s", err, output)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Herdr event did not restore the hidden watch: %v\n%s", watchPIDs(f.root), output)
+	}
+}
+
+func TestWatchRuntimeHeartbeatProgressClearsAnApparentStaleReading(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch missing: %v", watchPIDs(f.root))
+	}
+	pid := watchPIDs(f.root)[0]
+	state, err := f.db.WatchRuntime(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.HeartbeatAt = time.Now().Add(-time.Hour).UnixMilli()
+	if err := f.db.SetWatchRuntime(context.Background(), f.project.ID, state); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, f.binary, f.repo, f.env, "doctor", "--json")
+	if pids := watchPIDs(f.root); len(pids) != 1 || pids[0] != pid {
+		t.Fatalf("heartbeat progress unnecessarily replaced a resumed watch: %v", pids)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Watch runtime") {
+			t.Fatalf("fresh heartbeat progress left a false watch failure Notice: %#v", notice)
+		}
+	}
+}
+
+func TestWatchRuntimeStaleHeartbeatRaisesOneNoticeAndRepairs(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch missing: %v", watchPIDs(f.root))
+	}
+	pid := watchPIDs(f.root)[0]
+	state, err := f.db.WatchRuntime(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialHeartbeat := state.HeartbeatAt
+	if !waitForCondition(7*time.Second, func() bool {
+		state, err = f.db.WatchRuntime(context.Background(), f.project.ID)
+		return err == nil && state.HeartbeatAt > initialHeartbeat
+	}) {
+		t.Fatal("watch did not complete a heartbeat before the stale simulation")
+	}
+	state.HeartbeatAt = time.Now().Add(-time.Hour).UnixMilli()
+	if err := f.db.SetWatchRuntime(context.Background(), f.project.ID, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	resumed := false
+	t.Cleanup(func() {
+		if !resumed {
+			_ = syscall.Kill(pid, syscall.SIGCONT)
+		}
+	})
+	command := exec.Command(f.binary, "doctor", "--json")
+	command.Dir, command.Env = f.repo, f.env
+	done := make(chan struct {
+		output []byte
+		err    error
+	}, 1)
+	go func() {
+		output, runErr := command.CombinedOutput()
+		done <- struct {
+			output []byte
+			err    error
+		}{output, runErr}
+	}()
+	if !waitForCondition(20*time.Second, func() bool {
+		notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+		if err != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Watch runtime") {
+				return true
+			}
+		}
+		return false
+	}) {
+		_ = syscall.Kill(pid, syscall.SIGCONT)
+		resumed = true
+		select {
+		case result := <-done:
+			t.Fatalf("stale watch check exited before raising its Notice: %v\n%s", result.err, result.output)
+		default:
+		}
+		t.Fatal("stale heartbeat did not raise a watch failure Notice")
+	}
+	var result struct {
+		output []byte
+		err    error
+	}
+	select {
+	case result = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("doctor did not finish stale watch supervision")
+	}
+	if result.err != nil {
+		t.Fatalf("doctor failed while supervising stale watch: %v\n%s", result.err, result.output)
+	}
+	if pids := watchPIDs(f.root); len(pids) != 1 || pids[0] != pid {
+		t.Fatalf("supervision killed or replaced a nonresponsive watch instead of stopping gracefully: %v\n%s", pids, result.output)
+	}
+	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	resumed = true
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatalf("stale watch did not finish its pending graceful stop: %v", watchPIDs(f.root))
+	}
+	output := runPosse(t, f.binary, f.repo, f.env, "doctor", "--json")
+	if !waitForCondition(10*time.Second, func() bool {
+		pids := watchPIDs(f.root)
+		return len(pids) == 1 && pids[0] != pid
+	}) {
+		t.Fatalf("stale heartbeat was not repaired after graceful watch exit: %v\n%s", watchPIDs(f.root), output)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Watch runtime") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("stale heartbeat created %d watch failure Notices, want one: %#v", count, notices)
+	}
+}
+
+func TestConcurrentProjectCommandsStartOneWatch(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("initial Project watch missing: %v", watchPIDs(f.root))
+	}
+	if err := syscall.Kill(watchPIDs(f.root)[0], syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatalf("initial watch survived SIGKILL: %v", watchPIDs(f.root))
+	}
+	const commands = 8
+	errors := make(chan error, commands)
+	for index := 0; index < commands; index++ {
+		go func() {
+			command := exec.Command(f.binary, "list")
+			command.Dir, command.Env = f.repo, f.env
+			if output, err := command.CombinedOutput(); err != nil {
+				errors <- fmt.Errorf("list command: %w: %s", err, output)
+				return
+			}
+			errors <- nil
+		}()
+	}
+	for index := 0; index < commands; index++ {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("concurrent commands did not leave exactly one watch: %v", watchPIDs(f.root))
+	}
+}
+
+func TestWatchRuntimeIdentityIsStoredInProjectRuntime(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch missing: %v", watchPIDs(f.root))
+	}
+	state, err := f.db.WatchRuntime(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.PID != watchPIDs(f.root)[0] || state.Token == "" || state.StartedAt == 0 || state.HeartbeatAt < state.StartedAt || state.ExecutablePath == "" || state.ExecutableInode == 0 {
+		t.Fatalf("persisted watch identity = %#v", state)
+	}
+	environ, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(state.PID), "environ"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"HERDR_PANE_ID=", "HERDR_WORKSPACE_ID=", "HERDR_TAB_ID="} {
+		if strings.Contains(string(environ), forbidden) {
+			t.Errorf("detached watch inherited %q", forbidden)
+		}
+	}
+	if !strings.Contains(string(environ), "POSSE_WATCH_TOKEN="+state.Token) {
+		t.Fatal("watch process environment does not contain its persisted token")
+	}
+	if panes := watchPanes(t, herdr.NewWithEnv("herdr", f.env)); len(panes) != 0 {
+		t.Fatalf("watch identity test found visible Watch panes: %#v", panes)
 	}
 }

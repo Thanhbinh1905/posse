@@ -181,13 +181,13 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			}
 			command := exec.Command(binary, "start", "--brief", brief, "--name", "launch-skills")
 			command.Dir, command.Env = repo, leadEnv
-			output, rideErr := command.CombinedOutput()
-			if rideErr != nil || !strings.Contains(string(output), "working") {
+			output, startErr := command.CombinedOutput()
+			if startErr != nil || !strings.Contains(string(output), "working") {
 				snapshot, _ := client.Snapshot(context.Background())
 				reportLog, _ := os.ReadFile(filepath.Join(root, "report-agent.log"))
 				argsLog, _ := os.ReadFile(capture)
 				failedTask, _ := db.Task(context.Background(), project.ID, "t1")
-				t.Fatalf("start %s Worker: err=%v output=%s task=%#v snapshot=%#v reports=%s args=%s", kind, rideErr, output, failedTask, snapshot, reportLog, argsLog)
+				t.Fatalf("start %s Worker: err=%v output=%s task=%#v snapshot=%#v reports=%s args=%s", kind, startErr, output, failedTask, snapshot, reportLog, argsLog)
 			}
 			task, err := db.Task(context.Background(), project.ID, "t1")
 			if err != nil {

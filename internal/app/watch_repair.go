@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
-	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -28,64 +26,66 @@ func (s *Service) repairWatch(ctx *axi.Context, db *store.DB, home string, proje
 	if project.IsDown() {
 		return axi.Failure("project_down", "the Project is stopped; Watch repair will not restart it", false, "Run `posse up` only when you intend to restart the Lead and recover Workers")
 	}
+	if project.HerdrWorkspaceID == "" {
+		return axi.Failure("lead_workspace_missing", "the Project has no active Lead workspace to supervise", false, "Run `posse up` from the Project folder to start its Lead")
+	}
 	if _, err := os.Stat(project.Root); err != nil {
 		return axi.Failure("project_missing", fmt.Sprintf("Project %s path is unavailable: %s", project.Name, project.Root), false, "Run `posse project move` to update the Project path")
 	}
 	if s.Herdr == nil {
 		return axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true, "Run `posse doctor` to inspect setup")
 	}
-
 	snapshot, err := s.snapshot(ctx.Context)
 	if err != nil {
-		return axi.Failure("watch_repair_failed", "could not verify the existing Lead workspace; Watch was not changed", true, err.Error(), "Restore Herdr, then retry `posse watch --repair`")
+		return axi.Failure("watch_repair_failed", "could not verify the existing Lead workspace; watch was not changed", true, err.Error(), "Restore Herdr, then retry `posse watch --repair`")
 	}
 	workspaceID, found := leadWorkspace(snapshot, project)
 	if !found || workspaceID != project.HerdrWorkspaceID {
 		return axi.Failure("lead_workspace_missing", "the recorded Lead workspace is not open; Watch repair will not restart the Lead", false, "Restore the Lead workspace, then retry `posse watch --repair`")
 	}
-
-	beforeState, err := db.WatchRecovery(ctx.Context, project.ID)
+	before, err := db.WatchRuntime(ctx.Context, project.ID)
 	if err != nil {
 		return err
 	}
-	beforeProcesses, processErr := systemWatchProcesses(home)
-	beforeCheck := projectWatchCheck(project, beforeState, snapshot, beforeProcesses, processErr)
-
-	if err := s.ensureWatchTab(ctx.Context, db, project, snapshot, true); err != nil {
-		return axi.Failure("watch_repair_failed", "could not restore the Project's poll-only Watch", true, err.Error(), "Check Herdr availability and retry `posse watch --repair`")
-	}
-	state, check, err := s.waitWatchRepairVerification(ctx.Context, db, home, project)
+	beforeCheck, err := s.watchRuntimeHealth(ctx.Context, db, home, project)
 	if err != nil {
-		return axi.Failure("watch_repair_failed", "could not verify the restored poll-only Watch", true, err.Error(), "Check Herdr availability and retry `posse watch --repair`")
+		return err
+	}
+	if err := s.ensureWatchRuntime(ctx.Context, db, home, project); err != nil {
+		return axi.Failure("watch_repair_failed", "could not restore the Project watch", true, err.Error(), "Check process permissions and retry `posse watch --repair`")
+	}
+	state, check, err := s.waitWatchRuntimeVerification(ctx.Context, db, home, project)
+	if err != nil {
+		return axi.Failure("watch_repair_failed", "could not verify the restored Project watch", true, err.Error(), "Check process permissions and retry `posse watch --repair`")
 	}
 	if check.Status != "ok" {
-		return axi.Failure("watch_repair_failed", "Watch repair could not verify one matching pane and process", true, check.Detail, "Inspect Herdr and retry `posse watch --repair`")
+		return axi.Failure("watch_repair_failed", "the Project watch did not become healthy", true, check.Detail, "Inspect the Watch log at "+watchRuntimeLogPath(home, project))
 	}
 	return ctx.Print(axi.Object{
 		{Key: "project", Value: project.Name},
-		{Key: "pane", Value: state.PaneID},
+		{Key: "pid", Value: state.PID},
 		{Key: "state", Value: "running"},
-		{Key: "repaired", Value: beforeCheck.Status != "ok"},
-		{Key: "help", Value: []any{"This operation restores only the poll-only Watch; it does not recover the Lead or Workers or change config"}},
+		{Key: "repaired", Value: beforeCheck.Status != "ok" || before.PID != state.PID},
+		{Key: "heartbeat_at", Value: time.UnixMilli(state.HeartbeatAt).UTC().Format(time.RFC3339)},
+		{Key: "log", Value: watchRuntimeLogPath(home, project)},
+		{Key: "help", Value: []any{"The Project watch observes PRs, CI, checkout state and merged-Task Teardown; it never claims Notices"}},
 	})
 }
 
-func (s *Service) waitWatchRepairVerification(ctx context.Context, db *store.DB, home string, project store.Project) (store.WatchRecovery, doctorCheck, error) {
+func (s *Service) waitWatchRuntimeVerification(ctx context.Context, db *store.DB, home string, project store.Project) (store.WatchRuntime, doctorCheck, error) {
 	deadline := time.Now().Add(watchStartupGracePeriod)
-	var state store.WatchRecovery
+	var state store.WatchRuntime
 	var check doctorCheck
 	for {
 		var err error
-		state, err = db.WatchRecovery(ctx, project.ID)
+		state, err = db.WatchRuntime(ctx, project.ID)
 		if err != nil {
 			return state, doctorCheck{}, err
 		}
-		snapshot, err := s.snapshot(ctx)
+		check, err = s.watchRuntimeHealth(ctx, db, home, project)
 		if err != nil {
-			return state, doctorCheck{}, err
+			return state, check, err
 		}
-		processes, processErr := systemWatchProcesses(home)
-		check = projectWatchCheck(project, state, snapshot, processes, processErr)
 		if check.Status == "ok" || !time.Now().Before(deadline) {
 			return state, check, nil
 		}
@@ -97,71 +97,89 @@ func (s *Service) waitWatchRepairVerification(ctx context.Context, db *store.DB,
 	}
 }
 
-func projectWatchCheck(project store.Project, state store.WatchRecovery, snapshot herdr.Snapshot, processes []watchProcess, processErr error) doctorCheck {
-	panes := make([]herdr.Pane, 0, 1)
-	for _, pane := range snapshot.Panes {
-		if pane.Label == watchTabLabel(project) {
-			panes = append(panes, pane)
-		}
+func (s *Service) watchRuntimeHealth(ctx context.Context, db *store.DB, home string, project store.Project) (doctorCheck, error) {
+	state, err := db.WatchRuntime(ctx, project.ID)
+	if err != nil {
+		return doctorCheck{}, err
 	}
-	correctPanes := make([]herdr.Pane, 0, len(panes))
-	for _, pane := range panes {
-		if pane.WorkspaceID == project.HerdrWorkspaceID {
-			correctPanes = append(correctPanes, pane)
-		}
+	if project.IsDown() {
+		return doctorCheck{Name: "Project Watch " + project.Name, Status: "ok", Detail: "Project is down; no watch", Action: ""}, nil
 	}
-	pollerPaneIDs := make([]string, 0, 1)
-	for _, process := range processes {
-		if process.PollOnly && processBelongsToProject(process, project) && watchPIDRunning(process.PID) {
-			pollerPaneIDs = append(pollerPaneIDs, process.PaneID)
-		}
+	if project.HerdrWorkspaceID == "" {
+		return doctorCheck{Name: "Project Watch " + project.Name, Status: "ok", Detail: "Lead not started; no watch", Action: ""}, nil
 	}
-	leadRunning := liveLeadWatch(project, processes)
-
-	detail := fmt.Sprintf("recorded pane=%s; ", watchPaneValue(state.PaneID))
-	switch {
-	case len(panes) == 0:
-		detail += "poll-only pane missing"
-	case len(correctPanes) == 0:
-		detail += fmt.Sprintf("poll-only pane mismatched (workspace=%s)", panes[0].WorkspaceID)
-	case len(panes) > 1:
-		detail += fmt.Sprintf("multiple poll-only panes=%d", len(panes))
-	case state.PaneID != correctPanes[0].PaneID:
-		detail += fmt.Sprintf("recorded pane mismatch (observed=%s)", correctPanes[0].PaneID)
-	default:
-		detail += fmt.Sprintf("poll-only pane=%s", correctPanes[0].PaneID)
-	}
+	processes, processErr := systemWatchProcesses(home)
 	if processErr != nil {
-		detail += "; poll-only processes=unknown (" + processErr.Error() + ")"
-	} else {
-		detail += fmt.Sprintf("; poll-only processes=%d", len(pollerPaneIDs))
-		if len(pollerPaneIDs) == 1 {
-			detail += "; poll-only process pane=" + pollerPaneIDs[0]
-		} else if len(pollerPaneIDs) > 1 {
-			detail += "; poll-only process panes=" + strings.Join(pollerPaneIDs, ",")
+		return doctorCheck{Name: "Project Watch " + project.Name, Status: "warn", Detail: "watch process state unavailable: " + processErr.Error(), Action: "Check process-table access and run `posse watch --repair`"}, nil
+	}
+	var found *watchProcess
+	for index := range processes {
+		process := &processes[index]
+		if process.PollOnly && process.WatchProjectID == project.ID && process.PID == state.PID && process.WatchToken == state.Token && process.WatchStartedAt == state.StartedAt {
+			found = process
+			break
 		}
 	}
-	if processErr != nil {
-		detail += "; Lead delivery Watch=unknown"
-	} else if leadRunning {
-		detail += "; Lead delivery Watch=running"
-	} else {
-		detail += "; Lead delivery Watch=missing"
+	detail := "watch=missing"
+	if state.PID > 0 {
+		detail = fmt.Sprintf("pid=%d started_at=%s heartbeat_at=%s executable=%s (%d:%d)", state.PID, time.UnixMilli(state.StartedAt).UTC().Format(time.RFC3339), time.UnixMilli(state.HeartbeatAt).UTC().Format(time.RFC3339), state.ExecutablePath, state.ExecutableDevice, state.ExecutableInode)
 	}
-
-	pollerMatchesPane := len(correctPanes) == 1 && len(pollerPaneIDs) == 1 && pollerPaneIDs[0] == correctPanes[0].PaneID
-	healthy := len(panes) == 1 && len(correctPanes) == 1 && state.PaneID == correctPanes[0].PaneID && pollerMatchesPane && processErr == nil
+	healthy := state.PID > 0 && state.Token != "" && found != nil && watchPIDRunning(state.PID) && time.Since(time.UnixMilli(state.HeartbeatAt)) <= watchRuntimeStaleAfter
+	if found != nil && (found.Executable.Device != state.ExecutableDevice || found.Executable.Inode != state.ExecutableInode) {
+		detail += "; executable changed, re-exec pending"
+	}
+	if found == nil && state.PID > 0 {
+		detail += "; matching process not found"
+	}
+	if time.Since(time.UnixMilli(state.HeartbeatAt)) > watchRuntimeStaleAfter {
+		detail += "; heartbeat stale"
+	}
+	detail += "; log=" + watchRuntimeLogPath(home, project)
 	status, action := "ok", ""
 	if !healthy {
 		status = "warn"
-		action = "Run `posse watch --repair` from the Project folder to restore only its poll-only Watch"
+		action = "Run `posse watch --repair` or another Project command to repair the watch"
 	}
-	return doctorCheck{Name: "Project Watch " + project.Name, Status: status, Detail: detail, Action: action}
+	return doctorCheck{Name: "Project Watch " + project.Name, Status: status, Detail: detail, Action: action}, nil
 }
 
-func watchPaneValue(paneID string) string {
-	if paneID == "" {
-		return "none"
+func (s *Service) watchRuntimeRow(ctx context.Context, db *store.DB, home string, project store.Project) map[string]any {
+	status := "missing"
+	state, err := db.WatchRuntime(ctx, project.ID)
+	if project.IsDown() {
+		status = "stopped"
+	} else if project.HerdrWorkspaceID == "" {
+		status = "not_started"
+	} else if err != nil {
+		status = "unavailable"
+	} else if check, checkErr := s.watchRuntimeHealth(ctx, db, home, project); checkErr != nil {
+		status = "unavailable"
+	} else if check.Status == "ok" {
+		status = "running"
+	} else {
+		status = "unhealthy"
 	}
-	return paneID
+	row := map[string]any{"state": status, "log": watchRuntimeLogPath(home, project)}
+	if err != nil {
+		row["error"] = err.Error()
+		return row
+	}
+	if state.PID > 0 {
+		row["pid"] = state.PID
+		row["started_at"] = time.UnixMilli(state.StartedAt).UTC().Format(time.RFC3339)
+		row["heartbeat_at"] = time.UnixMilli(state.HeartbeatAt).UTC().Format(time.RFC3339)
+		row["executable"] = state.ExecutablePath
+		row["device"] = state.ExecutableDevice
+		row["inode"] = state.ExecutableInode
+	}
+	return row
+}
+
+func (s *Service) watchRuntimeSummary(ctx context.Context, db *store.DB, home string, project store.Project) string {
+	row := s.watchRuntimeRow(ctx, db, home, project)
+	status, _ := row["state"].(string)
+	if pid, ok := row["pid"]; ok {
+		return fmt.Sprintf("%s (pid=%v, heartbeat=%v)", status, pid, row["heartbeat_at"])
+	}
+	return status
 }

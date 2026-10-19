@@ -204,7 +204,7 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 // handles for Task panes and shell-only panes in the held Sandbox. CWD discovery
 // may detect a process but cannot authorize cleanup. Herdr 0.9.1 has no atomic
 // pane-close precondition, so teardown never closes panes by target ID alone.
-func (s *Service) verifySandboxForegroundOwnerchangeWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, authorization *sandboxProcessAuthorization) error {
+func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, authorization *sandboxProcessAuthorization) error {
 	sandboxes, err := db.Sandboxes(ctx, project.ID)
 	if err != nil {
 		return axi.Failure("sandbox_process_identity_unavailable", "could not verify Sandbox ownership before releasing it", true, err.Error())
@@ -397,14 +397,14 @@ func (s *Service) verifySandboxForegroundOwnerchangeWithAuthorization(ctx contex
 				if signal != syscall.SIGKILL {
 					return nil
 				}
-				return s.verifySandboxShellSignalOwnerchange(ctx, project, task, heldSandbox.Path, expectedPane, shellPID, taskOwnedPane, foreignShellPane, authorization)
+				return s.verifySandboxShellSignalOwnership(ctx, project, task, heldSandbox.Path, expectedPane, shellPID, taskOwnedPane, foreignShellPane, authorization)
 			})
 		}
 	}
 	return nil
 }
 
-func (s *Service) verifySandboxShellSignalOwnerchange(ctx context.Context, project store.Project, task store.Task, sandboxPath string, expectedPane herdr.Pane, shellPID int, taskOwnedPane, foreignShellPane bool, authorization *sandboxProcessAuthorization) error {
+func (s *Service) verifySandboxShellSignalOwnership(ctx context.Context, project store.Project, task store.Task, sandboxPath string, expectedPane herdr.Pane, shellPID int, taskOwnedPane, foreignShellPane bool, authorization *sandboxProcessAuthorization) error {
 	paneID := expectedPane.PaneID
 	alive, err := authorization.verifyIfAlive(shellPID)
 	if err != nil {
@@ -474,6 +474,62 @@ func (s *Service) verifySandboxShellSignalOwnerchange(ctx context.Context, proje
 		return fmt.Errorf("pane %s foreground process %d exited during ownership recheck", paneID, foregroundPID)
 	}
 	return nil
+}
+
+func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project store.Project, task store.Task) (paneProcessInfo, error) {
+	if s.Herdr == nil {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "Herdr is required to verify an in-place Task pane before signaling", true)
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task pane before signaling", true, err.Error())
+	}
+	pane, found := findTaskPane(snapshot.Panes, task)
+	if !found {
+		return paneProcessInfo{}, nil // No pane remains to contain a foreign foreground; process containment remains authoritative.
+	}
+	if !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task pane before signaling", true)
+	}
+	info, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
+	if err != nil {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task foreground before signaling", true, err.Error())
+	}
+	foreground := info.ForegroundProcessGroup
+	if foreground <= 1 {
+		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", fmt.Sprintf("Herdr reports no identifiable foreground process in in-place Task pane %s", pane.PaneID), true)
+	}
+	if foreground == info.ShellPID {
+		return info, nil
+	}
+	if pane.Agent == "" || !taskAgentMatchesPane(snapshot, project, task, pane) {
+		return paneProcessInfo{}, axi.Failure("task_process_not_owned", fmt.Sprintf("in-place Task pane %s has a foreign foreground process; preserving it", pane.PaneID), false, "Stop or inspect the unrelated process, preserve its work, then retry Teardown")
+	}
+	name, cwd, processFound := foregroundProcess(info, foreground)
+	if !processFound || !strings.EqualFold(name, pane.Agent) || !pathInside(cwd, task.WorktreePath) {
+		return paneProcessInfo{}, axi.Failure("task_process_not_owned", fmt.Sprintf("in-place Task pane %s has a foreign foreground process that is not the Task's verified Worker; preserving it", pane.PaneID), false, "Stop or inspect the unrelated process, preserve its work, then retry Teardown")
+	}
+	return info, nil
+}
+
+func (s *Service) verifyInPlaceProcessSignalOwnership(ctx context.Context, project store.Project, task store.Task, pid, recordedShellPID int) error {
+	info, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
+	if err != nil {
+		return err
+	}
+	if pid > 1 && info.ShellPID == pid {
+		return nil
+	}
+	if processInTaskCgroup(pid, task) {
+		return nil // Delegated cgroup membership independently proves Task ownership.
+	}
+	if task.ContainmentMarker != "" && processHasTaskMarker(pid, task.ContainmentMarker) {
+		return nil // Pane disappearance is safe for a process independently owned by the Task marker.
+	}
+	if pid > 1 && pid == recordedShellPID && info.ShellPID != recordedShellPID {
+		return errPaneShellNotRecorded
+	}
+	return axi.Failure("task_process_identity_unavailable", fmt.Sprintf("process %d is neither marked for the Task nor the verified in-place pane shell", pid), true)
 }
 
 func shellOnlyPaneInSandbox(snapshot herdr.Snapshot, pane herdr.Pane, sandboxPath string) bool {
@@ -863,6 +919,9 @@ func (s *Service) teardownDiscardIncomplete(ctx context.Context, db *store.DB, p
 }
 
 func (s *Service) recordTeardownIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
+	if err := s.recordTeardownBlocked(ctx, db, project, task, cause); err != nil {
+		return err
+	}
 	notices, err := db.Notices(ctx, project.ID, false)
 	if err != nil {
 		return err

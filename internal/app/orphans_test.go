@@ -49,7 +49,7 @@ func TestSweepOrphanPanesDryRunThenClose(t *testing.T) {
 	cli := service.CLI()
 	cli.Out = &output
 	if code := cli.Run([]string{"pool", "prune"}); code != 0 || !strings.Contains(output.String(), "dry_run: true") || !strings.Contains(output.String(), "w2:p1") {
-		t.Fatalf("sweep dry run did not list the orphan: code=%d output=%s", code, output.String())
+		t.Fatalf("pool prune dry run did not list the orphan: code=%d output=%s", code, output.String())
 	}
 	if fake.CallCount("pane.close") != 0 {
 		t.Fatalf("dry run closed an orphan pane: %#v", fake.Calls)
@@ -74,19 +74,19 @@ func TestSweepOrphanPanesDryRunThenClose(t *testing.T) {
 	}
 	output.Reset()
 	if code := cli.Run([]string{"pool", "prune", "--yes"}); code != 0 || !strings.Contains(output.String(), "w2:p1") {
-		t.Fatalf("sweep --yes failed to close the orphan: code=%d output=%s", code, output.String())
+		t.Fatalf("pool prune --yes failed to close the orphan: code=%d output=%s", code, output.String())
 	}
 	if fake.CallCount("pane.close") != 1 {
-		t.Fatalf("sweep --yes closed unexpected panes: %#v", fake.Calls)
+		t.Fatalf("pool prune --yes closed unexpected panes: %#v", fake.Calls)
 	}
 	for _, pane := range fake.currentSnapshot().Panes {
 		if pane.PaneID == "w2:p1" || pane.Label == "posse:shop:t99" {
-			t.Fatalf("orphan remains after sweep: %#v", pane)
+			t.Fatalf("orphan remains after pool prune: %#v", pane)
 		}
 	}
 }
 
-func TestTaskPaneCwdOwnerchangeResolvesSymlinks(t *testing.T) {
+func TestTaskPaneCwdOwnershipResolvesSymlinks(t *testing.T) {
 	root := t.TempDir()
 	sandbox := filepath.Join(root, "sandbox")
 	if err := os.MkdirAll(filepath.Join(sandbox, "nested"), 0o700); err != nil {

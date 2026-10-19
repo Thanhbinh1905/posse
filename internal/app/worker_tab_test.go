@@ -223,7 +223,7 @@ func TestOpenWorkerTabUsesTheLeadWorkspace(t *testing.T) {
 	home := t.TempDir()
 	opened, err := testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
 	if err != nil || opened != (openedTab{WorkspaceID: "w5", TabID: "w5:t1", PaneID: "w5:p1"}) {
-		t.Fatalf("openRiderTab = %#v, %v", opened, err)
+		t.Fatalf("openWorkerTab = %#v, %v", opened, err)
 	}
 	var methods []string
 	for _, call := range adapter.Calls {
@@ -241,7 +241,7 @@ func TestOpenWorkerTabUsesTheLeadWorkspace(t *testing.T) {
 		}
 	}
 	if strings.Join(methods, ",") != "worktree.open,pane.report_metadata,pane.rename" {
-		t.Fatalf("openRiderTab calls = %v", methods)
+		t.Fatalf("openWorkerTab calls = %v", methods)
 	}
 
 	// Without the Lead, posse refuses rather than open a second workspace.
@@ -249,7 +249,7 @@ func TestOpenWorkerTabUsesTheLeadWorkspace(t *testing.T) {
 	_, err = testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
 	var cliErr *axi.Error
 	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("worktree.open") != 0 || adapter.CallCount("workspace.create") != 0 {
-		t.Fatalf("openRiderTab without the Lead = %v, calls %#v", err, adapter.Calls)
+		t.Fatalf("openWorkerTab without the Lead = %v, calls %#v", err, adapter.Calls)
 	}
 }
 
@@ -258,7 +258,7 @@ func TestOpenWorkerTabDoesNotCloseAnUnlabeledPaneAfterMetadataFailure(t *testing
 	adapter.Errors["pane.report_metadata"] = errors.New("metadata write failed")
 	_, err := testService(t.TempDir(), adapter).openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
 	if err == nil {
-		t.Fatal("openRiderTab succeeded after metadata failure")
+		t.Fatal("openWorkerTab succeeded after metadata failure")
 	}
 	for _, method := range []string{"pane.close", "tab.close", "workspace.close"} {
 		if adapter.CallCount(method) != 0 {

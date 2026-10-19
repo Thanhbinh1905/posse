@@ -159,7 +159,7 @@ func TestLaunchPromptReturnsNonStallErrorsWithoutRetry(t *testing.T) {
 	}
 }
 
-type rideFixture struct {
+type startFixture struct {
 	fake    *herdr.Fake
 	service *Service
 	home    string
@@ -168,7 +168,7 @@ type rideFixture struct {
 	project store.Project
 }
 
-func newStartFixture(t *testing.T) rideFixture {
+func newStartFixture(t *testing.T) startFixture {
 	t.Helper()
 	fastLaunchRetries(t)
 	ctx := context.Background()
@@ -206,10 +206,10 @@ func newStartFixture(t *testing.T) rideFixture {
 	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t2","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p2","tab_id":"w1:t2"}}`)
 	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	t.Chdir(repo)
-	return rideFixture{fake: fake, service: testService(home, fake), home: home, repo: repo, brief: briefPath, project: project}
+	return startFixture{fake: fake, service: testService(home, fake), home: home, repo: repo, brief: briefPath, project: project}
 }
 
-func (f rideFixture) start(t *testing.T) (int, string) {
+func (f startFixture) start(t *testing.T) (int, string) {
 	t.Helper()
 	output := &bytes.Buffer{}
 	cli := f.service.CLI()
@@ -218,7 +218,7 @@ func (f rideFixture) start(t *testing.T) (int, string) {
 	return code, output.String()
 }
 
-func (f rideFixture) onlyTask(t *testing.T) (store.Task, []store.Notice) {
+func (f startFixture) onlyTask(t *testing.T) (store.Task, []store.Notice) {
 	t.Helper()
 	db, err := store.Open(f.home)
 	if err != nil {

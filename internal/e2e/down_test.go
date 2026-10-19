@@ -9,12 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 // userPaneEnv is a User shell in the given workspace, as Herdr exports it.
 func (f *workerTabsFixture) userPaneEnv(workspace workspaceResult) []string {
 	env := setEnv(f.env, "HERDR_ENV", "1")
+	env = setEnv(env, "HERDR_SOCKET_PATH", herdr.IsolatedTestSocketPath(f.root))
 	env = setEnv(env, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	env = setEnv(env, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
 	return setEnv(env, "HERDR_TAB_ID", workspace.RootPane.TabID)
@@ -81,6 +83,9 @@ func TestDownKeepsProjectStoppedUntilUp(t *testing.T) {
 	if project := f.project(t); !project.IsDown() || project.LeadPaneID != "" {
 		t.Fatalf("down did not record the Project down: %#v", project)
 	}
+	if pids := watchPIDs(f.root); len(pids) != 0 {
+		t.Fatalf("down left hidden Watch runtimees running: %v", pids)
+	}
 	if output := runPosse(t, f.binary, f.root, f.env, "--json"); !strings.Contains(output, `"lead":"down"`) {
 		t.Fatalf("the dashboard did not show the Lead down: %s", output)
 	}
@@ -106,6 +111,9 @@ func TestDownKeepsProjectStoppedUntilUp(t *testing.T) {
 	f.upInNewWorkspace(t)
 	if project := f.project(t); project.IsDown() {
 		t.Fatalf("posse up left the Project down: %#v", project)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("posse up did not restart exactly one hidden watch: %v", watchPIDs(f.root))
 	}
 }
 

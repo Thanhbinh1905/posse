@@ -69,8 +69,8 @@ func TestTaskScratchRefusesSymlinkedOwnedPath(t *testing.T) {
 func TestExportTaskScratchSetsTemporaryVariablesInOwnedPane(t *testing.T) {
 	fake := herdr.NewFake()
 	service := testService(t.TempDir(), fake)
-	scratch := "/tmp/posse scratch/it's-owned"
-	if err := exportTaskScratch(context.Background(), service, "w1:p2", scratch); err != nil {
+	scratch := "/home/thanhbinh/.posse/scratch/posse/t308/it's-owned"
+	if err := exportTaskScratch(context.Background(), service, "w1:p2", scratch, "task-marker-123"); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.Calls) != 1 || fake.Calls[0].Method != "pane.send_input" || fake.Calls[0].Params["pane_id"] != "w1:p2" {
@@ -83,9 +83,12 @@ func TestExportTaskScratchSetsTemporaryVariablesInOwnedPane(t *testing.T) {
 	if !strings.Contains(command, `it'"'"'s-owned`) {
 		t.Fatalf("scratch path was not shell-quoted safely: %s", command)
 	}
-	for _, variable := range []string{"TMPDIR", "GOTMPDIR", "TMP", "TEMP"} {
-		if !strings.Contains(command, variable+"='/tmp/posse scratch/it") {
+	for _, variable := range []string{"TMPDIR", "GOTMPDIR", "TMP", "TEMP", "POSSE_TASK_TEMP"} {
+		if !strings.Contains(command, variable+"='/home/thanhbinh/.posse/scratch/posse/t308/it") {
 			t.Errorf("environment command omitted quoted %s: %s", variable, command)
 		}
+	}
+	if !strings.Contains(command, "POSSE_TASK_ID='task-marker-123'") {
+		t.Errorf("environment command omitted the Task process marker: %s", command)
 	}
 }

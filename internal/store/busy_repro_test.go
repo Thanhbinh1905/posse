@@ -142,7 +142,7 @@ func TestConcurrentWritesNeverReturnBusy(t *testing.T) {
 	// Simulate CPU pressure alongside the fsync pressure that WAL commits already add.
 	stopCPU := make(chan struct{})
 	var cpuWg sync.WaitGroup
-	for i := 0; i < runtime.NumCPU(); i++ {
+	for i := 0; i < runtime.GOMAXPROCS(0); i++ {
 		cpuWg.Add(1)
 		go func() {
 			defer cpuWg.Done()

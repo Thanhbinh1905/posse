@@ -443,21 +443,21 @@ func TestWatchAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 // one command from competing message delivery or Teardown maintenance.
 func stopBackgroundWatch(t *testing.T, f *prLifecycleFixture) {
 	t.Helper()
+	// Mark subsequent commands as the current watch so their normal supervision
+	// does not restart the isolated process during this test.
+	f.env = setEnv(f.env, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
+	f.leadEnv = setEnv(f.leadEnv, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
 	stopFixtureBackgroundWatch(t, f.root, f.env, f.db, f.project.ID)
 }
 
 func stopFixtureBackgroundWatch(t *testing.T, root string, env []string, db *store.DB, projectID int64) {
 	t.Helper()
-	client := herdr.NewWithEnv("herdr", env)
+	_ = herdr.NewWithEnv("herdr", env) // Keep the fixture's Herdr environment isolated.
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(root)) == 1 }) {
 		t.Fatalf("initial Watch did not start: %v", watchPIDs(root))
 	}
-	panes := watchPanes(t, client)
-	if len(panes) != 1 {
-		t.Fatalf("initial Watch tabs = %d, want 1", len(panes))
-	}
 	for _, pid := range watchPIDs(root) {
-		// SIGTERM lets active maintenance release its poll leases before exit.
+		// SIGTERM lets active maintenance release its leases and SQLite writes.
 		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 			t.Fatalf("stop background Watch: %v", err)
 		}
@@ -465,14 +465,14 @@ func stopFixtureBackgroundWatch(t *testing.T, root string, env []string, db *sto
 	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
 		t.Fatalf("background Watch did not stop: %v", watchPIDs(root))
 	}
-	state, err := db.WatchRecovery(context.Background(), projectID)
+	state, err := db.WatchRuntime(context.Background(), projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Foreground observation must not restart the independent poll-only process.
-	state.RetryAt = time.Now().Add(time.Hour).UnixMilli()
-	if err := db.SetWatchRecovery(context.Background(), projectID, state); err != nil {
-		t.Fatal(err)
+	if state.PID > 0 {
+		if err := db.ClearWatchRuntime(context.Background(), projectID, state.PID, state.Token); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

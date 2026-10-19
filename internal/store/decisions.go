@@ -144,7 +144,7 @@ func (db *DB) ObsoletePendingOrphanDecision(ctx context.Context, id int64) error
 	return db.PersistProject(ctx, projectID)
 }
 
-// ObsoleteAppliedLeftoverDecision retires an unrecoverable Orphan Decision
+// ObsoleteAppliedOrphanDecision retires an unrecoverable Orphan Decision
 // after its approved discard has completed Teardown.
 func (db *DB) ObsoleteAppliedOrphanDecision(ctx context.Context, id int64) error {
 	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Unrecoverable Orphan resolved during Teardown'

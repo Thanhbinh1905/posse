@@ -4,85 +4,52 @@ package e2e
 
 import (
 	"context"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
-	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestWatchRecoveryBackoffSurvivesLeadRearm(t *testing.T) {
-	f := newPRLifecycleFixtureWithSlowLoginShell(t)
+func TestWatchRepairsDeadWatchesWithoutStaleNotices(t *testing.T) {
+	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatal("initial Watch did not start")
+		t.Fatalf("initial hidden watch did not start: %v", watchPIDs(f.root))
 	}
-	before := watchPanes(t, client)
-	if len(before) != 1 {
-		t.Fatalf("initial Watch tabs = %d, want 1", len(before))
+	if panes := watchPanes(t, client); len(panes) != 0 {
+		t.Fatalf("watch created visible panes: %#v", panes)
 	}
-	for _, pid := range watchPIDs(f.root) {
-		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
+
+	for episode := 1; episode <= 2; episode++ {
+		pids := watchPIDs(f.root)
+		if len(pids) != 1 {
+			t.Fatalf("episode %d began with watches %v", episode, pids)
+		}
+		if err := syscall.Kill(pids[0], syscall.SIGKILL); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
-		t.Fatal("initial Watch did not stop")
-	}
-	stuckShell := filepath.Join(f.root, "bin", "slow-login-shell")
-	if err := os.WriteFile(stuckShell, []byte("#!/bin/sh\nsleep 300\nexec /bin/sh -l\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := context.Background()
-	if err := f.db.SetWatchRecovery(ctx, f.project.ID, store.WatchRecovery{
-		PaneID: before[0].PaneID, RetryAt: time.Now().Add(-time.Second).UnixMilli(), FailedStarts: 3, NoticeRaised: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	noticeID, err := f.db.CreateNotice(ctx, store.Notice{
-		ProjectID: f.project.ID, Kind: "pr_watch_failing", Summary: "Watch failed to start after repeated retries; recovery will continue with backoff", DataJSON: `{}`,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.db.MarkNoticesDelivered(ctx, f.project.ID, []int64{noticeID}, time.Now().UnixMilli()); err != nil {
-		t.Fatal(err)
-	}
-
-	command := exec.Command(f.binary, "watch", "--ack", "all", "--timeout", "500")
-	command.Dir, command.Env = f.repo, f.leadEnv
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("re-armed Lead watch: %v\n%s", err, output)
-	}
-	panes := watchPanes(t, client)
-	if len(panes) != 1 || panes[0].TabID == before[0].TabID {
-		t.Fatalf("persisted failed-start retry did not replace exactly one tab: before=%v after=%v", before, panes)
-	}
-	state, err := f.db.WatchRecovery(ctx, f.project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.FailedStarts != 4 || !state.NoticeRaised {
-		t.Fatalf("re-armed recovery state = %#v, want failedStarts=4 with Notice already raised", state)
-	}
-	notices, err := f.db.Notices(ctx, f.project.ID, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	count := 0
-	for _, notice := range notices {
-		if notice.Kind == "pr_watch_failing" && notice.Summary == "Watch failed to start after repeated retries; recovery will continue with backoff" {
-			count++
+		if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+			t.Fatalf("episode %d watch survived SIGKILL: %v", episode, watchPIDs(f.root))
 		}
-	}
-	if count != 1 {
-		t.Fatalf("re-armed recovery created %d copies of the startup Notice, want exactly 1", count)
+		runPosse(t, f.binary, f.repo, f.env, "doctor", "--json")
+		if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+			t.Fatalf("episode %d was not repaired: %v", episode, watchPIDs(f.root))
+		}
+		notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, notice := range notices {
+			if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Watch runtime") {
+				count++
+			}
+		}
+		if count != 0 {
+			t.Fatalf("dead watch recovery after episode %d created a false stale-heartbeat Notice: %#v", episode, notices)
+		}
 	}
 }

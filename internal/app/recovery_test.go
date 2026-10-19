@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -405,27 +404,17 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 		t.Fatalf("restarted Claude Lead omitted its default bypass argument: %#v", fake.Calls)
 	}
 	assertLeadMetadataCall(t, fake, "w1:p1", "claude")
-	// Watch failure must not strand the newly launched prompt-kind Lead.
-	fake.Errors["tab.create"] = errors.New("Watch unavailable")
+	// Hidden watch startup is independent of Herdr tab creation and must not
+	// strand the newly launched prompt-kind Lead.
 	before := fake.CallCount("agent.prompt")
 	if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
 		t.Fatal(err)
 	}
 	if fake.CallCount("agent.prompt") <= before {
-		t.Fatal("Watch failure suppressed the Lead launch prompt")
+		t.Fatal("Watch supervision suppressed the Lead launch prompt")
 	}
-	notices, err := db.Notices(ctx, project.ID, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	found = false
-	for _, notice := range notices {
-		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Watch restart failed") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("Watch failure produced no Notice: %#v", notices)
+	if fake.CallCount("tab.create") != 0 {
+		t.Fatal("Lead recovery opened a visible Watch tab")
 	}
 }
 

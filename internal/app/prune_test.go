@@ -169,7 +169,7 @@ func TestTaskCreationAndScratchAcquisitionSharePruneLock(t *testing.T) {
 	}
 }
 
-func TestScratchPruneRevalidatesTaskOwnerchangeAtApply(t *testing.T) {
+func TestScratchPruneRevalidatesTaskOwnershipAtApply(t *testing.T) {
 	for _, scenario := range []string{"active-state", "active-intent", "held-sandbox"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
@@ -407,7 +407,7 @@ func TestPruneRemovesOnlyStaleOwnedWorktreeRegistrations(t *testing.T) {
 	}
 }
 
-func TestPruneBranchRechecksTaskOwnerchangeAndLiveWorktreesAtApply(t *testing.T) {
+func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")

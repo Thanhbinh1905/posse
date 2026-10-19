@@ -21,12 +21,12 @@ import (
 // every Notice below is discovered by a Watch process alone.
 type observationWorkload struct {
 	ForgeCalls        int           `json:"forge_calls"`
-	PollerArms        int           `json:"poller_arms"`
+	WatchArms         int           `json:"watch_arms"`
 	HandoffArms       int           `json:"handoff_arms"`
 	ActionableWakes   int           `json:"actionable_wakes"`
 	NoticesCreated    int           `json:"notices_created"`
 	MaintenanceFaults int           `json:"maintenance_failure_notices"`
-	PollerCPU         time.Duration `json:"poller_cpu_ns"`
+	WatchCPU          time.Duration `json:"watch_cpu_ns"`
 	ModelTurns        int           `json:"model_turns"`
 }
 
@@ -45,9 +45,9 @@ func forgeCalls(t *testing.T, f *prLifecycleFixture) int {
 	return calls
 }
 
-// runPollers runs the fixture's real poll-only Watch tab beside `count`
+// runWatches runs the fixture's real hidden watch beside `count`
 // foreground producers (ordinary Posse calls reconcile PRs too) for one window.
-func (w *observationWorkload) runPollers(t *testing.T, f *prLifecycleFixture, count int, window time.Duration) {
+func (w *observationWorkload) runWatchs(t *testing.T, f *prLifecycleFixture, count int, window time.Duration) {
 	t.Helper()
 	var wait sync.WaitGroup
 	var mutex sync.Mutex
@@ -64,8 +64,8 @@ func (w *observationWorkload) runPollers(t *testing.T, f *prLifecycleFixture, co
 					return
 				}
 				mutex.Lock()
-				w.PollerArms++
-				w.PollerCPU += command.ProcessState.UserTime() + command.ProcessState.SystemTime()
+				w.WatchArms++
+				w.WatchCPU += command.ProcessState.UserTime() + command.ProcessState.SystemTime()
 				mutex.Unlock()
 				time.Sleep(50 * time.Millisecond)
 			}
@@ -138,7 +138,7 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	// identical polls. The forge result must become exactly one Notice, found
 	// without any Lead turn.
 	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", headOne)
-	workload.runPollers(t, f, 2, 3*time.Second)
+	workload.runWatchs(t, f, 2, 3*time.Second)
 	firstCalls := forgeCalls(t, f)
 	if firstCalls < 2 {
 		t.Fatalf("two producers made %d forge calls, want repeated polls", firstCalls)
@@ -153,7 +153,7 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 
 	// A new PR head with the same failure is a new fact.
 	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", headTwo)
-	workload.runPollers(t, f, 2, 2*time.Second)
+	workload.runWatchs(t, f, 2, 2*time.Second)
 	failures = observationNotices(t, f, "pr_checks_failed")
 	if len(failures) != 2 || !strings.Contains(failures[1].DataJSON, headTwo) {
 		t.Fatalf("new head produced %d checks Notices, want exactly two: %#v", len(failures), failures)
@@ -170,7 +170,7 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	}
 	time.Sleep(300 * time.Millisecond) // let an in-flight short-interval poll finish
 	settled := forgeCalls(t, f)
-	workload.runPollers(t, f, 2, time.Second)
+	workload.runWatchs(t, f, 2, time.Second)
 	if got := forgeCalls(t, f); got != settled {
 		t.Fatalf("producers polled inside a one-hour interval: before=%d after=%d", settled, got)
 	}
@@ -178,16 +178,16 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 		t.Fatal(err)
 	}
 
-	// A live claim held by another poller suppresses forge calls and keeps its
+	// A live claim held by another watch suppresses forge calls and keeps its
 	// token; an expired claim is reclaimed without losing observations.
 	before := forgeCalls(t, f)
-	const foreignToken = "foreign-poller-token"
+	const foreignToken = "foreign-watch-token"
 	if _, err := f.db.ExecContext(ctx, `UPDATE project_watch_state SET pr_poll_claim_until=?, pr_poll_claim_token=? WHERE project_id=?`, time.Now().Add(time.Hour).UnixMilli(), foreignToken, f.project.ID); err != nil {
 		t.Fatal(err)
 	}
-	workload.runPollers(t, f, 2, time.Second)
+	workload.runWatchs(t, f, 2, time.Second)
 	if after := forgeCalls(t, f); after != before {
-		t.Fatalf("poller contacted the forge under another poller's live claim: before=%d after=%d", before, after)
+		t.Fatalf("watch contacted the forge under another watch's live claim: before=%d after=%d", before, after)
 	}
 	var token string
 	if err := f.db.QueryRowContext(ctx, `SELECT pr_poll_claim_token FROM project_watch_state WHERE project_id=?`, f.project.ID).Scan(&token); err != nil || token != foreignToken {
@@ -196,9 +196,9 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	if _, err := f.db.ExecContext(ctx, `UPDATE project_watch_state SET pr_poll_claim_until=? WHERE project_id=?`, time.Now().Add(-time.Minute).UnixMilli(), f.project.ID); err != nil {
 		t.Fatal(err)
 	}
-	workload.runPollers(t, f, 1, time.Second)
+	workload.runWatchs(t, f, 1, time.Second)
 	if after := forgeCalls(t, f); after == before {
-		t.Fatal("poller did not reclaim an expired claim")
+		t.Fatal("watch did not reclaim an expired claim")
 	}
 
 	// A forge outage raises one deduplicated maintenance Notice after repeated
@@ -206,14 +206,14 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	if err := os.WriteFile(filepath.Join(f.root, "gh-exit-nonzero"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	workload.runPollers(t, f, 2, 3*time.Second)
+	workload.runWatchs(t, f, 2, 3*time.Second)
 	if got := len(observationNotices(t, f, "pr_watch_failing")); got > 1 {
 		t.Fatalf("outage raised %d pr_watch_failing Notices, want at most one", got)
 	}
 	if err := os.Remove(filepath.Join(f.root, "gh-exit-nonzero")); err != nil {
 		t.Fatal(err)
 	}
-	workload.runPollers(t, f, 1, 2*time.Second)
+	workload.runWatchs(t, f, 1, 2*time.Second)
 	if streak := prTaskWatchFailureCount(t, f.db, taskID); streak != 0 {
 		t.Fatalf("recovered forge left failure streak %d", streak)
 	}
@@ -258,7 +258,7 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	}
 	workload.NoticesCreated = len(notices)
 	workload.MaintenanceFaults = len(observationNotices(t, f, "pr_watch_failing"))
-	if workload.ForgeCalls == 0 || workload.PollerCPU == 0 || workload.ModelTurns != 0 {
+	if workload.ForgeCalls == 0 || workload.WatchCPU == 0 || workload.ModelTurns != 0 {
 		t.Fatalf("workload counters are inconsistent: %#v", workload)
 	}
 	report, err := json.MarshalIndent(workload, "", "  ")
@@ -300,8 +300,8 @@ func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
 			if delta := forgeCalls(t, f) - before; delta != 1 {
 				t.Fatalf("producer made %d forge calls, want exactly one", delta)
 			}
-			workload.PollerArms++
-			workload.PollerCPU += command.ProcessState.UserTime() + command.ProcessState.SystemTime()
+			workload.WatchArms++
+			workload.WatchCPU += command.ProcessState.UserTime() + command.ProcessState.SystemTime()
 		}
 	}
 
@@ -338,7 +338,7 @@ func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
 	}
 	workload.ActionableWakes++
 	workload.ForgeCalls = forgeCalls(t, f) // the handoff Watch's own polls are API cost too
-	if workload.PollerArms != 5 || workload.HandoffArms != 1 || workload.ActionableWakes != 1 || workload.ModelTurns != 0 || workload.PollerCPU <= 0 {
+	if workload.WatchArms != 5 || workload.HandoffArms != 1 || workload.ActionableWakes != 1 || workload.ModelTurns != 0 || workload.WatchCPU <= 0 {
 		t.Fatalf("counters = %#v", workload)
 	}
 	if prompts, _ := os.ReadFile(filepath.Join(f.root, "lead-prompts.log")); len(prompts) != 0 {

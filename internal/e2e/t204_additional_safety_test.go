@@ -35,7 +35,16 @@ func showAfterActiveTeardown(t *testing.T, f *prLifecycleFixture, taskID string)
 func finishShowAfterTeardown(t *testing.T, f *prLifecycleFixture, taskID string, output []byte, err error) (string, error) {
 	t.Helper()
 	if err != nil && !strings.Contains(string(output), `"teardown_in_progress"`) {
-		return "", fmt.Errorf("posse show %s: %w\n%s", taskID, err, output)
+		task, taskErr := f.db.Task(context.Background(), f.project.ID, taskID)
+		stateRaceDuringTeardown := strings.Contains(string(output), "Task state changed concurrently") && taskErr == nil && (task.State == store.StateMerged || task.State == store.StateTornDown)
+		if !stateRaceDuringTeardown {
+			var transitions []store.TransitionRecord
+			var transitionsErr error
+			if taskErr == nil {
+				transitions, transitionsErr = f.db.TaskTransitions(context.Background(), task.ID, 20)
+			}
+			return "", fmt.Errorf("posse show %s: %w\n%s\nTask=%#v (%v)\nTransitions=%#v (%v)", taskID, err, output, task, taskErr, transitions, transitionsErr)
+		}
 	}
 	if !waitForCondition(30*time.Second, func() bool {
 		task, taskErr := f.db.Task(context.Background(), f.project.ID, taskID)
@@ -62,7 +71,7 @@ func TestShowWaitsForDeferredTeardown(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
@@ -134,7 +143,7 @@ func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
 	task := f.mustTask(t, "t1")
 	merged := f.mergeOnLocalOrigin(t, task, "t1")
@@ -364,7 +373,7 @@ func TestWorkerMappingIsStoppedBeforeRelease(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed work\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.rideAndComplete(t, brief, "t1")
+	f.startAndComplete(t, brief, "t1")
 	if !waitForCondition(3*time.Second, func() bool { _, err := os.Stat(filepath.Join(f.root, "mapped-ready")); return err == nil }) {
 		t.Fatal("actual Worker did not start its cache mapping")
 	}

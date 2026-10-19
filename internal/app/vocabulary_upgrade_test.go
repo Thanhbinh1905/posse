@@ -29,7 +29,7 @@ func TestHistoricalDiscardIntentRetainsVerifiedWorkerAndUserQuote(t *testing.T) 
 	}
 }
 
-func TestUpgradeReplacesOnlyRecordedLegacyWatchPane(t *testing.T) {
+func TestUpgradeRemovesOnlyRecordedLegacyWatchPane(t *testing.T) {
 	db, project, home := newWatchTestProject(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -42,7 +42,7 @@ func TestUpgradeReplacesOnlyRecordedLegacyWatchPane(t *testing.T) {
 	snapshot := herdr.Snapshot{Panes: []herdr.Pane{legacy, foreign}}
 	fake.SnapshotValue = snapshot
 	service := testService(home, fake)
-	if err := service.ensureWatchTab(ctx, db, project, snapshot, true); err != nil {
+	if err := service.cleanupLegacyWatchTabs(ctx, db, project, snapshot); err != nil {
 		t.Fatal(err)
 	}
 	closed, created := false, false
@@ -57,8 +57,8 @@ func TestUpgradeReplacesOnlyRecordedLegacyWatchPane(t *testing.T) {
 			created = true
 		}
 	}
-	if !closed || !created {
-		t.Fatalf("upgrade did not replace the recorded observer: %#v", fake.Calls)
+	if !closed || created {
+		t.Fatalf("upgrade did not remove only the recorded observer without creating a visible Watch: %#v", fake.Calls)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestUpgradePreservesAgentOccupyingFormerWatchPane(t *testing.T) {
 	}
 	fake := herdr.NewFake()
 	snapshot := herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "legacy:p1", TabID: "legacy:t1", WorkspaceID: project.HerdrWorkspaceID, Label: "posse:" + project.Name + ":lookout", Agent: "pi"}}}
-	if err := testService(home, fake).ensureWatchTab(ctx, db, project, snapshot, true); err == nil {
+	if err := testService(home, fake).cleanupLegacyWatchTabs(ctx, db, project, snapshot); err == nil {
 		t.Fatal("upgrade accepted an agent replacing the old observer")
 	}
 	if len(fake.Calls) != 0 {

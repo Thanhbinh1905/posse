@@ -110,10 +110,10 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 					return nil
 				}
 			}
-			waitMarker := func(marker string) {
+			waitMarker := func(marker string, output *bytes.Buffer) {
 				t.Helper()
 				if !waitForCondition(20*time.Second, func() bool { _, err := os.Stat(marker); return err == nil }) {
-					t.Fatalf("timed out waiting for pause marker %s", marker)
+					t.Fatalf("timed out waiting for pause marker %s: command=%s watches=%v", marker, output.String(), watchPIDs(fixture.root))
 				}
 			}
 			continueAt := func(marker string) {
@@ -127,15 +127,18 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 			mergeEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "merge:after:teardown.ready")
 			mergeEnv = setEnv(mergeEnv, "POSSE_INTENT_PAUSE_FILE", mergeMarker)
 			mergeOutput, mergeDone := startCLI(mergeEnv, "merge", taskID, "--execute", "--user-approved", "User approved this local merge")
-			waitMarker(mergeMarker)
+			waitMarker(mergeMarker, mergeOutput)
 
 			var mergeErr error
 			if scenario.failTeardown {
 				otherMarker := filepath.Join(fixture.root, "automatic-teardown-ready")
-				otherEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "teardown:after:panes.close")
+				// This case isolates one competing CLI teardown. The detached watch
+				// retries failed teardowns on its own reconcile ticks.
+				otherEnv := setEnv(fixture.env, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
+				otherEnv = setEnv(otherEnv, "POSSE_INTENT_PAUSE_AT", "teardown:after:panes.close")
 				otherEnv = setEnv(otherEnv, "POSSE_INTENT_PAUSE_FILE", otherMarker)
 				otherOutput, otherDone := startCLI(otherEnv, "list")
-				waitMarker(otherMarker)
+				waitMarker(otherMarker, otherOutput)
 				continueAt(mergeMarker)
 				time.Sleep(time.Second)
 				var task store.Task
@@ -152,6 +155,9 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 				continueAt(otherMarker)
 				if err := waitCLI("automatic Teardown", otherDone, otherOutput); err != nil {
 					t.Fatalf("automatic Teardown reconcile failed: %v output=%s", err, otherOutput.String())
+				}
+				if pids := watchPIDs(fixture.root); len(pids) != 0 {
+					t.Fatalf("isolated competing teardown started a hidden watch: %v", pids)
 				}
 				mergeErr = waitCLI("local Merge", mergeDone, mergeOutput)
 			} else {
@@ -176,6 +182,7 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 			var task store.Task
 			var sandbox store.Sandbox
 			var mergedCount, tornDownCount, approvalCount, intentCount, incompleteCount int
+			var intents []store.Intent
 			if err := fixture.openDB(t, func(db *store.DB) error {
 				var err error
 				task, err = db.Task(context.Background(), fixture.project.ID, taskID)
@@ -198,7 +205,11 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 				 (SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='merge'),
 				 (SELECT COUNT(*) FROM intents WHERE task_id=?),
 				 (SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='teardown_incomplete')`
-				return db.QueryRowContext(context.Background(), query, task.ID, task.ID, task.ID, task.ID, task.ID).Scan(&mergedCount, &tornDownCount, &approvalCount, &intentCount, &incompleteCount)
+				if err := db.QueryRowContext(context.Background(), query, task.ID, task.ID, task.ID, task.ID, task.ID).Scan(&mergedCount, &tornDownCount, &approvalCount, &intentCount, &incompleteCount); err != nil {
+					return err
+				}
+				intents, err = db.Intents(context.Background(), fixture.project.ID)
+				return err
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +218,7 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 				wantState, wantSandbox, wantTornDown, wantIncomplete = store.StateMerged, "broken", 0, 1
 			}
 			if task.State != wantState || sandbox.State != wantSandbox || mergedCount != 1 || tornDownCount != wantTornDown || approvalCount != 1 || intentCount != 0 || incompleteCount != wantIncomplete {
-				t.Fatalf("unexpected exactly-once outcome: state=%s sandbox=%s merged=%d torn-down=%d approvals=%d intents=%d incomplete=%d", task.State, sandbox.State, mergedCount, tornDownCount, approvalCount, intentCount, incompleteCount)
+				t.Fatalf("unexpected exactly-once outcome: state=%s sandbox=%s merged=%d torn-down=%d approvals=%d intents=%d incomplete=%d rows=%#v watch PIDs=%v merge output=%s", task.State, sandbox.State, mergedCount, tornDownCount, approvalCount, intentCount, incompleteCount, intents, watchPIDs(fixture.root), mergeOutput.String())
 			}
 		})
 	}
@@ -611,7 +622,10 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					return err
 				}
 				if len(intents) != 0 {
-					return fmt.Errorf("crash recovery left %d intent(s): %#v", len(intents), intents)
+					intent := intents[0]
+					bootID, startTime, identityErr := store.ProcessIdentityForPID(intent.ProcessID)
+					processCmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", intent.ProcessID))
+					return fmt.Errorf("crash recovery left %d intent(s): %#v; owner identity now %s/%s (read error %v), process command %q", len(intents), intents, bootID, startTime, identityErr, strings.ReplaceAll(string(processCmdline), "\x00", " "))
 				}
 				task, err := db.Task(context.Background(), fixture.project.ID, taskID)
 				if item.command == "start" && item.step == "task.create" && item.phase == "before" {
@@ -654,7 +668,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 				}
 				return nil
 			}); err != nil {
-				t.Fatal(err)
+				t.Fatalf("list output: %s\n%s", output, err)
 			}
 			if item.command == "merge --execute" {
 				mergeCompleted := item.step == "merge" && item.phase == "after" || item.step == "merged_ref.record" || item.step == "task.merged"
@@ -752,7 +766,7 @@ func newIntentCLIHarness(t *testing.T) *intentCLIHarness {
 		t.Fatal(err)
 	}
 	baseEnv = setEnv(baseEnv, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	socketPath := filepath.Join(root, "xdg", "herdr", "herdr.sock")
+	socketPath := herdr.IsolatedTestSocketPath(root)
 	session := newFakeHerdrSession(t, socketPath)
 	client := herdr.NewWithEnv(herdrPath, baseEnv)
 	posseBinary := filepath.Join(binDir, "posse")

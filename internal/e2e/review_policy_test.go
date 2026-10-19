@@ -43,7 +43,7 @@ func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 	stopBackgroundWatch(t, f)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
-	if code, out := rideReviewIdentityTask(t, f, "Selected policy", "author", ""); code != 0 {
+	if code, out := startReviewIdentityTask(t, f, "Selected policy", "author", ""); code != 0 {
 		t.Fatalf("start: %d %s", code, out)
 	}
 	change := f.mustTask(t, "t1")
@@ -56,7 +56,7 @@ func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 			t.Fatalf("missing pass admitted: %d %s", code, out)
 		}
 	}
-	if code, out := rideReviewIdentityTask(t, f, "Independent verdict", "reviewer", "t1"); code != 0 {
+	if code, out := startReviewIdentityTask(t, f, "Independent verdict", "reviewer", "t1"); code != 0 {
 		t.Fatalf("review: %d %s", code, out)
 	}
 	review := f.mustTask(t, "t2")
@@ -76,7 +76,7 @@ func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 	if got := gitTest(t, f.env, f.repo, "rev-parse", "main"); got != before {
 		t.Fatal("refused Merge changed main")
 	}
-	if code, out := rideReviewIdentityTask(t, f, "Current verdict", "reviewer", "t1"); code != 0 {
+	if code, out := startReviewIdentityTask(t, f, "Current verdict", "reviewer", "t1"); code != 0 {
 		t.Fatalf("second review: %d %s", code, out)
 	}
 	review = f.mustTask(t, "t3")
@@ -105,7 +105,7 @@ func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 	// failure manual so this test isolates review and merge authority.
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "gate_loop.max_fix_rounds", "0", "--user-approved", "Keep this test on the manual Gate failure path")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["exit 1"]`)
-	if code, out := rideReviewIdentityTask(t, f, "No independent review", "author", ""); code != 0 {
+	if code, out := startReviewIdentityTask(t, f, "No independent review", "author", ""); code != 0 {
 		t.Fatalf("start: %d %s", code, out)
 	}
 	change := f.mustTask(t, "t1")
@@ -151,7 +151,7 @@ func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	// The fake matches the installed upstream: it has no receipt query.
 	installFakeNoMistakes(t, f)
-	if code, out := rideReviewIdentityTask(t, f, "Pipeline receipt", "author", ""); code != 0 {
+	if code, out := startReviewIdentityTask(t, f, "Pipeline receipt", "author", ""); code != 0 {
 		t.Fatalf("start: %d %s", code, out)
 	}
 	change := f.mustTask(t, "t1")

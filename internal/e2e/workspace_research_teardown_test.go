@@ -4,11 +4,13 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -825,6 +827,24 @@ esac
 	}
 	reportTask, err := db.Task(context.Background(), project.ID, "t1")
 	if err != nil {
+		t.Fatal(err)
+	}
+	// The Report review is a synthetic Task with no Herdr pane. Stop any
+	// observer and defer its restart so reconciliation cannot mark it lost.
+	for _, pid := range watchPIDs(root) {
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("stop workspace Watch before synthetic review: %v", err)
+		}
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
+		t.Fatalf("workspace Watch did not stop: %v", watchPIDs(root))
+	}
+	recovery, err := db.WatchRecovery(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery.RetryAt = time.Now().Add(time.Hour).UnixMilli()
+	if err := db.SetWatchRecovery(context.Background(), project.ID, recovery); err != nil {
 		t.Fatal(err)
 	}
 	reviewerID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 10, Type: "review", ReviewsTaskID: reportTask.ID, Title: "Independent Report review", Profile: "report-reviewer"})

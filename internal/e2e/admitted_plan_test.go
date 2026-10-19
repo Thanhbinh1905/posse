@@ -18,7 +18,7 @@ import (
 
 func TestAdmittedPlanFreezesRelaunchConfiguration(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
-	if code, output := rideReviewIdentityTask(t, fixture, "Frozen candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Frozen candidate", "author", ""); code != 0 {
 		t.Fatalf("start: code=%d %s", code, output)
 	}
 	task := fixture.mustTask(t, "t1")
@@ -89,7 +89,7 @@ func TestAdmittedPublishUsesSelectedBriefInsteadOfMutableCopy(t *testing.T) {
 
 func TestWorkerAdmittedStatusDoesNotRecoverOrExposeSibling(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
-	if code, output := rideReviewIdentityTask(t, fixture, "Own candidate", "author", ""); code != 0 {
+	if code, output := startReviewIdentityTask(t, fixture, "Own candidate", "author", ""); code != 0 {
 		t.Fatalf("start: code=%d %s", code, output)
 	}
 	own := fixture.mustTask(t, "t1")

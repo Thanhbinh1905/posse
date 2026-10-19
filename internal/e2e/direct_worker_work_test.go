@@ -26,12 +26,12 @@ func TestT283DirectPaneWorkReopensCompletedChange(t *testing.T) {
 			if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a change.\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			fixture.rideAndComplete(t, brief, "t1")
+			fixture.startAndComplete(t, brief, "t1")
 			brief = filepath.Join(fixture.root, "second.md")
 			if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: External merge change\ndone_when: committed change exists\n---\nMake a second change.\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			completed := fixture.rideAndComplete(t, brief, "t2")
+			completed := fixture.startAndComplete(t, brief, "t2")
 			fixture.writeGraphQL(t, "pr2", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", completed.Branch)))
 			if state == store.StateMerging {
 				runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t2")

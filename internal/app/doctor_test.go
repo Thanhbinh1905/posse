@@ -40,6 +40,54 @@ func TestDoctorReportsPosseOwnedDiskAndArtifactRetention(t *testing.T) {
 	t.Fatalf("doctor omitted Posse-owned disk usage: %#v", result.Checks)
 }
 
+func TestDoctorReportsProjectDiskBreakdown(t *testing.T) {
+	home := t.TempDir()
+	project := store.Project{Name: "shop"}
+	for _, relative := range []string{"scratch/shop/t1", "pool/shop/sandbox-1", "projects/shop/tasks/t1"} {
+		path := filepath.Join(home, relative, "data")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("1234"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	detail, err := projectDiskUsage(home, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"12 bytes total", "scratch=4 bytes", "Pool=4 bytes", "Project data=4 bytes"} {
+		if !strings.Contains(detail, expected) {
+			t.Fatalf("Project disk usage %q does not contain %q", detail, expected)
+		}
+	}
+}
+
+func TestDoctorWarnsAboutLargeSharedGoCacheWithoutDeleting(t *testing.T) {
+	cache := t.TempDir()
+	contents := filepath.Join(cache, "large-cache-entry")
+	file, err := os.Create(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(largeSharedGoCacheBytes); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOCACHE", cache)
+	status, detail, action := sharedGoCacheDiagnostic(context.Background())
+	if status != "warn" || !strings.Contains(detail, cache) || !strings.Contains(action, "go clean -cache") {
+		t.Fatalf("shared cache diagnostic = %q, %q, %q", status, detail, action)
+	}
+	info, err := os.Stat(contents)
+	if err != nil || info.Size() != largeSharedGoCacheBytes {
+		t.Fatalf("doctor removed or changed the shared cache fixture: %v, %v", info, err)
+	}
+}
+
 func TestDoctorShowsDispatchInheritanceAndDisabledKinds(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\ndispatch_inheritance = \"lead_profile\"\n[kinds.pi]\ndisabled = true\n"), 0o600); err != nil {

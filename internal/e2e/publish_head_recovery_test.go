@@ -64,8 +64,8 @@ func t228Commit(t *testing.T, f *t205PRFixture, name string) string {
 
 func t228SeedUnverifiedOpenPR(t *testing.T, f *t205PRFixture) string {
 	t.Helper()
-	// The fixture's 1ms PR poller runs git status in this same linked
-	// worktree. Stop that unrelated poller before mutating its index directly.
+	// The fixture's 1ms PR Watch runs git status in this same linked
+	// worktree. Stop that unrelated Watch before mutating its index directly.
 	stopBackgroundWatch(t, f.prLifecycleFixture)
 	oldHead := strings.TrimSpace(gitTest(t, f.env, f.task.WorktreePath, "rev-parse", "HEAD"))
 	gitTest(t, f.env, f.task.WorktreePath, "push", "origin", "refs/heads/"+f.task.Branch+":refs/heads/"+f.task.Branch)
@@ -94,7 +94,7 @@ func t228AssertCrash86(t *testing.T, output string, err error) {
 func t228WorkspaceFixture(t *testing.T) *t205PRFixture {
 	t.Helper()
 	f := t205NewPRFixture(t, "github")
-	// The fixture's 1ms PR poller reads the Worker worktree while these tests
+	// The fixture's 1ms PR Watch reads the Worker worktree while these tests
 	// create commits and exercise direct publish recovery.
 	stopBackgroundWatch(t, f.prLifecycleFixture)
 	t228InstallForgeLag(t, f)

@@ -284,7 +284,7 @@ func (db *DB) LatestMemberPRObservation(ctx context.Context, taskID int64, repo 
 // MemberPREffect is what one observation of a member's pull request changes.
 type MemberPREffect struct {
 	Notices   []Notice
-	RepoState string // TaskRepoLanded, TaskRepoOpen or "" for no change
+	RepoState string // TaskRepoMerged, TaskRepoOpen or "" for no change
 	MergedRef string
 }
 

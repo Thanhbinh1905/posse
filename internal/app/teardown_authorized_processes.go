@@ -74,7 +74,7 @@ func (s *Service) releaseSandboxWithAuthorization(ctx context.Context, db *store
 	})
 }
 
-func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAuthorization) ([]string, error) {
+func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAuthorization, excluded ...map[int]bool) ([]string, error) {
 	if message := processIdentityCapabilityError(); message != "" {
 		return nil, fmt.Errorf("%s; refusing to signal processes or reset the Sandbox", message)
 	}
@@ -88,6 +88,11 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 		return nil, resolveErr
 	}
 	pids, err := sandboxProcessIDs(root)
+	if err != nil {
+		return nil, err
+	}
+	excludedPIDs := mergeTaskProcessExclusions(excluded...)
+	pids, err = excludeTaskProcessTree(pids, excludedPIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +134,7 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 		handles[pid] = handle
 		allPIDs = append(allPIDs, pid)
 	}
-	if err := verifySandboxProcessSet(root, handles, transients, authorization, false); err != nil {
+	if err := verifySandboxProcessSet(root, handles, transients, authorization, false, excludedPIDs); err != nil {
 		return nil, err
 	}
 	for _, handle := range handles {
@@ -139,7 +144,7 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := verifySandboxProcessSet(root, handles, transients, authorization, true); err != nil {
+		if err := verifySandboxProcessSet(root, handles, transients, authorization, true, excludedPIDs); err != nil {
 			return nil, err
 		}
 		alive, err := sandboxHandlesInSandbox(handles, root)
@@ -162,10 +167,14 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if err := verifySandboxProcessSet(root, handles, transients, authorization, true); err != nil {
+		if err := verifySandboxProcessSet(root, handles, transients, authorization, true, excludedPIDs); err != nil {
 			return nil, err
 		}
 		survivors, err := sandboxProcessIDs(root)
+		if err != nil {
+			return nil, err
+		}
+		survivors, err = excludeTaskProcessTree(survivors, excludedPIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -185,11 +194,19 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 	if err != nil {
 		return nil, err
 	}
+	survivors, err = excludeTaskProcessTree(survivors, excludedPIDs)
+	if err != nil {
+		return nil, err
+	}
 	return processLabels(allPIDs), fmt.Errorf("sandbox processes survived teardown: %v", survivors)
 }
 
-func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxProcessHandle, authorization *sandboxProcessAuthorization, waitForTransients bool) error {
+func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxProcessHandle, authorization *sandboxProcessAuthorization, waitForTransients bool, excluded map[int]bool) error {
 	pids, err := sandboxProcessIDs(root)
+	if err != nil {
+		return err
+	}
+	pids, err = excludeTaskProcessTree(pids, excluded)
 	if err != nil {
 		return err
 	}
@@ -275,10 +292,10 @@ func processLabels(pids []int) []string {
 	return labels
 }
 
-func stopTaskScratchProcessesAuthorized(home string, project store.Project, task store.Task, authorization *sandboxProcessAuthorization) ([]string, error) {
+func stopTaskScratchProcessesAuthorized(home string, project store.Project, task store.Task, authorization *sandboxProcessAuthorization, excluded ...map[int]bool) ([]string, error) {
 	root, err := validatedTaskScratchRoot(home, project, task)
 	if err != nil {
 		return nil, err
 	}
-	return stopAuthorizedOwnedProcesses([]ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true}}, authorization)
+	return stopAuthorizedOwnedProcesses([]ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true, excluded: mergeTaskProcessExclusions(excluded...)}}, authorization)
 }

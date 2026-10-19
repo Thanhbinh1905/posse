@@ -151,11 +151,11 @@ func TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testin
 	if !recoveredNotice {
 		t.Fatalf("no group-close recovery Notice: %#v", notices)
 	}
-	if !waitForCondition(10*time.Second, func() bool { return len(watchPanes(t, f.client)) > 0 && len(watchPIDs(f.root)) > 0 }) {
-		t.Fatal("foreign-primary recovery did not restart Watch")
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatal("foreign-primary recovery did not preserve the hidden Watch runtime")
 	}
-	if panes, processes := watchPanes(t, f.client), watchPIDs(f.root); len(panes) != 1 || len(processes) != 1 {
-		t.Fatalf("group recovery left Watches: panes=%d processes=%d", len(panes), len(processes))
+	if panes, processes := watchPanes(t, f.client), watchPIDs(f.root); len(panes) != 0 || len(processes) != 1 {
+		t.Fatalf("group recovery left visible or duplicate Watches: panes=%d processes=%d", len(panes), len(processes))
 	}
 	// The primary row uses the same close-group operation as a foreign primary.
 	firstBeforeLeadClose, secondBeforeLeadClose := f.task(t, "t1"), f.task(t, "t2")
@@ -168,8 +168,14 @@ func TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testin
 	}
 	if !waitForCondition(30*time.Second, func() bool {
 		a, b := f.task(t, "t1"), f.task(t, "t2")
-		_, leadReady := findLeadInSnapshot(f.snapshot(t))
-		return leadReady && a.Launches > firstBeforeLeadClose.Launches && b.Launches > secondBeforeLeadClose.Launches
+		project := f.project(t)
+		snapshot := f.snapshot(t)
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == "posse:shop:lead" {
+				return a.Launches > firstBeforeLeadClose.Launches && b.Launches > secondBeforeLeadClose.Launches
+			}
+		}
+		return false
 	}) {
 		db, err := store.OpenReadOnly(f.home)
 		if err == nil {
@@ -185,12 +191,24 @@ func TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testin
 		t.Fatalf("Lead group close did not restore both Workers: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
 	}
 	snap = f.snapshot(t)
-	assertRecoveredWorkerRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
-	if !waitForCondition(10*time.Second, func() bool { return len(watchPanes(t, f.client)) > 0 && len(watchPIDs(f.root)) > 0 }) {
-		t.Fatal("Lead-primary recovery did not restart Watch")
+	if !waitForCondition(10*time.Second, func() bool {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		project, err := db.ProjectByID(context.Background(), f.projectID)
+		return err == nil && project.LeadPaneID != "" && project.LeadLabel != ""
+	}) {
+		t.Fatal("Lead recovery did not finish recording its identity")
 	}
-	if panes, processes := watchPanes(t, f.client), watchPIDs(f.root); len(panes) != 1 || len(processes) != 1 {
-		t.Fatalf("Lead group close left Watches: panes=%d processes=%d", len(panes), len(processes))
+	snap = f.snapshot(t)
+	assertRecoveredWorkerRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatal("Lead-primary recovery did not preserve the hidden Watch runtime")
+	}
+	if panes, processes := watchPanes(t, f.client), watchPIDs(f.root); len(panes) != 0 || len(processes) != 1 {
+		t.Fatalf("Lead group close left visible or duplicate Watches: panes=%d processes=%d", len(panes), len(processes))
 	}
 	db, err = store.OpenReadOnly(f.home)
 	if err != nil {
@@ -220,22 +238,20 @@ func TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testin
 	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": second.HerdrWorkspaceID}); err != nil {
 		t.Fatalf("close the exited Worker child workspace: %v", err)
 	}
-	lead, found := findLeadInSnapshot(snap)
-	if !found {
-		t.Fatal("recovered Lead pane missing before child Teardown")
-	}
+	var lead herdr.Pane
 	if !waitForCondition(5*time.Second, func() bool {
-		db, err := store.OpenReadOnly(f.home)
-		if err != nil {
-			return false
+		project := f.project(t)
+		for _, pane := range f.snapshot(t).Panes {
+			if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == "posse:shop:lead" && pane.Agent != "" {
+				lead = pane
+				return true
+			}
 		}
-		defer db.Close()
-		project, err := db.ProjectByID(context.Background(), f.projectID)
-		return err == nil && project.LeadPaneID == lead.PaneID && project.HerdrWorkspaceID == lead.WorkspaceID
+		return false
 	}) {
 		db, err := store.OpenReadOnly(f.home)
 		if err != nil {
-			t.Fatalf("recovered Lead identity did not settle before child Teardown: pane=%#v open store: %v", lead, err)
+			t.Fatalf("recovered Lead identity did not settle before child Teardown: open store: %v", err)
 		}
 		project, projectErr := db.ProjectByID(context.Background(), f.projectID)
 		recovery, recoveryErr := db.ProjectRecovery(context.Background(), f.projectID)
@@ -244,7 +260,7 @@ func TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testin
 		_ = db.Close()
 		logs, logErr := f.client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.group-e2e"})
 		t.Logf("Project=%#v recovery=%#v first=%#v second=%#v errors=%v/%v/%v/%v hook logs=%s log error=%v", project, recovery, firstRecovery, secondRecovery, projectErr, recoveryErr, firstRecoveryErr, secondRecoveryErr, logs, logErr)
-		t.Fatalf("recovered Lead identity did not settle before child Teardown: pane=%#v Project=%#v err=%v", lead, project, projectErr)
+		t.Fatalf("recovered Lead identity did not settle before child Teardown: Project=%#v err=%v", project, projectErr)
 	}
 	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", lead.WorkspaceID)
@@ -274,7 +290,18 @@ func TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testin
 	if currentProject.LeadPaneID != lead.PaneID || currentProject.HerdrWorkspaceID != lead.WorkspaceID {
 		t.Fatalf("stale observation reverted the recovered Lead identity: got %#v, want pane=%s workspace=%s", currentProject, lead.PaneID, lead.WorkspaceID)
 	}
-	runPosse(t, f.binary, f.repo, leadEnv, "teardown", "t2", "--discard", "--user-approved", "User approved the child teardown test")
+	command := exec.Command(f.binary, "teardown", "t2", "--discard", "--user-approved", "User approved the child teardown test")
+	command.Dir, command.Env = f.repo, leadEnv
+	commandOutput, commandErr := command.CombinedOutput()
+	if commandErr != nil {
+		db, dbErr := store.OpenReadOnly(f.home)
+		if dbErr == nil {
+			project, projectErr := db.ProjectByName(context.Background(), "shop")
+			db.Close()
+			t.Fatalf("posse teardown t2 failed: %v\n%s\ncontext=%s leadPane=%s project=%#v projectErr=%v", commandErr, commandOutput, runPosse(t, f.binary, f.repo, leadEnv, "_context"), lead.PaneID, project, projectErr)
+		}
+		t.Fatalf("posse teardown t2 failed: %v\n%s\nopen project: %v", commandErr, commandOutput, dbErr)
+	}
 	snap = f.snapshot(t)
 	if snap.FocusedPaneID != focusedBeforeClose {
 		t.Fatalf("Teardown stole focus: before %s after %s", focusedBeforeClose, snap.FocusedPaneID)

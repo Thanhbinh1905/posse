@@ -86,6 +86,68 @@ func TestOpenNormalizesPublishedReportMigrationVersions(t *testing.T) {
 	}
 }
 
+func TestOpenRenumbersLegacyTaskContainmentMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE project_lookout_pollers`,
+		`DELETE FROM goose_db_version WHERE version_id=54`,
+		`DELETE FROM posse_migration_checksums WHERE version=54`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("prepare database from Task containment migration version 53: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE posse_migration_checksums SET sha256=? WHERE version=53`, taskContainmentMigrationChecksum); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatalf("open database after moving Task containment migration to version 54: %v", err)
+	}
+	defer db.Close()
+	for _, version := range []int64{53, 54} {
+		var applied int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM goose_db_version WHERE version_id=? AND is_applied=1`, version).Scan(&applied); err != nil || applied != 1 {
+			t.Fatalf("migration %d applied rows = %d, %v; want 1", version, applied, err)
+		}
+	}
+	for _, column := range []string{"containment_mode", "containment_path", "containment_marker"} {
+		var exists int
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name=?)`, column).Scan(&exists); err != nil || exists != 1 {
+			t.Fatalf("Task containment column %s exists=%d, err=%v", column, exists, err)
+		}
+	}
+	var watchTable int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lookout_pollers')`).Scan(&watchTable); err != nil || watchTable != 1 {
+		t.Fatalf("Lookout poller table exists=%d, err=%v", watchTable, err)
+	}
+	sources, err := embeddedMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []int64{53, 54} {
+		var expected, recorded string
+		for _, source := range sources {
+			if source.version == version {
+				expected = source.checksum
+				break
+			}
+		}
+		if err := db.QueryRowContext(ctx, `SELECT sha256 FROM posse_migration_checksums WHERE version=?`, version).Scan(&recorded); err != nil || recorded != expected {
+			t.Fatalf("migration %d checksum = %q, err=%v; want %q", version, recorded, err, expected)
+		}
+	}
+}
+
 func seedAcceptedReportForMigrationTest(t *testing.T, ctx context.Context, path string) (*DB, int64, int64, string, string) {
 	t.Helper()
 	db, err := OpenAt(path)

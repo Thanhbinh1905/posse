@@ -105,8 +105,9 @@ INSERT INTO tasks(
     landing_mode, autonomy_review, autonomy_land, branch, base_ref, target_branch, worktree_path,
     herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, agent_session_kind, pr_url,
     landed_ref, last_output_hash, last_worktree_hash, last_progress_at,
-    agent_absent_since, idle_since, created_at, updated_at, plan_json, report_kind
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    agent_absent_since, idle_since, created_at, updated_at, plan_json, report_kind,
+    containment_mode, containment_path, containment_marker
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertProject :execresult
 INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)
@@ -181,6 +182,9 @@ UPDATE tasks SET mount_id = ?, worktree_path = ?, updated_at = ? WHERE id = ?;
 
 -- name: UpdateTaskWorkspace :exec
 UPDATE tasks SET herdr_workspace_id = ?, pane_id = ?, updated_at = ? WHERE id = ?;
+
+-- name: SetTaskContainment :exec
+UPDATE tasks SET containment_mode = ?, containment_path = ?, containment_marker = ?, updated_at = ? WHERE id = ?;
 
 -- name: AllocateTaskLaunch :one
 UPDATE tasks SET launches = launches + 1, updated_at = ? WHERE id = ? RETURNING launches;

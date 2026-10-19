@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -217,8 +219,8 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture := newWorkerTabsFixture(t)
 	client := fixture.client
 
-	first := fixture.rideLegacy(t, "t1", "Tabs first worker", "tabs-first-worker")
-	second := fixture.rideLegacy(t, "t2", "Tabs second worker", "tabs-second-worker")
+	first := fixture.startLegacy(t, "t1", "Tabs first worker", "tabs-first-worker")
+	second := fixture.startLegacy(t, "t2", "Tabs second worker", "tabs-second-worker")
 	snapshot := fixture.snapshot(t)
 	fixture.assertUserLayout(t, snapshot)
 	fixture.assertWorkerTab(t, snapshot, first)
@@ -293,7 +295,7 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 
 	// Relaunch after an upgrade uses the new child layout. Move it back to a
 	// legacy tab to exercise restart and tab-scoped Teardown.
-	third := fixture.rideLegacy(t, "t3", "Tabs third worker", "tabs-third-worker")
+	third := fixture.startLegacy(t, "t3", "Tabs third worker", "tabs-third-worker")
 	if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": tabOf(t, fixture.snapshot(t), third.PaneID)}); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +352,7 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture.leadEnv = setEnv(fixture.leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
 	fixture.leadEnv = setEnv(fixture.leadEnv, "HERDR_TAB_ID", lead.TabID)
 	// A Task launched before this layout lives alone in its own workspace; it still reconciles and tears down.
-	legacy := fixture.rideLegacy(t, "t4", "Tabs legacy worker", "tabs-legacy-worker")
+	legacy := fixture.startLegacy(t, "t4", "Tabs legacy worker", "tabs-legacy-worker")
 	moved, err := client.Call(context.Background(), "pane.move", map[string]any{"pane_id": legacy.PaneID, "destination": map[string]any{"type": "new_workspace", "label": "└─ Tabs legacy worker"}})
 	if err != nil {
 		t.Fatal(err)
@@ -397,9 +399,59 @@ type workerTabsFixture struct {
 	projectID                int64
 }
 
+func cleanupEmptyFixtureTaskCgroups(t *testing.T, home string) {
+	t.Helper()
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	projects, err := db.Projects(context.Background())
+	if err != nil {
+		return
+	}
+	prefix := filepath.Join("/sys/fs/cgroup", "user.slice", fmt.Sprintf("user-%d.slice", os.Getuid()), fmt.Sprintf("user@%d.service", os.Getuid()), "app.slice")
+	for _, project := range projects {
+		tasks, err := db.Tasks(context.Background(), project.ID, true)
+		if err != nil {
+			continue
+		}
+		for _, task := range tasks {
+			if task.ContainmentMode != "cgroup" || len(task.ContainmentMarker) < 12 {
+				continue
+			}
+			path := task.ContainmentPath
+			want := filepath.Join(prefix, fmt.Sprintf("posse-task-t%d-%s.scope", task.ID, task.ContainmentMarker[:12]))
+			if path != want {
+				continue
+			}
+			pids := []string{}
+			_ = filepath.WalkDir(path, func(current string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil || entry.IsDir() || entry.Name() != "cgroup.procs" {
+					return nil
+				}
+				contents, err := os.ReadFile(current)
+				if err == nil {
+					pids = append(pids, strings.Fields(string(contents))...)
+				}
+				return nil
+			})
+			if len(pids) == 0 {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					t.Logf("remove empty E2E Task cgroup %s: %v", path, err)
+				}
+			} else {
+				t.Logf("leaving non-empty E2E Task cgroup %s with PIDs %s", path, strings.Join(pids, ","))
+			}
+		}
+	}
+}
+
 func newWorkerTabsFixture(t *testing.T) *workerTabsFixture {
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("tabs-"))
+	home := filepath.Join(root, "posse")
+	t.Cleanup(func() { cleanupEmptyFixtureTaskCgroups(t, home) })
 	binDir := filepath.Join(root, "bin")
 	worktrees := filepath.Join(root, "posse", "pool")
 	for _, directory := range []string{binDir, worktrees, filepath.Join(root, "claude", "skills"), filepath.Join(root, "codex"), filepath.Join(root, "home")} {
@@ -444,8 +496,8 @@ rows = [["state_icon", "machine", { token = "workspace", rules = [{ starts_with 
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build posse: %v\n%s", err, output)
 	}
-	// The fake Worker stays working until torn down; the fake Lead reports
-	// activity when prompted so its detached startup finalizer can finish.
+	// The fake Worker stays working until torn down. Keep the fake Lead alive
+	// so its detached startup finalizer can observe the agent.
 	agent := `#!/bin/sh
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 case "$PWD/" in
@@ -453,6 +505,13 @@ case "$PWD/" in
     if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then sleep 3; fi
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+    if [ -f "$POSSE_TEST_ROOT/check-task-env" ]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" > "$POSSE_TEST_ROOT/task-environment"
+    fi
+    if [ -f "$POSSE_TEST_ROOT/launch-detached-server" ]; then
+      setsid python3 "$POSSE_TEST_ROOT/detached-server.py" "$POSSE_TEST_ROOT" >/dev/null 2>&1 &
+      echo $! > "$POSSE_TEST_ROOT/detached-server.pid"
+    fi
     while [ ! -f "$PWD/.posse-e2e-agent-exit" ]; do sleep 0.05; done
     ;;
   *)
@@ -465,7 +524,6 @@ esac
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(agent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	home := filepath.Join(root, "posse")
 	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 4\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -506,10 +564,60 @@ esac
 		t.Fatal(err)
 	}
 	callerEnv := setEnv(env, "HERDR_ENV", "1")
+	callerEnv = setEnv(callerEnv, "HERDR_SOCKET_PATH", herdr.IsolatedTestSocketPath(root))
 	callerEnv = setEnv(callerEnv, "HERDR_PANE_ID", lead.RootPane.PaneID)
 	callerEnv = setEnv(callerEnv, "HERDR_WORKSPACE_ID", lead.Workspace.WorkspaceID)
 	callerEnv = setEnv(callerEnv, "HERDR_TAB_ID", lead.RootPane.TabID)
-	runPosse(t, binary, repo, callerEnv, "up", "--name", "shop", "--yes")
+	agentInput, leadInput, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := exec.Command(binary, "up", "--name", "shop", "--yes")
+	up.Dir, up.Env, up.Stdin = repo, callerEnv, agentInput
+	up.Stdout, up.Stderr = io.Discard, io.Discard
+	if err := up.Start(); err != nil {
+		_ = agentInput.Close()
+		_ = leadInput.Close()
+		t.Fatalf("start posse up: %v", err)
+	}
+	_ = agentInput.Close()
+	t.Cleanup(func() {
+		_ = leadInput.Close()
+		if up.Process != nil {
+			_ = up.Process.Kill()
+			_ = up.Wait()
+		}
+	})
+	if !waitForCondition(10*time.Second, func() bool {
+		snapshot, err := client.Snapshot(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID == lead.RootPane.PaneID && pane.Agent != "" && pane.AgentStatus == "idle" {
+				return true
+			}
+		}
+		return false
+	}) {
+		snapshot, _ := client.Snapshot(context.Background())
+		t.Fatalf("posse up did not start the Lead agent: %#v", snapshot.Panes)
+	}
+	if !waitForCondition(10*time.Second, func() bool {
+		details, err := fixtureProcessDetails(root)
+		if err != nil {
+			return false
+		}
+		for _, detail := range details {
+			if strings.Contains(detail, " _finalize-lead") {
+				return false
+			}
+		}
+		return true
+	}) {
+		details, _ := fixtureProcessDetails(root)
+		t.Fatalf("Lead startup finalizer did not finish: %v", details)
+	}
 	db, err := store.OpenReadOnly(home)
 	if err != nil {
 		t.Fatal(err)
@@ -522,12 +630,35 @@ esac
 	if project.HerdrWorkspaceID != lead.Workspace.WorkspaceID || project.LeadPaneID != lead.RootPane.PaneID {
 		t.Fatalf("Lead did not start in the calling pane: %#v", project)
 	}
-	return &workerTabsFixture{
+	fixture := &workerTabsFixture{
 		root: root, repo: repo, home: home, binary: binary, env: env,
 		leadEnv: callerEnv, client: client, server: server,
 		userBefore: userBefore, userAfter: userAfter, userTab: userTab,
 		leadWorkspaceID: lead.Workspace.WorkspaceID, leadPaneID: lead.RootPane.PaneID, projectID: project.ID,
 	}
+	// Cancel a startup finalizer before stopping Herdr. Once the isolated server
+	// stops, its snapshot calls can otherwise stay alive until their 30s timeout.
+	t.Cleanup(func() {
+		if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": fixture.leadPaneID}); err != nil {
+			return
+		}
+		if !waitForCondition(2*time.Second, func() bool {
+			processes, err := fixtureProcessDetails(root)
+			if err != nil {
+				return false
+			}
+			for _, process := range processes {
+				if strings.Contains(process, "_finalize-lead") {
+					return false
+				}
+			}
+			return true
+		}) {
+			processes, _ := fixtureProcessDetails(root)
+			t.Errorf("isolated Lead finalizer remained after closing its pane: %v", processes)
+		}
+	})
+	return fixture
 }
 
 // assertRenderedSidebar attaches a real desktop client to the isolated server.
@@ -693,6 +824,11 @@ func (f *workerTabsFixture) exitWorker(t *testing.T, taskID string) {
 		for _, pane := range snapshot.Panes {
 			if pane.PaneID == task.PaneID {
 				lastPane = pane
+				for _, agent := range snapshot.Agents {
+					if agent.PaneID == task.PaneID && agent.Name != "" {
+						return false // Agent ownership metadata settles after the pane foreground.
+					}
+				}
 				return pane.Agent == ""
 			}
 		}

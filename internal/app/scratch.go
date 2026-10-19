@@ -131,12 +131,13 @@ func removeTaskScratch(home string, project store.Project, task store.Task) erro
 	return nil
 }
 
-func exportTaskScratch(ctx context.Context, s *Service, paneID, scratch string) error {
-	if paneID == "" || scratch == "" {
-		return fmt.Errorf("task scratch environment requires a pane and directory")
+func exportTaskScratch(ctx context.Context, s *Service, paneID, scratch, taskMarker string) error {
+	if paneID == "" || scratch == "" || taskMarker == "" {
+		return fmt.Errorf("task environment requires a pane, scratch directory, and process marker")
 	}
-	quoted := "'" + strings.ReplaceAll(scratch, "'", "'\"'\"'") + "'"
-	command := "export TMPDIR=" + quoted + " GOTMPDIR=" + quoted + " TMP=" + quoted + " TEMP=" + quoted
+	quotedScratch := shellQuote(scratch)
+	quotedMarker := shellQuote(taskMarker)
+	command := "export TMPDIR=" + quotedScratch + " GOTMPDIR=" + quotedScratch + " TMP=" + quotedScratch + " TEMP=" + quotedScratch + " POSSE_TASK_TEMP=" + quotedScratch + " POSSE_TASK_ID=" + quotedMarker
 	_, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": command, "keys": []string{"enter"}})
 	return err
 }

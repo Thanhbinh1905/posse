@@ -135,6 +135,14 @@ func (authorization *sandboxProcessAuthorization) setSignalGuard(pid int, guard 
 	}
 }
 
+func (authorization *sandboxProcessAuthorization) guardSignal(pid int, signal syscall.Signal) error {
+	handle := authorization.handle(pid)
+	if handle == nil || handle.signalGuard == nil {
+		return nil
+	}
+	return handle.signalGuard(signal)
+}
+
 func (authorization *sandboxProcessAuthorization) retainProcessGroup(pgid int, handle *sandboxProcessHandle) {
 	if authorization == nil || pgid <= 1 || handle == nil {
 		return

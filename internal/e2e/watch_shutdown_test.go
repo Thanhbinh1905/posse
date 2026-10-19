@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -17,7 +18,7 @@ func TestStoppingBackgroundWatchReleasesActiveForgePoll(t *testing.T) {
 	defer f.db.Close()
 	// Stop the startup Watch before seeding its inputs. Restart it only after
 	// the controlled forge command and active PR record are ready.
-	stopBackgroundWatch(t, f)
+	stopLiveWatchRuntime(t, f.root)
 	probeLog := filepath.Join(f.root, "glab-probes.log")
 	glab := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + probeLog + "\"\ncase \"$1 $2\" in\n  'auth status') exec sleep 3 ;;\n  *) exit 1 ;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(f.root, "bin", "glab"), []byte(glab), 0o700); err != nil {
@@ -33,7 +34,7 @@ func TestStoppingBackgroundWatchReleasesActiveForgePoll(t *testing.T) {
 	}) {
 		t.Fatal("background Watch did not start the controlled forge probe")
 	}
-	stopBackgroundWatch(t, f)
+	stopLiveWatchRuntime(t, f.root)
 	var claimUntil int64
 	var claimToken string
 	if err := f.db.QueryRowContext(context.Background(), `SELECT pr_poll_claim_until,pr_poll_claim_token FROM project_watch_state WHERE project_id=?`, f.project.ID).Scan(&claimUntil, &claimToken); err != nil {
@@ -45,7 +46,8 @@ func TestStoppingBackgroundWatchReleasesActiveForgePoll(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, f.binary, "watch", "--ack", strconv.FormatInt(noticeID, 10), "--timeout", "500")
-	command.Dir, command.Env = f.repo, f.leadEnv
+	command.Dir = f.repo
+	command.Env = setEnv(f.leadEnv, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("replacement Watch failed: %v\n%s", err, output)
@@ -55,5 +57,17 @@ func TestStoppingBackgroundWatchReleasesActiveForgePoll(t *testing.T) {
 	}
 	if claimUntil != 0 || claimToken != "" {
 		t.Fatalf("stopped background Watch retained its poll lease: until=%d token_present=%t", claimUntil, claimToken != "")
+	}
+}
+
+func stopLiveWatchRuntime(t *testing.T, root string) {
+	t.Helper()
+	for _, pid := range watchPIDs(root) {
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+			t.Fatalf("stop live hidden Watch %d: %v", pid, err)
+		}
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
+		t.Fatalf("hidden Watch runtime did not stop: %v", watchPIDs(root))
 	}
 }

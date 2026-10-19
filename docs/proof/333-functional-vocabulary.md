@@ -1,6 +1,6 @@
 # Functional vocabulary and 0.14 upgrade
 
-Implements epic #333 and slices #334-#338 in one release cut. ADR 0025 records the mapping and compatibility boundary.
+Implements epic #333 and slices #334-#338 in one release cut. ADR 0026 records the mapping and compatibility boundary.
 
 ## Observable contract
 
@@ -48,9 +48,19 @@ Published SQL migrations and identifiers remain unchanged: `mounts`, `mount_id`,
 
 New Projects allocate `pool/<project>/sandbox-<n>`. Existing `remuda/<project>/mount-<n>` paths are not relocated because processes and Git registrations depend on them. A Sandbox is worktree/process containment, not a security boundary.
 
-## Verification evidence
+## Release integration #770
 
-Latest complete local E2E verification: all four shards passed at `8332042`, including the R2 config fix and CI fixture hardening. Details are in CI follow-up #747 below. The previously published R2 head `af1669b` also passed all CI checks; the final refreshed head still requires CI before Merge.
+Main `2422226` adds #348's E2E stabilization, #341's hidden supervised observation and update re-exec, and #323's Task process containment. Their behavior is retained with canonical names, including `posse clean`, cgroups/marker ownership, residual-process refusal, hidden Watch identity/heartbeat/repair and binary-replacement re-exec. Historical-pane cleanup retains the recorded 0.14 pane and Project-workspace checks, and refuses an agent replacing that pane.
+
+Main now owns migrations 53/54 and ADR 0025. The unreleased vocabulary migration moves unchanged to 55 and its ADR to 0026. The exact original migration-53 checksum can be normalized to 55; other receipts are not relabelled. A persisted-state regression reproduced `migrations 53 differ from this build` without that normalization, then passed after the fix, including repeated opens and preserved Task IDs. Published migrations 53/54 remain unchanged. `sqlc` regeneration gives the retained `project_lookout_pollers` table the canonical Go model `ProjectWatchRuntime`.
+
+`Test014LookoutReexecReportsReplacement` executes retained old observer argv into the new binary. Poll-only, timeout and help calls exit 2 with `posse lookout was removed; use posse watch`; the exact retained Pi/OpenCode handoff/receipt protocols still pass. The real binary-inode replacement E2E verifies canonical Watch re-exec separately. Historical private process bindings remain custody readers, not input aliases. `pool prune` reports `orphan_panes`, distinct from saved Orphan work; native ownership names and stale test/comment wording are corrected.
+
+Final integrated-head Gate and all four E2E shards are being run. The verification below records earlier heads, not this integration.
+
+## Verification evidence before #770
+
+Latest complete local E2E verification before #770: all four shards passed at `8332042`, including the R2 config fix and CI fixture hardening. Details are in CI follow-up #747 below. The previously published R2 head `af1669b` also passed all CI checks; the final refreshed head still requires CI before Merge.
 
 Commands and final outcomes are recorded in the PR verification entries. Task-local transcripts include `gate-unit.log`, `canonical-vocabulary.log`, `contracts-final.log`, `upgrade-e2e.log`, `retained-shell-settlement.log`, `e2e-final-{1,2,3,4}.log`, `vet-canonical.log` and `staticcheck-canonical.log`.
 

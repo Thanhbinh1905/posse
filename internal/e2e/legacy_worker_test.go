@@ -15,7 +15,7 @@ import (
 
 // Simulate a Worker opened before ADR 0012 by moving its running pane into a
 // Lead tab without changing the Task's Sandbox or agent session.
-func (f *workerTabsFixture) rideLegacy(t *testing.T, id, title, name string) store.Task {
+func (f *workerTabsFixture) startLegacy(t *testing.T, id, title, name string) store.Task {
 	t.Helper()
 	task := f.start(t, id, title, name)
 	return f.moveWorkerToLegacyTab(t, task)

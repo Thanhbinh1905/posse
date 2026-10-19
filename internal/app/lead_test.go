@@ -92,8 +92,8 @@ func TestConcurrentUpStartsAtMostOneLead(t *testing.T) {
 	if created.code != 0 {
 		t.Fatalf("Lead startup failed: %s", created.output)
 	}
-	if got := fake.CallCount("tab.create"); got != 1 {
-		t.Fatalf("concurrent up created %d Watch tabs, want one", got)
+	if got := fake.CallCount("tab.create"); got != 0 {
+		t.Fatalf("concurrent up created %d tabs for a hidden Watch, want none", got)
 	}
 	if got := fake.CallCount("agent.start"); got != 0 {
 		t.Fatalf("concurrent up invoked Herdr agent.start %d times", got)
@@ -327,7 +327,7 @@ func TestUpClearsReplacedDeadLeadLabelAndIncrementsLaunchName(t *testing.T) {
 	if service.pendingLead != nil && service.pendingLead.AgentName == "posse-shop-lead-2" && service.pendingLead.PaneID == "w1:p1" {
 		callerPaneSelected = true
 	}
-	if !clearedDuplicateLabel || !callerPaneSelected || fake.CallCount("tab.create") != 1 {
+	if !clearedDuplicateLabel || !callerPaneSelected || fake.CallCount("tab.create") != 0 {
 		t.Fatalf("replacement did not use the caller pane and clear duplicate labels: %#v", fake.Calls)
 	}
 }
@@ -399,7 +399,7 @@ func TestUpReplaceStopsOldLeadAndUsesSelectedKindWithConfiguredAutoApproval(t *t
 	}
 }
 
-func TestUpReplaceUsesLeadOwnerchangeInsteadOfStalePaneIDAndClearsLiveDuplicateLabel(t *testing.T) {
+func TestUpReplaceUsesLeadOwnershipInsteadOfStalePaneIDAndClearsLiveDuplicateLabel(t *testing.T) {
 	installFakeLeadAgents(t, "claude")
 	ctx := context.Background()
 	root := t.TempDir()

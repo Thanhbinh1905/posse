@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -14,7 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestWatchRepairFailureIsActionableAndPreservesRecoveryPolicy(t *testing.T) {
+func TestWatchRepairDoesNotStartLeadOrChangeHeldRecoveryPolicy(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	root := t.TempDir()
@@ -27,16 +26,7 @@ func TestWatchRepairFailureIsActionableAndPreservesRecoveryPolicy(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", leadWorkspaceLabel(project)); err != nil {
-		t.Fatal(err)
-	}
-	project, err = db.ProjectByID(ctx, project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	fake := herdr.NewFake()
-	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: project.LeadPaneID, WorkspaceID: project.HerdrWorkspaceID, Label: project.LeadLabel}}}
-	fake.Errors["tab.create"] = errors.New("injected tab creation failure")
 	service := testService(home, fake)
 	t.Setenv("HERDR_PANE_ID", "")
 	output := &bytes.Buffer{}
@@ -50,101 +40,83 @@ func TestWatchRepairFailureIsActionableAndPreservesRecoveryPolicy(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	beforeWatch, err := db.WatchRecovery(ctx, project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	err = service.repairWatch(commandContext, db, home, project)
 	var failure *axi.Error
-	if !errors.As(err, &failure) {
-		t.Fatalf("repair failure = %v, want structured watch_repair_failed", err)
-	}
-	if failure.Code != "watch_repair_failed" || !failure.Retryable || !strings.Contains(strings.Join(failure.Help, "\n"), "Check Herdr availability") {
-		t.Fatalf("repair failure = %#v, want actionable retryable watch_repair_failed", failure)
+	if !errors.As(err, &failure) || failure.Code != "lead_workspace_missing" {
+		t.Fatalf("repair without an active Lead = %v, want lead_workspace_missing", err)
 	}
 	afterRecovery, err := db.ProjectRecovery(ctx, project.ID)
 	if err != nil || afterRecovery != beforeRecovery {
-		t.Fatalf("failed repair changed recovery policy: before=%#v after=%#v err=%v", beforeRecovery, afterRecovery, err)
-	}
-	afterWatch, err := db.WatchRecovery(ctx, project.ID)
-	if err != nil || afterWatch != beforeWatch {
-		t.Fatalf("failed repair changed Watch runtime: before=%#v after=%#v err=%v", beforeWatch, afterWatch, err)
+		t.Fatalf("repair changed recovery policy: before=%#v after=%#v err=%v", beforeRecovery, afterRecovery, err)
 	}
 	configAfter, err := os.ReadFile(configPath)
 	if err != nil || !bytes.Equal(configAfter, configBefore) {
-		t.Fatalf("failed repair changed config: err=%v", err)
+		t.Fatalf("repair changed config: err=%v", err)
+	}
+	if fake.CallCount("tab.create") != 0 {
+		t.Fatal("repair created a Lead or Watch tab")
 	}
 }
 
-func TestProjectWatchCheckSeparatesPollOnlyAndLeadWatchers(t *testing.T) {
-	project := store.Project{Name: "shop", Root: t.TempDir(), HerdrWorkspaceID: "w1", LeadPaneID: "w1:p1"}
-	lead := watchProcess{PID: os.Getpid(), PaneID: project.LeadPaneID, WorkingDir: project.Root}
-	pane := herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: watchTabLabel(project)}
-
-	tests := []struct {
-		name      string
-		state     store.WatchRecovery
-		panes     []herdr.Pane
-		processes []watchProcess
-		want      []string
-	}{
-		{
-			name:      "Lead watcher without poll-only tab",
-			state:     store.WatchRecovery{PaneID: "w1:p-old"},
-			processes: []watchProcess{lead},
-			want:      []string{"poll-only pane missing", "poll-only processes=0", "Lead delivery Watch=running"},
-		},
-		{
-			name:      "poll-only tab without live poller",
-			state:     store.WatchRecovery{PaneID: pane.PaneID},
-			panes:     []herdr.Pane{pane},
-			processes: []watchProcess{lead},
-			want:      []string{"poll-only pane=w1:p2", "poll-only processes=0", "Lead delivery Watch=running"},
-		},
-		{
-			name:      "recorded pane mismatch",
-			state:     store.WatchRecovery{PaneID: "w1:p-old"},
-			panes:     []herdr.Pane{pane},
-			processes: []watchProcess{{PID: os.Getpid(), PaneID: pane.PaneID, PollOnly: true}, lead},
-			want:      []string{"recorded pane mismatch (observed=w1:p2)", "poll-only processes=1", "Lead delivery Watch=running"},
-		},
-		{
-			name:      "poller pane mismatch",
-			state:     store.WatchRecovery{PaneID: pane.PaneID},
-			panes:     []herdr.Pane{pane},
-			processes: []watchProcess{{PID: os.Getpid(), PaneID: "w1:p-old", PollOnly: true, WorkingDir: project.Root}},
-			want:      []string{"poll-only pane=w1:p2", "poll-only process pane=w1:p-old", "Lead delivery Watch=missing"},
-		},
-		{
-			name:  "both watchers missing",
-			state: store.WatchRecovery{PaneID: "w1:p-old"},
-			want:  []string{"poll-only pane missing", "poll-only processes=0", "Lead delivery Watch=missing"},
-		},
-		{
-			name:      "healthy poll-only watcher",
-			state:     store.WatchRecovery{PaneID: pane.PaneID},
-			panes:     []herdr.Pane{pane},
-			processes: []watchProcess{{PID: os.Getpid(), PaneID: pane.PaneID, PollOnly: true}, lead},
-		},
+func TestWatchRepairRefusesDownProject(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			check := projectWatchCheck(project, test.state, herdr.Snapshot{Panes: test.panes}, test.processes, nil)
-			if test.name == "healthy poll-only watcher" {
-				if check.Status != "ok" {
-					t.Fatalf("healthy watcher status = %s: %s", check.Status, check.Detail)
-				}
-				return
-			}
-			if check.Status != "warn" {
-				t.Fatalf("unhealthy watcher status = %s, want warn: %s", check.Status, check.Detail)
-			}
-			for _, want := range test.want {
-				if !strings.Contains(check.Detail, want) {
-					t.Errorf("watcher detail %q does not contain %q", check.Detail, want)
-				}
-			}
-		})
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkProjectDown(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	project, err = db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	commandContext := &axi.Context{Context: ctx, Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}}
+	err = service.repairWatch(commandContext, db, home, project)
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "project_down" {
+		t.Fatalf("repair of down Project = %v, want project_down", err)
+	}
+}
+
+func TestWatchSupervisionDoesNotCreateAnEmptyHomeDatabase(t *testing.T) {
+	home := t.TempDir()
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+	service := New(home, nil)
+	commandContext := &axi.Context{Context: context.Background(), Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}}
+	service.superviseWatchRuntimes(commandContext, "doctor", nil)
+	if _, err := os.Stat(filepath.Join(home, "posse.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("watch supervision created a database in an empty home: %v", err)
+	}
+}
+
+func TestWatchRuntimeRowReportsStoppedAndNotStartedStates(t *testing.T) {
+	ctx := context.Background()
+	db, project, home := newWatchTestProject(t)
+	defer db.Close()
+	service := testService(home, nil)
+	project.HerdrWorkspaceID = ""
+	if got := service.watchRuntimeRow(ctx, db, home, project)["state"]; got != "not_started" {
+		t.Fatalf("unstarted Project Watch state = %v", got)
+	}
+	if err := db.MarkProjectDown(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := service.watchRuntimeRow(ctx, db, home, project)["state"]; got != "stopped" {
+		t.Fatalf("down Project Watch state = %v", got)
 	}
 }

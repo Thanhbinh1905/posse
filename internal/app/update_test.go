@@ -68,7 +68,7 @@ func TestUpdateCheckReportsRunningWatches(t *testing.T) {
 	service.Version = "0.1.0"
 	service.updateURL = url
 	code, output := runCLI(t, service, "update", "--check", "--json")
-	if code != 0 || !strings.Contains(output, `"watches"`) || !strings.Contains(output, `"project":"demo"`) || !strings.Contains(output, `"kind":"lead"`) || !strings.Contains(output, `"kind":"watch_tab"`) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lead.command.Process.Pid)) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, watchTab.command.Process.Pid)) {
+	if code != 0 || !strings.Contains(output, `"watches"`) || !strings.Contains(output, `"project":"demo"`) || !strings.Contains(output, `"kind":"lead"`) || !strings.Contains(output, `"kind":"watch"`) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lead.command.Process.Pid)) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, watchTab.command.Process.Pid)) {
 		t.Fatalf("update --check omitted running Lead/Watch processes: %d %s", code, output)
 	}
 	for _, process := range []updateWatchHelper{lead, watchTab} {
@@ -150,7 +150,7 @@ func waitForFile(timeout time.Duration, path string) bool {
 	return false
 }
 
-func TestUpdateRefusesRunningWatchesUnlessRequested(t *testing.T) {
+func TestUpdateAllowsRunningWatchesToReexec(t *testing.T) {
 	home := t.TempDir()
 	db, err := store.Open(home)
 	if err != nil {
@@ -175,11 +175,114 @@ func TestUpdateRefusesRunningWatchesUnlessRequested(t *testing.T) {
 	service.Version = "0.1.0"
 	service.updateURL = server.URL
 	code, output := runCLI(t, service, "update")
-	if code != 1 || !strings.Contains(output, "watches_running") || !strings.Contains(output, "demo") || !strings.Contains(output, "watch_tab") || !strings.Contains(output, "lead") {
-		t.Fatalf("update did not refuse with the running process list: %d %s", code, output)
+	if code != 1 || strings.Contains(output, "watches_running") || !strings.Contains(output, "release_assets_missing") {
+		t.Fatalf("update did not proceed to release verification with live watches: %d %s", code, output)
 	}
-	if requests != 0 {
-		t.Fatalf("update fetched a release before refusing: %d request(s)", requests)
+	if requests == 0 {
+		t.Fatal("update refused before fetching the release while watches were running")
+	}
+}
+
+func TestRequestWatchReexecSkipsAnAlreadyUpdatedProcess(t *testing.T) {
+	home := t.TempDir()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binary}); err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+	current, ok := inspectWatchExecutable(os.Getpid())
+	if !ok {
+		t.Fatal("test process executable identity is unavailable")
+	}
+	process := watchProcess{PID: os.Getpid(), Executable: current}
+	if err := requestWatchReexec(home, []watchProcess{process}); err != nil {
+		t.Fatalf("already updated process produced a re-exec warning: %v", err)
+	}
+	if _, err := os.Stat(watchReexecMarker(home, os.Getpid())); !os.IsNotExist(err) {
+		t.Fatalf("already updated process got another re-exec marker: %v", err)
+	}
+}
+
+func TestRequestWatchReexecSkipsUpdatedProcessesAndMarksRemainingOnes(t *testing.T) {
+	home := t.TempDir()
+	old := startUpdateWatchProcess(t, home, "watch")
+	installed := filepath.Join(t.TempDir(), "posse")
+	binary, err := os.ReadFile(old.command.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installed, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(t.TempDir(), "ready")
+	stopped := filepath.Join(t.TempDir(), "stopped")
+	current := exec.Command(installed, "watch")
+	current.Dir = home
+	current.Env = append(os.Environ(), "POSSE_HOME="+home, "PWD="+home, "POSSE_TEST_READY_FILE="+ready, "POSSE_TEST_STOP_FILE="+stopped)
+	if err := current.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if current.Process != nil {
+			_ = current.Process.Signal(syscall.SIGTERM)
+			_ = current.Wait()
+		}
+	})
+	if !waitForFile(2*time.Second, ready) {
+		t.Fatalf("updated Watch helper PID %d did not start", current.Process.Pid)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: installed}); err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+	processes, err := systemWatchProcesses(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processes) != 2 {
+		t.Fatalf("expected old and updated helper processes, found %#v", processes)
+	}
+	if err := requestWatchReexec(home, processes); err != nil {
+		t.Fatalf("an already updated Watch caused a warning: %v", err)
+	}
+	if _, err := os.Stat(watchReexecMarker(home, current.Process.Pid)); !os.IsNotExist(err) {
+		t.Fatalf("updated process was requested to re-exec again: %v", err)
+	}
+	if _, err := os.Stat(watchReexecMarker(home, old.command.Process.Pid)); err != nil {
+		t.Fatalf("remaining old process did not receive a re-exec marker: %v", err)
+	}
+}
+
+func TestRequestWatchReexecWritesAProcessScopedMarker(t *testing.T) {
+	home := t.TempDir()
+	watch := startUpdateWatchProcess(t, home, "watch", "--poll-only")
+	processes, err := systemWatchProcesses(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *watchProcess
+	for index := range processes {
+		if processes[index].PID == watch.command.Process.Pid {
+			found = &processes[index]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("watch process %d was not discovered: %#v", watch.command.Process.Pid, processes)
+	}
+	if err := requestWatchReexec(home, []watchProcess{*found}); err != nil {
+		t.Fatal(err)
+	}
+	marker := watchReexecMarker(home, watch.command.Process.Pid)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("update did not request watch re-exec: %v", err)
 	}
 }
 
@@ -514,7 +617,7 @@ func TestUpdateFromUserShellPaneBacksUpAndAtomicallyInstallsVerifiedArchive(t *t
 	if code != 0 {
 		t.Fatalf("update --stop-watches: %d %s", code, output)
 	}
-	if !strings.Contains(output, "stopped_watches") || !strings.Contains(output, "watch_tab") || !strings.Contains(output, "lead") || !strings.Contains(output, "Watch tab owner") || !strings.Contains(output, "Lead restarts") {
+	if !strings.Contains(output, "stopped_watches") || !strings.Contains(output, "watch") || !strings.Contains(output, "lead") || !strings.Contains(output, "Project watch re-execs") || !strings.Contains(output, "Lead restarts") {
 		t.Fatalf("update omitted stopped processes or restart owners: %s", output)
 	}
 	leadStopped := waitForFile(2*time.Second, lead.stopped)

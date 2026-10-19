@@ -109,7 +109,7 @@ func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store
 		rows = append(rows, orphanRow{Label: label, Panes: paneIDs})
 	}
 	result := func() axi.Object {
-		return axi.Object{{Key: "project", Value: project.Name}, {Key: "orphans", Value: rows}, {Key: "closed_panes", Value: closed}, {Key: "dry_run", Value: !apply}, {Key: "help", Value: []any{"Run `posse pool prune --yes` to close these orphan panes"}}}
+		return axi.Object{{Key: "project", Value: project.Name}, {Key: "orphan_panes", Value: rows}, {Key: "closed_panes", Value: closed}, {Key: "dry_run", Value: !apply}, {Key: "help", Value: []any{"Run `posse pool prune --yes` to close these orphan panes"}}}
 	}
 	for _, row := range rows {
 		if !apply {

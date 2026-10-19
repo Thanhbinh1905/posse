@@ -29,7 +29,7 @@ The installer downloads a release to `~/.local/bin` by default and offers to set
 
 ### Upgrading from 0.14
 
-1. Back up the full Posse home and Project Git metadata as described in [ADR 0025](docs/adr/0025-functional-vocabulary.md).
+1. Back up the full Posse home and Project Git metadata as described in [ADR 0026](docs/adr/0026-functional-vocabulary.md).
 2. From a User shell, run the installed 0.14 binary with `posse update --stop-lookouts`. That binary does not know `--stop-watches`; use the new flag only after upgrading.
 3. `posse update` runs the new `posse setup` for integrations; run it manually after another installation method. If you installed optional global skills, also run `posse setup --global-skills` so agents do not learn removed commands from stale copies.
 4. Restart every running Lead: from a User shell in each Project, run `posse up --replace`. Running Pi/OpenCode Leads retain their old adapters in memory. Their exact machine handoff/receipt calls remain supported during the transition, but restarting loads the new adapter and instructions.
@@ -43,7 +43,7 @@ Stored Tasks, config and paths upgrade automatically; existing worktrees are not
 
 With one available agent kind, `posse up` selects it without saving a preference. With several, choose with `posse up --<kind>` or `lead.kind`. Without Dispatch Rules or `dispatch.default.use`, Workers use the Lead's kind with its default model and effort. Inspect consequential gaps with `posse`.
 
-For a clear implementation request, the Lead can dispatch one Change directly. Research Tasks, specifications, tickets and separate review Tasks are optional. Customize workflow guidance with `posse preferences show|path|set`; User and Project preferences can change advice but not Posse's runtime obligations or authority checks. Legacy preference files remain readable; move them explicitly with `posse preferences move`. Removed commands fail with an error naming their replacement. See [ADR 0025](docs/adr/0025-functional-vocabulary.md) for the vocabulary mapping and automatic 0.14 upgrade.
+For a clear implementation request, the Lead can dispatch one Change directly. Research Tasks, specifications, tickets and separate review Tasks are optional. Customize workflow guidance with `posse preferences show|path|set`; User and Project preferences can change advice but not Posse's runtime obligations or authority checks. Legacy preference files remain readable; move them explicitly with `posse preferences move`. Removed commands fail with an error naming their replacement. See [ADR 0026](docs/adr/0026-functional-vocabulary.md) for the vocabulary mapping and automatic 0.14 upgrade.
 
 The `posse-setup` skill (Claude Code: `/posse-setup`, Codex: `$posse-setup`) remains available as an optional full configuration tour. Use `posse config` to personalize later and `posse --help` to explore the CLI.
 

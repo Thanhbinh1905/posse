@@ -30,7 +30,7 @@ func reviewEvidenceFixture(t *testing.T, review string) *prLifecycleFixture {
 // reports done, as a Worker would.
 func publishCandidate(t *testing.T, f *prLifecycleFixture, title, profile string, number int) store.Task {
 	t.Helper()
-	if code, out := rideReviewIdentityTask(t, f, title, profile, ""); code != 0 {
+	if code, out := startReviewIdentityTask(t, f, title, profile, ""); code != 0 {
 		t.Fatalf("start %s: %d %s", title, code, out)
 	}
 	tasks, err := f.db.Tasks(context.Background(), f.project.ID, true)
@@ -98,7 +98,7 @@ func requireRefusal(t *testing.T, f *prLifecycleFixture, code string, args ...st
 
 func passReview(t *testing.T, f *prLifecycleFixture, change store.Task, title string) {
 	t.Helper()
-	if code, out := rideReviewIdentityTask(t, f, title, "reviewer", taskIDOf(change)); code != 0 {
+	if code, out := startReviewIdentityTask(t, f, title, "reviewer", taskIDOf(change)); code != 0 {
 		t.Fatalf("review: %d %s", code, out)
 	}
 	tasks, err := f.db.Tasks(context.Background(), f.project.ID, true)

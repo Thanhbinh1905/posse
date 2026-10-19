@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -50,6 +51,9 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	if parsed.Bool("execute") {
 		if task.State != store.StateDone && task.State != store.StateMerging {
+			if err := workingPRBehindFailure(ctx.Context, db, project, task); err != nil {
+				return err
+			}
 			return axi.Failure("merge_refused", "Task must be done or merging before Merge", false)
 		}
 		if task.AutonomyMerge != "auto" && strings.TrimSpace(parsed.Flags["user-approved"]) == "" {
@@ -567,7 +571,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	var processAuthorization *sandboxProcessAuthorization
 	if !discardable && s.Herdr != nil && task.AgentName != "" && sandboxHeld {
 		processAuthorization = newSandboxProcessAuthorization()
-		if err := s.verifySandboxForegroundOwnerchangeWithAuthorization(ctx, db, project, task, processAuthorization); err != nil {
+		if err := s.verifySandboxForegroundOwnershipWithAuthorization(ctx, db, project, task, processAuthorization); err != nil {
 			processAuthorization.Close()
 			return result, s.teardownIncomplete(ctx, db, project, task, "Sandbox process ownership", err)
 		}
@@ -582,6 +586,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		return result, s.teardownIncomplete(ctx, db, project, task, "pane inspection", err)
 	}
 	var stopped []string
+	var inPlaceShellPID int
 	var workerPlan *discardWorkerPlan
 	if discardable {
 		workerPlan, err = s.retainDiscardWorker(ctx, db, project, task, intent, panePlan)
@@ -642,26 +647,46 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}
 	if !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
-			if inPlace && task.AgentName != "" && s.Herdr != nil {
-				snapshot, err := s.snapshot(ctx)
+			if inPlace {
+				paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
 				if err != nil {
 					return err
 				}
-				pane, found := findTaskPane(snapshot.Panes, task)
-				if found && pane.Agent != "" {
-					if err := s.stopPaneAgent(ctx, pane.PaneID, pane.Agent); err != nil {
+				inPlaceShellPID = paneInfo.ShellPID
+				if task.AgentName != "" && processIdentityCapabilityError() != "" {
+					snapshot, err := s.snapshot(ctx)
+					if err != nil {
 						return err
+					}
+					pane, found := findTaskPane(snapshot.Panes, task)
+					if found && pane.Agent != "" {
+						if err := s.stopPaneAgent(ctx, pane.PaneID, pane.Agent); err != nil {
+							return err
+						}
 					}
 				}
 			}
+			signalGuard := taskProcessSignalGuard(nil)
+			if inPlace {
+				signalGuard = func(pid int, _ syscall.Signal) error {
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, inPlaceShellPID)
+				}
+			} else if processAuthorization != nil {
+				signalGuard = processAuthorization.guardSignal
+			}
+			preservedProcesses, containmentErr := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard, inPlaceShellPID)
+			if containmentErr != nil {
+				return containmentErr
+			}
+			excluded := taskProcessDetailsPIDSet(preservedProcesses)
 			if sandboxHeld {
-				sandboxStopped, stopErr := stopSandboxProcessesAuthorized(task.WorktreePath, processAuthorization)
+				sandboxStopped, stopErr := stopSandboxProcessesAuthorized(task.WorktreePath, processAuthorization, excluded)
 				if stopErr != nil {
 					return stopErr
 				}
 				stopped = append(stopped, sandboxStopped...)
 			}
-			scratchStopped, stopErr := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization)
+			scratchStopped, stopErr := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization, excluded)
 			if stopErr != nil {
 				return stopErr
 			}
@@ -693,12 +718,22 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}
 	if err := s.runIntentStep(ctx, db, intent, "sandbox.stop", func() error {
 		if discardable {
-			return verifyNoTaskOwnedProcesses(ctx, db, home, project, task)
+			if processes := taskContainmentProcessDetails(task); len(processes) > 0 {
+				return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, fmt.Sprint(processes), "No residual process was stopped or signalled. Inspect the Sandbox and scratch processes, then retry discard")
+			}
+			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
+				return err
+			}
+			return retireEmptyTaskCgroup(task)
+		}
+		_, excluded, err := taskSharedProcessExclusions(task)
+		if err != nil {
+			return err
 		}
 		if !sandboxHeld {
 			return nil
 		}
-		newlyStopped, err := stopSandboxProcessesAuthorized(task.WorktreePath, processAuthorization)
+		newlyStopped, err := stopSandboxProcessesAuthorized(task.WorktreePath, processAuthorization, excluded)
 		if err != nil {
 			return err
 		}
@@ -798,11 +833,28 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				return err
 			}
 		} else {
-			newlyStopped, err := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization)
+			_, excluded, err := taskSharedProcessExclusions(task)
+			if err != nil {
+				return err
+			}
+			newlyStopped, err := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization, excluded)
 			if err != nil {
 				return err
 			}
 			stopped = append(stopped, newlyStopped...)
+			scratchProcesses, err := taskScratchProcessDetails(home, project, task)
+			if err != nil {
+				return err
+			}
+			for _, process := range scratchProcesses {
+				preserved, err := taskProcessHasExcludedAncestor(process.PID, excluded)
+				if err != nil {
+					return fmt.Errorf("verify preserved daemon process %d before removing Task scratch: %w", process.PID, err)
+				}
+				if preserved {
+					return fmt.Errorf("cannot remove Task scratch while preserved shared daemon process %d (%s) still references it", process.PID, process.Command)
+				}
+			}
 		}
 		return removeTaskScratch(home, project, task)
 	}); err != nil {
@@ -838,6 +890,37 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		paneResult = latestPanes
 		if discardable && sandboxHeld {
 			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
+				return err
+			}
+		}
+		if !discardable {
+			var signalGuard taskProcessSignalGuard
+			shellPID := 0
+			if inPlace {
+				signalGuard = func(pid int, _ syscall.Signal) error {
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, shellPID)
+				}
+				if len(taskContainmentProcessDetails(task)) > 0 {
+					paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
+					if err != nil {
+						return err
+					}
+					shellPID = paneInfo.ShellPID
+				}
+			} else if processAuthorization != nil {
+				signalGuard = processAuthorization.guardSignal
+			}
+			if _, err := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard, shellPID); err != nil {
+				return err
+			}
+			preservedProcesses, _, err := taskSharedProcessExclusions(task)
+			if err != nil {
+				return err
+			}
+			if len(preservedProcesses) > 0 {
+				return fmt.Errorf("cannot release the Task Sandbox while preserving detached shared daemon processes: %s", describeSharedTaskProcesses(preservedProcesses))
+			}
+			if err := retireEmptyTaskCgroup(task); err != nil {
 				return err
 			}
 		}

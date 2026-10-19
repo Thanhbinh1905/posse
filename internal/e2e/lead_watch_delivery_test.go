@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -19,6 +20,50 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func startLeadWatchForTest(t *testing.T, f *prLifecycleFixture) (*exec.Cmd, chan error, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	command := exec.Command(f.binary, "watch", "--ack", "all", "--timeout", "10000")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderrOutput bytes.Buffer
+	command.Stdout = &stdout
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stderrOutput.WriteString(line + "\n")
+			if strings.Contains(line, "Watch acknowledgement committed:") {
+				close(ready)
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		<-readDone
+		done <- command.Wait()
+	}()
+	select {
+	case <-ready:
+		return command, done, &stdout, &stderrOutput
+	case err := <-done:
+		t.Fatalf("watch exited before acknowledgement: %v stdout=%s stderr=%s", err, stdout.String(), stderrOutput.String())
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		err := <-done
+		t.Fatalf("watch did not acknowledge before waiting: %v stdout=%s stderr=%s", err, stdout.String(), stderrOutput.String())
+	}
+	return nil, nil, nil, nil
+}
+
 func TestLeadWatchOwnsNoticeUntilItExits(t *testing.T) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
@@ -27,33 +72,20 @@ func TestLeadWatchOwnsNoticeUntilItExits(t *testing.T) {
 	if _, err := client.Run(context.Background(), "pane", "report-agent", f.project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := herdr.Snapshot{}
-	var snapshotErr error
-	otherPane := ""
-	if !waitForCondition(5*time.Second, func() bool {
-		snapshot, snapshotErr = client.Snapshot(context.Background())
-		if snapshotErr != nil {
-			return false
-		}
-		for _, pane := range snapshot.Panes {
-			if pane.WorkspaceID == f.project.HerdrWorkspaceID && pane.PaneID != f.project.LeadPaneID {
-				otherPane = pane.PaneID
-				break
-			}
-		}
-		return otherPane != ""
-	}) {
-		t.Fatalf("no other pane to focus: snapshot=%#v err=%v", snapshot.Panes, snapshotErr)
+	other, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, "fixture:other")
+	if err != nil || other.RootPane.PaneID == "" {
+		t.Fatalf("create an unfocused shell beside the Lead: %#v %v", other, err)
 	}
+	otherPane := other.RootPane.PaneID
 	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": otherPane}); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, snapshotErr = client.Snapshot(context.Background())
+	snapshot, snapshotErr := client.Snapshot(context.Background())
 	if snapshotErr != nil || snapshot.FocusedPaneID == f.project.LeadPaneID {
 		t.Fatalf("Lead is focused: %#v %v", snapshot, snapshotErr)
 	}
 	logPath := filepath.Join(f.root, "lead-prompts.log")
-	// The poll-only tab must not suppress fallback when the Lead has never
+	// The hidden watch must not suppress fallback when the Lead has never
 	// started a watch.
 	if _, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "fallback before watch starts", DataJSON: `{}`}); err != nil {
 		t.Fatal(err)
@@ -66,16 +98,8 @@ func TestLeadWatchOwnsNoticeUntilItExits(t *testing.T) {
 		contents, _ := os.ReadFile(logPath)
 		t.Fatalf("typed fallback missing without Lead watcher: %s", contents)
 	}
-	// Start the actual Lead command in the isolated Project, not the poll-only tab.
-	command := exec.Command(f.binary, "watch", "--timeout", "10000")
-	command.Dir, command.Env = f.repo, f.leadEnv
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
+	// Start the actual Lead command in the isolated Project, not the detached watch.
+	command, done, output, stderrOutput := startLeadWatchForTest(t, f)
 	finished := false
 	t.Cleanup(func() {
 		if !finished {
@@ -84,12 +108,10 @@ func TestLeadWatchOwnsNoticeUntilItExits(t *testing.T) {
 			<-done
 		}
 	})
-	// A live process must have entered its wait loop before the Notice is created.
-	time.Sleep(300 * time.Millisecond)
 	select {
 	case err := <-done:
 		finished = true
-		t.Fatalf("watch exited before Notice: %v %s", err, output.String())
+		t.Fatalf("watch exited before Notice: %v stdout=%s stderr=%s", err, output.String(), stderrOutput.String())
 	default:
 	}
 	// Insert but do not commit until the watcher is paused. This leaves the
@@ -157,7 +179,7 @@ func TestLeadWatchOwnsNoticeUntilItExits(t *testing.T) {
 	case err := <-done:
 		finished = true
 		if err != nil {
-			t.Fatalf("watch failed: %v %s", err, output.String())
+			t.Fatalf("watch failed: %v stdout=%s stderr=%s", err, output.String(), stderrOutput.String())
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("watch missed Notice %d: %s", id, output.String())
@@ -188,13 +210,7 @@ func TestLeadWatchOwnsNoticeUntilItExits(t *testing.T) {
 	}
 
 	// A watcher killed while waiting must not leave a stale ownership record.
-	crashed := exec.Command(f.binary, "watch", "--timeout", "10000")
-	crashed.Dir, crashed.Env = f.repo, f.leadEnv
-	if err := crashed.Start(); err != nil {
-		t.Fatal(err)
-	}
-	crashedDone := make(chan error, 1)
-	go func() { crashedDone <- crashed.Wait() }()
+	crashed, crashedDone, _, _ := startLeadWatchForTest(t, f)
 	crashedReaped := false
 	t.Cleanup(func() {
 		if !crashedReaped {
@@ -202,7 +218,6 @@ func TestLeadWatchOwnsNoticeUntilItExits(t *testing.T) {
 			<-crashedDone
 		}
 	})
-	time.Sleep(300 * time.Millisecond)
 	if err := crashed.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}

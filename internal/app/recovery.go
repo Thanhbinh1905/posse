@@ -308,24 +308,13 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if err := db.RememberProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt); err != nil {
 			return 0, err
 		}
-		// The first Watch tick may not have recorded the previous server
-		// generation before Herdr restarted. Reconcile its process even when
-		// generation comparison cannot prove a restart: a restored tab label
-		// does not mean its poller was restored.
+		// A restored Herdr pane does not restore this process. Commands repair
+		// the detached watch from its SQLite heartbeat instead.
 		if _, found := leadWorkspace(snapshot, project); found {
-			replaceUnstarted := false
-			for _, pane := range snapshot.Panes {
-				if pane.Label != watchTabLabel(project) || pane.WorkspaceID != project.HerdrWorkspaceID || watchProcessRunning(pane.PaneID, home) {
-					continue
-				}
-				running, err := s.waitWatchRecovery(ctx, project, pane.PaneID, home)
-				if err != nil {
-					return 0, err
-				}
-				replaceUnstarted = !running
-				break
+			if err := s.cleanupLegacyWatchTabs(ctx, db, project, snapshot); err != nil {
+				return 0, err
 			}
-			return 0, s.ensureWatchTab(ctx, db, project, snapshot, replaceUnstarted)
+			return 0, s.ensureWatchRuntime(ctx, db, home, project)
 		}
 		return 0, nil
 	}
@@ -761,7 +750,10 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	s.relabelProjectTabs(ctx, db, project)
 	freshSnapshot, watchErr := s.snapshot(ctx)
 	if watchErr == nil {
-		watchErr = s.ensureWatchTab(ctx, db, project, freshSnapshot, true)
+		watchErr = s.cleanupLegacyWatchTabs(ctx, db, project, freshSnapshot)
+	}
+	if watchErr == nil {
+		watchErr = s.ensureWatchRuntime(ctx, db, home, project)
 	}
 	if watchErr != nil {
 		_, _ = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Watch restart failed: " + truncate(watchErr.Error(), 240), DataJSON: `{}`})
