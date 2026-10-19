@@ -30,7 +30,7 @@ func TestMountCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 	defer stopMountProcess(t, leader)
 
 	marker := filepath.Join(root, "was-signaled")
-	child := exec.Command("sh", "-c", "trap 'touch "+marker+"' TERM; sleep 0.5")
+	child := exec.Command("sh", "-c", "trap 'touch "+marker+"' TERM; sleep 0.05")
 	child.Dir = root
 	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: leader.Process.Pid}
 	if err := child.Start(); err != nil {
