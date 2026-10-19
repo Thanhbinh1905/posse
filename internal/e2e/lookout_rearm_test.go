@@ -12,7 +12,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
-func TestLookoutStaleEpisodesCreateOneNoticeEach(t *testing.T) {
+func TestLookoutRepairsDeadPollersWithoutStaleNotices(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	client := herdr.NewWithEnv("herdr", f.env)
@@ -48,8 +48,8 @@ func TestLookoutStaleEpisodesCreateOneNoticeEach(t *testing.T) {
 				count++
 			}
 		}
-		if count != episode {
-			t.Fatalf("after stale episode %d got %d poller failure Notices, want one per episode: %#v", episode, count, notices)
+		if count != 0 {
+			t.Fatalf("dead poller recovery after episode %d created a false stale-heartbeat Notice: %#v", episode, notices)
 		}
 	}
 }

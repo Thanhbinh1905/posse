@@ -123,15 +123,29 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	var owned []lookoutProcess
+	var owned, pollers, leadLookouts []lookoutProcess
 	for _, process := range processes {
-		if processBelongsToProject(process, project) {
-			owned = append(owned, process)
+		if !processBelongsToProject(process, project) {
+			continue
+		}
+		owned = append(owned, process)
+		if process.PollOnly {
+			pollers = append(pollers, process)
+		} else {
+			leadLookouts = append(leadLookouts, process)
 		}
 	}
-	if remaining, err := stopLookoutProcesses(ctx.Context, home, owned); err != nil {
+	if remaining, err := stopLookoutProcesses(ctx.Context, home, leadLookouts); err != nil {
 		return err
 	} else if !allLookoutsStopped(remaining) {
+		return axi.Failure("lookout_stop_failed", "a Lookout of Project "+project.Name+" is still running", true, "Retry `posse down`")
+	}
+	for _, poller := range pollers {
+		if err := stopStoredLookoutPoller(ctx.Context, home, poller); err != nil {
+			return axi.Failure("lookout_stop_failed", "the Project poller is still completing maintenance", true, "Retry `posse down` after it stops")
+		}
+	}
+	if !allLookoutsStopped(owned) {
 		return axi.Failure("lookout_stop_failed", "a Lookout of Project "+project.Name+" is still running", true, "Retry `posse down`")
 	}
 	poller, err := db.LookoutPoller(ctx.Context, project.ID)

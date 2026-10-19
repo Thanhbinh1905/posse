@@ -118,40 +118,51 @@ func lineCount(path string) int {
 	return strings.Count(string(contents), "started\n")
 }
 
-func TestHiddenLookoutPollerDoesNotDeliverNotices(t *testing.T) {
-	f := newPRLifecycleFixture(t)
+func TestHiddenLookoutPollerDeliversNoticesWhenLeadHasNoWait(t *testing.T) {
+	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
+	client := herdr.NewWithEnv("herdr", f.env)
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
 		t.Fatalf("hidden Project poller did not start: %v", lookoutPIDs(f.root))
+	}
+	if _, err := client.Run(context.Background(), "pane", "report-agent", f.project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatalf("mark idle Lead: %v", err)
+	}
+	other, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, "fixture:other")
+	if err != nil {
+		t.Fatalf("create unfocused pane: %v", err)
+	}
+	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": other.RootPane.PaneID}); err != nil {
+		t.Fatalf("unfocus Lead: %v", err)
 	}
 	noticeID, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "Worker finished"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(3 * time.Second)
-	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if !waitForCondition(10*time.Second, func() bool {
+		return noticeDeliveredAt(t, f.db, f.project.ID, noticeID) != 0
+	}) {
+		notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+		t.Fatalf("hidden poller did not deliver a Notice without a Lead-side wait: %#v", notices)
+	}
+	contents, err := os.ReadFile(filepath.Join(f.root, "lead-prompts.log"))
+	if err != nil || !strings.Contains(string(contents), "Worker finished") {
+		t.Fatalf("hidden poller did not wake the idle Lead: %s (%v)", contents, err)
+	}
+}
+
+func noticeDeliveredAt(t *testing.T, db *store.DB, projectID, noticeID int64) int64 {
+	t.Helper()
+	notices, err := db.Notices(context.Background(), projectID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
 	for _, notice := range notices {
 		if notice.ID == noticeID {
-			found = true
-			if notice.DeliveredAt != 0 {
-				t.Fatalf("hidden poller delivered a Lead-owned Notice: %#v", notice)
-			}
+			return notice.DeliveredAt
 		}
 	}
-	if !found {
-		t.Fatalf("Lead-owned Notice %d is missing: %#v", noticeID, notices)
-	}
-	lastNotification, err := f.db.LastNoticeNotification(context.Background(), f.project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lastNotification != 0 {
-		t.Fatalf("hidden poller emitted a Lead-owned Notice notification at %d", lastNotification)
-	}
+	return 0
 }
 
 func TestLookoutRestartsAfterHerdrRestart(t *testing.T) {
@@ -316,12 +327,13 @@ func TestLookoutRepairsAfterHerdrAgentEvent(t *testing.T) {
 	}
 }
 
-func TestLookoutPollerStaleHeartbeatRaisesOneNoticeAndRepairs(t *testing.T) {
+func TestLookoutPollerHeartbeatProgressClearsAnApparentStaleReading(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
 		t.Fatalf("Project poller missing: %v", lookoutPIDs(f.root))
 	}
+	pid := lookoutPIDs(f.root)[0]
 	state, err := f.db.LookoutPoller(context.Background(), f.project.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -330,9 +342,114 @@ func TestLookoutPollerStaleHeartbeatRaisesOneNoticeAndRepairs(t *testing.T) {
 	if err := f.db.SetLookoutPoller(context.Background(), f.project.ID, state); err != nil {
 		t.Fatal(err)
 	}
-	output := runPosse(t, f.binary, f.repo, f.env, "doctor", "--json")
+	runPosse(t, f.binary, f.repo, f.env, "doctor", "--json")
+	if pids := lookoutPIDs(f.root); len(pids) != 1 || pids[0] != pid {
+		t.Fatalf("heartbeat progress unnecessarily replaced a resumed poller: %v", pids)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Lookout poller") {
+			t.Fatalf("fresh heartbeat progress left a false poller failure Notice: %#v", notice)
+		}
+	}
+}
+
+func TestLookoutPollerStaleHeartbeatRaisesOneNoticeAndRepairs(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
-		t.Fatalf("stale heartbeat was not repaired: %v\n%s", lookoutPIDs(f.root), output)
+		t.Fatalf("Project poller missing: %v", lookoutPIDs(f.root))
+	}
+	pid := lookoutPIDs(f.root)[0]
+	state, err := f.db.LookoutPoller(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialHeartbeat := state.HeartbeatAt
+	if !waitForCondition(7*time.Second, func() bool {
+		state, err = f.db.LookoutPoller(context.Background(), f.project.ID)
+		return err == nil && state.HeartbeatAt > initialHeartbeat
+	}) {
+		t.Fatal("poller did not complete a heartbeat before the stale simulation")
+	}
+	state.HeartbeatAt = time.Now().Add(-time.Hour).UnixMilli()
+	if err := f.db.SetLookoutPoller(context.Background(), f.project.ID, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	resumed := false
+	t.Cleanup(func() {
+		if !resumed {
+			_ = syscall.Kill(pid, syscall.SIGCONT)
+		}
+	})
+	command := exec.Command(f.binary, "doctor", "--json")
+	command.Dir, command.Env = f.repo, f.env
+	done := make(chan struct {
+		output []byte
+		err    error
+	}, 1)
+	go func() {
+		output, runErr := command.CombinedOutput()
+		done <- struct {
+			output []byte
+			err    error
+		}{output, runErr}
+	}()
+	if !waitForCondition(20*time.Second, func() bool {
+		notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+		if err != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Lookout poller") {
+				return true
+			}
+		}
+		return false
+	}) {
+		_ = syscall.Kill(pid, syscall.SIGCONT)
+		resumed = true
+		select {
+		case result := <-done:
+			t.Fatalf("stale poller check exited before raising its Notice: %v\n%s", result.err, result.output)
+		default:
+		}
+		t.Fatal("stale heartbeat did not raise a poller failure Notice")
+	}
+	var result struct {
+		output []byte
+		err    error
+	}
+	select {
+	case result = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("doctor did not finish stale poller supervision")
+	}
+	if result.err != nil {
+		t.Fatalf("doctor failed while supervising stale poller: %v\n%s", result.err, result.output)
+	}
+	if pids := lookoutPIDs(f.root); len(pids) != 1 || pids[0] != pid {
+		t.Fatalf("supervision killed or replaced a nonresponsive poller instead of stopping gracefully: %v\n%s", pids, result.output)
+	}
+	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	resumed = true
+	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 0 }) {
+		t.Fatalf("stale poller did not finish its pending graceful stop: %v", lookoutPIDs(f.root))
+	}
+	output := runPosse(t, f.binary, f.repo, f.env, "doctor", "--json")
+	if !waitForCondition(10*time.Second, func() bool {
+		pids := lookoutPIDs(f.root)
+		return len(pids) == 1 && pids[0] != pid
+	}) {
+		t.Fatalf("stale heartbeat was not repaired after graceful poller exit: %v\n%s", lookoutPIDs(f.root), output)
 	}
 	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
 	if err != nil {
@@ -346,20 +463,6 @@ func TestLookoutPollerStaleHeartbeatRaisesOneNoticeAndRepairs(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("stale heartbeat created %d poller failure Notices, want one: %#v", count, notices)
-	}
-	runPosse(t, f.binary, f.repo, f.env, "roster")
-	notices, err = f.db.Notices(context.Background(), f.project.ID, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	count = 0
-	for _, notice := range notices {
-		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Lookout poller") {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("healthy follow-up command duplicated the stale-episode Notice: %#v", notices)
 	}
 }
 

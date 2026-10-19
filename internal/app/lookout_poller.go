@@ -127,39 +127,46 @@ func (s *Service) ensureLookoutPoller(ctx context.Context, db *store.DB, home st
 		}
 	}
 
-	var healthy *lookoutProcess
+	var stored *lookoutProcess
 	if state.PID > 0 {
 		for index := range projectProcesses {
 			process := &projectProcesses[index]
-			if lookoutProcessMatchesPoller(*process, project.ID, state) && lookoutPIDRunning(process.PID) && time.Since(time.UnixMilli(state.HeartbeatAt)) <= lookoutPollerStaleAfter {
-				healthy = process
+			if lookoutProcessMatchesPoller(*process, project.ID, state) && lookoutPIDRunning(process.PID) {
+				stored = process
 				break
 			}
 		}
 	}
-	if healthy != nil {
-		return stopDuplicateLookoutPollers(ctx, home, projectProcesses, healthy.PID)
-	}
-
-	reason := "missing poller"
-	if state.PID > 0 {
-		reason = "missing, stopped, or stale heartbeat"
-		if _, err := db.RaiseLookoutPollerFailure(ctx, project.ID, state.Token, lookoutPollerFailureSummary(project, reason), currentTime()); err != nil {
+	if stored != nil && time.Since(time.UnixMilli(state.HeartbeatAt)) > lookoutPollerStaleAfter {
+		// A wall-clock heartbeat can look old immediately after suspend. Give a
+		// live process time to publish fresh progress before declaring it stale.
+		refreshed, err := waitForLookoutPollerHeartbeat(ctx, db, project.ID, state)
+		if err != nil {
 			return err
 		}
-		var stale *lookoutProcess
-		for index := range projectProcesses {
-			process := &projectProcesses[index]
-			if process.PID == state.PID && process.PollerToken == state.Token && process.PollerProjectID == project.ID && process.PollerStartedAt == state.StartedAt {
-				stale = process
-				break
+		if refreshed {
+			state, err = db.LookoutPoller(ctx, project.ID)
+			if err != nil {
+				return err
 			}
 		}
-		if stale != nil && lookoutPIDRunning(state.PID) {
-			if err := stopStoredLookoutPoller(ctx, home, *stale); err != nil {
+	}
+	if stored != nil && time.Since(time.UnixMilli(state.HeartbeatAt)) <= lookoutPollerStaleAfter {
+		return stopDuplicateLookoutPollers(ctx, home, projectProcesses, stored.PID)
+	}
+
+	if state.PID > 0 {
+		if stored != nil {
+			reason := "stale heartbeat"
+			if _, err := db.RaiseLookoutPollerFailure(ctx, project.ID, state.Token, lookoutPollerFailureSummary(project, reason), currentTime()); err != nil {
+				return err
+			}
+			if err := stopStoredLookoutPoller(ctx, home, *stored); err != nil {
 				return fmt.Errorf("stop stale Project Lookout: %w", err)
 			}
 		}
+		// Missing process rows are common after a reboot and do not prove that
+		// the poller was unhealthy while the machine was running.
 		if err := db.ClearLookoutPoller(ctx, project.ID, state.PID, state.Token); err != nil {
 			return err
 		}
@@ -169,7 +176,7 @@ func (s *Service) ensureLookoutPoller(ctx context.Context, db *store.DB, home st
 	// PID. Only the process's private Project id and random token identify it.
 	for _, process := range projectProcesses {
 		if process.PollerToken == "" && lookoutPIDRunning(process.PID) {
-			if _, err := stopLookoutProcesses(ctx, home, []lookoutProcess{process}); err != nil {
+			if err := stopStoredLookoutPoller(ctx, home, process); err != nil {
 				return fmt.Errorf("stop legacy Project Lookout: %w", err)
 			}
 		}
@@ -195,6 +202,33 @@ func (s *Service) ensureLookoutPoller(ctx context.Context, db *store.DB, home st
 	return s.startLookoutPoller(ctx, db, home, project, binary)
 }
 
+func waitForLookoutPollerHeartbeat(ctx context.Context, db *store.DB, projectID int64, stale store.LookoutPoller) (bool, error) {
+	grace := 2 * lookoutPollerHeartbeatInterval
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		state, err := db.LookoutPoller(ctx, projectID)
+		if err != nil {
+			return false, err
+		}
+		if state.PID != stale.PID || state.Token != stale.Token {
+			return false, nil
+		}
+		if state.HeartbeatAt > stale.HeartbeatAt && time.Since(time.UnixMilli(state.HeartbeatAt)) <= lookoutPollerStaleAfter {
+			return true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-deadline.C:
+			return false, nil
+		case <-ticker.C:
+		}
+	}
+}
+
 func lockLookoutPoller(ctx context.Context, file *os.File) error {
 	for {
 		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -213,17 +247,15 @@ func lockLookoutPoller(ctx context.Context, file *os.File) error {
 }
 
 func stopDuplicateLookoutPollers(ctx context.Context, home string, processes []lookoutProcess, keepPID int) error {
-	var duplicates []lookoutProcess
 	for _, process := range processes {
-		if process.PID != keepPID && lookoutPIDRunning(process.PID) {
-			duplicates = append(duplicates, process)
+		if process.PID == keepPID || !lookoutPIDRunning(process.PID) {
+			continue
+		}
+		if err := stopStoredLookoutPoller(ctx, home, process); err != nil {
+			return fmt.Errorf("stop duplicate Project Lookout: %w", err)
 		}
 	}
-	if len(duplicates) == 0 {
-		return nil
-	}
-	_, err := stopLookoutProcesses(ctx, home, duplicates)
-	return err
+	return nil
 }
 
 func stopStoredLookoutPoller(ctx context.Context, home string, process lookoutProcess) error {
@@ -252,16 +284,7 @@ func stopStoredLookoutPoller(ctx context.Context, home string, process lookoutPr
 		}
 	}
 	if lookoutPIDRunning(process.PID) {
-		owned, err := storedPollerProcessIsCurrent(home, process)
-		if err != nil {
-			return err
-		}
-		if !owned {
-			return fmt.Errorf("refusing to kill Lookout PID %d after its process identity changed", process.PID)
-		}
-		if err := syscall.Kill(process.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
+		return fmt.Errorf("lookout PID %d did not stop gracefully; refusing to interrupt Project maintenance", process.PID)
 	}
 	return nil
 }
@@ -595,7 +618,7 @@ func (s *Service) reexecLookoutIfUpdated(projectID int64, poller *store.LookoutP
 	if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	args := append([]string(nil), os.Args...)
+	args := lookoutReexecArguments(os.Args)
 	if len(args) == 0 {
 		args = []string{installed.Path}
 	} else {
@@ -611,8 +634,30 @@ func (s *Service) reexecLookoutIfUpdated(projectID int64, poller *store.LookoutP
 	return errors.New("lookout re-exec returned unexpectedly")
 }
 
+func lookoutReexecArguments(original []string) []string {
+	args := make([]string, 0, len(original))
+	for index := 0; index < len(original); index++ {
+		arg := original[index]
+		if arg == "--ack" || arg == "--requeue" {
+			if index+1 < len(original) {
+				index++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--ack=") || strings.HasPrefix(arg, "--requeue=") {
+			continue
+		}
+		args = append(args, arg)
+	}
+	return args
+}
+
 func lookoutReexecMarker(home string, pid int) string {
 	return filepath.Join(home, "lookout-reexec", strconv.Itoa(pid))
+}
+
+func sameLookoutExecutableIdentity(left, right lookoutExecutableIdentity) bool {
+	return left.Device == right.Device && left.Inode != 0 && left.Inode == right.Inode
 }
 
 func requestLookoutReexec(home string, processes []lookoutProcess) error {
@@ -623,20 +668,28 @@ func requestLookoutReexec(home string, processes []lookoutProcess) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
+	installed, installedOK := currentLookoutExecutable(home)
+	var failures []error
 	for _, process := range processes {
 		if !lookoutPIDRunning(process.PID) {
 			continue
 		}
-		if !lookoutExecutableIdentityMatches(process) {
-			if !lookoutPIDRunning(process.PID) {
-				continue
-			}
-			return fmt.Errorf("refusing to request re-exec for Lookout PID %d with a changed executable identity", process.PID)
+		current, currentOK := inspectLookoutExecutable(process.PID)
+		if !currentOK {
+			failures = append(failures, fmt.Errorf("cannot inspect Lookout PID %d after update", process.PID))
+			continue
+		}
+		if installedOK && sameLookoutExecutableIdentity(current, installed) {
+			continue // The process already re-execed while the update was installing.
+		}
+		if process.Executable.Inode == 0 || !sameLookoutExecutableIdentity(current, process.Executable) {
+			failures = append(failures, fmt.Errorf("refusing to request re-exec for Lookout PID %d with a changed executable identity", process.PID))
+			continue
 		}
 		marker := lookoutReexecMarker(home, process.PID)
 		if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
-			return err
+			failures = append(failures, err)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }

@@ -346,12 +346,6 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	lastHerdrReconcile := time.Time{}
 	lastReexecCheck := time.Time{}
 	for {
-		if time.Since(lastReexecCheck) >= time.Second {
-			if err := s.reexecLookoutIfUpdated(project.ID, nil); err != nil {
-				return err
-			}
-			lastReexecCheck = time.Now()
-		}
 		select {
 		case <-stopSignals:
 			return s.reportLookoutStopped(ctx, project, false)
@@ -537,6 +531,20 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				return err
 			}
 			return s.regenerateProjects(ctx.Context, db)
+		}
+		if time.Since(lastReexecCheck) >= time.Second {
+			home, err := s.homePath()
+			if err != nil {
+				return err
+			}
+			if len(os.Args) > 1 && os.Args[1] == "_claude-stop" {
+				if lookoutUpdatePending(home, os.Getpid()) {
+					return s.reportLookoutStopped(ctx, project, false)
+				}
+			} else if err := s.reexecLookoutIfUpdated(project.ID, nil); err != nil {
+				return err
+			}
+			lastReexecCheck = time.Now()
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			home, err := s.homePath()

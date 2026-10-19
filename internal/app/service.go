@@ -468,8 +468,9 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 	})
 }
 
-// The detached poller may deliver queued instructions, but command boundaries
-// recover interrupted intents and the Lead harness owns Notice delivery.
+// The detached poller may deliver queued instructions and Notices when no
+// extension or live Lead lookout owns Notice delivery. Command boundaries
+// recover interrupted intents.
 func (s *Service) prepareProjectPollerObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
 	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{deliverMessages: true, pollerObservation: true})
 }
@@ -585,10 +586,8 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 		if err != nil {
 			return cfg, err
 		}
-		if !options.pollerObservation {
-			if err := s.deliverNotices(ctx, db, fresh); err != nil && !isHerdrUnavailable(err) {
-				return cfg, herdrError(err)
-			}
+		if err := s.deliverNotices(ctx, db, fresh); err != nil && !isHerdrUnavailable(err) {
+			return cfg, herdrError(err)
 		}
 		if err := s.regenerateProjects(ctx, db); err != nil {
 			return cfg, err

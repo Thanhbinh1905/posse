@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -63,13 +64,20 @@ func TestLeadLookoutReexecsAfterUpdateRequest(t *testing.T) {
 	}
 }
 
-func TestClaudeStopLookoutReportsUpdateRequestAsRewake(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("POSSE_HOME", home)
+func TestClaudeStopUpdateRewakesThroughTheRealHookWithoutReexec(t *testing.T) {
+	db, project, home := newLookoutTestProject(t)
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	previousArgs := os.Args
 	os.Args = []string{"posse", "_claude-stop"}
 	t.Cleanup(func() { os.Args = previousArgs })
+	t.Chdir(project.Root)
 	service := testService(home, nil)
+	service.herdrContext = func() bool { return false }
 	marker := lookoutReexecMarker(home, os.Getpid())
 	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
 		t.Fatal(err)
@@ -78,16 +86,121 @@ func TestClaudeStopLookoutReportsUpdateRequestAsRewake(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output strings.Builder
-	ctx := &axi.Context{Context: context.Background(), JSON: true, Out: &output, ErrOut: io.Discard}
-	if err := service.handleLeadLookoutUpdate(ctx, store.Project{Name: "shop"}); err != nil {
+	input := `{"hook_event_name":"Stop","session_id":"session","transcript_path":"unused"}`
+	if code := service.RunClaudeStop(strings.NewReader(input), &output, nil); code != 2 {
+		t.Fatalf("Claude Stop update exit code = %d, want async rewake: %s", code, output.String())
+	}
+	if strings.Contains(output.String(), "EOF") || strings.Contains(output.String(), "wait failed") {
+		t.Fatalf("Claude Stop update attempted to reread consumed stdin: %s", output.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("update marker was not consumed by the hook: %v", err)
+	}
+}
+
+func TestLeadLookoutDeliversPendingNoticeBeforeUpdateReexec(t *testing.T) {
+	db, project, home := newLookoutTestProject(t)
+	defer db.Close()
+	if _, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: project.ID, Kind: "ci_failed", Summary: "pending before update"}); err != nil {
 		t.Fatal(err)
 	}
-	var result map[string]any
-	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
-		t.Fatalf("update response %q: %v", output.String(), err)
+	previousArgs := os.Args
+	os.Args = []string{"posse", "lookout"}
+	t.Cleanup(func() { os.Args = previousArgs })
+	t.Chdir(project.Root)
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("HERDR_PANE_ID", "")
+	marker := lookoutReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if result["state"] != "stopped" || result["reason"] != "update" {
-		t.Fatalf("Claude Stop hook update response = %v", result)
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reexeced := false
+	service := testService(home, nil)
+	service.herdrContext = func() bool { return false }
+	service.reexecUpdate = func(string, []string, []string) error {
+		reexeced = true
+		return nil
+	}
+	code, output := runCLI(t, service, "lookout", "--timeout", "5000")
+	if code != 0 || !strings.Contains(output, "pending before update") {
+		t.Fatalf("pending Notice was not delivered before update: code=%d output=%s", code, output)
+	}
+	if reexeced {
+		t.Fatal("Lookout re-execed before delivering its pending Notice")
+	}
+	notices, err := db.Notices(context.Background(), project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notices) != 1 || notices[0].DeliveredAt == 0 || notices[0].AckedAt != 0 {
+		t.Fatalf("pending Notice state after delivery = %#v", notices)
+	}
+}
+
+func TestLookoutReexecArgumentsRemoveOneShotDeliveryFlags(t *testing.T) {
+	got := lookoutReexecArguments([]string{"posse", "lookout", "--requeue", "1,2", "--quiet-routine", "--timeout=5000", "--ack=all"})
+	want := []string{"posse", "lookout", "--quiet-routine", "--timeout=5000"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("re-exec arguments = %q, want %q", got, want)
+	}
+}
+
+func TestLeadLookoutUpdateDoesNotReplayAckAll(t *testing.T) {
+	db, project, home := newLookoutTestProject(t)
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "already seen"}); err != nil {
+		t.Fatal(err)
+	}
+	previousArgs := os.Args
+	os.Args = []string{"posse", "lookout", "--ack", "all", "--timeout", "5000"}
+	t.Cleanup(func() { os.Args = previousArgs })
+	previousVerifier := lookoutExecutableVerifier
+	lookoutExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { lookoutExecutableVerifier = previousVerifier })
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: os.Args[0]}); err != nil {
+		t.Fatal(err)
+	}
+	marker := lookoutReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reexecArgs []string
+	service := testService(home, nil)
+	service.herdrContext = func() bool { return false }
+	service.reexecUpdate = func(_ string, args, _ []string) error {
+		reexecArgs = append([]string(nil), args...)
+		_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "ci_failed", Summary: "arrived after acknowledgement"})
+		return err
+	}
+	t.Chdir(project.Root)
+	code, output := runCLI(t, service, "lookout", "--ack", "all", "--timeout", "5000")
+	if code == 0 || !strings.Contains(output, "re-exec returned unexpectedly") {
+		t.Fatalf("Lookout did not reach the update re-exec boundary: code=%d output=%s", code, output)
+	}
+	for _, arg := range reexecArgs {
+		if arg == "--ack" || arg == "all" || strings.HasPrefix(arg, "--ack=") {
+			t.Fatalf("re-exec replayed one-shot acknowledgement arguments: %q", reexecArgs)
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unseen *store.Notice
+	for index := range notices {
+		if notices[index].Summary == "arrived after acknowledgement" {
+			unseen = &notices[index]
+		}
+	}
+	if unseen == nil || unseen.AckedAt != 0 {
+		t.Fatalf("notice created after ack-all was acknowledged: %#v", unseen)
 	}
 }
 
