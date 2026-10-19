@@ -499,7 +499,7 @@ func (s *Service) watchProjectLookout(ctx *axi.Context, db *store.DB, project st
 		if fresh.IsDown() || fresh.Root != project.Root {
 			return nil
 		}
-		if _, err := s.prepareProjectObservation(ctx.Context, db, fresh); err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) {
+		if _, err := s.prepareProjectPollerObservation(ctx.Context, db, fresh); err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) {
 			recordLookoutFailure(ctx, db, project.ID, &lastFailure, "reconcile", err)
 		}
 		if err := s.maintainProjectWatch(ctx.Context, db, fresh); err != nil {

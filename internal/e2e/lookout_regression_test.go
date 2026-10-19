@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func lookoutPanes(t *testing.T, client *herdr.Client) []herdr.Pane {
@@ -115,6 +116,42 @@ func lineCount(path string) int {
 		return 0
 	}
 	return strings.Count(string(contents), "started\n")
+}
+
+func TestHiddenLookoutPollerDoesNotDeliverNotices(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Fatalf("hidden Project poller did not start: %v", lookoutPIDs(f.root))
+	}
+	noticeID, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "Worker finished"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * time.Second)
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, notice := range notices {
+		if notice.ID == noticeID {
+			found = true
+			if notice.DeliveredAt != 0 {
+				t.Fatalf("hidden poller delivered a Lead-owned Notice: %#v", notice)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("Lead-owned Notice %d is missing: %#v", noticeID, notices)
+	}
+	lastNotification, err := f.db.LastNoticeNotification(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lastNotification != 0 {
+		t.Fatalf("hidden poller emitted a Lead-owned Notice notification at %d", lastNotification)
+	}
 }
 
 func TestLookoutRestartsAfterHerdrRestart(t *testing.T) {

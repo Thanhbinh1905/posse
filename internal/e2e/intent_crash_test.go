@@ -611,7 +611,10 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					return err
 				}
 				if len(intents) != 0 {
-					return fmt.Errorf("crash recovery left %d intent(s): %#v", len(intents), intents)
+					intent := intents[0]
+					bootID, startTime, identityErr := store.ProcessIdentityForPID(intent.ProcessID)
+					processCmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", intent.ProcessID))
+					return fmt.Errorf("crash recovery left %d intent(s): %#v; owner identity now %s/%s (read error %v), process command %q", len(intents), intents, bootID, startTime, identityErr, strings.ReplaceAll(string(processCmdline), "\x00", " "))
 				}
 				task, err := db.Task(context.Background(), fixture.project.ID, taskID)
 				if item.command == "ride" && item.step == "task.create" && item.phase == "before" {
@@ -654,7 +657,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 				}
 				return nil
 			}); err != nil {
-				t.Fatal(err)
+				t.Fatalf("roster output: %s\n%s", output, err)
 			}
 			if item.command == "land --merge" {
 				mergeCompleted := item.step == "merge" && item.phase == "after" || item.step == "landed_ref.record" || item.step == "task.landed"
