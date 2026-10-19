@@ -113,8 +113,47 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		contents, _ := os.ReadFile(inputLog)
 		t.Fatalf("fake Pi did not receive both steering messages while busy: %s", contents)
 	}
+	if _, err := client.Run(context.Background(), "pane", "report-agent", task.PaneID, "--source", "posse.e2e", "--agent", "pi", "--state", "idle"); err != nil {
+		t.Fatalf("mark Pi idle to drain --queue message: %v", err)
+	}
+	idleEnv := setEnv(fixture.leadEnv, "HERDR_PLUGIN_EVENT_JSON", `{"event":"pane_agent_status_changed","data":{"pane_id":"`+task.PaneID+`","workspace_id":"`+task.HerdrWorkspaceID+`","agent_status":"idle","agent":"pi"}}`)
+	runPosse(t, fixture.binary, fixture.repo, idleEnv, "_ingest")
+	if !waitForCondition(5*time.Second, func() bool {
+		message, err := fixture.db.MessageByID(context.Background(), pending.ID)
+		return err == nil && message.Status == "delivered"
+	}) {
+		message, _ := fixture.db.MessageByID(context.Background(), pending.ID)
+		contents, _ := os.ReadFile(inputLog)
+		t.Fatalf("--queue message was not delivered after idle: message=%#v input=%s", message, contents)
+	}
+	contents, err := os.ReadFile(inputLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Background steering", "Send-time steering", "Wait until the current turn ends"} {
+		if count := strings.Count(string(contents), expected); count != 1 {
+			t.Errorf("message %q reached fake Pi %d times, want exactly once: %s", expected, count, contents)
+		}
+	}
+	backgroundAt := strings.Index(string(contents), "Background steering")
+	sendAt := strings.Index(string(contents), "Send-time steering")
+	queuedAt := strings.Index(string(contents), "Wait until the current turn ends")
+	if backgroundAt < 0 || sendAt < backgroundAt || queuedAt < sendAt {
+		t.Errorf("--queue message was not delivered once, in order after both steering messages: %s", contents)
+	}
 
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsend", strconv.FormatInt(pending.ID, 10)); !strings.Contains(output, "state: withdrawn") {
+	if _, err := client.Run(context.Background(), "pane", "report-agent", task.PaneID, "--source", "posse.e2e", "--agent", "pi", "--state", "working"); err != nil {
+		t.Fatalf("mark Pi busy before testing unsend: %v", err)
+	}
+	unsendQueued := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Withdraw this queued message", "--queue")
+	if !strings.Contains(unsendQueued, "state: queued") {
+		t.Fatalf("could not queue a message for unsend: %s", unsendQueued)
+	}
+	unsendMessage, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)
+	if err != nil || unsendMessage.Body != "Withdraw this queued message" {
+		t.Fatalf("queued message for unsend = %#v, %v", unsendMessage, err)
+	}
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsend", strconv.FormatInt(unsendMessage.ID, 10)); !strings.Contains(output, "state: withdrawn") {
 		t.Fatalf("unsend did not withdraw the wait-for-idle message: %s", output)
 	}
 	queuedAgain := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Keep this queued", "--queue")
@@ -164,11 +203,11 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	if err != nil || !strings.Contains(string(keyLog), "pi:escape") {
 		t.Errorf("Pi abort key log = %q, err=%v; want Escape", keyLog, err)
 	}
-	contents, err := os.ReadFile(inputLog)
+	contents, err = os.ReadFile(inputLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, notDelivered := range []string{"Wait until the current turn ends", "Keep this queued", "Older steerable queue item"} {
+	for _, notDelivered := range []string{"Withdraw this queued message", "Keep this queued", "Older steerable queue item"} {
 		if strings.Contains(string(contents), notDelivered) {
 			t.Errorf("queued instruction was delivered out of order: %s", contents)
 		}
