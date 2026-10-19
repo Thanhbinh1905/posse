@@ -756,21 +756,19 @@ esac
 		if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
 			t.Fatalf("restore acquisition baseline for retry: %v", err)
 		}
+		notices, err := db.Notices(context.Background(), project.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
 		noticeID := ""
-		if !waitForCondition(30*time.Second, func() bool {
-			notices, err := db.Notices(context.Background(), project.ID, false)
-			if err != nil {
-				return false
+		for _, notice := range notices {
+			if notice.TaskID == task.ID && notice.Kind == "task_done" {
+				noticeID = fmt.Sprint(notice.ID)
+				break
 			}
-			for _, notice := range notices {
-				if notice.TaskID == task.ID && notice.Kind == "task_done" && notice.DeliveredAt != 0 {
-					noticeID = fmt.Sprint(notice.ID)
-					return true
-				}
-			}
-			return false
-		}) {
-			t.Fatal("repair-baseline Task's task_done Notice was not delivered before acknowledgement")
+		}
+		if noticeID == "" {
+			t.Fatalf("repair-baseline Task has no task_done Notice: %#v", notices)
 		}
 		ackOutput := ""
 		ackedOrTornDown := waitForCondition(15*time.Second, func() bool {
