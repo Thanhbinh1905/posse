@@ -766,7 +766,7 @@ func newIntentCLIHarness(t *testing.T) *intentCLIHarness {
 		t.Fatal(err)
 	}
 	baseEnv = setEnv(baseEnv, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	socketPath := filepath.Join(root, "xdg", "herdr", "herdr.sock")
+	socketPath := herdr.IsolatedTestSocketPath(root)
 	session := newFakeHerdrSession(t, socketPath)
 	client := herdr.NewWithEnv(herdrPath, baseEnv)
 	posseBinary := filepath.Join(binDir, "posse")

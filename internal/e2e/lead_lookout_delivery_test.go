@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,6 +19,50 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func startLeadLookoutForTest(t *testing.T, f *prLifecycleFixture) (*exec.Cmd, chan error, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	command := exec.Command(f.binary, "lookout", "--ack", "all", "--timeout", "10000")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderrOutput bytes.Buffer
+	command.Stdout = &stdout
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stderrOutput.WriteString(line + "\n")
+			if strings.Contains(line, "Lookout acknowledgement committed:") {
+				close(ready)
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		<-readDone
+		done <- command.Wait()
+	}()
+	select {
+	case <-ready:
+		return command, done, &stdout, &stderrOutput
+	case err := <-done:
+		t.Fatalf("lookout exited before acknowledgement: %v stdout=%s stderr=%s", err, stdout.String(), stderrOutput.String())
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		err := <-done
+		t.Fatalf("lookout did not acknowledge before waiting: %v stdout=%s stderr=%s", err, stdout.String(), stderrOutput.String())
+	}
+	return nil, nil, nil, nil
+}
 
 func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 	f := newPRLifecycleFixtureWithLead(t, true)
@@ -53,16 +98,8 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 		contents, _ := os.ReadFile(logPath)
 		t.Fatalf("typed fallback missing without Lead watcher: %s", contents)
 	}
-	// Start the actual Lead command in the isolated Project, not the Project poller.
-	command := exec.Command(f.binary, "lookout", "--timeout", "10000")
-	command.Dir, command.Env = f.repo, f.leadEnv
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
+	// Start the actual Lead command in the isolated Project, not the detached poller.
+	command, done, output, stderrOutput := startLeadLookoutForTest(t, f)
 	finished := false
 	t.Cleanup(func() {
 		if !finished {
@@ -71,12 +108,10 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 			<-done
 		}
 	})
-	// A live process must have entered its wait loop before the Notice is created.
-	time.Sleep(300 * time.Millisecond)
 	select {
 	case err := <-done:
 		finished = true
-		t.Fatalf("lookout exited before Notice: %v %s", err, output.String())
+		t.Fatalf("lookout exited before Notice: %v stdout=%s stderr=%s", err, output.String(), stderrOutput.String())
 	default:
 	}
 	// Insert but do not commit until the watcher is paused. This leaves the
@@ -144,7 +179,7 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 	case err := <-done:
 		finished = true
 		if err != nil {
-			t.Fatalf("lookout failed: %v %s", err, output.String())
+			t.Fatalf("lookout failed: %v stdout=%s stderr=%s", err, output.String(), stderrOutput.String())
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("lookout missed Notice %d: %s", id, output.String())
@@ -175,13 +210,7 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 	}
 
 	// A watcher killed while waiting must not leave a stale ownership record.
-	crashed := exec.Command(f.binary, "lookout", "--timeout", "10000")
-	crashed.Dir, crashed.Env = f.repo, f.leadEnv
-	if err := crashed.Start(); err != nil {
-		t.Fatal(err)
-	}
-	crashedDone := make(chan error, 1)
-	go func() { crashedDone <- crashed.Wait() }()
+	crashed, crashedDone, _, _ := startLeadLookoutForTest(t, f)
 	crashedReaped := false
 	t.Cleanup(func() {
 		if !crashedReaped {
@@ -189,7 +218,6 @@ func TestLeadLookoutOwnsNoticeUntilItExits(t *testing.T) {
 			<-crashedDone
 		}
 	})
-	time.Sleep(300 * time.Millisecond)
 	if err := crashed.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}

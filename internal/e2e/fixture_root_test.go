@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -18,6 +19,8 @@ import (
 )
 
 const fixtureLockName = ".posse-e2e-fixture.lock"
+
+var fixtureRootPathHandles sync.Map
 
 func isTaskScratchRoot(path string) bool {
 	path = filepath.Clean(path)
@@ -30,6 +33,41 @@ func fixturePrefix(suffix string) string {
 		prefix = "posse-e2e-"
 	}
 	return prefix + suffix
+}
+
+// shortFixtureRootPath uses a procfs path alias when a long Task scratch path
+// would make Herdr choose a sibling socket path that desktop clients ignore.
+func shortFixtureRootPath(t *testing.T, root string) string {
+	t.Helper()
+	defaultSocketPath := filepath.Join(root, "xdg", "herdr", "herdr.sock")
+	if runtime.GOOS != "linux" || len(defaultSocketPath) < 100 {
+		return root
+	}
+	parent, err := os.Open(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureRootPathHandles.Store(root, parent)
+	alias := fmt.Sprintf("/proc/%d/fd/%d/%s", os.Getpid(), parent.Fd(), filepath.Base(root))
+	resolvedAlias, err := filepath.EvalSymlinks(alias)
+	if err != nil {
+		t.Fatalf("resolve short E2E fixture path %s: %v", alias, err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil || resolvedAlias != resolvedRoot {
+		t.Fatalf("short E2E fixture path resolves to %s, want %s: %v", resolvedAlias, resolvedRoot, err)
+	}
+	shortSocketPath := filepath.Join(alias, "xdg", "herdr", "herdr.sock")
+	if len(shortSocketPath) >= 100 || herdr.IsolatedTestSocketPath(alias) != shortSocketPath {
+		t.Fatalf("short E2E fixture did not restore its default Herdr socket path: %s", herdr.IsolatedTestSocketPath(alias))
+	}
+	socketDir := herdr.IsolatedTestSocketDir(alias)
+	t.Cleanup(func() {
+		if err := os.RemoveAll(socketDir); err != nil {
+			t.Errorf("remove short-path Herdr socket directory %s: %v", socketDir, err)
+		}
+	})
+	return alias
 }
 
 // newFixtureRoot keeps a lock for the lifetime of this test. A later test run
@@ -168,6 +206,9 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		}
 		if err := removeFixtureRoot(root); err != nil {
 			t.Errorf("remove E2E fixture %s: %v", root, err)
+		}
+		if handle, ok := fixtureRootPathHandles.LoadAndDelete(root); ok {
+			_ = handle.(*os.File).Close()
 		}
 		_ = lock.Close()
 	})
@@ -335,6 +376,10 @@ func fixtureProcessDetails(root string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
 	var details []string
 	for _, process := range processes {
 		if !process.IsDir() || strings.Trim(process.Name(), "0123456789") != "" {
@@ -344,14 +389,7 @@ func fixtureProcessDetails(root string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		belongs := false
-		for _, item := range strings.Split(string(environ), "\x00") {
-			if item == "POSSE_TEST_ROOT="+root || item == "XDG_CONFIG_HOME="+filepath.Join(root, "xdg") {
-				belongs = true
-				break
-			}
-		}
-		if !belongs {
+		if !fixtureEnvironmentBelongsToRoot(environ, root, resolvedRoot) {
 			continue
 		}
 		cmdline, _ := os.ReadFile(filepath.Join("/proc", process.Name(), "cmdline"))
@@ -365,6 +403,37 @@ func fixtureProcessDetails(root string) ([]string, error) {
 	return details, nil
 }
 
+func fixtureEnvironmentBelongsToRoot(environ []byte, root, resolvedRoot string) bool {
+	procFDPrefix := fmt.Sprintf("/proc/%d/fd/", os.Getpid())
+	for _, item := range strings.Split(string(environ), "\x00") {
+		key, value, found := strings.Cut(item, "=")
+		if !found {
+			continue
+		}
+		switch key {
+		case "POSSE_TEST_ROOT":
+			if value == root {
+				return true
+			}
+			if strings.HasPrefix(value, procFDPrefix) {
+				if resolved, err := filepath.EvalSymlinks(value); err == nil && resolved == resolvedRoot {
+					return true
+				}
+			}
+		case "XDG_CONFIG_HOME":
+			if value == filepath.Join(root, "xdg") {
+				return true
+			}
+			if strings.HasPrefix(value, procFDPrefix) {
+				if resolved, err := filepath.EvalSymlinks(value); err == nil && resolved == filepath.Join(resolvedRoot, "xdg") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // A killed test can leave its Herdr server behind. Never delete a root while
 // any isolated process still advertises it as its state directory.
 func fixtureProcessAlive(root string) (bool, error) {
@@ -372,6 +441,10 @@ func fixtureProcessAlive(root string) (bool, error) {
 		return true, nil // Cannot prove an orphan is inactive without procfs.
 	}
 	processes, err := os.ReadDir("/proc")
+	if err != nil {
+		return false, err
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return false, err
 	}
@@ -387,10 +460,8 @@ func fixtureProcessAlive(root string) (bool, error) {
 		if err != nil { // Exited or not owned by this user.
 			continue
 		}
-		for _, item := range strings.Split(string(environ), "\x00") {
-			if item == "POSSE_TEST_ROOT="+root || item == "XDG_CONFIG_HOME="+filepath.Join(root, "xdg") {
-				return true, nil
-			}
+		if fixtureEnvironmentBelongsToRoot(environ, root, resolvedRoot) {
+			return true, nil
 		}
 	}
 	return false, nil

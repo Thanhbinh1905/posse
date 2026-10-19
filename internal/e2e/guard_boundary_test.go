@@ -19,7 +19,7 @@ import (
 // Exercise the hook decision and, when allowed, the actual shell command on
 // a disposable Herdr server. No command in this test can reach the host server.
 func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
-	root := newFixtureRoot(t, herdr.TestRootName())
+	root := shortFixtureRootPath(t, newFixtureRoot(t, herdr.TestRootName()))
 	env := herdr.IsolatedTestEnvironment(root)
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
@@ -42,6 +42,13 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	}
 	client := herdr.NewWithEnv("herdr", env)
 	startServer(t, client)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alive, err := fixtureProcessAlive(resolvedRoot); err != nil || !alive {
+		t.Fatalf("fixture process scan missed the isolated Herdr server: alive=%v err=%v", alive, err)
+	}
 	foreign, err := createWorkspace(client, root)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +72,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	// This path is not linked to the fixture socket. It is deliberately absent.
 	isolated := filepath.Join(other, "herdr.sock")
 	id := foreign.Workspace.WorkspaceID
-	otherRoot := newFixtureRoot(t, herdr.TestRootName())
+	otherRoot := shortFixtureRootPath(t, newFixtureRoot(t, herdr.TestRootName()))
 	otherEnv := herdr.IsolatedTestEnvironment(otherRoot)
 	if _, err := herdr.WriteIsolatedConfig(otherRoot); err != nil {
 		t.Fatal(err)
@@ -86,6 +93,22 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "probe"), []byte("print('herdr')\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	resolvedRoot, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedSocket, err := filepath.EvalSymlinks(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentSocketIsDefault := resolvedSocket == filepath.Join(resolvedRoot, "xdg", "herdr", "herdr.sock")
+	currentSocketEnv := ""
+	currentSocketCase := "default socket"
+	if !currentSocketIsDefault {
+		currentSocketEnv = "HERDR_SOCKET_PATH=" + shellQuote(socket) + " "
+		currentSocketCase = "current socket"
+	}
+	otherSocketEnv := "HERDR_SOCKET_PATH=" + shellQuote(herdr.SocketPath(otherEnv)) + " "
 	cases := []struct {
 		name, command string
 		blocked       bool
@@ -98,11 +121,11 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"default make recipe", fmt.Sprintf("printf 'all:\\n\\therdr workspace rename %s forbidden\\n' > ./Makefile && make", id), true},
 		{"generated executable", fmt.Sprintf("printf '#!/bin/sh\\nherdr workspace rename %s forbidden\\n' > ./generated && chmod +x ./generated && ./generated", id), true},
 		{"renamed posse build", foreignBinary + " config set defaults.max_workers 9", true},
-		{"default socket via unsets", fmt.Sprintf("env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s herdr workspace rename %s forbidden", filepath.Join(root, "xdg"), id), true},
-		{"default socket via clean environment", fmt.Sprintf("env -i HOME=%s XDG_CONFIG_HOME=%s PATH=%s herdr workspace rename %s forbidden", filepath.Join(root, "home"), filepath.Join(root, "xdg"), os.Getenv("PATH"), id), true},
-		{"isolated experiment", fmt.Sprintf("env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s POSSE_HOME=%s herdr workspace rename %s harmless", filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), otherWorkspace.Workspace.WorkspaceID), false},
-		{"isolated dynamic posse home", fmt.Sprintf("R=$(printf %%s %s); env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH XDG_CONFIG_HOME=%s POSSE_HOME=$R/posse herdr workspace rename %s harmless", otherRoot, filepath.Join(otherRoot, "xdg"), otherWorkspace.Workspace.WorkspaceID), false},
-		{"isolated clean environment", fmt.Sprintf("env -i HOME=%s XDG_CONFIG_HOME=%s POSSE_HOME=%s PATH=%s herdr workspace rename %s harmless", filepath.Join(otherRoot, "home"), filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), os.Getenv("PATH"), otherWorkspace.Workspace.WorkspaceID), false},
+		{currentSocketCase + " via unsets", fmt.Sprintf("env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH %sXDG_CONFIG_HOME=%s herdr workspace rename %s forbidden", currentSocketEnv, filepath.Join(root, "xdg"), id), true},
+		{currentSocketCase + " via clean environment", fmt.Sprintf("env -i HOME=%s XDG_CONFIG_HOME=%s PATH=%s %sherdr workspace rename %s forbidden", filepath.Join(root, "home"), filepath.Join(root, "xdg"), os.Getenv("PATH"), currentSocketEnv, id), true},
+		{"isolated experiment", fmt.Sprintf("env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH %sXDG_CONFIG_HOME=%s POSSE_HOME=%s herdr workspace rename %s harmless", otherSocketEnv, filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), otherWorkspace.Workspace.WorkspaceID), false},
+		{"isolated dynamic posse home", fmt.Sprintf("R=$(printf %%s %s); env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_ENV -u HERDR_BIN_PATH %sXDG_CONFIG_HOME=%s POSSE_HOME=$R/posse herdr workspace rename %s harmless", otherRoot, otherSocketEnv, filepath.Join(otherRoot, "xdg"), otherWorkspace.Workspace.WorkspaceID), false},
+		{"isolated clean environment", fmt.Sprintf("env -i HOME=%s XDG_CONFIG_HOME=%s POSSE_HOME=%s PATH=%s %sherdr workspace rename %s harmless", filepath.Join(otherRoot, "home"), filepath.Join(otherRoot, "xdg"), filepath.Join(otherRoot, "posse"), os.Getenv("PATH"), otherSocketEnv, otherWorkspace.Workspace.WorkspaceID), false},
 		{"unverifiable dynamic environment", fmt.Sprintf("R=$(printf %%s %s); HERDR_SOCKET_PATH=$R/herdr.sock herdr workspace rename %s forbidden", otherRoot, id), true},
 		{"python path read", `python3 -c "from pathlib import Path; print(Path('internal/herdr/adapter_test.go').read_text())"`, false},
 		{"python version query with Herdr data", `python3 -c "import sys; print('herdr runtime:', sys.version)"`, false},
@@ -139,6 +162,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			}
 			if tc.blocked && strings.HasPrefix(tc.name, "default socket") && (!strings.Contains(string(output), "default socket reaches the User's Herdr server") || !strings.Contains(string(output), "env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse")) {
 				t.Errorf("refusal omitted the default-socket reason or accepted isolation command: %s", output)
+			}
+			if tc.blocked && strings.HasPrefix(tc.name, "current socket") && !strings.Contains(string(output), "it changes the Herdr session this Rider runs in") {
+				t.Errorf("refusal did not identify the current isolated Herdr socket: %s", output)
 			}
 			runShell := true
 			if tc.name == "rg search with Herdr data" {

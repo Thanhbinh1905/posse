@@ -377,6 +377,8 @@ func TestBuiltInInterruptKeysVerifyStoppedRiderForEachKindE2E(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	client := herdr.NewWithEnv("herdr", fixture.env)
+	// Exercise direct send delivery without a poll-only Lookout racing to claim it.
+	stopBackgroundLookout(t, fixture)
 	keyByKind := map[string]string{"claude": "ctrl+c", "codex": "escape", "pi": "escape", "opencode": "escape"}
 	for i, kind := range []string{"claude", "codex", "pi", "opencode"} {
 		fakeAgent := filepath.Join(filepath.Dir(fixture.binary), kind)

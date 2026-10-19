@@ -480,6 +480,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 	callerEnv := append([]string(nil), env...)
 	callerEnv = setEnv(callerEnv, "HERDR_ENV", "1")
+	callerEnv = setEnv(callerEnv, "HERDR_SOCKET_PATH", herdr.SocketPath(env))
 	callerEnv = setEnv(callerEnv, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	callerEnv = setEnv(callerEnv, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
 	callerEnv = setEnv(callerEnv, "HERDR_TAB_ID", workspace.RootPane.TabID)
