@@ -179,6 +179,7 @@ type gitlabMergeRequest struct {
 	SquashCommitSHA   string `json:"squash_commit_sha"`
 	HasConflicts      bool   `json:"has_conflicts"`
 	HeadPipeline      *struct {
+		ID     int64  `json:"id"`
 		Status string `json:"status"`
 		WebURL string `json:"web_url"`
 	} `json:"head_pipeline"`
@@ -350,9 +351,13 @@ func gitlabObservationWithChecks(ctx context.Context, forge repositoryForge, tas
 			// Mergeability still controls land_ready below.
 		case "running", "pending", "created", "waiting_for_resource", "preparing", "manual", "scheduled":
 			checks.State = "PENDING"
-		case "failed", "canceled", "skipped":
+		case "failed", "canceled", "cancelled", "skipped":
 			checks.State = "FAILURE"
-			checks.Failures = []failedCheck{{Name: "pipeline", URL: mr.HeadPipeline.WebURL}}
+			pipelineID := strconv.FormatInt(mr.HeadPipeline.ID, 10)
+			if mr.HeadPipeline.ID == 0 {
+				pipelineID = gitlabPipelineID(mr.HeadPipeline.WebURL)
+			}
+			checks.Failures = []failedCheck{{Name: "pipeline", URL: mr.HeadPipeline.WebURL, Cancelled: oneOfString(mr.HeadPipeline.Status, "canceled", "cancelled"), RunID: pipelineID}}
 		default:
 			checks.State = "PENDING"
 		}

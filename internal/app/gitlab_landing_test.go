@@ -31,6 +31,9 @@ func gitlabFixture(t *testing.T, states ...store.State) *prLandingFixture {
 set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 case "$*" in
+ "ci retry "*) printf 'retry requested\n' ;;
+ *"/pipelines/"*"/jobs?per_page=100"*) printf '%s\n' '[{"id":77,"name":"unit","status":"canceled","web_url":"https://git.example.com/group/sub/shop/-/jobs/77"}]' ;;
+ *"/jobs/77/trace"*) printf 'unit failed log\n' ;;
  *"--method PUT"*)
    field_mode=
    for argument in "$@"; do

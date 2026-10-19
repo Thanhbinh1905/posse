@@ -13,6 +13,109 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestWorkerExitedNoticePastCursorStillRaisesDecision(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	db, err := store.Open(filepath.Join(root, "home"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "completed Rider", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunch(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}} {
+		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: taskID, Kind: "worker_exited", Summary: "Rider exited after reporting done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AdvanceDecisionNoticeCursor(ctx, project.ID, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(filepath.Join(root, "home"), herdr.NewFake())
+	for range 2 {
+		if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decisions, err := db.Decisions(ctx, project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "worker_exited" || strings.Join(decisions[0].Options, ",") != "relaunch,discard" {
+		t.Fatalf("backfilled worker_exited Decision = %#v, %v", decisions, err)
+	}
+}
+
+func TestLegacyWorkerExitedNoticeDoesNotAttachToLaterLaunch(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	db, err := store.Open(filepath.Join(root, "home"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "relaunched Rider", LandingMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunch(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}} {
+		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "first launch"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: taskID, Kind: "worker_exited", Summary: "legacy exit notice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AdvanceDecisionNoticeCursor(ctx, project.ID, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateDone, store.StateWorking, "lead", "Rider relaunched"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunch(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateWorking, store.StateDone, "worker", "second launch completed"); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(filepath.Join(root, "home"), herdr.NewFake())
+	if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := db.Decisions(ctx, project.ID, true)
+	if err != nil || len(decisions) != 0 {
+		t.Fatalf("legacy worker_exited Notice created a Decision for the wrong launch: %#v %v", decisions, err)
+	}
+}
+
 func TestAskAndDecideThroughCLIWithUserOnlyBoundary(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -130,6 +233,10 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 			if err := db.Transition(ctx, id, store.StateWorking, state, "worker", "failed"); err != nil {
 				t.Fatal(err)
 			}
+		} else if state == store.StateDone {
+			if err := db.Transition(ctx, id, store.StateWorking, state, "worker", "done"); err != nil {
+				t.Fatal(err)
+			}
 		} else if state == store.StateLanding {
 			if err := db.Transition(ctx, id, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
 				t.Fatal(err)
@@ -156,6 +263,10 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	failed := create(3, "ship", store.StateFailed, 0)
 	review := create(4, "review", store.StateReported, ship.ID)
 	findings := create(5, "ship", store.StateWorking, 0)
+	workerExited := create(6, "ship", store.StateDone, 0)
+	if _, err := db.NextTaskLaunch(ctx, workerExited.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET landing_mode='no-mistakes' WHERE id=?`, findings.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +283,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	for _, item := range []struct {
 		task store.Task
 		kind string
-	}{{ship, "land_ready"}, {lost, "task_lost"}, {failed, "task_failed"}, {review, "task_done"}, {findings, "needs_decision"}} {
+	}{{ship, "land_ready"}, {lost, "task_lost"}, {failed, "task_failed"}, {review, "task_done"}, {findings, "needs_decision"}, {workerExited, "worker_exited"}} {
 		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: item.task.ID, Kind: item.kind, Summary: item.task.Title}); err != nil {
 			t.Fatal(err)
 		}
@@ -192,11 +303,11 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		}
 	}
 	items, err := db.Decisions(ctx, project.ID, true)
-	if err != nil || len(items) != 5 {
+	if err != nil || len(items) != 6 {
 		t.Fatalf("raised Decisions: %#v %v", items, err)
 	}
-	want := [][]string{{"land", "wait"}, {"relaunch", "discard"}, {"relaunch", "discard"}, {"accept", "request-changes", "ignore"}, {"accept", "request-changes", "ignore"}}
-	wantKinds := []string{"land_ready", "recovery", "recovery", "review", "review"}
+	want := [][]string{{"land", "wait", "discard"}, {"relaunch", "discard"}, {"relaunch", "discard"}, {"accept", "request-changes", "ignore"}, {"accept", "request-changes", "ignore"}, {"relaunch", "discard"}}
+	wantKinds := []string{"land_ready", "recovery", "recovery", "review", "review", "worker_exited"}
 	for i, d := range items {
 		if d.Kind != wantKinds[i] || !strings.HasPrefix(d.Origin, "notice:") {
 			t.Fatalf("Decision origin or kind not recorded explicitly: %#v", d)
@@ -219,6 +330,9 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	}
 	if err := db.Transition(ctx, failed.ID, store.StateFailed, store.StateTornDown, "user", "discarded"); err == nil {
 		t.Fatal("discard without approval unexpectedly succeeded")
+	}
+	if err := db.Transition(ctx, workerExited.ID, store.StateDone, store.StateWorking, "lead", "Rider relaunched"); err != nil {
+		t.Fatal(err)
 	}
 	if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
 		t.Fatal(err)

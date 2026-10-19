@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,19 +29,25 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		return err
 	}
 	for _, notice := range notices {
-		if notice.TaskID == 0 || !oneOfString(notice.Kind, "land_ready", "task_failed", "task_lost", "task_done", "needs_decision") {
+		if notice.TaskID == 0 || !oneOfString(notice.Kind, "land_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited") {
 			continue
 		}
 		task, err := db.TaskByID(ctx, project.ID, notice.TaskID)
 		if err != nil {
 			return err
 		}
+		if notice.Kind == "worker_exited" {
+			if err := s.raiseWorkerExitedDecision(ctx, db, project, task, notice); err != nil {
+				return err
+			}
+			continue
+		}
 		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
 		switch {
 		case notice.Kind == "land_ready" && task.AutonomyLand != "auto" && task.State == store.StateLanding:
 			request.Kind = "land_ready"
 			request.Question = "Land " + task.Title + "? " + notice.Summary
-			request.Options = []string{"land", "wait"}
+			request.Options = []string{"land", "wait", "discard"}
 		case (notice.Kind == "task_failed" || notice.Kind == "task_lost") && (task.State == store.StateFailed || task.State == store.StateLost):
 			request.Kind = "recovery"
 			reason, err := taskFailureReason(ctx, db, task)
@@ -79,10 +86,57 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			}
 		}
 	}
+	// Older versions advanced the cursor past worker_exited Notices without
+	// creating a Decision. Reconcile those notices without rescanning others.
+	unanswered, err := db.UnansweredWorkerExitedNotices(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	for _, notice := range unanswered {
+		task, err := db.TaskByID(ctx, project.ID, notice.TaskID)
+		if err != nil {
+			return err
+		}
+		if err := s.raiseWorkerExitedDecision(ctx, db, project, task, notice); err != nil {
+			return err
+		}
+	}
 	if len(notices) > 0 {
 		return db.AdvanceDecisionNoticeCursor(ctx, project.ID, notices[len(notices)-1].ID)
 	}
 	return nil
+}
+
+func (s *Service) raiseWorkerExitedDecision(ctx context.Context, db *store.DB, project store.Project, task store.Task, notice store.Notice) error {
+	if task.State != store.StateDone && task.State != store.StateLanding {
+		return nil
+	}
+	var data struct {
+		TaskLaunches *int `json:"task_launches"`
+	}
+	if notice.DataJSON != "" {
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+			return err
+		}
+	}
+	if data.TaskLaunches != nil {
+		if *data.TaskLaunches != task.Launches {
+			return nil
+		}
+	} else if task.Launches != 1 {
+		// Legacy Notices have no launch identity. They are safe to backfill only
+		// when the Task has never been relaunched.
+		return nil
+	}
+	_, err := db.RaiseDecision(ctx, store.DecisionRequest{
+		ProjectID: project.ID,
+		TaskID:    task.ID,
+		Origin:    fmt.Sprintf("notice:%d", notice.ID),
+		Kind:      "worker_exited",
+		Question:  "Rider exited after reporting " + string(task.State) + " for " + task.Title + ". Relaunch or discard? " + notice.Summary,
+		Options:   []string{"relaunch", "discard"},
+	})
+	return err
 }
 
 func (s *Service) ask(ctx *axi.Context, args []string) error {

@@ -12,6 +12,39 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestEnsureDiscardArtifactDirectoryRejectsSymlinkedProjectRoot(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	defer fixture.db.Close()
+	outside := filepath.Join(fixture.root, "outside-discard-root")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(outside, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("outside data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projects := filepath.Join(fixture.home, "projects")
+	if err := os.MkdirAll(projects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot := filepath.Join(projects, fixture.project.Name)
+	if err := os.RemoveAll(projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureDiscardArtifactDirectory(fixture.home, fixture.project, fixture.task); err == nil {
+		t.Fatal("discard Teardown accepted a symlinked Project artifact root")
+	}
+	if contents, err := os.ReadFile(sentinel); err != nil || string(contents) != "outside data" {
+		t.Fatalf("symlinked discard Teardown changed outside data: %q %v", contents, err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "tasks")); !os.IsNotExist(err) {
+		t.Fatalf("symlinked discard Teardown created artifact paths outside POSSE_HOME: %v", err)
+	}
+}
+
 func TestDiscardCaptureRemovesTemporaryGitRefOnBundleFailure(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	ctx := context.Background()
