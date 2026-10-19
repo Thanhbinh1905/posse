@@ -145,7 +145,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Rider message before delivery begins.", Handler: s.unsend},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},
 		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Rider.", Handler: s.keys},
-		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Send the configured abort keys and verify the Rider stopped its busy turn.", Handler: s.interrupt},
+		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Interrupt a working Rider and verify it stopped; report when no working turn can be interrupted.", Handler: s.interrupt},
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Rider in the same execution root, optionally with another Profile.", Handler: s.relaunch},
 		{Name: "land", Summary: "Land a completed Ship Task; PR merges require the gated head to include the target branch.", Handler: s.land},
 		{Name: "review", Summary: "Inspect and admit built-in Review Rounds.", Subcommands: []*axi.Command{

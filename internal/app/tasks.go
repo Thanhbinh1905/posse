@@ -1651,6 +1651,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return err
 	}
 	reason := "agent_not_ready"
+	var blockedByMessageID int64
 	var sendPane herdr.Pane
 	paneFound := false
 	compacting := false
@@ -1697,6 +1698,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 				if !wasDelivered {
 					if candidate.ID != messageID && deliveryReason != "" && deliveryReason != "delivery_in_progress" {
 						earlierPending = true
+						blockedByMessageID = candidate.ID
 					} else {
 						attemptedReason = deliveryReason
 					}
@@ -1750,8 +1752,14 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"
 		} else if reason == "blocked" || reason == "agent_ui_unknown" {
 			help = "Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's dialog before retrying; use `posse keys " + taskIDString(task.Seq) + " <key...>` for a blocked permission prompt"
+		} else if blockedByMessageID != 0 {
+			help = fmt.Sprintf("Earlier message #%d is ahead in the queue; inspect it with `posse show %s`", blockedByMessageID, taskIDString(task.Seq))
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})
+		result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}}
+		if blockedByMessageID != 0 {
+			result = append(result, axi.Field{Key: "blocked_by_message", Value: blockedByMessageID})
+		}
+		return ctx.Print(result)
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"}}})
 }
@@ -2791,7 +2799,11 @@ func copySignalFile(home string, project store.Project, task store.Task, supplie
 	}
 	allowedRoots := []string{worktreeRoot, validatedScratchRoot}
 	allowedLocations := fmt.Sprintf("the Rider's worktree (%s) or this Task's scratch directory (%s)", worktreeRoot, scratchRoot)
-	path, err := filepath.Abs(supplied)
+	path := supplied
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(worktreeRoot, path)
+	}
+	path, err = filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
@@ -2808,7 +2820,7 @@ func copySignalFile(home string, project store.Project, task store.Task, supplie
 		}
 	}
 	if !insideAllowedRoot {
-		return "", fmt.Errorf("report and findings files must be inside %s", allowedLocations)
+		return "", fmt.Errorf("Signal files must be inside %s", allowedLocations)
 	}
 	contents, err := os.ReadFile(path)
 	if err != nil {

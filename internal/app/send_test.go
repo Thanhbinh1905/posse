@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -762,10 +763,12 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 		name, wantState, wantReason   string
 		rejectPrompt, headWaitForIdle bool
 		wantPromptCalls               int
+		wantBlocker                   bool
 	}{
-		{"accepted", "delivered", "steered", false, true, 1},
-		{"rejected", "queued", "compacting", true, true, 1},
-		{"earlier steerable message pending", "queued", "earlier_message_pending", true, false, 2},
+		{"accepted", "delivered", "steered", false, true, 1, false},
+		{"rejected", "queued", "compacting", true, true, 1, false},
+		{"earlier steerable message pending", "queued", "earlier_message_pending", true, false, 2, false},
+		{"earlier --queue message pending", "queued", "earlier_message_pending", false, true, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -815,6 +818,9 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 			}
 			if fake.CallCount("agent.prompt") != tc.wantPromptCalls {
 				t.Fatalf("agent.prompt calls = %d, want %d", fake.CallCount("agent.prompt"), tc.wantPromptCalls)
+			}
+			if tc.wantBlocker && (!strings.Contains(output.String(), "blocked_by_message: "+strconv.FormatInt(headID, 10)) || strings.Contains(output.String(), "waiting_for_idle (--queue)")) {
+				t.Fatalf("later message did not identify the earlier blocker: %s", output.String())
 			}
 			db, err = store.Open(home)
 			if err != nil {

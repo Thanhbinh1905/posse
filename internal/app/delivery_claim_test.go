@@ -380,6 +380,73 @@ func TestMessageClaimDoesNotRetryAfterAmbiguousPromptError(t *testing.T) {
 	}
 }
 
+func TestSteeredQueuedMessageUncertaintyDoesNotReplayOrOvertakeWaitForIdleHead(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{
+		Seq: 1, Type: "ship", Title: "Steer uncertainty", LandingMode: "local",
+		PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	waitID, err := db.QueueMessage(ctx, taskID, "Wait until the current turn ends", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steerID, err := db.QueueMessage(ctx, taskID, "Steer the current turn", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{
+		FocusedPaneID: "w1:p1",
+		Panes: []herdr.Pane{
+			{PaneID: "w1:p1", WorkspaceID: "w1", Agent: "claude", AgentStatus: "working", Focused: true},
+			{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"},
+		},
+	}
+	service := testService(home, acceptedPromptLostAckAdapter{Adapter: fake})
+	err = service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue)
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "message_delivery_uncertain" {
+		t.Fatalf("steered prompt failure = %v, want message_delivery_uncertain", err)
+	}
+	wait, err := db.MessageByID(ctx, waitID)
+	if err != nil || wait.Status != "queued" {
+		t.Fatalf("wait-for-idle message changed during steering: %#v, %v", wait, err)
+	}
+	steer, err := db.MessageByID(ctx, steerID)
+	if err != nil || steer.Status != "submitting" {
+		t.Fatalf("uncertain steer message = %#v, %v", steer, err)
+	}
+	for range 3 {
+		if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	steer, err = db.MessageByID(ctx, steerID)
+	if err != nil || steer.Status != "submitting" || fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("uncertain steer was replayed or changed: message=%#v err=%v prompts=%d", steer, err, fake.CallCount("agent.prompt"))
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "message_delivery_uncertain" || !strings.Contains(notices[0].Summary, "#"+strconv.FormatInt(steerID, 10)) {
+		t.Fatalf("uncertain steer Notice = %#v, %v", notices, err)
+	}
+}
+
 func (a *promptGateAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	if method == "agent.prompt" {
 		a.entered <- struct{}{}
