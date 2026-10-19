@@ -6,6 +6,7 @@ set -eu
 assignments='
 1 Test014ProjectVocabularyUpgradePreservesTasksSandboxesAndOpenPR
 1 Test014MalformedConfigRetainsFilenameAndErrorCode
+1 Test014ProjectShorthandConfigVocabularyUpgrade
 1 TestFailedRecoveryBoundWithRealHerdr
 1 TestStoppedWorkerPaneCanBeRelaunched
 1 TestProjectCommandDoesNotWaitForeverForStoppedLockOwner

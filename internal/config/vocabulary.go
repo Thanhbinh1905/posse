@@ -19,6 +19,10 @@ func ReplacementKey(key string) string {
 	switch key {
 	case "remuda":
 		return "pool"
+	case "landing_mode":
+		return "merge_mode"
+	case "auto_unsaddle":
+		return "auto_teardown"
 	case "defaults.landing_mode":
 		return "defaults.merge_mode"
 	case "defaults.auto_unsaddle":
@@ -76,6 +80,11 @@ func migrateVocabularyFile(path string) error {
 	changed, err := migrateVocabularyMap(values, "")
 	if err != nil {
 		return &InvalidError{File: path, Key: "config", Cause: err}
+	}
+	// Check the rewritten schema before recording completion. Allow Project
+	// shorthand here; Load enforces the actual file's global/Project scope.
+	if err := ValidateSchemaMap(path, values, true); err != nil {
+		return err
 	}
 	if !changed {
 		return atomicfile.Write(path+".vocabulary", []byte(vocabularyMarker), 0o600)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -60,6 +61,42 @@ func Test014LeadAdapterVocabularyHandoffAndReceipt(t *testing.T) {
 			notices, err := f.db.NoticesByIDs(context.Background(), f.project.ID, []int64{id})
 			if err != nil || len(notices) != 1 || notices[0].DeliveredAt == 0 {
 				t.Fatalf("retained receipt was not settled: %#v %v", notices, err)
+			}
+		})
+	}
+}
+
+func Test014ProjectShorthandConfigVocabularyUpgrade(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	stopBackgroundWatch(t, f)
+	path := filepath.Join(f.home, "projects", f.project.Name, "config.toml")
+	for _, mode := range []string{"local", "no-mistakes"} {
+		t.Run(mode, func(t *testing.T) {
+			// v0.14.0 docs/spec.md Project example, plus its supported
+			// auto_unsaddle shorthand and terminal value.
+			original := "# Project configuration\nlanding_mode = '" + mode + "'\nauto_unsaddle = 'landed'\ngate = ['just test']\n[defaults]\nforge = 'gitlab'\n[repositories.worker]\nlanding_mode = 'local'\ntarget_branch = 'staging'\ngate = ['make test']\nforge = 'github'\n[autonomy]\nyolo = false\nreview = 'ask'\nland = 'ask'\n"
+			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path + ".vocabulary"); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			output := runPosse(t, f.binary, f.repo, f.leadEnv, "config", "show", "--project", f.project.Name, "--effective", "--json")
+			var result struct {
+				Effective config.Config `json:"effective"`
+			}
+			if err := json.Unmarshal([]byte(output), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Effective.Defaults.MergeMode != mode || result.Effective.Defaults.AutoTeardown != "merged" || result.Effective.Repositories["worker"].MergeMode != "local" {
+				t.Fatalf("Project shorthand changed meaning: %s", output)
+			}
+			if data, err := os.ReadFile(path + ".v014"); err != nil || string(data) != original {
+				t.Fatalf("original spec config not preserved: %q %v", data, err)
+			}
+			for i := 0; i < 2; i++ {
+				runPosse(t, f.binary, f.repo, f.leadEnv, "config", "show", "--project", f.project.Name, "--json")
 			}
 		})
 	}

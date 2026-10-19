@@ -194,9 +194,9 @@ func (db *DB) CurrentReviewPass(ctx context.Context, changeTaskID int64, candida
 func recordReviewVerdictTx(ctx context.Context, tx *writeTx, taskID, signalID int64, input ReviewVerdictInput) error {
 	var taskType string
 	var launches int
-	var shipTaskID sql.NullInt64
+	var changeTaskID sql.NullInt64
 	var projectID int64
-	if err := tx.QueryRowContext(ctx, `SELECT type,launches,reviews_task_id,project_id FROM tasks WHERE id=?`, taskID).Scan(&taskType, &launches, &shipTaskID, &projectID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT type,launches,reviews_task_id,project_id FROM tasks WHERE id=?`, taskID).Scan(&taskType, &launches, &changeTaskID, &projectID); err != nil {
 		return err
 	}
 	if taskType != "review" {
@@ -210,17 +210,17 @@ func recordReviewVerdictTx(ctx context.Context, tx *writeTx, taskID, signalID in
 		return err
 	}
 	if roundCount > 0 {
-		if !shipTaskID.Valid || shipTaskID.Int64 < 1 {
-			return fmt.Errorf("%w: Review Round has no Ship Task", ErrReviewFindingsInvalid)
+		if !changeTaskID.Valid || changeTaskID.Int64 < 1 {
+			return fmt.Errorf("%w: Review Round has no Change Task", ErrReviewFindingsInvalid)
 		}
 		if input.Findings == nil {
 			return ErrReviewFindingsRequired
 		}
-		var shipTitle string
-		if err := tx.QueryRowContext(ctx, `SELECT title FROM tasks WHERE id=?`, shipTaskID.Int64).Scan(&shipTitle); err != nil {
+		var changeTitle string
+		if err := tx.QueryRowContext(ctx, `SELECT title FROM tasks WHERE id=?`, changeTaskID.Int64).Scan(&changeTitle); err != nil {
 			return err
 		}
-		result, err := recordReviewFindingsTx(ctx, tx, shipTaskID.Int64, taskID, *input.Findings)
+		result, err := recordReviewFindingsTx(ctx, tx, changeTaskID.Int64, taskID, *input.Findings)
 		if err != nil {
 			return err
 		}
@@ -238,7 +238,7 @@ func recordReviewVerdictTx(ctx context.Context, tx *writeTx, taskID, signalID in
 		if changed != int64(roundCount) {
 			return fmt.Errorf("%w: Review Round is no longer admitted", ErrReviewFindingsInvalid)
 		}
-		if err := insertReviewRoundNoticesTx(ctx, tx, projectID, shipTaskID.Int64, shipTitle, result, input.Verdict); err != nil {
+		if err := insertReviewRoundNoticesTx(ctx, tx, projectID, changeTaskID.Int64, changeTitle, result, input.Verdict); err != nil {
 			return err
 		}
 	} else if input.Findings != nil {
