@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -449,26 +448,6 @@ func stopBackgroundLookout(t *testing.T, f *prLifecycleFixture) {
 	f.env = setEnv(f.env, "POSSE_LOOKOUT_TOKEN", "e2e-manual-owner")
 	f.leadEnv = setEnv(f.leadEnv, "POSSE_LOOKOUT_TOKEN", "e2e-manual-owner")
 	stopFixtureBackgroundLookout(t, f.root, f.env, f.db, f.project.ID)
-}
-
-func pauseFixtureBackgroundLookout(t *testing.T, root string, env []string, db *store.DB, projectID int64) {
-	t.Helper()
-	for _, pid := range lookoutPIDs(root) {
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			t.Fatalf("stop background Lookout: %v", err)
-		}
-	}
-	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(root)) == 0 }) {
-		t.Fatalf("background Lookout did not stop: %v", lookoutPIDs(root))
-	}
-	state, err := db.LookoutRecovery(context.Background(), projectID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.RetryAt = time.Now().Add(time.Hour).UnixMilli()
-	if err := db.SetLookoutRecovery(context.Background(), projectID, state); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func stopFixtureBackgroundLookout(t *testing.T, root string, env []string, db *store.DB, projectID int64) {
