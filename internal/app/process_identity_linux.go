@@ -15,7 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-type mountProcessHandle struct {
+type sandboxProcessHandle struct {
 	pid         int
 	fd          int
 	bootID      string
@@ -25,8 +25,8 @@ type mountProcessHandle struct {
 
 func processIdentityCapabilityError() string { return "" }
 
-func mountProcessGroupID(pid int) (int, error) {
-	fields, err := mountProcessStatFields(pid)
+func sandboxProcessGroupID(pid int) (int, error) {
+	fields, err := sandboxProcessStatFields(pid)
 	if err != nil {
 		return 0, err
 	}
@@ -40,8 +40,8 @@ func mountProcessGroupID(pid int) (int, error) {
 	return group, nil
 }
 
-func mountProcessParentID(pid int) (int, error) {
-	fields, err := mountProcessStatFields(pid)
+func sandboxProcessParentID(pid int) (int, error) {
+	fields, err := sandboxProcessStatFields(pid)
 	if err != nil {
 		return 0, err
 	}
@@ -55,7 +55,7 @@ func mountProcessParentID(pid int) (int, error) {
 	return parent, nil
 }
 
-func mountProcessStatFields(pid int) ([]string, error) {
+func sandboxProcessStatFields(pid int) ([]string, error) {
 	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return nil, err
@@ -67,7 +67,7 @@ func mountProcessStatFields(pid int) ([]string, error) {
 	return strings.Fields(string(stat)[commandEnd+1:]), nil
 }
 
-func openMountProcessHandle(pid int) (*mountProcessHandle, error) {
+func openSandboxProcessHandle(pid int) (*sandboxProcessHandle, error) {
 	bootID, startTime, err := store.ProcessIdentityForPID(pid)
 	if err != nil {
 		return nil, err
@@ -79,7 +79,7 @@ func openMountProcessHandle(pid int) (*mountProcessHandle, error) {
 		}
 		return nil, fmt.Errorf("open pidfd for PID %d: %w", pid, err)
 	}
-	handle := &mountProcessHandle{pid: pid, fd: fd, bootID: bootID, startTime: startTime}
+	handle := &sandboxProcessHandle{pid: pid, fd: fd, bootID: bootID, startTime: startTime}
 	currentBootID, currentStartTime, err := store.ProcessIdentityForPID(pid)
 	if err != nil || currentBootID != bootID || currentStartTime != startTime {
 		_ = handle.Close()
@@ -91,9 +91,9 @@ func openMountProcessHandle(pid int) (*mountProcessHandle, error) {
 	return handle, nil
 }
 
-func (handle *mountProcessHandle) PID() int { return handle.pid }
+func (handle *sandboxProcessHandle) PID() int { return handle.pid }
 
-func (handle *mountProcessHandle) Identity() string { return handle.bootID + "/" + handle.startTime }
+func (handle *sandboxProcessHandle) Identity() string { return handle.bootID + "/" + handle.startTime }
 
 func openPIDFD(pid int) (int, error) {
 	for {
@@ -104,10 +104,10 @@ func openPIDFD(pid int) (int, error) {
 	}
 }
 
-func (handle *mountProcessHandle) Signal(signal syscall.Signal) error {
+func (handle *sandboxProcessHandle) Signal(signal syscall.Signal) error {
 	if handle.signalGuard != nil {
 		if err := handle.signalGuard(signal); err != nil {
-			return fmt.Errorf("refuse to signal Mount process instance %d after ownership changed: %w", handle.pid, err)
+			return fmt.Errorf("refuse to signal Sandbox process instance %d after ownership changed: %w", handle.pid, err)
 		}
 	}
 	for {
@@ -122,7 +122,7 @@ func (handle *mountProcessHandle) Signal(signal syscall.Signal) error {
 	}
 }
 
-func (handle *mountProcessHandle) Alive() (bool, error) {
+func (handle *sandboxProcessHandle) Alive() (bool, error) {
 	poll := []unix.PollFd{{Fd: int32(handle.fd), Events: unix.POLLIN}}
 	for {
 		_, err := unix.Poll(poll, 0)
@@ -136,7 +136,7 @@ func (handle *mountProcessHandle) Alive() (bool, error) {
 	}
 }
 
-func (handle *mountProcessHandle) Close() error {
+func (handle *sandboxProcessHandle) Close() error {
 	if handle.fd < 0 {
 		return nil
 	}

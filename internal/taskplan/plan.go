@@ -14,7 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 2
+const Version = 3
 
 const (
 	RootContextNone     = "none"
@@ -62,7 +62,7 @@ type UserChoice struct {
 
 func preferenceFields(brief dispatch.Brief) []string {
 	var fields []string
-	if brief.LandingMode != "" {
+	if brief.MergeMode != "" {
 		fields = append(fields, "delivery")
 	}
 	if brief.Review != "" {
@@ -136,6 +136,8 @@ func (loops ValidationLoops) MaxReviewRounds() int {
 }
 
 type Plan struct {
+	// Original bytes retain the digest and provenance of admitted 0.14 plans.
+	legacyJSON      string
 	Version         int              `json:"version"`
 	Revision        int              `json:"revision"`
 	PreviousSHA256  string           `json:"previous_sha256,omitempty"`
@@ -156,7 +158,7 @@ type Plan struct {
 	ValidationLoops *ValidationLoops `json:"validation_loops,omitempty"`
 	MergeMethod     string           `json:"merge_method"`
 	ProseLanguage   string           `json:"prose_language,omitempty"`
-	Remuda          config.Remuda    `json:"remuda"`
+	Pool            config.Pool      `json:"pool"`
 }
 
 type Request struct {
@@ -175,7 +177,7 @@ type Request struct {
 	ValidationLoops *ValidationLoops
 	MergeMethod     string
 	ProseLanguage   string
-	Remuda          config.Remuda
+	Pool            config.Pool
 }
 
 // Resolve interprets the admitted Brief contract after callers resolve repository facts.
@@ -185,7 +187,7 @@ func Resolve(r Request) (Plan, error) {
 		return Plan{}, err
 	}
 	var validationLoops *ValidationLoops
-	if brief.Type == "ship" && r.ValidationLoops != nil {
+	if brief.Type == "change" && r.ValidationLoops != nil {
 		frozen := *r.ValidationLoops
 		frozen.Review.Guidance = append([]string(nil), frozen.Review.Guidance...)
 		if brief.ReviewRounds > frozen.Review.MaxRounds {
@@ -208,16 +210,16 @@ func Resolve(r Request) (Plan, error) {
 		return Plan{}, err
 	}
 	outcome := "report"
-	if brief.Type == "ship" {
+	if brief.Type == "change" {
 		outcome = "change"
 	}
 	source := "effective config: " + strings.Join(r.ConfigSources, ", ")
-	reviewSource, landSource := source, source
+	reviewSource, mergeSource := source, source
 	if brief.AutonomyReview != "" {
 		reviewSource = "brief: " + r.Brief.Source
 	}
-	if brief.AutonomyLand != "" {
-		landSource = "brief: " + r.Brief.Source
+	if brief.AutonomyMerge != "" {
+		mergeSource = "brief: " + r.Brief.Source
 	}
 	if brief.Execution != "" {
 		r.Execution.Mode = brief.Execution
@@ -229,13 +231,13 @@ func Resolve(r Request) (Plan, error) {
 			r.Execution.RootContext = RootContextNone
 		}
 	}
-	p := Plan{Version: Version, Revision: 1, Type: brief.Type, Outcome: outcome, Executor: "rider",
+	p := Plan{Version: Version, Revision: 1, Type: brief.Type, Outcome: outcome, Executor: "worker",
 		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
-		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.land", Value: autonomy.Land, Source: landSource}},
+		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.merge", Value: autonomy.Merge, Source: mergeSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
-		Gate: r.Gate, ValidationLoops: validationLoops, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Remuda: r.Remuda}
+		Gate: r.Gate, ValidationLoops: validationLoops, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool}
 	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
-	for i, explicit := range []bool{brief.LandingMode != "", brief.Review != ""} {
+	for i, explicit := range []bool{brief.MergeMode != "", brief.Review != ""} {
 		if explicit {
 			p.Preferences[i].Source = "brief: " + r.Brief.Source
 		}
@@ -267,7 +269,7 @@ func Resolve(r Request) (Plan, error) {
 		}
 	}
 	if p.Execution.Mode == "" {
-		p.Execution.Mode = "mount"
+		p.Execution.Mode = "sandbox"
 	}
 	// Snapshot interpreted configuration fields consumed by the contract, not
 	// entire TOML files, other Profiles or unrelated forge content.
@@ -280,8 +282,8 @@ func Resolve(r Request) (Plan, error) {
 		ValidationLoops *ValidationLoops `json:"validation_loops,omitempty"`
 		MergeMethod     string           `json:"merge_method"`
 		ProseLanguage   string           `json:"prose_language"`
-		Remuda          config.Remuda    `json:"remuda"`
-	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.ValidationLoops, p.MergeMethod, p.ProseLanguage, p.Remuda})
+		Pool            config.Pool      `json:"pool"`
+	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.ValidationLoops, p.MergeMethod, p.ProseLanguage, p.Pool})
 	if err != nil {
 		return Plan{}, err
 	}
@@ -299,23 +301,23 @@ func Resolve(r Request) (Plan, error) {
 
 func (p Plan) Validate() error {
 	invalid := func(message string) error { return fmt.Errorf("invalid execution plan: %s", message) }
-	if p.Version != 1 && p.Version != Version || p.Revision < 1 {
+	if p.Version != 1 && p.Version != 2 && p.Version != Version || p.Revision < 1 {
 		return invalid("unsupported version or revision")
 	}
 	if p.Revision == 1 && p.PreviousSHA256 != "" || p.Revision > 1 && len(p.PreviousSHA256) != 64 {
 		return invalid("invalid previous revision digest")
 	}
-	if p.Executor != "rider" || p.Execution.Mode != "mount" && p.Execution.Mode != "in-place" {
+	if p.Executor != "worker" || p.Execution.Mode != "sandbox" && p.Execution.Mode != "in-place" {
 		return invalid("unsupported executor or execution mode")
 	}
 	if p.Execution.Scope != "repo" && p.Execution.Scope != "workspace" && p.Execution.Scope != "directory" {
 		return invalid("unsupported scope")
 	}
-	if p.Type != "ship" && p.Type != "scout" && p.Type != "review" {
+	if p.Type != "change" && p.Type != "research" && p.Type != "review" {
 		return invalid("unsupported Task type")
 	}
 	outcome := "report"
-	if p.Type == "ship" {
+	if p.Type == "change" {
 		outcome = "change"
 	}
 	if p.Outcome != outcome {
@@ -363,8 +365,8 @@ func (p Plan) Validate() error {
 	if p.Execution.Scope == "workspace" && p.Execution.RootContext != "" && p.Execution.RootContext != RootContextNone && p.Execution.RootContext != RootContextReadOnly {
 		return invalid("unsupported workspace root context")
 	}
-	if p.Execution.Scope == "workspace" && p.Type == "ship" && len(p.Execution.Members) == 0 {
-		return invalid("workspace Ship requires Members")
+	if p.Execution.Scope == "workspace" && p.Type == "change" && len(p.Execution.Members) == 0 {
+		return invalid("workspace Change requires Members")
 	}
 	if p.Execution.Mode == "in-place" {
 		seen := map[string]bool{}
@@ -429,7 +431,7 @@ func (p Plan) Validate() error {
 		return invalid("missing selected Brief")
 	}
 	parseBrief := dispatch.ParseBriefText
-	if p.Version == 1 {
+	if p.Version < Version {
 		parseBrief = dispatch.ParseHistoricalBriefText
 	}
 	brief, err := parseBrief(string(p.Inputs[0].Bytes))
@@ -444,8 +446,8 @@ func (p Plan) Validate() error {
 			return invalid("Brief review_rounds is not frozen in the plan")
 		}
 	} else {
-		if p.Type != "ship" {
-			return invalid("validation loops are only valid for Ship Tasks")
+		if p.Type != "change" {
+			return invalid("validation loops are only valid for Change Tasks")
 		}
 		settings := []struct {
 			key   string
@@ -482,7 +484,7 @@ func (p Plan) Validate() error {
 			return invalid("in-place execution cannot request Review")
 		}
 	}
-	if p.Execution.Mode == "in-place" && (p.UserChoice == nil || p.UserChoice.Source != "ride --user-approved") {
+	if p.Execution.Mode == "in-place" && (p.UserChoice == nil || p.UserChoice.Source != "start --user-approved") {
 		return invalid("in-place execution requires recorded User consent")
 	}
 	if p.Execution.Mode == "in-place" && (brief.Ticket != nil || len(brief.Issues) > 0 || len(brief.Refs) > 0 || p.Delivery != "local") {
@@ -493,7 +495,7 @@ func (p Plan) Validate() error {
 	}
 	if p.UserChoice != nil {
 		choice := p.UserChoice
-		if strings.TrimSpace(choice.Quote) == "" || choice.Actor != "lead" && choice.Actor != "user" || choice.Source != "ride --user-approved" || choice.BriefSHA256 != p.Inputs[0].SHA256 || len(choice.Fields) == 0 || strings.Join(choice.Fields, ",") != strings.Join(preferenceFields(brief), ",") {
+		if strings.TrimSpace(choice.Quote) == "" || choice.Actor != "lead" && choice.Actor != "user" || choice.Source != "start --user-approved" || choice.BriefSHA256 != p.Inputs[0].SHA256 || len(choice.Fields) == 0 || strings.Join(choice.Fields, ",") != strings.Join(preferenceFields(brief), ",") {
 			return invalid("invalid scoped User choice provenance")
 		}
 	}
@@ -515,7 +517,7 @@ func (p Plan) Validate() error {
 		}
 		grants[grant.Name] = grant.Value
 	}
-	if len(grants) != 2 || grants["autonomy.review"] != "ask" && grants["autonomy.review"] != "lead" || grants["autonomy.land"] != "ask" && grants["autonomy.land"] != "auto" {
+	if len(grants) != 2 || grants["autonomy.review"] != "ask" && grants["autonomy.review"] != "lead" || grants["autonomy.merge"] != "ask" && grants["autonomy.merge"] != "auto" {
 		return invalid("unsupported autonomy grant")
 	}
 	for _, input := range p.Inputs {
@@ -532,6 +534,41 @@ func Decode(data string) (Plan, error) {
 	if err := json.Unmarshal([]byte(data), &p); err != nil {
 		return Plan{}, fmt.Errorf("decode execution plan: %w", err)
 	}
+	if p.Version < Version {
+		p.legacyJSON = data
+		switch p.Type {
+		case "ship":
+			p.Type = "change"
+		case "scout":
+			p.Type = "research"
+		}
+		if p.Executor == "rider" {
+			p.Executor = "worker"
+		}
+		if p.Execution.Mode == "mount" {
+			p.Execution.Mode = "sandbox"
+		}
+		if p.Launch.Kind.NoticeDelivery == "lookout" {
+			p.Launch.Kind.NoticeDelivery = "watch"
+		}
+		if p.UserChoice != nil && p.UserChoice.Source == "ride --user-approved" {
+			p.UserChoice.Source = "start --user-approved"
+		}
+		for i := range p.Grants {
+			if p.Grants[i].Name == "autonomy.land" {
+				p.Grants[i].Name = "autonomy.merge"
+			}
+		}
+		var legacy struct {
+			Pool config.Pool `json:"remuda"`
+		}
+		if err := json.Unmarshal([]byte(data), &legacy); err != nil {
+			return Plan{}, err
+		}
+		if p.Pool.Clean == "" {
+			p.Pool = legacy.Pool
+		}
+	}
 	return p, p.Validate()
 }
 
@@ -539,12 +576,18 @@ func (p Plan) Encode() (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
+	if p.legacyJSON != "" {
+		return p.legacyJSON, nil
+	}
 	data, err := json.Marshal(p)
 	return string(data), err
 }
 
 func (p Plan) SHA256() string {
 	data, _ := json.Marshal(p)
+	if p.legacyJSON != "" {
+		data = []byte(p.legacyJSON)
+	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
@@ -568,6 +611,7 @@ func (p Plan) Reconfigure(launch Launch) (Plan, error) {
 		return Plan{}, err
 	}
 	p.PreviousSHA256 = p.SHA256()
+	p.legacyJSON = ""
 	p.Revision++
 	p.Launch = launch
 	data, err := p.Encode()

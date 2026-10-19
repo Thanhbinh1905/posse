@@ -17,7 +17,7 @@ import (
 
 // pauseCommand holds a real CLI process after a durable intent step. Only the
 // isolated fixture gets the test pause; the User's Herdr session is untouched.
-func pauseCommand(t *testing.T, f *riderTabsFixture, point string, action func(), args ...string) (string, error) {
+func pauseCommand(t *testing.T, f *workerTabsFixture, point string, action func(), args ...string) (string, error) {
 	t.Helper()
 	marker := filepath.Join(f.root, "intent-pause")
 	env := setEnv(f.leadEnv, "POSSE_INTENT_PAUSE_AT", point)
@@ -47,7 +47,7 @@ func pauseCommand(t *testing.T, f *riderTabsFixture, point string, action func()
 	return output.String(), err
 }
 
-func closeRiderGroup(t *testing.T, f *riderTabsFixture) {
+func closeWorkerGroup(t *testing.T, f *workerTabsFixture) {
 	t.Helper()
 	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": f.leadWorkspaceID, "close_group": true}); err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func closeRiderGroup(t *testing.T, f *riderTabsFixture) {
 	}
 }
 
-func restoreRiderGroup(t *testing.T, f *riderTabsFixture) {
+func restoreWorkerGroup(t *testing.T, f *workerTabsFixture) {
 	t.Helper()
 	runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
 	if !waitForCondition(20*time.Second, func() bool { _, found := findLeadInSnapshot(f.snapshot(t)); return found }) {
@@ -65,32 +65,32 @@ func restoreRiderGroup(t *testing.T, f *riderTabsFixture) {
 	}
 }
 
-func TestGroupCloseDuringRideRecoversLeadAndMount(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	brief := filepath.Join(f.root, "group-ride.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Group ride\ndone_when: test finishes\n---\nWait.\n"), 0o600); err != nil {
+func TestGroupCloseDuringStartRecoversLeadAndSandbox(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	brief := filepath.Join(f.root, "group-start.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Group start\ndone_when: test finishes\n---\nWait.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output, err := pauseCommand(t, f, "ride:after:pane.record", func() { closeRiderGroup(t, f) }, "ride", "--brief", brief, "--name", "group-ride")
+	output, err := pauseCommand(t, f, "start:after:pane.record", func() { closeWorkerGroup(t, f) }, "start", "--brief", brief, "--name", "group-start")
 	if err == nil {
 		if !strings.Contains(output, "state: working") {
-			t.Fatalf("ride succeeded without a working Task: %s", output)
+			t.Fatalf("start succeeded without a working Task: %s", output)
 		}
 	} else if !strings.Contains(output, `"pane_not_found"`) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse recover --all") {
-		t.Fatalf("ride failed without a recoverable pane-close error: %s %v", output, err)
+		t.Fatalf("start failed without a recoverable pane-close error: %s %v", output, err)
 	}
-	restoreRiderGroup(t, f)
+	restoreWorkerGroup(t, f)
 	task := f.task(t, "t1")
 	if task.State != store.StateWorking && task.State != store.StateFailed && task.State != store.StateLost {
-		t.Fatalf("interrupted ride left Task in unexpected state %s", task.State)
+		t.Fatalf("interrupted start left Task in unexpected state %s", task.State)
 	}
-	if task.MountID != 0 {
+	if task.SandboxID != 0 {
 		reason := gitTest(t, f.env, f.repo, "worktree", "list", "--porcelain")
 		if !strings.Contains(reason, "locked posse: held by t1") {
-			t.Fatalf("held Rider Mount lost its lock: %s", reason)
+			t.Fatalf("held Worker Sandbox lost its lock: %s", reason)
 		}
 	} else if task.State == store.StateWorking {
-		t.Fatal("working Task lost its Mount")
+		t.Fatal("working Task lost its Sandbox")
 	}
 	// Recovery can move the Lead to a different workspace. Close that
 	// isolated group so its panes do not outlive the fixture server.
@@ -106,11 +106,11 @@ func TestGroupCloseDuringRideRecoversLeadAndMount(t *testing.T) {
 	}
 }
 
-func TestGroupCloseDuringRelaunchRestoresLeadAndRider(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	before := f.ride(t, "t1", "Group relaunch", "group-relaunch")
+func TestGroupCloseDuringRelaunchRestoresLeadAndWorker(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	before := f.start(t, "t1", "Group relaunch", "group-relaunch")
 	f.fail(t, "t1")
-	output, commandErr := pauseCommand(t, f, "relaunch:after:pane.label", func() { closeRiderGroup(t, f) }, "relaunch", "t1")
+	output, commandErr := pauseCommand(t, f, "relaunch:after:pane.label", func() { closeWorkerGroup(t, f) }, "relaunch", "t1")
 	if commandErr == nil {
 		if !strings.Contains(output, "t1") {
 			t.Fatalf("relaunch succeeded without reporting Task t1: %s", output)
@@ -118,10 +118,10 @@ func TestGroupCloseDuringRelaunchRestoresLeadAndRider(t *testing.T) {
 	} else if (!strings.Contains(output, `"agent_pane_not_found"`) && !strings.Contains(output, `"pane_not_found"`)) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse recover --all") {
 		t.Fatalf("relaunch failed without a recoverable pane-close error: %s %v", output, commandErr)
 	}
-	restoreRiderGroup(t, f)
+	restoreWorkerGroup(t, f)
 	after := f.task(t, "t1")
-	if after.MountID != before.MountID {
-		t.Fatalf("relaunch lost held Mount: before=%#v after=%#v", before, after)
+	if after.SandboxID != before.SandboxID {
+		t.Fatalf("relaunch lost held Sandbox: before=%#v after=%#v", before, after)
 	}
 	if after.State != store.StateWorking && after.State != store.StateFailed && after.State != store.StateLost {
 		t.Fatalf("interrupted relaunch left Task in unexpected state %s", after.State)
@@ -139,25 +139,25 @@ func TestGroupCloseDuringRelaunchRestoresLeadAndRider(t *testing.T) {
 	f.waitState(t, "t1", store.StateWorking)
 }
 
-func TestGroupCloseDuringTeardownRestoresSurvivingRider(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	first := f.ride(t, "t1", "Group teardown", "group-teardown")
-	second := f.ride(t, "t2", "Surviving rider", "surviving-rider")
+func TestGroupCloseDuringTeardownRestoresSurvivingWorker(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	first := f.start(t, "t1", "Group teardown", "group-teardown")
+	second := f.start(t, "t2", "Surviving worker", "surviving-worker")
 	f.fail(t, "t1")
-	f.exitRider(t, "t1")
+	f.exitWorker(t, "t1")
 	if _, err := f.client.Call(context.Background(), "pane.close", map[string]any{"pane_id": first.PaneID}); err != nil {
 		t.Fatalf("close the exited Task pane before discard: %v", err)
 	}
-	output, err := pauseCommand(t, f, "unsaddle:after:panes.close", func() { closeRiderGroup(t, f) }, "unsaddle", "t1", "--discard", "--user-approved", "Test approved teardown")
+	output, err := pauseCommand(t, f, "teardown:after:panes.close", func() { closeWorkerGroup(t, f) }, "teardown", "t1", "--discard", "--user-approved", "Test approved teardown")
 	if err != nil {
 		t.Fatalf("teardown after group close: %s %v", output, err)
 	}
-	restoreRiderGroup(t, f)
+	restoreWorkerGroup(t, f)
 	if state := f.task(t, "t1").State; state != store.StateTornDown {
 		t.Fatalf("teardown state = %s", state)
 	}
-	assertMountUnlocked(t, f.env, f.repo, first.WorktreePath)
+	assertSandboxUnlocked(t, f.env, f.repo, first.WorktreePath)
 	if !waitForCondition(20*time.Second, func() bool { return f.task(t, "t2").Launches > second.Launches }) {
-		t.Fatal("surviving Rider was not recovered")
+		t.Fatal("surviving Worker was not recovered")
 	}
 }

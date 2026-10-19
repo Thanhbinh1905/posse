@@ -29,10 +29,10 @@ func TestTaskOutputContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, task := range []store.Task{
-		{Seq: 1, Type: "ship", Title: "Duplicate", ShortName: "duplicate", LandingMode: "local"},
-		{Seq: 2, Type: "ship", Title: "Duplicate", ShortName: "duplicate", LandingMode: "local"},
-		{Seq: 3, Type: "ship", Title: "Failed work", ShortName: "failed-work", LandingMode: "local"},
-		{Seq: 4, Type: "ship", Title: "Lost work", ShortName: "lost-work", LandingMode: "local"},
+		{Seq: 1, Type: "change", Title: "Duplicate", ShortName: "duplicate", MergeMode: "local"},
+		{Seq: 2, Type: "change", Title: "Duplicate", ShortName: "duplicate", MergeMode: "local"},
+		{Seq: 3, Type: "change", Title: "Failed work", ShortName: "failed-work", MergeMode: "local"},
+		{Seq: 4, Type: "change", Title: "Lost work", ShortName: "lost-work", MergeMode: "local"},
 	} {
 		id, err := db.CreateTask(ctx, project.ID, task)
 		if err != nil {
@@ -53,7 +53,7 @@ func TestTaskOutputContract(t *testing.T) {
 			if err := db.Transition(ctx, id, store.StateWorking, state, source, reason); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: id, Kind: kind, Summary: task.Title + " lost its Rider"}); err != nil {
+			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: id, Kind: kind, Summary: task.Title + " lost its Worker"}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -77,7 +77,7 @@ func TestTaskOutputContract(t *testing.T) {
 		}
 		return result
 	}
-	for _, args := range [][]string{{}, {"--full"}, {"roster"}, {"roster", "--all"}, {"show", "t3"}, {"show", "t3", "--full"}, {"decisions"}, {"project", "show"}, {"config", "schema"}, {"config", "show", "--effective"}, {"remuda"}} {
+	for _, args := range [][]string{{}, {"--full"}, {"list"}, {"list", "--all"}, {"show", "t3"}, {"show", "t3", "--full"}, {"decisions"}, {"project", "show"}, {"config", "schema"}, {"config", "show", "--effective"}, {"pool"}} {
 		result := run(args...)
 		text, _ := json.Marshal(result)
 		if matched := regexp.MustCompile(`"[A-Z][A-Za-z]*"\s*:`).Find(text); matched != nil {
@@ -87,13 +87,13 @@ func TestTaskOutputContract(t *testing.T) {
 			t.Errorf("%v: raw timestamp %s", args, text)
 		}
 		switch strings.Join(args, " ") {
-		case "roster":
+		case "list":
 			rows := result["tasks"].([]any)
 			if rows[0].(map[string]any)["id"] != "t1" || rows[0].(map[string]any)["name"] != "duplicate" {
-				t.Errorf("roster ids: %s", text)
+				t.Errorf("list ids: %s", text)
 			}
 			if rows[2].(map[string]any)["reason"] != "build failed" || rows[3].(map[string]any)["reason"] != "pane unavailable" {
-				t.Errorf("roster reason: %s", text)
+				t.Errorf("list reason: %s", text)
 			}
 		case "decisions":
 			decisions := result["decisions"].([]any)
@@ -141,7 +141,7 @@ func TestTaskOutputContract(t *testing.T) {
 		t.Errorf("projects.md Task ID: %s, %v", projectsMD, err)
 	}
 	t.Chdir(root)
-	for _, args := range [][]string{{}, {"roster", "--all"}} {
+	for _, args := range [][]string{{}, {"list", "--all"}} {
 		result := run(args...)
 		projects := result["projects"].([]any)
 		tasks := projects[0].(map[string]any)["tasks"].([]any)
@@ -164,7 +164,7 @@ func TestTaskOutputContract(t *testing.T) {
 }
 
 // All registered command paths share the formatter, including nested commands.
-// Real dashboard, roster and show outputs are covered above.
+// Real dashboard, list and show outputs are covered above.
 func TestEveryCommandUsesSharedOutputFormat(t *testing.T) {
 	cli := testService(t.TempDir(), nil).CLI()
 	var paths [][]string
@@ -204,7 +204,7 @@ func TestDispatchPreviewNameOnProfileRequired(t *testing.T) {
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
 	home := filepath.Join(root, "home")
-	config := "[profiles.one]\nkind = \"pi\"\n[profiles.two]\nkind = \"pi\"\n[[dispatch]]\ntype = \"ship\"\nuse = \"one\"\n[[dispatch]]\ntype = \"ship\"\nuse = \"two\"\n"
+	config := "[profiles.one]\nkind = \"pi\"\n[profiles.two]\nkind = \"pi\"\n[[dispatch]]\ntype = \"change\"\nuse = \"one\"\n[[dispatch]]\ntype = \"change\"\nuse = \"two\"\n"
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestDispatchPreviewNameOnProfileRequired(t *testing.T) {
 		t.Fatal(err)
 	}
 	brief := filepath.Join(root, "brief.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Fix unstable tests\ndone_when: Tests pass\n---\nRepair.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Fix unstable tests\ndone_when: Tests pass\n---\nRepair.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db, err := store.Open(home)
@@ -235,7 +235,7 @@ func TestDispatchPreviewNameOnProfileRequired(t *testing.T) {
 		t.Errorf("dispatch needs Profile and Task Name: %d %s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"dispatch", "--brief", brief, "--profile", "one"}); code != 0 || !strings.Contains(output.String(), "fix-unstable-tests") || !strings.Contains(output.String(), "posse ride --brief") {
+	if code := cli.Run([]string{"dispatch", "--brief", brief, "--profile", "one"}); code != 0 || !strings.Contains(output.String(), "fix-unstable-tests") || !strings.Contains(output.String(), "posse start --brief") {
 		t.Errorf("dispatch override: %d %s", code, output.String())
 	}
 	output.Reset()

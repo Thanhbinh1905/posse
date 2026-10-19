@@ -26,16 +26,16 @@ func TestDiscardDecisionEligibilityIsScopedByKind(t *testing.T) {
 	}{
 		{kind: "recovery", state: store.StateFailed, want: true},
 		{kind: "recovery", state: store.StateReported},
-		{kind: "recovery", state: store.StateLanded},
+		{kind: "recovery", state: store.StateMerged},
 		{kind: "worker_exited", state: store.StateDone, want: true},
 		{kind: "worker_exited", state: store.StateReported},
-		{kind: "land_ready", state: store.StateLanding, want: true},
-		{kind: "land_ready", state: store.StateLanded},
+		{kind: "merge_ready", state: store.StateMerging, want: true},
+		{kind: "merge_ready", state: store.StateMerged},
 		{kind: "pr_closed", state: store.StateFailed, want: true},
 		{kind: "pr_closed", state: store.StateReported},
-		{kind: "pr_closed", state: store.StateLanded},
-		{kind: "leftover", state: store.StateReported, want: true},
-		{kind: "leftover", state: store.StateLanded, want: true},
+		{kind: "pr_closed", state: store.StateMerged},
+		{kind: "orphan", state: store.StateReported, want: true},
+		{kind: "orphan", state: store.StateMerged, want: true},
 	} {
 		t.Run(test.kind+"/"+string(test.state), func(t *testing.T) {
 			if got := canDiscardFromDecision(test.kind, test.state); got != test.want {
@@ -45,18 +45,18 @@ func TestDiscardDecisionEligibilityIsScopedByKind(t *testing.T) {
 	}
 }
 
-func TestTeardownStopsMountWriterBeforeSnapshot(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+func TestTeardownStopsSandboxWriterBeforeSnapshot(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
-	attachPRFixtureMount(t, f)
-	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateLanding, "cli", "PR ready"); err != nil {
+	attachPRFixtureSandbox(t, f)
+	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateMerging, "cli", "PR ready"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.Transition(ctx, f.task.ID, store.StateLanding, store.StateLanded, "cli", "merged"); err != nil {
+	if err := f.db.Transition(ctx, f.task.ID, store.StateMerging, store.StateMerged, "cli", "merged"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
@@ -80,7 +80,7 @@ func TestTeardownStopsMountWriterBeforeSnapshot(t *testing.T) {
 	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		pids, err := mountProcessIDs(f.worktree)
+		pids, err := sandboxProcessIDs(f.worktree)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -88,7 +88,7 @@ func TestTeardownStopsMountWriterBeforeSnapshot(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("writer did not start in Mount")
+			t.Fatal("writer did not start in Sandbox")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -106,26 +106,26 @@ func TestTeardownStopsMountWriterBeforeSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.service.unsaddleTask(ctx, f.db, f.project, cfg, task, false, ""); err != nil {
+	if _, err := f.service.teardownTask(ctx, f.db, f.project, cfg, task, false, ""); err != nil {
 		t.Fatal(err)
 	}
-	if got := gitTest(t, f.repo, "show", "refs/heads/posse/t1-leftover:late.txt"); !strings.Contains(got, "late") {
-		t.Fatalf("Mount writer's final edit was lost: %q", got)
+	if got := gitTest(t, f.repo, "show", "refs/heads/posse/t1-orphan:late.txt"); !strings.Contains(got, "late") {
+		t.Fatalf("Sandbox writer's final edit was lost: %q", got)
 	}
 }
 
-func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+func TestUnrecoverableOrphanOffersApprovedDiscard(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
-	attachPRFixtureMount(t, f)
-	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateLanding, "cli", "PR ready"); err != nil {
+	attachPRFixtureSandbox(t, f)
+	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateMerging, "cli", "PR ready"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.Transition(ctx, f.task.ID, store.StateLanding, store.StateLanded, "cli", "merged"); err != nil {
+	if err := f.db.Transition(ctx, f.task.ID, store.StateMerging, store.StateMerged, "cli", "merged"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
@@ -138,9 +138,9 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.worktree, "unsaved.txt"), []byte("unfinished\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, f.repo, "branch", "posse/t1-leftover")
-	saved := filepath.Join(f.root, "saved-leftover")
-	gitTest(t, f.repo, "worktree", "add", saved, "posse/t1-leftover")
+	gitTest(t, f.repo, "branch", "posse/t1-orphan")
+	saved := filepath.Join(f.root, "saved-orphan")
+	gitTest(t, f.repo, "worktree", "add", saved, "posse/t1-orphan")
 	if err := os.WriteFile(filepath.Join(saved, "independent.txt"), []byte("independent saved work\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -152,11 +152,11 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
-	markPRFixtureRiderExited(fake)
+	markPRFixtureWorkerExited(fake)
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	removeFixtureTaskPane(f)
-	if _, err := f.service.unsaddleTask(ctx, f.db, f.project, cfg, task, false, ""); err == nil {
-		t.Fatal("conflicting Leftover snapshot should stop Teardown")
+	if _, err := f.service.teardownTask(ctx, f.db, f.project, cfg, task, false, ""); err == nil {
+		t.Fatal("conflicting Orphan snapshot should stop Teardown")
 	} else {
 		t.Logf("Teardown failure: %v", err)
 	}
@@ -166,14 +166,14 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 	}
 	var unrecoverable store.Decision
 	for _, decision := range decisions {
-		if strings.HasPrefix(decision.Origin, "leftover:unrecoverable:") {
+		if strings.HasPrefix(decision.Origin, "orphan:unrecoverable:") {
 			unrecoverable = decision
 		}
 	}
 	if unrecoverable.ID == 0 {
 		t.Fatalf("missing repair/discard Decision: %#v", decisions)
 	}
-	if _, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: task.ID, Kind: "leftover", Origin: "leftover:posse/t1-leftover", Question: "Keep the independently saved Leftover?", Options: []string{"open-task", "discard"}}); err != nil {
+	if _, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: task.ID, Kind: "orphan", Origin: "orphan:posse/t1-orphan", Question: "Keep the independently saved Orphan?", Options: []string{"open-task", "discard"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.db.AnswerDecision(ctx, f.project.ID, unrecoverable.ID, "discard", "User approved losing the unsaved work"); err != nil {
@@ -188,22 +188,22 @@ func TestUnrecoverableLeftoverOffersApprovedDiscard(t *testing.T) {
 		t.Fatalf("discard did not tear down: %#v %v", task, err)
 	}
 	pending, err := f.db.Decisions(ctx, f.project.ID, true)
-	if err != nil || len(pending) != 1 || pending[0].Origin != "leftover:posse/t1-leftover" {
-		t.Fatalf("discard of unrecoverable work retired another Member's saved Leftover: %#v %v", pending, err)
+	if err != nil || len(pending) != 1 || pending[0].Origin != "orphan:posse/t1-orphan" {
+		t.Fatalf("discard of unrecoverable work retired another Member's saved Orphan: %#v %v", pending, err)
 	}
 	applied, err := f.db.Decision(ctx, f.project.ID, unrecoverable.ID)
-	if err != nil || applied.ObsoleteAt == 0 || applied.ObsoleteReason != "Unrecoverable Leftover resolved during Teardown" {
-		t.Fatalf("applied unrecoverable Leftover Decision was not obsoleted: %#v %v", applied, err)
+	if err != nil || applied.ObsoleteAt == 0 || applied.ObsoleteReason != "Unrecoverable Orphan resolved during Teardown" {
+		t.Fatalf("applied unrecoverable Orphan Decision was not obsoleted: %#v %v", applied, err)
 	}
 }
 
 func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
-	attachPRFixtureMount(t, f)
-	if code, out, stderr := f.run("land", "t1"); code != 0 {
-		t.Fatalf("land: %s %s", out, stderr)
+	attachPRFixtureSandbox(t, f)
+	if code, out, stderr := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge: %s %s", out, stderr)
 	}
 	f.setGraphQLState(t, "CLOSED", "SUCCESS", "APPROVED", "MERGEABLE", "", f.headSHA)
 	cfg, err := config.Load(f.home, f.project.Name)
@@ -230,7 +230,7 @@ func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
-	markPRFixtureRiderExited(fake)
+	markPRFixtureWorkerExited(fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: agentName(f.project.Name, f.task.Seq, 1), PaneID: f.task.PaneID}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	removeFixtureTaskPane(f)
@@ -246,12 +246,12 @@ func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
 		t.Fatalf("discard did not release Task: %#v %v", task, err)
 	}
 	transitions, err := f.db.TaskTransitions(ctx, task.ID, 10)
-	if err != nil || len(transitions) == 0 || transitions[0].From != string(store.StateLanding) || transitions[0].To != string(store.StateTornDown) || transitions[0].Source != "user" {
-		t.Fatalf("closed-PR discard did not transition directly from landing: %#v %v", transitions, err)
+	if err != nil || len(transitions) == 0 || transitions[0].From != string(store.StateMerging) || transitions[0].To != string(store.StateTornDown) || transitions[0].Source != "user" {
+		t.Fatalf("closed-PR discard did not transition directly from merging: %#v %v", transitions, err)
 	}
 }
 
-func markPRFixtureRiderExited(fake *herdr.Fake) {
+func markPRFixtureWorkerExited(fake *herdr.Fake) {
 	fake.SnapshotValue.Agents = nil
 	for index := range fake.SnapshotValue.Panes {
 		if fake.SnapshotValue.Panes[index].PaneID == "w2:p1" {
@@ -262,13 +262,13 @@ func markPRFixtureRiderExited(fake *herdr.Fake) {
 	fake.Results["pane.process_info"] = []byte(`{"process_info":{"pane_id":"w2:p1","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[]}}`)
 }
 
-func TestAnsweredLeftoverDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
+func TestAnsweredOrphanDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
 	for _, option := range []string{"open-task", "discard"} {
 		t.Run(option, func(t *testing.T) {
-			f := newPRLandingFixture(t, "pr", store.StateDone)
+			f := newPRMergeFixture(t, "pr", store.StateDone)
 			defer f.db.Close()
 			ctx := context.Background()
-			if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+			if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(filepath.Join(f.worktree, "untracked.txt"), []byte("save\n"), 0o600); err != nil {
@@ -286,7 +286,7 @@ func TestAnsweredLeftoverDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := snapshotPRLeftover(ctx, f.db, f.project, task); err != nil {
+			if err := snapshotPROrphan(ctx, f.db, f.project, task); err != nil {
 				t.Fatal(err)
 			}
 			decisions, err := f.db.Decisions(ctx, f.project.ID, true)
@@ -302,14 +302,14 @@ func TestAnsweredLeftoverDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
 				t.Fatalf("apply: %s %s", out, stderr)
 			}
 			if option == "open-task" {
-				if !strings.Contains(out, "--from-leftover") {
+				if !strings.Contains(out, "--from-orphan") {
 					t.Fatalf("new Task command missing: %s", out)
 				}
-				if got := gitTest(t, f.repo, "show", "refs/heads/posse/t1-leftover:untracked.txt"); got != "save\n" {
-					t.Fatalf("Leftover lost: %q", got)
+				if got := gitTest(t, f.repo, "show", "refs/heads/posse/t1-orphan:untracked.txt"); got != "save\n" {
+					t.Fatalf("Orphan lost: %q", got)
 				}
 			} else {
-				if _, err := gitOutput(ctx, f.repo, "rev-parse", "--verify", "refs/heads/posse/t1-leftover"); err == nil {
+				if _, err := gitOutput(ctx, f.repo, "rev-parse", "--verify", "refs/heads/posse/t1-orphan"); err == nil {
 					t.Fatal("discard left branch behind")
 				}
 			}
@@ -318,10 +318,10 @@ func TestAnsweredLeftoverDecisionAppliesDiscardOrOffersNewTask(t *testing.T) {
 }
 
 func TestApprovedDiscardRequiresQuoteBeforeDestructiveWork(t *testing.T) {
-	f := newPRLandingFixture(t, "local", store.StateFailed)
+	f := newPRMergeFixture(t, "local", store.StateFailed)
 	defer f.db.Close()
 	ctx := context.Background()
-	mount := attachPRFixtureMount(t, f)
+	sandbox := attachPRFixtureSandbox(t, f)
 	if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, store.StateFailed, "worker", "Worker failed"); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestApprovedDiscardRequiresQuoteBeforeDestructiveWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.service.unsaddleTask(ctx, f.db, f.project, cfg, f.task, true, "")
+	_, err = f.service.teardownTask(ctx, f.db, f.project, cfg, f.task, true, "")
 	commandError, ok := err.(*axi.Error)
 	if !ok || commandError.Code != "teardown_refused" || commandError.Retryable {
 		t.Fatalf("missing-quote discard refusal = %#v, want non-retryable teardown_refused", err)
@@ -343,9 +343,9 @@ func TestApprovedDiscardRequiresQuoteBeforeDestructiveWork(t *testing.T) {
 	if err != nil || current.State != store.StateFailed {
 		t.Fatalf("Task after refusal = %#v, %v", current, err)
 	}
-	currentMount, err := f.db.MountByTask(ctx, f.task.ID)
-	if err != nil || currentMount.ID != mount.ID || currentMount.State != "held" {
-		t.Fatalf("Mount after refusal = %#v, %v", currentMount, err)
+	currentSandbox, err := f.db.SandboxByTask(ctx, f.task.ID)
+	if err != nil || currentSandbox.ID != sandbox.ID || currentSandbox.State != "held" {
+		t.Fatalf("Sandbox after refusal = %#v, %v", currentSandbox, err)
 	}
 	if _, err := os.Stat(f.worktree); err != nil {
 		t.Fatalf("worktree after refusal: %v", err)
@@ -361,17 +361,17 @@ func TestApprovedDiscardRequiresQuoteBeforeDestructiveWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if countNoticeKind(notices, "unsaddle_incomplete") != 0 {
+	if countNoticeKind(notices, "teardown_incomplete") != 0 {
 		t.Fatalf("deterministic refusal raised an incomplete Teardown Notice: %#v", notices)
 	}
 }
 
-func TestUnsaddleIncompleteDeterministicRefusalIsNotRetryable(t *testing.T) {
-	f := newPRLandingFixture(t, "local", store.StateWorking)
+func TestTeardownIncompleteDeterministicRefusalIsNotRetryable(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
 	defer f.db.Close()
-	err := f.service.unsaddleIncomplete(context.Background(), f.db, f.project, f.task, "Task state update", store.ErrInvalidApprovedDiscardTransition)
+	err := f.service.teardownIncomplete(context.Background(), f.db, f.project, f.task, "Task state update", store.ErrInvalidApprovedDiscardTransition)
 	commandError, ok := err.(*axi.Error)
-	if !ok || commandError.Code != "unsaddle_incomplete" || commandError.Retryable {
-		t.Fatalf("deterministic incomplete refusal = %#v, want non-retryable unsaddle_incomplete", err)
+	if !ok || commandError.Code != "teardown_incomplete" || commandError.Retryable {
+		t.Fatalf("deterministic incomplete refusal = %#v, want non-retryable teardown_incomplete", err)
 	}
 }

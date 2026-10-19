@@ -15,13 +15,13 @@ import (
 )
 
 // raiseNoticeDecisions reconciles persisted Notices into idempotent Decisions.
-// It also catches Notices written in the same transaction as a Rider Signal or
+// It also catches Notices written in the same transaction as a Worker Signal or
 // pull request observation, including after a crash before delivery.
 func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, project store.Project) error {
 	if err := db.ObsoleteResolvedDecisions(ctx, project.ID); err != nil {
 		return err
 	}
-	if err := s.obsoleteEmptyLeftovers(ctx, db, project); err != nil {
+	if err := s.obsoleteEmptyOrphans(ctx, db, project); err != nil {
 		return err
 	}
 	notices, err := db.DecisionSourceNotices(ctx, project.ID)
@@ -29,7 +29,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		return err
 	}
 	for _, notice := range notices {
-		if notice.TaskID == 0 || !oneOfString(notice.Kind, "land_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited") {
+		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited") {
 			continue
 		}
 		task, err := db.TaskByID(ctx, project.ID, notice.TaskID)
@@ -44,10 +44,10 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		}
 		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
 		switch {
-		case notice.Kind == "land_ready" && task.AutonomyLand != "auto" && task.State == store.StateLanding:
-			request.Kind = "land_ready"
-			request.Question = "Land " + task.Title + "? " + notice.Summary
-			request.Options = []string{"land", "wait", "discard"}
+		case notice.Kind == "merge_ready" && task.AutonomyMerge != "auto" && task.State == store.StateMerging:
+			request.Kind = "merge_ready"
+			request.Question = "Merge " + task.Title + "? " + notice.Summary
+			request.Options = []string{"merge", "wait", "discard"}
 		case (notice.Kind == "task_failed" || notice.Kind == "task_lost") && (task.State == store.StateFailed || task.State == store.StateLost):
 			request.Kind = "recovery"
 			reason, err := taskFailureReason(ctx, db, task)
@@ -69,7 +69,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			request.Kind = "review"
 			request.Question = "How should the Review Task findings for " + task.Title + " be handled? " + notice.Summary
 			request.Options = []string{"accept", "request-changes", "ignore"}
-		case notice.Kind == "needs_decision" && task.LandingMode == "no-mistakes" && task.AutonomyReview != "lead":
+		case notice.Kind == "needs_decision" && task.MergeMode == "no-mistakes" && task.AutonomyReview != "lead":
 			home, err := s.homePath()
 			if err != nil {
 				return err
@@ -108,7 +108,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 }
 
 func (s *Service) raiseWorkerExitedDecision(ctx context.Context, db *store.DB, project store.Project, task store.Task, notice store.Notice) error {
-	if task.State != store.StateDone && task.State != store.StateLanding {
+	if task.State != store.StateDone && task.State != store.StateMerging {
 		return nil
 	}
 	var data struct {
@@ -133,7 +133,7 @@ func (s *Service) raiseWorkerExitedDecision(ctx context.Context, db *store.DB, p
 		TaskID:    task.ID,
 		Origin:    fmt.Sprintf("notice:%d", notice.ID),
 		Kind:      "worker_exited",
-		Question:  "Rider exited after reporting " + string(task.State) + " for " + task.Title + ". Relaunch or discard? " + notice.Summary,
+		Question:  "Worker exited after reporting " + string(task.State) + " for " + task.Title + ". Relaunch or discard? " + notice.Summary,
 		Options:   []string{"relaunch", "discard"},
 	})
 	return err
@@ -180,7 +180,7 @@ func (s *Service) ask(ctx *axi.Context, args []string) error {
 	if task.State == store.StateTornDown {
 		return axi.Failure("ask_refused", "Task is torn down", false)
 	}
-	request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: "lead:" + strconv.FormatInt(task.ID, 10) + ":" + strconv.FormatInt(time.Now().UnixNano(), 10), Kind: "rider_question", Question: positionals[1], Options: options}
+	request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: "lead:" + strconv.FormatInt(task.ID, 10) + ":" + strconv.FormatInt(time.Now().UnixNano(), 10), Kind: "worker_question", Question: positionals[1], Options: options}
 	decision, err := db.RaiseDecision(ctx.Context, request)
 	if err != nil {
 		return axi.Usage(err.Error())
@@ -235,7 +235,7 @@ func decisionOutput(ctx context.Context, db *store.DB, projectID int64, d store.
 func (s *Service) requireLeadOrUser(ctx context.Context, db *store.DB, project store.Project) error {
 	role := s.configCallerRole(ctx, db)
 	if role == "worker" || role == "agent" {
-		return axi.Failure("user_only", "a Rider or unbound agent cannot answer a Decision", false)
+		return axi.Failure("user_only", "a Worker or unbound agent cannot answer a Decision", false)
 	}
 	if role == "lead" {
 		return s.requireLead(ctx, db, project)

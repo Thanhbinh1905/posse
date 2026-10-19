@@ -18,7 +18,7 @@ import (
 
 // observationWorkload counts what an observation costs, separated from model
 // usage. The fixture has no model, so model turns are zero by construction:
-// every Notice below is discovered by a Lookout process alone.
+// every Notice below is discovered by a Watch process alone.
 type observationWorkload struct {
 	ForgeCalls        int           `json:"forge_calls"`
 	PollerArms        int           `json:"poller_arms"`
@@ -45,7 +45,7 @@ func forgeCalls(t *testing.T, f *prLifecycleFixture) int {
 	return calls
 }
 
-// runPollers runs the fixture's real poll-only Lookout tab beside `count`
+// runPollers runs the fixture's real poll-only Watch tab beside `count`
 // foreground producers (ordinary Posse calls reconcile PRs too) for one window.
 func (w *observationWorkload) runPollers(t *testing.T, f *prLifecycleFixture, count int, window time.Duration) {
 	t.Helper()
@@ -57,7 +57,7 @@ func (w *observationWorkload) runPollers(t *testing.T, f *prLifecycleFixture, co
 		go func() {
 			defer wait.Done()
 			for time.Now().Before(deadline) {
-				command := exec.Command(f.binary, "roster")
+				command := exec.Command(f.binary, "list")
 				command.Dir, command.Env = f.repo, f.leadEnv
 				if output, err := command.CombinedOutput(); err != nil {
 					t.Errorf("foreground producer: %v\n%s", err, output)
@@ -116,12 +116,12 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	ctx := context.Background()
-	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
-		t.Fatalf("poll-only Lookout did not start: %v", lookoutPIDs(f.root))
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("poll-only Watch did not start: %v", watchPIDs(f.root))
 	}
 
 	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
-		Seq: 1, Type: "ship", Title: "Observed change", LandingMode: "pr", Branch: "posse/t1",
+		Seq: 1, Type: "change", Title: "Observed change", MergeMode: "pr", Branch: "posse/t1",
 		PRURL: "https://github.com/acme/shop/pull/17",
 	})
 	if err != nil {
@@ -224,11 +224,11 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	// The actionable wake is one receipt-backed batch; accepting it leaves
 	// nothing for the next arm to repeat.
 	handoff := func(timeout string) noticeHandoffPayload {
-		command := exec.Command(f.binary, "lookout", "--json", "--quiet-routine", "--handoff", "--destination", "fake:workload", "--timeout", timeout)
+		command := exec.Command(f.binary, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "fake:workload", "--timeout", timeout)
 		command.Dir, command.Env = f.repo, f.leadEnv
 		output, err := command.Output()
 		if err != nil {
-			t.Fatalf("handoff Lookout: %v\n%s", err, output)
+			t.Fatalf("handoff Watch: %v\n%s", err, output)
 		}
 		workload.HandoffArms++
 		var payload noticeHandoffPayload
@@ -242,7 +242,7 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 		t.Fatalf("handoff did not wake with the pending forge Notices: %#v", wake)
 	}
 	workload.ActionableWakes++
-	resolve := exec.Command(f.binary, "lookout", "--json", "--receipt", wake.Delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", wake.Delivery.OwnerToken)
+	resolve := exec.Command(f.binary, "watch", "--json", "--receipt", wake.Delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", wake.Delivery.OwnerToken)
 	resolve.Dir, resolve.Env = f.repo, f.leadEnv
 	if output, err := resolve.CombinedOutput(); err != nil {
 		t.Fatalf("accept receipt: %v\n%s", err, output)
@@ -268,17 +268,17 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	t.Logf("observation workload (API and CPU cost; no model usage):\n%s", report)
 }
 
-// With no poll-only Lookout running and producers run one at a time, every
+// With no poll-only Watch running and producers run one at a time, every
 // counter is exact: each producer makes one forge call, so the counts below
 // are the same on every machine.
 func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	ctx := context.Background()
-	stopBackgroundLookout(t, f)
+	stopBackgroundWatch(t, f)
 
 	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
-		Seq: 1, Type: "ship", Title: "Observed change", LandingMode: "pr", Branch: "posse/t1",
+		Seq: 1, Type: "change", Title: "Observed change", MergeMode: "pr", Branch: "posse/t1",
 		PRURL: "https://github.com/acme/shop/pull/17",
 	})
 	if err != nil {
@@ -292,7 +292,7 @@ func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
 	produce := func(times int) {
 		for i := 0; i < times; i++ {
 			before := forgeCalls(t, f)
-			command := exec.Command(f.binary, "roster")
+			command := exec.Command(f.binary, "list")
 			command.Dir, command.Env = f.repo, f.leadEnv
 			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("producer: %v\n%s", err, output)
@@ -316,7 +316,7 @@ func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
 	if got := len(observationNotices(t, f, "pr_checks_failed")); got != 2 {
 		t.Fatalf("checks Notices = %d, want one per head (2)", got)
 	}
-	handoff := exec.Command(f.binary, "lookout", "--json", "--quiet-routine", "--handoff", "--destination", "fake:deterministic", "--timeout", "5000")
+	handoff := exec.Command(f.binary, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "fake:deterministic", "--timeout", "5000")
 	handoff.Dir, handoff.Env = f.repo, f.leadEnv
 	output, err := handoff.Output()
 	if err != nil {
@@ -337,7 +337,7 @@ func TestObservationWorkloadCountersAreDeterministic(t *testing.T) {
 		}
 	}
 	workload.ActionableWakes++
-	workload.ForgeCalls = forgeCalls(t, f) // the handoff Lookout's own polls are API cost too
+	workload.ForgeCalls = forgeCalls(t, f) // the handoff Watch's own polls are API cost too
 	if workload.PollerArms != 5 || workload.HandoffArms != 1 || workload.ActionableWakes != 1 || workload.ModelTurns != 0 || workload.PollerCPU <= 0 {
 		t.Fatalf("counters = %#v", workload)
 	}

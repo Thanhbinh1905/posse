@@ -25,7 +25,7 @@ var (
 	ErrReviewVerdictFound  = errors.New("review verdict already recorded")
 )
 
-// ReviewTarget pins one repository of a completed Ship candidate to a commit.
+// ReviewTarget pins one repository of a completed Change candidate to a commit.
 // Repository is the Project name for a repository Project and the Member name
 // for a workspace Project.
 type ReviewTarget struct {
@@ -45,7 +45,7 @@ type ReviewVerdict struct {
 	CreatedAt    int64              `toml:"created_at" json:"created_at"`
 }
 
-// ReviewVerdictInput is what the Rider supplies with a done Signal.
+// ReviewVerdictInput is what the Worker supplies with a done Signal.
 type ReviewVerdictInput struct {
 	Verdict      string
 	ReportSHA256 string
@@ -132,10 +132,10 @@ func (db *DB) ReviewVerdict(ctx context.Context, taskID int64) (ReviewVerdict, e
 	return verdict, nil
 }
 
-// ReviewVerdictsFor lists the verdicts of every Review Task of a Ship Task,
+// ReviewVerdictsFor lists the verdicts of every Review Task of a Change Task,
 // newest first.
-func (db *DB) ReviewVerdictsFor(ctx context.Context, shipTaskID int64) ([]ReviewVerdict, error) {
-	rows, err := db.QueryContext(ctx, `SELECT v.task_id FROM review_verdicts v JOIN tasks t ON t.id=v.task_id WHERE t.reviews_task_id=? ORDER BY v.created_at DESC, v.task_id DESC`, shipTaskID)
+func (db *DB) ReviewVerdictsFor(ctx context.Context, changeTaskID int64) ([]ReviewVerdict, error) {
+	rows, err := db.QueryContext(ctx, `SELECT v.task_id FROM review_verdicts v JOIN tasks t ON t.id=v.task_id WHERE t.reviews_task_id=? ORDER BY v.created_at DESC, v.task_id DESC`, changeTaskID)
 	if err != nil {
 		return nil, err
 	}
@@ -164,14 +164,14 @@ func (db *DB) ReviewVerdictsFor(ctx context.Context, shipTaskID int64) ([]Review
 	return verdicts, nil
 }
 
-// CurrentReviewPass returns the newest pass verdict of the Ship Task whose
+// CurrentReviewPass returns the newest pass verdict of the Change Task whose
 // bound targets equal its current candidate commits. A candidate that has
 // moved has no current pass, and an older pass is never rebound to the new
 // commits because targets are fixed when the Review Task is admitted.
 // qualifies lets the caller apply policy that Posse cannot see here, such as
 // Reviewer identity eligibility.
-func (db *DB) CurrentReviewPass(ctx context.Context, shipTaskID int64, candidate []ReviewTarget, qualifies func(ReviewVerdict) bool) (ReviewVerdict, bool, error) {
-	verdicts, err := db.ReviewVerdictsFor(ctx, shipTaskID)
+func (db *DB) CurrentReviewPass(ctx context.Context, changeTaskID int64, candidate []ReviewTarget, qualifies func(ReviewVerdict) bool) (ReviewVerdict, bool, error) {
+	verdicts, err := db.ReviewVerdictsFor(ctx, changeTaskID)
 	if err != nil {
 		return ReviewVerdict{}, false, err
 	}
@@ -189,7 +189,7 @@ func (db *DB) CurrentReviewPass(ctx context.Context, shipTaskID int64, candidate
 
 // recordReviewVerdictTx writes the verdict inside the Signal transaction. The
 // bound target, Reviewer launch identity and Review Task identity come from
-// the store, never from the Rider.
+// the store, never from the Worker.
 func recordReviewVerdictTx(ctx context.Context, tx *writeTx, taskID, signalID int64, input ReviewVerdictInput) error {
 	var taskType string
 	var launches int

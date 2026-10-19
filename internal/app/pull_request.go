@@ -104,7 +104,7 @@ func createPROpenedNotice(ctx context.Context, db *store.DB, project store.Proje
 	return err
 }
 
-func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merge bool, userQuote string) (returnErr error) {
+func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merge bool, userQuote string) (returnErr error) {
 	ctx := out.Context
 	if task.PRURL != "" {
 		previous, err := db.LatestPRObservation(ctx, task.ID)
@@ -112,7 +112,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 			return err
 		}
 		if err == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
-			return axi.Failure("pr_closed", "pull request closed without merging; resolve its Decision before retrying Land", false)
+			return axi.Failure("pr_closed", "pull request closed without merging; resolve its Decision before retrying Merge", false)
 		}
 	}
 	var openIntent store.Intent
@@ -125,24 +125,24 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 		}
 	}()
 	if merge {
-		if task.State != store.StateDone && task.State != store.StateLanding {
-			return axi.Failure("land_refused", "Task must be done or landing before Land", false)
+		if task.State != store.StateDone && task.State != store.StateMerging {
+			return axi.Failure("merge_refused", "Task must be done or merging before Merge", false)
 		}
-		if task.AutonomyLand != "auto" && userQuote == "" {
-			return axi.Failure("land_approval_required", "pull request merge needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
+		if task.AutonomyMerge != "auto" && userQuote == "" {
+			return axi.Failure("merge_approval_required", "pull request merge needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
 		}
 	}
-	if task.State == store.StateLanding && task.GatedSHA != "" {
-		if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, task.GatedSHA); err != nil {
+	if task.State == store.StateMerging && task.GatedSHA != "" {
+		if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, task.GatedSHA); err != nil {
 			return err
 		}
 	}
 	if task.State == store.StateDone {
-		if task.LandingMode == "no-mistakes" {
+		if task.MergeMode == "no-mistakes" {
 			if task.PRURL == "" {
-				return axi.Failure("land_refused", "no-mistakes delivery has no pull request URL", false, "Signal completion with `posse holler done <summary> --pr <url>`")
+				return axi.Failure("merge_refused", "no-mistakes delivery has no pull request URL", false, "Signal completion with `posse signal done <summary> --pr <url>`")
 			}
-			if err := s.enterNoMistakesLanding(ctx, db, project, cfg, task); err != nil {
+			if err := s.enterNoMistakesMerge(ctx, db, project, cfg, task); err != nil {
 				return err
 			}
 			current, err := db.TaskByID(ctx, project.ID, task.ID)
@@ -152,9 +152,9 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 			task = current
 		} else {
 			// Legacy completions without a Worker-reported PR may reopen a
-			// closed PR at Land. Worker-reported URLs must never be silently
+			// closed PR at Merge. Worker-reported URLs must never be silently
 			// replaced by a PR that the Worker did not validate.
-			if task.LandingMode == "pr" && task.PRURL != "" {
+			if task.MergeMode == "pr" && task.PRURL != "" {
 				previous, previousErr := db.LatestPRObservation(ctx, task.ID)
 				if previousErr != nil && !store.IsNotFound(previousErr) {
 					return previousErr
@@ -171,7 +171,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 						var data map[string]string
 						_ = json.Unmarshal([]byte(signal.DataJSON), &data)
 						if data["pr_url"] == "" {
-							if err := db.UpdateTaskLanding(ctx, task.ID, "", ""); err != nil {
+							if err := db.UpdateTaskMerge(ctx, task.ID, "", ""); err != nil {
 								return err
 							}
 							task.PRURL = ""
@@ -181,14 +181,14 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 				}
 			}
 			if task.WorktreePath == "" || task.Branch == "" {
-				return axi.Failure("land_refused", "Task has no branch or Mount", false)
+				return axi.Failure("merge_refused", "Task has no branch or Sandbox", false)
 			}
 			status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain")
 			if err != nil {
 				return err
 			}
 			if status != "" {
-				return axi.Failure("land_refused", "Task worktree is not clean", false, "Commit or discard the remaining changes, then signal done again")
+				return axi.Failure("merge_refused", "Task worktree is not clean", false, "Commit or discard the remaining changes, then signal done again")
 			}
 			gatedSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 			if err != nil {
@@ -204,7 +204,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return err
 				}
 			}
-			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, gatedSHA); err != nil {
+			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, gatedSHA); err != nil {
 				return err
 			}
 			if err := db.SetTaskGatedSHA(ctx, task.ID, gatedSHA); err != nil {
@@ -227,9 +227,9 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 				if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
 					return err
 				}
-				return axi.Failure("branch_moved", "Task branch moved while the Gate was running", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
+				return axi.Failure("branch_moved", "Task branch moved while the Gate was running", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
 			}
-			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, gatedSHA); err != nil {
+			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, gatedSHA); err != nil {
 				if clearErr := db.ClearTaskGatedSHA(ctx, task.ID); clearErr != nil {
 					return errors.Join(err, clearErr)
 				}
@@ -259,7 +259,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return err
 				}
 			} else {
-				// Compatibility with Ship Tasks completed before Worker publishing existed.
+				// Compatibility with Change Tasks completed before Worker publishing existed.
 				branchRef := "refs/heads/" + task.Branch
 				if _, err := gitOutput(ctx, project.Root, "push", "origin", branchRef+":"+branchRef); err != nil {
 					return axi.Failure("pr_push_failed", "could not push the gated Task branch", true, err.Error())
@@ -267,7 +267,7 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 			}
 			openedURL := ""
 			if task.PRURL == "" {
-				openIntent, err = s.startTaskIntent(ctx, db, project.ID, task.ID, "land --open-pr")
+				openIntent, err = s.startTaskIntent(ctx, db, project.ID, task.ID, "merge --open-pr")
 				if err != nil {
 					return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 				}
@@ -282,10 +282,10 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return axi.Failure("pr_create_failed", "forge returned an invalid pull request URL", false, err.Error())
 				}
 			}
-			if err := db.UpdateTaskLanding(ctx, task.ID, task.PRURL, ""); err != nil {
+			if err := db.UpdateTaskMerge(ctx, task.ID, task.PRURL, ""); err != nil {
 				return err
 			}
-			if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "Pull request is open for review"); err != nil {
+			if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "Pull request is open for review"); err != nil {
 				return err
 			}
 			if openedURL != "" {
@@ -299,17 +299,17 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 				}
 				openIntentActive = false
 			}
-			task.State = store.StateLanding
+			task.State = store.StateMerging
 		}
 	}
-	if task.State != store.StateLanding {
-		return axi.Failure("land_refused", "Task must be done or landing before Land", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
+	if task.State != store.StateMerging {
+		return axi.Failure("merge_refused", "Task must be done or merging before Merge", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
 	}
 	if !merge {
 		if err := s.deliverNotices(ctx, db, project); err != nil && !isHerdrUnavailable(err) {
 			return err
 		}
-		return ctxPrintLand(out, task, "Run `posse lookout` to watch this pull request")
+		return ctxPrintMerge(out, task, "Run `posse watch` to watch this pull request")
 	}
 	return s.mergePullRequest(out, db, project, cfg, task, userQuote)
 }
@@ -362,7 +362,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 				if err := validateWorkerPullRequest(ctx, project, task, forge, urlValue, task.GatedSHA); err != nil {
 					return "", false, err
 				}
-				// Land may adopt an existing PR but has no new Rider metadata to publish.
+				// Merge may adopt an existing PR but has no new Worker metadata to publish.
 				if summary != "" {
 					if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, urlValue, member, summary, verification, proof, risk, refreshLegacy); err != nil {
 						return "", false, err
@@ -583,25 +583,25 @@ func pullRequestTargetMismatch(prURL, actual, expected string) error {
 }
 
 func pullRequestHeadMismatch(actual, expected string) error {
-	return axi.Failure("branch_moved", fmt.Sprintf("open request for the Task branch has head %s; expected %s", actual, expected), false, "Re-run `posse land` to verify the Task branch tip")
+	return axi.Failure("branch_moved", fmt.Sprintf("open request for the Task branch has head %s; expected %s", actual, expected), false, "Re-run `posse merge` to verify the Task branch tip")
 }
 
 func pullRequestHeadLagTimeout(actual, expected string) error {
 	return axi.Failure("pr_head_lag_timeout", fmt.Sprintf("forge has not caught up to pushed Task head %s; the request still reports previous head %s", expected, actual), true, "Re-run `posse publish` after the forge updates its request head")
 }
 
-func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) error {
+func (s *Service) enterNoMistakesMerge(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) error {
 	if err := validatePullRequestOrigin(ctx, project.Root, task.PRURL); err != nil {
 		return err
 	}
 	if task.Branch == "" || task.WorktreePath == "" {
-		return axi.Failure("land_refused", "Task has no branch or Mount", false)
+		return axi.Failure("merge_refused", "Task has no branch or Sandbox", false)
 	}
 	gatedSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 	if err != nil {
 		return err
 	}
-	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, gatedSHA); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, gatedSHA); err != nil {
 		return err
 	}
 	if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
@@ -610,10 +610,10 @@ func (s *Service) enterNoMistakesLanding(ctx context.Context, db *store.DB, proj
 	if err := db.SetTaskGatedSHA(ctx, task.ID, gatedSHA); err != nil {
 		return err
 	}
-	if err := db.UpdateTaskLanding(ctx, task.ID, task.PRURL, ""); err != nil {
+	if err := db.UpdateTaskMerge(ctx, task.ID, task.PRURL, ""); err != nil {
 		return err
 	}
-	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "no-mistakes delivered the pull request"); err != nil {
+	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "no-mistakes delivered the pull request"); err != nil {
 		return err
 	}
 	return createPROpenedNotice(ctx, db, project, task, task.PRURL, gatedSHA, task.Title+": no-mistakes pull request is ready for review")
@@ -625,7 +625,7 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		task, _ = db.TaskByID(ctx, project.ID, task.ID)
 	}
 	if task.GatedSHA == "" || task.PRURL == "" {
-		return axi.Failure("land_refused", "Task has no recorded pull request or gated commit", false)
+		return axi.Failure("merge_refused", "Task has no recorded pull request or gated commit", false)
 	}
 	forge, err := forgeForRepository(ctx, project.Root, cfg, "")
 	if err != nil {
@@ -658,20 +658,20 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		return axi.Failure("pr_view_failed", "gh pr view returned no headRefOid", true, strings.TrimSpace(output))
 	}
 	if head.HeadRefOID != task.GatedSHA {
-		if err := db.Transition(ctx, task.ID, store.StateLanding, store.StateDone, "cli", "Pull request head moved after the Gate passed"); err != nil {
+		if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateDone, "cli", "Pull request head moved after the Gate passed"); err != nil {
 			return err
 		}
 		if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
 			return err
 		}
-		return axi.Failure("branch_moved", "pull request head moved after the Gate passed", false, "Run `posse land "+taskIDString(task.Seq)+"` again to re-gate")
+		return axi.Failure("branch_moved", "pull request head moved after the Gate passed", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
 	}
 	mergeLock, err := acquirePRMergeLock(ctx, project.Root)
 	if err != nil {
 		return err
 	}
 	defer mergeLock.Close()
-	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, task.GatedSHA); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, task.GatedSHA); err != nil {
 		return err
 	}
 	if err := requireGreenObservation(ctx, db, task); err != nil {
@@ -691,7 +691,7 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 			return err
 		}
 	}
-	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "land --merge")
+	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "merge --execute")
 	if err != nil {
 		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
@@ -700,7 +700,7 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 			returnErr = finishErr
 		}
 	}()
-	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.LandingMode, task.GatedSHA); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, task.GatedSHA); err != nil {
 		return err
 	}
 	if err := requireGreenObservation(ctx, db, task); err != nil {
@@ -719,7 +719,7 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 	} else if _, err := runOutputStep(ctx, db, intent, "pr.merge", project.Root, "gh", "pr", "merge", task.PRURL, "--"+method, "--match-head-commit", task.GatedSHA); err != nil {
 		return axi.Failure("pr_merge_failed", "GitHub did not merge the pull request", true, err.Error())
 	}
-	return ctxPrintLand(out, task, "Run `posse` or `posse lookout` to observe the merge")
+	return ctxPrintMerge(out, task, "Run `posse` or `posse watch` to observe the merge")
 }
 
 // requireGreenObservation accepts only the newest observation of the recorded
@@ -733,7 +733,7 @@ func requireGreenObservation(ctx context.Context, db *store.DB, task store.Task)
 	var checks checkSnapshot
 	checksErr := json.Unmarshal([]byte(observation.Checks), &checks)
 	if err != nil || checksErr != nil || observation.PRURL != task.PRURL || observation.HeadSHA != task.GatedSHA || checks.State != "SUCCESS" || observation.Review == "CHANGES_REQUESTED" || observation.Review == "REVIEW_REQUIRED" || observation.Mergeable != "MERGEABLE" {
-		return axi.Failure("checks_not_green", "pull request does not have a green observation for the gated head", false, "Wait for `land_ready` before retrying `posse land "+taskIDString(task.Seq)+" --merge`")
+		return axi.Failure("checks_not_green", "pull request does not have a green observation for the gated head", false, "Wait for `merge_ready` before retrying `posse merge "+taskIDString(task.Seq)+" --execute`")
 	}
 	return nil
 }
@@ -762,8 +762,8 @@ func runOutputStep(ctx context.Context, db *store.DB, intent store.Intent, step,
 	return output, nil
 }
 
-func ctxPrintLand(ctx *axi.Context, task store.Task, help string) error {
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "landing"}, {Key: "pr_url", Value: task.PRURL}, {Key: "gated_sha", Value: task.GatedSHA}, {Key: "help", Value: []any{help}}})
+func ctxPrintMerge(ctx *axi.Context, task store.Task, help string) error {
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merging"}, {Key: "pr_url", Value: task.PRURL}, {Key: "gated_sha", Value: task.GatedSHA}, {Key: "help", Value: []any{help}}})
 }
 
 func prDetails(ctx context.Context, db *store.DB, project store.Project, task store.Task, homeFor func() (string, error), member, summary, verification, proof, risk string) (string, string, error) {
@@ -780,7 +780,7 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 		}
 	}
 	if strings.TrimSpace(summary) == "" {
-		return "", "", axi.Failure("pr_summary_missing", "Rider completion summary is missing", false)
+		return "", "", axi.Failure("pr_summary_missing", "Worker completion summary is missing", false)
 	}
 	home, err := homeFor()
 	if err != nil {
@@ -971,12 +971,12 @@ func validatePullRequestOrigin(ctx context.Context, root, value string) error {
 }
 
 func (s *Service) pollProjectPullRequests(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) error {
-	return s.pollProjectPullRequestsWithLandedCallback(ctx, db, project, cfg, force, nil)
+	return s.pollProjectPullRequestsWithMergedCallback(ctx, db, project, cfg, force, nil)
 }
 
-func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onWorkspaceTaskLanded func()) error {
+func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onWorkspaceTaskMerged func()) error {
 	if project.IsWorkspace() {
-		return s.pollWorkspacePullRequestsAndNotify(ctx, db, project, cfg, force, onWorkspaceTaskLanded)
+		return s.pollWorkspacePullRequestsAndNotify(ctx, db, project, cfg, force, onWorkspaceTaskMerged)
 	}
 	now := time.Now()
 	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
@@ -997,7 +997,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 	}
 	watched := make([]store.Task, 0)
 	for _, task := range tasks {
-		if task.PRURL == "" || task.State == store.StateLanded || task.State == store.StateTornDown || task.State == store.StateReported {
+		if task.PRURL == "" || task.State == store.StateMerged || task.State == store.StateTornDown || task.State == store.StateReported {
 			continue
 		}
 		previous, previousErr := db.LatestPRObservation(ctx, task.ID)
@@ -1041,7 +1041,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		}
 		if !freshness.Fresh {
 			staleBeforeQuery[task.ID] = true
-			if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.LandingMode, freshness, headSHA); err != nil {
+			if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.MergeMode, freshness, headSHA); err != nil {
 				return err
 			}
 		}
@@ -1200,7 +1200,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 				continue
 			}
 			if !freshness.Fresh {
-				if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.LandingMode, freshness, observation.HeadSHA); err != nil {
+				if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.MergeMode, freshness, observation.HeadSHA); err != nil {
 					return err
 				}
 				observation.Checks = stalePRChecks()
@@ -1212,7 +1212,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 			if verifyErr != nil {
 				return verifyErr
 			}
-			// A head still on the Mount's Task branch is also the Rider's own.
+			// A head still on the Sandbox's Task branch is also the Worker's own.
 			if !verified && task.WorktreePath != "" && task.Branch != "" {
 				branch, branchErr := gitOutput(ctx, task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
 				if branchErr == nil && branch == task.Branch {
@@ -1221,12 +1221,12 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 				}
 			}
 			if !verified {
-				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("merged head %s is neither on the Mount Task branch nor recorded by publish", observation.HeadSHA), now); err != nil {
+				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("merged head %s is neither on the Sandbox Task branch nor recorded by publish", observation.HeadSHA), now); err != nil {
 					return err
 				}
 				continue
 			}
-			if (task.State != store.StateLanding || task.GatedSHA != observation.HeadSHA) && validateWorkerPullRequestWithRemote(ctx, project, task, forge, task.PRURL, observation.HeadSHA, false) != nil {
+			if (task.State != store.StateMerging || task.GatedSHA != observation.HeadSHA) && validateWorkerPullRequestWithRemote(ctx, project, task, forge, task.PRURL, observation.HeadSHA, false) != nil {
 				err := fmt.Errorf("merged pull request identity could not be verified for %s", task.PRURL)
 				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, err, now); recordErr != nil {
 					return recordErr
@@ -1294,7 +1294,7 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 }
 
 // reviewPolicyViolation evaluates the selected evidence for the head the forge
-// merged. A merge Posse did not guard still Lands (ADR 0011), but it never gains
+// merged. A merge Posse did not guard still Merges (ADR 0011), but it never gains
 // a fabricated pass: the missing evidence is reported as a policy violation.
 func reviewPolicyViolation(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merged store.PRObservation) (store.Notice, bool) {
 	err := requireSelectedReviewAt(ctx, db, project, cfg, task, merged.HeadSHA)
@@ -1526,9 +1526,9 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 		if !hasPrevious || previous.State != "MERGED" {
 			addNotice("pr_merged", task.Title+": pull request merged", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "merge_commit": current.MergeCommit})
 		}
-		effect.TransitionTo = store.StateLanded
+		effect.TransitionTo = store.StateMerged
 		effect.TransitionNote = "Pull request merged at " + current.MergeCommit
-		effect.LandedRef = current.MergeCommit
+		effect.MergedRef = current.MergeCommit
 	case "CLOSED":
 		if !hasPrevious || previous.State != "CLOSED" {
 			addNotice("pr_closed", task.Title+": pull request closed without merging", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
@@ -1544,8 +1544,8 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			addNotice("pr_conflict", task.Title+": pull request conflicts with the Task's frozen target branch", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 		ready := checks.State == "SUCCESS" && current.Review != "CHANGES_REQUESTED" && current.Review != "REVIEW_REQUIRED" && current.Mergeable == "MERGEABLE"
-		if ready && (task.State == store.StateDone || task.State == store.StateLanding) {
-			addNotice("land_ready", task.Title+": pull request checks and reviews are ready to merge", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
+		if ready && (task.State == store.StateDone || task.State == store.StateMerging) {
+			addNotice("merge_ready", task.Title+": pull request checks and reviews are ready to merge", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	}
 	return effect

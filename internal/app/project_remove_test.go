@@ -38,7 +38,7 @@ func TestProjectRemoveDeletesEveryProjectReference(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE future_project_state (project_id INTEGER PRIMARY KEY REFERENCES projects(id), value TEXT NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, anchor.ID, store.Task{Seq: 1, Type: "ship", Title: "anchor", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, anchor.ID, store.Task{Seq: 1, Type: "change", Title: "anchor", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,11 +50,11 @@ func TestProjectRemoveDeletesEveryProjectReference(t *testing.T) {
 			t.Fatalf("SQLite foreign-key metadata did not identify %s as a Project reference", table)
 		}
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id, n, path, state, task_id, acquired_at, released_at) VALUES(?, 1, ?, 'released', ?, 0, 0)`, anchor.ID, filepath.Join(root, "anchor-mount"), taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id, n, path, state, task_id, acquired_at, released_at) VALUES(?, 1, ?, 'released', ?, 0, 0)`, anchor.ID, filepath.Join(root, "anchor-sandbox"), taskID); err != nil {
 		t.Fatal(err)
 	}
 	for table, foreignKeys := range references {
-		// Tasks and Mounts define whether a Project is empty, so their seed rows
+		// Tasks and Sandboxes define whether a Project is empty, so their seed rows
 		// belong to the separate anchor Project. That Task also supplies valid
 		// task_id references for Project-level rows. All other references belong
 		// to the Project being removed.
@@ -95,8 +95,8 @@ func TestProjectRemoveDeletesEveryProjectReference(t *testing.T) {
 	if _, err := observer.ProjectByName(ctx, "anchor"); err != nil {
 		t.Fatalf("unrelated Project was removed: %v", err)
 	}
-	if tasks, mounts, err := observer.ProjectContents(ctx, anchor.ID); err != nil || tasks != 1 || mounts != 1 {
-		t.Fatalf("unrelated Project contents changed: tasks=%d mounts=%d err=%v", tasks, mounts, err)
+	if tasks, sandboxes, err := observer.ProjectContents(ctx, anchor.ID); err != nil || tasks != 1 || sandboxes != 1 {
+		t.Fatalf("unrelated Project contents changed: tasks=%d sandboxes=%d err=%v", tasks, sandboxes, err)
 	}
 	rows, err := observer.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {

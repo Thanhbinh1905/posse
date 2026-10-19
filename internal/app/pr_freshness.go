@@ -44,12 +44,12 @@ func prBranchBehindFailure(taskSeq int, headSHA string, freshness prTargetFreshn
 		"pr_branch_behind",
 		message,
 		false,
-		"Posse queued an instruction to merge origin/"+freshness.Branch+" into the Task branch, rerun the Gate, republish, and report done before retrying `posse land "+taskIDString(taskSeq)+"`; never rebase a pushed branch",
+		"Posse queued an instruction to merge origin/"+freshness.Branch+" into the Task branch, rerun the Gate, republish, and report done before retrying `posse merge "+taskIDString(taskSeq)+"`; never rebase a pushed branch",
 	)
 }
 
-func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, landingMode string, freshness prTargetFreshness, headSHA string) error {
-	if task.State != store.StateDone && task.State != store.StateLanding {
+func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) error {
+	if task.State != store.StateDone && task.State != store.StateMerging {
 		return nil
 	}
 	memberLabel := ""
@@ -60,7 +60,7 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 		"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, rerun the configured Gate, republish the updated head through this Task's delivery mode, and signal done again.",
 		memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
 	)
-	if landingMode == "no-mistakes" {
+	if mergeMode == "no-mistakes" {
 		instruction = fmt.Sprintf(
 			"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, then rerun no-mistakes with `--skip=rebase` and the Brief intent so its Gate and publication run on the updated head. Signal done again afterward.",
 			memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
@@ -83,8 +83,8 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	return err
 }
 
-func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, task store.Task, member, landingMode, headSHA string) error {
-	if landingMode != "pr" && landingMode != "no-mistakes" {
+func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, task store.Task, member, mergeMode, headSHA string) error {
+	if mergeMode != "pr" && mergeMode != "no-mistakes" {
 		return nil
 	}
 	targetBranch := taskTargetBranch(project, task)
@@ -95,7 +95,7 @@ func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, projec
 	if freshness.Fresh {
 		return nil
 	}
-	if err := queuePRTargetSyncInstruction(ctx, db, task, member, landingMode, freshness, headSHA); err != nil {
+	if err := queuePRTargetSyncInstruction(ctx, db, task, member, mergeMode, freshness, headSHA); err != nil {
 		return err
 	}
 	return prBranchBehindFailure(task.Seq, headSHA, freshness)

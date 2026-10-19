@@ -1,0 +1,50 @@
+# Use functional names for Posse concepts
+
+Posse uses functional names because themed names need a glossary and are harder for agents and non-native English speakers to interpret. This release implements epic #333 and slices #334-#338 together. It replaces the proposed one-release alias period with immediate rejection of old input, while retaining automatic data and config migration.
+
+| Formerly | Now |
+|---|---|
+| Rider | Worker |
+| `posse ride` | `posse start` |
+| `posse holler` | `posse signal` |
+| `posse unsaddle` | `posse teardown` |
+| Lookout / `posse lookout` | Watch / `posse watch` |
+| Remuda / `posse remuda` | Pool / `posse pool` |
+| Mount | Sandbox |
+| Sheriff default persona | Lead, with no default persona |
+| `posse roster` | `posse list` |
+| Ship Task / `type: ship` | Change Task / `type: change` |
+| Scout Task / `type: scout` | Research Task / `type: research` |
+| Land / `posse land` | Merge / `posse merge` |
+| Landing Mode / `landing_mode` | Merge Mode / `merge_mode` |
+| Leftover / `--from-leftover` | Orphan / `--from-orphan` |
+| `posse sweep` | `posse pool prune` |
+| `posse playbook` | `posse preferences` |
+| `remuda.*` | `pool.*` |
+| `auto_unsaddle` / `landed` | `auto_teardown` / `merged` |
+| `autonomy.land` | `autonomy.merge` |
+| `--stop-lookouts` | `--stop-watches` |
+| `execution: mount` | `execution: sandbox` |
+| `notice_delivery: lookout` | `notice_delivery: watch` |
+
+Notice kinds use the same replacements, including `rider_resumed` to `worker_resumed`, `mount_missing` to `sandbox_missing`, `land_ready` to `merge_ready`, and `unsaddle_incomplete` to `teardown_incomplete`. Task states are `merging` and `merged`. Product name `posse`, `lowkey`, Brief, Stall, `peek`, and other neutral terms stay unchanged. Herdr is external and unchanged.
+
+## Merge is a two-step operation
+
+`posse merge <task>` prepares integration: it runs the Gate, requires current Review evidence and checks the candidate head and target. It does not integrate changes. `posse merge <task> --execute` integrates the prepared candidate, retaining the existing User-approval or Autonomy requirement and rechecking freshness. It may also prepare a done Task before integrating it. This preserves the former two-step flow without the redundant `merge --merge` spelling. Publication remains `posse publish`.
+
+## Sandbox is not a security boundary
+
+A Sandbox is a per-Task git worktree with per-Task process containment. For Workspace Tasks it contains selected Members' worktrees. It separates changes and lets Posse identify and stop Task-owned processes before releasing custody. It does not restrict filesystem access, network access or credentials, and is not a security sandbox. Pool reuse occurs only after Teardown preserves the outcome and releases custody.
+
+## Input rejection and persisted compatibility
+
+Old commands are hidden error-only entries that name their replacements; they never invoke an operation. Old flags, config keys and Brief values are rejected with replacement-specific errors. There are no working aliases. Legacy stored Briefs and admitted plans are decoded only through historical-data paths, not admitted as new input.
+
+The database migration changes domain values without changing IDs, PR observations, branches or custody references. Published SQL migrations, database table/column names and snapshot field names remain stable where they encode persisted data. SQL generator overrides give Go models and accessors canonical names without changing those columns. Existing filesystem lock names also remain stable so pre-upgrade processes retain custody. Immutable plan inputs, digests, User quotes and Report evidence remain byte-for-byte intact. Existing worktree paths are not moved: running processes and Git registrations depend on them. New Projects use `pool/<project>/sandbox-<n>`; existing Pool directories remain usable in place.
+
+When Watch maintenance resumes, the recorded pre-upgrade observer pane is replaced with a canonical Watch. This does not touch unrelated panes or an agent that has replaced that observer.
+
+Stored global and Project config is migrated once before validation. A migration marker prevents reintroduced old keys from becoming aliases. Migration preserves a `.v014` copy of changed config for rollback and fails on conflicting old/new keys instead of choosing one. Unchanged config retains its exact bytes and receives a sidecar marker. Legacy preference files remain data sources; the old command is removed.
+
+Rollback requires restoring the pre-upgrade home/database backup and any `.v014` config backups before reinstalling the previous binary. Do not run an older binary against migrated state.

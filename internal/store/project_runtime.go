@@ -5,28 +5,28 @@ import (
 	"database/sql"
 )
 
-// LookoutRecovery stores retry state independently of the short-lived Lead
+// WatchRecovery stores retry state independently of the short-lived Lead
 // watcher process, so a Notice-triggered re-arm cannot reset its backoff.
-type LookoutRecovery struct {
+type WatchRecovery struct {
 	PaneID       string
 	RetryAt      int64
 	FailedStarts int
 	NoticeRaised bool
 }
 
-func (db *DB) LookoutRecovery(ctx context.Context, projectID int64) (LookoutRecovery, error) {
-	var state LookoutRecovery
+func (db *DB) WatchRecovery(ctx context.Context, projectID int64) (WatchRecovery, error) {
+	var state WatchRecovery
 	var noticeRaised int
 	err := db.QueryRowContext(ctx, `SELECT lookout_pane_id,lookout_retry_at,lookout_failed_starts,lookout_notice_raised FROM project_runtime WHERE project_id=?`, projectID).
 		Scan(&state.PaneID, &state.RetryAt, &state.FailedStarts, &noticeRaised)
 	if IsNotFound(err) {
-		return LookoutRecovery{}, nil
+		return WatchRecovery{}, nil
 	}
 	state.NoticeRaised = noticeRaised != 0
 	return state, err
 }
 
-func (db *DB) SetLookoutRecovery(ctx context.Context, projectID int64, state LookoutRecovery) error {
+func (db *DB) SetWatchRecovery(ctx context.Context, projectID int64, state WatchRecovery) error {
 	noticeRaised := 0
 	if state.NoticeRaised {
 		noticeRaised = 1
@@ -35,7 +35,7 @@ func (db *DB) SetLookoutRecovery(ctx context.Context, projectID int64, state Loo
 	return err
 }
 
-func (db *DB) ResetLookoutRecovery(ctx context.Context, projectID int64) error {
+func (db *DB) ResetWatchRecovery(ctx context.Context, projectID int64) error {
 	_, err := db.ExecContext(ctx, `UPDATE project_runtime SET lookout_pane_id='',lookout_retry_at=0,lookout_failed_starts=0,lookout_notice_raised=0 WHERE project_id=?`, projectID)
 	return err
 }

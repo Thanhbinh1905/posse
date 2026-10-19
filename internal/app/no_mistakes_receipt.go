@@ -36,7 +36,7 @@ type noMistakesReceipt struct {
 	} `json:"review"`
 }
 
-// queryNoMistakesReceipt asks the pipeline owner, never the Rider, for the
+// queryNoMistakesReceipt asks the pipeline owner, never the Worker, for the
 // receipt of one exact candidate commit.
 var queryNoMistakesReceipt = func(ctx context.Context, root, commit string) (string, error) {
 	if _, err := exec.LookPath("no-mistakes"); err != nil {

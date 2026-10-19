@@ -25,14 +25,14 @@ import (
 func TestHistoricalMultiIssuePublishKeepsClosingLinks(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
-	briefPath := filepath.Join(fixture.root, "ship.md")
-	initial := "---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change.\n"
+	briefPath := filepath.Join(fixture.root, "change.md")
+	initial := "---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change.\n"
 	if err := os.WriteFile(briefPath, []byte(initial), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.runRideWithStoreBusyRetry(t, briefPath, "pr-lifecycle-change")
+	fixture.runStartWithStoreBusyRetry(t, briefPath, "pr-lifecycle-change")
 	// This fixture represents an old Task, not a newly admitted contract.
-	stopBackgroundLookout(t, fixture)
+	stopBackgroundWatch(t, fixture)
 	task := fixture.mustTask(t, "t1")
 	tx, err := fixture.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -80,14 +80,14 @@ func TestHistoricalMultiIssuePublishKeepsClosingLinks(t *testing.T) {
 
 func TestPublishRefreshesReusedPRMetadata(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
-	brief := filepath.Join(fixture.root, "ship.md")
-	initialBrief := "---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change for the PR refresh E2E.\n"
+	brief := filepath.Join(fixture.root, "change.md")
+	initialBrief := "---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change for the PR refresh E2E.\n"
 	if err := os.WriteFile(brief, []byte(initialBrief), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "pr-lifecycle-change")
+	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "pr-lifecycle-change")
 	if !strings.Contains(output, "t1") {
-		t.Fatalf("ride did not return t1: %s", output)
+		t.Fatalf("start did not return t1: %s", output)
 	}
 	task := fixture.mustTask(t, "t1")
 	if !waitForCondition(15*time.Second, func() bool {
@@ -226,7 +226,7 @@ func stripManagedPublishedMarkers(body string) string {
 	return strings.Replace(body, endMarker, "", 1)
 }
 
-func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
+func TestPRMergeLifecycleAndExternalMerge(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	gitTest(t, fixture.env, fixture.repo, "branch", "staging", "main")
 	gitTest(t, fixture.env, fixture.repo, "push", "origin", "staging")
@@ -235,8 +235,8 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	brief := filepath.Join(fixture.root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\nbase: staging\ntarget: staging\n---\nCreate a committed change for the PR lifecycle E2E.\n"), 0o600); err != nil {
+	brief := filepath.Join(fixture.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\nbase: staging\ntarget: staging\n---\nCreate a committed change for the PR lifecycle E2E.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -247,7 +247,7 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "show-ref", "--hash", "refs/heads/posse/t1")); got != strings.TrimSpace(gitTest(t, fixture.env, first.WorktreePath, "rev-parse", "HEAD")) {
 		t.Fatalf("Worker did not push its own Task branch: %s", got)
 	}
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
 		t.Fatalf("first PR did not open: %s", output)
 	}
 	first = fixture.mustTask(t, "t1")
@@ -281,14 +281,14 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 	fixture.waitTaskState(t, "t1", store.StateDone)
 	first = fixture.mustTask(t, "t1")
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
-		t.Fatalf("fixed PR did not pass the Gate and return to landing: %s", output)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
+		t.Fatalf("fixed PR did not pass the Gate and return to merging: %s", output)
 	}
 	first = fixture.mustTask(t, "t1")
 	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", first.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
-	fixture.requireNotice(t, "t1", "land_ready")
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge", "--user-approved", "User approved the PR merge"); !strings.Contains(output, "landing") {
+	fixture.requireNotice(t, "t1", "merge_ready")
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1", "--execute", "--user-approved", "User approved the PR merge"); !strings.Contains(output, "merging") {
 		t.Fatalf("approved PR merge did not call GitHub: %s", output)
 	}
 	if _, err := os.Stat(fixture.ghMerge); err != nil {
@@ -298,8 +298,8 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", mergeOne, first.GatedSHA)
 	showAfterActiveTeardown(t, fixture, "t1")
 	first = fixture.mustTask(t, "t1")
-	if first.State != store.StateTornDown || first.LandedRef != mergeOne {
-		t.Fatalf("merged PR did not land and auto-teardown: %#v, merge=%s", first, mergeOne)
+	if first.State != store.StateTornDown || first.MergedRef != mergeOne {
+		t.Fatalf("merged PR did not merge and auto-teardown: %#v, merge=%s", first, mergeOne)
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/staging")); got != mergeOne {
 		t.Fatalf("staging checkout head=%s, merge commit=%s", got, mergeOne)
@@ -316,34 +316,34 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	}
 	fixture.requireNotice(t, "t1", "pr_merged")
 
-	secondBrief := filepath.Join(fixture.root, "ship-second.md")
-	if err := os.WriteFile(secondBrief, []byte("---\ntype: ship\ntitle: External merge change\ndone_when: second committed change exists\n---\nCreate a second committed change for external merge observation.\n"), 0o600); err != nil {
+	secondBrief := filepath.Join(fixture.root, "change-second.md")
+	if err := os.WriteFile(secondBrief, []byte("---\ntype: change\ntitle: External merge change\ndone_when: second committed change exists\n---\nCreate a second committed change for external merge observation.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	secondPublished := fixture.rideAndComplete(t, secondBrief, "t2")
 	if secondPublished.PRURL != "https://github.com/acme/shop/pull/18" || secondPublished.GatedSHA != "" || secondPublished.Branch != "posse/t2" {
 		t.Fatalf("second Worker did not publish its own PR: %#v", secondPublished)
 	}
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t2"); !strings.Contains(output, "landing") {
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t2"); !strings.Contains(output, "merging") {
 		t.Fatalf("second PR did not open: %s", output)
 	}
 	second := fixture.mustTask(t, "t2")
 	// The offline observer must be the only process that can record this merge.
-	// Otherwise the live Lookout can advance landed to torn-down before the read.
-	stopBackgroundLookout(t, fixture)
+	// Otherwise the live Watch can advance merged to torn-down before the read.
+	stopBackgroundWatch(t, fixture)
 	mergeTwo := fixture.mergeOnLocalOrigin(t, second, "t2")
 	fixture.writeGraphQL(t, "pr2", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", mergeTwo, second.GatedSHA)
 	time.Sleep(5 * time.Millisecond)
 	offlineEnv := setEnv(fixture.leadEnv, "HERDR_SOCKET_PATH", filepath.Join(fixture.root, "offline-herdr.sock"))
 	runPosse(t, fixture.binary, fixture.repo, offlineEnv, "show", "t2")
-	fixture.waitTaskState(t, "t2", store.StateLanded)
+	fixture.waitTaskState(t, "t2", store.StateMerged)
 	second = fixture.mustTask(t, "t2")
-	if second.State != store.StateLanded || second.LandedRef != mergeTwo {
-		t.Fatalf("merge observed without Herdr did not leave the Task landed: %#v, merge=%s", second, mergeTwo)
+	if second.State != store.StateMerged || second.MergedRef != mergeTwo {
+		t.Fatalf("merge observed without Herdr did not leave the Task merged: %#v, merge=%s", second, mergeTwo)
 	}
 	showAfterActiveTeardown(t, fixture, "t2")
 	second = fixture.mustTask(t, "t2")
-	if second.State != store.StateTornDown || second.LandedRef != mergeTwo {
+	if second.State != store.StateTornDown || second.MergedRef != mergeTwo {
 		t.Fatalf("external PR merge was not observed and torn down: %#v, merge=%s", second, mergeTwo)
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/main")); got != mergeTwo {
@@ -370,20 +370,20 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 
 func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
-	// The fixture's poll-only Lookout can deliver queued messages as soon as
-	// the Rider becomes idle, racing the explicit crash-injected owner below.
-	stopBackgroundLookout(t, fixture)
+	// The fixture's poll-only Watch can deliver queued messages as soon as
+	// the Worker becomes idle, racing the explicit crash-injected owner below.
+	stopBackgroundWatch(t, fixture)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "queued-crash.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCommit one change for queued message crash recovery.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCommit one change for queued message crash recovery.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.rideAndComplete(t, brief, "t1")
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
-		t.Fatalf("Task did not enter landing: %s", output)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
+		t.Fatalf("Task did not enter merging: %s", output)
 	}
-	landing := fixture.mustTask(t, "t1")
-	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", landing.GatedSHA)
+	candidate := fixture.mustTask(t, "t1")
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.GatedSHA)
 
 	client := herdr.NewWithEnv("herdr", fixture.env)
 	awaitAgentState := func(want string) {
@@ -394,7 +394,7 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 				return false
 			}
 			for _, pane := range snapshot.Panes {
-				if pane.PaneID == landing.PaneID {
+				if pane.PaneID == candidate.PaneID {
 					return pane.AgentStatus == want || want == "idle" && pane.AgentStatus == "done"
 				}
 			}
@@ -403,10 +403,10 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 			return
 		}
 		snapshot, err := client.Snapshot(context.Background())
-		t.Fatalf("Rider did not reach %s: snapshot=%#v err=%v", want, snapshot, err)
+		t.Fatalf("Worker did not reach %s: snapshot=%#v err=%v", want, snapshot, err)
 	}
 	awaitAgentState("idle")
-	if _, err := client.Run(context.Background(), "pane", "report-agent", landing.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+	if _, err := client.Run(context.Background(), "pane", "report-agent", candidate.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
 		t.Fatal(err)
 	}
 	awaitAgentState("working")
@@ -415,46 +415,46 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 	if !strings.Contains(queued, "state: queued") {
 		t.Fatalf("send did not finish with a queued instruction: %s", queued)
 	}
-	if _, err := client.Run(context.Background(), "pane", "report-agent", landing.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+	if _, err := client.Run(context.Background(), "pane", "report-agent", candidate.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)
 	}
 	awaitAgentState("idle")
 	var queuedStatus string
-	if err := fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE task_id=? AND body=?`, landing.ID, body).Scan(&queuedStatus); err != nil || queuedStatus != "queued" {
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE task_id=? AND body=?`, candidate.ID, body).Scan(&queuedStatus); err != nil || queuedStatus != "queued" {
 		t.Fatalf("queued instruction changed before the controlled delivery owner: status=%q err=%v", queuedStatus, err)
 	}
 
-	owner := exec.Command(fixture.binary, "roster")
+	owner := exec.Command(fixture.binary, "list")
 	owner.Dir = fixture.repo
 	owner.Env = setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "send:before:message.prompt")
 	output, err := owner.CombinedOutput()
 	var exitError *exec.ExitError
 	if !errors.As(err, &exitError) || exitError.ExitCode() != 86 {
 		var status string
-		_ = fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE task_id=? AND body=?`, landing.ID, body).Scan(&status)
+		_ = fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE task_id=? AND body=?`, candidate.ID, body).Scan(&status)
 		snapshot, snapshotErr := client.Snapshot(context.Background())
 		var paneState string
 		var paneFocused bool
 		for _, pane := range snapshot.Panes {
-			if pane.PaneID == landing.PaneID {
+			if pane.PaneID == candidate.PaneID {
 				paneState, paneFocused = pane.AgentStatus, pane.Focused
 			}
 		}
 		t.Fatalf("delivery owner did not crash before agent.prompt: err=%v output=%s message_status=%s pane_status=%s focused=%t snapshot_err=%v", err, output, status, paneState, paneFocused, snapshotErr)
 	}
-	message, err := fixture.db.OldestQueuedMessage(context.Background(), landing.ID)
+	message, err := fixture.db.OldestQueuedMessage(context.Background(), candidate.ID)
 	if !store.IsNotFound(err) {
 		t.Fatalf("crashed message remained queued: %#v, %v", message, err)
 	}
 	var messageID int64
-	if err := fixture.db.QueryRowContext(context.Background(), `SELECT id FROM messages WHERE task_id=? AND body=? AND status='submitting'`, landing.ID, body).Scan(&messageID); err != nil {
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT id FROM messages WHERE task_id=? AND body=? AND status='submitting'`, candidate.ID, body).Scan(&messageID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE messages SET claimed_at=? WHERE id=?`, time.Now().Add(-3*time.Minute).UnixMilli(), messageID); err != nil {
 		t.Fatal(err)
 	}
 	for range 3 {
-		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "roster")
+		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
 	}
 	show := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "--json", "show", "t1", "--full")
 	for _, expected := range []string{"uncertain_messages", strconv.FormatInt(messageID, 10), body} {
@@ -462,10 +462,10 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 			t.Fatalf("Task inspection omitted uncertain instruction %q: %s", expected, show)
 		}
 	}
-	lookout := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "lookout", "--timeout", "1")
+	watch := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "watch", "--timeout", "1")
 	for _, expected := range []string{"message_delivery_uncertain", "#" + strconv.FormatInt(messageID, 10), body, "posse peek t1", "posse show t1 --full"} {
-		if !strings.Contains(lookout, expected) {
-			t.Fatalf("Lookout omitted actionable uncertainty %q: %s", expected, lookout)
+		if !strings.Contains(watch, expected) {
+			t.Fatalf("Watch omitted actionable uncertainty %q: %s", expected, watch)
 		}
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
@@ -475,7 +475,7 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 	wantInstructions := map[int64]string{messageID: body}
 	uncertain := 0
 	for _, notice := range notices {
-		if notice.Kind != "message_delivery_uncertain" || notice.TaskID != landing.ID {
+		if notice.Kind != "message_delivery_uncertain" || notice.TaskID != candidate.ID {
 			continue
 		}
 		uncertain++
@@ -498,7 +498,7 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 	if err := fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE id=?`, messageID).Scan(&status); err != nil || status != "submitting" {
 		t.Fatalf("ambiguous submission %d was retried or lost: status=%q err=%v", messageID, status, err)
 	}
-	if _, err := os.Stat(filepath.Join(landing.WorktreePath, "e2e-fix-t1.txt")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(candidate.WorktreePath, "e2e-fix-t1.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("crashed instruction was delivered despite the no-retry guarantee: err=%v", err)
 	}
 }
@@ -517,15 +517,15 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	firstBrief := filepath.Join(fixture.root, "migration-first.md")
 	secondBrief := filepath.Join(fixture.root, "migration-second.md")
 	for path, title := range map[string]string{firstBrief: "PR lifecycle change", secondBrief: "External merge change"} {
-		brief := "---\ntype: ship\ntitle: " + title + "\ndone_when: committed change exists\n---\nCreate a migration.\n"
+		brief := "---\ntype: change\ntitle: " + title + "\ndone_when: committed change exists\n---\nCreate a migration.\n"
 		if err := os.WriteFile(path, []byte(brief), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	first := fixture.rideAndComplete(t, firstBrief, "t1")
 	second := fixture.rideAndComplete(t, secondBrief, "t2")
-	if first.AutonomyLand != "auto" || second.AutonomyLand != "auto" {
-		t.Fatalf("Tasks did not inherit automatic Land autonomy: %q, %q", first.AutonomyLand, second.AutonomyLand)
+	if first.AutonomyMerge != "auto" || second.AutonomyMerge != "auto" {
+		t.Fatalf("Tasks did not inherit automatic Merge autonomy: %q, %q", first.AutonomyMerge, second.AutonomyMerge)
 	}
 
 	addVersion40 := func(task store.Task, name string) {
@@ -548,7 +548,7 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	addVersion40(second, "00040_second.sql")
 
 	for _, id := range []string{"t1", "t2"} {
-		if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", id); !strings.Contains(output, "landing") {
+		if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", id); !strings.Contains(output, "merging") {
 			t.Fatalf("%s PR did not open: %s", id, output)
 		}
 	}
@@ -557,11 +557,11 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	fixture.writeGraphQL(t, "pr2", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", second.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
-	// Isolate the explicit Land check from the independent watcher, which can
+	// Isolate the explicit Merge check from the independent watcher, which can
 	// deliver its own target-sync instruction and reopen t2 first.
-	stopBackgroundLookout(t, fixture)
+	stopBackgroundWatch(t, fixture)
 
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge"); !strings.Contains(output, "landing") {
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1", "--execute"); !strings.Contains(output, "merging") {
 		t.Fatalf("first PR did not merge: %s", output)
 	}
 	fixture.mergeOnLocalOrigin(t, first, "t1")
@@ -570,7 +570,7 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	}
 
 	beforeSecondMerge := fixture.mustTask(t, "t2")
-	command := exec.Command(fixture.binary, "land", "t2", "--merge")
+	command := exec.Command(fixture.binary, "merge", "t2", "--execute")
 	command.Dir, command.Env = fixture.repo, fixture.leadEnv
 	output, err := command.CombinedOutput()
 	if err == nil {
@@ -603,25 +603,25 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "follow-up.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.rideAndComplete(t, brief, "t1")
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
-	landing := fixture.mustTask(t, "t1")
-	if landing.PRURL != "https://github.com/acme/shop/pull/17" || landing.GatedSHA == "" {
-		t.Fatalf("PR ownership was not recorded: %#v", landing)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
+	candidate := fixture.mustTask(t, "t1")
+	if candidate.PRURL != "https://github.com/acme/shop/pull/17" || candidate.GatedSHA == "" {
+		t.Fatalf("PR ownership was not recorded: %#v", candidate)
 	}
-	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", landing.GatedSHA)
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.GatedSHA)
 	if err := os.WriteFile(filepath.Join(fixture.root, "pause-fix-commit"), []byte("wait"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Handle the follow-up.")
-	if current := fixture.mustTask(t, "t1"); current.State != store.StateWorking || current.GatedSHA != "" || current.PRURL != landing.PRURL {
+	if current := fixture.mustTask(t, "t1"); current.State != store.StateWorking || current.GatedSHA != "" || current.PRURL != candidate.PRURL {
 		t.Fatalf("follow-up did not return to working: %#v", current)
 	}
-	merge := fixture.mergeOnLocalOrigin(t, landing, "t1")
-	// Other Tasks can Land on main before the Rider merges origin/main.
+	merge := fixture.mergeOnLocalOrigin(t, candidate, "t1")
+	// Other Tasks can Merge on main before the Worker merges origin/main.
 	extra := filepath.Join(fixture.root, "external-merge-t1")
 	if err := os.WriteFile(filepath.Join(extra, "other-main-work.txt"), []byte("another Task\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -630,28 +630,28 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	gitTest(t, fixture.env, extra, "commit", "-m", "other Task on main")
 	gitTest(t, fixture.env, extra, "push", "origin", "HEAD:refs/heads/main")
 	// Keep this test ref isolated from origin/main, which Project sync may fetch concurrently.
-	gitTest(t, fixture.env, landing.WorktreePath, "fetch", "--no-write-fetch-head", "--refmap=", "origin", "main:refs/remotes/posse-test/main")
-	gitTest(t, fixture.env, landing.WorktreePath, "merge", "--no-edit", "refs/remotes/posse-test/main")
-	movedTip := strings.TrimSpace(gitTest(t, fixture.env, landing.WorktreePath, "rev-parse", "HEAD"))
-	if movedTip == landing.GatedSHA {
+	gitTest(t, fixture.env, candidate.WorktreePath, "fetch", "--no-write-fetch-head", "--refmap=", "origin", "main:refs/remotes/posse-test/main")
+	gitTest(t, fixture.env, candidate.WorktreePath, "merge", "--no-edit", "refs/remotes/posse-test/main")
+	movedTip := strings.TrimSpace(gitTest(t, fixture.env, candidate.WorktreePath, "rev-parse", "HEAD"))
+	if movedTip == candidate.GatedSHA {
 		t.Fatal("follow-up did not move the Task branch tip")
 	}
-	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
 	showAfterActiveTeardown(t, fixture, "t1")
 	current := fixture.mustTask(t, "t1")
 	if verified, err := fixture.db.WasVerifiedPRHead(context.Background(), current.ID, current.PRURL, movedTip); err != nil || verified {
 		t.Fatalf("moved local tip was recorded as verified PR head: %v %v", verified, err)
 	}
-	if current.State != store.StateTornDown || current.LandedRef != merge {
-		status, _ := gitCommand(fixture.env, landing.WorktreePath, "status", "--porcelain", "--untracked-files=all", "--ignored")
-		diff, diffErr := gitCommand(fixture.env, landing.WorktreePath, "diff", "--quiet", merge, "HEAD")
-		t.Fatalf("externally merged PR was not Landed during follow-up: %#v status=%q diff=%q err=%v", current, status, diff, diffErr)
+	if current.State != store.StateTornDown || current.MergedRef != merge {
+		status, _ := gitCommand(fixture.env, candidate.WorktreePath, "status", "--porcelain", "--untracked-files=all", "--ignored")
+		diff, diffErr := gitCommand(fixture.env, candidate.WorktreePath, "diff", "--quiet", merge, "HEAD")
+		t.Fatalf("externally merged PR was not Merged during follow-up: %#v status=%q diff=%q err=%v", current, status, diff, diffErr)
 	}
 	fixture.requireNotice(t, "t1", "pr_merged")
-	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/"+landing.Branch)); got != movedTip {
+	if got := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "refs/heads/"+candidate.Branch)); got != movedTip {
 		t.Fatalf("Task branch moved during teardown: got=%s want=%s", got, movedTip)
 	}
-	if current.PRURL != landing.PRURL || current.Branch != landing.Branch {
+	if current.PRURL != candidate.PRURL || current.Branch != candidate.Branch {
 		t.Fatalf("merged PR identity changed: %#v", current)
 	}
 	for i := 0; i < 2; i++ {
@@ -681,28 +681,28 @@ func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 }
 
 // A missing old PR must not prevent a merged PR in the same GraphQL batch
-// from landing and releasing its Rider, even when gh exits unsuccessfully.
-func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
+// from merging and releasing its Worker, even when gh exits unsuccessfully.
+func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "partial-merge.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nObserve a merge despite an inaccessible old PR.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nObserve a merge despite an inaccessible old PR.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.rideAndComplete(t, brief, "t1")
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
-		t.Fatalf("valid PR did not enter landing: %s", output)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
+		t.Fatalf("valid PR did not enter merging: %s", output)
 	}
 	valid := fixture.mustTask(t, "t1")
 	badID, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{
-		Seq: 2, Type: "ship", Title: "inaccessible old PR", State: store.StateSpawning,
-		LandingMode: "pr", Branch: "posse/old-pr", BaseRef: "main",
+		Seq: 2, Type: "change", Title: "inaccessible old PR", State: store.StateSpawning,
+		MergeMode: "pr", Branch: "posse/old-pr", BaseRef: "main",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, transition := range []struct{ from, to store.State }{
-		{store.StateSpawning, store.StateWorking}, {store.StateWorking, store.StateDone}, {store.StateDone, store.StateLanding},
+		{store.StateSpawning, store.StateWorking}, {store.StateWorking, store.StateDone}, {store.StateDone, store.StateMerging},
 	} {
 		source := "cli"
 		if transition.to == store.StateDone {
@@ -734,7 +734,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.root, "gh-exit-nonzero"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Do not expose the old PR to Lookout until its GraphQL response is ready.
+	// Do not expose the old PR to Watch until its GraphQL response is ready.
 	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=? WHERE id=?`, "https://github.com/acme/shop/pull/41", badID); err != nil {
 		t.Fatal(err)
 	}
@@ -742,23 +742,23 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range [][]string{{"show", "t1"}, {"show", "t1"}, {"roster"}} {
+	for _, command := range [][]string{{"show", "t1"}, {"show", "t1"}, {"list"}} {
 		time.Sleep(5 * time.Millisecond)
 		if command[0] == "show" {
 			showAfterActiveTeardown(t, fixture, "t1")
 		} else {
 			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, command...)
 		}
-		landed := fixture.mustTask(t, "t1")
-		if landed.State != store.StateTornDown || landed.LandedRef != merge {
-			t.Fatalf("%v missed valid merge or safe teardown: %#v", command, landed)
+		merged := fixture.mustTask(t, "t1")
+		if merged.State != store.StateTornDown || merged.MergedRef != merge {
+			t.Fatalf("%v missed valid merge or safe teardown: %#v", command, merged)
 		}
-		mounts, err := fixture.db.Mounts(context.Background(), fixture.project.ID)
-		if err != nil || len(mounts) != 1 || mounts[0].TaskID != 0 || mounts[0].State != "idle" {
-			t.Fatalf("merged Rider still holds its Mount: %#v, %v", mounts, err)
+		sandboxes, err := fixture.db.Sandboxes(context.Background(), fixture.project.ID)
+		if err != nil || len(sandboxes) != 1 || sandboxes[0].TaskID != 0 || sandboxes[0].State != "idle" {
+			t.Fatalf("merged Worker still holds its Sandbox: %#v, %v", sandboxes, err)
 		}
 		fixture.requireNotice(t, "t1", "pr_merged")
-		// Lookout can claim a poll before the old URL is exposed, then read
+		// Watch can claim a poll before the old URL is exposed, then read
 		// only pr1. Allow the next poll to see the old URL before checking the
 		// invalid PR Decision; it must still be raised, not skipped.
 		var decisions []store.Decision
@@ -786,7 +786,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 			t.Fatalf("target-specific failure blocked healthy project polling: %#v, %v", watch, err)
 		}
 		bad := fixture.mustTask(t, "t2")
-		if bad.State != store.StateLanding {
+		if bad.State != store.StateMerging {
 			t.Fatalf("bad PR was changed despite failed observation: %#v", bad)
 		}
 	}
@@ -794,7 +794,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fixture sets pr_poll=1ms. Its live Lookout may legitimately poll
+	// The fixture sets pr_poll=1ms. Its live Watch may legitimately poll
 	// between these CLI calls, so an exact count races the background poller.
 	if polls := strings.Count(string(afterPolls), "api graphql") - strings.Count(string(beforePolls), "api graphql"); polls < 3 {
 		t.Fatalf("expected at least one poll per CLI restart, got %d", polls)
@@ -821,23 +821,23 @@ func TestWorkerExitedDoneTaskWithOpenPRCanBeDiscarded(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "done-open-pr.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a completed Task with a recorded open PR.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a completed Task with a recorded open PR.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	task := fixture.rideAndComplete(t, brief, "t1")
 	const prURL = "https://github.com/acme/shop/pull/17"
-	if err := fixture.db.UpdateTaskLanding(context.Background(), task.ID, prURL, ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(context.Background(), task.ID, prURL, ""); err != nil {
 		t.Fatal(err)
 	}
 	head := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
 	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", head)
-	fixture.exitRider(t, "t1")
+	fixture.exitWorker(t, "t1")
 	client := herdr.NewWithEnv("herdr", fixture.env)
 	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": task.PaneID}); err != nil {
-		t.Fatalf("remove exited Rider pane before observation: %v", err)
+		t.Fatalf("remove exited Worker pane before observation: %v", err)
 	}
-	stopBackgroundLookout(t, fixture)
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "roster")
+	stopBackgroundWatch(t, fixture)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
 
 	current := fixture.mustTask(t, "t1")
 	if current.State != store.StateDone || current.PRURL != prURL {
@@ -864,8 +864,8 @@ func TestWorkerExitedDoneTaskWithOpenPRCanBeDiscarded(t *testing.T) {
 	if err != nil || observation.State != "CLOSED" || observation.PRURL != prURL {
 		t.Fatalf("discard did not retain a verified PR closure observation: %#v %v", observation, err)
 	}
-	if _, err := fixture.db.MountByTask(context.Background(), task.ID); !store.IsNotFound(err) {
-		t.Fatalf("discard did not release the completed Task's Mount: %v", err)
+	if _, err := fixture.db.SandboxByTask(context.Background(), task.ID); !store.IsNotFound(err) {
+		t.Fatalf("discard did not release the completed Task's Sandbox: %v", err)
 	}
 }
 
@@ -878,7 +878,7 @@ func TestApprovedDiscardClosesAndVerifiesRecordedPR(t *testing.T) {
 		t.Fatalf("close the exited Task pane before discard: %v", err)
 	}
 
-	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
+	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved discarding this Task")
 	if !strings.Contains(output, "torn-down") {
 		t.Fatalf("approved discard did not complete after closing the PR: %s", output)
 	}
@@ -896,12 +896,12 @@ func TestApprovedDiscardClosesAndVerifiesRecordedPR(t *testing.T) {
 	if err != nil || observation.State != "CLOSED" || observation.PRURL != task.PRURL {
 		t.Fatalf("discard did not preserve the verified closure observation: %#v %v", observation, err)
 	}
-	if _, err := fixture.db.MountByTask(context.Background(), task.ID); !store.IsNotFound(err) {
-		t.Fatalf("verified discard did not release the Mount: %v", err)
+	if _, err := fixture.db.SandboxByTask(context.Background(), task.ID); !store.IsNotFound(err) {
+		t.Fatalf("verified discard did not release the Sandbox: %v", err)
 	}
 }
 
-func TestLookoutCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
+func TestWatchCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	task := prepareDiscardPRTask(t, fixture)
@@ -911,7 +911,7 @@ func TestLookoutCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
 	}
 	closeStarted := filepath.Join(fixture.root, "gh-close-started")
 	closeRelease := filepath.Join(fixture.root, "gh-close-release")
-	command := exec.Command(fixture.binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
+	command := exec.Command(fixture.binary, "teardown", "t1", "--discard", "--user-approved", "User approved discarding this Task")
 	command.Dir = fixture.repo
 	command.Env = setEnv(fixture.leadEnv, "POSSE_TEST_GH_CLOSE_STARTED", closeStarted)
 	command.Env = setEnv(command.Env, "POSSE_TEST_GH_CLOSE_RELEASE", closeRelease)
@@ -933,7 +933,7 @@ func TestLookoutCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
 	}) {
 		t.Fatalf("discard did not reach the recorded PR close call: %s", output.String())
 	}
-	// This concurrent observation is the Lookout side of the close/Teardown
+	// This concurrent observation is the Watch side of the close/Teardown
 	// race: it records the now-closed PR and raises its normal follow-up.
 	fixture.writeGraphQL(t, "pr1", "CLOSED", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", task.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
@@ -947,7 +947,7 @@ func TestLookoutCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
 		foundClosedDecision = foundClosedDecision || decision.TaskID == task.ID && decision.Kind == "pr_closed"
 	}
 	if !foundClosedDecision {
-		t.Fatalf("concurrent Lookout observation did not raise pr_closed: %#v", decisions)
+		t.Fatalf("concurrent Watch observation did not raise pr_closed: %#v", decisions)
 	}
 	if err := os.WriteFile(closeRelease, []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -957,7 +957,7 @@ func TestLookoutCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
 		t.Fatalf("discard lost the close/Teardown race: %v output=%s", err, output.String())
 	}
 	if current := fixture.mustTask(t, "t1"); current.State != store.StateTornDown {
-		t.Fatalf("concurrent Lookout observation changed approved discard custody: %#v", current)
+		t.Fatalf("concurrent Watch observation changed approved discard custody: %#v", current)
 	}
 	decisions, err = fixture.db.Decisions(context.Background(), fixture.project.ID, true)
 	if err != nil {
@@ -970,33 +970,33 @@ func TestLookoutCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
 	}
 }
 
-func TestLandReadyDecisionCanDiscardUnlandedPR(t *testing.T) {
+func TestMergeReadyDecisionCanDiscardUnmergedPR(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	task := prepareDiscardPRTask(t, fixture)
 	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", task.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
-	fixture.requireNotice(t, "t1", "land_ready")
+	fixture.requireNotice(t, "t1", "merge_ready")
 	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decisions")
 	if !strings.Contains(output, "discard") {
-		t.Fatalf("land_ready Decision omitted discard: %s", output)
+		t.Fatalf("merge_ready Decision omitted discard: %s", output)
 	}
 	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
-	if err != nil || len(decisions) != 1 || decisions[0].Kind != "land_ready" || !slices.Contains(decisions[0].Options, "discard") {
-		t.Fatalf("land_ready Decision = %#v, %v", decisions, err)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "merge_ready" || !slices.Contains(decisions[0].Options, "discard") {
+		t.Fatalf("merge_ready Decision = %#v, %v", decisions, err)
 	}
-	const quote = "User approved discarding the ready but unlanded PR"
+	const quote = "User approved discarding the ready but unmerged PR"
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decide", strconv.FormatInt(decisions[0].ID, 10), "discard", "--user-approved", quote)
 	output = runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "apply", strconv.FormatInt(decisions[0].ID, 10))
 	if !strings.Contains(output, "torn-down") || fixture.mustTask(t, "t1").State != store.StateTornDown {
-		t.Fatalf("land_ready discard did not complete Teardown: %s task=%#v", output, fixture.mustTask(t, "t1"))
+		t.Fatalf("merge_ready discard did not complete Teardown: %s task=%#v", output, fixture.mustTask(t, "t1"))
 	}
 	if _, err := os.Stat(fixture.ghPRClosed); err != nil {
-		t.Fatalf("land_ready discard did not close the recorded PR: %v", err)
+		t.Fatalf("merge_ready discard did not close the recorded PR: %v", err)
 	}
 }
 
-func TestApprovedDiscardKeepsMountHeldWhenPRCloseFails(t *testing.T) {
+func TestApprovedDiscardKeepsSandboxHeldWhenPRCloseFails(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	task := prepareDiscardPRTask(t, fixture)
@@ -1004,16 +1004,16 @@ func TestApprovedDiscardKeepsMountHeldWhenPRCloseFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := exec.Command(fixture.binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
+	command := exec.Command(fixture.binary, "teardown", "t1", "--discard", "--user-approved", "User approved discarding this Task")
 	command.Dir, command.Env = fixture.repo, fixture.leadEnv
 	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "unsaddle_incomplete") || !strings.Contains(string(output), "keeps the Mount held") {
+	if err == nil || !strings.Contains(string(output), "teardown_incomplete") || !strings.Contains(string(output), "keeps the Sandbox held") {
 		t.Fatalf("failed forge close did not refuse discard: err=%v output=%s", err, output)
 	}
 	current := fixture.mustTask(t, "t1")
-	mount, mountErr := fixture.db.MountByTask(context.Background(), task.ID)
-	if current.State != store.StateLanding || mountErr != nil || mount.State != "held" {
-		t.Fatalf("failed PR close changed Task custody: task=%#v mount=%#v err=%v", current, mount, mountErr)
+	sandbox, sandboxErr := fixture.db.SandboxByTask(context.Background(), task.ID)
+	if current.State != store.StateMerging || sandboxErr != nil || sandbox.State != "held" {
+		t.Fatalf("failed PR close changed Task custody: task=%#v sandbox=%#v err=%v", current, sandbox, sandboxErr)
 	}
 	if _, err := os.Stat(fixture.ghPRClosed); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed close unexpectedly changed forge state: %v", err)
@@ -1028,7 +1028,7 @@ func TestApprovedDiscardKeepsMountHeldWhenPRCloseFails(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("failed PR close proceeded to close the Rider pane")
+	t.Fatal("failed PR close proceeded to close the Worker pane")
 }
 
 func TestApprovedDiscardRefusesMergedPR(t *testing.T) {
@@ -1037,16 +1037,16 @@ func TestApprovedDiscardRefusesMergedPR(t *testing.T) {
 	task := prepareDiscardPRTask(t, fixture)
 	fixture.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", "merge-sha", task.GatedSHA)
 
-	command := exec.Command(fixture.binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
+	command := exec.Command(fixture.binary, "teardown", "t1", "--discard", "--user-approved", "User approved discarding this Task")
 	command.Dir, command.Env = fixture.repo, fixture.leadEnv
 	output, err := command.CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "pr_merged") {
 		t.Fatalf("merged PR was not refused before discard: err=%v output=%s", err, output)
 	}
 	current := fixture.mustTask(t, "t1")
-	mount, mountErr := fixture.db.MountByTask(context.Background(), task.ID)
-	if current.State != store.StateLanding || mountErr != nil || mount.State != "held" {
-		t.Fatalf("merged-PR refusal changed Task custody: task=%#v mount=%#v err=%v", current, mount, mountErr)
+	sandbox, sandboxErr := fixture.db.SandboxByTask(context.Background(), task.ID)
+	if current.State != store.StateMerging || sandboxErr != nil || sandbox.State != "held" {
+		t.Fatalf("merged-PR refusal changed Task custody: task=%#v sandbox=%#v err=%v", current, sandbox, sandboxErr)
 	}
 	if _, err := os.Stat(fixture.ghPRClosed); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("merged PR was sent a close request: %v", err)
@@ -1064,17 +1064,17 @@ func TestApprovedDiscardRefusesMergedPR(t *testing.T) {
 func prepareDiscardPRTask(t *testing.T, fixture *prLifecycleFixture) store.Task {
 	t.Helper()
 	brief := filepath.Join(fixture.root, "discard-pr.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change for approved-discard PR closure.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a committed change for approved-discard PR closure.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.rideAndComplete(t, brief, "t1")
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
 	task := fixture.mustTask(t, "t1")
-	if task.State != store.StateLanding || task.PRURL == "" || task.GatedSHA == "" {
+	if task.State != store.StateMerging || task.PRURL == "" || task.GatedSHA == "" {
 		t.Fatalf("fixture did not open a recorded PR: %#v", task)
 	}
-	fixture.exitRider(t, "t1")
-	stopBackgroundLookout(t, fixture)
+	fixture.exitWorker(t, "t1")
+	stopBackgroundWatch(t, fixture)
 	return task
 }
 
@@ -1085,7 +1085,7 @@ func TestClosedPRDiscardRechecksForgeStateBeforeTeardown(t *testing.T) {
 	gitTest(t, fixture.env, fixture.repo, "branch", "posse/t1")
 	gitTest(t, fixture.env, fixture.repo, "push", "origin", "posse/t1")
 	taskID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
-		Seq: 1, Type: "ship", Title: "Closed PR discard", ShortName: "closed-pr-discard", LandingMode: "pr", Branch: "posse/t1",
+		Seq: 1, Type: "change", Title: "Closed PR discard", ShortName: "closed-pr-discard", MergeMode: "pr", Branch: "posse/t1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1093,11 +1093,11 @@ func TestClosedPRDiscardRechecksForgeStateBeforeTeardown(t *testing.T) {
 	if err := fixture.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.Transition(ctx, taskID, store.StateWorking, store.StateLost, "cli", "Rider exited"); err != nil {
+	if err := fixture.db.Transition(ctx, taskID, store.StateWorking, store.StateLost, "cli", "Worker exited"); err != nil {
 		t.Fatal(err)
 	}
 	const prURL = "https://github.com/acme/shop/pull/17"
-	if err := fixture.db.UpdateTaskLanding(ctx, taskID, prURL, ""); err != nil {
+	if err := fixture.db.UpdateTaskMerge(ctx, taskID, prURL, ""); err != nil {
 		t.Fatal(err)
 	}
 	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", "head-open")
@@ -1115,7 +1115,7 @@ func TestClosedPRDiscardRechecksForgeStateBeforeTeardown(t *testing.T) {
 	if err != nil || len(decisions) != 1 || decisions[0].Kind != "pr_closed" || decisions[0].TaskID != taskID {
 		t.Fatalf("closed PR Decision = %#v, %v", decisions, err)
 	}
-	const quote = "User approved discarding the closed, unlanded Task"
+	const quote = "User approved discarding the closed, unmerged Task"
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decide", strconv.FormatInt(decisions[0].ID, 10), "discard", "--user-approved", quote)
 
 	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", "head-reopened")
@@ -1152,40 +1152,40 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 			f := newPRLifecycleFixture(t)
 			defer f.db.Close()
 			brief := filepath.Join(f.root, "follow-up.md")
-			if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+			if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			f.rideAndComplete(t, brief, "t1")
-			runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
-			landing := f.mustTask(t, "t1")
-			f.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", landing.GatedSHA)
+			runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
+			candidate := f.mustTask(t, "t1")
+			f.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.GatedSHA)
 			if err := os.WriteFile(filepath.Join(f.root, "pause-fix-commit"), []byte("wait"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			runPosse(t, f.binary, f.repo, f.leadEnv, "send", "t1", "Add the follow-up.")
-			merge := f.mergeOnLocalOrigin(t, landing, "t1")
-			work := filepath.Join(landing.WorktreePath, "follow-up-work.txt")
+			merge := f.mergeOnLocalOrigin(t, candidate, "t1")
+			work := filepath.Join(candidate.WorktreePath, "follow-up-work.txt")
 			if err := os.WriteFile(work, []byte("unmerged work\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "committed" {
-				gitTest(t, f.env, landing.WorktreePath, "add", "follow-up-work.txt")
-				gitTest(t, f.env, landing.WorktreePath, "commit", "-m", "unmerged follow-up")
+				gitTest(t, f.env, candidate.WorktreePath, "add", "follow-up-work.txt")
+				gitTest(t, f.env, candidate.WorktreePath, "commit", "-m", "unmerged follow-up")
 			}
-			f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+			f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
 			showAfterActiveTeardown(t, f, "t1")
-			if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
+			if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.MergedRef != merge {
 				notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
-				t.Fatalf("merged Task did not release its Rider: %#v notices=%#v", task, notices)
+				t.Fatalf("merged Task did not release its Worker: %#v notices=%#v", task, notices)
 			}
-			assertMountUnlocked(t, f.env, f.repo, landing.WorktreePath)
+			assertSandboxUnlocked(t, f.env, f.repo, candidate.WorktreePath)
 			f.requireNotice(t, "t1", "pr_merged")
-			if content := gitTest(t, f.env, f.repo, "show", "refs/heads/posse/t1-leftover:follow-up-work.txt"); content != "unmerged work\n" {
-				t.Fatalf("Leftover did not preserve %s work: %q", mode, content)
+			if content := gitTest(t, f.env, f.repo, "show", "refs/heads/posse/t1-orphan:follow-up-work.txt"); content != "unmerged work\n" {
+				t.Fatalf("Orphan did not preserve %s work: %q", mode, content)
 			}
 			decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
-			if err != nil || len(decisions) != 1 || decisions[0].Kind != "leftover" {
-				t.Fatalf("Leftover Decision: %#v %v", decisions, err)
+			if err != nil || len(decisions) != 1 || decisions[0].Kind != "orphan" {
+				t.Fatalf("Orphan Decision: %#v %v", decisions, err)
 			}
 			if mode == "committed" {
 				// A squash merge has a different commit ID from the old Task.
@@ -1196,52 +1196,52 @@ func TestMergedPRSnapshotsUnmergedFollowUp(t *testing.T) {
 				runPosse(t, f.binary, f.repo, f.leadEnv, "apply", strconv.FormatInt(decisions[0].ID, 10))
 				gitTest(t, f.env, f.repo, "fetch", "origin")
 				gitTest(t, f.env, f.repo, "merge", "--ff-only", "origin/main")
-				followup := filepath.Join(f.root, "leftover-next.md")
-				if err := os.WriteFile(followup, []byte("---\ntype: ship\ntitle: From Leftover\ndone_when: follow-up change exists\n---\nKeep only the follow-up.\n"), 0o600); err != nil {
+				followup := filepath.Join(f.root, "orphan-next.md")
+				if err := os.WriteFile(followup, []byte("---\ntype: change\ntitle: From Orphan\ndone_when: follow-up change exists\n---\nKeep only the follow-up.\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				runPosse(t, f.binary, f.repo, f.leadEnv, "ride", "--brief", followup, "--name", "from-leftover", "--from-leftover", strconv.FormatInt(decisions[0].ID, 10))
+				runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", followup, "--name", "from-orphan", "--from-orphan", strconv.FormatInt(decisions[0].ID, 10))
 				next := f.mustTask(t, "t2")
 				diff := gitTest(t, f.env, next.WorktreePath, "diff", "--name-only", "origin/main...HEAD")
 				if strings.Contains(diff, "e2e-worker-t1.txt") || !strings.Contains(diff, "follow-up-work.txt") {
-					t.Fatalf("new PR includes old squash-merged work or loses the Leftover: %q", diff)
+					t.Fatalf("new PR includes old squash-merged work or loses the Orphan: %q", diff)
 				}
 			}
 		})
 	}
 }
 
-func TestMergedPRWithIgnoredArtifactStillLands(t *testing.T) {
+func TestMergedPRWithIgnoredArtifactStillMerges(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	brief := filepath.Join(f.root, "ignored-artifact.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f.rideAndComplete(t, brief, "t1")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
-	landing := f.mustTask(t, "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
+	candidate := f.mustTask(t, "t1")
 	exclude := filepath.Join(f.root, "exclude")
 	if err := os.WriteFile(exclude, []byte("build.log\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, f.env, landing.WorktreePath, "config", "core.excludesFile", exclude)
-	artifact := filepath.Join(landing.WorktreePath, "build.log")
+	gitTest(t, f.env, candidate.WorktreePath, "config", "core.excludesFile", exclude)
+	artifact := filepath.Join(candidate.WorktreePath, "build.log")
 	if err := os.WriteFile(artifact, []byte("ignored build output\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	merge := f.mergeOnLocalOrigin(t, landing, "t1")
-	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
 	showAfterActiveTeardown(t, f, "t1")
-	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.LandedRef != merge {
-		t.Fatalf("ignored artifact blocked normal landing: %#v", task)
+	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown || task.MergedRef != merge {
+		t.Fatalf("ignored artifact blocked normal merging: %#v", task)
 	}
 	if _, err := os.Stat(artifact); err != nil {
 		t.Fatalf("ignored artifact was discarded by default clean mode: %v", err)
 	}
 }
 
-func TestMergedPRAutoTearsDownEvenWhenAutoUnsaddleIsNever(t *testing.T) {
+func TestMergedPRAutoTearsDownEvenWhenAutoTeardownIsNever(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	configPath := filepath.Join(f.home, "config.toml")
@@ -1249,45 +1249,45 @@ func TestMergedPRAutoTearsDownEvenWhenAutoUnsaddleIsNever(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte(strings.Replace(string(configData), "auto_unsaddle = \"finished\"", "auto_unsaddle = \"never\"", 1)), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(strings.Replace(string(configData), "auto_teardown = \"finished\"", "auto_teardown = \"never\"", 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	brief := filepath.Join(f.root, "late-work.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f.rideAndComplete(t, brief, "t1")
-	runPosse(t, f.binary, f.repo, f.leadEnv, "land", "t1")
-	landing := f.mustTask(t, "t1")
-	merge := f.mergeOnLocalOrigin(t, landing, "t1")
-	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
+	candidate := f.mustTask(t, "t1")
+	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
 	showAfterActiveTeardown(t, f, "t1")
 	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown {
-		t.Fatalf("merged PR did not tear down despite auto_unsaddle=never: %#v", task)
+		t.Fatalf("merged PR did not tear down despite auto_teardown=never: %#v", task)
 	}
 	f.requireNotice(t, "t1", "pr_merged")
 }
 
-func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
+func TestPRMergeAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "follow-up.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: follow-up is committed\n---\nAllow follow-up work while the PR is landing.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: follow-up is committed\n---\nAllow follow-up work while the PR is merging.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	published := fixture.rideAndComplete(t, brief, "t1")
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
-		t.Fatalf("PR did not enter landing: %s", output)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
+		t.Fatalf("PR did not enter merging: %s", output)
 	}
-	landing := fixture.mustTask(t, "t1")
-	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", landing.GatedSHA)
+	candidate := fixture.mustTask(t, "t1")
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.GatedSHA)
 
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, notice := range notices {
-		if notice.TaskID == landing.ID && (notice.Kind == "pr_checks_failed" || notice.Kind == "pr_changes_requested" || notice.Kind == "pr_conflict") {
+		if notice.TaskID == candidate.ID && (notice.Kind == "pr_checks_failed" || notice.Kind == "pr_changes_requested" || notice.Kind == "pr_conflict") {
 			t.Fatalf("failure Notice exists before follow-up send: %#v", notice)
 		}
 	}
@@ -1295,8 +1295,8 @@ func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 		t.Fatalf("follow-up send before a failure Notice was not delivered: %s", output)
 	}
 	working := fixture.mustTask(t, "t1")
-	if working.State != store.StateWorking || working.GatedSHA != "" || working.PRURL != landing.PRURL || published.PRURL != landing.PRURL {
-		t.Fatalf("follow-up did not return the same PR Task to working and clear its gate: published=%#v landing=%#v working=%#v", published, landing, working)
+	if working.State != store.StateWorking || working.GatedSHA != "" || working.PRURL != candidate.PRURL || published.PRURL != candidate.PRURL {
+		t.Fatalf("follow-up did not return the same PR Task to working and clear its gate: published=%#v merging=%#v working=%#v", published, candidate, working)
 	}
 
 	if err := os.WriteFile(filepath.Join(fixture.fixGate, "t1"), []byte("continue\n"), 0o600); err != nil {
@@ -1305,20 +1305,20 @@ func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 	fixture.waitTaskState(t, "t1", store.StateDone)
 	completed := fixture.mustTask(t, "t1")
 	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/posse/t1")))
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1"); !strings.Contains(output, "landing") {
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
 		t.Fatalf("follow-up could not be re-gated: %s", output)
 	}
-	relanded := fixture.mustTask(t, "t1")
-	if reLandedState := relanded.State; reLandedState != store.StateLanding || relanded.GatedSHA == "" || relanded.PRURL != landing.PRURL || completed.State != store.StateDone {
-		t.Fatalf("Task did not return to landing after the follow-up: completed=%#v relanded=%#v", completed, relanded)
+	remerged := fixture.mustTask(t, "t1")
+	if reMergedState := remerged.State; reMergedState != store.StateMerging || remerged.GatedSHA == "" || remerged.PRURL != candidate.PRURL || completed.State != store.StateDone {
+		t.Fatalf("Task did not return to merging after the follow-up: completed=%#v relanded=%#v", completed, remerged)
 	}
 }
 
-func TestLandReadyBeforeMergeDoesNotRaiseLatePROpened(t *testing.T) {
+func TestMergeReadyBeforeMergeDoesNotRaiseLatePROpened(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "ready-before-merge.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise the order of PR lifecycle Notices.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise the order of PR lifecycle Notices.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	task := fixture.rideAndComplete(t, brief, "t1")
@@ -1330,15 +1330,15 @@ func TestLandReadyBeforeMergeDoesNotRaiseLatePROpened(t *testing.T) {
 			return false
 		}
 		for _, notice := range notices {
-			if notice.TaskID == task.ID && notice.Kind == "land_ready" {
+			if notice.TaskID == task.ID && notice.Kind == "merge_ready" {
 				return true
 			}
 		}
 		return false
 	}) {
-		t.Fatal("PR watcher did not raise land_ready")
+		t.Fatal("PR watcher did not raise merge_ready")
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge", "--user-approved", "User approved the pull request")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1", "--execute", "--user-approved", "User approved the pull request")
 
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
@@ -1352,15 +1352,15 @@ func TestLandReadyBeforeMergeDoesNotRaiseLatePROpened(t *testing.T) {
 		switch notice.Kind {
 		case "pr_opened":
 			opened = append(opened, notice)
-		case "land_ready":
+		case "merge_ready":
 			ready = append(ready, notice)
 		}
 	}
 	if len(opened) != 1 || len(ready) != 1 {
-		t.Fatalf("expected one pr_opened and one land_ready Notice, got opened=%#v ready=%#v", opened, ready)
+		t.Fatalf("expected one pr_opened and one merge_ready Notice, got opened=%#v ready=%#v", opened, ready)
 	}
 	if opened[0].ID >= ready[0].ID {
-		t.Fatalf("pr_opened was raised after land_ready: opened=%#v ready=%#v", opened[0], ready[0])
+		t.Fatalf("pr_opened was raised after merge_ready: opened=%#v ready=%#v", opened[0], ready[0])
 	}
 	var openedData struct {
 		URL  string `json:"url"`
@@ -1378,12 +1378,12 @@ func TestWorkerPublishRetriesLaggingOpenPRHead(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "publish-follow-up.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: committed change exists\n---\nExercise a stale PR head immediately after a push.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR follow-up\ndone_when: committed change exists\n---\nExercise a stale PR head immediately after a push.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	task := fixture.rideAndComplete(t, brief, "t1")
 	oldHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Add the publish consistency follow-up.")
 	if !waitForCondition(30*time.Second, func() bool {
 		current := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
@@ -1467,12 +1467,12 @@ func TestWorkerPublishDistinguishesMovedHeadFromLagTimeout(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "publish-head-race.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise unexpected-head and timeout outcomes during publish.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nExercise unexpected-head and timeout outcomes during publish.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	task := fixture.rideAndComplete(t, brief, "t1")
 	oldHead := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
 	if err := os.WriteFile(filepath.Join(fixture.root, "pause-fix-commit"), []byte("hold\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1557,7 +1557,7 @@ func TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "deferred-pr-recovery.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR create recovery\ndone_when: committed change exists\n---\nExercise deferred recovery of an interrupted PR creation.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR create recovery\ndone_when: committed change exists\n---\nExercise deferred recovery of an interrupted PR creation.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.rideAndCommitLegacy(t, brief, "t1")
@@ -1568,27 +1568,27 @@ func TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, pane := range snapshot.Panes {
-		if pane.Label != "posse:shop:lookout" || pane.WorkspaceID != fixture.project.HerdrWorkspaceID {
+		if pane.Label != "posse:shop:watch" || pane.WorkspaceID != fixture.project.HerdrWorkspaceID {
 			continue
 		}
 		if _, err := client.Run(context.Background(), "pane", "send-keys", pane.PaneID, "ctrl+c"); err != nil {
-			t.Fatalf("stop fixture Lookout before injecting interrupted intent: %v", err)
+			t.Fatalf("stop fixture Watch before injecting interrupted intent: %v", err)
 		}
 		if pane.TabID != "" {
 			if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": pane.TabID}); err != nil {
-				t.Fatalf("close fixture Lookout tab: %v", err)
+				t.Fatalf("close fixture Watch tab: %v", err)
 			}
 		}
 		break
 	}
 
-	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "land --open-pr:after:pr.create")
-	command := exec.Command(fixture.binary, "land", "t1")
+	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "merge --open-pr:after:pr.create")
+	command := exec.Command(fixture.binary, "merge", "t1")
 	command.Dir, command.Env = fixture.repo, crashEnv
 	output, err := command.CombinedOutput()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 86 {
-		t.Fatalf("Land did not crash at the injected post-create boundary: err=%v output=%s", err, output)
+		t.Fatalf("Merge did not crash at the injected post-create boundary: err=%v output=%s", err, output)
 	}
 	task := fixture.mustTask(t, "t1")
 	openPRs, err := json.Marshal([]map[string]string{{
@@ -1656,7 +1656,7 @@ func TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts(t *testing.T) {
 		_, intentErr := fixture.db.IntentByTask(context.Background(), current.ID)
 		return current.PRURL == "https://github.com/acme/shop/pull/17" && store.IsNotFound(intentErr)
 	}) {
-		t.Fatalf("Lookout did not recover the deferred PR intent after Lead startup: %#v", fixture.mustTask(t, "t1"))
+		t.Fatalf("Watch did not recover the deferred PR intent after Lead startup: %#v", fixture.mustTask(t, "t1"))
 	}
 	ghLog, err := os.ReadFile(fixture.ghLog)
 	if err != nil || !strings.Contains(string(ghLog), "pr list") {
@@ -1680,22 +1680,22 @@ func envValue(values []string, key string) string {
 
 func TestPRCreateCrashRecoveryAdoptsOpenPullRequest(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
-	brief := filepath.Join(fixture.root, "crash-ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR create recovery\ndone_when: committed change exists\n---\nExercise adoption of a PR created before Posse persisted its URL.\n"), 0o600); err != nil {
+	brief := filepath.Join(fixture.root, "crash-change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR create recovery\ndone_when: committed change exists\n---\nExercise adoption of a PR created before Posse persisted its URL.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate a Task completed before Workers published their own PRs.
-	// The compatibility path still lets Land recover a create interrupted
+	// The compatibility path still lets Merge recover a create interrupted
 	// after the forge accepted it but before Posse persisted its URL.
 	fixture.rideAndCommitLegacy(t, brief, "t1")
-	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "land --open-pr:after:pr.create")
-	command := exec.Command(fixture.binary, "land", "t1")
+	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "merge --open-pr:after:pr.create")
+	command := exec.Command(fixture.binary, "merge", "t1")
 	command.Dir = fixture.repo
 	command.Env = crashEnv
 	output, err := command.CombinedOutput()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 86 {
-		t.Fatalf("Land did not crash at the injected post-create boundary: err=%v output=%s", err, output)
+		t.Fatalf("Merge did not crash at the injected post-create boundary: err=%v output=%s", err, output)
 	}
 	task := fixture.mustTask(t, "t1")
 	openPRs, err := json.Marshal([]map[string]string{{
@@ -1713,7 +1713,7 @@ func TestPRCreateCrashRecoveryAdoptsOpenPullRequest(t *testing.T) {
 	// state, URL and Notice to commit before checking the recovered result.
 	if !waitForCondition(30*time.Second, func() bool {
 		task := fixture.mustTask(t, "t1")
-		if task.State != store.StateLanding || task.PRURL != "https://github.com/acme/shop/pull/17" {
+		if task.State != store.StateMerging || task.PRURL != "https://github.com/acme/shop/pull/17" {
 			return false
 		}
 		notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
@@ -1779,7 +1779,7 @@ func newPRLifecycleFixtureWithLeadAndShell(t *testing.T, liveLead, slowLoginShel
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("pr-"))
 	binDir := filepath.Join(root, "bin")
-	worktrees := filepath.Join(root, "posse", "remuda")
+	worktrees := filepath.Join(root, "posse", "pool")
 	fixGate := filepath.Join(root, "fix-gates")
 	for _, directory := range []string{binDir, worktrees, fixGate} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -1856,7 +1856,7 @@ case "$PWD/" in
     while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id" ]; do sleep 0.02; done
     case "$task_id" in t1) pr_url='https://github.com/acme/shop/pull/17' ;; t2) pr_url='https://github.com/acme/shop/pull/18' ;; esac
     "$POSSE_E2E_POSSE_BIN" publish "Worker committed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
-    "$POSSE_E2E_POSSE_BIN" holler done "Worker committed $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+    "$POSSE_E2E_POSSE_BIN" signal done "Worker committed $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     while IFS= read -r instruction; do
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
@@ -1866,7 +1866,7 @@ case "$PWD/" in
       git commit -m "fix worker change $task_id" >/dev/null
       while [ ! -e "$POSSE_E2E_FIX_GATE/$task_id" ]; do sleep 0.02; done
       "$POSSE_E2E_POSSE_BIN" publish "Worker fixed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
-      "$POSSE_E2E_POSSE_BIN" holler done "Worker fixed $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+      "$POSSE_E2E_POSSE_BIN" signal done "Worker fixed $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     done
     ;;
@@ -1967,7 +1967,7 @@ esac
 
 	home := filepath.Join(root, "posse")
 	// Lifecycle tests exercise explicit Lead instructions; CI auto-fixes have fake-forge coverage elsewhere.
-	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"finished\"\npr_poll = \"1ms\"\n\n[ci_loop]\nmax_fix_rounds = 0\nrerun_cancelled = 0\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"finished\"\npr_poll = \"1ms\"\n\n[ci_loop]\nmax_fix_rounds = 0\nrerun_cancelled = 0\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2138,12 +2138,12 @@ func leadFinalizerPIDs(root, binary string) ([]int, error) {
 	return pids, nil
 }
 
-func (fixture *prLifecycleFixture) exitRider(t *testing.T, taskID string) {
+func (fixture *prLifecycleFixture) exitWorker(t *testing.T, taskID string) {
 	t.Helper()
 	task := fixture.mustTask(t, taskID)
 	client := herdr.NewWithEnv("herdr", fixture.env)
 	if _, err := client.Run(context.Background(), "pane", "send-keys", task.PaneID, "ctrl+d"); err != nil {
-		t.Fatalf("send EOF to fixture Rider %s: %v", taskID, err)
+		t.Fatalf("send EOF to fixture Worker %s: %v", taskID, err)
 	}
 	var lastProcessInfo json.RawMessage
 	if !waitForCondition(5*time.Second, func() bool {
@@ -2161,7 +2161,7 @@ func (fixture *prLifecycleFixture) exitRider(t *testing.T, taskID string) {
 		}
 		return json.Unmarshal(raw, &info) == nil && info.ProcessInfo.ShellPID > 0 && (info.ProcessInfo.ForegroundProcessGroupID <= 1 || info.ProcessInfo.ForegroundProcessGroupID == info.ProcessInfo.ShellPID)
 	}) {
-		t.Fatalf("fixture Rider %s did not exit naturally: process_info=%s", taskID, lastProcessInfo)
+		t.Fatalf("fixture Worker %s did not exit naturally: process_info=%s", taskID, lastProcessInfo)
 	}
 }
 
@@ -2173,9 +2173,9 @@ func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID s
 	} else if strings.Contains(brief, "follow-up") {
 		name = "pr-follow-up"
 	}
-	output := fixture.runRideWithStoreBusyRetry(t, brief, name)
+	output := fixture.runStartWithStoreBusyRetry(t, brief, name)
 	if !strings.Contains(output, taskID) {
-		t.Fatalf("ride did not return %s: %s", taskID, output)
+		t.Fatalf("start did not return %s: %s", taskID, output)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.root, "signal-gates", taskID), []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -2184,38 +2184,38 @@ func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID s
 	return fixture.mustTask(t, taskID)
 }
 
-// A retryable observation lock can fail before ride creates a Task. Retry that
+// A retryable observation lock can fail before start creates a Task. Retry that
 // documented store_busy result, but never retry if the failed command created a Task.
-func (fixture *prLifecycleFixture) runRideWithStoreBusyRetry(t *testing.T, brief, name string) string {
+func (fixture *prLifecycleFixture) runStartWithStoreBusyRetry(t *testing.T, brief, name string) string {
 	t.Helper()
 	const maxAttempts = 4
 	var output []byte
 	var err error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		command := exec.Command(fixture.binary, "ride", "--brief", brief, "--name", name)
+		command := exec.Command(fixture.binary, "start", "--brief", brief, "--name", name)
 		command.Dir, command.Env = fixture.repo, fixture.leadEnv
 		output, err = command.CombinedOutput()
 		if err == nil {
 			return string(output)
 		}
 		if !strings.Contains(string(output), `error{code,message,retryable,help}: "store_busy"`) {
-			t.Fatalf("posse ride: %v\n%s", err, output)
+			t.Fatalf("posse start: %v\n%s", err, output)
 		}
 		var count int
 		if queryErr := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM tasks WHERE project_id=? AND short_name=?`, fixture.project.ID, name).Scan(&count); queryErr != nil || count != 0 {
-			t.Fatalf("refusing to retry ride after a partial Task creation: tasks=%d query_err=%v output=%s", count, queryErr, output)
+			t.Fatalf("refusing to retry start after a partial Task creation: tasks=%d query_err=%v output=%s", count, queryErr, output)
 		}
 		if attempt+1 < maxAttempts {
 			time.Sleep(time.Duration(25*(1<<attempt)) * time.Millisecond)
 		}
 	}
-	t.Fatalf("posse ride stayed retryable store_busy after %d attempts: %v\n%s", maxAttempts, err, output)
+	t.Fatalf("posse start stayed retryable store_busy after %d attempts: %v\n%s", maxAttempts, err, output)
 	return ""
 }
 
 func (fixture *prLifecycleFixture) rideAndCommitLegacy(t *testing.T, brief, taskID string) {
 	t.Helper()
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "pr-create-recovery")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "pr-create-recovery")
 	if !waitForCondition(30*time.Second, func() bool {
 		task := fixture.mustTask(t, taskID)
 		if task.WorktreePath == "" {

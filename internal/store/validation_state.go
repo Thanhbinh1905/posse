@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// ReviewRound binds one repository in a Review Task to an exact Ship head.
+// ReviewRound binds one repository in a Review Task to an exact Change head.
 type ReviewRound struct {
-	ShipTaskID      int64  `toml:"ship_task_id"`
+	ChangeTaskID    int64  `toml:"ship_task_id"`
 	Round           int    `toml:"round"`
 	ReviewTaskID    int64  `toml:"review_task_id"`
 	Repository      string `toml:"repository"`
@@ -32,7 +32,7 @@ type ReviewRound struct {
 // ReviewPattern groups findings that share one root cause or violated rule.
 type ReviewPattern struct {
 	ID           int64  `toml:"id"`
-	ShipTaskID   int64  `toml:"ship_task_id"`
+	ChangeTaskID int64  `toml:"ship_task_id"`
 	Seq          int    `toml:"seq"`
 	Key          string `toml:"key"`
 	Title        string `toml:"title"`
@@ -43,10 +43,10 @@ type ReviewPattern struct {
 	CreatedRound int    `toml:"created_round"`
 }
 
-// ReviewFinding is one stable, anchored instance in a Ship Task's ledger.
+// ReviewFinding is one stable, anchored instance in a Change Task's ledger.
 type ReviewFinding struct {
 	ID            int64  `toml:"id"`
-	ShipTaskID    int64  `toml:"ship_task_id"`
+	ChangeTaskID  int64  `toml:"ship_task_id"`
 	Seq           int    `toml:"seq"`
 	PatternID     int64  `toml:"pattern_id"`
 	Fingerprint   string `toml:"fingerprint"`
@@ -79,7 +79,7 @@ type ReviewFindingEvent struct {
 
 // ReviewCarry records proof that a clean target merge preserves a passed tree.
 type ReviewCarry struct {
-	ShipTaskID      int64  `toml:"ship_task_id"`
+	ChangeTaskID    int64  `toml:"ship_task_id"`
 	Repository      string `toml:"repository"`
 	FromHead        string `toml:"from_head"`
 	ToHead          string `toml:"to_head"`
@@ -88,20 +88,20 @@ type ReviewCarry struct {
 	CreatedAt       int64  `toml:"created_at"`
 }
 
-// ReviewDisposition records a risk decision against one exact Ship head.
+// ReviewDisposition records a risk decision against one exact Change head.
 type ReviewDisposition struct {
-	ID         int64  `toml:"id"`
-	ShipTaskID int64  `toml:"ship_task_id"`
-	HeadSHA    string `toml:"head_sha"`
-	DecisionID int64  `toml:"decision_id"`
-	UserQuote  string `toml:"user_quote"`
-	At         int64  `toml:"at"`
+	ID           int64  `toml:"id"`
+	ChangeTaskID int64  `toml:"ship_task_id"`
+	HeadSHA      string `toml:"head_sha"`
+	DecisionID   int64  `toml:"decision_id"`
+	UserQuote    string `toml:"user_quote"`
+	At           int64  `toml:"at"`
 }
 
 // ValidationFixRound records one queued automatic validation instruction.
 type ValidationFixRound struct {
 	ID               int64  `toml:"id"`
-	ShipTaskID       int64  `toml:"ship_task_id"`
+	ChangeTaskID     int64  `toml:"ship_task_id"`
 	Kind             string `toml:"kind"`
 	Seq              int    `toml:"seq"`
 	ExpectedBaseHead string `toml:"expected_base_head"`
@@ -151,7 +151,7 @@ func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, k
 	if err := tx.QueryRowContext(ctx, `SELECT state,type FROM tasks WHERE id=?`, taskID).Scan(&state, &taskType); err != nil {
 		return QueueValidationFixResult{}, err
 	}
-	if taskType != "ship" || !taskAcceptsInstruction(State(state), taskType) {
+	if taskType != "change" || !taskAcceptsInstruction(State(state), taskType) {
 		return QueueValidationFixResult{}, ErrStateRace
 	}
 
@@ -227,7 +227,7 @@ func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, k
 }
 
 // ValidationContinuitySnapshot returns the heads named by automatic
-// instructions issued since the Ship Task's most recent done Signal, together
+// instructions issued since the Change Task's most recent done Signal, together
 // with a revision that detects additional rounds on an already-known head.
 func (db *DB) ValidationContinuitySnapshot(ctx context.Context, taskID int64) (ValidationContinuitySnapshot, error) {
 	return validationContinuitySnapshot(ctx, db, taskID)
@@ -316,7 +316,7 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 	for rows.Next() {
 		var value ReviewRound
 		var verdict sql.NullString
-		if err := rows.Scan(&value.ShipTaskID, &value.Round, &value.ReviewTaskID, &value.Repository, &value.ScopeKind, &value.ScopeBaseSHA, &value.HeadSHA, &value.TargetCommitSHA, &value.BaselineTree, &value.DeltaSHA256, &value.ConflictedPaths, &value.Status, &verdict, &value.CreatedAt); err != nil {
+		if err := rows.Scan(&value.ChangeTaskID, &value.Round, &value.ReviewTaskID, &value.Repository, &value.ScopeKind, &value.ScopeBaseSHA, &value.HeadSHA, &value.TargetCommitSHA, &value.BaselineTree, &value.DeltaSHA256, &value.ConflictedPaths, &value.Status, &verdict, &value.CreatedAt); err != nil {
 			_ = rows.Close()
 			return state, err
 		}
@@ -334,7 +334,7 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 	for rows.Next() {
 		var value ReviewPattern
 		var mergedInto sql.NullInt64
-		if err := rows.Scan(&value.ID, &value.ShipTaskID, &value.Seq, &value.Key, &value.Title, &value.Rule, &value.RootCause, &value.FixGuidance, &mergedInto, &value.CreatedRound); err != nil {
+		if err := rows.Scan(&value.ID, &value.ChangeTaskID, &value.Seq, &value.Key, &value.Title, &value.Rule, &value.RootCause, &value.FixGuidance, &mergedInto, &value.CreatedRound); err != nil {
 			_ = rows.Close()
 			return state, err
 		}
@@ -353,7 +353,7 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 		var value ReviewFinding
 		var inScope int
 		var inheritedFrom sql.NullInt64
-		if err := rows.Scan(&value.ID, &value.ShipTaskID, &value.Seq, &value.PatternID, &value.Fingerprint, &value.Round, &value.Repository, &value.Path, &value.Symbol, &value.Excerpt, &value.LineAtReport, &value.HeadSHA, &value.Severity, &value.Origin, &inScope, &value.State, &value.FollowUpURL, &inheritedFrom); err != nil {
+		if err := rows.Scan(&value.ID, &value.ChangeTaskID, &value.Seq, &value.PatternID, &value.Fingerprint, &value.Round, &value.Repository, &value.Path, &value.Symbol, &value.Excerpt, &value.LineAtReport, &value.HeadSHA, &value.Severity, &value.Origin, &inScope, &value.State, &value.FollowUpURL, &inheritedFrom); err != nil {
 			_ = rows.Close()
 			return state, err
 		}
@@ -387,7 +387,7 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 	}
 	for rows.Next() {
 		var value ReviewCarry
-		if err := rows.Scan(&value.ShipTaskID, &value.Repository, &value.FromHead, &value.ToHead, &value.TargetCommitSHA, &value.Tree, &value.CreatedAt); err != nil {
+		if err := rows.Scan(&value.ChangeTaskID, &value.Repository, &value.FromHead, &value.ToHead, &value.TargetCommitSHA, &value.Tree, &value.CreatedAt); err != nil {
 			_ = rows.Close()
 			return state, err
 		}
@@ -404,7 +404,7 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 	for rows.Next() {
 		var value ReviewDisposition
 		var decisionID sql.NullInt64
-		if err := rows.Scan(&value.ID, &value.ShipTaskID, &value.HeadSHA, &decisionID, &value.UserQuote, &value.At); err != nil {
+		if err := rows.Scan(&value.ID, &value.ChangeTaskID, &value.HeadSHA, &decisionID, &value.UserQuote, &value.At); err != nil {
 			_ = rows.Close()
 			return state, err
 		}
@@ -421,7 +421,7 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 	}
 	for rows.Next() {
 		var value ValidationFixRound
-		if err := rows.Scan(&value.ID, &value.ShipTaskID, &value.Kind, &value.Seq, &value.ExpectedBaseHead, &value.DedupeKey, &value.MessageID, &value.CreatedAt); err != nil {
+		if err := rows.Scan(&value.ID, &value.ChangeTaskID, &value.Kind, &value.Seq, &value.ExpectedBaseHead, &value.DedupeKey, &value.MessageID, &value.CreatedAt); err != nil {
 			_ = rows.Close()
 			return state, err
 		}

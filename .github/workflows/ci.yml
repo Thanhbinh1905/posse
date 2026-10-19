@@ -308,12 +308,12 @@ jobs:
           chmod 755 "$herdr"
           echo "$tool_dir" >> "$GITHUB_PATH"
           "$herdr" --version
-      - name: Run stopped Rider relaunch stress regression
+      - name: Run stopped Worker relaunch stress regression
         env:
           POSSE_E2E_RELAUNCH_STRESS: "1"
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-relaunch-stress-
-        run: go test -tags=e2e -count=1 -timeout=9m ./internal/e2e -run '^TestStoppedRiderPaneCanBeRelaunched$'
-      - name: Clean stopped Rider stress fixtures and caches
+        run: go test -tags=e2e -count=1 -timeout=9m ./internal/e2e -run '^TestStoppedWorkerPaneCanBeRelaunched$'
+      - name: Clean stopped Worker stress fixtures and caches
         if: ${{ always() }}
         run: |
           prefix="posse-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-relaunch-stress-"

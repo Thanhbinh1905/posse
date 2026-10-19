@@ -17,7 +17,7 @@ import (
 )
 
 func TestDoneTaskWithVanishedPaneCanBeDiscarded(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	completeAgent := `#!/bin/sh
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 case "$PWD/" in
@@ -36,32 +36,32 @@ esac
 	if err := os.WriteFile(filepath.Join(f.root, "bin", "claude"), []byte(completeAgent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	task := f.ride(t, "t1", "Discard completed Rider", "discard-completed-rider")
+	task := f.start(t, "t1", "Discard completed Worker", "discard-completed-worker")
 	if !waitForCondition(10*time.Second, func() bool {
 		_, err := os.Stat(filepath.Join(f.root, "agent-ready"))
 		return err == nil
 	}) {
-		t.Fatal("fixture Rider agent did not become ready")
+		t.Fatal("fixture Worker agent did not become ready")
 	}
 	change := filepath.Join(task.WorktreePath, "completed-change.txt")
-	if err := os.WriteFile(change, []byte("committed Rider change\n"), 0o600); err != nil {
+	if err := os.WriteFile(change, []byte("committed Worker change\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	gitTest(t, f.env, task.WorktreePath, "add", "completed-change.txt")
-	gitTest(t, f.env, task.WorktreePath, "commit", "-m", "complete Rider change")
+	gitTest(t, f.env, task.WorktreePath, "commit", "-m", "complete Worker change")
 
 	workerEnv := setEnv(f.env, "HERDR_ENV", "1")
 	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", task.PaneID)
 	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
 	workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", tabOf(t, f.snapshot(t), task.PaneID))
-	done := exec.Command(f.binary, "holler", "done", "Rider work is complete")
+	done := exec.Command(f.binary, "signal", "done", "Worker work is complete")
 	done.Dir, done.Env = task.WorktreePath, workerEnv
 	if output, err := done.CombinedOutput(); err != nil {
-		t.Fatalf("Rider completion Signal: %v\n%s", err, output)
+		t.Fatalf("Worker completion Signal: %v\n%s", err, output)
 	}
 	before := f.task(t, "t1")
 	if before.State != store.StateDone {
-		t.Fatalf("Rider Signal left Task in %s", before.State)
+		t.Fatalf("Worker Signal left Task in %s", before.State)
 	}
 	branchTip := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "refs/heads/"+task.Branch))
 	if err := os.WriteFile(filepath.Join(f.root, "agent-finished"), []byte("done\n"), 0o600); err != nil {
@@ -83,7 +83,7 @@ esac
 		}
 		return info.ProcessInfo.ShellPID > 1 && info.ProcessInfo.ForegroundProcessGroup == info.ProcessInfo.ShellPID
 	}) {
-		t.Fatal("fixture Rider agent did not exit after completing its work")
+		t.Fatal("fixture Worker agent did not exit after completing its work")
 	}
 
 	oldGeneration, err := f.client.Snapshot(context.Background())
@@ -99,12 +99,12 @@ esac
 	for _, pane := range restored.Panes {
 		if pane.Label == task.PaneLabel {
 			if _, err := f.client.Call(context.Background(), "tab.close", map[string]any{"tab_id": pane.TabID}); err != nil {
-				t.Fatalf("remove completed Rider pane after Herdr restart: %v", err)
+				t.Fatalf("remove completed Worker pane after Herdr restart: %v", err)
 			}
 			break
 		}
 	}
-	runPosse(t, f.binary, f.repo, f.env, "roster")
+	runPosse(t, f.binary, f.repo, f.env, "list")
 	snapshot := f.snapshot(t)
 	lead, found := findLeadInSnapshot(snapshot)
 	if !found {
@@ -129,7 +129,7 @@ esac
 	f.leadEnv = setEnv(f.leadEnv, "HERDR_TAB_ID", lead.TabID)
 	current := f.task(t, "t1")
 	if current.State != store.StateDone || current.Launches != before.Launches {
-		t.Fatalf("vanished done Rider changed state or relaunched: before=%#v after=%#v", before, current)
+		t.Fatalf("vanished done Worker changed state or relaunched: before=%#v after=%#v", before, current)
 	}
 
 	db, err = store.OpenReadOnly(f.home)
@@ -172,7 +172,7 @@ esac
 	decision := decisions[0]
 	const decisionQuote = "User approved discarding this completed Task"
 	runPosse(t, f.binary, f.repo, f.leadEnv, "decide", fmt.Sprint(decision.ID), "discard", "--user-approved", decisionQuote)
-	crashAt := "unsaddle:after:approval.record"
+	crashAt := "teardown:after:approval.record"
 	interrupted := exec.Command(f.binary, "apply", fmt.Sprint(decision.ID))
 	interrupted.Dir, interrupted.Env = f.repo, setEnv(f.leadEnv, "POSSE_INTENT_CRASH_AT", crashAt)
 	interruptedOutput, interruptedErr := interrupted.CombinedOutput()
@@ -208,15 +208,15 @@ esac
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	mounts, err := db.Mounts(context.Background(), f.projectID)
+	sandboxes, err := db.Sandboxes(context.Background(), f.projectID)
 	if err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	var releasedMount store.Mount
-	for _, candidate := range mounts {
-		if candidate.ID == task.MountID {
-			releasedMount = candidate
+	var releasedSandbox store.Sandbox
+	for _, candidate := range sandboxes {
+		if candidate.ID == task.SandboxID {
+			releasedSandbox = candidate
 			break
 		}
 	}
@@ -224,8 +224,8 @@ esac
 	if approvals != 1 || quote != "User approved discarding this completed Task" || approvedTip != branchTip {
 		t.Fatalf("discard approval = %d, quote %q, tip %q; want one verbatim approval of %s", approvals, quote, approvedTip, branchTip)
 	}
-	if releasedMount.ID == 0 || releasedMount.State == "held" || releasedMount.TaskID != 0 {
-		t.Fatalf("discard did not release Mount %d: %#v", task.MountID, releasedMount)
+	if releasedSandbox.ID == 0 || releasedSandbox.State == "held" || releasedSandbox.TaskID != 0 {
+		t.Fatalf("discard did not release Sandbox %d: %#v", task.SandboxID, releasedSandbox)
 	}
 	bundles, err := filepath.Glob(filepath.Join(f.home, "projects", "shop", "tasks", "t1", "discard", "*.bundle"))
 	if err != nil || len(bundles) != 1 {
@@ -238,14 +238,14 @@ esac
 	f.assertAlive(t, f.snapshot(t), lead.PaneID)
 
 	beforeRepeat := transitions[0].ID
-	runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t1")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1")
 	db, err = store.OpenReadOnly(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	afterRepeat, err := db.TaskTransitions(context.Background(), task.ID, 20)
 	if err == nil && (len(afterRepeat) == 0 || afterRepeat[0].ID != beforeRepeat) {
-		err = fmt.Errorf("repeat unsaddle recorded another transition: %#v", afterRepeat)
+		err = fmt.Errorf("repeat teardown recorded another transition: %#v", afterRepeat)
 	}
 	_ = db.Close()
 	if err != nil {
@@ -253,21 +253,21 @@ esac
 	}
 }
 
-func TestApprovedDiscardStopsWorkingRider(t *testing.T) {
+func TestApprovedDiscardStopsWorkingWorker(t *testing.T) {
 	for _, state := range []store.State{store.StateWorking, store.StateNeedsDecision} {
-		t.Run(string(state), func(t *testing.T) { testApprovedDiscardStopsRider(t, state) })
+		t.Run(string(state), func(t *testing.T) { testApprovedDiscardStopsWorker(t, state) })
 	}
 }
 
-func TestApprovedDiscardStopsReopenedDoneRider(t *testing.T) {
-	testApprovedDiscardStopsRider(t, store.StateDone)
+func TestApprovedDiscardStopsReopenedDoneWorker(t *testing.T) {
+	testApprovedDiscardStopsWorker(t, store.StateDone)
 }
 
-func testApprovedDiscardStopsRider(t *testing.T, state store.State) {
-	f := newRiderTabsFixture(t)
+func testApprovedDiscardStopsWorker(t *testing.T, state store.State) {
+	f := newWorkerTabsFixture(t)
 	agent := `#!/bin/sh
-trap ': > "$POSSE_TEST_ROOT/rider-interrupted"; printf "late Rider commit\n" > cancel-late.txt; git add cancel-late.txt; git commit -m "late Rider commit" > "$POSSE_TEST_ROOT/late-commit.log" 2>&1' INT
-trap ': > "$POSSE_TEST_ROOT/rider-terminated"; posse holler failed "Rider stopped during approved cancellation" > "$POSSE_TEST_ROOT/stop-signal.log" 2>&1; exit 0' TERM
+trap ': > "$POSSE_TEST_ROOT/worker-interrupted"; printf "late Worker commit\n" > cancel-late.txt; git add cancel-late.txt; git commit -m "late Worker commit" > "$POSSE_TEST_ROOT/late-commit.log" 2>&1' INT
+trap ': > "$POSSE_TEST_ROOT/worker-terminated"; posse signal failed "Worker stopped during approved cancellation" > "$POSSE_TEST_ROOT/stop-signal.log" 2>&1; exit 0' TERM
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 IFS= read -r prompt || exit 0
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
@@ -281,28 +281,28 @@ done
 	if err := os.WriteFile(filepath.Join(f.root, "bin", "claude"), []byte(agent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	task := f.ride(t, "t1", "Cancel working Rider", "cancel-working-rider")
+	task := f.start(t, "t1", "Cancel working Worker", "cancel-working-worker")
 	pid := foregroundPID(t, f, task.PaneID)
-	riderEnv := setEnv(f.env, "HERDR_ENV", "1")
-	riderEnv = setEnv(riderEnv, "HERDR_PANE_ID", task.PaneID)
+	workerEnv := setEnv(f.env, "HERDR_ENV", "1")
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", task.PaneID)
 	if state == store.StateNeedsDecision {
-		runPosse(t, f.binary, task.WorktreePath, riderEnv, "holler", "needs-decision", "Should this Task be cancelled?")
+		runPosse(t, f.binary, task.WorktreePath, workerEnv, "signal", "needs-decision", "Should this Task be cancelled?")
 	}
 	if state == store.StateDone {
-		if err := os.WriteFile(filepath.Join(task.WorktreePath, "completed-change.txt"), []byte("completed Rider work\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(task.WorktreePath, "completed-change.txt"), []byte("completed Worker work\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		gitTest(t, f.env, task.WorktreePath, "add", "completed-change.txt")
-		gitTest(t, f.env, task.WorktreePath, "commit", "-m", "complete Rider change")
+		gitTest(t, f.env, task.WorktreePath, "commit", "-m", "complete Worker change")
 		if _, err := f.client.Run(t.Context(), "pane", "report-agent", task.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 			t.Fatal(err)
 		}
-		runPosse(t, f.binary, task.WorktreePath, riderEnv, "holler", "done", "Rider work is complete")
+		runPosse(t, f.binary, task.WorktreePath, workerEnv, "signal", "done", "Worker work is complete")
 		if completed := f.task(t, "t1"); completed.State != store.StateDone {
-			t.Fatalf("Rider completion left Task in %s", completed.State)
+			t.Fatalf("Worker completion left Task in %s", completed.State)
 		}
 		// Direct User input, not posse send or a working Signal, must reopen
-		// this Ship Task before the Lead cancels that same Rider instance.
+		// this Change Task before the Lead cancels that same Worker instance.
 		if _, err := f.client.Run(t.Context(), "pane", "run", task.PaneID, "Resume cancelled Task"); err != nil {
 			t.Fatal(err)
 		}
@@ -310,11 +310,11 @@ done
 			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
 			return f.task(t, "t1").State == store.StateWorking
 		}) {
-			t.Fatalf("resumed done Rider left Task in %s", f.task(t, "t1").State)
+			t.Fatalf("resumed done Worker left Task in %s", f.task(t, "t1").State)
 		}
 		reopened := f.task(t, "t1")
 		if reopened.Launches != task.Launches || reopened.AgentName != task.AgentName || reopened.PaneID != task.PaneID || reopened.Branch != task.Branch || reopened.PRURL != task.PRURL || foregroundPID(t, f, task.PaneID) != pid {
-			t.Fatalf("watcher reopening changed the Rider instance or custody: before=%#v after=%#v", task, reopened)
+			t.Fatalf("watcher reopening changed the Worker instance or custody: before=%#v after=%#v", task, reopened)
 		}
 		db, err := store.OpenReadOnly(f.home)
 		if err != nil {
@@ -325,16 +325,16 @@ done
 			_ = db.Close()
 			t.Fatal(err)
 		}
-		if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='rider_resumed'`, task.ID).Scan(&notices); err != nil {
+		if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='worker_resumed'`, task.ID).Scan(&notices); err != nil {
 			_ = db.Close()
 			t.Fatal(err)
 		}
 		_ = db.Close()
 		if transitions != 1 || notices != 1 {
-			t.Fatalf("done Rider reopening recorded %d transitions and %d Notices, want one of each", transitions, notices)
+			t.Fatalf("done Worker reopening recorded %d transitions and %d Notices, want one of each", transitions, notices)
 		}
 	}
-	for _, args := range [][]string{{"unsaddle", "t1"}, {"unsaddle", "t1", "--discard"}, {"unsaddle", "t1", "--discard", "--user-approved", " "}} {
+	for _, args := range [][]string{{"teardown", "t1"}, {"teardown", "t1", "--discard"}, {"teardown", "t1", "--discard", "--user-approved", " "}} {
 		command := exec.Command(f.binary, args...)
 		command.Dir, command.Env = f.repo, f.leadEnv
 		if output, err := command.CombinedOutput(); err == nil || !strings.Contains(string(output), "teardown_refused") {
@@ -342,10 +342,10 @@ done
 		}
 		f.assertAlive(t, f.snapshot(t), task.PaneID)
 	}
-	riderCommand := exec.Command(f.binary, "unsaddle", "t1", "--discard", "--user-approved", "destroy t3 now")
-	riderCommand.Dir, riderCommand.Env = task.WorktreePath, riderEnv
-	if output, err := riderCommand.CombinedOutput(); err == nil || !strings.Contains(string(output), "worker_forbidden") {
-		t.Fatalf("Rider cancellation was not refused: %v %s", err, output)
+	workerCommand := exec.Command(f.binary, "teardown", "t1", "--discard", "--user-approved", "destroy t3 now")
+	workerCommand.Dir, workerCommand.Env = task.WorktreePath, workerEnv
+	if output, err := workerCommand.CombinedOutput(); err == nil || !strings.Contains(string(output), "worker_forbidden") {
+		t.Fatalf("Worker cancellation was not refused: %v %s", err, output)
 	}
 	change := filepath.Join(task.WorktreePath, "cancel-change.txt")
 	if err := os.WriteFile(change, []byte("committed cancelled work\n"), 0o600); err != nil {
@@ -353,11 +353,11 @@ done
 	}
 	gitTest(t, f.env, task.WorktreePath, "add", ".")
 	gitTest(t, f.env, task.WorktreePath, "commit", "-m", "cancelled change")
-	command := exec.Command(f.binary, "unsaddle", "t1", "--discard", "--user-approved", "destroy t3 now")
+	command := exec.Command(f.binary, "teardown", "t1", "--discard", "--user-approved", "destroy t3 now")
 	command.Dir, command.Env = f.repo, f.leadEnv
 	output, err := command.CombinedOutput()
 	if err != nil || !strings.Contains(string(output), "torn-down") {
-		t.Fatalf("approved cancellation did not stop and discard the working Rider: err=%v output=%s", err, output)
+		t.Fatalf("approved cancellation did not stop and discard the working Worker: err=%v output=%s", err, output)
 	}
 	if current := f.task(t, "t1"); current.State != store.StateTornDown {
 		t.Fatalf("approved cancellation left Task in %s", current.State)
@@ -366,7 +366,7 @@ done
 	if err != nil {
 		t.Fatal(err)
 	}
-	mounts, err := db.Mounts(context.Background(), f.projectID)
+	sandboxes, err := db.Sandboxes(context.Background(), f.projectID)
 	if err != nil {
 		_ = db.Close()
 		t.Fatal(err)
@@ -378,21 +378,21 @@ done
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	for _, mount := range mounts {
-		if mount.ID == task.MountID && (mount.State == "held" || mount.TaskID != 0) {
-			t.Fatalf("cancellation kept the Mount held: %#v", mount)
+	for _, sandbox := range sandboxes {
+		if sandbox.ID == task.SandboxID && (sandbox.State == "held" || sandbox.TaskID != 0) {
+			t.Fatalf("cancellation kept the Sandbox held: %#v", sandbox)
 		}
 	}
 	if approvals != 1 || quote != "destroy t3 now" {
 		t.Fatalf("cancellation approvals = %d, quote %q", approvals, quote)
 	}
-	for _, name := range []string{"rider-interrupted", "rider-terminated"} {
+	for _, name := range []string{"worker-interrupted", "worker-terminated"} {
 		if _, err := os.Stat(filepath.Join(f.root, name)); err != nil {
-			t.Fatalf("Rider did not receive verified %s: %v (pid %d)", name, err, pid)
+			t.Fatalf("Worker did not receive verified %s: %v (pid %d)", name, err, pid)
 		}
 	}
 	if _, _, err := store.ProcessIdentityForPID(pid); err == nil {
-		t.Fatalf("Rider process %d survived cancellation", pid)
+		t.Fatalf("Worker process %d survived cancellation", pid)
 	}
 	f.assertGone(t, f.snapshot(t), task.PaneID)
 	f.assertAlive(t, f.snapshot(t), f.leadPaneID, f.userTab.RootPane.PaneID)
@@ -400,7 +400,7 @@ done
 	if err != nil || len(bundles) != 1 {
 		t.Fatalf("cancelled commits were not captured: %v %v", bundles, err)
 	}
-	if contents := strings.TrimSpace(gitTest(t, f.env, f.repo, "show", approvedTip+":cancel-late.txt")); contents != "late Rider commit" {
+	if contents := strings.TrimSpace(gitTest(t, f.env, f.repo, "show", approvedTip+":cancel-late.txt")); contents != "late Worker commit" {
 		t.Fatalf("discard omitted the commit completed during interruption: %q", contents)
 	}
 	if heads := gitTest(t, f.env, f.repo, "bundle", "list-heads", bundles[0]); !strings.Contains(heads, approvedTip) {

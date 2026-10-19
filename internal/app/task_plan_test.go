@@ -17,12 +17,12 @@ import (
 func TestUnsupportedBriefsRefuseBeforePreparationOrResourceAllocation(t *testing.T) {
 	for _, field := range []string{"executor: lead\n", "execution: in-place\n", "repos: [api]\n", "base: {api: main}\n", "target: [main]\n"} {
 		t.Run(strings.TrimSpace(field), func(t *testing.T) {
-			f := newRideFixture(t)
-			text := "---\ntype: ship\ntitle: Launch probe\ndone_when: checked\n" + field + "---\nInspect.\n"
+			f := newStartFixture(t)
+			text := "---\ntype: change\ntitle: Launch probe\ndone_when: checked\n" + field + "---\nInspect.\n"
 			if err := os.WriteFile(f.brief, []byte(text), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			code, output := f.ride(t)
+			code, output := f.start(t)
 			if code != 1 || !strings.Contains(output, "brief_invalid") {
 				t.Fatalf("unsupported Brief was not refused: code=%d %s", code, output)
 			}
@@ -38,15 +38,15 @@ func TestUnsupportedBriefsRefuseBeforePreparationOrResourceAllocation(t *testing
 			if err != nil || len(tasks) != 0 {
 				t.Fatalf("refusal allocated Task: %#v %v", tasks, err)
 			}
-			mounts, err := db.Mounts(context.Background(), f.project.ID)
-			if err != nil || len(mounts) != 0 {
-				t.Fatalf("refusal allocated Mount: %#v %v", mounts, err)
+			sandboxes, err := db.Sandboxes(context.Background(), f.project.ID)
+			if err != nil || len(sandboxes) != 0 {
+				t.Fatalf("refusal allocated Sandbox: %#v %v", sandboxes, err)
 			}
 			intents, err := db.Intents(context.Background(), f.project.ID)
 			if err != nil || len(intents) != 0 {
 				t.Fatalf("refusal allocated intent: %#v %v", intents, err)
 			}
-			for _, directory := range []string{"scratch", "remuda", filepath.Join("projects", "shop", "tasks")} {
+			for _, directory := range []string{"scratch", "pool", filepath.Join("projects", "shop", "tasks")} {
 				if _, err := os.Stat(filepath.Join(f.home, directory)); !os.IsNotExist(err) {
 					t.Fatalf("refusal allocated %s: %v", directory, err)
 				}
@@ -58,10 +58,10 @@ func TestUnsupportedBriefsRefuseBeforePreparationOrResourceAllocation(t *testing
 	}
 }
 
-func TestRiderStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
-	f := newRideFixture(t)
-	if code, output := f.ride(t); code != 0 {
-		t.Fatalf("ride code=%d %s", code, output)
+func TestWorkerStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
+	f := newStartFixture(t)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
 	}
 	task, _ := f.onlyTask(t)
 	db, err := store.Open(f.home)
@@ -69,11 +69,11 @@ func TestRiderStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	siblingID, err := db.CreateTask(context.Background(), f.project.ID, store.Task{Seq: 2, Type: "scout", Title: "private sibling", Profile: "private-profile"})
+	siblingID, err := db.CreateTask(context.Background(), f.project.ID, store.Task{Seq: 2, Type: "research", Title: "private sibling", Profile: "private-profile"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(context.Background(), f.project.ID, siblingID, "ride", "done:task.create", "{}", 999999); err != nil {
+	if err := db.StartIntent(context.Background(), f.project.ID, siblingID, "start", "done:task.create", "{}", 999999); err != nil {
 		t.Fatal(err)
 	}
 	beforeIntents, err := db.Intents(context.Background(), f.project.ID)
@@ -123,24 +123,24 @@ func TestRiderStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
 }
 
 func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
-	f := newRideFixture(t)
-	configText := "[identity.lead]\nlanguage = \"vi\"\n\n[defaults]\nlanding_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"
+	f := newStartFixture(t)
+	configText := "[identity.lead]\nlanguage = \"vi\"\n\n[defaults]\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	original := []byte("---\r\ntype: ship\r\ntitle: Launch probe\r\ndone_when: checked\r\nticket: 12\r\n---\r\nUser words stay exact.\r\n")
+	original := []byte("---\r\ntype: change\r\ntitle: Launch probe\r\ndone_when: checked\r\nticket: 12\r\n---\r\nUser words stay exact.\r\n")
 	if err := os.WriteFile(f.brief, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	prefPath := filepath.Join(f.home, "preferences", "rider.md")
+	prefPath := filepath.Join(f.home, "preferences", "worker.md")
 	if err := os.MkdirAll(filepath.Dir(prefPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(prefPath, []byte("Original preference.\r\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := f.ride(t); code != 0 {
-		t.Fatalf("ride code=%d %s", code, output)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
 	}
 	task, _ := f.onlyTask(t)
 	plan, err := task.AdmittedPlan()
@@ -176,10 +176,10 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	}
 }
 
-func TestRideFreezesValidationLoopSettingsAndBriefTightening(t *testing.T) {
-	f := newRideFixture(t)
+func TestStartFreezesValidationLoopSettingsAndBriefTightening(t *testing.T) {
+	f := newStartFixture(t)
 	global := `[defaults]
-landing_mode = "local"
+merge_mode = "local"
 
 [profiles.claude]
 kind = "claude"
@@ -205,12 +205,12 @@ rerun_cancelled = 2
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(global), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nreview_rounds: 2\n---\nCreate a committed file.\n"
+	brief := "---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\nreview_rounds: 2\n---\nCreate a committed file.\n"
 	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := f.ride(t); code != 0 {
-		t.Fatalf("ride code=%d %s", code, output)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
 	}
 	task, _ := f.onlyTask(t)
 	plan, err := task.AdmittedPlan()
@@ -241,24 +241,24 @@ rerun_cancelled = 2
 	}
 }
 
-func TestRideRejectsValidationConfigAboveThreeRounds(t *testing.T) {
-	f := newRideFixture(t)
+func TestStartRejectsValidationConfigAboveThreeRounds(t *testing.T) {
+	f := newStartFixture(t)
 	global := "[review_loop]\nmax_rounds = 4\n"
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(global), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := f.ride(t); code != 1 || !strings.Contains(output, "config_invalid") || !strings.Contains(output, "review_loop.max_rounds") {
+	if code, output := f.start(t); code != 1 || !strings.Contains(output, "config_invalid") || !strings.Contains(output, "review_loop.max_rounds") {
 		t.Fatalf("invalid review cap exit=%d output=%s", code, output)
 	}
 	if f.fake.CallCount("tab.create") != 0 || f.fake.CallCount("agent.start") != 0 {
-		t.Fatalf("invalid loop config allocated Rider resources: %#v", f.fake.Calls)
+		t.Fatalf("invalid loop config allocated Worker resources: %#v", f.fake.Calls)
 	}
 }
 
-func TestRideRejectsBriefReviewRoundsAboveConfiguredCap(t *testing.T) {
-	f := newRideFixture(t)
+func TestStartRejectsBriefReviewRoundsAboveConfiguredCap(t *testing.T) {
+	f := newStartFixture(t)
 	global := `[defaults]
-landing_mode = "local"
+merge_mode = "local"
 
 [profiles.claude]
 kind = "claude"
@@ -272,15 +272,15 @@ max_rounds = 2
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(global), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nreview_rounds: 3\n---\nCreate a committed file.\n"
+	brief := "---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\nreview_rounds: 3\n---\nCreate a committed file.\n"
 	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := f.ride(t); code != 1 || !strings.Contains(output, "brief_invalid") || !strings.Contains(output, "cannot exceed") {
+	if code, output := f.start(t); code != 1 || !strings.Contains(output, "brief_invalid") || !strings.Contains(output, "cannot exceed") {
 		t.Fatalf("raised Brief cap exit=%d output=%s", code, output)
 	}
 	if f.fake.CallCount("tab.create") != 0 || f.fake.CallCount("agent.start") != 0 {
-		t.Fatalf("invalid Brief allocated Rider resources: %#v", f.fake.Calls)
+		t.Fatalf("invalid Brief allocated Worker resources: %#v", f.fake.Calls)
 	}
 }
 

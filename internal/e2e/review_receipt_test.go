@@ -15,35 +15,35 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// reviewEvidenceFixture drives Ship Tasks by hand on PR delivery: the fake
+// reviewEvidenceFixture drives Change Tasks by hand on PR delivery: the fake
 // agents stay idle, so each test commits, publishes and signals explicitly.
 func reviewEvidenceFixture(t *testing.T, review string) *prLifecycleFixture {
 	t.Helper()
 	f := reviewIdentityFixture(t)
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.landing_mode", "pr")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", review)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	return f
 }
 
-// publishCandidate commits on the Ship branch, publishes it as PR number and
-// reports done, as a Rider would.
+// publishCandidate commits on the Change branch, publishes it as PR number and
+// reports done, as a Worker would.
 func publishCandidate(t *testing.T, f *prLifecycleFixture, title, profile string, number int) store.Task {
 	t.Helper()
 	if code, out := rideReviewIdentityTask(t, f, title, profile, ""); code != 0 {
-		t.Fatalf("ride %s: %d %s", title, code, out)
+		t.Fatalf("start %s: %d %s", title, code, out)
 	}
 	tasks, err := f.db.Tasks(context.Background(), f.project.ID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ship := tasks[len(tasks)-1]
-	commitFile(t, f, ship, "candidate-"+taskIDOf(ship)+".txt", "candidate "+title)
-	env := setEnv(f.env, "HERDR_PANE_ID", ship.PaneID)
+	change := tasks[len(tasks)-1]
+	commitFile(t, f, change, "candidate-"+taskIDOf(change)+".txt", "candidate "+title)
+	env := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
 	env = setEnv(env, "POSSE_WORKER_HOME", f.home)
-	runPosse(t, f.binary, ship.WorktreePath, env, "publish", "Candidate "+title)
-	signalReviewPolicyTask(t, f, ship, "--pr", "https://github.com/acme/shop/pull/"+strconv.Itoa(number))
-	return f.mustTask(t, taskIDOf(ship))
+	runPosse(t, f.binary, change.WorktreePath, env, "publish", "Candidate "+title)
+	signalReviewPolicyTask(t, f, change, "--pr", "https://github.com/acme/shop/pull/"+strconv.Itoa(number))
+	return f.mustTask(t, taskIDOf(change))
 }
 
 // commitFile commits a real change: squash merges drop empty commits.
@@ -96,9 +96,9 @@ func requireRefusal(t *testing.T, f *prLifecycleFixture, code string, args ...st
 	}
 }
 
-func passReview(t *testing.T, f *prLifecycleFixture, ship store.Task, title string) {
+func passReview(t *testing.T, f *prLifecycleFixture, change store.Task, title string) {
 	t.Helper()
-	if code, out := rideReviewIdentityTask(t, f, title, "reviewer", taskIDOf(ship)); code != 0 {
+	if code, out := rideReviewIdentityTask(t, f, title, "reviewer", taskIDOf(change)); code != 0 {
 		t.Fatalf("review: %d %s", code, out)
 	}
 	tasks, err := f.db.Tasks(context.Background(), f.project.ID, true)
@@ -115,39 +115,39 @@ func passReview(t *testing.T, f *prLifecycleFixture, ship store.Task, title stri
 
 func TestPRMergeBindsHeadObservationAndLocalVerdict(t *testing.T) {
 	f := reviewEvidenceFixture(t, "local")
-	ship := publishCandidate(t, f, "PR lifecycle change", "author", 17)
-	requireRefusal(t, f, "review_required", "land", "t1")
-	passReview(t, f, ship, "First review")
-	if code, out := runReviewIdentityCLI(t, f, "land", "t1"); code != 0 || !strings.Contains(out, "landing") {
-		t.Fatalf("reviewed PR did not open Land: %d %s", code, out)
+	change := publishCandidate(t, f, "PR lifecycle change", "author", 17)
+	requireRefusal(t, f, "review_required", "merge", "t1")
+	passReview(t, f, change, "First review")
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 || !strings.Contains(out, "merging") {
+		t.Fatalf("reviewed PR did not open Merge: %d %s", code, out)
 	}
 	reviewed := f.mustTask(t, "t1").GatedSHA
-	observePR(t, f, ship, 17, "OPEN", "SUCCESS", reviewed, "")
+	observePR(t, f, change, 17, "OPEN", "SUCCESS", reviewed, "")
 
-	// The Rider pushes an unreviewed commit; CI turns green for the new head.
-	commitFile(t, f, ship, "follow-up.txt", "unreviewed follow-up")
-	gitTest(t, f.env, ship.WorktreePath, "push", "origin", ship.Branch)
-	moved := strings.TrimSpace(gitTest(t, f.env, ship.WorktreePath, "rev-parse", "HEAD"))
-	observePR(t, f, ship, 17, "OPEN", "SUCCESS", moved, "")
-	requireRefusal(t, f, "branch_moved", "land", "t1", "--merge")
+	// The Worker pushes an unreviewed commit; CI turns green for the new head.
+	commitFile(t, f, change, "follow-up.txt", "unreviewed follow-up")
+	gitTest(t, f.env, change.WorktreePath, "push", "origin", change.Branch)
+	moved := strings.TrimSpace(gitTest(t, f.env, change.WorktreePath, "rev-parse", "HEAD"))
+	observePR(t, f, change, 17, "OPEN", "SUCCESS", moved, "")
+	requireRefusal(t, f, "branch_moved", "merge", "t1", "--execute")
 	// Re-gating the new head finds the pass bound to the older head only.
-	requireRefusal(t, f, "review_required", "land", "t1")
+	requireRefusal(t, f, "review_required", "merge", "t1")
 	if got := f.mustTask(t, "t1"); got.State != store.StateDone {
 		t.Fatalf("stale evidence advanced the Task: %s", got.State)
 	}
 
 	passReview(t, f, f.mustTask(t, "t1"), "Second review")
-	if code, out := runReviewIdentityCLI(t, f, "land", "t1"); code != 0 {
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 {
 		t.Fatalf("current pass refused: %d %s", code, out)
 	}
 	if got := f.mustTask(t, "t1").GatedSHA; got != moved {
 		t.Fatalf("gated %s, want %s", got, moved)
 	}
 	// A green observation of the older head never qualifies the new head.
-	observePR(t, f, ship, 17, "OPEN", "SUCCESS", reviewed, "")
-	requireRefusal(t, f, "checks_not_green", "land", "t1", "--merge")
-	observePR(t, f, ship, 17, "OPEN", "SUCCESS", moved, "")
-	if code, out := runReviewIdentityCLI(t, f, "land", "t1", "--merge"); code != 0 {
+	observePR(t, f, change, 17, "OPEN", "SUCCESS", reviewed, "")
+	requireRefusal(t, f, "checks_not_green", "merge", "t1", "--execute")
+	observePR(t, f, change, 17, "OPEN", "SUCCESS", moved, "")
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1", "--execute"); code != 0 {
 		t.Fatalf("aligned head, observation and verdict refused: %d %s", code, out)
 	}
 	calls, err := os.ReadFile(f.ghLog)
@@ -155,21 +155,21 @@ func TestPRMergeBindsHeadObservationAndLocalVerdict(t *testing.T) {
 		t.Fatalf("merge was not pinned to the reviewed head: %v\n%s", err, calls)
 	}
 	merge := f.mergeOnLocalOrigin(t, f.mustTask(t, "t1"), "t1")
-	observePR(t, f, ship, 17, "MERGED", "SUCCESS", moved, merge)
-	waitLanded(t, f, "t1", merge)
+	observePR(t, f, change, 17, "MERGED", "SUCCESS", moved, merge)
+	waitMerged(t, f, "t1", merge)
 	requireNoNotice(t, f, "t1", "review_policy_violation")
 }
 
 func TestExternalMergeWithoutEvidenceIsPolicyViolation(t *testing.T) {
 	f := reviewEvidenceFixture(t, "local")
-	ship := publishCandidate(t, f, "External merge change", "author", 17)
-	stopBackgroundLookout(t, f)
-	merge := f.mergeOnLocalOrigin(t, ship, "t1")
-	observePR(t, f, ship, 17, "MERGED", "SUCCESS", strings.TrimSpace(gitTest(t, f.env, ship.WorktreePath, "rev-parse", "HEAD")), merge)
-	waitLanded(t, f, "t1", merge)
+	change := publishCandidate(t, f, "External merge change", "author", 17)
+	stopBackgroundWatch(t, f)
+	merge := f.mergeOnLocalOrigin(t, change, "t1")
+	observePR(t, f, change, 17, "MERGED", "SUCCESS", strings.TrimSpace(gitTest(t, f.env, change.WorktreePath, "rev-parse", "HEAD")), merge)
+	waitMerged(t, f, "t1", merge)
 	f.requireNotice(t, "t1", "pr_merged")
 	f.requireNotice(t, "t1", "review_policy_violation")
-	verdicts, err := f.db.ReviewVerdictsFor(context.Background(), ship.ID)
+	verdicts, err := f.db.ReviewVerdictsFor(context.Background(), change.ID)
 	if err != nil || len(verdicts) != 0 {
 		t.Fatalf("external merge fabricated a verdict: %#v %v", verdicts, err)
 	}
@@ -178,14 +178,14 @@ func TestExternalMergeWithoutEvidenceIsPolicyViolation(t *testing.T) {
 	}
 }
 
-// waitLanded accepts landed or the automatic Teardown that follows a merge.
-func waitLanded(t *testing.T, f *prLifecycleFixture, taskID, merge string) {
+// waitMerged accepts merged or the automatic Teardown that follows a merge.
+func waitMerged(t *testing.T, f *prLifecycleFixture, taskID, merge string) {
 	t.Helper()
 	if !waitForCondition(30*time.Second, func() bool {
 		task := f.mustTask(t, taskID)
-		return (task.State == store.StateLanded || task.State == store.StateTornDown) && task.LandedRef == merge
+		return (task.State == store.StateMerged || task.State == store.StateTornDown) && task.MergedRef == merge
 	}) {
-		t.Fatalf("Task %s did not Land at %s: %#v", taskID, merge, f.mustTask(t, taskID))
+		t.Fatalf("Task %s did not Merge at %s: %#v", taskID, merge, f.mustTask(t, taskID))
 	}
 }
 
@@ -235,35 +235,35 @@ func writeReceipt(t *testing.T, path, head, runStatus, reviewStatus, model strin
 func TestNoMistakesReceiptGatesPRMergeAtExactHead(t *testing.T) {
 	f := reviewEvidenceFixture(t, "no-mistakes")
 	receipt, log := installFakeNoMistakes(t, f)
-	ship := publishCandidate(t, f, "PR lifecycle change", "author", 17)
-	head := strings.TrimSpace(gitTest(t, f.env, ship.WorktreePath, "rev-parse", "HEAD"))
+	change := publishCandidate(t, f, "PR lifecycle change", "author", 17)
+	head := strings.TrimSpace(gitTest(t, f.env, change.WorktreePath, "rev-parse", "HEAD"))
 
-	requireRefusal(t, f, "review_receipt_unsupported", "land", "t1")
+	requireRefusal(t, f, "review_receipt_unsupported", "merge", "t1")
 	writeReceipt(t, receipt, head, "failed", "failed", "model-r")
-	requireRefusal(t, f, "review_receipt_failed", "land", "t1")
+	requireRefusal(t, f, "review_receipt_failed", "merge", "t1")
 	writeReceipt(t, receipt, head, "completed", "passed", "model-a")
-	requireRefusal(t, f, "review_receipt_identity_ineligible", "land", "t1")
+	requireRefusal(t, f, "review_receipt_identity_ineligible", "merge", "t1")
 	if got := f.mustTask(t, "t1"); got.State != store.StateDone {
 		t.Fatalf("refused receipts advanced the Task: %s", got.State)
 	}
 
 	writeReceipt(t, receipt, head, "completed", "passed", "model-r")
-	if code, out := runReviewIdentityCLI(t, f, "land", "t1"); code != 0 || !strings.Contains(out, "landing") {
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 || !strings.Contains(out, "merging") {
 		t.Fatalf("passing receipt refused: %d %s", code, out)
 	}
-	observePR(t, f, ship, 17, "OPEN", "SUCCESS", head, "")
+	observePR(t, f, change, 17, "OPEN", "SUCCESS", head, "")
 	// The pipeline now reports a different head: the stored receipt does not
 	// carry over, and nothing merges.
 	writeReceipt(t, receipt, strings.Repeat("c", 40), "completed", "passed", "model-r")
-	requireRefusal(t, f, "review_receipt_stale", "land", "t1", "--merge")
+	requireRefusal(t, f, "review_receipt_stale", "merge", "t1", "--execute")
 	writeReceipt(t, receipt, head, "completed", "passed", "model-r")
-	if code, out := runReviewIdentityCLI(t, f, "land", "t1", "--merge"); code != 0 {
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1", "--execute"); code != 0 {
 		t.Fatalf("aligned receipt refused: %d %s", code, out)
 	}
 	if _, err := os.Stat(f.ghMerge); err != nil {
 		t.Fatalf("merge was not issued: %v", err)
 	}
-	receipts, err := f.db.ReviewReceipts(context.Background(), ship.ID)
+	receipts, err := f.db.ReviewReceipts(context.Background(), change.ID)
 	if err != nil || len(receipts) != 1 || receipts[0].HeadSHA != head || receipts[0].ReviewerModel != "model-r" || receipts[0].RunID != "01RUNcompleted" {
 		t.Fatalf("qualifying receipt record: %#v %v", receipts, err)
 	}

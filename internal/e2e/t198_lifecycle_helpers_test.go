@@ -84,48 +84,48 @@ func cleanupTeardownFixtureProcesses(t *testing.T, root string, names []string, 
 	}
 }
 
-func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, root string, env, leadEnv []string, db *store.DB, project store.Project, task store.Task, processes map[string]teardownFixtureProcess) {
+func finishTeardownOwnerchangeLifecycle(t *testing.T, mode, binary, repo, home, root string, env, leadEnv []string, db *store.DB, project store.Project, task store.Task, processes map[string]teardownFixtureProcess) {
 	t.Helper()
 	scratch := filepath.Join(home, "scratch", "shop", "t1")
 
 	switch mode {
 	case "local-ordering", "local-held-prune":
-		if got := runPosse(t, binary, repo, leadEnv, "land", "t1", "--merge", "--user-approved", "User approved the isolated local Land"); !strings.Contains(got, "state: landed") {
-			t.Fatalf("local Land did not leave a landed Task for explicit Teardown: %s", got)
+		if got := runPosse(t, binary, repo, leadEnv, "merge", "t1", "--execute", "--user-approved", "User approved the isolated local Merge"); !strings.Contains(got, "state: merged") {
+			t.Fatalf("local Merge did not leave a merged Task for explicit Teardown: %s", got)
 		}
 		if got := gitTest(t, env, repo, "show", "main:evidence.txt"); got != "evidence\n" {
-			t.Fatalf("local Land lost delivered work: %q", got)
+			t.Fatalf("local Merge lost delivered work: %q", got)
 		}
 		if mode == "local-held-prune" {
-			mount, err := db.MountByTask(context.Background(), task.ID)
-			if err != nil || mount.State != "held" {
-				t.Fatalf("Land did not retain its Mount: %#v %v", mount, err)
+			sandbox, err := db.SandboxByTask(context.Background(), task.ID)
+			if err != nil || sandbox.State != "held" {
+				t.Fatalf("Merge did not retain its Sandbox: %#v %v", sandbox, err)
 			}
 			before := strings.TrimSpace(gitTest(t, env, task.WorktreePath, "rev-parse", "HEAD"))
-			dryRun := runPosse(t, binary, repo, leadEnv, "remuda", "prune")
+			dryRun := runPosse(t, binary, repo, leadEnv, "pool", "prune")
 			if strings.Contains(dryRun, task.Branch) {
-				t.Fatalf("prune lists held Rider branch %s as reclaimable: %s", task.Branch, dryRun)
+				t.Fatalf("prune lists held Worker branch %s as reclaimable: %s", task.Branch, dryRun)
 			}
-			runPosse(t, binary, repo, leadEnv, "remuda", "prune", "--yes")
+			runPosse(t, binary, repo, leadEnv, "pool", "prune", "--yes")
 			after := strings.TrimSpace(gitTest(t, env, task.WorktreePath, "rev-parse", "HEAD"))
 			if after != before {
-				t.Fatalf("prune changed held Rider HEAD from %s to %s", before, after)
+				t.Fatalf("prune changed held Worker HEAD from %s to %s", before, after)
 			}
-			if current, err := db.MountByTask(context.Background(), task.ID); err != nil || current.State != "held" {
-				t.Fatalf("prune changed the held Mount: %#v %v", current, err)
+			if current, err := db.SandboxByTask(context.Background(), task.ID); err != nil || current.State != "held" {
+				t.Fatalf("prune changed the held Sandbox: %#v %v", current, err)
 			}
 			if _, err := gitCommand(env, repo, "show-ref", "--verify", "refs/heads/"+task.Branch); err != nil {
 				t.Fatalf("prune deleted the checked-out branch: %v", err)
 			}
 			return
 		}
-		runPosse(t, binary, repo, leadEnv, "unsaddle", "t1")
+		runPosse(t, binary, repo, leadEnv, "teardown", "t1")
 	case "failed-discard-ordering":
 		client := herdr.NewWithEnv("herdr", env)
 		if _, err := client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": task.HerdrWorkspaceID}); err != nil {
-			t.Fatalf("close the exited Rider workspace before discard: %v", err)
+			t.Fatalf("close the exited Worker workspace before discard: %v", err)
 		}
-		command := exec.Command(binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved the isolated failed Rider discard")
+		command := exec.Command(binary, "teardown", "t1", "--discard", "--user-approved", "User approved the isolated failed Worker discard")
 		command.Dir, command.Env = repo, leadEnv
 		output, err := command.CombinedOutput()
 		if err == nil || !strings.Contains(string(output), "refusing approved discard while processes remain in Task-owned paths") {
@@ -149,15 +149,15 @@ func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, ro
 		}) {
 			t.Fatal("Task-owned background process did not exit naturally")
 		}
-		runPosse(t, binary, repo, leadEnv, "unsaddle", "t1", "--discard", "--user-approved", "User approved the isolated failed Rider discard")
+		runPosse(t, binary, repo, leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved the isolated failed Worker discard")
 		bundles, err := filepath.Glob(filepath.Join(home, "projects", "shop", "tasks", "t1", "discard", "*.bundle"))
 		if err != nil || len(bundles) != 1 {
 			t.Fatalf("failed discard lost approved tip bundle: %v %v", bundles, err)
 		}
 	case "scratch-child":
-		runPosse(t, binary, repo, leadEnv, "unsaddle", "t1")
+		runPosse(t, binary, repo, leadEnv, "teardown", "t1")
 		if !waitForCondition(7*time.Second, func() bool { return !teardownFixtureProcessRunning(processes["background"]) }) {
-			t.Fatalf("Rider-created scratch process survived Teardown: pid=%d cwd=%q", processes["background"].PID, processCWD(processes["background"].PID))
+			t.Fatalf("Worker-created scratch process survived Teardown: pid=%d cwd=%q", processes["background"].PID, processCWD(processes["background"].PID))
 		}
 		assertFixtureDescriptorClosed(t, processes["background"], "3", "open-cache")
 		for _, name := range []string{"global-child", "other-task-child"} {
@@ -183,7 +183,7 @@ func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, ro
 			t.Fatalf("shutdown writer survived Teardown: pid=%d cwd=%q", processes["background"].PID, processCWD(processes["background"].PID))
 		}
 		if contents, err := os.ReadFile(filepath.Join(root, "shutdown-marker")); err != nil || string(contents) != "shutdown handler ran\n" {
-			t.Fatalf("Rider shutdown handler did not run before scratch cleanup: %q %v", contents, err)
+			t.Fatalf("Worker shutdown handler did not run before scratch cleanup: %q %v", contents, err)
 		}
 	}
 	if mode == "scratch-child" {
@@ -195,7 +195,7 @@ func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, ro
 		}
 	}
 	if got := gitTest(t, env, task.WorktreePath, "status", "--porcelain"); strings.TrimSpace(got) != "" {
-		t.Errorf("Mount not clean: %s", got)
+		t.Errorf("Sandbox not clean: %s", got)
 	}
 	if _, err := gitCommand(env, repo, "show-ref", "--verify", "refs/heads/"+task.Branch); err == nil {
 		t.Error("finished Task local branch remains")
@@ -245,7 +245,7 @@ func assertFixtureDescriptorClosed(t *testing.T, process teardownFixtureProcess,
 	t.Helper()
 	path := fmt.Sprintf("/proc/%d/fd/%s", process.PID, fd)
 	if target, err := os.Readlink(path); err == nil && strings.Contains(target, name) {
-		t.Errorf("Teardown left the Rider cache descriptor open: %s -> %s", path, target)
+		t.Errorf("Teardown left the Worker cache descriptor open: %s -> %s", path, target)
 	}
 }
 

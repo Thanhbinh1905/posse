@@ -142,7 +142,7 @@ func buildReportBundleManifest(root string, task store.Task) (reportBundleManife
 
 func verifyReportBundle(home string, project store.Project, task store.Task) error {
 	if task.ReportDigest == "" || task.ReportManifestJSON == "" {
-		return fmt.Errorf("report bundle has not been finalized; Teardown the Scout Task first")
+		return fmt.Errorf("report bundle has not been finalized; Teardown the Research Task first")
 	}
 	encoded := []byte(task.ReportManifestJSON)
 	if reportDigest(encoded) != task.ReportDigest {

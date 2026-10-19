@@ -60,12 +60,12 @@ func TestOpenCodeWorkerArgsAndResume(t *testing.T) {
 }
 
 func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testing.T) {
-	task := store.Task{Seq: 12, Title: "Stable output for workers", ShortName: "stable-output", Branch: "posse/t12", WorktreePath: "/tmp/remuda/shop/mount-2", PaneID: "w2:p1", PaneLabel: "posse:shop:t12"}
+	task := store.Task{Seq: 12, Title: "Stable output for workers", ShortName: "stable-output", Branch: "posse/t12", WorktreePath: "/tmp/pool/shop/sandbox-2", PaneID: "w2:p1", PaneLabel: "posse:shop:t12"}
 	if got := workerTabLabel(task); got != "stable-output" {
 		t.Fatalf("Worker tab label = %q", got)
 	}
 	metadata := workerDisplayMetadata(task, "claude", "")
-	if metadata["title"] != "Stable output for workers · stable-output · /tmp/remuda/shop/mount-2" || metadata["clear_display_agent"] != nil || metadata["display_agent"] != "claude" || metadata["pane_id"] != task.PaneID {
+	if metadata["title"] != "Stable output for workers · stable-output · /tmp/pool/shop/sandbox-2" || metadata["clear_display_agent"] != nil || metadata["display_agent"] != "claude" || metadata["pane_id"] != task.PaneID {
 		t.Fatalf("Worker display metadata = %#v", metadata)
 	}
 	if got := taskPaneLabel.FindString(task.PaneLabel); got != task.PaneLabel {
@@ -77,19 +77,19 @@ func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testi
 	}
 }
 
-func TestWorkerDisplayMountContextDoesNotTruncateMidPath(t *testing.T) {
-	mount := filepath.Join("/tmp", strings.Repeat("ci-run-", 18), "posse", "remuda", "shop", "mount-3")
-	task := store.Task{Seq: 3, Title: "Show Worker worktrees", ShortName: "show-worktrees", Branch: "posse/show-worktrees", WorktreePath: mount, PaneID: "w2:p1"}
+func TestWorkerDisplaySandboxContextDoesNotTruncateMidPath(t *testing.T) {
+	sandbox := filepath.Join("/tmp", strings.Repeat("ci-run-", 18), "posse", "pool", "shop", "sandbox-3")
+	task := store.Task{Seq: 3, Title: "Show Worker worktrees", ShortName: "show-worktrees", Branch: "posse/show-worktrees", WorktreePath: sandbox, PaneID: "w2:p1"}
 	metadata := workerDisplayMetadata(task, "codex", "")
 	if metadata["clear_display_agent"] != nil || metadata["display_agent"] != "codex" {
 		t.Fatalf("Worker harness subtitle does not match the detected agent: %#v", metadata)
 	}
 	tokens := metadata["tokens"].(map[string]string)
-	if got := tokens["posse_mount"]; got != "mount-3" {
-		t.Fatalf("Mount token = %q, want stable basename rather than Herdr's truncated path", got)
+	if got := tokens["posse_sandbox"]; got != "sandbox-3" {
+		t.Fatalf("Sandbox token = %q, want stable basename rather than Herdr's truncated path", got)
 	}
-	if got := metadata["title"].(string); !strings.Contains(got, mount) {
-		t.Fatalf("full Mount path was not submitted as pane title: %q", got)
+	if got := metadata["title"].(string); !strings.Contains(got, sandbox) {
+		t.Fatalf("full Sandbox path was not submitted as pane title: %q", got)
 	}
 }
 
@@ -109,7 +109,7 @@ func TestTaskTitlesGenerateDisplayNames(t *testing.T) {
 	}
 }
 
-func TestRideRejectsInvalidOptionalDisplayName(t *testing.T) {
+func TestStartRejectsInvalidOptionalDisplayName(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
@@ -125,7 +125,7 @@ func TestRideRejectsInvalidOptionalDisplayName(t *testing.T) {
 		t.Fatal(err)
 	}
 	brief := filepath.Join(root, "brief.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Fix unstable tests\ndone_when: Tests pass\n---\nRepair.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Fix unstable tests\ndone_when: Tests pass\n---\nRepair.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(repo)
@@ -134,8 +134,8 @@ func TestRideRejectsInvalidOptionalDisplayName(t *testing.T) {
 			output := &bytes.Buffer{}
 			cli := testService(home, nil).CLI()
 			cli.Out, cli.ErrOut = output, output
-			if code := cli.Run([]string{"ride", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "safe lowercase kebab-case") {
-				t.Fatalf("invalid Rider name exit=%d output=%s", code, output.String())
+			if code := cli.Run([]string{"start", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "safe lowercase kebab-case") {
+				t.Fatalf("invalid Worker name exit=%d output=%s", code, output.String())
 			}
 		})
 	}
@@ -147,13 +147,13 @@ func TestRideRejectsInvalidOptionalDisplayName(t *testing.T) {
 	}
 }
 
-func TestRideRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestStartRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {
+	fixture := newStartFixture(t)
 	gitTest(t, fixture.repo, "branch", "posse/t1")
 	output := &bytes.Buffer{}
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = output, output
-	if code := cli.Run([]string{"ride", "--brief", fixture.brief, "--name", "independent-label"}); code != 1 || !strings.Contains(output.String(), "branch_exists") || !strings.Contains(output.String(), "posse/t1") {
+	if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", "independent-label"}); code != 1 || !strings.Contains(output.String(), "branch_exists") || !strings.Contains(output.String(), "posse/t1") {
 		t.Fatalf("Task-bound branch collision exit=%d output=%s", code, output.String())
 	}
 	db, err := store.OpenReadOnly(fixture.home)
@@ -165,14 +165,14 @@ func TestRideRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {
 	if err != nil || len(tasks) != 0 {
 		t.Fatalf("branch collision allocated a Task: %#v, %v", tasks, err)
 	}
-	mounts, err := db.Mounts(context.Background(), fixture.project.ID)
-	if err != nil || len(mounts) != 0 {
-		t.Fatalf("branch collision acquired a Mount: %#v, %v", mounts, err)
+	sandboxes, err := db.Sandboxes(context.Background(), fixture.project.ID)
+	if err != nil || len(sandboxes) != 0 {
+		t.Fatalf("branch collision acquired a Sandbox: %#v, %v", sandboxes, err)
 	}
 }
 
-func TestRideRejectsNoMistakesOnNonDefaultTargetBeforeAllocatingResources(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestStartRejectsNoMistakesOnNonDefaultTargetBeforeAllocatingResources(t *testing.T) {
+	fixture := newStartFixture(t)
 	origin := filepath.Join(filepath.Dir(fixture.repo), "origin.git")
 	gitTest(t, filepath.Dir(fixture.repo), "init", "--bare", origin)
 	gitTest(t, fixture.repo, "remote", "add", "origin", origin)
@@ -181,13 +181,13 @@ func TestRideRejectsNoMistakesOnNonDefaultTargetBeforeAllocatingResources(t *tes
 	gitTest(t, fixture.repo, "push", "origin", "staging")
 	gitTest(t, fixture.repo, "switch", "main")
 	installReadyNoMistakes(t)
-	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nlanding_mode: no-mistakes\ntarget: staging\n---\nCreate a committed file.\n"
+	brief := "---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\nmerge_mode: no-mistakes\ntarget: staging\n---\nCreate a committed file.\n"
 	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, output := fixture.ride(t)
+	code, output := fixture.start(t)
 	if code != 1 || !strings.Contains(output, "no_mistakes_target_unsupported") {
-		t.Fatalf("ride did not refuse unsupported no-mistakes target: code=%d output=%s", code, output)
+		t.Fatalf("start did not refuse unsupported no-mistakes target: code=%d output=%s", code, output)
 	}
 	if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
 		t.Fatalf("unsupported no-mistakes target allocated Herdr resources: calls=%#v", fixture.fake.Calls)
@@ -201,9 +201,9 @@ func TestRideRejectsNoMistakesOnNonDefaultTargetBeforeAllocatingResources(t *tes
 	if err != nil || len(tasks) != 0 {
 		t.Fatalf("unsupported no-mistakes target allocated Tasks: %#v, %v", tasks, err)
 	}
-	mounts, err := db.Mounts(context.Background(), fixture.project.ID)
-	if err != nil || len(mounts) != 0 {
-		t.Fatalf("unsupported no-mistakes target acquired Mounts: %#v, %v", mounts, err)
+	sandboxes, err := db.Sandboxes(context.Background(), fixture.project.ID)
+	if err != nil || len(sandboxes) != 0 {
+		t.Fatalf("unsupported no-mistakes target acquired Sandboxes: %#v, %v", sandboxes, err)
 	}
 	if _, err := os.Stat(filepath.Join(fixture.home, "scratch", "shop", "t1")); !os.IsNotExist(err) {
 		t.Fatalf("unsupported no-mistakes target allocated Task scratch: %v", err)
@@ -216,18 +216,18 @@ func TestRideRejectsNoMistakesOnNonDefaultTargetBeforeAllocatingResources(t *tes
 	}
 }
 
-func TestRideAdmitsDefaultTargetNoMistakesWithDeprecationWarning(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestStartAdmitsDefaultTargetNoMistakesWithDeprecationWarning(t *testing.T) {
+	fixture := newStartFixture(t)
 	origin := filepath.Join(filepath.Dir(fixture.repo), "origin.git")
 	gitTest(t, filepath.Dir(fixture.repo), "init", "--bare", origin)
 	gitTest(t, fixture.repo, "remote", "add", "origin", origin)
 	gitTest(t, fixture.repo, "push", "origin", "main")
 	installReadyNoMistakes(t)
-	brief := "---\ntype: ship\ntitle: Launch probe\ndone_when: the Worker acts\nlanding_mode: no-mistakes\n---\nCreate a committed file.\n"
+	brief := "---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\nmerge_mode: no-mistakes\n---\nCreate a committed file.\n"
 	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, output := fixture.ride(t)
+	code, output := fixture.start(t)
 	if code != 0 || !strings.Contains(output, "deprecated") {
 		t.Fatalf("default-target no-mistakes Task was not admitted with warning: code=%d output=%s", code, output)
 	}
@@ -237,7 +237,7 @@ func TestRideAdmitsDefaultTargetNoMistakesWithDeprecationWarning(t *testing.T) {
 	}
 	defer db.Close()
 	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
-	if err != nil || len(tasks) != 1 || tasks[0].LandingMode != "no-mistakes" || tasks[0].TargetBranch != "main" || tasks[0].State != store.StateWorking {
+	if err != nil || len(tasks) != 1 || tasks[0].MergeMode != "no-mistakes" || tasks[0].TargetBranch != "main" || tasks[0].State != store.StateWorking {
 		t.Fatalf("default-target Task behavior changed: %#v, %v", tasks, err)
 	}
 }
@@ -254,7 +254,7 @@ func installReadyNoMistakes(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func TestRideReportsMountSetupFailureAndReleasesMount(t *testing.T) {
+func TestStartReportsSandboxSetupFailureAndReleasesSandbox(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -263,15 +263,15 @@ func TestRideReportsMountSetupFailureAndReleasesMount(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, "projects", "shop"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	globalConfig := "[defaults]\nlanding_mode = \"local\"\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n"
+	globalConfig := "[defaults]\nmerge_mode = \"local\"\n\n[profiles.fast]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"fast\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(globalConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, "projects", "shop", "config.toml"), []byte("[remuda]\nsetup = [\"false\"]\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "projects", "shop", "config.toml"), []byte("[pool]\nsetup = [\"false\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	briefPath := filepath.Join(root, "brief.md")
-	if err := os.WriteFile(briefPath, []byte("---\ntype: ship\ntitle: Setup failure\ndone_when: setup passes\n---\nCreate a committed file.\n"), 0o600); err != nil {
+	if err := os.WriteFile(briefPath, []byte("---\ntype: change\ntitle: Setup failure\ndone_when: setup passes\n---\nCreate a committed file.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db, err := store.Open(home)
@@ -295,8 +295,8 @@ func TestRideReportsMountSetupFailureAndReleasesMount(t *testing.T) {
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = output, output
 	t.Chdir(repo)
-	if code := cli.Run([]string{"ride", "--brief", briefPath}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
-		t.Fatalf("ride setup failure code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"start", "--brief", briefPath}); code != 1 || !strings.Contains(output.String(), "sandbox_setup_failed") {
+		t.Fatalf("start setup failure code=%d output=%s", code, output.String())
 	}
 	db, err = store.Open(home)
 	if err != nil {
@@ -308,33 +308,33 @@ func TestRideReportsMountSetupFailureAndReleasesMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	tasks, err := db.Tasks(ctx, project.ID, true)
-	if err != nil || len(tasks) != 1 || tasks[0].State != store.StateFailed || tasks[0].MountID != 0 || tasks[0].ShortName != "setup-failure" || tasks[0].Branch != "posse/t1" {
+	if err != nil || len(tasks) != 1 || tasks[0].State != store.StateFailed || tasks[0].SandboxID != 0 || tasks[0].ShortName != "setup-failure" || tasks[0].Branch != "posse/t1" {
 		t.Fatalf("failed setup Task = %#v, %v", tasks, err)
 	}
 	output.Reset()
-	if code := cli.Run([]string{"ride", "--brief", briefPath, "--name", "opaque"}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
+	if code := cli.Run([]string{"start", "--brief", briefPath, "--name", "opaque"}); code != 1 || !strings.Contains(output.String(), "sandbox_setup_failed") {
 		t.Fatalf("independent display name exit=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"ride", "--brief", briefPath}); code != 1 || !strings.Contains(output.String(), "mount_setup_failed") {
+	if code := cli.Run([]string{"start", "--brief", briefPath}); code != 1 || !strings.Contains(output.String(), "sandbox_setup_failed") {
 		t.Fatalf("repeated title refused: code=%d output=%s", code, output.String())
 	}
 	if tasks, err := db.Tasks(ctx, project.ID, true); err != nil || len(tasks) != 3 || tasks[0].ShortName != "setup-failure" || tasks[1].ShortName != "opaque" || tasks[2].ShortName != "setup-failure" || tasks[0].Branch != "posse/t1" || tasks[1].Branch != "posse/t2" || tasks[2].Branch != "posse/t3" {
 		t.Fatalf("repeated titles did not get independent display names and Task branches: %#v, %v", tasks, err)
 	}
-	mounts, err := db.Mounts(ctx, project.ID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" || mounts[0].TaskID != 0 {
-		t.Fatalf("Mount after setup failure = %#v, %v", mounts, err)
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "idle" || sandboxes[0].TaskID != 0 {
+		t.Fatalf("Sandbox after setup failure = %#v, %v", sandboxes, err)
 	}
 }
 
-func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *testing.T) {
+func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
-	mount := filepath.Join(root, "mount")
-	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mount, "main")
+	sandbox := filepath.Join(root, "sandbox")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandbox, "main")
 	home := filepath.Join(root, "posse")
 	if err := os.MkdirAll(filepath.Join(home, "projects", "shop", "tasks", "t1"), 0o700); err != nil {
 		t.Fatal(err)
@@ -358,7 +358,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 		t.Fatal(err)
 	}
 	project.HerdrWorkspaceID, project.LeadPaneID, project.LeadLabel = "w3", "w3:p1", "posse:shop:lead"
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Resume", ShortName: "worker-tree", Profile: "deep", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mount, HerdrWorkspaceID: "w2", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", AgentSession: `{"session_id":"session-9"}`})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Resume", ShortName: "worker-tree", Profile: "deep", MergeMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: sandbox, HerdrWorkspaceID: "w2", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", AgentSession: `{"session_id":"session-9"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 	if err := db.Transition(ctx, taskID, store.StateWorking, store.StateLost, "cli", "lost"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, mount, taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, sandbox, taskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, taskID, taskID); err != nil {
@@ -395,9 +395,9 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	gitDir := strings.TrimSpace(gitTest(t, mount, "rev-parse", "--git-dir"))
+	gitDir := strings.TrimSpace(gitTest(t, sandbox, "rev-parse", "--git-dir"))
 	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(mount, gitDir)
+		gitDir = filepath.Join(sandbox, gitDir)
 	}
 	indexLock := filepath.Join(gitDir, "index.lock")
 	if err := os.WriteFile(indexLock, []byte("stale"), 0o600); err != nil {
@@ -458,7 +458,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 		case "workspace.rename":
 			workspaceRenamed = true
 		case "worktree.open":
-			tabCreated = call.Params["label"] == "worker-tree" && call.Params["path"] == mount
+			tabCreated = call.Params["label"] == "worker-tree" && call.Params["path"] == sandbox
 		case "agent.start":
 			startedIndex = index
 		case "pane.report_metadata":
@@ -466,7 +466,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 				firstMetadataIndex = index
 			}
 			lastMetadataIndex = index
-			metadataReported := call.Params["clear_display_agent"] == nil && call.Params["display_agent"] == "claude" && strings.Contains(call.Params["title"].(string), mount)
+			metadataReported := call.Params["clear_display_agent"] == nil && call.Params["display_agent"] == "claude" && strings.Contains(call.Params["title"].(string), sandbox)
 			metadataBeforeStart = metadataBeforeStart || (metadataReported && (startedIndex < 0 || index < startedIndex))
 			metadataAfterStart = metadataAfterStart || (metadataReported && startedIndex >= 0 && index > startedIndex)
 		}
@@ -475,7 +475,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 		t.Fatalf("relaunch relabeled a workspace or missed early harness metadata: workspace renamed=%v tab_created=%v metadata_before=%v metadata_after=%v calls=%#v", workspaceRenamed, tabCreated, metadataBeforeStart, metadataAfterStart, fake.Calls)
 	}
 	relaunchText, err := os.ReadFile(filepath.Join(home, "projects", "shop", "tasks", "t1", "relaunch.md"))
-	if err != nil || !strings.Contains(string(relaunchText), "Re-read `launch.md`") || !strings.Contains(string(relaunchText), "posse holler") || !strings.Contains(string(relaunchText), "first instruction") || !strings.Contains(string(relaunchText), "later instruction supersedes the first") {
+	if err != nil || !strings.Contains(string(relaunchText), "Re-read `launch.md`") || !strings.Contains(string(relaunchText), "posse signal") || !strings.Contains(string(relaunchText), "first instruction") || !strings.Contains(string(relaunchText), "later instruction supersedes the first") {
 		t.Fatalf("relaunch instructions were not written: %q, %v", relaunchText, err)
 	}
 	if strings.Index(string(relaunchText), "first instruction") > strings.Index(string(relaunchText), "later instruction supersedes the first") || strings.Contains(string(relaunchText), "before the Brief") || strings.Contains(string(relaunchText), "queued instruction") || !strings.Contains(string(relaunchText), "Later messages supersede earlier ones") {
@@ -487,8 +487,8 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 	}
 	defer observer.Close()
 	updated, err := observer.Task(ctx, project.ID, "t1")
-	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != mount || updated.HerdrWorkspaceID != "w4" || updated.PaneID != "w3:p2" || updated.Profile != "fast" || updated.DispatchRule != "relaunch --profile fast" {
-		t.Fatalf("relaunch changed Task Mount/state incorrectly: %#v, %v", updated, err)
+	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != sandbox || updated.HerdrWorkspaceID != "w4" || updated.PaneID != "w3:p2" || updated.Profile != "fast" || updated.DispatchRule != "relaunch --profile fast" {
+		t.Fatalf("relaunch changed Task Sandbox/state incorrectly: %#v, %v", updated, err)
 	}
 	transitions, err := observer.TaskTransitions(ctx, taskID, 10)
 	profileChangeRecorded := false
@@ -532,8 +532,8 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 		t.Fatalf("kind-changing relaunch did not set the harness subtitle before agent.start: %#v", fake.Calls)
 	}
 	codexConfig, err := os.ReadFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"))
-	if err != nil || !strings.Contains(string(codexConfig), `trust_level = "trusted"`) || !strings.Contains(string(codexConfig), mount) {
-		t.Fatalf("Codex Mount preparation was not run: %q, %v", codexConfig, err)
+	if err != nil || !strings.Contains(string(codexConfig), `trust_level = "trusted"`) || !strings.Contains(string(codexConfig), sandbox) {
+		t.Fatalf("Codex Sandbox preparation was not run: %q, %v", codexConfig, err)
 	}
 	updated, err = observer.Task(ctx, project.ID, "t1")
 	if err != nil || updated.Profile != "codex-fast" || updated.DispatchRule != "relaunch --profile codex-fast" {
@@ -558,8 +558,8 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameMount(t *test
 		t.Fatalf("interrupted relaunch did not recover: %v", err)
 	}
 	updated, err = observer.Task(ctx, project.ID, "t1")
-	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != mount || updated.Launches != 3 {
-		t.Fatalf("recovered relaunch changed Task Mount/state incorrectly: %#v, %v", updated, err)
+	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != sandbox || updated.Launches != 3 {
+		t.Fatalf("recovered relaunch changed Task Sandbox/state incorrectly: %#v, %v", updated, err)
 	}
 	launchIdentities, err := observer.TaskLaunchIdentities(ctx, taskID)
 	wantLaunchIdentities := []store.TaskLaunchIdentity{
@@ -595,12 +595,12 @@ func TestRelaunchReportsInProgressGitStateWithoutChangingIt(t *testing.T) {
 			root := t.TempDir()
 			repo := filepath.Join(root, "repo")
 			initRepo(t, repo)
-			mountPath := filepath.Join(root, "mount")
-			gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
-			gitDirText := strings.TrimSpace(gitTest(t, mountPath, "rev-parse", "--git-dir"))
+			sandboxPath := filepath.Join(root, "sandbox")
+			gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
+			gitDirText := strings.TrimSpace(gitTest(t, sandboxPath, "rev-parse", "--git-dir"))
 			gitDir := gitDirText
 			if !filepath.IsAbs(gitDir) {
-				gitDir = filepath.Join(mountPath, gitDir)
+				gitDir = filepath.Join(sandboxPath, gitDir)
 			}
 			var marker string
 			var process *exec.Cmd
@@ -621,17 +621,17 @@ func TestRelaunchReportsInProgressGitStateWithoutChangingIt(t *testing.T) {
 					t.Fatal(err)
 				}
 				process = exec.Command("bash", "-c", "exec -a git sleep 30")
-				process.Dir = mountPath
+				process.Dir = sandboxPath
 				if err := process.Start(); err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = process.Process.Kill(); _ = process.Wait() })
 				deadline := time.Now().Add(2 * time.Second)
-				for !processInMount(process.Process.Pid, mountPath) && time.Now().Before(deadline) {
+				for !processInSandbox(process.Process.Pid, sandboxPath) && time.Now().Before(deadline) {
 					time.Sleep(time.Millisecond)
 				}
 			}
-			warning, err := inspectMountGitState(context.Background(), mountPath)
+			warning, err := inspectSandboxGitState(context.Background(), sandboxPath)
 			if err != nil {
 				t.Fatalf("relaunch refused an in-progress Git operation: %v", err)
 			}
@@ -661,8 +661,8 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
-	mountPath := filepath.Join(root, "mount")
-	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
+	sandboxPath := filepath.Join(root, "sandbox")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
 	home := filepath.Join(root, "posse")
 	if err := os.MkdirAll(filepath.Join(home, "projects", "shop", "tasks", "t1"), 0o700); err != nil {
 		t.Fatal(err)
@@ -680,7 +680,7 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Resume attention state", Profile: "deep", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mountPath, HerdrWorkspaceID: "w1", PaneID: "w1:p1", PaneLabel: "posse:shop:t1", AgentName: "posse-shop-t1-1"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Resume attention state", Profile: "deep", MergeMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: sandboxPath, HerdrWorkspaceID: "w1", PaneID: "w1:p1", PaneLabel: "posse:shop:t1", AgentName: "posse-shop-t1-1"})
 	if err == nil {
 		err = db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started")
 	}
@@ -688,7 +688,7 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 		_, err = db.ExecContext(ctx, `UPDATE tasks SET state=? WHERE id=?`, string(initial), taskID)
 	}
 	if err == nil {
-		_, err = db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, mountPath, taskID)
+		_, err = db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, project.ID, sandboxPath, taskID)
 	}
 	if err == nil {
 		_, err = db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, taskID, taskID)
@@ -711,21 +711,21 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	return relaunchFixture{db: db, fake: fake, service: service, home: home, project: project, cfg: cfg, task: task}
 }
 
-func TestRelaunchDoneShipSuggestsSend(t *testing.T) {
+func TestRelaunchDoneChangeSuggestsSend(t *testing.T) {
 	fixture := newRelaunchFixture(t, store.StateDone)
 	t.Chdir(filepath.Join(filepath.Dir(fixture.home), "repo"))
 	var output bytes.Buffer
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = &output, &output
 	if code := cli.Run([]string{"relaunch", "t1"}); code != 1 || !strings.Contains(output.String(), "relaunch_refused") || !strings.Contains(output.String(), "posse send t1 <message>") {
-		t.Fatalf("done Ship relaunch did not refuse with a send step: code=%d output=%s", code, output.String())
+		t.Fatalf("done Change relaunch did not refuse with a send step: code=%d output=%s", code, output.String())
 	}
 	if len(fixture.fake.Calls) != 0 {
-		t.Fatalf("done Ship relaunch contacted Herdr before refusing: %#v", fixture.fake.Calls)
+		t.Fatalf("done Change relaunch contacted Herdr before refusing: %#v", fixture.fake.Calls)
 	}
 }
 
-func TestCodexRiderSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
+func TestCodexWorkerSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
 	const (
 		globalRule  = "Fixture safety rule: never delete user data without explicit consent."
 		profileRule = "Profile safety rule: preserve existing User changes."
@@ -736,7 +736,7 @@ func TestCodexRiderSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
 		setupFollowupAgentPath(t, "pi", "codex")
 		codexHome := filepath.Join(f.root, "codex-home")
 		writeCodexInstructionsFixture(t, codexHome, globalRule)
-		writeCodexRiderProfileFixture(t, f.home, "worker", profileRule, true, false)
+		writeCodexWorkerProfileFixture(t, f.home, "worker", profileRule, true, false)
 		t.Setenv("CODEX_HOME", codexHome)
 		f.fake.BeforeCall = func(method string) {
 			if method == "agent.start" {
@@ -746,15 +746,15 @@ func TestCodexRiderSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
 		t.Setenv("HERDR_ENV", "1")
 		t.Setenv("HERDR_PANE_ID", "w1:p1")
 		t.Setenv("HERDR_WORKSPACE_ID", "w1")
-		outcomeCLI(t, f.service, 0, "ride", "--brief", f.brief, "--name", "first-outcome")
-		assertCodexRiderDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
+		outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "first-outcome")
+		assertCodexWorkerDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
 	})
 
 	t.Run("relaunch", func(t *testing.T) {
 		f := newRelaunchFixture(t, store.StateLost)
 		codexHome := filepath.Join(filepath.Dir(f.home), "codex-home")
 		writeCodexInstructionsFixture(t, codexHome, globalRule)
-		writeCodexRiderProfileFixture(t, f.home, "deep", profileRule, false, false)
+		writeCodexWorkerProfileFixture(t, f.home, "deep", profileRule, false, false)
 		t.Setenv("CODEX_HOME", codexHome)
 		cfg, err := config.Load(f.home, f.project.Name)
 		if err != nil {
@@ -765,9 +765,9 @@ func TestCodexRiderSkillInjectionPreservesDeveloperInstructions(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := f.service.relaunchTask(context.Background(), f.db, f.home, f.project, cfg, task, ""); err != nil {
-			t.Fatalf("relaunch Codex Rider: %v", err)
+			t.Fatalf("relaunch Codex Worker: %v", err)
 		}
-		assertCodexRiderDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
+		assertCodexWorkerDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
 	})
 }
 
@@ -781,7 +781,7 @@ func writeCodexInstructionsFixture(t *testing.T, codexHome, instructions string)
 	}
 }
 
-func writeCodexRiderProfileFixture(t *testing.T, home, name, instructions string, dispatchDefault, raw bool) {
+func writeCodexWorkerProfileFixture(t *testing.T, home, name, instructions string, dispatchDefault, raw bool) {
 	t.Helper()
 	encodedInstructions := mustJSONString(t, instructions)
 	if raw {
@@ -791,7 +791,7 @@ func writeCodexRiderProfileFixture(t *testing.T, home, name, instructions string
 	if err != nil {
 		t.Fatal(err)
 	}
-	configText := "[defaults]\nlanding_mode = \"local\"\n\n[profiles." + name + "]\nkind = \"codex\"\nmodel = \"gpt-5\"\neffort = \"high\"\nargs = " + string(profileArgs) + "\n"
+	configText := "[defaults]\nmerge_mode = \"local\"\n\n[profiles." + name + "]\nkind = \"codex\"\nmodel = \"gpt-5\"\neffort = \"high\"\nargs = " + string(profileArgs) + "\n"
 	if dispatchDefault {
 		configText += "\n[dispatch.default]\nuse = \"" + name + "\"\n"
 	}
@@ -812,7 +812,7 @@ func codexStartArgs(t *testing.T, fake *herdr.Fake) []string {
 			return args
 		}
 	}
-	t.Fatal("no Codex Rider launch was recorded")
+	t.Fatal("no Codex Worker launch was recorded")
 	return nil
 }
 
@@ -825,7 +825,7 @@ func containsArgPair(args []string, flag, value string) bool {
 	return false
 }
 
-func assertCodexRiderDeveloperInstructions(t *testing.T, args []string, globalRule, profileRule string) {
+func assertCodexWorkerDeveloperInstructions(t *testing.T, args []string, globalRule, profileRule string) {
 	t.Helper()
 	var developerInstructions []string
 	for index := 0; index+1 < len(args); index++ {
@@ -855,7 +855,7 @@ func assertCodexRiderDeveloperInstructions(t *testing.T, args []string, globalRu
 	}
 }
 
-func TestCodexRiderSkillInjectionPreservesRawDeveloperInstructions(t *testing.T) {
+func TestCodexWorkerSkillInjectionPreservesRawDeveloperInstructions(t *testing.T) {
 	const (
 		globalRule  = "Fixture safety rule: never delete user data without explicit consent."
 		profileRule = "Profile safety rule: preserve existing User changes."
@@ -866,7 +866,7 @@ func TestCodexRiderSkillInjectionPreservesRawDeveloperInstructions(t *testing.T)
 		setupFollowupAgentPath(t, "pi", "codex")
 		codexHome := filepath.Join(f.root, "codex-home")
 		writeCodexInstructionsFixture(t, codexHome, globalRule)
-		writeCodexRiderProfileFixture(t, f.home, "worker", profileRule, true, true)
+		writeCodexWorkerProfileFixture(t, f.home, "worker", profileRule, true, true)
 		t.Setenv("CODEX_HOME", codexHome)
 		f.fake.BeforeCall = func(method string) {
 			if method == "agent.start" {
@@ -876,15 +876,15 @@ func TestCodexRiderSkillInjectionPreservesRawDeveloperInstructions(t *testing.T)
 		t.Setenv("HERDR_ENV", "1")
 		t.Setenv("HERDR_PANE_ID", "w1:p1")
 		t.Setenv("HERDR_WORKSPACE_ID", "w1")
-		outcomeCLI(t, f.service, 0, "ride", "--brief", f.brief, "--name", "first-outcome")
-		assertCodexRiderDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
+		outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "first-outcome")
+		assertCodexWorkerDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
 	})
 
 	t.Run("relaunch", func(t *testing.T) {
 		f := newRelaunchFixture(t, store.StateLost)
 		codexHome := filepath.Join(filepath.Dir(f.home), "codex-home")
 		writeCodexInstructionsFixture(t, codexHome, globalRule)
-		writeCodexRiderProfileFixture(t, f.home, "deep", profileRule, false, true)
+		writeCodexWorkerProfileFixture(t, f.home, "deep", profileRule, false, true)
 		t.Setenv("CODEX_HOME", codexHome)
 		cfg, err := config.Load(f.home, f.project.Name)
 		if err != nil {
@@ -895,9 +895,9 @@ func TestCodexRiderSkillInjectionPreservesRawDeveloperInstructions(t *testing.T)
 			t.Fatal(err)
 		}
 		if _, err := f.service.relaunchTask(context.Background(), f.db, f.home, f.project, cfg, task, ""); err != nil {
-			t.Fatalf("relaunch Codex Rider with raw developer instructions: %v", err)
+			t.Fatalf("relaunch Codex Worker with raw developer instructions: %v", err)
 		}
-		assertCodexRiderDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
+		assertCodexWorkerDeveloperInstructions(t, codexStartArgs(t, f.fake), globalRule, profileRule)
 	})
 }
 
@@ -910,8 +910,8 @@ func TestRelaunchRecoversNeedsDecisionAndBlockedWorkers(t *testing.T) {
 				t.Fatalf("relaunch %s Worker: %v", initial, err)
 			}
 			updated, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
-			if err != nil || updated.State != store.StateWorking || updated.MountID == 0 || updated.Launches != 1 {
-				t.Fatalf("relaunch lost Task state or Mount: %#v, %v", updated, err)
+			if err != nil || updated.State != store.StateWorking || updated.SandboxID == 0 || updated.Launches != 1 {
+				t.Fatalf("relaunch lost Task state or Sandbox: %#v, %v", updated, err)
 			}
 		})
 	}
@@ -959,13 +959,13 @@ func TestTaskSequenceDoesNotDependOnLegacyBranch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(repo, "unlanded.txt"), []byte("keep this commit\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "unmerged.txt"), []byte("keep this commit\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gitOutput(ctx, repo, "add", "unlanded.txt"); err != nil {
+	if _, err := gitOutput(ctx, repo, "add", "unmerged.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gitOutput(ctx, repo, "commit", "-m", "unlanded task work"); err != nil {
+	if _, err := gitOutput(ctx, repo, "commit", "-m", "unmerged task work"); err != nil {
 		t.Fatal(err)
 	}
 	wantCommit, err := gitOutput(ctx, repo, "rev-parse", "refs/heads/posse/legacy-work")
@@ -986,7 +986,7 @@ func TestTaskSequenceDoesNotDependOnLegacyBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, sequence, err := createTaskWithSequence(ctx, db, project, home, store.Task{Type: "ship", Title: "New work", ShortName: "new-work", BaseRef: "main"})
+	id, sequence, err := createTaskWithSequence(ctx, db, project, home, store.Task{Type: "change", Title: "New work", ShortName: "new-work", BaseRef: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,18 +1100,18 @@ func TestTaskBranchAvailabilityAllowsWorkspaceMemberWithoutOrigin(t *testing.T) 
 	}
 }
 
-func TestWorkspaceRideChecksOnlySelectedMembers(t *testing.T) {
+func TestWorkspaceStartChecksOnlySelectedMembers(t *testing.T) {
 	for _, testCase := range []struct {
 		name      string
 		brief     dispatch.Brief
 		wantError bool
 	}{
-		{name: "unrequested collision", brief: dispatch.Brief{Type: "ship", Repos: []string{"worker"}}},
-		{name: "scout without editable members", brief: dispatch.Brief{Type: "scout"}},
-		{name: "selected collision", brief: dispatch.Brief{Type: "ship", Repos: []string{"backend"}}, wantError: true},
+		{name: "unrequested collision", brief: dispatch.Brief{Type: "change", Repos: []string{"worker"}}},
+		{name: "research without editable members", brief: dispatch.Brief{Type: "research"}},
+		{name: "selected collision", brief: dispatch.Brief{Type: "change", Repos: []string{"backend"}}, wantError: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
+			f := newWorkspaceMergeFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
 			gitTest(t, filepath.Join(f.workspace, "backend"), "branch", store.TaskBranchName(2))
 			members, _, err := f.service.planTaskMembers(context.Background(), f.db, f.project, f.config(), testCase.brief, nil)
 			if err != nil {
@@ -1175,14 +1175,14 @@ func TestFailSpawnDeliversTaskFailedNoticeToIdleLead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Broken spawn", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Broken spawn", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "claude", AgentStatus: "idle"}}}
 	service := testService(home, fake)
-	if err := service.failSpawn(ctx, db, project, taskID, "Broken spawn", "Mount setup failed"); err != nil {
+	if err := service.failSpawn(ctx, db, project, taskID, "Broken spawn", "Sandbox setup failed"); err != nil {
 		t.Fatal(err)
 	}
 	if fake.CallCount("agent.prompt") != 1 {

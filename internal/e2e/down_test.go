@@ -13,14 +13,14 @@ import (
 )
 
 // userPaneEnv is a User shell in the given workspace, as Herdr exports it.
-func (f *riderTabsFixture) userPaneEnv(workspace workspaceResult) []string {
+func (f *workerTabsFixture) userPaneEnv(workspace workspaceResult) []string {
 	env := setEnv(f.env, "HERDR_ENV", "1")
 	env = setEnv(env, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	env = setEnv(env, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
 	return setEnv(env, "HERDR_TAB_ID", workspace.RootPane.TabID)
 }
 
-func (f *riderTabsFixture) project(t *testing.T) store.Project {
+func (f *workerTabsFixture) project(t *testing.T) store.Project {
 	t.Helper()
 	db, err := store.OpenReadOnly(f.home)
 	if err != nil {
@@ -35,19 +35,19 @@ func (f *riderTabsFixture) project(t *testing.T) store.Project {
 }
 
 // assertLeadStaysGone gives a wrongly started recovery time to show up.
-func (f *riderTabsFixture) assertLeadStaysGone(t *testing.T, when string) {
+func (f *workerTabsFixture) assertLeadStaysGone(t *testing.T, when string) {
 	t.Helper()
 	if waitForCondition(3*time.Second, func() bool { _, found := findLeadInSnapshot(f.snapshot(t)); return found }) {
 		t.Fatalf("Lead restarted %s", when)
 	}
 	for _, pane := range f.snapshot(t).Panes {
-		if pane.Label == "posse:shop:lookout" {
-			t.Fatalf("Lookout restarted %s", when)
+		if pane.Label == "posse:shop:watch" {
+			t.Fatalf("Watch restarted %s", when)
 		}
 	}
 }
 
-func (f *riderTabsFixture) upInNewWorkspace(t *testing.T) workspaceResult {
+func (f *workerTabsFixture) upInNewWorkspace(t *testing.T) workspaceResult {
 	t.Helper()
 	workspace, err := createWorkspace(f.client, f.repo)
 	if err != nil {
@@ -70,7 +70,7 @@ func (f *riderTabsFixture) upInNewWorkspace(t *testing.T) workspaceResult {
 }
 
 func TestDownKeepsProjectStoppedUntilUp(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	output := runPosse(t, f.binary, f.repo, f.userPaneEnv(f.userBefore), "down")
 	if !strings.Contains(output, "state: down") {
 		t.Fatalf("down did not report the Project down: %s", output)
@@ -94,7 +94,7 @@ func TestDownKeepsProjectStoppedUntilUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
-	runPosse(t, f.binary, f.repo, f.env, "roster")
+	runPosse(t, f.binary, f.repo, f.env, "list")
 	f.assertLeadStaysGone(t, "after its workspace closed")
 
 	// A machine restart runs the startup hook against a new Herdr generation.
@@ -110,8 +110,8 @@ func TestDownKeepsProjectStoppedUntilUp(t *testing.T) {
 }
 
 func TestDownRefusesRunningTasks(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	f.ride(t, "t1", "Busy rider", "busy-rider")
+	f := newWorkerTabsFixture(t)
+	f.start(t, "t1", "Busy worker", "busy-worker")
 	command := exec.Command(f.binary, "down")
 	command.Dir, command.Env = f.repo, f.userPaneEnv(f.userBefore)
 	output, err := command.CombinedOutput()
@@ -127,17 +127,17 @@ func TestDownRefusesRunningTasks(t *testing.T) {
 }
 
 func TestAutoRecoverOffHoldsGroupCloseUntilUp(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.auto_recover", "false", "--project", "shop")
-	f.ride(t, "t1", "Held rider", "held-rider")
-	closeRiderGroup(t, f)
+	f.start(t, "t1", "Held worker", "held-worker")
+	closeWorkerGroup(t, f)
 	if output := runPosse(t, f.binary, f.repo, f.env, "recover", "--all"); !strings.Contains(output, "held_projects[1]: shop") {
 		t.Fatalf("recover --all did not hold the Project: %s", output)
 	}
-	runPosse(t, f.binary, f.repo, f.env, "roster")
+	runPosse(t, f.binary, f.repo, f.env, "list")
 	f.assertLeadStaysGone(t, "with auto_recover off")
 	if task := f.task(t, "t1"); task.State != store.StateWorking {
-		t.Fatalf("held recovery changed the Rider's state to %s", task.State)
+		t.Fatalf("held recovery changed the Worker's state to %s", task.State)
 	}
 
 	workspace := f.upInNewWorkspace(t)
@@ -151,7 +151,7 @@ func TestAutoRecoverOffHoldsGroupCloseUntilUp(t *testing.T) {
 		}
 		return false
 	}) {
-		t.Fatalf("posse up did not relaunch the held Rider: %#v", task)
+		t.Fatalf("posse up did not relaunch the held Worker: %#v", task)
 	}
 	if project := f.project(t); project.HerdrWorkspaceID != workspace.Workspace.WorkspaceID {
 		t.Fatalf("recovery used workspace %s, not the new Lead's %s", project.HerdrWorkspaceID, workspace.Workspace.WorkspaceID)

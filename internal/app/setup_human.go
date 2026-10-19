@@ -108,13 +108,13 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 	case "pi_guard":
 		switch action {
 		case "keep":
-			return kept("pi Rider guard already installed")
+			return kept("pi Worker guard already installed")
 		case "update":
-			return change("Update the pi Rider guard at "+displayPath(target), "Updated the pi Rider guard at "+displayPath(target))
+			return change("Update the pi Worker guard at "+displayPath(target), "Updated the pi Worker guard at "+displayPath(target))
 		case "conflict":
 			return []string{humanFailed + "  " + displayPath(target) + " was not written by posse"}
 		default:
-			return change("Install the pi Rider guard at "+displayPath(target), "Installed the pi Rider guard at "+displayPath(target))
+			return change("Install the pi Worker guard at "+displayPath(target), "Installed the pi Worker guard at "+displayPath(target))
 		}
 	case "default_config":
 		if action == "keep" {
@@ -151,7 +151,7 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 		agent, _ := row["agent"].(string)
 		hook := "SessionStart hook"
 		if step == "guard_hook" {
-			hook = "Rider guard hook"
+			hook = "Worker guard hook"
 		}
 		if resolved, ok := row["resolved_target"].(string); ok && resolved != "" {
 			target = resolved

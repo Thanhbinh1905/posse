@@ -22,7 +22,7 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nlanding_mode = \"local\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db, err := store.Open(home)
@@ -36,7 +36,7 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 5, Type: "ship", Title: "Ready to land", ShortName: "ready-to-land", LandingMode: "local", Branch: "posse/t5", AgentName: "posse-shop-t5-1", PaneID: "w2:p1", PaneLabel: "posse:shop:t5"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 5, Type: "change", Title: "Ready to merge", ShortName: "ready-to-merge", MergeMode: "local", Branch: "posse/t5", AgentName: "posse-shop-t5-1", PaneID: "w2:p1", PaneLabel: "posse:shop:t5"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 	if err := db.Transition(ctx, taskID, store.StateWorking, store.StateDone, "worker", "finished"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: taskID, Kind: "task_done", Summary: "Ready to land", DataJSON: `{}`}); err != nil {
+	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: taskID, Kind: "task_done", Summary: "Ready to merge", DataJSON: `{}`}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -64,34 +64,34 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 	if code := cli.Run([]string{"--full"}); code != 0 {
 		t.Fatalf("home failed: code=%d output=%s", code, output.String())
 	}
-	for _, expected := range []string{"project{name,mode,autonomy,lead}:", "shop,local,\"review=ask land=ask\",working", "Run `posse show t5`", "Run `posse land t5`", "Run `posse ack 1`"} {
+	for _, expected := range []string{"project{name,mode,autonomy,lead}:", "shop,local,\"review=ask merge=ask\",working", "Run `posse show t5`", "Run `posse merge t5`", "Run `posse ack 1`"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Errorf("home output missing %q:\n%s", expected, output.String())
 		}
 	}
-	if strings.Contains(output.String(), "open_tasks") || strings.Contains(output.String(), "open_notices") || !strings.Contains(output.String(), "t5") || !strings.Contains(output.String(), "ready-to-land") {
-		t.Fatalf("home output included roster fields, omitted the Task name, or used a hardcoded Task id: %s", output.String())
+	if strings.Contains(output.String(), "open_tasks") || strings.Contains(output.String(), "open_notices") || !strings.Contains(output.String(), "t5") || !strings.Contains(output.String(), "ready-to-merge") {
+		t.Fatalf("home output included list fields, omitted the Task name, or used a hardcoded Task id: %s", output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"roster", "--json"}); code != 0 {
-		t.Fatalf("roster JSON failed: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"list", "--json"}); code != 0 {
+		t.Fatalf("list JSON failed: code=%d output=%s", code, output.String())
 	}
-	var roster struct {
+	var list struct {
 		Tasks []map[string]any `json:"tasks"`
 	}
-	if err := json.Unmarshal(output.Bytes(), &roster); err != nil || len(roster.Tasks) != 1 || roster.Tasks[0]["id"] != "t5" || roster.Tasks[0]["name"] != "ready-to-land" {
-		t.Fatalf("roster omitted the Task name: err=%v output=%s rows=%#v", err, output.String(), roster.Tasks)
+	if err := json.Unmarshal(output.Bytes(), &list); err != nil || len(list.Tasks) != 1 || list.Tasks[0]["id"] != "t5" || list.Tasks[0]["name"] != "ready-to-merge" {
+		t.Fatalf("list omitted the Task name: err=%v output=%s rows=%#v", err, output.String(), list.Tasks)
 	}
 	output.Reset()
-	if code := cli.Run([]string{"--json", "roster", "--full"}); code != 0 || strings.Contains(output.String(), "posse/t5") {
-		t.Fatalf("full roster exposed legacy branch: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"--json", "list", "--full"}); code != 0 || strings.Contains(output.String(), "posse/t5") {
+		t.Fatalf("full list exposed legacy branch: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"--json", "show", "ready-to-land"}); code != 0 || !strings.Contains(output.String(), `"id":"t5"`) || !strings.Contains(output.String(), `"name":"ready-to-land"`) {
-		t.Fatalf("show by visible Rider name failed: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"--json", "show", "ready-to-merge"}); code != 0 || !strings.Contains(output.String(), `"id":"t5"`) || !strings.Contains(output.String(), `"name":"ready-to-merge"`) {
+		t.Fatalf("show by visible Worker name failed: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"--json", "show", "ready-to-land", "--full"}); code != 0 || strings.Contains(output.String(), "posse/t5") || strings.Contains(output.String(), "posse-shop-t5") {
+	if code := cli.Run([]string{"--json", "show", "ready-to-merge", "--full"}); code != 0 || strings.Contains(output.String(), "posse/t5") || strings.Contains(output.String(), "posse-shop-t5") {
 		t.Fatalf("full show exposed legacy Task identity: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
@@ -123,7 +123,7 @@ func TestShowIncludesSignalsAndTransitionsOnlyWithFull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 5, Type: "ship", Title: "Inspect", Profile: "deep", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 5, Type: "change", Title: "Inspect", Profile: "deep", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,14 +160,14 @@ func TestShowIncludesSignalsAndTransitionsOnlyWithFull(t *testing.T) {
 		t.Fatalf("default show Profile = %#v, want current Profile fast", compact["profile"])
 	}
 	output.Reset()
-	if code := cli.Run([]string{"--json", "roster"}); code != 0 {
-		t.Fatalf("roster failed: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"--json", "list"}); code != 0 {
+		t.Fatalf("list failed: code=%d output=%s", code, output.String())
 	}
-	var roster struct {
+	var list struct {
 		Tasks []map[string]any `json:"tasks"`
 	}
-	if err := json.Unmarshal(output.Bytes(), &roster); err != nil || len(roster.Tasks) != 1 || roster.Tasks[0]["profile"] != "fast" {
-		t.Fatalf("roster omitted the current Profile: %#v, %v, output=%s", roster, err, output.String())
+	if err := json.Unmarshal(output.Bytes(), &list); err != nil || len(list.Tasks) != 1 || list.Tasks[0]["profile"] != "fast" {
+		t.Fatalf("list omitted the current Profile: %#v, %v, output=%s", list, err, output.String())
 	}
 	output.Reset()
 	if code := cli.Run([]string{"--json", "show", "t5", "--full"}); code != 0 {
@@ -244,7 +244,7 @@ func TestPeekReadsPaneIdAfterLabelReconciliation(t *testing.T) {
 	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Read output", LandingMode: "local", PaneID: "w2:p-old", PaneLabel: "posse:shop:t1"}); err != nil {
+	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Read output", MergeMode: "local", PaneID: "w2:p-old", PaneLabel: "posse:shop:t1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

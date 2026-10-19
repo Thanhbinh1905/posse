@@ -229,7 +229,7 @@ func TestProjectAddRegistersGitAndNonGitDirectories(t *testing.T) {
 			if err != nil || !project.IsDirectory() || project.DefaultBranch != "" {
 				t.Fatalf("registered directory = %#v, %v", project, err)
 			}
-			if code := harness.run("project", "show"); code != 0 || !strings.Contains(harness.out.String(), "kind: directory") || !strings.Contains(harness.out.String(), "execution_mode: in-place") || !strings.Contains(harness.out.String(), "landing_mode: local") || strings.Contains(harness.out.String(), "target_branch") {
+			if code := harness.run("project", "show"); code != 0 || !strings.Contains(harness.out.String(), "kind: directory") || !strings.Contains(harness.out.String(), "execution_mode: in-place") || !strings.Contains(harness.out.String(), "merge_mode: local") || strings.Contains(harness.out.String(), "target_branch") {
 				t.Fatalf("Directory Project summary is misleading: %d\n%s", code, harness.out.String())
 			}
 			if code := harness.run("up", "--claude"); code != 0 || !strings.Contains(harness.out.String(), "lead: starting") {

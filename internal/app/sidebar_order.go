@@ -10,12 +10,12 @@ import (
 )
 
 // Herdr's Agents panel follows workspace order, not worktree provenance. Move
-// only identified linked Riders, preserving their order and all other labels.
-func (s *Service) groupRiderWorkspaces(ctx context.Context, snapshot herdr.Snapshot, project store.Project, tasks []store.Task) {
+// only identified linked Workers, preserving their order and all other labels.
+func (s *Service) groupWorkerWorkspaces(ctx context.Context, snapshot herdr.Snapshot, project store.Project, tasks []store.Task) {
 	if ctx.Err() != nil {
 		return
 	}
-	ids, before := riderWorkspacePlacement(snapshot, project, tasks)
+	ids, before := workerWorkspacePlacement(snapshot, project, tasks)
 	if len(ids) == 0 {
 		return
 	}
@@ -24,13 +24,13 @@ func (s *Service) groupRiderWorkspaces(ctx context.Context, snapshot herdr.Snaps
 		params["before_workspace_id"] = before
 	}
 	if _, err := s.herdrCall(ctx, "workspace.move_block", params); err != nil && ctx.Err() == nil {
-		log.Printf("posse: could not group Rider workspaces under Lead for Project %s: %v", project.Name, err)
+		log.Printf("posse: could not group Worker workspaces under Lead for Project %s: %v", project.Name, err)
 	}
 }
 
-// Return the Rider block and its next non-Rider anchor only if a move is needed.
+// Return the Worker block and its next non-Worker anchor only if a move is needed.
 // Labels and checkout provenance, never recorded ids alone, establish ownership.
-func riderWorkspacePlacement(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) ([]string, string) {
+func workerWorkspacePlacement(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) ([]string, string) {
 	if project.IsWorkspace() {
 		return nil, ""
 	}

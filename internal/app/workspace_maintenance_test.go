@@ -14,7 +14,7 @@ import (
 )
 
 func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"landed\"\npr_poll = \"1ms\"\nforge = \"auto\"\n", []string{"backend"}, []string{"backend"})
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"merged\"\npr_poll = \"1ms\"\nforge = \"auto\"\n", []string{"backend"}, []string{"backend"})
 	ctx := context.Background()
 	goodURL := "https://github.com/acme/worker/pull/2"
 	offlineURL := "https://vpn-t181.invalid/acme/backend/pull/1"
@@ -40,7 +40,7 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 		t.Fatal(err)
 	}
 
-	setLandingPR := func(task store.Task, repoName, prURL string) store.TaskRepo {
+	setMergePR := func(task store.Task, repoName, prURL string) store.TaskRepo {
 		t.Helper()
 		memberWorktree := filepath.Join(task.WorktreePath, repoName)
 		head := strings.TrimSpace(gitTest(t, memberWorktree, "rev-parse", "HEAD"))
@@ -48,7 +48,7 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 			t.Fatal(err)
 		}
 		if task.State == store.StateDone {
-			if err := f.db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "PR published"); err != nil {
+			if err := f.db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "PR published"); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -70,14 +70,14 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 		t.Fatalf("Task %d has no repo %q", task.ID, repoName)
 		return store.TaskRepo{}
 	}
-	setLandingPR(f.task, "backend", offlineURL)
+	setMergePR(f.task, "backend", offlineURL)
 
 	cfg := f.config()
-	members, _, err := f.service.planTaskMembers(ctx, f.db, f.project, cfg, dispatch.Brief{Type: "ship", Repos: []string{"worker"}}, nil)
+	members, _, err := f.service.planTaskMembers(ctx, f.db, f.project, cfg, dispatch.Brief{Type: "change", Repos: []string{"worker"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	goodID, _, err := createTaskWithSequence(ctx, f.db, f.project, f.home, store.Task{Type: "ship", Title: "Good Member merged PR", ShortName: "good-member-pr", LandingMode: "pr"})
+	goodID, _, err := createTaskWithSequence(ctx, f.db, f.project, f.home, store.Task{Type: "change", Title: "Good Member merged PR", ShortName: "good-member-pr", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.service.acquireWorkspaceMount(ctx, f.db, f.project, goodTask, members, f.home, "warm", nil, "legacy"); err != nil {
+	if _, err := f.service.acquireWorkspaceSandbox(ctx, f.db, f.project, goodTask, members, f.home, "warm", nil, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	goodTask, err = f.db.TaskByID(ctx, f.project.ID, goodID)
@@ -101,12 +101,12 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 	for _, transition := range []struct {
 		from, to store.State
 		source   string
-	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateLanding, "cli"}} {
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerging, "cli"}} {
 		if err := f.db.Transition(ctx, goodID, transition.from, transition.to, transition.source, "fixture"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	goodRepo := setLandingPR(goodTask, "worker", goodURL)
+	goodRepo := setMergePR(goodTask, "worker", goodURL)
 	goodHead := goodRepo.GatedSHA
 	workerRoot := filepath.Join(f.workspace, "worker")
 	gitTest(t, workerRoot, "merge", "--ff-only", goodHead)

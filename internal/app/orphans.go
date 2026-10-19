@@ -38,7 +38,7 @@ func (s *Service) reconcileTaskPanes(ctx context.Context, db *store.DB, project 
 			continue
 		}
 		if _, err := s.verifyTaskPanesGone(ctx, project, task); err != nil {
-			if incompleteErr := s.recordUnsaddleIncomplete(ctx, db, project, task, err); incompleteErr != nil {
+			if incompleteErr := s.recordTeardownIncomplete(ctx, db, project, task, err); incompleteErr != nil {
 				return incompleteErr
 			}
 		}
@@ -60,36 +60,14 @@ func createNoticeOnce(ctx context.Context, db *store.DB, notice store.Notice) er
 	return err
 }
 
-func (s *Service) sweep(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("sweep", args, map[string]flagSpec{"yes": {boolean: true}})
-	if err != nil {
-		return err
-	}
-	if len(parsed.Positionals) != 0 {
-		return axi.Usage("sweep does not take positional arguments")
-	}
-	db, _, err := s.openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	project, err := s.projectForCWD(ctx.Context, db)
-	if err != nil {
-		return err
-	}
-	if err := s.requireLead(ctx.Context, db, project); err != nil {
-		return err
-	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
-		return err
-	}
+func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store.Project, apply bool) (axi.Object, error) {
 	snapshot, err := s.snapshot(ctx.Context)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	mounts, err := db.Mounts(ctx.Context, project.ID)
+	sandboxes, err := db.Sandboxes(ctx.Context, project.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	unknown := make(map[string][]herdr.Pane)
 	for _, pane := range snapshot.Panes {
@@ -104,9 +82,9 @@ func (s *Service) sweep(ctx *axi.Context, args []string) error {
 		if _, err := db.Task(ctx.Context, project.ID, taskIDString(sequence)); err == nil {
 			continue
 		} else if !store.IsNotFound(err) {
-			return err
+			return nil, err
 		}
-		if !ownsUnknownPane(snapshot, pane, project.Name, sequence, mounts) {
+		if !ownsUnknownPane(snapshot, pane, project.Name, sequence, sandboxes) {
 			continue
 		}
 		unknown[pane.Label] = append(unknown[pane.Label], pane)
@@ -125,20 +103,20 @@ func (s *Service) sweep(ctx *axi.Context, args []string) error {
 		}
 		sort.Strings(paneIDs)
 		rows = append(rows, map[string]any{"label": label, "panes": paneIDs})
-		if !parsed.Bool("yes") {
+		if !apply {
 			continue
 		}
 		for _, paneID := range paneIDs {
 			if _, err := s.herdrCall(ctx.Context, "pane.close", map[string]any{"pane_id": paneID}); err != nil && !missingPaneError(err) {
-				return err
+				return nil, err
 			}
 			closed = append(closed, paneID)
 		}
 	}
-	if parsed.Bool("yes") {
+	if apply {
 		verified, err := s.snapshot(ctx.Context)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		closedSet := make(map[string]bool, len(closed))
 		for _, paneID := range closed {
@@ -146,17 +124,17 @@ func (s *Service) sweep(ctx *axi.Context, args []string) error {
 		}
 		for _, pane := range verified.Panes {
 			if closedSet[pane.PaneID] {
-				return axi.Failure("sweep_incomplete", fmt.Sprintf("orphan pane %s remains open", pane.PaneID), true)
+				return nil, axi.Failure("prune_incomplete", fmt.Sprintf("orphan pane %s remains open", pane.PaneID), true)
 			}
 			if _, selected := unknown[pane.Label]; selected {
-				return axi.Failure("sweep_incomplete", fmt.Sprintf("orphan label %s remains", pane.Label), true)
+				return nil, axi.Failure("prune_incomplete", fmt.Sprintf("orphan label %s remains", pane.Label), true)
 			}
 		}
 	}
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "orphans", Value: rows}, {Key: "closed_panes", Value: closed}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{"Run `posse sweep --yes` to close these orphan panes"}}})
+	return axi.Object{{Key: "project", Value: project.Name}, {Key: "orphans", Value: rows}, {Key: "closed_panes", Value: closed}, {Key: "dry_run", Value: !apply}, {Key: "help", Value: []any{"Run `posse pool prune --yes` to close these orphan panes"}}}, nil
 }
 
-func ownsUnknownPane(snapshot herdr.Snapshot, pane herdr.Pane, project string, sequence int, mounts []store.Mount) bool {
+func ownsUnknownPane(snapshot herdr.Snapshot, pane herdr.Pane, project string, sequence int, sandboxes []store.Sandbox) bool {
 	if pane.Agent != "" {
 		for _, agent := range snapshot.Agents {
 			if agent.PaneID == pane.PaneID {
@@ -165,8 +143,8 @@ func ownsUnknownPane(snapshot herdr.Snapshot, pane herdr.Pane, project string, s
 		}
 		return false
 	}
-	for _, mount := range mounts {
-		if pathInside(pane.CWD, mount.Path) {
+	for _, sandbox := range sandboxes {
+		if pathInside(pane.CWD, sandbox.Path) {
 			return true
 		}
 	}

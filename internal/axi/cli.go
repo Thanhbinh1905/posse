@@ -44,10 +44,12 @@ func Usage(message string, help ...string) *Error {
 }
 
 type Command struct {
-	Name        string
-	Usage       string
-	Summary     string
-	Hidden      bool
+	Name    string
+	Usage   string
+	Summary string
+	Hidden  bool
+	// ReplacedBy is an error-only tombstone, including for --help requests.
+	ReplacedBy  string
 	Handler     func(*Context, []string) error
 	Subcommands []*Command
 }
@@ -223,9 +225,14 @@ func (a *App) Run(args []string) int {
 		}
 		return 0
 	}
-	if command, path, ok := a.resolve(filtered); ok && hasFlag(filtered, "--help", "-h") {
-		a.printHelp(command, path)
-		return 0
+	if command, path, ok := a.resolve(filtered); ok {
+		if command.ReplacedBy != "" {
+			return a.printError(ctx, Usage(fmt.Sprintf("%s %s was removed; use %s %s", a.Name, strings.Join(path, " "), a.Name, command.ReplacedBy)))
+		}
+		if hasFlag(filtered, "--help", "-h") {
+			a.printHelp(command, path)
+			return 0
+		}
 	}
 	if hasFlag(filtered, "--help", "-h") {
 		a.printHelp(a.Root, nil)

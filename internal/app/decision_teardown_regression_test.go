@@ -12,11 +12,11 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestAckReportedReviewPreservesMountAttachments(t *testing.T) {
-	f := newPRLandingFixture(t, "local", store.StateDone)
+func TestAckReportedReviewPreservesSandboxAttachments(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
-	attachPRFixtureMount(t, f)
+	attachPRFixtureSandbox(t, f)
 	fake := f.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
@@ -27,7 +27,7 @@ func TestAckReportedReviewPreservesMountAttachments(t *testing.T) {
 	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateReported, "cli", "report saved"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"finished\"\n[remuda]\nclean = \"pristine\"\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"finished\"\n[pool]\nclean = \"pristine\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(f.worktree, "reports", "t1-probes")
@@ -70,7 +70,7 @@ func TestAckReportedReviewPreservesMountAttachments(t *testing.T) {
 			t.Fatalf("ack failed for an unexpected reason: %s %s", out, stderr)
 		}
 		if content, err := os.ReadFile(filepath.Join(f.worktree, "change.txt")); err != nil || string(content) != "uncommitted edit" {
-			t.Fatalf("failed teardown did not preserve Mount edit: %q %v", content, err)
+			t.Fatalf("failed teardown did not preserve Sandbox edit: %q %v", content, err)
 		}
 		return
 	}
@@ -91,11 +91,11 @@ func TestAckReportedReviewPreservesMountAttachments(t *testing.T) {
 	}
 }
 
-func TestScoutDoneSignalCopiesExplicitIgnoredAttachments(t *testing.T) {
-	f := newPRLandingFixture(t, "local", store.StateWorking)
+func TestResearchDoneSignalCopiesExplicitIgnoredAttachments(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
-	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET type='scout' WHERE id=?`, f.task.ID); err != nil {
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET type='research' WHERE id=?`, f.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(f.worktree, "report.md"), []byte("See ignored/probe.txt and ignored/log.txt"), 0600); err != nil {
@@ -113,7 +113,7 @@ func TestScoutDoneSignalCopiesExplicitIgnoredAttachments(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	code, out, stderr := f.run("holler", "done", "Report ready", "--report", "report.md", "--attach", "ignored/probe.txt", "--attach", "ignored/log.txt")
+	code, out, stderr := f.run("signal", "done", "Report ready", "--report", "report.md", "--attach", "ignored/probe.txt", "--attach", "ignored/log.txt")
 	if code != 0 {
 		t.Fatalf("done --attach: %s %s", out, stderr)
 	}
@@ -126,10 +126,10 @@ func TestScoutDoneSignalCopiesExplicitIgnoredAttachments(t *testing.T) {
 }
 
 func TestClosedPRInvalidObservationSupersedesClosedDecision(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/pull/41", ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/pull/41", ""); err != nil {
 		t.Fatal(err)
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
@@ -154,21 +154,21 @@ func TestClosedPRInvalidObservationSupersedesClosedDecision(t *testing.T) {
 	}
 }
 
-func TestExistingMergeOnlyLeftoverDecisionBecomesObsolete(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+func TestExistingMergeOnlyOrphanDecisionBecomesObsolete(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
-	gitTest(t, f.repo, "branch", "posse/t1-leftover", "main")
-	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "leftover", Origin: "leftover:posse/t1-leftover", Question: "Open a Task from this Leftover?", Options: []string{"open-task", "discard"}})
+	gitTest(t, f.repo, "branch", "posse/t1-orphan", "main")
+	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "orphan", Origin: "orphan:posse/t1-orphan", Question: "Open a Task from this Orphan?", Options: []string{"open-task", "discard"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.obsoleteEmptyLeftovers(ctx, f.db, f.project); err != nil {
+	if err := f.service.obsoleteEmptyOrphans(ctx, f.db, f.project); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := f.db.Decisions(ctx, f.project.ID, true)
 	if err != nil || len(pending) != 0 {
-		t.Fatalf("merge-only Leftover still pending: %#v %v", pending, err)
+		t.Fatalf("merge-only Orphan still pending: %#v %v", pending, err)
 	}
 	saved, err := f.db.Decision(ctx, f.project.ID, decision.ID)
 	if err != nil || saved.ObsoleteAt == 0 {
@@ -176,8 +176,8 @@ func TestExistingMergeOnlyLeftoverDecisionBecomesObsolete(t *testing.T) {
 	}
 }
 
-func TestMergeOnlyLeftoverDoesNotAskUser(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", store.StateDone)
+func TestMergeOnlyOrphanDoesNotAskUser(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
 	gitTest(t, f.repo, "merge", "--no-ff", "--no-edit", "posse/t1")
@@ -192,6 +192,6 @@ func TestMergeOnlyLeftoverDoesNotAskUser(t *testing.T) {
 	}
 	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
 	if err != nil || len(decisions) != 0 {
-		t.Fatalf("merge-only Leftover: %#v %v", decisions, err)
+		t.Fatalf("merge-only Orphan: %#v %v", decisions, err)
 	}
 }

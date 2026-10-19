@@ -17,11 +17,11 @@ func TestTaskTargetChangeIsIdempotentAndRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lowerID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Lower", Branch: "posse/lower", TargetBranch: "staging", LandingMode: "pr"})
+	lowerID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Lower", Branch: "posse/lower", TargetBranch: "staging", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "ship", Title: "Upper", Branch: "posse/upper", TargetBranch: "posse/lower", PRURL: "https://github.com/acme/shop/pull/2", LandingMode: "pr"})
+	upperID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "Upper", Branch: "posse/upper", TargetBranch: "posse/lower", PRURL: "https://github.com/acme/shop/pull/2", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,18 +72,18 @@ func TestWorkspaceMemberTargetChangeUpdatesOnlyThatMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lowerID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Lower", Branch: "posse/lower", LandingMode: "pr"})
+	lowerID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Lower", Branch: "posse/lower", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "ship", Title: "Upper", Branch: "posse/upper", LandingMode: "pr"})
+	upperID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "Upper", Branch: "posse/upper", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateTaskRepos(ctx, lowerID, []TaskRepo{{Repo: "api", TargetBranch: "staging", LandingMode: "pr"}}); err != nil {
+	if err := db.CreateTaskRepos(ctx, lowerID, []TaskRepo{{Repo: "api", TargetBranch: "staging", MergeMode: "pr"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateTaskRepos(ctx, upperID, []TaskRepo{{Repo: "api", TargetBranch: "posse/lower", LandingMode: "pr", PRURL: "https://github.com/acme/api/pull/2"}, {Repo: "worker", TargetBranch: "main", LandingMode: "pr"}}); err != nil {
+	if err := db.CreateTaskRepos(ctx, upperID, []TaskRepo{{Repo: "api", TargetBranch: "posse/lower", MergeMode: "pr", PRURL: "https://github.com/acme/api/pull/2"}, {Repo: "worker", TargetBranch: "main", MergeMode: "pr"}}); err != nil {
 		t.Fatal(err)
 	}
 	change, err := db.BeginTaskTargetChange(ctx, project.ID, upperID, "api", lowerID, "posse/lower", "staging")

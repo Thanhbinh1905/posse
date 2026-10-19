@@ -10,7 +10,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t *testing.T) {
+func TestRememberProjectServerStartedAtFillsGenerationAlongsideWatchRecovery(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
 	if err != nil {
@@ -21,8 +21,8 @@ func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	lookout := LookoutRecovery{PaneID: "w1:p2", RetryAt: 123456, FailedStarts: 2, NoticeRaised: true}
-	if err := db.SetLookoutRecovery(ctx, project.ID, lookout); err != nil {
+	watch := WatchRecovery{PaneID: "w1:p2", RetryAt: 123456, FailedStarts: 2, NoticeRaised: true}
+	if err := db.SetWatchRecovery(ctx, project.ID, watch); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "server-1"); err != nil {
@@ -32,9 +32,9 @@ func TestRememberProjectServerStartedAtFillsGenerationAlongsideLookoutRecovery(t
 	if err != nil || generation != "server-1" {
 		t.Fatalf("remembered Project generation = %q, want server-1: %v", generation, err)
 	}
-	gotLookout, err := db.LookoutRecovery(ctx, project.ID)
-	if err != nil || gotLookout != lookout {
-		t.Fatalf("remembering Project generation changed Lookout recovery: %#v, want %#v: %v", gotLookout, lookout, err)
+	gotWatch, err := db.WatchRecovery(ctx, project.ID)
+	if err != nil || gotWatch != watch {
+		t.Fatalf("remembering Project generation changed Watch recovery: %#v, want %#v: %v", gotWatch, watch, err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "server-2"); err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestUnchangedTaskObservationDoesNotWaitForWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Observation"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Observation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestUnchangedTaskObservationDoesNotWaitForWriter(t *testing.T) {
 	}
 }
 
-func TestLookoutRecoveryPersistsAcrossStoreReopen(t *testing.T) {
+func TestWatchRecoveryPersistsAcrossStoreReopen(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -208,8 +208,8 @@ func TestLookoutRecoveryPersistsAcrossStoreReopen(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	want := LookoutRecovery{PaneID: "w1:p2", RetryAt: 123456, FailedStarts: 4, NoticeRaised: true}
-	if err := db.SetLookoutRecovery(ctx, project.ID, want); err != nil {
+	want := WatchRecovery{PaneID: "w1:p2", RetryAt: 123456, FailedStarts: 4, NoticeRaised: true}
+	if err := db.SetWatchRecovery(ctx, project.ID, want); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -222,21 +222,21 @@ func TestLookoutRecoveryPersistsAcrossStoreReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	got, err := db.LookoutRecovery(ctx, project.ID)
+	got, err := db.WatchRecovery(ctx, project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("reopened Lookout recovery = %#v, want %#v", got, want)
+		t.Fatalf("reopened Watch recovery = %#v, want %#v", got, want)
 	}
-	if err := db.ResetLookoutRecovery(ctx, project.ID); err != nil {
+	if err := db.ResetWatchRecovery(ctx, project.ID); err != nil {
 		t.Fatal(err)
 	}
-	got, err = db.LookoutRecovery(ctx, project.ID)
+	got, err = db.WatchRecovery(ctx, project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != (LookoutRecovery{}) {
-		t.Fatalf("reset Lookout recovery = %#v, want empty state", got)
+	if got != (WatchRecovery{}) {
+		t.Fatalf("reset Watch recovery = %#v, want empty state", got)
 	}
 }

@@ -172,7 +172,7 @@ func ensureInPlaceLeases(ctx context.Context, db *store.DB, project store.Projec
 
 func ensureInPlaceLeasesAt(ctx context.Context, db *store.DB, project store.Project, task store.Task, canonicalPaths []string) error {
 	manager := execution.NewManager(db)
-	if err := manager.EnsureMountLeases(ctx); err != nil {
+	if err := manager.EnsureSandboxLeases(ctx); err != nil {
 		return resourceLeaseError(err)
 	}
 	acquired := make([]store.ResourceLease, 0, len(canonicalPaths))
@@ -239,7 +239,7 @@ func captureInPlaceBaseline(ctx context.Context, db *store.DB, project store.Pro
 		if err := ensureInPlaceLeasesAt(ctx, db, project, task, canonical); err != nil {
 			return err
 		}
-		return db.UpdateTaskMountPath(ctx, task.ID, 0, root)
+		return db.UpdateTaskSandboxPath(ctx, task.ID, 0, root)
 	} else if !os.IsNotExist(statErr) {
 		return statErr
 	}
@@ -250,7 +250,7 @@ func captureInPlaceBaseline(ctx context.Context, db *store.DB, project store.Pro
 	if err := ensureInPlaceLeasesAt(ctx, db, project, task, canonicalScopes); err != nil {
 		return err
 	}
-	if err := db.UpdateTaskMountPath(ctx, task.ID, 0, root); err != nil {
+	if err := db.UpdateTaskSandboxPath(ctx, task.ID, 0, root); err != nil {
 		return err
 	}
 	snapshot, err := scanInPlaceFiles(ctx, root)
@@ -633,7 +633,7 @@ func validateInPlaceChanges(root string, scopes []string, changes []inPlaceChang
 		}
 		if !covered {
 			return axi.Failure("in_place_scope_violation", "Task changed a path outside its approved scope: "+change.Path, false,
-				"The source change was left in place for inspection. Ask the Rider to restore or explain it, then retry `posse holler done`")
+				"The source change was left in place for inspection. Ask the Worker to restore or explain it, then retry `posse signal done`")
 		}
 	}
 	return nil
@@ -672,7 +672,7 @@ func runInPlaceChecks(ctx context.Context, plan taskplan.Plan, root string) ([]i
 		output, err := commandOutput(ctx, root, check)
 		if err != nil {
 			return nil, axi.Failure("in_place_check_failed", fmt.Sprintf("approved check %q failed: %s", check, truncate(strings.TrimSpace(output), 1200)), false,
-				"Fix the check failure in the approved path scope, then retry `posse holler done`")
+				"Fix the check failure in the approved path scope, then retry `posse signal done`")
 		}
 		sum := sha256.Sum256([]byte(output))
 		results = append(results, inPlaceCheck{Command: check, OutputSHA256: hex.EncodeToString(sum[:])})
@@ -689,7 +689,7 @@ func releaseInPlaceLeases(ctx context.Context, db *store.DB, project store.Proje
 	prefix := fmt.Sprintf("in-place:%d:", task.ID)
 	for _, lease := range leases {
 		if lease.OwnerTaskID == task.ID && strings.HasPrefix(lease.SourceKey, prefix) {
-			if err := manager.Reconcile(ctx, lease, "Rider process and panes are stopped; in-place output was preserved without rollback"); err != nil {
+			if err := manager.Reconcile(ctx, lease, "Worker process and panes are stopped; in-place output was preserved without rollback"); err != nil {
 				return err
 			}
 		}

@@ -13,7 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestBrokenProjectDoesNotBlockHomeRosterOrProjectsRegeneration(t *testing.T) {
+func TestBrokenProjectDoesNotBlockHomeListOrProjectsRegeneration(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	goodRoot := filepath.Join(root, "good-repo")
@@ -24,7 +24,7 @@ func TestBrokenProjectDoesNotBlockHomeRosterOrProjectsRegeneration(t *testing.T)
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nlanding_mode = \"local\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	db, err := store.Open(home)
@@ -41,7 +41,7 @@ func TestBrokenProjectDoesNotBlockHomeRosterOrProjectsRegeneration(t *testing.T)
 	if err := os.MkdirAll(filepath.Dir(brokenConfig), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(brokenConfig, []byte("[defaults]\nlanding_mode = \"invalid\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(brokenConfig, []byte("[defaults]\nmerge_mode = \"invalid\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -55,22 +55,22 @@ func TestBrokenProjectDoesNotBlockHomeRosterOrProjectsRegeneration(t *testing.T)
 	if code := cli.Run(nil); code != 0 {
 		t.Fatalf("home failed on a broken Project: code=%d output=%s", code, output.String())
 	}
-	if !strings.Contains(output.String(), "good") || !strings.Contains(output.String(), "broken") || !strings.Contains(output.String(), "landing_mode") {
+	if !strings.Contains(output.String(), "good") || !strings.Contains(output.String(), "broken") || !strings.Contains(output.String(), "merge_mode") {
 		t.Fatalf("home did not report both Project rows and the broken config: %s", output.String())
 	}
 
 	output.Reset()
-	if code := cli.Run([]string{"roster", "--all", "--json"}); code != 0 {
-		t.Fatalf("roster --all failed on a broken Project: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"list", "--all", "--json"}); code != 0 {
+		t.Fatalf("list --all failed on a broken Project: code=%d output=%s", code, output.String())
 	}
 	var result struct {
 		Projects []map[string]any `json:"projects"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
-		t.Fatalf("decode roster JSON: %v: %s", err, output.String())
+		t.Fatalf("decode list JSON: %v: %s", err, output.String())
 	}
 	if len(result.Projects) != 2 || result.Projects[0]["name"] != "broken" || result.Projects[0]["error"] == nil || result.Projects[1]["name"] != "good" {
-		t.Fatalf("roster rows did not isolate the bad Project: %#v", result.Projects)
+		t.Fatalf("list rows did not isolate the bad Project: %#v", result.Projects)
 	}
 
 	db, err = store.Open(home)
@@ -85,7 +85,7 @@ func TestBrokenProjectDoesNotBlockHomeRosterOrProjectsRegeneration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(generated), "## broken") || !strings.Contains(string(generated), "## good") || !strings.Contains(string(generated), "landing_mode") {
+	if !strings.Contains(string(generated), "## broken") || !strings.Contains(string(generated), "## good") || !strings.Contains(string(generated), "merge_mode") {
 		t.Fatalf("projects.md omitted a Project or its config error: %s", generated)
 	}
 }

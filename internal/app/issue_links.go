@@ -40,8 +40,8 @@ func validateBriefIssueReferences(project store.Project, brief dispatch.Brief, t
 	return nil
 }
 
-func validateShipIssueTargets(brief dispatch.Brief, taskTargets []repoTarget) error {
-	if brief.Type != "ship" {
+func validateChangeIssueTargets(brief dispatch.Brief, taskTargets []repoTarget) error {
+	if brief.Type != "change" {
 		return nil
 	}
 	members := make(map[string]bool, len(taskTargets))

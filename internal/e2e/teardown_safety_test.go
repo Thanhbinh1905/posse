@@ -40,7 +40,7 @@ func (adapter *teardownCloseGuardAdapter) Call(ctx context.Context, method strin
 	return raw, err
 }
 
-func markTaskReported(t *testing.T, f *riderTabsFixture, task store.Task) {
+func markTaskReported(t *testing.T, f *workerTabsFixture, task store.Task) {
 	t.Helper()
 	db, err := store.Open(f.home)
 	if err != nil {
@@ -48,20 +48,20 @@ func markTaskReported(t *testing.T, f *riderTabsFixture, task store.Task) {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "E2E marks the completed Rider done"); err != nil {
+	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "E2E marks the completed Worker done"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateReported, "cli", "E2E records the completed Rider report"); err != nil {
+	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateReported, "cli", "E2E records the completed Worker report"); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary verifies that a
-// replacement launched between Rider shutdown and the close guard survives.
+// replacement launched between Worker shutdown and the close guard survives.
 func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	ctx := context.Background()
-	task := f.ride(t, "t1", "Close race", "close-race")
+	task := f.start(t, "t1", "Close race", "close-race")
 	f.fail(t, "t1")
 	work := filepath.Join(task.WorktreePath, "foreign-work.txt")
 	if err := os.WriteFile(work, []byte("preserve\n"), 0o600); err != nil {
@@ -107,7 +107,7 @@ func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 	cli := app.New(f.home, adapter).CLI()
 	var output bytes.Buffer
 	cli.Out, cli.ErrOut = &output, &output
-	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
+	code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved this discard"})
 	if !replaced {
 		t.Fatalf("replacement did not reach the pane-close boundary: code=%d output=%s", code, output.String())
 	}
@@ -131,28 +131,28 @@ func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mounts, mountErr := db.Mounts(ctx, f.projectID)
+	sandboxes, sandboxErr := db.Sandboxes(ctx, f.projectID)
 	_ = db.Close()
-	if code == 0 || !strings.Contains(output.String(), "unsaddle_incomplete") || !strings.Contains(output.String(), "Replacement foreground process") || !paneAlive || fileErr != nil || string(contents) != "preserve\n" || branchErr != nil || taskAfter.State != store.StateFailed || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
-		t.Fatalf("discard did not preserve the open pane and Mount: pane=%v file=%q fileErr=%v branch=%s Task=%s Mounts=%#v output=%s", paneAlive, contents, fileErr, branchOut, taskAfter.State, mounts, output.String())
+	if code == 0 || !strings.Contains(output.String(), "teardown_incomplete") || !strings.Contains(output.String(), "Replacement foreground process") || !paneAlive || fileErr != nil || string(contents) != "preserve\n" || branchErr != nil || taskAfter.State != store.StateFailed || sandboxErr != nil || len(sandboxes) != 1 || sandboxes[0].State != "held" {
+		t.Fatalf("discard did not preserve the open pane and Sandbox: pane=%v file=%q fileErr=%v branch=%s Task=%s Sandboxes=%#v output=%s", paneAlive, contents, fileErr, branchOut, taskAfter.State, sandboxes, output.String())
 	}
 }
 
 func TestTeardownStopsRetainedShellByVerifiedIdentity(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	task := f.ride(t, "t1", "Retained Rider shell", "retained-rider-shell")
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Retained Worker shell", "retained-worker-shell")
 	markTaskReported(t, f, task)
-	f.exitRider(t, "t1")
+	f.exitWorker(t, "t1")
 	shellPID := foregroundPID(t, f, task.PaneID)
 	if shellPID <= 1 {
 		t.Fatalf("invalid retained shell PID %d", shellPID)
 	}
-	output := runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t1")
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1")
 	if !strings.Contains(output, "torn-down") {
-		t.Fatalf("normal Teardown did not stop the verified Rider shell: %s", output)
+		t.Fatalf("normal Teardown did not stop the verified Worker shell: %s", output)
 	}
 	if !waitForCondition(5*time.Second, func() bool { return syscall.Kill(shellPID, 0) != nil }) {
-		t.Fatalf("retained Rider shell PID %d survived Teardown", shellPID)
+		t.Fatalf("retained Worker shell PID %d survived Teardown", shellPID)
 	}
 	if taskAfter := f.task(t, "t1"); taskAfter.State != store.StateTornDown {
 		t.Fatalf("Task state after Teardown = %s", taskAfter.State)
@@ -162,7 +162,7 @@ func TestTeardownStopsRetainedShellByVerifiedIdentity(t *testing.T) {
 		paneAlive = paneAlive || pane.PaneID == task.PaneID
 	}
 	if paneAlive {
-		t.Fatalf("Rider pane %s survived Teardown", task.PaneID)
+		t.Fatalf("Worker pane %s survived Teardown", task.PaneID)
 	}
 	if output, err := exec.Command("git", "-C", f.repo, "show-ref", "--verify", "refs/heads/"+task.Branch).CombinedOutput(); err == nil {
 		t.Fatalf("finished branch survived Teardown: %s", output)
@@ -171,10 +171,10 @@ func TestTeardownStopsRetainedShellByVerifiedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mounts, err := db.Mounts(context.Background(), f.projectID)
+	sandboxes, err := db.Sandboxes(context.Background(), f.projectID)
 	_ = db.Close()
-	if err != nil || len(mounts) != 1 || mounts[0].State != "idle" || mounts[0].TaskID != 0 {
-		t.Fatalf("Mount was not released after verified shell cleanup: %#v %v", mounts, err)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "idle" || sandboxes[0].TaskID != 0 {
+		t.Fatalf("Sandbox was not released after verified shell cleanup: %#v %v", sandboxes, err)
 	}
 }
 
@@ -208,15 +208,15 @@ func TestTeardownPidfdLauncherHelper(t *testing.T) {
 }
 
 func TestTeardownWithoutPidfdPreservesResourcesAndReportsCapability(t *testing.T) {
-	f := newRiderTabsFixture(t)
-	task := f.ride(t, "t1", "No pidfd", "no-pidfd")
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "No pidfd", "no-pidfd")
 	markTaskReported(t, f, task)
 	ownedPID := foregroundPID(t, f, task.PaneID)
 	work := filepath.Join(task.WorktreePath, "preserved-work.txt")
 	if err := os.WriteFile(work, []byte("preserve\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	args, err := json.Marshal([]string{"unsaddle", "t1"})
+	args, err := json.Marshal([]string{"teardown", "t1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestTeardownWithoutPidfdPreservesResourcesAndReportsCapability(t *testing.T
 	command.Dir, command.Env = f.repo, append(append([]string(nil), f.leadEnv...), "POSSE_T193_BLOCK_PIDFD=1", "POSSE_T193_PIDFD_EXEC="+f.binary, "POSSE_T193_PIDFD_ARGS="+string(args))
 	output, runErr := command.CombinedOutput()
 	t.Logf("no-pidfd CLI: owned=%d error=%v output=%s", ownedPID, runErr, output)
-	if runErr == nil || !strings.Contains(string(output), "unsaddle_incomplete") || !strings.Contains(string(output), "pidfd is unavailable") {
+	if runErr == nil || !strings.Contains(string(output), "teardown_incomplete") || !strings.Contains(string(output), "pidfd is unavailable") {
 		t.Fatal("real CLI did not retain the unsupported-pidfd refusal")
 	}
 	if err := syscall.Kill(ownedPID, 0); err != nil {
@@ -244,9 +244,9 @@ func TestTeardownWithoutPidfdPreservesResourcesAndReportsCapability(t *testing.T
 		t.Fatal(err)
 	}
 	defer db.Close()
-	mounts, err := db.Mounts(context.Background(), f.projectID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "held" || mounts[0].TaskID != task.ID {
-		t.Fatalf("Mount changed: %#v %v", mounts, err)
+	sandboxes, err := db.Sandboxes(context.Background(), f.projectID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "held" || sandboxes[0].TaskID != task.ID {
+		t.Fatalf("Sandbox changed: %#v %v", sandboxes, err)
 	}
 	notices, err := db.Notices(context.Background(), f.projectID, false)
 	if err != nil {
@@ -254,9 +254,9 @@ func TestTeardownWithoutPidfdPreservesResourcesAndReportsCapability(t *testing.T
 	}
 	foundCapabilityNotice := false
 	for _, notice := range notices {
-		foundCapabilityNotice = foundCapabilityNotice || notice.Kind == "unsaddle_incomplete" && strings.Contains(notice.Summary, "pidfd is unavailable")
+		foundCapabilityNotice = foundCapabilityNotice || notice.Kind == "teardown_incomplete" && strings.Contains(notice.Summary, "pidfd is unavailable")
 	}
 	if !foundCapabilityNotice {
-		t.Fatalf("unsaddle_incomplete Notice omitted the pidfd capability reason: %#v", notices)
+		t.Fatalf("teardown_incomplete Notice omitted the pidfd capability reason: %#v", notices)
 	}
 }

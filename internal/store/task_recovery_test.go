@@ -17,7 +17,7 @@ func TestTaskRecoveryBudgetBackoffAndExhaustionSurviveReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Broken Rider"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Broken Worker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestCompletedTaskRecoveryCanRetryWhenPaneDisappearsWithinGeneration(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Rider"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Worker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,12 +122,12 @@ func TestCompletedTaskRecoveryCanRetryWhenPaneDisappearsWithinGeneration(t *test
 	if err := db.FinishTaskRecovery(ctx, task, 102, 3, true, "", 4000); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.FinishTaskRecovery(ctx, task, 0, 2, false, "recovered Rider pane is no longer live", 0); err != nil {
+	if err := db.FinishTaskRecovery(ctx, task, 0, 2, false, "recovered Worker pane is no longer live", 0); err != nil {
 		t.Fatal(err)
 	}
 	state, err = db.TaskRecovery(ctx, id)
 	if err != nil || state.Status != "exhausted" {
-		t.Fatalf("missing Rider at exhausted budget state=%#v err=%v", state, err)
+		t.Fatalf("missing Worker at exhausted budget state=%#v err=%v", state, err)
 	}
 	notices, err := db.Notices(ctx, project.ID, false)
 	if err != nil || len(notices) != 1 || notices[0].Kind != "recovery_failed" {
@@ -146,7 +146,7 @@ func TestConcurrentTaskRecoveryClaimsChargeOneAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Rider"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Worker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestSettleTaskRecoveryPreservesBudgetAndRequiresObservedState(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Rider"})
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Worker"})
 	if err != nil {
 		t.Fatal(err)
 	}

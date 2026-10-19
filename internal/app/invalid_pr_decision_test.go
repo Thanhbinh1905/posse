@@ -6,10 +6,10 @@ import (
 )
 
 func TestAnsweredInvalidPRDecisionIsNotReofferedOnEveryPoll(t *testing.T) {
-	f := newPRLandingFixture(t, "pr", "done")
+	f := newPRMergeFixture(t, "pr", "done")
 	defer f.db.Close()
 	ctx := context.Background()
-	if err := f.db.UpdateTaskLanding(ctx, f.task.ID, "https://github.com/acme/shop/issues/17", ""); err != nil {
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, "https://github.com/acme/shop/issues/17", ""); err != nil {
 		t.Fatal(err)
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")

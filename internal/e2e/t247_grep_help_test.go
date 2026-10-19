@@ -11,7 +11,7 @@ import (
 func TestT247SuccessfulGrepOfPiErrorResultIsNotRetried(t *testing.T) {
 	// grep -A1 returns the standalone error line and the next /bug help line.
 	// The fixture appends that help line, just as the captured log contains it.
-	f := newPiModelErrorFixture(t, "────────────────\n$ grep -A1 stream-error rider.log\n"+t242StreamError, false)
+	f := newPiModelErrorFixture(t, "────────────────\n$ grep -A1 stream-error worker.log\n"+t242StreamError, false)
 	f.emitError(t)
 	time.Sleep(1200 * time.Millisecond)
 	task := f.base.mustTask(t, "t1")

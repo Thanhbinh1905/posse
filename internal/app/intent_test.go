@@ -42,7 +42,7 @@ func TestIntentCrashHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-func TestTaskIntentClaimWaitsForMountStateLock(t *testing.T) {
+func TestTaskIntentClaimWaitsForSandboxStateLock(t *testing.T) {
 	ctx := context.Background()
 	home := filepath.Join(t.TempDir(), "posse")
 	db, err := store.Open(home)
@@ -54,7 +54,7 @@ func TestTaskIntentClaimWaitsForMountStateLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Lock test"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Lock test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,13 +68,13 @@ func TestTaskIntentClaimWaitsForMountStateLock(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		close(started)
-		_, err := service.startTaskIntent(ctx, db, project.ID, taskID, "unsaddle")
+		_, err := service.startTaskIntent(ctx, db, project.ID, taskID, "teardown")
 		result <- err
 	}()
 	<-started
 	select {
 	case err := <-result:
-		t.Fatalf("Task intent claim bypassed the Mount-state lock: %v", err)
+		t.Fatalf("Task intent claim bypassed the Sandbox-state lock: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 	if err := lock.Close(); err != nil {
@@ -111,10 +111,10 @@ func TestIntentProcessAliveChecksBootAndStartTime(t *testing.T) {
 func TestIntentCrashHookExitsAfterPersistingCompletedStep(t *testing.T) {
 	ctx := context.Background()
 	checkpoints := map[string][]string{
-		"ride":         {"scratch.create", "mount.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"},
-		"land --merge": {"gate.record", "gate.run", "task.landing", "notice.create", "approval.record", "merge", "landed_ref.record", "task.landed"},
-		"unsaddle":     {"approval.record", "discard.capture", "process.stop", "panes.close", "mount.stop", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"},
-		"relaunch":     {"git.inspect", "pane.open", "agent.stop", "pane.label", "scratch.environment", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"},
+		"start":           {"scratch.create", "sandbox.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"},
+		"merge --execute": {"gate.record", "gate.run", "task.merging", "notice.create", "approval.record", "merge", "merged_ref.record", "task.merged"},
+		"teardown":        {"approval.record", "discard.capture", "process.stop", "panes.close", "sandbox.stop", "scratch.remove", "sandbox.release", "branch.remove", "task.torn_down"},
+		"relaunch":        {"git.inspect", "pane.open", "agent.stop", "pane.label", "scratch.environment", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"},
 	}
 	dbPath := filepath.Join(t.TempDir(), "posse.db")
 	var taskID int64
@@ -133,7 +133,7 @@ func TestIntentCrashHookExitsAfterPersistingCompletedStep(t *testing.T) {
 				}
 				projectID = project.ID
 			}
-			taskID, err = db.CreateTask(ctx, projectID, store.Task{Seq: seq, Type: "ship", Title: "crash", LandingMode: "local"})
+			taskID, err = db.CreateTask(ctx, projectID, store.Task{Seq: seq, Type: "change", Title: "crash", MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -17,7 +17,7 @@ import (
 )
 
 func TestUpStartsLeadAndSettlesRelaunchIntentWhileRecoveryWaitsForBackoff(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	t.Cleanup(func() { stopIsolatedFinalizers(t, f.root) })
 	startLog := filepath.Join(f.root, "recovery-starts.log")
 	agentPath := filepath.Join(f.root, "bin", "claude")
@@ -35,7 +35,7 @@ esac
 		t.Fatal(err)
 	}
 
-	initial := f.ride(t, "t1", "Recovery waits for backoff", "recovery-waits-backoff")
+	initial := f.start(t, "t1", "Recovery waits for backoff", "recovery-waits-backoff")
 	workerStarts := func() int {
 		t.Helper()
 		contents, err := os.ReadFile(startLog)
@@ -46,7 +46,7 @@ esac
 	}
 	startsBeforeCrash := workerStarts()
 	if startsBeforeCrash != 1 {
-		t.Fatalf("initial Rider starts=%d, want 1", startsBeforeCrash)
+		t.Fatalf("initial Worker starts=%d, want 1", startsBeforeCrash)
 	}
 
 	backoffEnds := time.Now().Add(time.Minute).UnixMilli()
@@ -82,7 +82,7 @@ esac
 		t.Fatalf("crashed relaunch process start was not logged: starts=%d, want at least %d", workerStarts(), startsBeforeCrash+1)
 	}
 	if got := workerStarts(); got != startsBeforeCrash+1 {
-		t.Fatalf("crashed relaunch starts=%d, want one new Rider launch", got-startsBeforeCrash)
+		t.Fatalf("crashed relaunch starts=%d, want one new Worker launch", got-startsBeforeCrash)
 	}
 	if err := func() error {
 		db, err := store.Open(f.home)
@@ -109,7 +109,7 @@ esac
 		t.Fatal(err)
 	}
 
-	closeRiderGroup(t, f)
+	closeWorkerGroup(t, f)
 	caller, err := createWorkspace(f.client, f.repo)
 	if err != nil {
 		t.Fatal(err)
@@ -133,12 +133,12 @@ esac
 		t.Fatalf("Lead starts=%q err=%v, want exactly one replacement Lead", contents, err)
 	}
 	if got := workerStarts(); got != startsBeforeCrash+2 {
-		t.Fatalf("Rider starts after replacement up=%d, want one launch to settle the interrupted intent", got-startsBeforeCrash)
+		t.Fatalf("Worker starts after replacement up=%d, want one launch to settle the interrupted intent", got-startsBeforeCrash)
 	}
 
 	task := f.task(t, "t1")
 	if task.State != store.StateWorking || task.Launches != initial.Launches+2 {
-		t.Fatalf("interrupted Rider relaunch was not settled exactly once: initial=%#v current=%#v", initial, task)
+		t.Fatalf("interrupted Worker relaunch was not settled exactly once: initial=%#v current=%#v", initial, task)
 	}
 	snapshot := f.snapshot(t)
 	lead, found := findLeadInSnapshot(snapshot)
@@ -163,7 +163,7 @@ esac
 }
 
 func TestUpStartsLeadAndSettlesRelaunchIntentDuringRestartBackoff(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	t.Cleanup(func() { stopIsolatedFinalizers(t, f.root) })
 	startLog := filepath.Join(f.root, "restart-backoff-starts.log")
 	agentPath := filepath.Join(f.root, "bin", "claude")
@@ -197,9 +197,9 @@ esac
 		return strings.Count(string(contents), "lead\n")
 	}
 
-	initial := f.ride(t, "t1", "Restart waits for backoff", "restart-waits-backoff")
+	initial := f.start(t, "t1", "Restart waits for backoff", "restart-waits-backoff")
 	if !waitForCondition(5*time.Second, func() bool { return workerStarts() == 1 }) {
-		t.Fatalf("initial Rider process start was not logged: starts=%d", workerStarts())
+		t.Fatalf("initial Worker process start was not logged: starts=%d", workerStarts())
 	}
 	backoffEnds := time.Now().Add(time.Minute).UnixMilli()
 	db, err := store.Open(f.home)
@@ -290,14 +290,14 @@ esac
 		t.Fatalf("replacement Lead did not start: starts=%d output=%s read_err=%v", leadStarts(), pane, readErr)
 	}
 	if !waitForCondition(5*time.Second, func() bool { return workerStarts() >= 3 }) {
-		t.Fatalf("replacement Rider process start was not logged: starts=%d, want at least 3", workerStarts())
+		t.Fatalf("replacement Worker process start was not logged: starts=%d, want at least 3", workerStarts())
 	}
 	if got := workerStarts(); got != 3 {
-		t.Fatalf("Rider starts after replacement up=%d, want one explicit relaunch to settle the intent", got)
+		t.Fatalf("Worker starts after replacement up=%d, want one explicit relaunch to settle the intent", got)
 	}
 	task := f.task(t, "t1")
 	if task.State != store.StateWorking || task.Launches != initial.Launches+2 {
-		t.Fatalf("interrupted Rider relaunch was not settled exactly once: initial=%#v current=%#v", initial, task)
+		t.Fatalf("interrupted Worker relaunch was not settled exactly once: initial=%#v current=%#v", initial, task)
 	}
 	if err := func() error {
 		db, err := store.OpenReadOnly(f.home)

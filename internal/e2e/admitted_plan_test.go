@@ -19,7 +19,7 @@ import (
 func TestAdmittedPlanFreezesRelaunchConfiguration(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
 	if code, output := rideReviewIdentityTask(t, fixture, "Frozen candidate", "author", ""); code != 0 {
-		t.Fatalf("ride: code=%d %s", code, output)
+		t.Fatalf("start: code=%d %s", code, output)
 	}
 	task := fixture.mustTask(t, "t1")
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.model", "edited-model")
@@ -35,7 +35,7 @@ func TestAdmittedPlanFreezesRelaunchConfiguration(t *testing.T) {
 	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", fixture.home)
 	output := runPosse(t, fixture.binary, task.WorktreePath, workerEnv, "status", "--json")
 	if !strings.Contains(output, `"admitted"`) || !strings.Contains(output, `"model-a"`) || strings.Contains(output, "edited-model") {
-		t.Fatalf("Rider status did not expose its frozen plan: %s", output)
+		t.Fatalf("Worker status did not expose its frozen plan: %s", output)
 	}
 	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET gated_sha='old-evidence' WHERE id=?`, task.ID); err != nil {
 		t.Fatal(err)
@@ -66,12 +66,12 @@ func TestAdmittedPlanFreezesRelaunchConfiguration(t *testing.T) {
 func TestAdmittedPublishUsesSelectedBriefInsteadOfMutableCopy(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
-	briefPath := filepath.Join(fixture.root, "ship.md")
-	original := "---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\nticket: 12\nrefs: [18]\n---\nCreate a committed change.\n"
+	briefPath := filepath.Join(fixture.root, "change.md")
+	original := "---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\nticket: 12\nrefs: [18]\n---\nCreate a committed change.\n"
 	if err := os.WriteFile(briefPath, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.runRideWithStoreBusyRetry(t, briefPath, "pr-lifecycle-change")
+	fixture.runStartWithStoreBusyRetry(t, briefPath, "pr-lifecycle-change")
 	stored := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
 	edited := strings.ReplaceAll(strings.ReplaceAll(original, "ticket: 12", "ticket: 999"), "refs: [18]", "refs: [998]")
 	if err := os.WriteFile(stored, []byte(edited), 0o600); err != nil {
@@ -87,18 +87,18 @@ func TestAdmittedPublishUsesSelectedBriefInsteadOfMutableCopy(t *testing.T) {
 	}
 }
 
-func TestRiderAdmittedStatusDoesNotRecoverOrExposeSibling(t *testing.T) {
+func TestWorkerAdmittedStatusDoesNotRecoverOrExposeSibling(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
 	if code, output := rideReviewIdentityTask(t, fixture, "Own candidate", "author", ""); code != 0 {
-		t.Fatalf("ride: code=%d %s", code, output)
+		t.Fatalf("start: code=%d %s", code, output)
 	}
 	own := fixture.mustTask(t, "t1")
 	ctx := context.Background()
-	siblingID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "scout", Title: "Private sibling", Profile: "sibling-profile"})
+	siblingID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "research", Title: "Private sibling", Profile: "sibling-profile"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.StartIntent(ctx, fixture.project.ID, siblingID, "ride", "done:task.create", "{}", 999999); err != nil {
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, siblingID, "start", "done:task.create", "{}", 999999); err != nil {
 		t.Fatal(err)
 	}
 	before, err := fixture.db.Intents(ctx, fixture.project.ID)
@@ -127,7 +127,7 @@ func TestRiderAdmittedStatusDoesNotRecoverOrExposeSibling(t *testing.T) {
 	command := exec.Command(fixture.binary, "status", "t2")
 	command.Dir, command.Env = own.WorktreePath, workerEnv
 	if output, err := command.CombinedOutput(); err == nil || !strings.Contains(string(output), "only its own status") {
-		t.Fatalf("Rider selected sibling: %v %s", err, output)
+		t.Fatalf("Worker selected sibling: %v %s", err, output)
 	}
 	after, err := fixture.db.Intents(ctx, fixture.project.ID)
 	if err != nil || !reflect.DeepEqual(before, after) {

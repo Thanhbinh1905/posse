@@ -69,7 +69,7 @@ func TestPiStreamDisconnectTailBeginningInsideToolPanelAutomaticallyResumes(t *t
 }
 
 func TestPiUnprefixedStreamDisconnectAfterEditAutomaticallyResumes(t *testing.T) {
-	modelError := " edit ~/.../busy_rider_steer_interrupt_test.go\n\n\n stream error: stream disconnected before completion: stream closed before response.completed"
+	modelError := " edit ~/.../busy_worker_steer_interrupt_test.go\n\n\n stream error: stream disconnected before completion: stream closed before response.completed"
 	fixture := newPiModelErrorFixture(t, modelError, false)
 	fixture.emitError(t)
 
@@ -105,11 +105,11 @@ func TestPiProviderRefusalIsNotRetried(t *testing.T) {
 	}
 }
 
-func TestPiStreamDisconnectIsNotNudgedIntoFocusedRider(t *testing.T) {
+func TestPiStreamDisconnectIsNotNudgedIntoFocusedWorker(t *testing.T) {
 	fixture := newPiModelErrorFixture(t, "Error: stream error: stream disconnected before completion: stream closed before response.completed", true)
 	task := fixture.base.mustTask(t, "t1")
 	if _, err := fixture.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": task.PaneID}); err != nil {
-		t.Fatalf("focus the isolated Rider pane: %v", err)
+		t.Fatalf("focus the isolated Worker pane: %v", err)
 	}
 	fixture.emitError(t)
 	if !waitForCondition(4*time.Second, func() bool { return fixture.hasNotice("model_stream_error") }) {
@@ -117,7 +117,7 @@ func TestPiStreamDisconnectIsNotNudgedIntoFocusedRider(t *testing.T) {
 	}
 	if got := countPromptLines(fixture.prompts, "continue"); got != 0 {
 		logged, _ := os.ReadFile(fixture.prompts)
-		t.Fatalf("focused Rider received an automatic nudge: count=%d prompts=%q", got, logged)
+		t.Fatalf("focused Worker received an automatic nudge: count=%d prompts=%q", got, logged)
 	}
 	signals, err := fixture.base.db.TaskSignals(context.Background(), task.ID, 10)
 	if err != nil {
@@ -156,7 +156,7 @@ func newPiModelErrorFixture(t *testing.T, modelError string, repeatOnContinue bo
 		t.Fatalf("install Pi integration in isolated Herdr: %v", err)
 	}
 	if output := runPosse(t, base.binary, base.repo, base.env, "config", "set", "profiles.deep.kind", "pi"); !strings.Contains(output, "pi") {
-		t.Fatalf("select Pi for the Rider harness: %s", output)
+		t.Fatalf("select Pi for the Worker harness: %s", output)
 	}
 	if !strings.Contains(modelError, "\n") && !strings.HasPrefix(strings.TrimSpace(modelError), "Error:") {
 		modelError = "Error: " + modelError
@@ -210,11 +210,11 @@ done
 		t.Fatal(err)
 	}
 	brief := filepath.Join(base.root, "model-error.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Recover model error\ndone_when: model error is handled\n---\nContinue the task.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Recover model error\ndone_when: model error is handled\n---\nContinue the task.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, base.binary, base.repo, base.leadEnv, "ride", "--brief", brief, "--name", "recover-model-error"); !strings.Contains(output, "t1") {
-		t.Fatalf("ride did not return t1: %s", output)
+	if output := runPosse(t, base.binary, base.repo, base.leadEnv, "start", "--brief", brief, "--name", "recover-model-error"); !strings.Contains(output, "t1") {
+		t.Fatalf("start did not return t1: %s", output)
 	}
 	if !waitForCondition(5*time.Second, func() bool {
 		task, err := base.db.Task(context.Background(), base.project.ID, "t1")

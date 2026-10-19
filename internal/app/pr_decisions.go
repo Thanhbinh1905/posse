@@ -19,7 +19,7 @@ func raiseInvalidPRDecision(ctx context.Context, db *store.DB, project store.Pro
 			return nil
 		}
 	}
-	_, err = db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_closed", Origin: origin, Question: "The recorded URL " + task.PRURL + " is not a pull request. Discard the Task or relaunch the Rider to publish a real PR URL?", Options: []string{"reopen-relaunch", "discard"}})
+	_, err = db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_closed", Origin: origin, Question: "The recorded URL " + task.PRURL + " is not a pull request. Discard the Task or relaunch the Worker to publish a real PR URL?", Options: []string{"reopen-relaunch", "discard"}})
 	if err != nil {
 		return err
 	}

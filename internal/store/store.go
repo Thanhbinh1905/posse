@@ -303,8 +303,8 @@ const (
 	StateBlocked       State = "blocked"
 	StateStalled       State = "stalled"
 	StateDone          State = "done"
-	StateLanding       State = "landing"
-	StateLanded        State = "landed"
+	StateMerging       State = "merging"
+	StateMerged        State = "merged"
 	StateReported      State = "reported"
 	StateFailed        State = "failed"
 	StateLost          State = "lost"
@@ -315,28 +315,28 @@ const (
 // tearing down a Task from this state. Keep this predicate centralized so the
 // allowed set can expand without changing each discard path independently.
 func IsApprovedDiscardSourceState(state State) bool {
-	return oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost, StateReported, StateLanded)
+	return oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateMerging, StateFailed, StateLost, StateReported, StateMerged)
 }
 
 func taskAcceptsInstruction(state State, taskType string) bool {
 	if oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled) {
 		return true
 	}
-	return taskType == "ship" && oneOfState(state, StateDone, StateLanding)
+	return taskType == "change" && oneOfState(state, StateDone, StateMerging)
 }
 
 var transitions = map[State]map[State]bool{
-	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
-	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateLanded: true, StateTornDown: true},
-	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
-	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true, StateLanded: true, StateTornDown: true},
-	StateStalled:       {StateWorking: true, StateTornDown: true, StateLost: true, StateLanded: true},
-	StateDone:          {StateLanding: true, StateLanded: true, StateReported: true, StateWorking: true, StateTornDown: true},
-	StateLanding:       {StateLanded: true, StateDone: true, StateWorking: true, StateTornDown: true},
-	StateLanded:        {StateTornDown: true},
+	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateMerged: true, StateTornDown: true},
+	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateMerged: true, StateTornDown: true},
+	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateMerged: true, StateTornDown: true},
+	StateBlocked:       {StateWorking: true, StateFailed: true, StateLost: true, StateMerged: true, StateTornDown: true},
+	StateStalled:       {StateWorking: true, StateTornDown: true, StateLost: true, StateMerged: true},
+	StateDone:          {StateMerging: true, StateMerged: true, StateReported: true, StateWorking: true, StateTornDown: true},
+	StateMerging:       {StateMerged: true, StateDone: true, StateWorking: true, StateTornDown: true},
+	StateMerged:        {StateTornDown: true},
 	StateReported:      {StateTornDown: true},
-	StateFailed:        {StateWorking: true, StateTornDown: true, StateLanded: true},
-	StateLost:          {StateWorking: true, StateTornDown: true, StateLanded: true},
+	StateFailed:        {StateWorking: true, StateTornDown: true, StateMerged: true},
+	StateLost:          {StateWorking: true, StateTornDown: true, StateMerged: true},
 }
 
 func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State, source, note string) error {
@@ -518,8 +518,8 @@ func transitionTx(ctx context.Context, queries *dbgen.Queries, taskID int64, exp
 			return err
 		}
 	}
-	if expected == StateLanding && next == StateDone {
-		if err := queries.ClearGatedSHALandingToDone(ctx, taskID); err != nil {
+	if expected == StateMerging && next == StateDone {
+		if err := queries.ClearGatedSHAMergeToDone(ctx, taskID); err != nil {
 			return err
 		}
 	}
@@ -529,23 +529,23 @@ func transitionTx(ctx context.Context, queries *dbgen.Queries, taskID int64, exp
 func validateTransitionSource(from, to State, source string) error {
 	expected := "cli"
 	switch {
-	case (to == StateDone && from != StateLanding) || (from == StateWorking && (to == StateNeedsDecision || to == StateFailed)):
+	case (to == StateDone && from != StateMerging) || (from == StateWorking && (to == StateNeedsDecision || to == StateFailed)):
 		expected = "worker"
 	case from == StateWorking && to == StateBlocked || from == StateBlocked && to == StateWorking:
 		expected = "herdr"
 	case from == StateNeedsDecision && to == StateWorking:
 		expected = "lead"
-		if source == "worker" || source == "rider" {
+		if source == "worker" {
 			expected = source
 		}
-	case (from == StateDone || from == StateLanding) && to == StateWorking:
+	case (from == StateDone || from == StateMerging) && to == StateWorking:
 		expected = "lead"
-		if source == "watcher" || source == "rider" {
+		if source == "watcher" || source == "worker" {
 			expected = source
 		}
 	case from == StateStalled && to == StateWorking:
-		if source == "rider" {
-			expected = "rider"
+		if source == "worker" {
+			expected = "worker"
 		} else if source != "cli" {
 			expected = "worker"
 		}
@@ -553,7 +553,7 @@ func validateTransitionSource(from, to State, source string) error {
 		expected = "cli"
 	case to == StateTornDown && source == "user" && IsApprovedDiscardSourceState(from):
 		expected = "user"
-	case to == StateTornDown && oneOfState(from, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateLanding, StateFailed, StateLost):
+	case to == StateTornDown && oneOfState(from, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateMerging, StateFailed, StateLost):
 		expected = "user"
 	}
 	if source != expected {
@@ -592,10 +592,10 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 	result, err := queries.InsertTask(ctx, dbgen.InsertTaskParams{
 		ProjectID: projectID, Seq: int64(task.Seq), Type: task.Type, ReviewsTaskID: nullableID(task.ReviewsTaskID),
 		Title: task.Title, PrTitle: task.PRTitle, ShortName: task.ShortName, State: string(task.State), Profile: task.Profile, DispatchRule: task.DispatchRule,
-		LandingMode: task.LandingMode, AutonomyReview: task.AutonomyReview, AutonomyLand: task.AutonomyLand,
+		MergeMode: task.MergeMode, AutonomyReview: task.AutonomyReview, AutonomyMerge: task.AutonomyMerge,
 		Branch: task.Branch, BaseRef: task.BaseRef, TargetBranch: task.TargetBranch, WorktreePath: task.WorktreePath,
 		HerdrWorkspaceID: task.HerdrWorkspaceID, PaneID: task.PaneID, PaneLabel: task.PaneLabel,
-		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, LandedRef: task.LandedRef,
+		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, MergedRef: task.MergedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
 		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now, PlanJson: planJSON,
 		ReportKind: task.ReportKind,
@@ -641,7 +641,7 @@ func nullableID(id int64) sql.NullInt64 {
 
 func oneOfSource(source string) bool {
 	switch source {
-	case "worker", "rider", "herdr", "cli", "lead", "user":
+	case "worker", "herdr", "cli", "lead", "user":
 		return true
 	default:
 		return false
@@ -670,14 +670,14 @@ type Task struct {
 	Profile        string `toml:"profile"`
 	DispatchRule   string `toml:"dispatch_rule"`
 	PlanJSON       string `toml:"plan_json,omitempty"`
-	LandingMode    string `toml:"landing_mode"`
+	MergeMode      string `toml:"landing_mode"`
 	AutonomyReview string `toml:"autonomy_review"`
-	AutonomyLand   string `toml:"autonomy_land"`
+	AutonomyMerge  string `toml:"autonomy_land"`
 	Branch         string `toml:"branch"`
 	BaseRef        string `toml:"base_ref"`
 	TargetBranch   string `toml:"target_branch"`
 	WorktreePath   string `toml:"worktree_path"`
-	MountID        int64  `toml:"mount_id"`
+	SandboxID      int64  `toml:"mount_id"`
 	Launches       int    `toml:"launches"`
 	// ReviewTargets is read only when a Review Task is created; the store keeps
 	// the bound commits in review_targets.
@@ -693,7 +693,7 @@ type Task struct {
 	IdleSince            int64          `toml:"idle_since"`
 	AgentServerStartedAt string         `toml:"agent_server_started_at"`
 	PRURL                string         `toml:"pr_url"`
-	LandedRef            string         `toml:"landed_ref"`
+	MergedRef            string         `toml:"landed_ref"`
 	LastOutputHash       string         `toml:"last_output_hash"`
 	LastWorktreeHash     string         `toml:"last_worktree_hash"`
 	LastProgressAt       int64          `toml:"last_progress_at"`
@@ -704,7 +704,7 @@ type Task struct {
 	ReportManifestJSON   string         `toml:"report_manifest_json,omitempty"`
 }
 
-type Mount struct {
+type Sandbox struct {
 	ID         int64
 	ProjectID  int64
 	Number     int
@@ -732,8 +732,8 @@ func (db *DB) CreateReviewRoundTaskWithSequenceAndIntent(ctx context.Context, pr
 	if command == "" || processID < 1 {
 		return 0, 0, fmt.Errorf("intent command and process id are required")
 	}
-	if task.Type != "review" || task.ReviewsTaskID != admission.ShipTaskID {
-		return 0, 0, fmt.Errorf("review round task does not target its admitted Ship Task")
+	if task.Type != "review" || task.ReviewsTaskID != admission.ChangeTaskID {
+		return 0, 0, fmt.Errorf("review round task does not target its admitted Change Task")
 	}
 	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission)
 }
@@ -826,7 +826,7 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at,plan_json,report_kind)
 VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?) RETURNING id`,
 		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, task.Profile, task.DispatchRule,
-		task.LandingMode, task.AutonomyReview, task.AutonomyLand, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
+		task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
 		projectName, seq, now, now, planJSON, task.ReportKind).Scan(&id)
 	if err != nil {
 		return 0, 0, err
@@ -864,49 +864,49 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 		return 0, 0, err
 	}
 	if roundAdmission != nil {
-		if err := db.PersistTask(ctx, roundAdmission.ShipTaskID); err != nil {
+		if err := db.PersistTask(ctx, roundAdmission.ChangeTaskID); err != nil {
 			return 0, 0, err
 		}
 	}
 	return id, seq, nil
 }
 
-func (db *DB) AcquireMount(ctx context.Context, projectID, taskID int64, basePath string) (Mount, error) {
+func (db *DB) AcquireSandbox(ctx context.Context, projectID, taskID int64, basePath string) (Sandbox, error) {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
-		return Mount{}, err
+		return Sandbox{}, err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	var mount Mount
-	err = tx.QueryRowContext(ctx, `UPDATE mounts SET state='held',task_id=?,acquired_at=?,released_at=0 WHERE id=(SELECT id FROM mounts WHERE project_id=? AND state='idle' ORDER BY n LIMIT 1) AND state='idle' RETURNING id,project_id,n,path,state,task_id,acquired_at,released_at`, taskID, now, projectID).Scan(&mount.ID, &mount.ProjectID, &mount.Number, &mount.Path, &mount.State, &mount.TaskID, &mount.AcquiredAt, &mount.ReleasedAt)
+	var sandbox Sandbox
+	err = tx.QueryRowContext(ctx, `UPDATE mounts SET state='held',task_id=?,acquired_at=?,released_at=0 WHERE id=(SELECT id FROM mounts WHERE project_id=? AND state='idle' ORDER BY n LIMIT 1) AND state='idle' RETURNING id,project_id,n,path,state,task_id,acquired_at,released_at`, taskID, now, projectID).Scan(&sandbox.ID, &sandbox.ProjectID, &sandbox.Number, &sandbox.Path, &sandbox.State, &sandbox.TaskID, &sandbox.AcquiredAt, &sandbox.ReleasedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		err = tx.QueryRowContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id,acquired_at,released_at) SELECT ?,COALESCE(MAX(n),0)+1,? || '/mount-' || (COALESCE(MAX(n),0)+1),'held',?,?,0 FROM mounts WHERE project_id=? RETURNING id,project_id,n,path,state,task_id,acquired_at,released_at`, projectID, basePath, taskID, now, projectID).Scan(&mount.ID, &mount.ProjectID, &mount.Number, &mount.Path, &mount.State, &mount.TaskID, &mount.AcquiredAt, &mount.ReleasedAt)
+		err = tx.QueryRowContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id,acquired_at,released_at) SELECT ?,COALESCE(MAX(n),0)+1,? || '/sandbox-' || (COALESCE(MAX(n),0)+1),'held',?,?,0 FROM mounts WHERE project_id=? RETURNING id,project_id,n,path,state,task_id,acquired_at,released_at`, projectID, basePath, taskID, now, projectID).Scan(&sandbox.ID, &sandbox.ProjectID, &sandbox.Number, &sandbox.Path, &sandbox.State, &sandbox.TaskID, &sandbox.AcquiredAt, &sandbox.ReleasedAt)
 	}
 	if err != nil {
-		return Mount{}, err
+		return Sandbox{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET mount_id=?,worktree_path=?,updated_at=? WHERE id=?`, mount.ID, mount.Path, now, taskID); err != nil {
-		return Mount{}, err
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET mount_id=?,worktree_path=?,updated_at=? WHERE id=?`, sandbox.ID, sandbox.Path, now, taskID); err != nil {
+		return Sandbox{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return Mount{}, err
+		return Sandbox{}, err
 	}
 	if err := db.PersistTask(ctx, taskID); err != nil {
-		return Mount{}, err
+		return Sandbox{}, err
 	}
-	return mount, nil
+	return sandbox, nil
 }
 
-// BeginMountRelease records that the checkout has been reset and no longer
+// BeginSandboxRelease records that the checkout has been reset and no longer
 // contains Task work. Its Git lock may now be removed without ever exposing
 // an unlocked checkout that the database still describes as held.
-func (db *DB) BeginMountRelease(ctx context.Context, mountID, taskID int64) error {
+func (db *DB) BeginSandboxRelease(ctx context.Context, sandboxID, taskID int64) error {
 	var projectID int64
-	if err := db.QueryRowContext(ctx, `SELECT project_id FROM mounts WHERE id=? AND task_id=? AND state='held'`, mountID, taskID).Scan(&projectID); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM mounts WHERE id=? AND task_id=? AND state='held'`, sandboxID, taskID).Scan(&projectID); err != nil {
 		return err
 	}
-	result, err := db.ExecContext(ctx, `UPDATE mounts SET state='releasing' WHERE id=? AND task_id=? AND state='held'`, mountID, taskID)
+	result, err := db.ExecContext(ctx, `UPDATE mounts SET state='releasing' WHERE id=? AND task_id=? AND state='held'`, sandboxID, taskID)
 	if err != nil {
 		return err
 	}
@@ -920,16 +920,16 @@ func (db *DB) BeginMountRelease(ctx context.Context, mountID, taskID int64) erro
 	return db.PersistProject(ctx, projectID)
 }
 
-// FinishMountRelease is retryable after a crash. A failed Task snapshot write
+// FinishSandboxRelease is retryable after a crash. A failed Task snapshot write
 // may follow the committed idle transition; callers must never relock it.
-func (db *DB) FinishMountRelease(ctx context.Context, mountID, taskID int64) error {
+func (db *DB) FinishSandboxRelease(ctx context.Context, sandboxID, taskID int64) error {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	result, err := tx.ExecContext(ctx, `UPDATE mounts SET state='idle',task_id=NULL,released_at=? WHERE id=? AND task_id=? AND state='releasing'`, now, mountID, taskID)
+	result, err := tx.ExecContext(ctx, `UPDATE mounts SET state='idle',task_id=NULL,released_at=? WHERE id=? AND task_id=? AND state='releasing'`, now, sandboxID, taskID)
 	if err != nil {
 		return err
 	}
@@ -940,7 +940,7 @@ func (db *DB) FinishMountRelease(ctx context.Context, mountID, taskID int64) err
 	if count != 1 {
 		return ErrStateRace
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE tasks SET mount_id=NULL,updated_at=? WHERE id=? AND mount_id=?`, now, taskID, mountID)
+	result, err = tx.ExecContext(ctx, `UPDATE tasks SET mount_id=NULL,updated_at=? WHERE id=? AND mount_id=?`, now, taskID, sandboxID)
 	if err != nil {
 		return err
 	}
@@ -951,7 +951,7 @@ func (db *DB) FinishMountRelease(ctx context.Context, mountID, taskID int64) err
 	if count != 1 {
 		return ErrStateRace
 	}
-	if err := db.releaseMountLeaseTx(ctx, tx, mountID); err != nil {
+	if err := db.releaseSandboxLeaseTx(ctx, tx, sandboxID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -960,8 +960,8 @@ func (db *DB) FinishMountRelease(ctx context.Context, mountID, taskID int64) err
 	return db.PersistTask(ctx, taskID)
 }
 
-func (db *DB) UpdateTaskMountPath(ctx context.Context, taskID, mountID int64, path string) error {
-	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=NULLIF(?,0),worktree_path=?,updated_at=? WHERE id=?`, mountID, path, time.Now().UnixMilli(), taskID); err != nil {
+func (db *DB) UpdateTaskSandboxPath(ctx context.Context, taskID, sandboxID int64, path string) error {
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET mount_id=NULLIF(?,0),worktree_path=?,updated_at=? WHERE id=?`, sandboxID, path, time.Now().UnixMilli(), taskID); err != nil {
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
@@ -974,14 +974,14 @@ func (db *DB) UpdateTaskWorkspace(ctx context.Context, taskID int64, workspaceID
 	return db.PersistTask(ctx, taskID)
 }
 
-func (db *DB) BreakMount(ctx context.Context, mountID, taskID int64) error {
+func (db *DB) BreakSandbox(ctx context.Context, sandboxID, taskID int64) error {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	result, err := tx.ExecContext(ctx, `UPDATE mounts SET state='broken',task_id=NULL,released_at=? WHERE id=? AND task_id=? AND state='held'`, now, mountID, taskID)
+	result, err := tx.ExecContext(ctx, `UPDATE mounts SET state='broken',task_id=NULL,released_at=? WHERE id=? AND task_id=? AND state='held'`, now, sandboxID, taskID)
 	if err != nil {
 		return err
 	}
@@ -992,7 +992,7 @@ func (db *DB) BreakMount(ctx context.Context, mountID, taskID int64) error {
 	if count != 1 {
 		return ErrStateRace
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE tasks SET mount_id=NULL,updated_at=? WHERE id=? AND mount_id=?`, now, taskID, mountID)
+	result, err = tx.ExecContext(ctx, `UPDATE tasks SET mount_id=NULL,updated_at=? WHERE id=? AND mount_id=?`, now, taskID, sandboxID)
 	if err != nil {
 		return err
 	}
@@ -1009,8 +1009,8 @@ func (db *DB) BreakMount(ctx context.Context, mountID, taskID int64) error {
 	return db.PersistTask(ctx, taskID)
 }
 
-func (db *DB) ClaimMountPrune(ctx context.Context, projectID, mountID int64) (bool, error) {
-	result, err := db.ExecContext(ctx, `UPDATE mounts SET state='pruning' WHERE id=? AND project_id=? AND state IN ('idle','broken')`, mountID, projectID)
+func (db *DB) ClaimSandboxPrune(ctx context.Context, projectID, sandboxID int64) (bool, error) {
+	result, err := db.ExecContext(ctx, `UPDATE mounts SET state='pruning' WHERE id=? AND project_id=? AND state IN ('idle','broken')`, sandboxID, projectID)
 	if err != nil {
 		return false, err
 	}
@@ -1018,11 +1018,11 @@ func (db *DB) ClaimMountPrune(ctx context.Context, projectID, mountID int64) (bo
 	return count == 1, err
 }
 
-func (db *DB) RestoreMountAfterPrune(ctx context.Context, mountID int64, state string) error {
+func (db *DB) RestoreSandboxAfterPrune(ctx context.Context, sandboxID int64, state string) error {
 	if state != "idle" && state != "broken" {
-		return fmt.Errorf("invalid Mount state after prune: %q", state)
+		return fmt.Errorf("invalid Sandbox state after prune: %q", state)
 	}
-	result, err := db.ExecContext(ctx, `UPDATE mounts SET state=? WHERE id=? AND state='pruning'`, state, mountID)
+	result, err := db.ExecContext(ctx, `UPDATE mounts SET state=? WHERE id=? AND state='pruning'`, state, sandboxID)
 	if err != nil {
 		return err
 	}
@@ -1033,8 +1033,8 @@ func (db *DB) RestoreMountAfterPrune(ctx context.Context, mountID int64, state s
 	return err
 }
 
-func (db *DB) DeletePrunedMount(ctx context.Context, projectID, mountID int64) error {
-	result, err := db.ExecContext(ctx, `DELETE FROM mounts WHERE id=? AND project_id=? AND state='pruning'`, mountID, projectID)
+func (db *DB) DeletePrunedSandbox(ctx context.Context, projectID, sandboxID int64) error {
+	result, err := db.ExecContext(ctx, `DELETE FROM mounts WHERE id=? AND project_id=? AND state='pruning'`, sandboxID, projectID)
 	if err != nil {
 		return err
 	}
@@ -1048,27 +1048,27 @@ func (db *DB) DeletePrunedMount(ctx context.Context, projectID, mountID int64) e
 	return db.PersistProject(ctx, projectID)
 }
 
-func (db *DB) Mounts(ctx context.Context, projectID int64) ([]Mount, error) {
+func (db *DB) Sandboxes(ctx context.Context, projectID int64) ([]Sandbox, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id,project_id,n,path,state,COALESCE(task_id,0),acquired_at,released_at FROM mounts WHERE project_id=? ORDER BY n`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	mounts := []Mount{}
+	sandboxes := []Sandbox{}
 	for rows.Next() {
-		var mount Mount
-		if err := rows.Scan(&mount.ID, &mount.ProjectID, &mount.Number, &mount.Path, &mount.State, &mount.TaskID, &mount.AcquiredAt, &mount.ReleasedAt); err != nil {
+		var sandbox Sandbox
+		if err := rows.Scan(&sandbox.ID, &sandbox.ProjectID, &sandbox.Number, &sandbox.Path, &sandbox.State, &sandbox.TaskID, &sandbox.AcquiredAt, &sandbox.ReleasedAt); err != nil {
 			return nil, err
 		}
-		mounts = append(mounts, mount)
+		sandboxes = append(sandboxes, sandbox)
 	}
-	return mounts, rows.Err()
+	return sandboxes, rows.Err()
 }
 
-func (db *DB) MountByTask(ctx context.Context, taskID int64) (Mount, error) {
-	var mount Mount
-	err := db.QueryRowContext(ctx, `SELECT id,project_id,n,path,state,COALESCE(task_id,0),acquired_at,released_at FROM mounts WHERE task_id=?`, taskID).Scan(&mount.ID, &mount.ProjectID, &mount.Number, &mount.Path, &mount.State, &mount.TaskID, &mount.AcquiredAt, &mount.ReleasedAt)
-	return mount, err
+func (db *DB) SandboxByTask(ctx context.Context, taskID int64) (Sandbox, error) {
+	var sandbox Sandbox
+	err := db.QueryRowContext(ctx, `SELECT id,project_id,n,path,state,COALESCE(task_id,0),acquired_at,released_at FROM mounts WHERE task_id=?`, taskID).Scan(&sandbox.ID, &sandbox.ProjectID, &sandbox.Number, &sandbox.Path, &sandbox.State, &sandbox.TaskID, &sandbox.AcquiredAt, &sandbox.ReleasedAt)
+	return sandbox, err
 }
 
 func (db *DB) SetTaskGatedSHA(ctx context.Context, taskID int64, sha string) error {
@@ -1079,7 +1079,7 @@ func (db *DB) SetTaskGatedSHA(ctx context.Context, taskID int64, sha string) err
 }
 
 // ClearTaskGatedSHA forgets the commit the Gate passed, for the Task and for
-// each workspace member not already landing through a pull request.
+// each workspace member not already merging through a pull request.
 func (db *DB) ClearTaskGatedSHA(ctx context.Context, taskID int64) error {
 	now := time.Now().UnixMilli()
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET gated_sha='',updated_at=? WHERE id=?`, now, taskID); err != nil {
@@ -1204,7 +1204,7 @@ func (db *DB) CreateProject(ctx context.Context, name, root, defaultBranch strin
 }
 
 // IsDown reports that the User stopped this Project with `posse down`.
-// Nothing restarts its Lead or Riders until `posse up`.
+// Nothing restarts its Lead or Workers until `posse up`.
 func (p Project) IsDown() bool { return p.DownAt != 0 }
 
 func (db *DB) MarkProjectDown(ctx context.Context, projectID int64) error {
@@ -1345,8 +1345,8 @@ func (db *DB) ChangeTaskProfile(ctx context.Context, taskID int64, oldProfile, n
 	return db.PersistTask(ctx, taskID)
 }
 
-func (db *DB) UpdateTaskLanding(ctx context.Context, taskID int64, prURL, landedRef string) error {
-	if err := db.queries.UpdateTaskLanding(ctx, dbgen.UpdateTaskLandingParams{PrUrl: prURL, LandedRef: landedRef, UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
+func (db *DB) UpdateTaskMerge(ctx context.Context, taskID int64, prURL, mergedRef string) error {
+	if err := db.queries.UpdateTaskMerge(ctx, dbgen.UpdateTaskMergeParams{PrUrl: prURL, MergedRef: mergedRef, UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
@@ -1393,7 +1393,7 @@ func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb
 	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, verdict, nil)
 }
 
-// RecordWorkerSignalWithValidation records a Ship done Signal only if the
+// RecordWorkerSignalWithValidation records a Change done Signal only if the
 // automatic validation instructions checked by the caller have not changed.
 func (db *DB) RecordWorkerSignalWithValidation(ctx context.Context, task Task, verb, note string, data any, noticeKind string, validation ValidationContinuitySnapshot) (State, error) {
 	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, nil, &validation)
@@ -1426,7 +1426,7 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 		return "", err
 	}
 	current := State(state)
-	if verb == "done" && taskType == "ship" && validationHeads != nil {
+	if verb == "done" && taskType == "change" && validationHeads != nil {
 		currentHeads, err := validationContinuitySnapshotTx(ctx, tx, task.ID)
 		if err != nil {
 			return "", err
@@ -1436,25 +1436,25 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 		}
 	}
 	previousState := current
-	riderResumed := false
+	workerResumed := false
 	watcherTransitionAt := int64(0)
-	if verb == "working" && current == StateWorking && taskType == "ship" {
+	if verb == "working" && current == StateWorking && taskType == "change" {
 		var transitionID, transitionAt int64
 		var fromState, source string
 		err := tx.QueryRowContext(ctx, `SELECT id,from_state,source,at FROM transitions WHERE task_id=? AND to_state='working' ORDER BY id DESC LIMIT 1`, task.ID).Scan(&transitionID, &fromState, &source, &transitionAt)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return "", err
 		}
-		if err == nil && source == "watcher" && (fromState == string(StateDone) || fromState == string(StateLanding)) {
+		if err == nil && source == "watcher" && (fromState == string(StateDone) || fromState == string(StateMerging)) {
 			var alreadySignaled bool
 			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM signals WHERE task_id=? AND verb='working' AND at>?)`, task.ID, transitionAt).Scan(&alreadySignaled); err != nil {
 				return "", err
 			}
 			if !alreadySignaled {
-				if err := cancelPendingLandIntentTx(ctx, tx, task.ID); err != nil {
+				if err := cancelPendingMergeIntentTx(ctx, tx, task.ID); err != nil {
 					return "", err
 				}
-				result, err := tx.ExecContext(ctx, `UPDATE transitions SET source='rider',note=? WHERE id=? AND source='watcher'`, note, transitionID)
+				result, err := tx.ExecContext(ctx, `UPDATE transitions SET source='worker',note=? WHERE id=? AND source='watcher'`, note, transitionID)
 				if err != nil {
 					return "", err
 				}
@@ -1467,27 +1467,27 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 				}
 				previousState = State(fromState)
 				watcherTransitionAt = transitionAt
-				riderResumed = true
+				workerResumed = true
 			}
 		}
 	}
-	completedShip := taskType == "ship" && oneOfState(current, StateDone, StateLanding)
-	if !riderResumed {
-		if verb == "working" && (completedShip || oneOfState(current, StateStalled, StateNeedsDecision)) {
-			if completedShip {
-				if err := cancelPendingLandIntentTx(ctx, tx, task.ID); err != nil {
+	completedChange := taskType == "change" && oneOfState(current, StateDone, StateMerging)
+	if !workerResumed {
+		if verb == "working" && (completedChange || oneOfState(current, StateStalled, StateNeedsDecision)) {
+			if completedChange {
+				if err := cancelPendingMergeIntentTx(ctx, tx, task.ID); err != nil {
 					return "", err
 				}
 			}
-			if err := transitionTx(ctx, queries, task.ID, current, StateWorking, "rider", note); err != nil {
+			if err := transitionTx(ctx, queries, task.ID, current, StateWorking, "worker", note); err != nil {
 				return "", err
 			}
 			previousState = current
 			current = StateWorking
-			riderResumed = true
+			workerResumed = true
 		} else {
 			if current == StateStalled {
-				if err := transitionTx(ctx, queries, task.ID, StateStalled, StateWorking, "worker", "Rider resumed with a Signal"); err != nil {
+				if err := transitionTx(ctx, queries, task.ID, StateStalled, StateWorking, "worker", "Worker resumed with a Signal"); err != nil {
 					return "", err
 				}
 				current = StateWorking
@@ -1497,18 +1497,18 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 			}
 		}
 	}
-	if riderResumed {
+	if workerResumed {
 		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET gated_sha='' WHERE id=?`, task.ID); err != nil {
 			return "", err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='',state=CASE WHEN state IN ('gated','unchanged','landing') THEN 'open' ELSE state END,updated_at=? WHERE task_id=? AND state<>'landed'`, time.Now().UnixMilli(), task.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='',state=CASE WHEN state IN ('gated','unchanged','merging') THEN 'open' ELSE state END,updated_at=? WHERE task_id=? AND state<>'merged'`, time.Now().UnixMilli(), task.ID); err != nil {
 			return "", err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM completed_rider_busy WHERE task_id=?`, task.ID); err != nil {
 			return "", err
 		}
-		if taskType == "ship" && oneOfState(previousState, StateDone, StateLanding) {
-			if _, err := tx.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Rider reopened Task' WHERE task_id=? AND kind='land_ready' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), task.ID); err != nil {
+		if taskType == "change" && oneOfState(previousState, StateDone, StateMerging) {
+			if _, err := tx.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Worker reopened Task' WHERE task_id=? AND kind='merge_ready' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), task.ID); err != nil {
 				return "", err
 			}
 		}
@@ -1523,7 +1523,7 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 		}
 	}
 	signalAt := time.Now().UnixMilli()
-	if verb == "done" && taskType == "ship" && validationHeads != nil {
+	if verb == "done" && taskType == "change" && validationHeads != nil {
 		var latestInstruction sql.NullInt64
 		if err := tx.QueryRowContext(ctx, `SELECT MAX(m.created_at) FROM messages m JOIN validation_fix_rounds r ON r.message_id=m.id WHERE r.ship_task_id=?`, task.ID).Scan(&latestInstruction); err != nil {
 			return "", err
@@ -1566,22 +1566,22 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 			return "", err
 		}
 	}
-	if verb == "done" && task.Type == "ship" && !inPlace {
+	if verb == "done" && task.Type == "change" && !inPlace {
 		var taskType, paneID, server string
 		var transitionID int64
 		if err := tx.QueryRowContext(ctx, `SELECT type,pane_id,agent_server_started_at,COALESCE((SELECT id FROM transitions WHERE task_id=tasks.id AND to_state='done' ORDER BY id DESC LIMIT 1),0) FROM tasks WHERE id=?`, task.ID).Scan(&taskType, &paneID, &server, &transitionID); err != nil {
 			return "", err
 		}
-		if taskType == "ship" {
-			if err := upsertCompletedRiderTurn(ctx, tx, task.ID, transitionID, paneID, server, time.Now().UnixMilli(), false); err != nil {
+		if taskType == "change" {
+			if err := upsertCompletedWorkerTurn(ctx, tx, task.ID, transitionID, paneID, server, time.Now().UnixMilli(), false); err != nil {
 				return "", err
 			}
 		}
 	}
-	if verb == "done" && (task.Type != "ship" || inPlace) {
-		reason := "Rider Report copied to the Project home"
+	if verb == "done" && (task.Type != "change" || inPlace) {
+		reason := "Worker Report copied to the Project home"
 		if inPlace {
-			reason = "in-place Task output recorded without a Land step"
+			reason = "in-place Task output recorded without a Merge step"
 		}
 		if err := transitionTx(ctx, queries, task.ID, StateDone, StateReported, "cli", reason); err != nil {
 			return "", err
@@ -1590,23 +1590,23 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	}
 	noticeSummary := note
 	noticeDataJSON := string(encoded)
-	if riderResumed {
-		noticeKind = "rider_resumed"
-		noticeSummary = task.Title + ": Rider resumed: " + strconv.Quote(note)
+	if workerResumed {
+		noticeKind = "worker_resumed"
+		noticeSummary = task.Title + ": Worker resumed: " + strconv.Quote(note)
 		noticeData, marshalErr := json.Marshal(map[string]any{"previous_state": previousState, "reason": note})
 		if marshalErr != nil {
 			return "", marshalErr
 		}
 		noticeDataJSON = string(noticeData)
-	} else if noticeKind == "rider_resumed" {
+	} else if noticeKind == "worker_resumed" {
 		noticeKind = ""
 	}
 	if noticeKind != "" {
 		updatedWatcherNotice := false
-		if riderResumed && watcherTransitionAt > 0 {
+		if workerResumed && watcherTransitionAt > 0 {
 			var noticeID int64
 			var priorDataJSON string
-			err := tx.QueryRowContext(ctx, `SELECT id,data_json FROM notices WHERE task_id=? AND kind='rider_resumed' AND delivered_at=0 AND created_at>=? ORDER BY id DESC LIMIT 1`, task.ID, watcherTransitionAt).Scan(&noticeID, &priorDataJSON)
+			err := tx.QueryRowContext(ctx, `SELECT id,data_json FROM notices WHERE task_id=? AND kind='worker_resumed' AND delivered_at=0 AND created_at>=? ORDER BY id DESC LIMIT 1`, task.ID, watcherTransitionAt).Scan(&noticeID, &priorDataJSON)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return "", err
 			}
@@ -1656,7 +1656,7 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	return current, nil
 }
 
-func cancelPendingLandIntentTx(ctx context.Context, tx *writeTx, taskID int64) error {
+func cancelPendingMergeIntentTx(ctx context.Context, tx *writeTx, taskID int64) error {
 	var intentID int64
 	var command, step string
 	err := tx.QueryRowContext(ctx, `SELECT id,command,step FROM intents WHERE task_id=?`, taskID).Scan(&intentID, &command, &step)
@@ -1666,7 +1666,7 @@ func cancelPendingLandIntentTx(ctx context.Context, tx *writeTx, taskID int64) e
 	if err != nil {
 		return err
 	}
-	if command != "land --merge" && command != "land --open-pr" {
+	if command != "merge --execute" && command != "merge --open-pr" {
 		return fmt.Errorf("%w: %s", ErrIntentOwned, command)
 	}
 	step = strings.TrimPrefix(step, "resuming:")
@@ -1770,7 +1770,7 @@ SELECT ?, ?, ?, 'queued', ?
 WHERE EXISTS (
     SELECT 1 FROM tasks WHERE id=? AND (
         state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled')
-        OR type='ship' AND state IN ('done', 'landing')
+        OR type='change' AND state IN ('done', 'merging')
     )
 )`, taskID, body, time.Now().UnixMilli(), waitForIdle, taskID)
 	if err != nil {
@@ -1788,14 +1788,14 @@ WHERE EXISTS (
 
 // QueueMessageOnceAfter queues a message once for the current completion. A
 // later done Signal permits a retry, while repeated watcher ticks do not spam
-// the Rider with the same outstanding freshness instruction.
+// the Worker with the same outstanding freshness instruction.
 func (db *DB) QueueMessageOnceAfter(ctx context.Context, taskID int64, body string, waitForIdle bool, after int64) (int64, bool, error) {
 	result, err := db.ExecContext(ctx, `INSERT INTO messages(task_id, body, created_at, status, wait_for_idle)
 SELECT ?, ?, ?, 'queued', ?
 WHERE EXISTS (
     SELECT 1 FROM tasks WHERE id=? AND (
         state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled')
-        OR type='ship' AND state IN ('done', 'landing')
+        OR type='change' AND state IN ('done', 'merging')
     )
 ) AND NOT EXISTS (
     SELECT 1 FROM messages WHERE task_id=? AND body=? AND created_at>? AND status IN ('queued', 'claimed', 'interrupting', 'submitting', 'delivered')
@@ -1815,7 +1815,7 @@ WHERE EXISTS (
 	if err := db.QueryRowContext(ctx, `SELECT
 EXISTS(SELECT 1 FROM tasks WHERE id=? AND (
     state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled')
-    OR type='ship' AND state IN ('done', 'landing')
+    OR type='change' AND state IN ('done', 'merging')
 )),
 EXISTS(SELECT 1 FROM messages WHERE task_id=? AND body=? AND created_at>? AND status IN ('queued', 'claimed', 'interrupting', 'submitting', 'delivered'))`, taskID, taskID, body, after).Scan(&eligible, &exists); err != nil {
 		return 0, false, err
@@ -2113,13 +2113,13 @@ func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token 
 		return err
 	}
 	// Commit the authorized Task transition before Herdr can expose the
-	// instruction. An immediate Rider Signal must see the reopened Task.
+	// instruction. An immediate Worker Signal must see the reopened Task.
 	current := State(state)
-	if current == StateNeedsDecision || taskType == "ship" && (current == StateDone || current == StateLanding) {
+	if current == StateNeedsDecision || taskType == "change" && (current == StateDone || current == StateMerging) {
 		if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, current, StateWorking, "lead", "Lead submitted an instruction"); err != nil {
 			return err
 		}
-		if taskType == "ship" && current != StateNeedsDecision {
+		if taskType == "change" && current != StateNeedsDecision {
 			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET gated_sha='' WHERE id=?`, taskID); err != nil {
 				return err
 			}
@@ -2527,17 +2527,17 @@ func taskFromDB(row dbgen.Task) Task {
 	if row.ReviewsTaskID.Valid {
 		reviewsTaskID = row.ReviewsTaskID.Int64
 	}
-	mountID := int64(0)
-	if row.MountID.Valid {
-		mountID = row.MountID.Int64
+	sandboxID := int64(0)
+	if row.SandboxID.Valid {
+		sandboxID = row.SandboxID.Int64
 	}
 	return Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, ReviewsTaskID: reviewsTaskID,
 		Title: row.Title, PRTitle: row.PrTitle, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule, PlanJSON: row.PlanJson,
-		LandingMode: row.LandingMode, AutonomyReview: row.AutonomyReview, AutonomyLand: row.AutonomyLand,
-		Branch: row.Branch, BaseRef: row.BaseRef, TargetBranch: row.TargetBranch, WorktreePath: row.WorktreePath, MountID: mountID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
+		MergeMode: row.MergeMode, AutonomyReview: row.AutonomyReview, AutonomyMerge: row.AutonomyMerge,
+		Branch: row.Branch, BaseRef: row.BaseRef, TargetBranch: row.TargetBranch, WorktreePath: row.WorktreePath, SandboxID: sandboxID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
 		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
-		PRURL: row.PrUrl, LandedRef: row.LandedRef, LastOutputHash: row.LastOutputHash,
+		PRURL: row.PrUrl, MergedRef: row.MergedRef, LastOutputHash: row.LastOutputHash,
 		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson}
 }
@@ -2692,7 +2692,7 @@ func (db *DB) CreateWorkerExitedNotice(ctx context.Context, task Task, now time.
 	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO notices(project_id, task_id, kind, summary, data_json, created_at) VALUES (?, ?, 'worker_exited', ?, ?, ?)`, task.ProjectID, task.ID, task.Title+" Rider exited after signaling done", string(dataJSON), now.UnixMilli()); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO notices(project_id, task_id, kind, summary, data_json, created_at) VALUES (?, ?, 'worker_exited', ?, ?, ?)`, task.ProjectID, task.ID, task.Title+" Worker exited after signaling done", string(dataJSON), now.UnixMilli()); err != nil {
 		return err
 	}
 	return db.PersistProject(ctx, task.ProjectID)
@@ -2713,16 +2713,16 @@ func (db *DB) AddEvent(ctx context.Context, kind, paneID, dataJSON string, at in
 
 func IsNotFound(err error) bool { return errors.Is(err, sql.ErrNoRows) }
 
-// ErrProjectNotEmpty reports a Project that still has Tasks or Mounts.
-var ErrProjectNotEmpty = errors.New("project has Tasks or Mounts")
+// ErrProjectNotEmpty reports a Project that still has Tasks or Sandboxes.
+var ErrProjectNotEmpty = errors.New("project has Tasks or Sandboxes")
 
-// ProjectContents counts a Project's Tasks (of any state) and Mounts.
-func (db *DB) ProjectContents(ctx context.Context, projectID int64) (tasks, mounts int, err error) {
-	err = db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM tasks WHERE project_id=?), (SELECT COUNT(*) FROM mounts WHERE project_id=?)`, projectID, projectID).Scan(&tasks, &mounts)
-	return tasks, mounts, err
+// ProjectContents counts a Project's Tasks (of any state) and Sandboxes.
+func (db *DB) ProjectContents(ctx context.Context, projectID int64) (tasks, sandboxes int, err error) {
+	err = db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM tasks WHERE project_id=?), (SELECT COUNT(*) FROM mounts WHERE project_id=?)`, projectID, projectID).Scan(&tasks, &sandboxes)
+	return tasks, sandboxes, err
 }
 
-// DeleteEmptyProject removes a Project that never had a Task or a Mount, with
+// DeleteEmptyProject removes a Project that never had a Task or a Sandbox, with
 // its Project-level rows, in one transaction. A Project with either is refused
 // with ErrProjectNotEmpty, so no Task history or worktree is ever dropped.
 func (db *DB) DeleteEmptyProject(ctx context.Context, projectID int64) error {
@@ -2735,11 +2735,11 @@ func (db *DB) DeleteEmptyProject(ctx context.Context, projectID int64) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var tasks, mounts int
-	if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM tasks WHERE project_id=?), (SELECT COUNT(*) FROM mounts WHERE project_id=?)`, projectID, projectID).Scan(&tasks, &mounts); err != nil {
+	var tasks, sandboxes int
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM tasks WHERE project_id=?), (SELECT COUNT(*) FROM mounts WHERE project_id=?)`, projectID, projectID).Scan(&tasks, &sandboxes); err != nil {
 		return err
 	}
-	if tasks != 0 || mounts != 0 {
+	if tasks != 0 || sandboxes != 0 {
 		return ErrProjectNotEmpty
 	}
 	if err := deleteProjectReferences(ctx, tx, projectID); err != nil {

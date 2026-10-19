@@ -121,8 +121,8 @@ func (s *Service) recover(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return axi.Failure("rebuild_failed", "could not rebuild the database from Task snapshots", false, err.Error())
 		}
-		if err := execution.NewManager(db).EnsureMountLeases(ctx.Context); err != nil {
-			return axi.Failure("rebuild_failed", "database was rebuilt, but Mount resource custody could not be reconciled", false, err.Error())
+		if err := execution.NewManager(db).EnsureSandboxLeases(ctx.Context); err != nil {
+			return axi.Failure("rebuild_failed", "database was rebuilt, but Sandbox resource custody could not be reconciled", false, err.Error())
 		}
 		result := axi.Object{{Key: "rebuilt_tasks", Value: count}, {Key: "source", Value: filepath.Join(home, "projects")}}
 		if len(orphanedSidecars) > 0 {
@@ -167,7 +167,7 @@ func (s *Service) recover(ctx *axi.Context, args []string) error {
 	}
 	result := axi.Object{{Key: "projects", Value: reconciled}, {Key: "attempted", Value: len(projects) - len(held)}, {Key: "restarted", Value: restarted}, {Key: "failed_projects", Value: failed}}
 	if len(held) > 0 {
-		result = append(result, axi.Field{Key: "held_projects", Value: held}, axi.Field{Key: "help", Value: []any{"Run `posse up` in a held Project's folder to start its Lead and recover its Riders"}})
+		result = append(result, axi.Field{Key: "held_projects", Value: held}, axi.Field{Key: "help", Value: []any{"Run `posse up` in a held Project's folder to start its Lead and recover its Workers"}})
 	}
 	return ctx.Print(append(result, axi.Field{Key: "state", Value: state}))
 }
@@ -187,7 +187,7 @@ func recoveryWork(ctx context.Context, db *store.DB, project store.Project, snap
 	if err != nil {
 		return nil, false, "", err
 	}
-	// LiveTasks omits lost Riders. Include Lost while keeping failed Tasks out of recovery.
+	// LiveTasks omits lost Workers. Include Lost while keeping failed Tasks out of recovery.
 	tasks := make([]store.Task, 0, len(allTasks))
 	for _, task := range allTasks {
 		if task.State != store.StateFailed {
@@ -217,7 +217,7 @@ func recoveryWork(ctx context.Context, db *store.DB, project store.Project, snap
 		missing := !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped"
 		// A group can close again while its first Lead is still starting.
 		// Another hook may recover only that Lead from a pre-close snapshot.
-		// Missing Riders from the older group episode still need recovery,
+		// Missing Workers from the older group episode still need recovery,
 		// even though the server generation and the new Lead are now current.
 		unfinishedGroup := state.Status == "recovered" && strings.Contains(state.Generation, "/group/") && strings.Contains(projectRecoveryGeneration, "/group/") && state.Generation != projectRecoveryGeneration && missing
 		if taskNeedsRestartRecovery(task, snapshot) || unfinishedGroup {
@@ -299,7 +299,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, err
 	}
-	groupClosed := riderGroupClosed(snapshot, project, tasks) && !serverRestarted
+	groupClosed := workerGroupClosed(snapshot, project, tasks) && !serverRestarted
 	groupRecoveryPending := pendingGroupGeneration != ""
 	if !serverRestarted && !groupClosed && !groupRecoveryPending {
 		if _, err := s.prepareProjectLocalRecovery(ctx, db, project); err != nil {
@@ -308,24 +308,24 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if err := db.RememberProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt); err != nil {
 			return 0, err
 		}
-		// The first Lookout tick may not have recorded the previous server
+		// The first Watch tick may not have recorded the previous server
 		// generation before Herdr restarted. Reconcile its process even when
 		// generation comparison cannot prove a restart: a restored tab label
 		// does not mean its poller was restored.
 		if _, found := leadWorkspace(snapshot, project); found {
 			replaceUnstarted := false
 			for _, pane := range snapshot.Panes {
-				if pane.Label != lookoutTabLabel(project) || pane.WorkspaceID != project.HerdrWorkspaceID || lookoutProcessRunning(pane.PaneID, home) {
+				if pane.Label != watchTabLabel(project) || pane.WorkspaceID != project.HerdrWorkspaceID || watchProcessRunning(pane.PaneID, home) {
 					continue
 				}
-				running, err := s.waitLookoutRecovery(ctx, project, pane.PaneID, home)
+				running, err := s.waitWatchRecovery(ctx, project, pane.PaneID, home)
 				if err != nil {
 					return 0, err
 				}
 				replaceUnstarted = !running
 				break
 			}
-			return 0, s.ensureLookoutTab(ctx, db, project, snapshot, replaceUnstarted)
+			return 0, s.ensureWatchTab(ctx, db, project, snapshot, replaceUnstarted)
 		}
 		return 0, nil
 	}
@@ -378,7 +378,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		return 0, err
 	}
 	groupRecoveryPending = pendingGroupGeneration != ""
-	groupClosed = riderGroupClosed(fresh, current, tasks) && !serverRestarted
+	groupClosed = workerGroupClosed(fresh, current, tasks) && !serverRestarted
 	if !serverRestarted && !groupClosed && !groupRecoveryPending {
 		recoveryComplete = true
 		return 0, nil
@@ -392,7 +392,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, configError(err)
 	}
-	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
 		return 0, err
 	}
 	project, err = s.ensureRecoveryWorkspace(ctx, db, project, snapshot)
@@ -411,13 +411,13 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		if err != nil {
 			return len(recovered), err
 		}
-		// A failed Signal can arrive after enumeration. Lost Riders remain
+		// A failed Signal can arrive after enumeration. Lost Workers remain
 		// recoverable, but Failed Tasks still require an explicit relaunch.
 		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
 		}
 		if deferredGroupRetry {
-			// The prior group-close snapshot predates the Lead and Riders started
+			// The prior group-close snapshot predates the Lead and Workers started
 			// during backoff. Recheck each pane under this recovery claim.
 			currentSnapshot, err := s.snapshot(ctx)
 			if err != nil {
@@ -432,7 +432,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 			if err != nil {
 				return len(recovered), err
 			}
-			if healthyCurrentGenerationRider(task, snapshot, state) {
+			if healthyCurrentGenerationWorker(task, snapshot, state) {
 				if (state.Status == "pending" || state.Status == "running") && (state.OwnerPID == 0 || !processAlive(state.OwnerPID)) {
 					if _, err := db.SettleTaskRecovery(ctx, task.ID, state); err != nil {
 						return len(recovered), err
@@ -541,15 +541,15 @@ func (s *Service) claimProjectRecovery(ctx context.Context, db *store.DB, projec
 }
 
 // A close of another primary with close_group can remove the Lead and all
-// Riders without restarting Herdr. During recovery some Rider panes may
+// Workers without restarting Herdr. During recovery some Worker panes may
 // already be back, but no reconciliation may mark the others lost while the
-// Lead is still absent. A lone closed Rider has a live Lead.
-func riderGroupClosed(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) bool {
+// Lead is still absent. A lone closed Worker has a live Lead.
+func workerGroupClosed(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) bool {
 	if project.IsWorkspace() || project.HerdrWorkspaceID == "" || snapshot.ServerStartedAt == "" {
 		return false
 	}
 	// Closing only the Lead pane leaves its workspace intact. `posse up`
-	// handles that case; it is not a group-close recovery when no Rider is live.
+	// handles that case; it is not a group-close recovery when no Worker is live.
 	if len(tasks) == 0 {
 		for _, workspace := range snapshot.Workspaces {
 			if workspace.WorkspaceID == project.HerdrWorkspaceID {
@@ -608,7 +608,7 @@ func pendingGroupRecoveryDue(ctx context.Context, db *store.DB, projectID int64)
 	return false, nil
 }
 
-func healthyCurrentGenerationRider(task store.Task, snapshot herdr.Snapshot, state store.TaskRecovery) bool {
+func healthyCurrentGenerationWorker(task store.Task, snapshot herdr.Snapshot, state store.TaskRecovery) bool {
 	if snapshot.ServerStartedAt == "" || task.AgentServerStartedAt != snapshot.ServerStartedAt {
 		return false
 	}
@@ -759,12 +759,12 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 		return err
 	}
 	s.relabelProjectTabs(ctx, db, project)
-	freshSnapshot, lookoutErr := s.snapshot(ctx)
-	if lookoutErr == nil {
-		lookoutErr = s.ensureLookoutTab(ctx, db, project, freshSnapshot, true)
+	freshSnapshot, watchErr := s.snapshot(ctx)
+	if watchErr == nil {
+		watchErr = s.ensureWatchTab(ctx, db, project, freshSnapshot, true)
 	}
-	if lookoutErr != nil {
-		_, _ = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout restart failed: " + truncate(lookoutErr.Error(), 240), DataJSON: `{}`})
+	if watchErr != nil {
+		_, _ = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Watch restart failed: " + truncate(watchErr.Error(), 240), DataJSON: `{}`})
 	}
 	if leadStart.TypedPrompt != "" {
 		if err := s.deliverLaunchPrompt(ctx, current.PaneID, leadStart.TypedPrompt); err != nil {

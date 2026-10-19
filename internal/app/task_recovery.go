@@ -11,9 +11,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// A retryable Rider failure is persisted, not returned through unrelated CLI
-// operations. The project generation stays pending until every Rider settles.
-var errRecoveryDeferred = errors.New("rider recovery is waiting for its retry backoff")
+// A retryable Worker failure is persisted, not returned through unrelated CLI
+// operations. The project generation stays pending until every Worker settles.
+var errRecoveryDeferred = errors.New("worker recovery is waiting for its retry backoff")
 
 func recoveryBackoff(initial time.Duration, attempts int) time.Duration {
 	delay := min(initial, time.Minute)
@@ -53,7 +53,7 @@ func (s *Service) recoverTask(ctx context.Context, db *store.DB, home string, pr
 		pane, found := findTaskPane(snapshot.Panes, task)
 		paneLive := found && pane.Agent != "" && pane.AgentStatus != "exited" && pane.AgentStatus != "stopped"
 		// A group close does not change Herdr's server generation. A later
-		// close can reuse the same recovery generation while removing a Rider
+		// close can reuse the same recovery generation while removing a Worker
 		// that an earlier pass marked recovered. The pane must still be live;
 		// on a server restart its recorded generation must also be current.
 		if paneLive && (state.Generation == generation || task.AgentServerStartedAt == snapshot.ServerStartedAt) {
@@ -76,7 +76,7 @@ func (s *Service) recoverTask(ctx context.Context, db *store.DB, home string, pr
 	if state.Attempts >= cfg.Defaults.RecoveryAttempts {
 		cause := "recovery process exited before recording its outcome: " + state.LastError
 		if recoveredPaneMissing {
-			cause = "recovered Rider pane is no longer live"
+			cause = "recovered Worker pane is no longer live"
 		}
 		if err := db.FinishTaskRecovery(ctx, task, state.OwnerPID, cfg.Defaults.RecoveryAttempts, false, cause, 0); err != nil {
 			return false, false, err

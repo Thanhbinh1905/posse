@@ -21,7 +21,7 @@ import (
 const t242StreamError = "Error: stream error: stream disconnected before completion: stream closed before response.completed"
 
 func TestT242OrdinaryToolOutputIsNotRetried(t *testing.T) {
-	f := newPiModelErrorFixture(t, "$ grep stream-error rider.log\n2026-10-06 log entry: "+t242StreamError, false)
+	f := newPiModelErrorFixture(t, "$ grep stream-error worker.log\n2026-10-06 log entry: "+t242StreamError, false)
 	f.emitError(t)
 	time.Sleep(1200 * time.Millisecond)
 	prompts, _ := os.ReadFile(f.prompts)
@@ -43,13 +43,13 @@ func TestT242QuotedRefusalTranscriptIsNotRetried(t *testing.T) {
 func TestT242DecisionWaitIsNotRetried(t *testing.T) {
 	f := newPiModelErrorFixture(t, t242StreamError, false)
 	task := f.base.mustTask(t, "t1")
-	riderEnv := setEnv(f.base.leadEnv, "HERDR_PANE_ID", task.PaneID)
-	riderEnv = setEnv(riderEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
-	runPosse(t, f.base.binary, task.WorktreePath, riderEnv, "holler", "needs-decision", "Waiting on Lead")
+	workerEnv := setEnv(f.base.leadEnv, "HERDR_PANE_ID", task.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
+	runPosse(t, f.base.binary, task.WorktreePath, workerEnv, "signal", "needs-decision", "Waiting on Lead")
 	f.emitError(t)
 	time.Sleep(1200 * time.Millisecond)
 	if n := countPromptLines(f.prompts, "continue"); n != 0 {
-		t.Fatalf("waiting Rider received %d nudges", n)
+		t.Fatalf("waiting Worker received %d nudges", n)
 	}
 }
 
@@ -58,9 +58,9 @@ func TestT242DecisionDuringBackoffIsNotRetried(t *testing.T) {
 	task := f.base.mustTask(t, "t1")
 	f.emitError(t)
 	t242WaitClaim(t, f, task)
-	riderEnv := setEnv(f.base.leadEnv, "HERDR_PANE_ID", task.PaneID)
-	riderEnv = setEnv(riderEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
-	runPosse(t, f.base.binary, task.WorktreePath, riderEnv, "holler", "needs-decision", "Waiting on Lead")
+	workerEnv := setEnv(f.base.leadEnv, "HERDR_PANE_ID", task.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
+	runPosse(t, f.base.binary, task.WorktreePath, workerEnv, "signal", "needs-decision", "Waiting on Lead")
 	signals, err := f.base.db.TaskSignals(context.Background(), task.ID, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestT242DecisionDuringBackoffIsNotRetried(t *testing.T) {
 	time.Sleep(900 * time.Millisecond)
 	state := f.base.mustTask(t, "t1").State
 	if n := countPromptLines(f.prompts, "continue"); n != 0 {
-		t.Fatalf("Rider entered %q during backoff but still received %d nudges", state, n)
+		t.Fatalf("Worker entered %q during backoff but still received %d nudges", state, n)
 	}
 }
 

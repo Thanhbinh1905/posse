@@ -100,13 +100,13 @@ func TestT203LegacyHumanSectionsAppendWithoutDataLoss(t *testing.T) {
 	}
 }
 
-func t201LegacyFixture(t *testing.T, forge string) (*prLandingFixture, string) {
+func t201LegacyFixture(t *testing.T, forge string) (*prMergeFixture, string) {
 	t.Helper()
-	var fixture *prLandingFixture
+	var fixture *prMergeFixture
 	if forge == "gitlab" {
 		fixture = gitlabFixture(t, store.StateWorking)
 	} else {
-		fixture = newPRLandingFixture(t, "pr", store.StateWorking)
+		fixture = newPRMergeFixture(t, "pr", store.StateWorking)
 	}
 	_, body, err := prDetails(context.Background(), fixture.db, fixture.project, fixture.task, fixture.service.homePath, "", "First summary", "first tests -> pass", "first proof", "Risk: first\nRollback: first")
 	if err != nil {
@@ -115,7 +115,7 @@ func t201LegacyFixture(t *testing.T, forge string) (*prLandingFixture, string) {
 	return fixture, body
 }
 
-func t201SetLegacyBody(t *testing.T, fixture *prLandingFixture, forge, body string) string {
+func t201SetLegacyBody(t *testing.T, fixture *prMergeFixture, forge, body string) string {
 	t.Helper()
 	if forge == "gitlab" {
 		state, err := os.ReadFile(fixture.ghState)

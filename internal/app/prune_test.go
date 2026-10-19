@@ -32,7 +32,7 @@ func TestTaskScratchPruneReclaimsUnheldTerminalTasksOnly(t *testing.T) {
 	}
 	makeTask := func(seq int, state store.State) store.Task {
 		t.Helper()
-		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "ship", Title: "Task", Branch: store.TaskBranchName(seq), BaseRef: "main"})
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "change", Title: "Task", Branch: store.TaskBranchName(seq), BaseRef: "main"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -47,15 +47,15 @@ func TestTaskScratchPruneReclaimsUnheldTerminalTasksOnly(t *testing.T) {
 	}
 	makeTask(1, store.StateTornDown)
 	makeTask(2, store.StateFailed)
-	held := makeTask(3, store.StateLanded)
+	held := makeTask(3, store.StateMerged)
 	makeTask(6, store.StateLost)
 	heldFailed := makeTask(7, store.StateFailed)
 	activeTeardown := makeTask(5, store.StateTornDown)
-	if err := db.StartIntent(ctx, project.ID, activeTeardown.ID, "unsaddle", "in_progress:scratch.remove", "{}", os.Getpid()); err != nil {
+	if err := db.StartIntent(ctx, project.ID, activeTeardown.ID, "teardown", "in_progress:scratch.remove", "{}", os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	for _, task := range []store.Task{held, heldFailed} {
-		if _, err := acquireMount(ctx, db, project, task, home, "warm", nil); err != nil {
+		if _, err := acquireSandbox(ctx, db, project, task, home, "warm", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -117,7 +117,7 @@ func TestTaskCreationAndScratchAcquisitionSharePruneLock(t *testing.T) {
 	defer lock.Close()
 	createResult := make(chan error, 1)
 	go func() {
-		_, _, _, err := createTaskWithSequenceAndIntent(ctx, db, project, home, store.Task{Type: "ship", Title: "Concurrent Rider", ShortName: "concurrent-rider", Branch: "posse/concurrent-rider", BaseRef: "main"})
+		_, _, _, err := createTaskWithSequenceAndIntent(ctx, db, project, home, store.Task{Type: "change", Title: "Concurrent Worker", ShortName: "concurrent-worker", Branch: "posse/concurrent-worker", BaseRef: "main"})
 		createResult <- err
 	}()
 	select {
@@ -169,8 +169,8 @@ func TestTaskCreationAndScratchAcquisitionSharePruneLock(t *testing.T) {
 	}
 }
 
-func TestScratchPruneRevalidatesTaskOwnershipAtApply(t *testing.T) {
-	for _, scenario := range []string{"active-state", "active-intent", "held-mount"} {
+func TestScratchPruneRevalidatesTaskOwnerchangeAtApply(t *testing.T) {
+	for _, scenario := range []string{"active-state", "active-intent", "held-sandbox"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
@@ -191,14 +191,14 @@ func TestScratchPruneRevalidatesTaskOwnershipAtApply(t *testing.T) {
 				t.Fatal(err)
 			}
 			cache := filepath.Join(scratch, "cache")
-			if err := os.WriteFile(cache, []byte("active rider cache"), 0o600); err != nil {
+			if err := os.WriteFile(cache, []byte("active worker cache"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			items, err := taskScratchPruneItems(ctx, db, home, project)
 			if err != nil || len(items) != 1 || items[0].taskID != 0 {
 				t.Fatalf("orphan scratch plan = %#v, %v", items, err)
 			}
-			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Concurrent Rider", Branch: "posse/concurrent-rider", BaseRef: "main"})
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Concurrent Worker", Branch: "posse/concurrent-worker", BaseRef: "main"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -208,7 +208,7 @@ func TestScratchPruneRevalidatesTaskOwnershipAtApply(t *testing.T) {
 			}
 			switch scenario {
 			case "active-state":
-				if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Rider started"); err != nil {
+				if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker started"); err != nil {
 					t.Fatal(err)
 				}
 			case "active-intent":
@@ -218,13 +218,13 @@ func TestScratchPruneRevalidatesTaskOwnershipAtApply(t *testing.T) {
 				if err := db.StartIntent(ctx, project.ID, taskID, "relaunch", "scratch.environment", "{}", os.Getpid()); err != nil {
 					t.Fatal(err)
 				}
-			case "held-mount":
+			case "held-sandbox":
 				if _, err := db.ExecContext(ctx, `UPDATE tasks SET state=? WHERE id=?`, string(store.StateTornDown), taskID); err != nil {
 					t.Fatal(err)
 				}
-				mount, err := acquireMount(ctx, db, project, task, home, "warm", nil)
-				if err != nil || mount.State != "held" {
-					t.Fatalf("acquire concurrent Rider Mount = %#v, %v", mount, err)
+				sandbox, err := acquireSandbox(ctx, db, project, task, home, "warm", nil)
+				if err != nil || sandbox.State != "held" {
+					t.Fatalf("acquire concurrent Worker Sandbox = %#v, %v", sandbox, err)
 				}
 			}
 			service := testService(home, nil)
@@ -233,7 +233,7 @@ func TestScratchPruneRevalidatesTaskOwnershipAtApply(t *testing.T) {
 			if !errors.As(err, &structured) || !structured.Retryable {
 				t.Fatalf("stale scratch prune error = %v, want retryable ownership failure", err)
 			}
-			if contents, err := os.ReadFile(cache); err != nil || string(contents) != "active rider cache" {
+			if contents, err := os.ReadFile(cache); err != nil || string(contents) != "active worker cache" {
 				t.Fatalf("stale scratch plan removed current Task data: %q %v", contents, err)
 			}
 		})
@@ -360,7 +360,7 @@ func TestPruneRemovesOnlyStaleOwnedWorktreeRegistrations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	managedPath := filepath.Join(home, "remuda", "shop", "mount-1")
+	managedPath := filepath.Join(home, "pool", "shop", "sandbox-1")
 	if err := os.MkdirAll(filepath.Dir(managedPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -379,11 +379,11 @@ func TestPruneRemovesOnlyStaleOwnedWorktreeRegistrations(t *testing.T) {
 	if err := os.RemoveAll(outsidePath); err != nil {
 		t.Fatal(err)
 	}
-	mounts, err := db.Mounts(ctx, project.ID)
+	sandboxes, err := db.Sandboxes(ctx, project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := staleOwnedWorktreeItems(ctx, db, project, home, mounts)
+	items, err := staleOwnedWorktreeItems(ctx, db, project, home, sandboxes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,13 +401,13 @@ func TestPruneRemovesOnlyStaleOwnedWorktreeRegistrations(t *testing.T) {
 	if strings.Contains(listing, managedPath) || !strings.Contains(listing, outsidePath) {
 		t.Fatalf("prune changed unexpected worktree registrations: %s", listing)
 	}
-	mounts, err = db.Mounts(ctx, project.ID)
-	if err != nil || len(mounts) != 0 {
-		t.Fatalf("Mounts after pruning stale registration = %#v, %v", mounts, err)
+	sandboxes, err = db.Sandboxes(ctx, project.ID)
+	if err != nil || len(sandboxes) != 0 {
+		t.Fatalf("Sandboxes after pruning stale registration = %#v, %v", sandboxes, err)
 	}
 }
 
-func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
+func TestPruneBranchRechecksTaskOwnerchangeAndLiveWorktreesAtApply(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -422,12 +422,12 @@ func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	makeLandedTask := func(seq int) (store.Task, string) {
+	makeMergedTask := func(seq int) (store.Task, string) {
 		t.Helper()
 		branch := store.TaskBranchName(seq)
 		gitTest(t, repo, "switch", "-c", branch)
-		file := "landed-" + strconv.Itoa(seq) + ".txt"
-		if err := os.WriteFile(filepath.Join(repo, file), []byte("landed\n"), 0o600); err != nil {
+		file := "merged-" + strconv.Itoa(seq) + ".txt"
+		if err := os.WriteFile(filepath.Join(repo, file), []byte("merged\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		gitTest(t, repo, "add", file)
@@ -435,11 +435,11 @@ func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
 		sha := strings.TrimSpace(gitTest(t, repo, "rev-parse", "HEAD"))
 		gitTest(t, repo, "switch", "main")
 		gitTest(t, repo, "merge", "--ff-only", branch)
-		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "ship", Title: "Landed Task", Branch: branch, BaseRef: "main", LandingMode: "local"})
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "change", Title: "Merged Task", Branch: branch, BaseRef: "main", MergeMode: "local"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='landed' WHERE id=?`, id); err != nil {
+		if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='merged' WHERE id=?`, id); err != nil {
 			t.Fatal(err)
 		}
 		task, err := db.TaskByID(ctx, project.ID, id)
@@ -451,7 +451,7 @@ func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
 	service := testService(home, nil)
 	assertProtectedAtApply := func(task store.Task, expectedSHA string, afterPlan func()) {
 		t.Helper()
-		items, err := landedOrDiscardedBranchItems(ctx, db, home, project, []store.Task{task})
+		items, err := mergedOrDiscardedBranchItems(ctx, db, home, project, []store.Task{task})
 		if err != nil || len(items) != 1 {
 			t.Fatalf("branch plan for %s = %#v, %v; want one initially eligible branch", task.Branch, items, err)
 		}
@@ -464,9 +464,9 @@ func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
 		}
 	}
 
-	intentTask, intentSHA := makeLandedTask(1)
+	intentTask, intentSHA := makeMergedTask(1)
 	assertProtectedAtApply(intentTask, intentSHA, func() {
-		if err := db.StartIntent(ctx, project.ID, intentTask.ID, "unsaddle", "in_progress:branch.remove", "{}", os.Getpid()); err != nil {
+		if err := db.StartIntent(ctx, project.ID, intentTask.ID, "teardown", "in_progress:branch.remove", "{}", os.Getpid()); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -474,16 +474,16 @@ func TestPruneBranchRechecksTaskOwnershipAndLiveWorktreesAtApply(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	heldTask, heldSHA := makeLandedTask(2)
+	heldTask, heldSHA := makeMergedTask(2)
 	assertProtectedAtApply(heldTask, heldSHA, func() {
-		mount, err := db.AcquireMount(ctx, project.ID, heldTask.ID, filepath.Join(home, "remuda", project.Name))
+		sandbox, err := db.AcquireSandbox(ctx, project.ID, heldTask.ID, filepath.Join(home, "pool", project.Name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		gitTest(t, repo, "worktree", "add", mount.Path, heldTask.Branch)
+		gitTest(t, repo, "worktree", "add", sandbox.Path, heldTask.Branch)
 	})
 
-	checkedOutTask, checkedOutSHA := makeLandedTask(3)
+	checkedOutTask, checkedOutSHA := makeMergedTask(3)
 	assertProtectedAtApply(checkedOutTask, checkedOutSHA, func() {
 		path := filepath.Join(root, "external-worktree")
 		gitTest(t, repo, "worktree", "add", path, checkedOutTask.Branch)
@@ -499,7 +499,7 @@ func mustTaskIntent(t *testing.T, db *store.DB, taskID int64) int64 {
 	return intent.ID
 }
 
-func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
+func TestPruneSelectsOnlyMergedAndCapturedDiscardBranches(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -526,10 +526,10 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 		gitTest(t, repo, "switch", "main")
 		return sha
 	}
-	landedSHA := makeBranch("posse/t1", "landed.txt")
+	mergedSHA := makeBranch("posse/t1", "merged.txt")
 	gitTest(t, repo, "merge", "--ff-only", "posse/t1")
 	discardSHA := makeBranch("posse/t3", "discard.txt")
-	unlandedSHA := makeBranch("posse/t2", "unlanded.txt")
+	unmergedSHA := makeBranch("posse/t2", "unmerged.txt")
 	prMergedSHA := makeBranch("posse/t4", "pr-merged.txt")
 	noMistakesMergedSHA := makeBranch("posse/t6", "no-mistakes-merged.txt")
 	noMistakesHeadSHA := makeBranch("posse/t7", "no-mistakes-head.txt")
@@ -555,9 +555,9 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 	gitTest(t, repo, "commit", "-m", "follow-up after PR head")
 	prFollowUpSHA := strings.TrimSpace(gitTest(t, repo, "rev-parse", "HEAD"))
 	gitTest(t, repo, "switch", "main")
-	makeTask := func(seq int, branch string, state store.State, landingMode string) store.Task {
+	makeTask := func(seq int, branch string, state store.State, mergeMode string) store.Task {
 		t.Helper()
-		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "ship", Title: "Task", Branch: branch, BaseRef: "main", LandingMode: landingMode})
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "change", Title: "Task", Branch: branch, BaseRef: "main", MergeMode: mergeMode})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -570,13 +570,13 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 		}
 		return task
 	}
-	landed := makeTask(1, "posse/t1", store.StateLanded, "local")
-	unlanded := makeTask(2, "posse/t2", store.StateWorking, "local")
+	merged := makeTask(1, "posse/t1", store.StateMerged, "local")
+	unmerged := makeTask(2, "posse/t2", store.StateWorking, "local")
 	discarded := makeTask(3, "posse/t3", store.StateTornDown, "local")
-	mergedPR := makeTask(4, "posse/t4", store.StateLanded, "pr")
-	advancedPR := makeTask(5, "posse/t5", store.StateLanded, "pr")
-	mergedNoMistakes := makeTask(6, "posse/t6", store.StateLanded, "no-mistakes")
-	advancedNoMistakes := makeTask(7, "posse/t7", store.StateLanded, "no-mistakes")
+	mergedPR := makeTask(4, "posse/t4", store.StateMerged, "pr")
+	advancedPR := makeTask(5, "posse/t5", store.StateMerged, "pr")
+	mergedNoMistakes := makeTask(6, "posse/t6", store.StateMerged, "no-mistakes")
+	advancedNoMistakes := makeTask(7, "posse/t7", store.StateMerged, "no-mistakes")
 	for _, entry := range []struct {
 		task    store.Task
 		headSHA string
@@ -596,14 +596,14 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 	if err := testService(home, nil).captureDiscardTips(ctx, db, home, project, discarded); err != nil {
 		t.Fatalf("capture approved discard for prune: %v", err)
 	}
-	items, err := landedOrDiscardedBranchItems(ctx, db, home, project, []store.Task{landed, unlanded, discarded, mergedPR, advancedPR, mergedNoMistakes, advancedNoMistakes})
+	items, err := mergedOrDiscardedBranchItems(ctx, db, home, project, []store.Task{merged, unmerged, discarded, mergedPR, advancedPR, mergedNoMistakes, advancedNoMistakes})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(items) != 4 || items[0].label != "posse/t1" || items[1].label != "posse/t3" || items[2].label != "posse/t4" || items[3].label != "posse/t6" {
-		t.Fatalf("prunable branch items = %#v, want landed, captured discard, merged PR, and merged no-mistakes branches", items)
+		t.Fatalf("prunable branch items = %#v, want merged, captured discard, merged PR, and merged no-mistakes branches", items)
 	}
-	if items[0].sha != landedSHA || items[1].sha != discardSHA || items[1].bytes <= 0 || items[2].sha != prMergedSHA || items[3].sha != noMistakesMergedSHA || prFollowUpSHA == prHeadSHA {
+	if items[0].sha != mergedSHA || items[1].sha != discardSHA || items[1].bytes <= 0 || items[2].sha != prMergedSHA || items[3].sha != noMistakesMergedSHA || prFollowUpSHA == prHeadSHA {
 		t.Fatalf("branch candidates lost their captured tips or sizes: %#v", items)
 	}
 	service := testService(home, nil)
@@ -618,8 +618,8 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 			t.Errorf("pruned branch %s still exists: %s", branch, output)
 		}
 	}
-	if got := strings.TrimSpace(gitTest(t, repo, "rev-parse", "refs/heads/posse/t2")); got != unlandedSHA {
-		t.Fatalf("prune changed unlanded branch tip to %s, want %s", got, unlandedSHA)
+	if got := strings.TrimSpace(gitTest(t, repo, "rev-parse", "refs/heads/posse/t2")); got != unmergedSHA {
+		t.Fatalf("prune changed unmerged branch tip to %s, want %s", got, unmergedSHA)
 	}
 	if got := strings.TrimSpace(gitTest(t, repo, "rev-parse", "refs/heads/posse/t5")); got != prFollowUpSHA {
 		t.Fatalf("prune changed follow-up PR branch tip to %s, want %s", got, prFollowUpSHA)
@@ -629,19 +629,19 @@ func TestPruneSelectsOnlyLandedAndCapturedDiscardBranches(t *testing.T) {
 	}
 }
 
-func TestSafeManagedMountPathRejectsExternalAndSymlinkedMounts(t *testing.T) {
+func TestSafeManagedSandboxPathRejectsExternalAndSymlinkedSandboxes(t *testing.T) {
 	home := t.TempDir()
-	managedProject := filepath.Join(home, "remuda", "shop")
-	managedMount := filepath.Join(managedProject, "mount-1")
-	if err := os.MkdirAll(managedMount, 0o700); err != nil {
+	managedProject := filepath.Join(home, "pool", "shop")
+	managedSandbox := filepath.Join(managedProject, "sandbox-1")
+	if err := os.MkdirAll(managedSandbox, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if !safeManagedMountPath(home, "shop", managedMount) {
-		t.Fatal("safe Posse-owned Mount was rejected")
+	if !safeManagedSandboxPath(home, "shop", managedSandbox) {
+		t.Fatal("safe Posse-owned Sandbox was rejected")
 	}
 	outside := t.TempDir()
-	if safeManagedMountPath(home, "shop", outside) {
-		t.Fatal("external path was accepted as a Posse-owned Mount")
+	if safeManagedSandboxPath(home, "shop", outside) {
+		t.Fatal("external path was accepted as a Posse-owned Sandbox")
 	}
 	if err := os.RemoveAll(managedProject); err != nil {
 		t.Fatal(err)
@@ -649,7 +649,7 @@ func TestSafeManagedMountPathRejectsExternalAndSymlinkedMounts(t *testing.T) {
 	if err := os.Symlink(outside, managedProject); err != nil {
 		t.Fatal(err)
 	}
-	if safeManagedMountPath(home, "shop", managedMount) {
-		t.Fatal("Mount through a symlinked Project directory was accepted")
+	if safeManagedSandboxPath(home, "shop", managedSandbox) {
+		t.Fatal("Sandbox through a symlinked Project directory was accepted")
 	}
 }

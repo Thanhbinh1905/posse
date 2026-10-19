@@ -31,6 +31,9 @@ func parseArgs(command string, args []string, specs map[string]flagSpec) (parsed
 			continue
 		}
 		name, value, hasValue := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+		if replacement := removedFlag(command, name); replacement != "" {
+			return parsedArgs{}, axi.Usage(fmt.Sprintf("--%s was removed; use --%s", name, replacement))
+		}
 		spec, found := specs[name]
 		if !found {
 			return parsedArgs{}, axi.Usage(fmt.Sprintf("unknown %s flag --%s", command, name))

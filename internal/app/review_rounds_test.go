@@ -18,9 +18,9 @@ import (
 )
 
 func TestReviewStartAdmitsFrozenRoundAndGeneratedFiles(t *testing.T) {
-	f := newRideFixture(t)
+	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
-landing_mode = "local"
+merge_mode = "local"
 
 [profiles.author]
 kind = "claude"
@@ -53,23 +53,23 @@ guidance = ["docs/review.md"]
 	gitTest(t, f.repo, "init", "--bare", remote)
 	gitTest(t, f.repo, "remote", "add", "origin", remote)
 	gitTest(t, f.repo, "push", "-u", "origin", "main")
-	if code, output := f.ride(t); code != 0 {
-		t.Fatalf("ride code=%d %s", code, output)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
 	}
-	ship, _ := f.onlyTask(t)
-	if err := os.WriteFile(filepath.Join(ship.WorktreePath, "author-change.txt"), []byte("review me\n"), 0o600); err != nil {
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "author-change.txt"), []byte("review me\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, ship.WorktreePath, "add", "author-change.txt")
-	gitTest(t, ship.WorktreePath, "commit", "-m", "author change")
-	head := strings.TrimSpace(gitTest(t, ship.WorktreePath, "rev-parse", "HEAD"))
+	gitTest(t, change.WorktreePath, "add", "author-change.txt")
+	gitTest(t, change.WorktreePath, "commit", "-m", "author change")
+	head := strings.TrimSpace(gitTest(t, change.WorktreePath, "rev-parse", "HEAD"))
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.Transition(ctx, ship.ID, ship.State, store.StateDone, "worker", "done"); err != nil {
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_ENV", "1")
@@ -79,13 +79,13 @@ guidance = ["docs/review.md"]
 		var output bytes.Buffer
 		cli := f.service.CLI()
 		cli.Out, cli.ErrOut = &output, &output
-		code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", ship.Seq), "--profile", "reviewer"})
+		code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq), "--profile", "reviewer"})
 		return code, output.String()
 	}
 	if code, output := start(); code != 0 {
 		t.Fatalf("review start code=%d %s", code, output)
 	}
-	rounds, err := db.ReviewRoundsFor(ctx, ship.ID)
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil || len(rounds) != 1 {
 		t.Fatalf("admitted rounds = %#v, %v", rounds, err)
 	}
@@ -94,13 +94,13 @@ guidance = ["docs/review.md"]
 	if round.Round != 1 || round.Status != "admitted" || round.HeadSHA != head || round.TargetCommitSHA != target || round.ScopeBaseSHA != target || round.Repository != "shop" {
 		t.Fatalf("round binding = %#v, target=%s head=%s", round, target, head)
 	}
-	review, err := db.TaskByID(ctx, ship.ProjectID, round.ReviewTaskID)
+	review, err := db.TaskByID(ctx, change.ProjectID, round.ReviewTaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan, err := review.AdmittedPlan()
 	if err != nil || plan == nil || len(plan.Inputs) == 0 || !strings.Contains(string(plan.Inputs[0].Bytes), "Create a committed file.") {
-		t.Fatalf("generated Review Brief lost Ship intent: plan=%#v err=%v", plan, err)
+		t.Fatalf("generated Review Brief lost Change intent: plan=%#v err=%v", plan, err)
 	}
 	read := func(name string) []byte {
 		t.Helper()
@@ -165,26 +165,26 @@ guidance = ["docs/review.md"]
 	if f.fake.CallCount("tab.create") != beforeTabs {
 		t.Fatal("active-round refusal created another pane")
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE review_rounds SET status='verdict',verdict='pass' WHERE ship_task_id=?`, ship.ID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE review_rounds SET status='verdict',verdict='pass' WHERE ship_task_id=?`, change.ID); err != nil {
 		t.Fatal(err)
 	}
 	if code, output := start(); code != 1 || !strings.Contains(output, "review_round_unchanged") {
 		t.Fatalf("unchanged head refusal code=%d: %s", code, output)
 	}
-	if err := os.WriteFile(filepath.Join(ship.WorktreePath, "later-change.txt"), []byte("new review scope\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "later-change.txt"), []byte("new review scope\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, ship.WorktreePath, "add", "later-change.txt")
-	gitTest(t, ship.WorktreePath, "commit", "-m", "later change")
+	gitTest(t, change.WorktreePath, "add", "later-change.txt")
+	gitTest(t, change.WorktreePath, "commit", "-m", "later change")
 	if code, output := start(); code != 1 || !strings.Contains(output, "review_round_cap") {
 		t.Fatalf("round cap refusal code=%d: %s", code, output)
 	}
 }
 
 func TestAutoStartReviewLoopStartsOnlyAfterGatePasses(t *testing.T) {
-	f := newRideFixture(t)
+	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
-landing_mode = "local"
+merge_mode = "local"
 gate = ["test -f gate.ok"]
 
 [profiles.author]
@@ -196,7 +196,7 @@ kind = "claude"
 model = "model-b"
 
 [[dispatch]]
-type = "ship"
+type = "change"
 use = "author"
 
 [[dispatch]]
@@ -217,69 +217,69 @@ auto_start = true
 	gitTest(t, f.repo, "init", "--bare", remote)
 	gitTest(t, f.repo, "remote", "add", "origin", remote)
 	gitTest(t, f.repo, "push", "-u", "origin", "main")
-	if code, output := f.ride(t); code != 0 {
-		t.Fatalf("ride code=%d %s", code, output)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
 	}
-	ship, _ := f.onlyTask(t)
-	if err := os.WriteFile(filepath.Join(ship.WorktreePath, "change.txt"), []byte("candidate\n"), 0o600); err != nil {
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "change.txt"), []byte("candidate\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, ship.WorktreePath, "add", "change.txt")
-	gitTest(t, ship.WorktreePath, "commit", "-m", "candidate change")
+	gitTest(t, change.WorktreePath, "add", "change.txt")
+	gitTest(t, change.WorktreePath, "commit", "-m", "candidate change")
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.Transition(ctx, ship.ID, ship.State, store.StateDone, "worker", "done"); err != nil {
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
 	t.Setenv("HERDR_WORKSPACE_ID", "w1")
-	land := func() (int, string) {
+	merge := func() (int, string) {
 		t.Helper()
 		var output bytes.Buffer
 		cli := f.service.CLI()
 		cli.Out, cli.ErrOut = &output, &output
-		code := cli.Run([]string{"land", fmt.Sprintf("t%d", ship.Seq)})
+		code := cli.Run([]string{"merge", fmt.Sprintf("t%d", change.Seq)})
 		return code, output.String()
 	}
 	beforeTabs := f.fake.CallCount("tab.create")
-	if code, output := land(); code != 1 || !strings.Contains(output, "gate_failed") {
+	if code, output := merge(); code != 1 || !strings.Contains(output, "gate_failed") {
 		t.Fatalf("failed gate exit=%d output=%s", code, output)
 	}
-	rounds, err := db.ReviewRoundsFor(ctx, ship.ID)
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil || len(rounds) != 0 || f.fake.CallCount("tab.create") != beforeTabs {
 		t.Fatalf("auto_start admitted before gate pass: rounds=%#v err=%v tabs=%d", rounds, err, f.fake.CallCount("tab.create"))
 	}
-	if err := os.WriteFile(filepath.Join(ship.WorktreePath, "gate.ok"), []byte("pass\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "gate.ok"), []byte("pass\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, ship.WorktreePath, "add", "gate.ok")
-	gitTest(t, ship.WorktreePath, "commit", "-m", "satisfy gate")
-	landCode, landOutput := land()
-	if landCode != 0 {
-		t.Fatalf("auto-start land exit=%d output=%s", landCode, landOutput)
+	gitTest(t, change.WorktreePath, "add", "gate.ok")
+	gitTest(t, change.WorktreePath, "commit", "-m", "satisfy gate")
+	mergeCode, mergeOutput := merge()
+	if mergeCode != 0 {
+		t.Fatalf("auto-start merge exit=%d output=%s", mergeCode, mergeOutput)
 	}
-	rounds, err = db.ReviewRoundsFor(ctx, ship.ID)
+	rounds, err = db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil || len(rounds) != 1 || rounds[0].Round != 1 || rounds[0].Status != "admitted" {
-		current, _ := db.TaskByID(ctx, ship.ProjectID, ship.ID)
+		current, _ := db.TaskByID(ctx, change.ProjectID, change.ID)
 		frozen, _ := current.AdmittedPlan()
-		t.Fatalf("auto-start rounds = %#v, err=%v, output=%s, state=%s loops=%#v", rounds, err, landOutput, current.State, frozen.ValidationLoops)
+		t.Fatalf("auto-start rounds = %#v, err=%v, output=%s, state=%s loops=%#v", rounds, err, mergeOutput, current.State, frozen.ValidationLoops)
 	}
-	review, err := db.TaskByID(ctx, ship.ProjectID, rounds[0].ReviewTaskID)
+	review, err := db.TaskByID(ctx, change.ProjectID, rounds[0].ReviewTaskID)
 	if err != nil || review.Profile != "reviewer" {
 		t.Fatalf("auto-start Review Task = %#v, %v", review, err)
 	}
-	current, err := db.TaskByID(ctx, ship.ProjectID, ship.ID)
+	current, err := db.TaskByID(ctx, change.ProjectID, change.ID)
 	if err != nil || current.State != store.StateDone {
-		t.Fatalf("auto-start moved Ship Task before review: %#v, %v", current, err)
+		t.Fatalf("auto-start moved Change Task before review: %#v, %v", current, err)
 	}
 }
 
-func TestAutoStartSkipsUnavailableReviewerWithoutBlockingLand(t *testing.T) {
+func TestAutoStartSkipsUnavailableReviewerWithoutBlockingMerge(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		config       string
@@ -288,7 +288,7 @@ func TestAutoStartSkipsUnavailableReviewerWithoutBlockingLand(t *testing.T) {
 		{
 			name: "ineligible identity",
 			config: `[defaults]
-landing_mode = "local"
+merge_mode = "local"
 
 [profiles.author]
 kind = "claude"
@@ -305,13 +305,13 @@ auto_start = true
 		{
 			name: "no review dispatch",
 			config: `[defaults]
-landing_mode = "local"
+merge_mode = "local"
 
 [profiles.author]
 kind = "claude"
 
 [[dispatch]]
-type = "ship"
+type = "change"
 use = "author"
 
 [review_loop]
@@ -329,7 +329,7 @@ auto_start = true
 
 func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitCode string) {
 	t.Helper()
-	f := newRideFixture(t)
+	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -337,22 +337,22 @@ func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitC
 	gitTest(t, f.repo, "init", "--bare", remote)
 	gitTest(t, f.repo, "remote", "add", "origin", remote)
 	gitTest(t, f.repo, "push", "-u", "origin", "main")
-	if code, output := f.ride(t); code != 0 {
-		t.Fatalf("ride code=%d %s", code, output)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
 	}
-	ship, _ := f.onlyTask(t)
-	if err := os.WriteFile(filepath.Join(ship.WorktreePath, "change.txt"), []byte("candidate\n"), 0o600); err != nil {
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "change.txt"), []byte("candidate\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, ship.WorktreePath, "add", "change.txt")
-	gitTest(t, ship.WorktreePath, "commit", "-m", "candidate change")
+	gitTest(t, change.WorktreePath, "add", "change.txt")
+	gitTest(t, change.WorktreePath, "commit", "-m", "candidate change")
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.Transition(ctx, ship.ID, ship.State, store.StateDone, "worker", "done"); err != nil {
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HERDR_ENV", "1")
@@ -361,19 +361,19 @@ func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitC
 	var output bytes.Buffer
 	cli := f.service.CLI()
 	cli.Out, cli.ErrOut = &output, &output
-	if code := cli.Run([]string{"land", fmt.Sprintf("t%d", ship.Seq)}); code != 0 {
-		t.Fatalf("Land blocked by unavailable auto-start reviewer: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"merge", fmt.Sprintf("t%d", change.Seq)}); code != 0 {
+		t.Fatalf("Merge blocked by unavailable auto-start reviewer: code=%d output=%s", code, output.String())
 	}
-	current, err := db.TaskByID(ctx, ship.ProjectID, ship.ID)
-	if err != nil || current.State != store.StateLanding {
-		t.Fatalf("Land did not reach landing: task=%#v err=%v", current, err)
+	current, err := db.TaskByID(ctx, change.ProjectID, change.ID)
+	if err != nil || current.State != store.StateMerging {
+		t.Fatalf("Merge did not reach merging: task=%#v err=%v", current, err)
 	}
-	rounds, err := db.ReviewRoundsFor(ctx, ship.ID)
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil || len(rounds) != 0 {
 		t.Fatalf("unavailable auto-start admitted Review Rounds: %#v, %v", rounds, err)
 	}
-	assertOneReviewAutoStartReadinessNotice(t, db, ctx, ship)
-	current, err = db.TaskByID(ctx, ship.ProjectID, ship.ID)
+	assertOneReviewAutoStartReadinessNotice(t, db, ctx, change)
+	current, err = db.TaskByID(ctx, change.ProjectID, change.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,9 +381,9 @@ func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitC
 	if err != nil || started {
 		t.Fatalf("repeat auto-start result = started %v, err %v", started, err)
 	}
-	assertOneReviewAutoStartReadinessNotice(t, db, ctx, ship)
+	assertOneReviewAutoStartReadinessNotice(t, db, ctx, change)
 	output.Reset()
-	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", ship.Seq)}); code == 0 || !strings.Contains(output.String(), explicitCode) {
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), explicitCode) {
 		t.Fatalf("explicit review start should fail with %s: code=%d output=%s", explicitCode, code, output.String())
 	}
 }
@@ -412,9 +412,9 @@ func TestAutoStartReviewerUnavailableOnlySkipsProfileResolutionFailures(t *testi
 	}
 }
 
-func assertOneReviewAutoStartReadinessNotice(t *testing.T, db *store.DB, ctx context.Context, ship store.Task) {
+func assertOneReviewAutoStartReadinessNotice(t *testing.T, db *store.DB, ctx context.Context, change store.Task) {
 	t.Helper()
-	notices, err := db.Notices(ctx, ship.ProjectID, false)
+	notices, err := db.Notices(ctx, change.ProjectID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestReviewRoundScopeUsesFrozenTargetVirtualBaseline(t *testing.T) {
 			wantOut:         []string{"target-only.txt", "author-before.txt"},
 		},
 		{
-			name:     "rewritten Ship branch",
+			name:     "rewritten Change branch",
 			rewrite:  true,
 			wantKind: "full_fallback",
 			wantIn:   []string{"rewritten.txt"},

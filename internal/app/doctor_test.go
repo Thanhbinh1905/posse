@@ -77,14 +77,14 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 		t.Fatal(err)
 	}
 	createTask := func(name string) (int64, error) {
-		id, _, err := db.CreateTaskWithSequence(ctx, project.ID, "shop", store.Task{Type: "ship", Title: name, ShortName: name, Branch: "posse/" + name}, func(int) (bool, error) { return false, nil })
+		id, _, err := db.CreateTaskWithSequence(ctx, project.ID, "shop", store.Task{Type: "change", Title: name, ShortName: name, Branch: "posse/" + name}, func(int) (bool, error) { return false, nil })
 		return id, err
 	}
 	activeID, err := createTask("active")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.AcquireMount(ctx, project.ID, activeID, filepath.Join(home, "remuda", "shop")); err != nil {
+	if _, err := db.AcquireSandbox(ctx, project.ID, activeID, filepath.Join(home, "pool", "shop")); err != nil {
 		t.Fatal(err)
 	}
 	parkedID, err := createTask("parked")
@@ -97,14 +97,14 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	if err := db.Transition(ctx, parkedID, store.StateWorking, store.StateDone, "worker", "fixture done"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.AcquireMount(ctx, project.ID, parkedID, filepath.Join(home, "remuda", "shop")); err != nil {
+	if _, err := db.AcquireSandbox(ctx, project.ID, parkedID, filepath.Join(home, "pool", "shop")); err != nil {
 		t.Fatal(err)
 	}
 	got, err := executionResourceSummary(ctx, db, project.ID, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"active_riders=1/4", "native_children=0", "parked_resources=1"} {
+	for _, want := range []string{"active_workers=1/4", "native_children=0", "parked_resources=1"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("resource summary %q omitted %q", got, want)
 		}
@@ -115,7 +115,7 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	}
 	for _, check := range result.Checks {
 		if check.Name == "execution resources shop" {
-			if !strings.Contains(check.Detail, "active_riders=1/4") || !strings.Contains(check.Detail, "native_children=0") || !strings.Contains(check.Detail, "parked_resources=1") {
+			if !strings.Contains(check.Detail, "active_workers=1/4") || !strings.Contains(check.Detail, "native_children=0") || !strings.Contains(check.Detail, "parked_resources=1") {
 				t.Fatalf("doctor execution resource detail = %#v", check)
 			}
 			return
@@ -150,14 +150,14 @@ func TestDoctorListsProjectsAndMembersUsingNoMistakes(t *testing.T) {
 	}
 	for project, text := range map[string]string{
 		"shop": `[defaults]
-landing_mode = "no-mistakes"
+merge_mode = "no-mistakes"
 review = "no-mistakes"
 `,
 		"stack": `[defaults]
-landing_mode = "pr"
+merge_mode = "pr"
 review = "none"
 [repositories.api]
-landing_mode = "no-mistakes"
+merge_mode = "no-mistakes"
 review = "no-mistakes"
 `,
 	} {
@@ -177,8 +177,8 @@ review = "no-mistakes"
 		t.Fatalf("doctor exit=%d output=%s", code, output.String())
 	}
 	for _, want := range []string{
-		"deprecated no-mistakes shop", "Project shop defaults.landing_mode", "Project shop defaults.review",
-		"deprecated no-mistakes stack", "Member api effective landing_mode", "Member api effective review policy",
+		"deprecated no-mistakes shop", "Project shop defaults.merge_mode", "Project shop defaults.review",
+		"deprecated no-mistakes stack", "Member api effective merge_mode", "Member api effective review policy",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("doctor omitted %q: %s", want, output.String())
@@ -189,10 +189,10 @@ review = "no-mistakes"
 func TestDoctorRecommendsRemovingProjectsWithStaleRoots(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "posse-home")
-	remudaRoot := filepath.Join(home, "remuda", "shop", "mount-2")
+	poolRoot := filepath.Join(home, "pool", "shop", "sandbox-2")
 	tempRoot := filepath.Join(root, "e2erepo")
 	missingRoot := filepath.Join(root, "leadrepo")
-	for _, dir := range []string{remudaRoot, tempRoot} {
+	for _, dir := range []string{poolRoot, tempRoot} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -205,7 +205,7 @@ func TestDoctorRecommendsRemovingProjectsWithStaleRoots(t *testing.T) {
 	for _, project := range []struct {
 		name, root string
 	}{
-		{"mount-2", remudaRoot},
+		{"sandbox-2", poolRoot},
 		{"e2erepo", tempRoot},
 		{"leadrepo", missingRoot},
 	} {
@@ -232,9 +232,9 @@ func TestDoctorRecommendsRemovingProjectsWithStaleRoots(t *testing.T) {
 		t.Fatalf("doctor did not return JSON: %s: %v", output.String(), err)
 	}
 	wantDetails := map[string]string{
-		"mount-2":  "inside a Remuda Mount",
-		"e2erepo":  "under a temporary directory",
-		"leadrepo": "is missing",
+		"sandbox-2": "inside a Pool Sandbox",
+		"e2erepo":   "under a temporary directory",
+		"leadrepo":  "is missing",
 	}
 	for name, detail := range wantDetails {
 		checkName := "project " + name

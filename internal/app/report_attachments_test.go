@@ -32,13 +32,13 @@ func TestReportAttachmentGitArgsOmitEmptyBaseRef(t *testing.T) {
 }
 
 func TestWorkspaceRootReportAttachmentsIncludeOnlyChangedSharedFiles(t *testing.T) {
-	mountRoot := filepath.Join(t.TempDir(), "mount")
+	sandboxRoot := filepath.Join(t.TempDir(), "sandbox")
 	for path, contents := range map[string]string{
-		filepath.Join(mountRoot, "unchanged.txt"):           "same\n",
-		filepath.Join(mountRoot, "changed.txt"):             "original\n",
-		filepath.Join(mountRoot, "report.md"):               "canonical report\n",
-		filepath.Join(mountRoot, ".git", "hidden"):          "metadata\n",
-		filepath.Join(mountRoot, "backend", "evidence.txt"): "member evidence\n",
+		filepath.Join(sandboxRoot, "unchanged.txt"):           "same\n",
+		filepath.Join(sandboxRoot, "changed.txt"):             "original\n",
+		filepath.Join(sandboxRoot, "report.md"):               "canonical report\n",
+		filepath.Join(sandboxRoot, ".git", "hidden"):          "metadata\n",
+		filepath.Join(sandboxRoot, "backend", "evidence.txt"): "member evidence\n",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -48,25 +48,25 @@ func TestWorkspaceRootReportAttachmentsIncludeOnlyChangedSharedFiles(t *testing.
 		}
 	}
 	members := map[string]bool{"backend": true}
-	baselineFiles, err := workspaceRootFileStates(mountRoot, members)
+	baselineFiles, err := workspaceRootFileStates(sandboxRoot, members)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for path, contents := range map[string]string{
-		filepath.Join(mountRoot, "changed.txt"): "edited\n",
-		filepath.Join(mountRoot, "new.txt"):     "new evidence\n",
+		filepath.Join(sandboxRoot, "changed.txt"): "edited\n",
+		filepath.Join(sandboxRoot, "new.txt"):     "new evidence\n",
 	} {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	attachments, err := workspaceRootReportAttachments(context.Background(), mountRoot, members, workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: baselineFiles})
+	attachments, err := workspaceRootReportAttachments(context.Background(), sandboxRoot, members, workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: baselineFiles})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]reportAttachmentSource{
-		"changed.txt": {root: mountRoot, name: "changed.txt"},
-		"new.txt":     {root: mountRoot, name: "new.txt"},
+		"changed.txt": {root: sandboxRoot, name: "changed.txt"},
+		"new.txt":     {root: sandboxRoot, name: "new.txt"},
 	}
 	if !reflect.DeepEqual(attachments, want) {
 		t.Fatalf("workspace-root attachments = %#v, want %#v", attachments, want)
@@ -74,8 +74,8 @@ func TestWorkspaceRootReportAttachmentsIncludeOnlyChangedSharedFiles(t *testing.
 }
 
 func TestWorkspaceRootReportAttachmentsIncludeNonIgnoredNestedGitFiles(t *testing.T) {
-	mountRoot := t.TempDir()
-	repository := filepath.Join(mountRoot, "git-evidence")
+	sandboxRoot := t.TempDir()
+	repository := filepath.Join(sandboxRoot, "git-evidence")
 	if err := os.MkdirAll(repository, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestWorkspaceRootReportAttachmentsIncludeNonIgnoredNestedGitFiles(t *testin
 	}
 	gitTest(t, repository, "add", "proof.txt")
 	gitTest(t, repository, "commit", "-m", "evidence")
-	attachments, err := workspaceRootReportAttachments(context.Background(), mountRoot, map[string]bool{}, workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: map[string]workspaceRootFingerprint{}})
+	attachments, err := workspaceRootReportAttachments(context.Background(), sandboxRoot, map[string]bool{}, workspaceRootBaseline{Version: workspaceRootBaselineVersion, Files: map[string]workspaceRootFingerprint{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,10 +121,10 @@ func TestWorkspaceRootReportAttachmentsIncludeNonIgnoredNestedGitFiles(t *testin
 	}
 }
 
-func TestWorkspaceRootBaselineUsesMountContentsAtAcquireAndRemainsHidden(t *testing.T) {
+func TestWorkspaceRootBaselineUsesSandboxContentsAtAcquireAndRemainsHidden(t *testing.T) {
 	home := t.TempDir()
 	project := store.Project{Name: "stack", Kind: store.ProjectKindWorkspace, Root: filepath.Join(t.TempDir(), "project")}
-	task := store.Task{Seq: 1, WorktreePath: filepath.Join(t.TempDir(), "mount")}
+	task := store.Task{Seq: 1, WorktreePath: filepath.Join(t.TempDir(), "sandbox")}
 	for _, root := range []string{project.Root, task.WorktreePath, filepath.Join(task.WorktreePath, "backend")} {
 		if err := os.MkdirAll(root, 0o700); err != nil {
 			t.Fatal(err)
@@ -207,7 +207,7 @@ func TestWorkspaceProtocolMakesRootContextExplicit(t *testing.T) {
 	}
 }
 
-func TestUnsaddleIncompleteHelpNamesFailedStep(t *testing.T) {
+func TestTeardownIncompleteHelpNamesFailedStep(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	home := filepath.Join(root, "posse")
@@ -223,7 +223,7 @@ func TestUnsaddleIncompleteHelpNamesFailedStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "scout", Title: "Scout report"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "research", Title: "Research report"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,12 +232,12 @@ func TestUnsaddleIncompleteHelpNamesFailedStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := testService(home, nil)
-	err = service.unsaddleIncomplete(ctx, db, project, task, "Report attachment preservation", errors.New("fixture failure"))
+	err = service.teardownIncomplete(ctx, db, project, task, "Report attachment preservation", errors.New("fixture failure"))
 	var failure *axi.Error
-	if !errors.As(err, &failure) || failure.Code != "unsaddle_incomplete" {
+	if !errors.As(err, &failure) || failure.Code != "teardown_incomplete" {
 		t.Fatalf("Teardown error = %#v", err)
 	}
-	if len(failure.Help) != 1 || !strings.Contains(failure.Help[0], "Report attachment preservation") || strings.Contains(failure.Help[0], "remaining pane or Mount process") {
+	if len(failure.Help) != 1 || !strings.Contains(failure.Help[0], "Report attachment preservation") || strings.Contains(failure.Help[0], "remaining pane or Sandbox process") {
 		t.Fatalf("Teardown help = %#v", failure.Help)
 	}
 }

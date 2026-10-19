@@ -9,7 +9,7 @@ Addresses #120 and #119. The quoted User intent remains "yes do all what u sugge
 Read the adversarial reports from t150, t152 and t154. The t150/t152 harnesses are at
 `29af740` and `aeb0a82`. The t150 counterexample commits t1's observation, then
 holds an independent SQLite writer for seven seconds while 255 unrelated Tasks,
-a Lead Lookout and eight `roster` processes share an isolated POSSE_HOME.
+a Lead Watch and eight `list` processes share an isolated POSSE_HOME.
 Previously this rejected t1's Signal with non-retryable `internal_error`.
 
 The follow-up on `aa7fb88` exposed two remaining design failures:
@@ -33,17 +33,17 @@ The t150 real-CLI harness also passes after the rework:
 
 ```text
 256 Tasks, seven-second writer hold, real isolated Herdr server
-holler done: exit 0, state=reported, elapsed=3.045s
-Lead lookout: exit 0, delivered Notice after release, elapsed=7.132s
-8 roster processes: exit 1, store_busy, retryable=true, elapsed=2.792-2.929s
+signal done: exit 0, state=reported, elapsed=3.045s
+Lead watch: exit 0, delivered Notice after release, elapsed=7.132s
+8 list processes: exit 1, store_busy, retryable=true, elapsed=2.792-2.929s
 ```
 
-Only the harness's Scout success oracle (`done` to `reported`) and teardown-only
+Only the harness's Research success oracle (`done` to `reported`) and teardown-only
 socket listener race were corrected. Neither changes the contention injection.
 
 The t152 `progress.py` harness, with four Tasks and an eight-second writer, now
-keeps the same `lookout --timeout 20000` process armed through release. Status
-and roster return retryable `store_busy`. Post-release Signal, Notice delivery
+keeps the same `watch --timeout 20000` process armed through release. Status
+and list return retryable `store_busy`. Post-release Signal, Notice delivery
 and status checks pass without a product workaround.
 
 The full Gate exposed another ordering race: a queued fix could become visible
@@ -102,10 +102,10 @@ Final lock and error-propagation fix: 30/30 passed under parallel load, 128.559s
 Zero failures in these samples does not establish equal underlying flake rates.
 The existing CI and t141 evidence establish that the stall predates this PR.
 
-A deterministic real-CLI regression acquires `.mount-lock` in a separate
+A deterministic real-CLI regression acquires `.sandbox-lock` in a separate
 process, waits for acquisition, SIGSTOPs the owner, and runs Project status.
 Before the fix the wake exceeded an eight-second watchdog. The final regression
-covers both `.mount-lock` and `.git/posse-fetch.lock`: status returns retryable
+covers both `.sandbox-lock` and `.git/posse-fetch.lock`: status returns retryable
 `store_busy`, leaves the owned lock intact, and succeeds after the owner is killed.
 
 The wake calls `ensureHeldMountLocks`, whose flock acquisition previously
@@ -128,7 +128,7 @@ while paused; its Notice-ownership assertions are unchanged.
 
 ## Design
 
-- Validate and atomically record only the Rider's own Signal first. Project
+- Validate and atomically record only the Worker's own Signal first. Project
   preparation afterward cannot reject it, regardless of the unrelated failure.
 - Bound post-Signal maintenance separately. Committed Signals and Notices remain
   durable when maintenance or delivery is deferred.
@@ -143,9 +143,9 @@ while paused; its Notice-ownership assertions are unchanged.
   deadlines as `store.ErrBusy`. Every CLI handler maps contention to retryable
   `store_busy`, preserving existing structured failures.
 - Commit instruction authorization and its message-submission marker together,
-  before exposing a fix to a Rider. Never reopen the Task after the prompt.
-- Keep Lookout armed when preparation encounters transient contention.
-- Bound Mount-state and repository-fetch flock acquisition to three seconds;
+  before exposing a fix to a Worker. Never reopen the Task after the prompt.
+- Keep Watch armed when preparation encounters transient contention.
+- Bound Sandbox-state and repository-fetch flock acquisition to three seconds;
   do not remove or steal another process's lock. Propagate local contention
   instead of treating it as evidence that the Project checkout is behind origin.
 
@@ -217,7 +217,7 @@ A bounded pass may leave observations and stall evaluation stale until a later
 pass. Persistent contention in the Signal's own transaction still rejects that
 Signal with retryable `store_busy`. A successful Signal may print a deferred
 maintenance or delivery diagnostic; its durable Notice remains available for
-Lookout. An instruction whose submission result is uncertain leaves its Task
+Watch. An instruction whose submission result is uncertain leaves its Task
 reopened and raises `message_delivery_uncertain`, rather than assuming Herdr
 rejected it or automatically retrying it. A stopped lock holder now causes a bounded retryable refusal instead
 of an indefinite wait.

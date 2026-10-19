@@ -108,7 +108,7 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 		{Key: "reporting_rule", Value: composed.ReportingRule},
 		{Key: "identity", Value: composed.Identity},
 		{Key: "language_rule", Value: composed.LanguageRule},
-		{Key: "help", Value: []any{"Continue the Lead conversation with the User. For code changes, follow the runtime obligations in these instructions and use `posse ride`."}},
+		{Key: "help", Value: []any{"Continue the Lead conversation with the User. For code changes, follow the runtime obligations in these instructions and use `posse start`."}},
 	}
 	return ctx.Print(withReadiness(result, gaps))
 }
@@ -142,7 +142,7 @@ func (s *Service) currentLeadKind(ctx context.Context, project store.Project, cf
 }
 
 // The role belongs in the title and posse_row, not in Herdr's harness field.
-// Like Riders, Leads show the resolved kind before start and detection afterward.
+// Like Workers, Leads show the resolved kind before start and detection afterward.
 func leadDisplayMetadata(project store.Project, paneID, detectedAgent, expectedAgent string) map[string]any {
 	metadata := map[string]any{
 		"pane_id": paneID, "source": "posse", "title": "Lead: " + project.Name,
@@ -200,7 +200,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	}
 	actor := s.configCaller(ctx.Context, db)
 	if actor.role == "worker" {
-		return axi.Failure("lead_only", "posse up cannot run from a Rider pane", false, "Run `posse up` from a User or Lead shell in the Project folder")
+		return axi.Failure("lead_only", "posse up cannot run from a Worker pane", false, "Run `posse up` from a User or Lead shell in the Project folder")
 	}
 	if task, taskErr := taskForPath(ctx.Context, db, dir); taskErr == nil {
 		plan, planErr := task.AdmittedPlan()
@@ -208,7 +208,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 			return admittedPlanFailure(planErr)
 		}
 		if plan == nil || plan.Execution.Mode != "in-place" {
-			return axi.Failure("lead_only", "posse up cannot run inside a Rider Mount", false, "Run `posse up` in the Project folder")
+			return axi.Failure("lead_only", "posse up cannot run inside a Worker Sandbox", false, "Run `posse up` in the Project folder")
 		}
 	} else if !store.IsNotFound(taskErr) {
 		return taskErr
@@ -261,9 +261,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 		return axi.Failure("agent_kind_unknown", "unknown Lead agent kind "+kind, false, "Choose a configured kind from `posse config show --effective`")
 	}
 	workspace := (registered && project.IsWorkspace()) || (!registered && detected.Kind == store.ProjectKindWorkspace)
-	if cfg.Defaults.LandingMode == "no-mistakes" && detected.Kind != store.ProjectKindDirectory && !project.IsDirectory() {
+	if cfg.Defaults.MergeMode == "no-mistakes" && detected.Kind != store.ProjectKindDirectory && !project.IsDirectory() {
 		if workspace {
-			return axi.Failure("config_invalid", "no-mistakes landing is not available for workspace Projects", false, "Set `landing_mode` to local or pr for Project "+name)
+			return axi.Failure("config_invalid", "no-mistakes merging is not available for workspace Projects", false, "Set `merge_mode` to local or pr for Project "+name)
 		}
 		if err := ensureNoMistakesInitialized(ctx.Context, root); err != nil {
 			readinessProject := project
@@ -309,7 +309,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	if registered {
 		// With no Lead workspace left (`posse down`, a closed group or a
 		// held restart), the caller's workspace becomes it before recovery,
-		// so recovered Riders open beside the Lead this command starts.
+		// so recovered Workers open beside the Lead this command starts.
 		if workspaceID := os.Getenv("HERDR_WORKSPACE_ID"); workspaceID != "" {
 			current, err := s.Herdr.Snapshot(ctx.Context)
 			if err != nil {
@@ -454,7 +454,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	}
 	project.HerdrWorkspaceID = callerWorkspaceID
 	s.relabelProjectTabs(ctx.Context, db, project)
-	if err := s.ensureLookoutTab(ctx.Context, db, project, snapshot, false); err != nil {
+	if err := s.ensureWatchTab(ctx.Context, db, project, snapshot, false); err != nil {
 		return err
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {

@@ -2,11 +2,11 @@
 
 ## Contract
 
-New Tasks admit a version-1 plan before Project preparation or execution resource allocation. The plan records the existing outcome, Rider/Mount execution, scope and Members, review/delivery, base/target, Autonomy with provenance, managed paths and resolved launch settings. Selected Brief, preferences, skills and consumed configuration fields retain their bytes and SHA-256 digests. Unused configuration fields, including unrelated credentials, and unrelated forge comments are excluded.
+New Tasks admit a version-1 plan before Project preparation or execution resource allocation. The plan records the existing outcome, Worker/Sandbox execution, scope and Members, review/delivery, base/target, Autonomy with provenance, managed paths and resolved launch settings. Selected Brief, preferences, skills and consumed configuration fields retain their bytes and SHA-256 digests. Unused configuration fields, including unrelated credentials, and unrelated forge comments are excluded.
 
 Ordinary relaunch consumes the frozen argument vector, resume templates and instruction inputs. Explicit `--profile`, including the same name, appends a linked revision and clears Task/member Gate evidence before execution effects. Launch identities and Signals retain their revision binding. Existing Tasks remain legacy.
 
-`posse status` exposes only the calling Rider's recorded state and plan. It opens SQLite read-only without config loading, migration, Herdr calls, recovery, synchronization or cleanup.
+`posse status` exposes only the calling Worker's recorded state and plan. It opens SQLite read-only without config loading, migration, Herdr calls, recovery, synchronization or cleanup.
 
 ## End-user reproductions
 
@@ -16,10 +16,10 @@ A second real-CLI regression edited the copied Brief after admission. Before fix
 
 ## Acceptance coverage
 
-- `internal/taskplan`: existing Ship/Scout/Review semantics, supported combinations, exact CRLF and binary input bytes, digests, detached inputs, argument replay and managed-path binding.
-- Refusal tests assert no Task, intent, scratch, Mount, branch or pane allocation, and no Herdr calls before rejection.
+- `internal/taskplan`: existing Change/Research/Review semantics, supported combinations, exact CRLF and binary input bytes, digests, detached inputs, argument replay and managed-path binding.
+- Refusal tests assert no Task, intent, scratch, Sandbox, branch or pane allocation, and no Herdr calls before rejection.
 - Own-status CLI coverage uses invalid current config, an unreachable Herdr socket and a sibling's unfinished intent. Status succeeds without exposing or changing that sibling; selecting another Task is refused.
-- Task-create interruption coverage verifies revision 1 survives the process exit before any Mount exists and remains unchanged during recovery.
+- Task-create interruption coverage verifies revision 1 survives the process exit before any Sandbox exists and remains unchanged during recovery.
 - Store coverage rebuilds initial and revised plans into a fresh database, preserves unknown historical model identity, rejects stale revision updates and clears both Task/member evidence.
 - Concurrent snapshot coverage checks plan/history consistency during revisions. Admitted snapshot writers serialize across processes and exclude history newer than the captured Task row.
 - Workspace coverage compares admitted scope, selected Members, paths, base/target and delivery with the registered repository facts.
@@ -40,14 +40,14 @@ Merge commit `c339170` incorporates `origin/main` through `da79d74` (PRs #263, #
 Post-merge verification:
 
 - The Project Gate passed: formatting, vet with `e2e,perf`, staticcheck 2026.2.1, generation with no diff, and `go test ./...`. App tests took 595.346 seconds; store tests took 87.077 seconds.
-- Targeted E2E passed in 189.249 seconds, with 21 test/subtest passes. Coverage includes admission, revision/rebuild, own-only status, selected Brief publication, legacy publication, PR title refresh, unsend isolation, launch skills, current-target merge refusal, PR landing, held-Project Lookout repair, Claude Stop ownership, Pi session replacement and Workspace admission/landing.
-- Targeted admission, snapshot, Claude Stop, Lookout repair and merge-boundary race tests passed (app 39.077 seconds; store 17.210 seconds). The complete `internal/taskplan` race suite also passed.
+- Targeted E2E passed in 189.249 seconds, with 21 test/subtest passes. Coverage includes admission, revision/rebuild, own-only status, selected Brief publication, legacy publication, PR title refresh, unsend isolation, launch skills, current-target merge refusal, PR merging, held-Project Watch repair, Claude Stop ownership, Pi session replacement and Workspace admission/merging.
+- Targeted admission, snapshot, Claude Stop, Watch repair and merge-boundary race tests passed (app 39.077 seconds; store 17.210 seconds). The complete `internal/taskplan` race suite also passed.
 - Performance budgets, shellcheck and shard-assignment self-check passed. Sampled command wall p95 remained below 58 ms.
 - Read-only inspection still found the same 18 disclosed Claude trust references; no live trust-store cleanup was attempted.
 
 ## Test-suite findings
 
-The original full E2E attempt exposed an existing unsend fixture race. It also reproduces on the unchanged base revision `ffc11ed`: the real poll-only Lookout can legitimately claim a queued message before `unsend` starts. A temporary caller trace identified `lookout --poll-only`, not `unsend`, as the delivery owner. The fixture now uses the existing helper to stop its own background Lookout before queuing; all original assertions remain. The isolated regression passed 10 consecutive runs. Temporary tracing was removed.
+The original full E2E attempt exposed an existing unsend fixture race. It also reproduces on the unchanged base revision `ffc11ed`: the real poll-only Watch can legitimately claim a queued message before `unsend` starts. A temporary caller trace identified `watch --poll-only`, not `unsend`, as the delivery owner. The fixture now uses the existing helper to stop its own background Watch before queuing; all original assertions remain. The isolated regression passed 10 consecutive runs. Temporary tracing was removed.
 
 The schema-43 migration required updating legacy-schema fixture teardown and current-version assertions. The first Workspace assertion assumed Git's initial branch was `main`; it now checks the actual registered default branch. A pre-admission `store_busy` refusal in the historical publication fixture now uses the existing documented retry helper, which refuses to retry if a Task was created.
 

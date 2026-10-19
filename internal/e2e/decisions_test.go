@@ -14,7 +14,7 @@ import (
 func TestDecisionCLIFromLeadAndUserShellDeliversAnswerToLead(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "decisions")
-	taskID, err := f.addShipTask(t, store.StateFailed)
+	taskID, err := f.addChangeTask(t, store.StateFailed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestDecisionCLIFromLeadAndUserShellDeliversAnswerToLead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: f.taskDBID, Kind: "task_failed", Summary: "Rider failed"}); err != nil {
+	if _, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: f.taskDBID, Kind: "task_failed", Summary: "Worker failed"}); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -53,7 +53,7 @@ func TestDecisionCLIFromLeadAndUserShellDeliversAnswerToLead(t *testing.T) {
 	if code == 0 || !strings.Contains(output, "user_only") {
 		t.Fatalf("Lead answered without User quote: %d %s", code, output)
 	}
-	code, output = f.run(t, "", "decide", fmt.Sprint(failedID), "relaunch", "--user-approved", "Please relaunch the Rider")
+	code, output = f.run(t, "", "decide", fmt.Sprint(failedID), "relaunch", "--user-approved", "Please relaunch the Worker")
 	if code != 0 {
 		t.Fatalf("Lead quoted answer: %d %s", code, output)
 	}
@@ -62,7 +62,7 @@ func TestDecisionCLIFromLeadAndUserShellDeliversAnswerToLead(t *testing.T) {
 		if e != nil {
 			return e
 		}
-		if d.Answer != "relaunch" || d.UserQuote != "Please relaunch the Rider" {
+		if d.Answer != "relaunch" || d.UserQuote != "Please relaunch the Worker" {
 			return fmt.Errorf("quoted answer: %#v", d)
 		}
 		notices, e := db.Notices(context.Background(), f.project.ID, false)

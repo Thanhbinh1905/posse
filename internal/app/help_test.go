@@ -25,13 +25,13 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		t.Fatalf("posse --help exposed an internal command: %s", help)
 	}
 	for _, want := range []string{
-		"Restart the Rider in the same execution root, optionally with another Profile.",
-		"Start a Rider from a Brief with an optional display name.",
-		"List a Project's Remuda or prune safe, Posse-owned leftovers.",
+		"Restart the Worker in the same execution root, optionally with another Profile.",
+		"Start a Worker from a Brief with an optional display name.",
+		"List a Project's Pool or prune safe, Posse-owned orphans.",
 		"Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).",
-		"Send a message, optionally queueing it or interrupting and redirecting a busy Rider.",
-		"Withdraw a queued Rider message before delivery begins.",
-		"Record a Rider's Signal; done is refused while queued instructions remain undelivered.",
+		"Send a message, optionally queueing it or interrupting and redirecting a busy Worker.",
+		"Withdraw a queued Worker message before delivery begins.",
+		"Record a Worker's Signal; done is refused while queued instructions remain undelivered.",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("posse --help omitted summary %q: %s", want, help)
@@ -61,8 +61,8 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		t.Fatalf("publish help omitted repeatable metadata flags: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"holler", "--help"}); code != 0 || !strings.Contains(output.String(), "[--findings <file>] [--report <file>]") {
-		t.Fatalf("holler help omitted Signal file flags: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"signal", "--help"}); code != 0 || !strings.Contains(output.String(), "[--findings <file>] [--report <file>]") {
+		t.Fatalf("signal help omitted Signal file flags: code=%d output=%s", code, output.String())
 	}
 
 	var checkSummary func(*axi.Command)

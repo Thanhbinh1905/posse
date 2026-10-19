@@ -17,7 +17,7 @@ type Approval struct {
 	BranchSha string
 }
 
-type CompletedRiderBusy struct {
+type CompletedWorkerBusy struct {
 	TaskID          int64
 	TransitionID    int64
 	PaneID          string
@@ -119,17 +119,6 @@ type ModelErrorEpisode struct {
 	UpdatedAt     int64
 }
 
-type Mount struct {
-	ID         int64
-	ProjectID  int64
-	N          int64
-	Path       string
-	State      string
-	TaskID     sql.NullInt64
-	AcquiredAt int64
-	ReleasedAt int64
-}
-
 type Notice struct {
 	ID          int64
 	ProjectID   int64
@@ -229,15 +218,15 @@ type ProjectRepo struct {
 }
 
 type ProjectRuntime struct {
-	ProjectID           int64
-	ServerStartedAt     string
-	RecoveryGeneration  string
-	RecoveryOwnerPid    int64
-	RecoveryClaimedAt   int64
-	LookoutPaneID       string
-	LookoutRetryAt      int64
-	LookoutFailedStarts int64
-	LookoutNoticeRaised int64
+	ProjectID          int64
+	ServerStartedAt    string
+	RecoveryGeneration string
+	RecoveryOwnerPid   int64
+	RecoveryClaimedAt  int64
+	WatchPaneID        string
+	WatchRetryAt       int64
+	WatchFailedStarts  int64
+	WatchNoticeRaised  int64
 }
 
 type ProjectWatchState struct {
@@ -306,7 +295,7 @@ type ResourceLease struct {
 	SourceKey      string
 	CustodyToken   string
 	IntentID       int64
-	MountID        sql.NullInt64
+	SandboxID      sql.NullInt64
 	OwnerPid       int64
 	OwnerBootID    string
 	OwnerStartTime string
@@ -315,7 +304,7 @@ type ResourceLease struct {
 }
 
 type ReviewCarry struct {
-	ShipTaskID      int64
+	ChangeTaskID    int64
 	Repository      string
 	FromHead        string
 	ToHead          string
@@ -325,17 +314,17 @@ type ReviewCarry struct {
 }
 
 type ReviewDisposition struct {
-	ID         int64
-	ShipTaskID int64
-	HeadSha    string
-	DecisionID sql.NullInt64
-	UserQuote  string
-	At         int64
+	ID           int64
+	ChangeTaskID int64
+	HeadSha      string
+	DecisionID   sql.NullInt64
+	UserQuote    string
+	At           int64
 }
 
 type ReviewFinding struct {
 	ID            int64
-	ShipTaskID    int64
+	ChangeTaskID  int64
 	Seq           int64
 	PatternID     int64
 	Fingerprint   string
@@ -367,7 +356,7 @@ type ReviewFindingEvent struct {
 
 type ReviewPattern struct {
 	ID           int64
-	ShipTaskID   int64
+	ChangeTaskID int64
 	Seq          int64
 	Key          string
 	Title        string
@@ -392,7 +381,7 @@ type ReviewReceipt struct {
 }
 
 type ReviewRound struct {
-	ShipTaskID          int64
+	ChangeTaskID        int64
 	Round               int64
 	ReviewTaskID        int64
 	Repository          string
@@ -427,6 +416,17 @@ type ReviewVerdict struct {
 	CreatedAt       int64
 }
 
+type Sandbox struct {
+	ID         int64
+	ProjectID  int64
+	N          int64
+	Path       string
+	State      string
+	TaskID     sql.NullInt64
+	AcquiredAt int64
+	ReleasedAt int64
+}
+
 type Signal struct {
 	ID       int64
 	TaskID   int64
@@ -446,9 +446,9 @@ type Task struct {
 	State                string
 	Profile              string
 	DispatchRule         string
-	LandingMode          string
+	MergeMode            string
 	AutonomyReview       string
-	AutonomyLand         string
+	AutonomyMerge        string
 	Branch               string
 	BaseRef              string
 	WorktreePath         string
@@ -458,14 +458,14 @@ type Task struct {
 	AgentName            string
 	AgentSession         string
 	PrUrl                string
-	LandedRef            string
+	MergedRef            string
 	LastOutputHash       string
 	LastWorktreeHash     string
 	LastProgressAt       int64
 	AgentAbsentSince     int64
 	CreatedAt            int64
 	UpdatedAt            int64
-	MountID              sql.NullInt64
+	SandboxID            sql.NullInt64
 	Launches             int64
 	GatedSha             string
 	AgentServerStartedAt string
@@ -511,11 +511,11 @@ type TaskRepo struct {
 	Repo         string
 	WorktreePath string
 	BaseRef      string
-	LandingMode  string
+	MergeMode    string
 	State        string
 	GatedSha     string
 	PrUrl        string
-	LandedRef    string
+	MergedRef    string
 	UpdatedAt    int64
 	TargetBranch string
 }
@@ -547,7 +547,7 @@ type Transition struct {
 
 type ValidationFixRound struct {
 	ID               int64
-	ShipTaskID       int64
+	ChangeTaskID     int64
 	Kind             string
 	Seq              int64
 	ExpectedBaseHead string

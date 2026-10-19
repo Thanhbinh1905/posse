@@ -63,7 +63,7 @@ func TestIngestAppliesBlockedStateAndJournalsEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1"})
+	taskID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestQueuedMessageDeliversWhenNextReconcileSeesIdleWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "ship", Title: "Fix", LandingMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1"})
+	taskID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1"})
 	if err != nil {
 		t.Fatal(err)
 	}

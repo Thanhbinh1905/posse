@@ -20,7 +20,7 @@ func TestEnsurePRBodyMarkerPersistsAndBindsTokenPerTaskMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Ship"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Change"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestPersistTaskPreservesMarkersMissingFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Published"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Published"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestPRBodyMarkersSurviveSnapshotRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pendingTask, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Pending", Branch: "posse/pending"})
+	pendingTask, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Pending", Branch: "posse/pending"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestPRBodyMarkersSurviveSnapshotRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requestTask, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "ship", Title: "Published", Branch: "posse/published"})
+	requestTask, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "Published", Branch: "posse/published"})
 	if err != nil {
 		t.Fatal(err)
 	}

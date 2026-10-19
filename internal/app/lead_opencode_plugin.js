@@ -63,7 +63,7 @@ export const PosseLead = async ({ client, directory }) => {
 
   const settleReceipt = (delivery, outcome) => new Promise((resolve) => {
     if (stopped) return resolve(false);
-    const args = ["lookout", "--json", "--receipt", delivery.delivery_id,
+    const args = ["watch", "--json", "--receipt", delivery.delivery_id,
       "--receipt-outcome", outcome];
     if (delivery.owner_token) args.push("--receipt-token", delivery.owner_token);
     let current;
@@ -94,12 +94,12 @@ export const PosseLead = async ({ client, directory }) => {
 
   const watch = () => {
     if (stopped || blocked || watcher || pending || !session || (sending && !prompting)) return;
-    const args = ["lookout", "--json", "--quiet-routine", "--handoff", "--destination", `opencode:${session}`];
+    const args = ["watch", "--json", "--quiet-routine", "--handoff", "--destination", `opencode:${session}`];
     let current;
     try {
       current = spawnOwned(args, { stdio: ["ignore", "pipe", "ignore"] });
     } catch (error) {
-      console.error("Posse OpenCode Notice: could not start lookout", error);
+      console.error("Posse OpenCode Notice: could not start watch", error);
       retry();
       return;
     }
@@ -119,7 +119,7 @@ export const PosseLead = async ({ client, directory }) => {
         result = JSON.parse(output);
       } catch (error) {
         // A printed receipt remains durable, so the next query can recover it.
-        console.error("Posse OpenCode Notice: invalid lookout result", error);
+        console.error("Posse OpenCode Notice: invalid watch result", error);
         retry();
         return;
       }

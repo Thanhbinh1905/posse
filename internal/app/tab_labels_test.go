@@ -26,8 +26,8 @@ func TestRelabelProjectTabsUsesHerdrOrderAndLeavesUserTabsAlone(t *testing.T) {
 	project.LeadPaneID = "p1"
 	project.LeadLabel = "posse:shop:lead"
 	for _, task := range []store.Task{
-		{Seq: 1, Type: "ship", Title: "First rider", ShortName: "first-rider", State: store.StateSpawning, LandingMode: "local", HerdrWorkspaceID: "w1", PaneID: "p4", PaneLabel: "posse:shop:t1"},
-		{Seq: 2, Type: "ship", Title: "Second rider", ShortName: "second-rider", State: store.StateSpawning, LandingMode: "local", HerdrWorkspaceID: "w1", PaneID: "p3", PaneLabel: "posse:shop:t2"},
+		{Seq: 1, Type: "change", Title: "First worker", ShortName: "first-worker", State: store.StateSpawning, MergeMode: "local", HerdrWorkspaceID: "w1", PaneID: "p4", PaneLabel: "posse:shop:t1"},
+		{Seq: 2, Type: "change", Title: "Second worker", ShortName: "second-worker", State: store.StateSpawning, MergeMode: "local", HerdrWorkspaceID: "w1", PaneID: "p3", PaneLabel: "posse:shop:t2"},
 	} {
 		if _, err := db.CreateTask(ctx, project.ID, task); err != nil {
 			t.Fatal(err)
@@ -38,8 +38,8 @@ func TestRelabelProjectTabsUsesHerdrOrderAndLeavesUserTabsAlone(t *testing.T) {
 		Tabs: []herdr.Tab{
 			{TabID: "t1", WorkspaceID: "w1", Label: "1"},
 			{TabID: "t2", WorkspaceID: "w1", Label: "user-shell"},
-			{TabID: "t3", WorkspaceID: "w1", Label: "├─ second-rider"},
-			{TabID: "t4", WorkspaceID: "w1", Label: "└─ first-rider"},
+			{TabID: "t3", WorkspaceID: "w1", Label: "├─ second-worker"},
+			{TabID: "t4", WorkspaceID: "w1", Label: "└─ first-worker"},
 		},
 		Panes: []herdr.Pane{
 			{PaneID: "p1", WorkspaceID: "w1", TabID: "t1", Label: project.LeadLabel},
@@ -57,8 +57,8 @@ func TestRelabelProjectTabsUsesHerdrOrderAndLeavesUserTabsAlone(t *testing.T) {
 			got[call.Params["tab_id"].(string)] = call.Params["label"].(string)
 		}
 	}
-	want := map[string]string{"t1": "Lead", "t3": "second-rider", "t4": "first-rider"}
-	wantRows := map[string]string{"p1": "Lead:shop", "p3": "├─ second-rider", "p4": "└─ first-rider"}
+	want := map[string]string{"t1": "Lead", "t3": "second-worker", "t4": "first-worker"}
+	wantRows := map[string]string{"p1": "Lead:shop", "p3": "├─ second-worker", "p4": "└─ first-worker"}
 	for _, call := range fake.Calls {
 		if call.Method != "pane.report_metadata" {
 			continue
@@ -85,25 +85,25 @@ func TestRelabelProjectTabsUsesHerdrOrderAndLeavesUserTabsAlone(t *testing.T) {
 	}
 }
 
-func TestProjectTabPresentationDoesNotDuplicateLinkedRiderName(t *testing.T) {
+func TestProjectTabPresentationDoesNotDuplicateLinkedWorkerName(t *testing.T) {
 	project := store.Project{Name: "shop", LeadLabel: "posse:shop:lead"}
-	task := store.Task{ID: 1, PaneLabel: "posse:shop:t1", PaneID: "rider:p1", WorktreePath: "/mount", ShortName: "first-rider"}
-	workspace := herdr.Workspace{WorkspaceID: "rider", Label: task.ShortName}
+	task := store.Task{ID: 1, PaneLabel: "posse:shop:t1", PaneID: "worker:p1", WorktreePath: "/sandbox", ShortName: "first-worker"}
+	workspace := herdr.Workspace{WorkspaceID: "worker", Label: task.ShortName}
 	workspace.Worktree.CheckoutPath, workspace.Worktree.IsLinkedWorktree = task.WorktreePath, true
 	snap := herdr.Snapshot{
 		Workspaces: []herdr.Workspace{workspace},
-		Tabs:       []herdr.Tab{{TabID: "lead:t1", Label: "Lead"}, {TabID: "rider:t1", WorkspaceID: "rider", Label: "1"}},
+		Tabs:       []herdr.Tab{{TabID: "lead:t1", Label: "Lead"}, {TabID: "worker:t1", WorkspaceID: "worker", Label: "1"}},
 		Panes: []herdr.Pane{
 			{PaneID: "lead:p1", TabID: "lead:t1", Label: project.LeadLabel},
-			{PaneID: task.PaneID, TabID: "rider:t1", WorkspaceID: "rider", Label: task.PaneLabel, CWD: task.WorktreePath, Tokens: map[string]string{"posse_row": task.ShortName}},
+			{PaneID: task.PaneID, TabID: "worker:t1", WorkspaceID: "worker", Label: task.PaneLabel, CWD: task.WorktreePath, Tokens: map[string]string{"posse_row": task.ShortName}},
 		},
 	}
 	labels, rows := projectTabPresentation(snap, project, []store.Task{task})
 	if row, owned := rows[task.PaneID]; !owned || row != "" {
-		t.Fatalf("linked Rider must clear its redundant custom row: %#v", rows)
+		t.Fatalf("linked Worker must clear its redundant custom row: %#v", rows)
 	}
-	if _, renamed := labels["rider:t1"]; renamed {
-		t.Fatalf("linked Rider's native tab label was changed: %#v", labels)
+	if _, renamed := labels["worker:t1"]; renamed {
+		t.Fatalf("linked Worker's native tab label was changed: %#v", labels)
 	}
 }
 
@@ -151,12 +151,12 @@ func TestRelabelProjectTabsLogsFailuresAndContinues(t *testing.T) {
 	}
 	project.LeadPaneID = "p1"
 	project.LeadLabel = "posse:shop:lead"
-	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "First rider", ShortName: "first-rider", State: store.StateSpawning, LandingMode: "local", WorktreePath: t.TempDir(), HerdrWorkspaceID: "w1", PaneID: "p2", PaneLabel: "posse:shop:t1"}); err != nil {
+	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "First worker", ShortName: "first-worker", State: store.StateSpawning, MergeMode: "local", WorktreePath: t.TempDir(), HerdrWorkspaceID: "w1", PaneID: "p2", PaneLabel: "posse:shop:t1"}); err != nil {
 		t.Fatal(err)
 	}
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{
-		Tabs:  []herdr.Tab{{TabID: "t1", Label: "1"}, {TabID: "t2", Label: "└─ first-rider"}},
+		Tabs:  []herdr.Tab{{TabID: "t1", Label: "1"}, {TabID: "t2", Label: "└─ first-worker"}},
 		Panes: []herdr.Pane{{PaneID: "p1", TabID: "t1", Label: project.LeadLabel}, {PaneID: "p2", TabID: "t2", Label: "posse:shop:t1"}},
 	}
 	fake.Errors["tab.rename"] = &herdr.Error{Code: "tab_unavailable", Message: "rename denied"}

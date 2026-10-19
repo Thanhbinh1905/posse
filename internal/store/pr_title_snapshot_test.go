@@ -18,7 +18,7 @@ func TestTaskPRTitleSurvivesSnapshotRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Brief title", ShortName: "brief-title", LandingMode: "pr"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Brief title", ShortName: "brief-title", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,7 @@ import (
 // Real Herdr starts a real fake-harness process for each attempt. The harness
 // remains idle after every prompt, exercising Herdr's actual prompt-wait error.
 func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	agentPath := filepath.Join(f.root, "bin", "claude")
 	agent, err := os.ReadFile(agentPath)
 	if err != nil {
@@ -28,7 +28,7 @@ func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
 	if err := os.WriteFile(agentPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	before := f.ride(t, "t1", "Always failing recovery", "always-failing-recovery")
+	before := f.start(t, "t1", "Always failing recovery", "always-failing-recovery")
 	for _, setting := range [][]string{{"defaults.recovery_attempts", "2"}, {"defaults.recovery_backoff", "10ms"}} {
 		runPosse(t, f.binary, f.repo, f.leadEnv, "config", "set", setting[0], setting[1], "--project", "shop")
 	}
@@ -52,7 +52,7 @@ func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
 	}
 	eventEnv := setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"working"}}`, f.leadPaneID))
 	runPosse(t, f.binary, f.repo, eventEnv, "_ingest")
-	for _, args := range [][]string{{"show", "t1"}, {"ack", "all"}, {"lead"}, {"lookout", "--timeout", "10"}} {
+	for _, args := range [][]string{{"show", "t1"}, {"ack", "all"}, {"lead"}, {"watch", "--timeout", "10"}} {
 		runPosse(t, f.binary, f.repo, f.leadEnv, args...)
 	}
 	for i := 0; i < 8; i++ {
@@ -80,5 +80,5 @@ func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
 	if after.Launches != before.Launches+2 || starts != 2 || state.Attempts != 2 || state.Status != "exhausted" || notices != 1 || !strings.Contains(state.LastError, "prompt") {
 		t.Fatalf("real Herdr failed recovery: launches %d -> %d, process starts=%d state=%#v Notices=%d", before.Launches, after.Launches, starts, state, notices)
 	}
-	t.Logf("real Herdr: configured bound=2, launches=%d, Rider process starts=%d, exhaustion Notices=%d; last error=%s", after.Launches-before.Launches, starts, notices, state.LastError)
+	t.Logf("real Herdr: configured bound=2, launches=%d, Worker process starts=%d, exhaustion Notices=%d; last error=%s", after.Launches-before.Launches, starts, notices, state.LastError)
 }

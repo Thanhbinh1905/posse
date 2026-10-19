@@ -72,11 +72,11 @@ func t242RealPiErrorUI(t *testing.T, message, expectedKind string) {
 	runPosse(t, base.binary, base.repo, base.leadEnv, "config", "set", "profiles.deep.model", "test")
 	runPosse(t, base.binary, base.repo, base.env, "config", "set", "profiles.deep.args", `["--provider", "t242-local", "--no-skills", "--no-prompt-templates"]`)
 	brief := filepath.Join(base.root, "real-model-error.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Real Pi stream error\ndone_when: error handled\n---\nSay hello.\n"), 0600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Real Pi stream error\ndone_when: error handled\n---\nSay hello.\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	// PATH resolves the real Pi executable; its agent directory and provider are isolated.
-	runPosse(t, base.binary, base.repo, base.leadEnv, "ride", "--brief", brief, "--name", "real-pi-stream")
+	runPosse(t, base.binary, base.repo, base.leadEnv, "start", "--brief", brief, "--name", "real-pi-stream")
 	task := base.mustTask(t, "t1")
 	releaseModel()
 	var output string

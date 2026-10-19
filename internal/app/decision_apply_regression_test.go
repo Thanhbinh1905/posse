@@ -37,11 +37,11 @@ func TestApplyRecoveryRelaunchesAnsweredTask(t *testing.T) {
 	}
 }
 
-func TestApplyRecoveryDiscardWithPrunedMount(t *testing.T) {
-	f := newPRLandingFixture(t, "local", store.StateWorking)
+func TestApplyRecoveryDiscardWithPrunedSandbox(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
-	attachPRFixtureMount(t, f)
+	attachPRFixtureSandbox(t, f)
 	if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, store.StateFailed, "worker", "failed"); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestApplyRecoveryDiscardWithPrunedMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
-	markPRFixtureRiderExited(fake)
+	markPRFixtureWorkerExited(fake)
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	removeFixtureTaskPane(f)
 	// Simulate a pruned worktree link without touching the Project repository.
@@ -73,10 +73,10 @@ func TestApplyRecoveryDiscardWithPrunedMount(t *testing.T) {
 func TestApplyAnsweredReviewChoices(t *testing.T) {
 	for _, choice := range []string{"accept", "request-changes", "ignore"} {
 		t.Run(choice, func(t *testing.T) {
-			f := newPRLandingFixture(t, "local", store.StateWorking)
+			f := newPRMergeFixture(t, "local", store.StateWorking)
 			defer f.db.Close()
 			ctx := context.Background()
-			reviewID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 2, Type: "review", ReviewsTaskID: f.task.ID, Title: "Review", LandingMode: "local"})
+			reviewID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 2, Type: "review", ReviewsTaskID: f.task.ID, Title: "Review", MergeMode: "local"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -117,8 +117,8 @@ func TestApplyAnsweredReviewChoices(t *testing.T) {
 	}
 }
 
-func TestApplyNoMistakesReviewAnswerQueuesRider(t *testing.T) {
-	f := newPRLandingFixture(t, "local", store.StateWorking)
+func TestApplyNoMistakesReviewAnswerQueuesWorker(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
 	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET landing_mode='no-mistakes' WHERE id=?`, f.task.ID); err != nil {
@@ -140,16 +140,16 @@ func TestApplyNoMistakesReviewAnswerQueuesRider(t *testing.T) {
 	}
 	message, err := f.db.OldestQueuedMessage(ctx, f.task.ID)
 	if err != nil || !strings.Contains(message.Body, "findings.toon") {
-		t.Fatalf("findings not sent to Rider: %#v %v", message, err)
+		t.Fatalf("findings not sent to Worker: %#v %v", message, err)
 	}
 }
 
 func TestReportedTeardownFailureKeepsFilesAndRaisesDecision(t *testing.T) {
-	f := newPRLandingFixture(t, "local", store.StateDone)
+	f := newPRMergeFixture(t, "local", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
-	attachPRFixtureMount(t, f)
-	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET type='scout' WHERE id=?`, f.task.ID); err != nil {
+	attachPRFixtureSandbox(t, f)
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET type='research' WHERE id=?`, f.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateReported, "cli", "report saved"); err != nil {
@@ -175,7 +175,7 @@ func TestReportedTeardownFailureKeepsFilesAndRaisesDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.service.unsaddleTask(ctx, f.db, f.project, cfg, task, false, "")
+	_, err = f.service.teardownTask(ctx, f.db, f.project, cfg, task, false, "")
 	if err == nil {
 		t.Fatal("expected attachment conflict")
 	}
@@ -185,6 +185,6 @@ func TestReportedTeardownFailureKeepsFilesAndRaisesDecision(t *testing.T) {
 	}
 	content, err := os.ReadFile(filepath.Join(f.worktree, "change.txt"))
 	if err != nil || string(content) != "new edit" {
-		t.Fatalf("Mount cleaned: %q %v", content, err)
+		t.Fatalf("Sandbox cleaned: %q %v", content, err)
 	}
 }

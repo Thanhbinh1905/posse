@@ -26,12 +26,12 @@ func TestImplicitInheritanceDefaultsToKindAndCanUseLeadProfile(t *testing.T) {
 		Kinds:    map[string]config.Kind{"claude": {}},
 		Profiles: map[string]config.Profile{"lead": {Kind: "claude", Model: "model-a", Effort: "high"}},
 	}
-	result, err := Resolve(cfg, "ship", "")
+	result, err := Resolve(cfg, "change", "")
 	if err != nil || result.Profile != "implicit:claude" || result.Rule != ImplicitRule || result.Resolved.Model != "" || result.Resolved.Effort != "" {
 		t.Fatalf("default kind-only inheritance = %#v, %v", result, err)
 	}
 	cfg.Defaults.DispatchInheritance = "lead_profile"
-	result, err = Resolve(cfg, "ship", "")
+	result, err = Resolve(cfg, "change", "")
 	if err != nil || result.Profile != "lead" || result.Rule != ImplicitLeadProfileRule || result.Resolved.Model != "model-a" || result.Resolved.Effort != "high" {
 		t.Fatalf("Lead Profile inheritance = %#v, %v", result, err)
 	}
@@ -60,7 +60,7 @@ func TestDisabledKindsRefuseNewDispatchButRemainReadable(t *testing.T) {
 			if testCase.name == "implicit Lead kind" {
 				cfg.DispatchDefault.Use = ""
 			}
-			_, err := Resolve(cfg, "ship", requested)
+			_, err := Resolve(cfg, "change", requested)
 			profileError, ok := err.(*ProfileError)
 			if !ok || profileError.Code != testCase.wantCode {
 				t.Fatalf("Resolve error = %#v, want %s", err, testCase.wantCode)
@@ -88,7 +88,7 @@ func TestSpecBriefFixtureParsesWithTrailingComments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spec Brief fixture did not validate: %v", err)
 	}
-	if brief.Type != "ship" || brief.Title != "Fix flaky login test" || brief.DoneWhen != "login spec passes 20 consecutive runs in CI mode" || brief.LandingMode != "pr" || brief.ReviewOf != "" || brief.AutonomyLand != "ask" {
+	if brief.Type != "change" || brief.Title != "Fix flaky login test" || brief.DoneWhen != "login spec passes 20 consecutive runs in CI mode" || brief.MergeMode != "pr" || brief.ReviewOf != "" || brief.AutonomyMerge != "ask" {
 		t.Fatalf("parsed spec Brief = %#v", brief)
 	}
 }
@@ -99,7 +99,7 @@ func TestBriefParsesCanonicalAndLegacyTicketFields(t *testing.T) {
 		"issues: [12]\n",
 		"ticket: 12\nissues: [12]\n",
 	} {
-		source := "---\ntype: ship\ntitle: Fix issue links\ndone_when: PR body includes links\n" + frontmatter + "refs: [worker#9]\n---\nWork on the listed issue.\n"
+		source := "---\ntype: change\ntitle: Fix issue links\ndone_when: PR body includes links\n" + frontmatter + "refs: [worker#9]\n---\nWork on the listed issue.\n"
 		brief, err := ParseBriefText(source)
 		if err != nil {
 			t.Fatalf("Brief with ticket %q did not validate: %v", frontmatter, err)
@@ -114,7 +114,7 @@ func TestBriefParsesCanonicalAndLegacyTicketFields(t *testing.T) {
 }
 
 func TestLegacyWorkspaceIssueAliasBecomesTheCanonicalTicket(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: ship\ntitle: Workspace issue\ndone_when: member is linked\nissues: [worker#12]\n---\n")
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Workspace issue\ndone_when: member is linked\nissues: [worker#12]\n---\n")
 	if err != nil {
 		t.Fatalf("legacy Workspace alias did not parse: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestBriefParserRejectsConflictingOrMultipleClosingIssues(t *testing.T) {
 		"ticket: [12]\n",
 		"ticket: 12, 13\n",
 	} {
-		source := "---\ntype: ship\ntitle: Fix issue links\ndone_when: tests pass\n" + frontmatter + "---\n"
+		source := "---\ntype: change\ntitle: Fix issue links\ndone_when: tests pass\n" + frontmatter + "---\n"
 		if _, err := ParseBriefText(source); err == nil {
 			t.Fatalf("accepted invalid canonical ticket:\n%s", source)
 		}
@@ -139,7 +139,7 @@ func TestBriefParserRejectsConflictingOrMultipleClosingIssues(t *testing.T) {
 }
 
 func TestHistoricalBriefParserPreservesMultipleLegacyIssues(t *testing.T) {
-	brief, err := ParseHistoricalBriefText("---\ntype: ship\ntitle: Old multi-issue Task\ndone_when: historical\nissues: [12, 16]\n---\n")
+	brief, err := ParseHistoricalBriefText("---\ntype: change\ntitle: Old multi-issue Task\ndone_when: historical\nissues: [12, 16]\n---\n")
 	if err != nil {
 		t.Fatalf("historical Brief did not parse: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestBriefRejectsInvalidOrRepeatedIssueReferences(t *testing.T) {
 		"issues: [member#12]\nrefs: [member#12]\n",
 		"refs: [../member#12]\n",
 	} {
-		source := "---\ntype: ship\ntitle: Fix issue links\ndone_when: tests pass\n" + frontmatter + "---\n"
+		source := "---\ntype: change\ntitle: Fix issue links\ndone_when: tests pass\n" + frontmatter + "---\n"
 		if _, err := ParseBriefText(source); err == nil {
 			t.Fatalf("accepted invalid issue references:\\n%s", source)
 		}
@@ -164,7 +164,7 @@ func TestBriefRejectsInvalidOrRepeatedIssueReferences(t *testing.T) {
 
 func TestBriefParsesPublicationBoundReportKind(t *testing.T) {
 	for _, kind := range []string{"spec", "tickets"} {
-		source := "---\ntype: scout\ntitle: Planning Report\ndone_when: findings are complete\nreport_kind: " + kind + "\n---\n"
+		source := "---\ntype: research\ntitle: Planning Report\ndone_when: findings are complete\nreport_kind: " + kind + "\n---\n"
 		brief, err := ParseBriefText(source)
 		if err != nil || brief.ReportKind != kind {
 			t.Fatalf("report_kind %q parsed as %#v, err=%v", kind, brief, err)
@@ -174,9 +174,9 @@ func TestBriefParsesPublicationBoundReportKind(t *testing.T) {
 
 func TestBriefRejectsInvalidReportKindPlacement(t *testing.T) {
 	for _, source := range []string{
-		"---\ntype: ship\ntitle: Change\ndone_when: done\nreport_kind: spec\n---\n",
+		"---\ntype: change\ntitle: Change\ndone_when: done\nreport_kind: spec\n---\n",
 		"---\ntype: review\ntitle: Review\ndone_when: done\nreport_kind: tickets\nreview_of: t1\n---\n",
-		"---\ntype: scout\ntitle: Scout\ndone_when: done\nreport_kind: draft\n---\n",
+		"---\ntype: research\ntitle: Research\ndone_when: done\nreport_kind: draft\n---\n",
 	} {
 		if _, err := ParseBriefText(source); err == nil {
 			t.Fatalf("accepted invalid report_kind Brief:\\n%s", source)
@@ -185,7 +185,7 @@ func TestBriefRejectsInvalidReportKindPlacement(t *testing.T) {
 }
 
 func TestBriefRejectsRemovedNameField(t *testing.T) {
-	_, err := ParseBriefText("---\ntype: ship\ntitle: Fix flaky login test\nname: worker-tree\ndone_when: tests pass\n---\n")
+	_, err := ParseBriefText("---\ntype: change\ntitle: Fix flaky login test\nname: worker-tree\ndone_when: tests pass\n---\n")
 	briefErr, ok := err.(*BriefError)
 	if !ok || briefErr.Field != "name" {
 		t.Fatalf("removed name field error = %#v, want unknown name field", err)
@@ -193,17 +193,17 @@ func TestBriefRejectsRemovedNameField(t *testing.T) {
 }
 
 func TestBriefTrailingCommentsPreserveHashInsideQuotedValues(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: ship # kind\ntitle: \"Fix #42\" # title\ndone_when: 'pass # tests' # result\nautonomy: { land: ask } # policy\n---\nBody.\n")
+	brief, err := ParseBriefText("---\ntype: change # kind\ntitle: \"Fix #42\" # title\ndone_when: 'pass # tests' # result\nautonomy: { merge: ask } # policy\n---\nBody.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if brief.Title != "Fix #42" || brief.DoneWhen != "pass # tests" || brief.AutonomyLand != "ask" {
+	if brief.Title != "Fix #42" || brief.DoneWhen != "pass # tests" || brief.AutonomyMerge != "ask" {
 		t.Fatalf("quoted comment values changed: %#v", brief)
 	}
 }
 
 func TestBriefParsesTaskBaseAndTargetBranches(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: ship\ntitle: Stacked change\ndone_when: published\nbase: posse/lower-task\ntarget: {api: staging, worker: posse/lower-task}\n---\n")
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Stacked change\ndone_when: published\nbase: posse/lower-task\ntarget: {api: staging, worker: posse/lower-task}\n---\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,21 +213,21 @@ func TestBriefParsesTaskBaseAndTargetBranches(t *testing.T) {
 }
 
 func TestBriefExplainsYAMLListFrontmatter(t *testing.T) {
-	_, err := ParseBriefText("---\ntype: ship\ntitle: List value\ndone_when:\n  - tests pass\n---\n")
+	_, err := ParseBriefText("---\ntype: change\ntitle: List value\ndone_when:\n  - tests pass\n---\n")
 	briefErr, ok := err.(*BriefError)
 	if !ok || briefErr.Field != "frontmatter" || !strings.Contains(briefErr.Reason, "YAML lists are unsupported") {
 		t.Fatalf("YAML list error = %#v", err)
 	}
 }
 
-func TestAutonomyLandAutoCanBeTightenedInBrief(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: ship\ntitle: Fix\ndone_when: tests pass\nautonomy: { land: ask }\n---\n")
+func TestAutonomyMergeAutoCanBeTightenedInBrief(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Fix\ndone_when: tests pass\nautonomy: { merge: ask }\n---\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, autonomy, err := ValidateTightening(brief, "pr", config.Autonomy{Land: "auto"})
-	if err != nil || autonomy.Land != "ask" {
-		t.Fatalf("auto Land Autonomy was not tightened to ask: %#v, %v", autonomy, err)
+	_, autonomy, err := ValidateTightening(brief, "pr", config.Autonomy{Merge: "auto"})
+	if err != nil || autonomy.Merge != "ask" {
+		t.Fatalf("auto Merge Autonomy was not tightened to ask: %#v, %v", autonomy, err)
 	}
 }
 
@@ -236,7 +236,7 @@ func TestResolveAsksForProfileWhenWhenRulesCompete(t *testing.T) {
 		Profiles: map[string]config.Profile{"fast": {}, "deep": {}},
 		Dispatch: []config.Rule{{When: "UI", Use: "fast"}, {When: "architecture", Use: "deep"}},
 	}
-	_, err := Resolve(cfg, "ship", "")
+	_, err := Resolve(cfg, "change", "")
 	profileError, ok := err.(*ProfileError)
 	if !ok || profileError.Code != "profile_required" || len(profileError.Candidates) != 2 {
 		t.Fatalf("expected Profile choice, got %#v", err)
@@ -245,27 +245,27 @@ func TestResolveAsksForProfileWhenWhenRulesCompete(t *testing.T) {
 
 func TestResolveExplicitAndDefaultProfiles(t *testing.T) {
 	cfg := config.Config{Profiles: map[string]config.Profile{"fast": {}}, DispatchDefault: config.DispatchDefault{Use: "fast"}}
-	result, err := Resolve(cfg, "ship", "fast")
+	result, err := Resolve(cfg, "change", "fast")
 	if err != nil || result.Profile != "fast" || result.Rule != "--profile fast" {
 		t.Fatalf("explicit resolution = %#v, %v", result, err)
 	}
-	result, err = Resolve(cfg, "ship", "")
+	result, err = Resolve(cfg, "change", "")
 	if err != nil || result.Profile != "fast" || result.Rule != "dispatch.default" {
 		t.Fatalf("default resolution = %#v, %v", result, err)
 	}
-	_, err = Resolve(cfg, "ship", "missing")
+	_, err = Resolve(cfg, "change", "missing")
 	if profileError, ok := err.(*ProfileError); !ok || !strings.Contains(profileError.Message, "unknown Profile") {
 		t.Fatalf("unknown Profile error = %#v", err)
 	}
 }
 
 func TestBriefRootContextMustBeExplicitAndReadOnly(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: scout\ntitle: Read workspace context\ndone_when: report is saved\nroot_context: read-only\n---\n")
+	brief, err := ParseBriefText("---\ntype: research\ntitle: Read workspace context\ndone_when: report is saved\nroot_context: read-only\n---\n")
 	if err != nil || brief.RootContext != "read-only" {
 		t.Fatalf("read-only root context = %#v, %v", brief, err)
 	}
 	for _, value := range []string{"write", "true", "read-write"} {
-		source := "---\ntype: scout\ntitle: Read workspace context\ndone_when: report is saved\nroot_context: " + value + "\n---\n"
+		source := "---\ntype: research\ntitle: Read workspace context\ndone_when: report is saved\nroot_context: " + value + "\n---\n"
 		if _, err := ParseBriefText(source); err == nil {
 			t.Errorf("accepted root_context %q", value)
 		}
@@ -273,7 +273,7 @@ func TestBriefRootContextMustBeExplicitAndReadOnly(t *testing.T) {
 }
 
 func TestBriefInPlaceExecutionRequiresAnExplicitRelativePathList(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: ship\ntitle: Update notes\ndone_when: the check passes\nexecution: in-place\npaths: [src, docs/guide.md]\n---\n")
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Update notes\ndone_when: the check passes\nexecution: in-place\npaths: [src, docs/guide.md]\n---\n")
 	if err != nil || brief.Execution != "in-place" || strings.Join(brief.Paths, ",") != "src,docs/guide.md" {
 		t.Fatalf("in-place scope = %#v, %v", brief, err)
 	}
@@ -283,7 +283,7 @@ func TestBriefInPlaceExecutionRequiresAnExplicitRelativePathList(t *testing.T) {
 		"execution: copy\npaths: [src]\n",
 		"execution: in-place\npaths: []\n",
 	} {
-		source := "---\ntype: ship\ntitle: Update notes\ndone_when: check passes\n" + frontmatter + "---\n"
+		source := "---\ntype: change\ntitle: Update notes\ndone_when: check passes\n" + frontmatter + "---\n"
 		if _, err := ParseBriefText(source); err == nil {
 			t.Errorf("accepted invalid in-place scope:\n%s", source)
 		}
@@ -292,19 +292,19 @@ func TestBriefInPlaceExecutionRequiresAnExplicitRelativePathList(t *testing.T) {
 
 func TestBriefParsingAndTightening(t *testing.T) {
 	brief, err := ParseBriefText(`---
-type: ship
+type: change
 title: Fix login
 done_when: login test passes
-landing_mode: no-mistakes
-autonomy: { land: ask }
+merge_mode: no-mistakes
+autonomy: { merge: ask }
 ---
 Do the work.
 `)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mode, autonomy, err := ValidateTightening(brief, "pr", config.Autonomy{Review: "lead", Land: "auto"})
-	if err != nil || mode != "no-mistakes" || autonomy.Land != "ask" || autonomy.Review != "lead" {
+	mode, autonomy, err := ValidateTightening(brief, "pr", config.Autonomy{Review: "lead", Merge: "auto"})
+	if err != nil || mode != "no-mistakes" || autonomy.Merge != "ask" || autonomy.Review != "lead" {
 		t.Fatalf("tightened values = %q %#v, %v", mode, autonomy, err)
 	}
 }
@@ -312,7 +312,7 @@ Do the work.
 func TestBriefRejectsInvalidOrLooserContract(t *testing.T) {
 	for _, source := range []string{
 		"---\ntitle: missing type\ndone_when: x\n---\n",
-		"---\ntype: ship\ntitle: x\ndone_when: x\nunknown: x\n---\n",
+		"---\ntype: change\ntitle: x\ndone_when: x\nunknown: x\n---\n",
 		"---\ntype: review\ntitle: x\ndone_when: x\n---\n",
 	} {
 		if _, err := ParseBriefText(source); err == nil {
@@ -326,11 +326,11 @@ func TestBriefRejectsInvalidOrLooserContract(t *testing.T) {
 		autonomy    config.Autonomy
 		wantField   string
 	}{
-		{name: "Landing Mode", frontmatter: "landing_mode: local\n", mode: "pr", autonomy: config.Autonomy{Land: "ask"}, wantField: "landing_mode"},
-		{name: "Autonomy", frontmatter: "autonomy: { land: auto }\n", mode: "pr", autonomy: config.Autonomy{Land: "ask"}, wantField: "autonomy.land"},
+		{name: "Merge Mode", frontmatter: "merge_mode: local\n", mode: "pr", autonomy: config.Autonomy{Merge: "ask"}, wantField: "merge_mode"},
+		{name: "Autonomy", frontmatter: "autonomy: { merge: auto }\n", mode: "pr", autonomy: config.Autonomy{Merge: "ask"}, wantField: "autonomy.merge"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			brief, err := ParseBriefText("---\ntype: ship\ntitle: x\ndone_when: x\n" + testCase.frontmatter + "---\n")
+			brief, err := ParseBriefText("---\ntype: change\ntitle: x\ndone_when: x\n" + testCase.frontmatter + "---\n")
 			if err != nil {
 				t.Fatal(err)
 			}

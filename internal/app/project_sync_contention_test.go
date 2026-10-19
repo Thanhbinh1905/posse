@@ -17,7 +17,7 @@ import (
 )
 
 func TestLocalFetchContentionDoesNotInventRootBehindNotice(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	owner, err := acquireRepositoryFetchLock(context.Background(), fixture.repo)
 	if err != nil {
 		t.Fatal(err)
@@ -40,8 +40,8 @@ func TestLocalFetchContentionDoesNotInventRootBehindNotice(t *testing.T) {
 	}
 }
 
-func TestPollOnlyLookoutDefersFetchLockContentionWithoutNotice(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+func TestPollOnlyWatchDefersFetchLockContentionWithoutNotice(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	project, err := fixture.db.ProjectByID(context.Background(), fixture.project.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func TestPollOnlyLookoutDefersFetchLockContentionWithoutNotice(t *testing.T) {
 	fake := fixture.service.Herdr.(*herdr.Fake)
 	paneID := "w1:p9"
 	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{
-		PaneID: paneID, WorkspaceID: project.HerdrWorkspaceID, Label: lookoutTabLabel(project),
+		PaneID: paneID, WorkspaceID: project.HerdrWorkspaceID, Label: watchTabLabel(project),
 	})
 	t.Setenv("HERDR_PANE_ID", paneID)
 
@@ -60,10 +60,10 @@ func TestPollOnlyLookoutDefersFetchLockContentionWithoutNotice(t *testing.T) {
 	defer owner.Close()
 	defer unix.Flock(int(owner.Fd()), unix.LOCK_UN)
 
-	if code, output, errOutput := fixture.run("lookout", "--poll-only", "--timeout", "1"); code != 0 {
-		t.Fatalf("poll-only Lookout exited during expected fetch contention: code=%d output=%s error=%s", code, output, errOutput)
+	if code, output, errOutput := fixture.run("watch", "--poll-only", "--timeout", "1"); code != 0 {
+		t.Fatalf("poll-only Watch exited during expected fetch contention: code=%d output=%s error=%s", code, output, errOutput)
 	} else if !strings.Contains(errOutput, "deferred due to transient store contention") {
-		t.Fatalf("poll-only Lookout did not log deferred contention: %s", errOutput)
+		t.Fatalf("poll-only Watch did not log deferred contention: %s", errOutput)
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
@@ -74,14 +74,14 @@ func TestPollOnlyLookoutDefersFetchLockContentionWithoutNotice(t *testing.T) {
 	}
 }
 
-func TestLookoutDefersPureContentionButNotMixedFailures(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+func TestWatchDefersPureContentionButNotMixedFailures(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	var diagnostics bytes.Buffer
 	ctx := &axi.Context{Context: context.Background(), ErrOut: &diagnostics}
 	lastFailure := ""
 
 	busy := errors.Join(fmt.Errorf("checkout sync: %w", store.ErrBusy), store.ErrBusy)
-	recordLookoutFailure(ctx, fixture.db, fixture.project.ID, &lastFailure, "reconcile", busy)
+	recordWatchFailure(ctx, fixture.db, fixture.project.ID, &lastFailure, "reconcile", busy)
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestLookoutDefersPureContentionButNotMixedFailures(t *testing.T) {
 
 	persistent := errors.New("Task t2 observation: constraint failed")
 	mixed := errors.Join(fmt.Errorf("Task t1 observation: %w", store.ErrBusy), persistent)
-	recordLookoutFailure(ctx, fixture.db, fixture.project.ID, &lastFailure, "reconcile", mixed)
+	recordWatchFailure(ctx, fixture.db, fixture.project.ID, &lastFailure, "reconcile", mixed)
 	notices, err = fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +108,7 @@ func TestLookoutDefersPureContentionButNotMixedFailures(t *testing.T) {
 }
 
 func TestRepositorySyncSkipsAnOverlappingSameTarget(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	target := repoTarget{Root: fixture.repo, DefaultBranch: fixture.project.DefaultBranch}
 	key := repositorySyncKey(fixture.project, target)
 	if !fixture.service.beginMaintenance(key) {
@@ -121,8 +121,8 @@ func TestRepositorySyncSkipsAnOverlappingSameTarget(t *testing.T) {
 	}
 }
 
-func TestRemudaDisplaysResourceScopeAndOwner(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+func TestPoolDisplaysResourceScopeAndOwner(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	other, err := fixture.db.CreateProject(context.Background(), "other", fixture.root, "main")
 	if err != nil {
 		t.Fatal(err)
@@ -135,14 +135,14 @@ func TestRemudaDisplaysResourceScopeAndOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = fixture.db.ReleaseResourceLease(context.Background(), lease.ID, lease.CustodyToken) }()
-	code, output, errOutput := fixture.run("remuda")
+	code, output, errOutput := fixture.run("pool")
 	if code != 0 || !strings.Contains(output, fixture.repo) || !strings.Contains(output, "local root writer") {
-		t.Fatalf("Remuda resource status = %d, %s, %s; want scope and owner", code, output, errOutput)
+		t.Fatalf("Pool resource status = %d, %s, %s; want scope and owner", code, output, errOutput)
 	}
 }
 
-func TestRemudaReconcilesAnExplicitlyApprovedDeadResourceOwner(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+func TestPoolReconcilesAnExplicitlyApprovedDeadResourceOwner(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	lease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
 		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: fixture.project.ID,
 		Owner: "interrupted root writer", SourceKey: "interrupted-root-writer",
@@ -153,7 +153,7 @@ func TestRemudaReconcilesAnExplicitlyApprovedDeadResourceOwner(t *testing.T) {
 	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE resource_leases SET owner_pid=99999999,owner_boot_id='old-boot',owner_start_time='old-start' WHERE id=?`, lease.ID); err != nil {
 		t.Fatal(err)
 	}
-	code, output, errOutput := fixture.run("remuda", "reconcile-resource", fmt.Sprint(lease.ID), "--user-approved", "verified the editor stopped and inspected the root")
+	code, output, errOutput := fixture.run("pool", "reconcile-resource", fmt.Sprint(lease.ID), "--user-approved", "verified the editor stopped and inspected the root")
 	if code != 0 || !strings.Contains(output, "reconciled_resource_lease") {
 		t.Fatalf("approved dead-owner reconciliation = %d, %s, %s", code, output, errOutput)
 	}
@@ -162,8 +162,8 @@ func TestRemudaReconcilesAnExplicitlyApprovedDeadResourceOwner(t *testing.T) {
 	}
 }
 
-func TestRemudaRefusesReconcileWhileResourceOwnerIsAlive(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+func TestPoolRefusesReconcileWhileResourceOwnerIsAlive(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	lease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
 		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: fixture.project.ID,
 		Owner: "live root writer", SourceKey: "live-root-writer",
@@ -171,7 +171,7 @@ func TestRemudaRefusesReconcileWhileResourceOwnerIsAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, output, errOutput := fixture.run("remuda", "reconcile-resource", fmt.Sprint(lease.ID), "--user-approved", "inspected the root")
+	code, output, errOutput := fixture.run("pool", "reconcile-resource", fmt.Sprint(lease.ID), "--user-approved", "inspected the root")
 	if code == 0 || !strings.Contains(output+errOutput, "resource_owner_live") {
 		t.Fatalf("live-owner reconciliation = %d, %s, %s; want refusal", code, output, errOutput)
 	}
@@ -181,7 +181,7 @@ func TestRemudaRefusesReconcileWhileResourceOwnerIsAlive(t *testing.T) {
 }
 
 func TestRepositorySyncSkipsWhenLocalRootWriterOwnsThePath(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	lease, err := fixture.db.AcquireResourceLease(context.Background(), store.ResourceLeaseRequest{
 		ResourceType: store.ResourcePath, ScopePath: fixture.repo, OwnerProjectID: fixture.project.ID,
 		Owner: "local root writer", SourceKey: "test-local-root-writer",
@@ -198,7 +198,7 @@ func TestRepositorySyncSkipsWhenLocalRootWriterOwnsThePath(t *testing.T) {
 }
 
 func TestRepositorySyncSkipsAnInterprocessOverlap(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	owner, err := acquireRepositorySyncLock(context.Background(), fixture.repo)
 	if err != nil {
 		t.Fatal(err)

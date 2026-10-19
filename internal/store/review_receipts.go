@@ -6,7 +6,7 @@ import (
 )
 
 // ReviewReceipt is a pipeline-owned no-mistakes review receipt that qualified
-// one exact Ship candidate. Posse only computes ReceiptSHA256 and ObservedAt.
+// one exact Change candidate. Posse only computes ReceiptSHA256 and ObservedAt.
 type ReviewReceipt struct {
 	TaskID          int64  `toml:"task_id" json:"task_id"`
 	Repository      string `toml:"repository" json:"repository"`
@@ -30,7 +30,7 @@ func (db *DB) RecordReviewReceipt(ctx context.Context, receipt ReviewReceipt) er
 	return db.PersistTask(ctx, receipt.TaskID)
 }
 
-// ReviewReceipts lists the receipts recorded for a Ship Task, oldest first.
+// ReviewReceipts lists the receipts recorded for a Change Task, oldest first.
 func (db *DB) ReviewReceipts(ctx context.Context, taskID int64) ([]ReviewReceipt, error) {
 	rows, err := db.QueryContext(ctx, `SELECT task_id,repository,run_id,head_sha,review_status,reviewer_profile,reviewer_model,report_sha256,receipt_sha256,observed_at FROM review_receipts WHERE task_id=? ORDER BY observed_at, receipt_sha256`, taskID)
 	if err != nil {

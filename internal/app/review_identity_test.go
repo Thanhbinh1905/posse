@@ -223,8 +223,8 @@ func TestReviewIdentityRequiresDistinctKnownProfileAndModel(t *testing.T) {
 	}
 }
 
-func TestReviewRideRefusesSameConfiguredIdentityWithComparedEvidence(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestReviewStartRefusesSameConfiguredIdentityWithComparedEvidence(t *testing.T) {
+	fixture := newStartFixture(t)
 	configureReviewIdentityFixture(t, fixture, "[profiles.reviewer]\nkind = \"pi\"\nmodel = \"model-b\"\n")
 	seedReviewAuthor(t, fixture)
 	brief := filepath.Join(filepath.Dir(fixture.brief), "review-brief.md")
@@ -234,7 +234,7 @@ func TestReviewRideRefusesSameConfiguredIdentityWithComparedEvidence(t *testing.
 	output := &bytes.Buffer{}
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = output, output
-	code := cli.Run([]string{"ride", "--brief", brief, "--name", "review-launch-identity", "--profile", "author"})
+	code := cli.Run([]string{"start", "--brief", brief, "--name", "review-launch-identity", "--profile", "author"})
 	if code != 1 || !strings.Contains(output.String(), "review_identity_ineligible") || !strings.Contains(output.String(), "Profile matches author launch 1") || !strings.Contains(output.String(), "Profile=author model=") || !strings.Contains(output.String(), "model-a") {
 		t.Fatalf("same-identity review was not refused with comparison evidence: code=%d output=%s", code, output.String())
 	}
@@ -267,11 +267,11 @@ func TestReviewRelaunchRejectsProfileResumeOverrideBeforeHerdr(t *testing.T) {
 	if err := os.WriteFile(configPath, configText, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	mountPath := filepath.Join(filepath.Dir(fixture.home), "review-mount")
-	if _, err := gitOutput(ctx, filepath.Join(filepath.Dir(fixture.home), "repo"), "worktree", "add", "-b", "posse/t2", mountPath, "main"); err != nil {
+	sandboxPath := filepath.Join(filepath.Dir(fixture.home), "review-sandbox")
+	if _, err := gitOutput(ctx, filepath.Join(filepath.Dir(fixture.home), "repo"), "worktree", "add", "-b", "posse/t2", sandboxPath, "main"); err != nil {
 		t.Fatal(err)
 	}
-	reviewID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "review", Title: "Independent review", Profile: "reviewer", LandingMode: "local", Branch: "posse/t2", BaseRef: "main", WorktreePath: mountPath, HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:shop:t2", AgentName: "posse-shop-t2-1", AgentSession: `{"session_id":"review-session"}`, ReviewsTaskID: fixture.task.ID})
+	reviewID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "review", Title: "Independent review", Profile: "reviewer", MergeMode: "local", Branch: "posse/t2", BaseRef: "main", WorktreePath: sandboxPath, HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:shop:t2", AgentName: "posse-shop-t2-1", AgentSession: `{"session_id":"review-session"}`, ReviewsTaskID: fixture.task.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestReviewRelaunchRejectsProfileResumeOverrideBeforeHerdr(t *testing.T) {
 	if err := fixture.db.Transition(ctx, reviewID, store.StateWorking, store.StateLost, "cli", "test relaunch"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,2,?,'held',?)`, fixture.project.ID, mountPath, reviewID); err != nil {
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,2,?,'held',?)`, fixture.project.ID, sandboxPath, reviewID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, reviewID, reviewID); err != nil {
@@ -309,8 +309,8 @@ func TestReviewRelaunchRejectsProfileResumeOverrideBeforeHerdr(t *testing.T) {
 	}
 }
 
-func TestReviewRideRecordsAndShowsDistinctConfiguredIdentities(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestReviewStartRecordsAndShowsDistinctConfiguredIdentities(t *testing.T) {
+	fixture := newStartFixture(t)
 	configureReviewIdentityFixture(t, fixture, "[profiles.reviewer]\nkind = \"pi\"\nmodel = \"model-b\"\n")
 	seedReviewAuthor(t, fixture)
 	brief := filepath.Join(filepath.Dir(fixture.brief), "review-brief.md")
@@ -320,7 +320,7 @@ func TestReviewRideRecordsAndShowsDistinctConfiguredIdentities(t *testing.T) {
 	output := &bytes.Buffer{}
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = output, output
-	code := cli.Run([]string{"ride", "--brief", brief, "--name", "review-launch-identity", "--profile", "reviewer"})
+	code := cli.Run([]string{"start", "--brief", brief, "--name", "review-launch-identity", "--profile", "reviewer"})
 	if code != 0 || !strings.Contains(output.String(), "review_identity") || !strings.Contains(output.String(), `model-b`) {
 		t.Fatalf("independent review launch failed or omitted comparison: code=%d output=%s", code, output.String())
 	}
@@ -338,7 +338,7 @@ func TestReviewRideRecordsAndShowsDistinctConfiguredIdentities(t *testing.T) {
 		}
 	}
 	if !freshSession {
-		t.Fatalf("Review Task reused the Ship Task session: %#v", fixture.fake.Calls)
+		t.Fatalf("Review Task reused the Change Task session: %#v", fixture.fake.Calls)
 	}
 	db, err := store.Open(fixture.home)
 	if err != nil {
@@ -363,7 +363,7 @@ func TestReviewRideRecordsAndShowsDistinctConfiguredIdentities(t *testing.T) {
 
 func configureReviewIdentityFixture(t *testing.T, fixture rideFixture, reviewerProfile string) {
 	t.Helper()
-	configText := "[defaults]\nlanding_mode = \"local\"\n\n[profiles.author]\nkind = \"claude\"\nmodel = \"model-a\"\n\n" + reviewerProfile + "\n[dispatch.default]\nuse = \"author\"\n"
+	configText := "[defaults]\nmerge_mode = \"local\"\n\n[profiles.author]\nkind = \"claude\"\nmodel = \"model-a\"\n\n" + reviewerProfile + "\n[dispatch.default]\nuse = \"author\"\n"
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -378,14 +378,14 @@ func seedReviewAuthor(t *testing.T, fixture rideFixture) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	authorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "ship", Title: "Author change", ShortName: "author", Profile: "author", LandingMode: "local", Branch: "posse/author", BaseRef: "main", AgentSession: `{"session_id":"author-session"}`})
+	authorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Author change", ShortName: "author", Profile: "author", MergeMode: "local", Branch: "posse/author", BaseRef: "main", AgentSession: `{"session_id":"author-session"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.NextTaskLaunchWithIdentity(ctx, authorID, "author", "model-a", true); err != nil {
 		t.Fatal(err)
 	}
-	// Review admission pins a completed Ship revision.
+	// Review admission pins a completed Change revision.
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='done' WHERE id=?`, authorID); err != nil {
 		t.Fatal(err)
 	}

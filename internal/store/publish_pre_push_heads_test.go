@@ -17,7 +17,7 @@ func TestPublishPrePushHeadsAreScopedAndNotVerified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Publish", LandingMode: "pr"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Publish", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}

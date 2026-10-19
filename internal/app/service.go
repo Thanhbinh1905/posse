@@ -28,7 +28,7 @@ type Service struct {
 	Herdr         herdr.Adapter
 	Progress      runtime.ProgressSource
 	herdrContext  func() bool
-	removeMount   func(context.Context, string, string) error
+	removeSandbox func(context.Context, string, string) error
 	pendingLead   *leadExecPlan
 	confirm       confirmFunc
 	updateConfirm confirmFunc
@@ -40,7 +40,7 @@ type Service struct {
 func New(home string, adapter herdr.Adapter) *Service {
 	return &Service{
 		Home: home, Herdr: adapter, Progress: runtime.SystemProgress{}, herdrContext: insideHerdr,
-		removeMount: func(ctx context.Context, root, path string) error {
+		removeSandbox: func(ctx context.Context, root, path string) error {
 			_, err := gitOutput(ctx, root, "worktree", "remove", path)
 			return err
 		},
@@ -50,6 +50,7 @@ func New(home string, adapter herdr.Adapter) *Service {
 func (s *Service) CLI() *axi.App {
 	root := s.commands()
 	s.guardWorkers(root, nil)
+	addRemovedVocabularyCommands(root)
 	structureStoreErrors(root)
 	return &axi.App{Name: "posse", Root: root}
 }
@@ -109,60 +110,54 @@ func isOnlyStateRace(err error) bool {
 }
 
 func (s *Service) commands() *axi.Command {
-	root := &axi.Command{Usage: "$ [--full] [--json]", Summary: "A local-first Lead and Rider CLI for Herdr. `posse --full` prints the full Project dashboard."}
+	root := &axi.Command{Usage: "$ [--full] [--json]", Summary: "A local-first Lead and Worker CLI for Herdr. `posse --full` prints the full Project dashboard."}
 	root.Handler = s.home
 	root.Subcommands = []*axi.Command{
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
-		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Lookout; nothing restarts them until `posse up`.", Handler: s.down},
+		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Watch; nothing restarts them until `posse up`.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
 		{Name: "preferences", Summary: "Inspect and update layered User and Project preferences.", Subcommands: []*axi.Command{
-			{Name: "show", Usage: "$ preferences show [--project <name>]", Summary: "Show effective Lead and Rider preferences with their sources.", Handler: s.preferencesShow},
-			{Name: "path", Usage: "$ preferences path <lead|rider> [--project <name>]", Summary: "Show canonical and legacy source paths for a role.", Handler: s.preferencesPath},
-			{Name: "set", Usage: "$ preferences set <lead|rider> --file <file> [--project <name>] [--user-approved <quote>]", Summary: "Write preferences atomically; a Lead needs a User quote.", Handler: s.preferencesSet},
-			{Name: "move", Usage: "$ preferences move <lead|rider> [--project <name>] [--user-approved <quote>]", Summary: "Move one legacy Playbook file without overwriting existing preferences.", Handler: s.preferencesMove},
-		}},
-		{Name: "playbook", Summary: "Deprecated alias for `posse preferences`; legacy files remain readable.", Subcommands: []*axi.Command{
-			{Name: "show", Usage: "$ playbook show [--project <name>]", Summary: "Deprecated alias for `posse preferences show`.", Handler: s.playbookShow},
-			{Name: "path", Usage: "$ playbook path <lead|rider> [--project <name>]", Summary: "Deprecated alias for `posse preferences path`.", Handler: s.playbookPath},
-			{Name: "set", Usage: "$ playbook set <lead|rider> --file <file> [--project <name>] [--user-approved <quote>]", Summary: "Deprecated alias for `posse preferences set`.", Handler: s.playbookSet},
+			{Name: "show", Usage: "$ preferences show [--project <name>]", Summary: "Show effective Lead and Worker preferences with their sources.", Handler: s.preferencesShow},
+			{Name: "path", Usage: "$ preferences path <lead|worker> [--project <name>]", Summary: "Show canonical and legacy source paths for a role.", Handler: s.preferencesPath},
+			{Name: "set", Usage: "$ preferences set <lead|worker> --file <file> [--project <name>] [--user-approved <quote>]", Summary: "Write preferences atomically; a Lead needs a User quote.", Handler: s.preferencesSet},
+			{Name: "move", Usage: "$ preferences move <lead|worker> [--project <name>] [--user-approved <quote>]", Summary: "Move one legacy Playbook file without overwriting existing preferences.", Handler: s.preferencesMove},
 		}},
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
-		{Name: "roster", Usage: "$ roster [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
+		{Name: "list", Usage: "$ list [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
 		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, model-error recovery episode, undelivered messages, Signals and transitions.", Handler: s.show},
-		{Name: "accept", Usage: "$ accept <task> [--user-approved <quote>]", Summary: "Record User acceptance of a publication-bound Scout Report after independent review.", Handler: s.acceptReport},
-		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Rider's question to the User as a Decision.", Handler: s.ask},
+		{Name: "accept", Usage: "$ accept <task> [--user-approved <quote>]", Summary: "Record User acceptance of a publication-bound Research Report after independent review.", Handler: s.acceptReport},
+		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Worker's question to the User as a Decision.", Handler: s.ask},
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
-		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Leftover or closed-PR Decision.", Handler: s.applyDecision},
+		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Orphan or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
-		{Name: "ride", Usage: "$ ride --brief <file> [--name <short>] [--profile p] [--from-leftover <decision>] [--user-approved <quote>]", Summary: "Start a Rider from a Brief with an optional display name.", Handler: s.spawn},
-		{Name: "holler", Usage: "$ holler <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Rider's Signal; done is refused while queued instructions remain undelivered.", Handler: s.signal},
-		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Ship Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
-		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Rider's next publish will use.", Handler: s.retitle},
-		{Name: "brief", Summary: "Reprint this Rider's launch Brief.", Handler: s.brief},
-		{Name: "status", Summary: "Read only this Rider's recorded status and admitted plan without maintenance.", Handler: s.status},
-		{Name: "send", Usage: "$ send <task> <message> [--queue] | send <task> --interrupt <message>", Summary: "Send a message, optionally queueing it or interrupting and redirecting a busy Rider.", Handler: s.send},
-		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Rider message before delivery begins.", Handler: s.unsend},
-		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},
-		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Rider.", Handler: s.keys},
-		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Send the configured abort keys and verify the Rider stopped its busy turn.", Handler: s.interrupt},
-		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Rider in the same execution root, optionally with another Profile.", Handler: s.relaunch},
-		{Name: "land", Summary: "Land a completed Ship Task; PR merges require the gated head to include the target branch.", Handler: s.land},
+		{Name: "start", Usage: "$ start --brief <file> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>]", Summary: "Start a Worker from a Brief with an optional display name.", Handler: s.spawn},
+		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Worker's Signal; done is refused while queued instructions remain undelivered.", Handler: s.signal},
+		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Change Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
+		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Worker's next publish will use.", Handler: s.retitle},
+		{Name: "brief", Summary: "Reprint this Worker's launch Brief.", Handler: s.brief},
+		{Name: "status", Summary: "Read only this Worker's recorded status and admitted plan without maintenance.", Handler: s.status},
+		{Name: "send", Usage: "$ send <task> <message> [--queue] | send <task> --interrupt <message>", Summary: "Send a message, optionally queueing it or interrupting and redirecting a busy Worker.", Handler: s.send},
+		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Worker message before delivery begins.", Handler: s.unsend},
+		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Worker output.", Handler: s.peek},
+		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Worker.", Handler: s.keys},
+		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Send the configured abort keys and verify the Worker stopped its busy turn.", Handler: s.interrupt},
+		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Worker in the same execution root, optionally with another Profile.", Handler: s.relaunch},
+		{Name: "merge", Usage: "$ merge <task> [--execute] [--user-approved <quote>]", Summary: "Merge a completed Change Task; PR merges require the gated head to include the target branch.", Handler: s.merge},
 		{Name: "review", Summary: "Inspect and admit built-in Review Rounds.", Subcommands: []*axi.Command{
-			{Name: "start", Usage: "$ review start <ship> [--profile <name>] [--name <short>]", Summary: "Admit the next numbered Review Round with its frozen delta scope.", Handler: s.reviewStart},
+			{Name: "start", Usage: "$ review start <change> [--profile <name>] [--name <short>]", Summary: "Admit the next numbered Review Round with its frozen delta scope.", Handler: s.reviewStart},
 		}},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
-		{Name: "unsaddle", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Mount work with User approval and verified Rider shutdown.", Handler: s.teardown},
-		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the poll-only Lookout.", Handler: s.wait},
-		{Name: "remuda", Summary: "List a Project's Remuda or prune safe, Posse-owned leftovers.", Handler: s.remuda},
-		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},
+		{Name: "teardown", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Sandbox work with User approval and verified Worker shutdown.", Handler: s.teardown},
+		{Name: "watch", Usage: "$ watch [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the poll-only Watch.", Handler: s.wait},
+		{Name: "pool", Summary: "List a Project's Pool or prune safe, Posse-owned orphans.", Handler: s.pool},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
 		{Name: "project", Summary: "Inspect or change a Project's settings.", Subcommands: []*axi.Command{
 			{Name: "add", Usage: "$ project add [--directory] [--name <n>]", Summary: "Register a repository or workspace, or explicitly register a local directory Project, without starting its Lead.", Handler: s.projectAdd},
 			{Name: "scan", Usage: "$ project scan [<name>]", Summary: "Re-detect a workspace Project's member repositories.", Handler: s.projectScan},
 			{Name: "show", Summary: "Show a Project's effective config.", Handler: s.projectShow},
 			{Name: "move", Summary: "Update a moved Project's root path.", Handler: s.projectMove},
-			{Name: "remove", Usage: "$ project remove <name> [--yes]", Summary: "Unregister a Project that has no Tasks or Mounts (dry run without --yes).", Handler: s.projectRemove},
+			{Name: "remove", Usage: "$ project remove <name> [--yes]", Summary: "Unregister a Project that has no Tasks or Sandboxes (dry run without --yes).", Handler: s.projectRemove},
 		}},
 		{Name: "config", Summary: "Inspect and update schema-validated configuration.", Subcommands: []*axi.Command{
 			{Name: "schema", Summary: "List config keys, types, defaults and meanings.", Handler: s.configSchema},
@@ -170,12 +165,12 @@ func (s *Service) commands() *axi.Command {
 			{Name: "set", Usage: "$ config set <key> <value> [--project <n>] [--user-approved <quote>]", Summary: "Set one validated config value; Lead needs a User quote for user-only keys.", Handler: s.configSet},
 			{Name: "unset", Usage: "$ config unset <key> [--project <n>] [--user-approved <quote>]", Summary: "Remove one config value; Lead needs a User quote for user-only keys.", Handler: s.configUnset},
 		}},
-		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-lookouts]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
+		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-watches]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "setup", Summary: "Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).", Handler: s.setup},
-		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Riders or rebuild Projects, Tasks, Mounts, Decisions and Notices from snapshots.", Handler: s.recover},
-		{Name: "_context", Summary: "Print Lead or Rider context inside a posse pane.", Hidden: true, Handler: s.context},
-		{Name: "doctor", Summary: "Check Herdr, plugin, config, database and landing tools.", Handler: s.doctor},
+		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Workers or rebuild Projects, Tasks, Sandboxes, Decisions and Notices from snapshots.", Handler: s.recover},
+		{Name: "_context", Summary: "Print Lead or Worker context inside a posse pane.", Hidden: true, Handler: s.context},
+		{Name: "doctor", Summary: "Check Herdr, plugin, config, database and merging tools.", Handler: s.doctor},
 	}
 	return root
 }
@@ -246,7 +241,7 @@ func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) 
 // Only userStart (`posse up`) may recover a Project whose recovery is held;
 // other callers get errRecoveryHeld and must not reconcile its stale panes.
 func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, userStart bool) (runtime.RunResult, error) {
-	if err := ensureHeldMountLocks(ctx, db, project); err != nil {
+	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
 		return runtime.RunResult{}, err
 	}
 	// No snapshot taken during a recovery claim is a complete project view.
@@ -255,7 +250,7 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	}
 	if !project.IsWorkspace() {
 		if snapshot, err := s.snapshot(ctx); err == nil {
-			if tasks, err := db.LiveTasks(ctx, project.ID); err == nil && riderGroupClosed(snapshot, project, tasks) {
+			if tasks, err := db.LiveTasks(ctx, project.ID); err == nil && workerGroupClosed(snapshot, project, tasks) {
 				if !userStart && recoveryHeld(project, cfg) {
 					return runtime.RunResult{}, errRecoveryHeld
 				}
@@ -271,7 +266,7 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 					// relaunch intents after reconciling the current snapshot.
 				}
 				// Concurrent workspace.closed hooks wait for the recovery owner;
-				// a partial snapshot would mark still-restoring Riders lost.
+				// a partial snapshot would mark still-restoring Workers lost.
 				if err := waitProjectRecovery(ctx, db, project); err != nil {
 					return runtime.RunResult{}, err
 				}
@@ -290,7 +285,7 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 					if err != nil {
 						return runtime.RunResult{}, err
 					}
-					if riderGroupClosed(fresh, current, currentTasks) {
+					if workerGroupClosed(fresh, current, currentTasks) {
 						return runtime.RunResult{}, fmt.Errorf("lead still missing after Herdr group recovery for %s", project.Name)
 					}
 				}
@@ -356,7 +351,7 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 			if !userStart || !errors.Is(err, errRecoveryDeferred) {
 				return result, fmt.Errorf("recover Project %s after Herdr restart: %w", project.Name, err)
 			}
-			// Start the Lead while the interrupted Rider waits for its retry
+			// Start the Lead while the interrupted Worker waits for its retry
 			// backoff. Up settles explicit relaunch intents after reconciliation.
 			deferredRecovery = true
 		}
@@ -411,7 +406,7 @@ func (s *Service) prepareProjectInspection(ctx context.Context, db *store.DB, pr
 }
 
 // Notice and inspection commands reconcile observations, but never start a
-// Rider, retry a launch Brief, or wait for a launch-capable recovery owner.
+// Worker, retry a launch Brief, or wait for a launch-capable recovery owner.
 func (s *Service) prepareProjectObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
 	return s.prepareProjectMode(ctx, db, project, false, false)
 }
@@ -540,7 +535,7 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 	}
 	if herdrReady {
 		if pollRepositories {
-			if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
+			if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {
 				return cfg, err
 			}
 			if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
@@ -565,11 +560,11 @@ func (s *Service) requireLead(ctx context.Context, db *store.DB, project store.P
 	actor := s.configCaller(ctx, db)
 	if actor.role == "agent" || s.herdrContext != nil && s.herdrContext() {
 		if actor.role != "lead" || actor.projectID != project.ID {
-			return axi.Failure("lead_only", "this command must run from the Project Lead pane", false, "Use `posse holler` from a Rider pane")
+			return axi.Failure("lead_only", "this command must run from the Project Lead pane", false, "Use `posse signal` from a Worker pane")
 		}
 	}
-	if cwdInsideMount(ctx, db) {
-		return axi.Failure("lead_only", "Lead-only commands cannot run from inside a Mount", false, "Use the Project Lead pane")
+	if cwdInsideSandbox(ctx, db) {
+		return axi.Failure("lead_only", "Lead-only commands cannot run from inside a Sandbox", false, "Use the Project Lead pane")
 	}
 	return nil
 }
@@ -633,7 +628,7 @@ func (s *Service) currentTask(ctx context.Context, db *store.DB, project store.P
 		return store.Task{}, axi.Failure("task_ambiguous", err.Error(), false, help...)
 	}
 	if store.IsNotFound(err) {
-		return store.Task{}, axi.Failure("task_unknown", fmt.Sprintf("unknown Task %q", identifier), false, "Run `posse roster` to list Tasks")
+		return store.Task{}, axi.Failure("task_unknown", fmt.Sprintf("unknown Task %q", identifier), false, "Run `posse list` to list Tasks")
 	}
 	return task, err
 }
@@ -717,7 +712,7 @@ func herdrError(err error) error {
 			message = apiError.Error()
 		}
 		if code == "pane_not_found" || code == "agent_pane_not_found" {
-			return axi.Failure(code, message, true, "The pane may have closed during this command. Run `posse recover --all`; then inspect the Task and relaunch it if it still holds a Mount")
+			return axi.Failure(code, message, true, "The pane may have closed during this command. Run `posse recover --all`; then inspect the Task and relaunch it if it still holds a Sandbox")
 		}
 		return axi.Failure(code, message, code == "herdr_unavailable", "Run `posse doctor` to inspect Herdr connectivity")
 	}

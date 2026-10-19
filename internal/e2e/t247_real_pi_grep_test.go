@@ -68,11 +68,11 @@ func t247RealPiGrep(t *testing.T, message string) {
 	runPosse(t, base.binary, base.repo, base.leadEnv, "config", "set", "profiles.deep.model", "test")
 	runPosse(t, base.binary, base.repo, base.env, "config", "set", "profiles.deep.args", `["--provider", "t242-local", "--no-skills", "--no-prompt-templates"]`)
 	brief := filepath.Join(base.root, "real-model-error.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Real Pi stream error\ndone_when: error handled\n---\nSay hello.\n"), 0600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Real Pi stream error\ndone_when: error handled\n---\nSay hello.\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	// PATH resolves the real Pi executable; its agent directory and provider are isolated.
-	runPosse(t, base.binary, base.repo, base.leadEnv, "ride", "--brief", brief, "--name", "real-pi-stream")
+	runPosse(t, base.binary, base.repo, base.leadEnv, "start", "--brief", brief, "--name", "real-pi-stream")
 	task := base.mustTask(t, "t1")
 	releaseModel()
 	var output string
@@ -83,12 +83,12 @@ func t247RealPiGrep(t *testing.T, message string) {
 		t.Fatalf("real Pi never rendered model error: %s", output)
 	}
 	time.Sleep(500 * time.Millisecond)
-	logFile := filepath.Join(task.WorktreePath, "rider.log")
+	logFile := filepath.Join(task.WorktreePath, "worker.log")
 	if err := os.WriteFile(logFile, []byte(t242StreamError+"\n"+e2ePiErrorHelpLine+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	// Execute an actual successful shell tool in real Pi, without a model turn.
-	if _, err := client.Run(context.Background(), "pane", "run", task.PaneID, "! grep -A1 'stream error' rider.log"); err != nil {
+	if _, err := client.Run(context.Background(), "pane", "run", task.PaneID, "! grep -A1 'stream error' worker.log"); err != nil {
 		t.Fatal(err)
 	}
 	if !waitForCondition(15*time.Second, func() bool {

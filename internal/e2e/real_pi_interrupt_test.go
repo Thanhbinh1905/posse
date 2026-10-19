@@ -64,11 +64,11 @@ func TestRealPiInterruptStopsBusyTurnE2E(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "profiles.deep.model", "test")
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.deep.args", `["--provider", "t265-local", "--no-skills", "--no-prompt-templates"]`)
 	brief := filepath.Join(fixture.root, "real-pi-interrupt.md")
-	briefText := "---\ntype: ship\ntitle: Real Pi interrupt\ndone_when: aborted turn observed\n---\nKeep working until the Lead interrupts this turn.\n"
+	briefText := "---\ntype: change\ntitle: Real Pi interrupt\ndone_when: aborted turn observed\n---\nKeep working until the Lead interrupts this turn.\n"
 	if err := os.WriteFile(brief, []byte(briefText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "ride", "--brief", brief, "--name", "real-pi-interrupt")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "real-pi-interrupt")
 	task := fixture.mustTask(t, "t1")
 	select {
 	case <-requestStarted:

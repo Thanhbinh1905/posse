@@ -69,7 +69,7 @@ func (s *Service) reviewStart(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if len(parsed.Positionals) != 1 {
-		return axi.Usage("review start requires one Ship Task id")
+		return axi.Usage("review start requires one Change Task id")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -83,35 +83,35 @@ func (s *Service) reviewStart(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	ship, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
+	change, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
 	}
-	return s.startReviewRound(ctx, db, home, project, ship, parsed.Flags["profile"], parsed.Flags["name"])
+	return s.startReviewRound(ctx, db, home, project, change, parsed.Flags["profile"], parsed.Flags["name"])
 }
 
-func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, project store.Project, ship store.Task, profile, name string) error {
+func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, project store.Project, change store.Task, profile, name string) error {
 	if project.IsDirectory() {
 		return axi.Failure("review_round_unsupported", "directory Tasks cannot be reviewed as Git rounds", false)
 	}
-	if ship.Type != "ship" {
-		return axi.Failure("review_round_target_invalid", "Review Rounds require a Ship Task", false)
+	if change.Type != "change" {
+		return axi.Failure("review_round_target_invalid", "Review Rounds require a Change Task", false)
 	}
-	if err := reviewableShip(ship); err != nil {
+	if err := reviewableChange(change); err != nil {
 		return err
 	}
-	plan, err := ship.AdmittedPlan()
+	plan, err := change.AdmittedPlan()
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
 	if plan == nil || plan.ValidationLoops == nil || !plan.ValidationLoops.Review.Enabled {
-		return axi.Failure("review_loop_disabled", "Ship Task "+taskIDString(ship.Seq)+" has no enabled, frozen Review Loop", false)
+		return axi.Failure("review_loop_disabled", "Change Task "+taskIDString(change.Seq)+" has no enabled, frozen Review Loop", false)
 	}
 	maxRounds := plan.ValidationLoops.MaxReviewRounds()
 	if maxRounds < 1 || maxRounds > 3 {
-		return axi.Failure("plan_invalid", "Ship Task has an invalid frozen Review Round cap", false)
+		return axi.Failure("plan_invalid", "Change Task has an invalid frozen Review Round cap", false)
 	}
-	generated, err := buildReviewRound(ctx.Context, db, project, ship, *plan, maxRounds, home)
+	generated, err := buildReviewRound(ctx.Context, db, project, change, *plan, maxRounds, home)
 	if err != nil {
 		return err
 	}
@@ -128,12 +128,12 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	return s.spawnTask(ctx, args, generated)
 }
 
-func buildReviewRound(ctx context.Context, db *store.DB, project store.Project, ship store.Task, plan taskplan.Plan, maxRounds int, home string) (*generatedReviewRound, error) {
-	targets, err := shipCandidateTargets(ctx, db, project, ship)
+func buildReviewRound(ctx context.Context, db *store.DB, project store.Project, change store.Task, plan taskplan.Plan, maxRounds int, home string) (*generatedReviewRound, error) {
+	targets, err := changeCandidateTargets(ctx, db, project, change)
 	if err != nil {
-		return nil, axi.Failure("review_target_unresolved", "cannot pin the reviewed Ship revision: "+err.Error(), false)
+		return nil, axi.Failure("review_target_unresolved", "cannot pin the reviewed Change revision: "+err.Error(), false)
 	}
-	priorRounds, err := db.ReviewRoundsFor(ctx, ship.ID)
+	priorRounds, err := db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func buildReviewRound(ctx context.Context, db *store.DB, project store.Project, 
 		}
 	}
 	roundNumber := len(used) + 1
-	repositories, err := reviewRoundRepositories(ctx, db, project, ship, targets)
+	repositories, err := reviewRoundRepositories(ctx, db, project, change, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -160,21 +160,21 @@ func buildReviewRound(ctx context.Context, db *store.DB, project store.Project, 
 		if err != nil {
 			return nil, err
 		}
-		scope.Binding.ShipTaskID = ship.ID
+		scope.Binding.ChangeTaskID = change.ID
 		scopes = append(scopes, scope)
 	}
 	if len(scopes) == 0 {
-		return nil, axi.Failure("review_target_unresolved", "Ship Task has no changed repository to review", false)
+		return nil, axi.Failure("review_target_unresolved", "Change Task has no changed repository to review", false)
 	}
-	return renderReviewRound(ctx, db, ship, plan, maxRounds, roundNumber, targets, scopes, filepath.Join(home, "projects", project.Name, "tasks"), project.IsWorkspace())
+	return renderReviewRound(ctx, db, change, plan, maxRounds, roundNumber, targets, scopes, filepath.Join(home, "projects", project.Name, "tasks"), project.IsWorkspace())
 }
 
-func reviewRoundRepositories(ctx context.Context, db *store.DB, project store.Project, ship store.Task, targets []store.ReviewTarget) ([]reviewRoundRepository, error) {
+func reviewRoundRepositories(ctx context.Context, db *store.DB, project store.Project, change store.Task, targets []store.ReviewTarget) ([]reviewRoundRepository, error) {
 	if !project.IsWorkspace() {
 		if len(targets) != 1 || targets[0].Repository != project.Name {
-			return nil, axi.Failure("review_target_unresolved", "Ship candidate does not match its Project repository", false)
+			return nil, axi.Failure("review_target_unresolved", "Change candidate does not match its Project repository", false)
 		}
-		return []reviewRoundRepository{{name: project.Name, root: project.Root, worktree: ship.WorktreePath, targetBranch: taskTargetBranch(project, ship), head: targets[0].Commit}}, nil
+		return []reviewRoundRepository{{name: project.Name, root: project.Root, worktree: change.WorktreePath, targetBranch: taskTargetBranch(project, change), head: targets[0].Commit}}, nil
 	}
 	projectRepos, err := db.ProjectRepos(ctx, project.ID)
 	if err != nil {
@@ -184,7 +184,7 @@ func reviewRoundRepositories(ctx context.Context, db *store.DB, project store.Pr
 	for _, repo := range projectRepos {
 		byName[repo.Name] = repo
 	}
-	taskRepos, err := db.TaskRepos(ctx, ship.ID)
+	taskRepos, err := db.TaskRepos(ctx, change.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +370,7 @@ func readReviewGuidance(ctx context.Context, root, targetRef, targetBranch strin
 	return files, nil
 }
 
-func renderReviewRound(ctx context.Context, db *store.DB, ship store.Task, plan taskplan.Plan, maxRounds, round int, targets []store.ReviewTarget, scopes []reviewRoundScope, projectTasksPath string, workspace bool) (*generatedReviewRound, error) {
+func renderReviewRound(ctx context.Context, db *store.DB, change store.Task, plan taskplan.Plan, maxRounds, round int, targets []store.ReviewTarget, scopes []reviewRoundScope, projectTasksPath string, workspace bool) (*generatedReviewRound, error) {
 	files := map[string][]byte{}
 	var roundEntries []reviewRoundJSONEntry
 	var delta, cumulative, conflictText strings.Builder
@@ -396,7 +396,7 @@ func renderReviewRound(ctx context.Context, db *store.DB, ship store.Task, plan 
 			BaselineTree: binding.BaselineTree, DeltaSHA256: binding.DeltaSHA256, ConflictedPaths: paths,
 		})
 	}
-	ledger, err := reviewLedgerMarkdown(ctx, db, ship.ID)
+	ledger, err := reviewLedgerMarkdown(ctx, db, change.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -413,17 +413,17 @@ func renderReviewRound(ctx context.Context, db *store.DB, ship store.Task, plan 
 	files["review/cumulative.patch"] = []byte(cumulative.String())
 	files["review/conflicts.txt"] = []byte(conflictText.String())
 	files["review/ledger.md"] = []byte(ledger)
-	briefData := generatedReviewBrief(ship, plan, round, scopes, workspace)
-	briefPath := filepath.Join(projectTasksPath, "review-rounds", fmt.Sprintf("t%d-round-%d.md", ship.Seq, round))
-	bindings := store.ReviewRoundAdmission{ShipTaskID: ship.ID, Round: round, MaxRounds: maxRounds}
+	briefData := generatedReviewBrief(change, plan, round, scopes, workspace)
+	briefPath := filepath.Join(projectTasksPath, "review-rounds", fmt.Sprintf("t%d-round-%d.md", change.Seq, round))
+	bindings := store.ReviewRoundAdmission{ChangeTaskID: change.ID, Round: round, MaxRounds: maxRounds}
 	for _, scope := range scopes {
 		bindings.Bindings = append(bindings.Bindings, scope.Binding)
 	}
 	return &generatedReviewRound{Admission: bindings, Targets: targets, BriefData: briefData, BriefPath: briefPath, Files: files}, nil
 }
 
-func reviewLedgerMarkdown(ctx context.Context, db *store.DB, shipTaskID int64) (string, error) {
-	entries, err := db.ReviewLedgerFor(ctx, shipTaskID)
+func reviewLedgerMarkdown(ctx context.Context, db *store.DB, changeTaskID int64) (string, error) {
+	entries, err := db.ReviewLedgerFor(ctx, changeTaskID)
 	if err != nil {
 		return "", err
 	}
@@ -451,9 +451,9 @@ func reviewLedgerMarkdown(ctx context.Context, db *store.DB, shipTaskID int64) (
 	return builder.String(), nil
 }
 
-func generatedReviewBrief(ship store.Task, plan taskplan.Plan, round int, scopes []reviewRoundScope, workspace bool) []byte {
+func generatedReviewBrief(change store.Task, plan taskplan.Plan, round int, scopes []reviewRoundScope, workspace bool) []byte {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "---\ntype: review\ntitle: Review round %d of t%d\ndone_when: the round records an anchored review verdict\nreview_of: t%d\n", round, ship.Seq, ship.Seq)
+	fmt.Fprintf(&builder, "---\ntype: review\ntitle: Review round %d of t%d\ndone_when: the round records an anchored review verdict\nreview_of: t%d\n", round, change.Seq, change.Seq)
 	if workspace {
 		var names []string
 		for _, scope := range scopes {
@@ -463,7 +463,7 @@ func generatedReviewBrief(ship store.Task, plan taskplan.Plan, round int, scopes
 		fmt.Fprintf(&builder, "repos: [%s]\n", strings.Join(names, ", "))
 	}
 	builder.WriteString("---\n")
-	fmt.Fprintf(&builder, "Review this candidate as a numbered Review Round.\n\n## Review Round %d\n\nReview only findings in `review/delta.patch`, using `review/cumulative.patch` for context. The immutable bindings are in `review/round.json`; conflicts are listed in `review/conflicts.txt`; the Finding Ledger is in `review/ledger.md`. Repository guidance is copied into `review/guidance/` from the frozen target's origin ref, never from the Ship branch. Do not modify the checkout.\n\n## Ship Brief (verbatim)\n\n", round)
+	fmt.Fprintf(&builder, "Review this candidate as a numbered Review Round.\n\n## Review Round %d\n\nReview only findings in `review/delta.patch`, using `review/cumulative.patch` for context. The immutable bindings are in `review/round.json`; conflicts are listed in `review/conflicts.txt`; the Finding Ledger is in `review/ledger.md`. Repository guidance is copied into `review/guidance/` from the frozen target's origin ref, never from the Change branch. Do not modify the checkout.\n\n## Change Brief (verbatim)\n\n", round)
 	for _, input := range plan.Inputs {
 		if input.Role == "brief" {
 			builder.Write(input.Bytes)
@@ -506,9 +506,9 @@ func writeReviewRoundFiles(taskHome string, files map[string][]byte) error {
 func mapReviewRoundAdmissionError(err error) error {
 	switch {
 	case errors.Is(err, store.ErrReviewRoundActive):
-		return axi.Failure("review_round_active", "another Review Round is already active for this Ship Task", false, "Wait for the active Review Task to finish or become void")
+		return axi.Failure("review_round_active", "another Review Round is already active for this Change Task", false, "Wait for the active Review Task to finish or become void")
 	case errors.Is(err, store.ErrReviewRoundUnchanged):
-		return axi.Failure("review_round_unchanged", "the Ship head is unchanged since its last verdict or is already covered by a carry", false)
+		return axi.Failure("review_round_unchanged", "the Change head is unchanged since its last verdict or is already covered by a carry", false)
 	case errors.Is(err, store.ErrReviewRoundCap):
 		return axi.Failure("review_round_cap", "the frozen Review Round cap has been reached", false)
 	case errors.Is(err, store.ErrReviewRoundNumber):
@@ -535,31 +535,31 @@ func autoStartReviewerUnavailable(err error) (*axi.Error, bool) {
 	}
 }
 
-func recordAutoStartReviewerReadiness(ctx context.Context, db *store.DB, project store.Project, ship store.Task, failure *axi.Error) error {
-	found, err := db.HasNotice(ctx, project.ID, ship.ID, "review_auto_start_skipped")
+func recordAutoStartReviewerReadiness(ctx context.Context, db *store.DB, project store.Project, change store.Task, failure *axi.Error) error {
+	found, err := db.HasNotice(ctx, project.ID, change.ID, "review_auto_start_skipped")
 	if err != nil || found {
 		return err
 	}
-	summary := fmt.Sprintf("%s: Review auto-start skipped because no eligible reviewer Profile is configured. Configure a distinct Profile with a known model, then run `posse review start %s --profile <profile>`.", ship.Title, taskIDString(ship.Seq))
+	summary := fmt.Sprintf("%s: Review auto-start skipped because no eligible reviewer Profile is configured. Configure a distinct Profile with a known model, then run `posse review start %s --profile <profile>`.", change.Title, taskIDString(change.Seq))
 	data := marshalJSON(map[string]any{"reason_code": failure.Code, "reason": failure.Message, "help": failure.Help})
-	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: ship.ID, Kind: "review_auto_start_skipped", Summary: summary, DataJSON: data})
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: change.ID, Kind: "review_auto_start_skipped", Summary: summary, DataJSON: data})
 	return err
 }
 
-func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home string, project store.Project, ship store.Task) (bool, error) {
-	plan, err := ship.AdmittedPlan()
+func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home string, project store.Project, change store.Task) (bool, error) {
+	plan, err := change.AdmittedPlan()
 	if err != nil {
 		return false, admittedPlanFailure(err)
 	}
 	if !autoStartReviewLoop(plan) {
 		return false, nil
 	}
-	targets, err := shipCandidateTargets(ctx.Context, db, project, ship)
+	targets, err := changeCandidateTargets(ctx.Context, db, project, change)
 	if err != nil {
 		return false, err
 	}
 	if project.IsWorkspace() {
-		taskRepos, err := db.TaskRepos(ctx.Context, ship.ID)
+		taskRepos, err := db.TaskRepos(ctx.Context, change.ID)
 		if err != nil {
 			return false, err
 		}
@@ -572,12 +572,12 @@ func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home
 				return false, nil
 			}
 		}
-	} else if len(targets) != 1 || ship.GatedSHA == "" || targets[0].Commit != ship.GatedSHA {
+	} else if len(targets) != 1 || change.GatedSHA == "" || targets[0].Commit != change.GatedSHA {
 		return false, nil
 	}
-	err = s.startReviewRound(ctx, db, home, project, ship, "", "")
+	err = s.startReviewRound(ctx, db, home, project, change, "", "")
 	if failure, unavailable := autoStartReviewerUnavailable(err); unavailable {
-		if noticeErr := recordAutoStartReviewerReadiness(ctx.Context, db, project, ship, failure); noticeErr != nil {
+		if noticeErr := recordAutoStartReviewerReadiness(ctx.Context, db, project, change, failure); noticeErr != nil {
 			return false, noticeErr
 		}
 		return false, nil

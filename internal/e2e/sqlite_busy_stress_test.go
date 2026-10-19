@@ -15,55 +15,55 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestConcurrentLookoutSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T) {
+func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
 
-	if !waitForCondition(15*time.Second, func() bool { return len(lookoutPIDs(f.root)) > 0 }) {
-		t.Fatalf("isolated Lookout poller did not start: panes=%#v", lookoutPanes(t, herdr.NewWithEnv("herdr", f.env)))
+	if !waitForCondition(15*time.Second, func() bool { return len(watchPIDs(f.root)) > 0 }) {
+		t.Fatalf("isolated Watch poller did not start: panes=%#v", watchPanes(t, herdr.NewWithEnv("herdr", f.env)))
 	}
 
 	client := herdr.NewWithEnv("herdr", f.env)
-	rider, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, "posse:shop:t1")
+	worker, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, "posse:shop:t1")
 	if err != nil {
-		t.Fatalf("create isolated Rider pane: %v", err)
+		t.Fatalf("create isolated Worker pane: %v", err)
 	}
-	const riderLabel = "posse:shop:t1"
-	if _, err := client.Call(context.Background(), "pane.rename", map[string]any{"pane_id": rider.RootPane.PaneID, "label": riderLabel}); err != nil {
-		t.Fatalf("label isolated Rider pane: %v", err)
+	const workerLabel = "posse:shop:t1"
+	if _, err := client.Call(context.Background(), "pane.rename", map[string]any{"pane_id": worker.RootPane.PaneID, "label": workerLabel}); err != nil {
+		t.Fatalf("label isolated Worker pane: %v", err)
 	}
-	if _, err := client.Run(context.Background(), "pane", "report-agent", rider.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
-		t.Fatalf("mark isolated Rider working: %v", err)
+	if _, err := client.Run(context.Background(), "pane", "report-agent", worker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+		t.Fatalf("mark isolated Worker working: %v", err)
 	}
 
 	ctx := context.Background()
 	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
-		Seq: 1, Type: "ship", Title: "Concurrent store stress", ShortName: "concurrent-store-stress",
-		Profile: "deep", LandingMode: "local", Branch: "posse/concurrent-store-stress", BaseRef: "main",
-		HerdrWorkspaceID: f.project.HerdrWorkspaceID, PaneID: rider.RootPane.PaneID,
-		PaneLabel: riderLabel, AgentName: "claude", AutonomyReview: "ask", AutonomyLand: "ask",
+		Seq: 1, Type: "change", Title: "Concurrent store stress", ShortName: "concurrent-store-stress",
+		Profile: "deep", MergeMode: "local", Branch: "posse/concurrent-store-stress", BaseRef: "main",
+		HerdrWorkspaceID: f.project.HerdrWorkspaceID, PaneID: worker.RootPane.PaneID,
+		PaneLabel: workerLabel, AgentName: "claude", AutonomyReview: "ask", AutonomyMerge: "ask",
 	})
 	if err != nil {
-		t.Fatalf("create isolated Rider Task: %v", err)
+		t.Fatalf("create isolated Worker Task: %v", err)
 	}
-	mount, err := f.db.AcquireMount(ctx, f.project.ID, taskID, filepath.Join(f.root, "posse", "remuda"))
+	sandbox, err := f.db.AcquireSandbox(ctx, f.project.ID, taskID, filepath.Join(f.root, "posse", "pool"))
 	if err != nil {
-		t.Fatalf("acquire isolated Rider Mount: %v", err)
+		t.Fatalf("acquire isolated Worker Sandbox: %v", err)
 	}
-	gitTest(t, f.env, f.repo, "worktree", "add", "-b", "posse/concurrent-store-stress", mount.Path, "main")
-	if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Rider ready"); err != nil {
-		t.Fatalf("start isolated Rider Task: %v", err)
+	gitTest(t, f.env, f.repo, "worktree", "add", "-b", "posse/concurrent-store-stress", sandbox.Path, "main")
+	if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker ready"); err != nil {
+		t.Fatalf("start isolated Worker Task: %v", err)
 	}
 
-	riderEnv := setEnv(f.env, "HERDR_ENV", "1")
-	riderEnv = setEnv(riderEnv, "HERDR_PANE_ID", rider.RootPane.PaneID)
-	riderEnv = setEnv(riderEnv, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
-	riderEnv = setEnv(riderEnv, "HERDR_TAB_ID", rider.RootPane.TabID)
+	workerEnv := setEnv(f.env, "HERDR_ENV", "1")
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", worker.RootPane.PaneID)
+	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
+	workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", worker.RootPane.TabID)
 
 	const iterations = 12
 	const commandsPerRole = 8
 	if _, err := f.db.RecordPRPoll(ctx, f.project.ID, 0, ""); err != nil {
-		t.Fatalf("reset isolated Lookout poll timestamp: %v", err)
+		t.Fatalf("reset isolated Watch poll timestamp: %v", err)
 	}
 	busyText := func(output string) bool {
 		lower := strings.ToLower(output)
@@ -75,14 +75,14 @@ func TestConcurrentLookoutSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.
 		var group sync.WaitGroup
 		for command := 0; command < commandsPerRole; command++ {
 			note := "concurrent store stress " + time.Now().Format(time.RFC3339Nano)
-			args := []string{"holler", "working", note}
+			args := []string{"signal", "working", note}
 			group.Add(1)
 			go func(args []string) {
 				defer group.Done()
-				results <- runStressCommand(f.binary, mount.Path, riderEnv, args)
+				results <- runStressCommand(f.binary, sandbox.Path, workerEnv, args)
 			}(args)
 
-			leadArgs := []string{"roster"}
+			leadArgs := []string{"list"}
 			if command%2 == 1 {
 				leadArgs = nil
 			}
@@ -96,7 +96,7 @@ func TestConcurrentLookoutSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.
 		close(results)
 		for result := range results {
 			if result.err != nil || busyText(result.output) {
-				t.Fatalf("iteration %d: posse %s failed under concurrent Lookout/Rider/Lead load: err=%v\n%s", iteration+1, strings.Join(result.args, " "), result.err, result.output)
+				t.Fatalf("iteration %d: posse %s failed under concurrent Watch/Worker/Lead load: err=%v\n%s", iteration+1, strings.Join(result.args, " "), result.err, result.output)
 			}
 		}
 	}
@@ -113,15 +113,15 @@ func TestConcurrentLookoutSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.
 			t.Fatalf("stress-run recorded unexpected Signal: %#v", signal)
 		}
 	}
-	if got := len(lookoutPIDs(f.root)); got == 0 {
-		t.Fatal("isolated Lookout poller exited during the stress run")
+	if got := len(watchPIDs(f.root)); got == 0 {
+		t.Fatal("isolated Watch poller exited during the stress run")
 	}
 	var lastPoll int64
 	if err := f.db.QueryRowContext(ctx, `SELECT pr_polled_at FROM project_watch_state WHERE project_id=?`, f.project.ID).Scan(&lastPoll); err != nil {
-		t.Fatalf("read isolated Lookout poll timestamp: %v", err)
+		t.Fatalf("read isolated Watch poll timestamp: %v", err)
 	}
 	if lastPoll == 0 {
-		t.Fatal("isolated Lookout did not complete a poll during the stress run")
+		t.Fatal("isolated Watch did not complete a poll during the stress run")
 	}
 	notices, err := f.db.Notices(ctx, f.project.ID, false)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestConcurrentLookoutSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.
 	}
 	for _, notice := range notices {
 		if busyText(notice.Summary) || busyText(notice.DataJSON) {
-			t.Fatalf("Lookout recorded a visible contention Notice: %#v", notice)
+			t.Fatalf("Watch recorded a visible contention Notice: %#v", notice)
 		}
 	}
 }

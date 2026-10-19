@@ -32,15 +32,15 @@ func resourceLeaseError(err error) error {
 
 func withIntentGitResources(ctx context.Context, db *store.DB, project store.Project, task store.Task, intentID int64, repository string, refs []string, path string, effect func() error) error {
 	manager := execution.NewManager(db)
-	if err := manager.EnsureMountLeases(ctx); err != nil {
+	if err := manager.EnsureSandboxLeases(ctx); err != nil {
 		return resourceLeaseError(err)
 	}
 	refs = append([]string(nil), refs...)
 	sort.Strings(refs)
 	leases := make([]store.ResourceLease, 0, len(refs)+1)
-	owner := fmt.Sprintf("Land t%d", task.Seq)
+	owner := fmt.Sprintf("Merge t%d", task.Seq)
 	if task.Seq < 1 {
-		owner = "Posse Land"
+		owner = "Posse Merge"
 	}
 	request := func(source string) store.ResourceLeaseRequest {
 		return store.ResourceLeaseRequest{OwnerProjectID: project.ID, OwnerTaskID: task.ID, Owner: owner,

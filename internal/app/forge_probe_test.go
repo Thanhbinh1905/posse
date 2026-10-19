@@ -62,7 +62,7 @@ esac
 	}
 
 	started := time.Now()
-	checks := repositoryDoctorChecks(context.Background(), config.Config{Defaults: config.Defaults{LandingMode: "pr"}}, targets)
+	checks := repositoryDoctorChecks(context.Background(), config.Config{Defaults: config.Defaults{MergeMode: "pr"}}, targets)
 	elapsed := time.Since(started)
 	if elapsed >= forgeProbeTimeout {
 		t.Fatalf("distinct hosts were not probed concurrently: took %s, timeout is %s", elapsed, forgeProbeTimeout)
@@ -111,7 +111,7 @@ func TestExplicitForgeConfigSkipsAutoDetectionAndDeduplicatesReadiness(t *testin
 		gitTest(t, repo, "remote", "add", "origin", "https://git.example/acme/"+member+".git")
 		targets = append(targets, repoTarget{Name: member, Root: repo, DefaultBranch: "main"})
 	}
-	cfg := config.Config{Defaults: config.Defaults{LandingMode: "pr", Forge: "gitlab"}}
+	cfg := config.Config{Defaults: config.Defaults{MergeMode: "pr", Forge: "gitlab"}}
 	checks := repositoryDoctorChecks(context.Background(), cfg, targets)
 	for _, check := range checks {
 		if check.GapCode == "forge_auth" && check.Status != "ok" {
@@ -133,7 +133,7 @@ func TestExplicitForgeConfigSkipsAutoDetectionAndDeduplicatesReadiness(t *testin
 	gitTest(t, docs, "remote", "add", "origin", "https://git.example/acme/docs.git")
 	memberTargets := append(append([]repoTarget(nil), targets...), repoTarget{Name: "docs", Root: docs, DefaultBranch: "main"})
 	memberConfig := config.Config{
-		Defaults: config.Defaults{LandingMode: "pr"},
+		Defaults: config.Defaults{MergeMode: "pr"},
 		Repositories: map[string]config.Repository{
 			"api": {Forge: "gitlab"}, "worker": {Forge: "gitlab"},
 		},
@@ -255,7 +255,7 @@ exit "$POSSE_PROBE_EXIT"
 	}
 
 	cfg := config.Config{
-		Defaults: config.Defaults{LandingMode: "pr"},
+		Defaults: config.Defaults{MergeMode: "pr"},
 		Repositories: map[string]config.Repository{
 			"api":      {Forge: "gitlab"},
 			"frontend": {Forge: "github"},

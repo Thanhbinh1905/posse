@@ -19,7 +19,7 @@ func signalReviewPolicyTask(t *testing.T, f *prLifecycleFixture, task store.Task
 	t.Helper()
 	env := setEnv(f.env, "HERDR_PANE_ID", task.PaneID)
 	env = setEnv(env, "POSSE_WORKER_HOME", f.home)
-	output := runPosse(t, f.binary, task.WorktreePath, env, append([]string{"holler", "done", "Checked"}, args...)...)
+	output := runPosse(t, f.binary, task.WorktreePath, env, append([]string{"signal", "done", "Checked"}, args...)...)
 	// The identity fixture reports working after its launch prompt and then waits
 	// for input. Complete that fake turn too, so reconciliation does not correctly
 	// interpret its permanently-working pane as resumed work.
@@ -29,19 +29,19 @@ func signalReviewPolicyTask(t *testing.T, f *prLifecycleFixture, task store.Task
 	return output
 }
 
-func TestSelectedReviewPolicyLocalLand(t *testing.T) {
+func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 	f := reviewIdentityFixture(t)
-	stopBackgroundLookout(t, f)
+	stopBackgroundWatch(t, f)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	if code, out := rideReviewIdentityTask(t, f, "Selected policy", "author", ""); code != 0 {
-		t.Fatalf("ride: %d %s", code, out)
+		t.Fatalf("start: %d %s", code, out)
 	}
-	ship := f.mustTask(t, "t1")
-	gitTest(t, f.env, ship.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
-	signalReviewPolicyTask(t, f, ship)
+	change := f.mustTask(t, "t1")
+	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
+	signalReviewPolicyTask(t, f, change)
 	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
-	for _, args := range [][]string{{"land", "t1"}, {"land", "t1", "--merge"}} {
+	for _, args := range [][]string{{"merge", "t1"}, {"merge", "t1", "--execute"}} {
 		code, out := runReviewIdentityCLI(t, f, args...)
 		if code != 1 || !strings.Contains(out, "review_required") {
 			t.Fatalf("missing pass admitted: %d %s", code, out)
@@ -56,16 +56,16 @@ func TestSelectedReviewPolicyLocalLand(t *testing.T) {
 		t.Fatal(err)
 	}
 	signalReviewPolicyTask(t, f, review, "--report", report, "--verdict", "pass")
-	if code, out := runReviewIdentityCLI(t, f, "land", "t1"); code != 0 {
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 {
 		t.Fatalf("current pass refused: %d %s", code, out)
 	}
-	gitTest(t, f.env, ship.WorktreePath, "commit", "--allow-empty", "-m", "unreviewed follow-up")
-	code, out := runReviewIdentityCLI(t, f, "land", "t1", "--merge")
+	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "unreviewed follow-up")
+	code, out := runReviewIdentityCLI(t, f, "merge", "t1", "--execute")
 	if code != 1 || !strings.Contains(out, "review_required") {
 		t.Fatalf("stale pass admitted: %d %s", code, out)
 	}
 	if got := gitTest(t, f.env, f.repo, "rev-parse", "main"); got != before {
-		t.Fatal("refused Land changed main")
+		t.Fatal("refused Merge changed main")
 	}
 	if code, out := rideReviewIdentityTask(t, f, "Current verdict", "reviewer", "t1"); code != 0 {
 		t.Fatalf("second review: %d %s", code, out)
@@ -77,35 +77,35 @@ func TestSelectedReviewPolicyLocalLand(t *testing.T) {
 	}
 	signalReviewPolicyTask(t, f, review, "--report", report, "--verdict", "pass")
 	// The new pass is current, but the Gate must run again for the changed branch.
-	code, out = runReviewIdentityCLI(t, f, "land", "t1", "--merge")
+	code, out = runReviewIdentityCLI(t, f, "merge", "t1", "--execute")
 	if code != 1 || !strings.Contains(out, "branch_moved") {
 		t.Fatalf("missing re-gate: %d %s", code, out)
 	}
-	if code, out = runReviewIdentityCLI(t, f, "land", "t1", "--merge"); code != 0 {
+	if code, out = runReviewIdentityCLI(t, f, "merge", "t1", "--execute"); code != 0 {
 		t.Fatalf("current pass merge: %d %s", code, out)
 	}
-	if got := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "main")); got != strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "refs/heads/"+ship.Branch)) {
-		t.Fatal("merge did not land the reviewed candidate")
+	if got := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "main")); got != strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "refs/heads/"+change.Branch)) {
+		t.Fatal("merge did not merge the reviewed candidate")
 	}
 }
 
 func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 	f := reviewIdentityFixture(t)
-	stopBackgroundLookout(t, f)
+	stopBackgroundWatch(t, f)
 	// No explicit review setting: the built-in policy is none.
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["exit 1"]`)
 	if code, out := rideReviewIdentityTask(t, f, "No independent review", "author", ""); code != 0 {
-		t.Fatalf("ride: %d %s", code, out)
+		t.Fatalf("start: %d %s", code, out)
 	}
-	ship := f.mustTask(t, "t1")
-	gitTest(t, f.env, ship.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
-	signalReviewPolicyTask(t, f, ship)
+	change := f.mustTask(t, "t1")
+	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
+	signalReviewPolicyTask(t, f, change)
 	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
-	code, out := runReviewIdentityCLI(t, f, "land", "t1", "--merge")
-	if code != 1 || !strings.Contains(out, "land_approval_required") {
+	code, out := runReviewIdentityCLI(t, f, "merge", "t1", "--execute")
+	if code != 1 || !strings.Contains(out, "merge_approval_required") {
 		t.Fatalf("authority bypassed: %d %s", code, out)
 	}
-	code, out = runReviewIdentityCLI(t, f, "land", "t1")
+	code, out = runReviewIdentityCLI(t, f, "merge", "t1")
 	if code != 1 || !strings.Contains(out, "gate_failed") {
 		t.Fatalf("Gate bypassed: %d %s", code, out)
 	}
@@ -113,7 +113,7 @@ func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 		t.Fatal("refusal changed target")
 	}
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["true"]`)
-	if code, out = runReviewIdentityCLIWithResourceConflictRetry(t, f, "land", "t1", "--merge", "--user-approved", "Land this checked Task"); code != 0 {
+	if code, out = runReviewIdentityCLIWithResourceConflictRetry(t, f, "merge", "t1", "--execute", "--user-approved", "Merge this checked Task"); code != 0 {
 		t.Fatalf("none refused: %d %s", code, out)
 	}
 }
@@ -138,13 +138,13 @@ func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
 	// The fake matches the installed upstream: it has no receipt query.
 	installFakeNoMistakes(t, f)
 	if code, out := rideReviewIdentityTask(t, f, "Pipeline receipt", "author", ""); code != 0 {
-		t.Fatalf("ride: %d %s", code, out)
+		t.Fatalf("start: %d %s", code, out)
 	}
-	ship := f.mustTask(t, "t1")
-	gitTest(t, f.env, ship.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
-	signalReviewPolicyTask(t, f, ship)
+	change := f.mustTask(t, "t1")
+	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
+	signalReviewPolicyTask(t, f, change)
 	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
-	for _, args := range [][]string{{"land", "t1"}, {"land", "t1", "--merge"}} {
+	for _, args := range [][]string{{"merge", "t1"}, {"merge", "t1", "--execute"}} {
 		code, out := runReviewIdentityCLI(t, f, args...)
 		if code != 1 || !strings.Contains(out, "review_receipt_unsupported") {
 			t.Fatalf("missing receipt admitted: %d %s", code, out)
@@ -195,7 +195,7 @@ func TestSelectedReviewPolicyWorkspaceAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	leadEnv := setEnv(f.env, "HERDR_PANE_ID", workspace.RootPane.PaneID)
-	for _, setting := range [][2]string{{"defaults.landing_mode", "local"}, {"defaults.review", "no-mistakes"}, {"repositories.api.review", "none"}} {
+	for _, setting := range [][2]string{{"defaults.merge_mode", "local"}, {"defaults.review", "no-mistakes"}, {"repositories.api.review", "none"}} {
 		runPosse(t, f.binary, root, f.env, "config", "set", setting[0], setting[1], "--project", "policy-stack")
 	}
 	brief := filepath.Join(f.root, "member-policy.md")
@@ -205,12 +205,12 @@ func TestSelectedReviewPolicyWorkspaceAdmission(t *testing.T) {
 		if fields != "" {
 			title = "Lighter member"
 		}
-		if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: "+title+"\ndone_when: checked\nrepos: [api]\n"+fields+"---\n"), 0600); err != nil {
+		if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: "+title+"\ndone_when: checked\nrepos: [api]\n"+fields+"---\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	writeBrief("")
-	runPosse(t, f.binary, root, leadEnv, "ride", "--brief", brief, "--name", "member-policy", "--profile", "author")
+	runPosse(t, f.binary, root, leadEnv, "start", "--brief", brief, "--name", "member-policy", "--profile", "author")
 	tasks, err := f.db.Tasks(context.Background(), project.ID, true)
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("workspace Task: %#v %v", tasks, err)
@@ -222,13 +222,13 @@ func TestSelectedReviewPolicyWorkspaceAdmission(t *testing.T) {
 	// A stricter live override does not rewrite the already admitted policy.
 	runPosse(t, f.binary, root, f.env, "config", "set", "repositories.api.review", "local", "--project", "policy-stack")
 	writeBrief("review: none\n")
-	cmd := exec.Command(f.binary, "ride", "--brief", brief, "--name", "lighter-member", "--profile", "author")
+	cmd := exec.Command(f.binary, "start", "--brief", brief, "--name", "lighter-member", "--profile", "author")
 	cmd.Dir, cmd.Env = root, leadEnv
 	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "scoped User choice") {
 		t.Fatalf("unapproved Member override: %v %s", err, out)
 	}
 	const quote = "  Use no independent review for this Member Task.  "
-	runPosse(t, f.binary, root, leadEnv, "ride", "--brief", brief, "--name", "lighter-member", "--profile", "author", "--user-approved", quote)
+	runPosse(t, f.binary, root, leadEnv, "start", "--brief", brief, "--name", "lighter-member", "--profile", "author", "--user-approved", quote)
 	tasks, err = f.db.Tasks(context.Background(), project.ID, true)
 	if err != nil || len(tasks) != 2 {
 		t.Fatalf("scoped workspace Task: %#v %v", tasks, err)
@@ -238,7 +238,7 @@ func TestSelectedReviewPolicyWorkspaceAdmission(t *testing.T) {
 		if err != nil || plan.Execution.Members[0].Review != "none" {
 			t.Fatalf("Member policy changed: %#v %v", plan, err)
 		}
-		if task.ShortName == "lighter-member" && (plan.UserChoice == nil || plan.UserChoice.Quote != quote || task.AutonomyLand != "ask") {
+		if task.ShortName == "lighter-member" && (plan.UserChoice == nil || plan.UserChoice.Quote != quote || task.AutonomyMerge != "ask") {
 			t.Fatalf("Member consent lost or escalated: %#v", plan)
 		}
 	}

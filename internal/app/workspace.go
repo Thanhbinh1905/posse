@@ -161,33 +161,33 @@ func originHost(ctx context.Context, root string) string {
 	return "local"
 }
 
-// memberLandingMode is how one member Lands: its own `repositories.<name>.landing_mode`,
+// memberMergeMode is how one member Merges: its own `repositories.<name>.merge_mode`,
 // else `local` when it has no origin to open a pull request against, else the Project's mode.
-func memberLandingMode(cfg config.Config, name, remote string) string {
-	if repository, ok := cfg.Repositories[name]; ok && repository.LandingMode != "" {
-		return repository.LandingMode
+func memberMergeMode(cfg config.Config, name, remote string) string {
+	if repository, ok := cfg.Repositories[name]; ok && repository.MergeMode != "" {
+		return repository.MergeMode
 	}
 	if remote == "" || remote == noOriginHost {
 		return "local"
 	}
-	return cfg.Defaults.LandingMode
+	return cfg.Defaults.MergeMode
 }
 
-func projectLandingMode(project store.Project, cfg config.Config) string {
+func projectMergeMode(project store.Project, cfg config.Config) string {
 	if project.IsDirectory() {
 		return "local"
 	}
-	return cfg.Defaults.LandingMode
+	return cfg.Defaults.MergeMode
 }
 
-func savedMemberLandingMode(cfg config.Config, name, remote string) string {
+func savedMemberMergeMode(cfg config.Config, name, remote string) string {
 	if remote == "" {
-		if repository, ok := cfg.Repositories[name]; ok && repository.LandingMode != "" {
-			return repository.LandingMode
+		if repository, ok := cfg.Repositories[name]; ok && repository.MergeMode != "" {
+			return repository.MergeMode
 		}
-		return cfg.Defaults.LandingMode
+		return cfg.Defaults.MergeMode
 	}
-	return memberLandingMode(cfg, name, remote)
+	return memberMergeMode(cfg, name, remote)
 }
 
 // projectTargets lists the repositories of a Project: the Project itself, or its active members.
@@ -226,7 +226,7 @@ func (s *Service) projectTarget(ctx context.Context, db *store.DB, project store
 }
 
 // registeredProjectFor resolves the most specific registered Project that
-// contains dir, or the Project of the Task whose Mount contains dir.
+// contains dir, or the Project of the Task whose Sandbox contains dir.
 func registeredProjectFor(ctx context.Context, db *store.DB, dir string) (store.Project, bool, error) {
 	projects, err := db.Projects(ctx)
 	if err != nil {
@@ -249,7 +249,7 @@ func registeredProjectFor(ctx context.Context, db *store.DB, dir string) (store.
 	return store.Project{}, false, nil
 }
 
-// taskForPath finds the live-or-finished Task whose Mount contains dir.
+// taskForPath finds the live-or-finished Task whose Sandbox contains dir.
 func taskForPath(ctx context.Context, db *store.DB, dir string) (store.Task, error) {
 	if top, err := gitTop(ctx, dir); err == nil {
 		task, taskErr := db.TaskByWorktree(ctx, top)
@@ -274,15 +274,15 @@ func taskForPath(ctx context.Context, db *store.DB, dir string) (store.Task, err
 				return store.Task{}, taskErr
 			}
 		}
-		mounts, err := db.Mounts(ctx, project.ID)
+		sandboxes, err := db.Sandboxes(ctx, project.ID)
 		if err != nil {
 			return store.Task{}, err
 		}
-		for _, mount := range mounts {
-			if mount.State != "held" || mount.TaskID == 0 || !pathWithin(resolvedPath(mount.Path), dir) {
+		for _, sandbox := range sandboxes {
+			if sandbox.State != "held" || sandbox.TaskID == 0 || !pathWithin(resolvedPath(sandbox.Path), dir) {
 				continue
 			}
-			return db.TaskByID(ctx, project.ID, mount.TaskID)
+			return db.TaskByID(ctx, project.ID, sandbox.TaskID)
 		}
 	}
 	return store.Task{}, errNoTask
@@ -307,7 +307,7 @@ func detectionObject(detected detectedProject, cfg config.Config) axi.Object {
 		}
 		repos = append(repos, axi.Object{
 			{Key: "name", Value: repo.Name}, {Key: "default_branch", Value: repo.DefaultBranch},
-			{Key: "remote", Value: remote}, {Key: "landing_mode", Value: memberLandingMode(cfg, repo.Name, repo.Remote)},
+			{Key: "remote", Value: remote}, {Key: "merge_mode", Value: memberMergeMode(cfg, repo.Name, repo.Remote)},
 		})
 	}
 	object := axi.Object{

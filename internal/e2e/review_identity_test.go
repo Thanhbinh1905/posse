@@ -25,8 +25,8 @@ func reviewIdentityFixture(t *testing.T) *prLifecycleFixture {
 	fixture := newPRLifecycleFixture(t)
 	t.Cleanup(func() { _ = fixture.db.Close() })
 	for _, setting := range [][2]string{
-		{"defaults.landing_mode", "local"},
-		{"defaults.auto_unsaddle", "never"},
+		{"defaults.merge_mode", "local"},
+		{"defaults.auto_teardown", "never"},
 		{"defaults.max_workers", "20"},
 		{"profiles.author.kind", "claude"},
 		{"profiles.author.model", "model-a"},
@@ -53,7 +53,7 @@ func reviewIdentityFixture(t *testing.T) *prLifecycleFixture {
 
 func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, profile, reviewOf string) (int, string) {
 	t.Helper()
-	taskType := "ship"
+	taskType := "change"
 	if reviewOf != "" {
 		taskType = "review"
 	}
@@ -62,8 +62,8 @@ func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, pr
 	text := fmt.Sprintf("---\ntype: %s\ntitle: %s\ndone_when: checked\n", taskType, title)
 	if reviewOf != "" {
 		text += "review_of: " + reviewOf + "\n"
-		// Review admission pins a completed Ship revision.
-		result, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE seq=? AND type='ship' AND state='working'`, strings.TrimPrefix(reviewOf, "t"))
+		// Review admission pins a completed Change revision.
+		result, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE seq=? AND type='change' AND state='working'`, strings.TrimPrefix(reviewOf, "t"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,7 +74,7 @@ func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, pr
 		if changed != 0 {
 			// Restore only the working author temporarily completed by this helper.
 			defer func() {
-				_, _ = fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE seq=? AND type='ship' AND state='done'`, strings.TrimPrefix(reviewOf, "t"))
+				_, _ = fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE seq=? AND type='change' AND state='done'`, strings.TrimPrefix(reviewOf, "t"))
 			}()
 		}
 	}
@@ -82,7 +82,7 @@ func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, pr
 	if err := os.WriteFile(brief, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return runReviewIdentityCLI(t, fixture, "ride", "--brief", brief, "--name", name, "--profile", profile)
+	return runReviewIdentityCLI(t, fixture, "start", "--brief", brief, "--name", name, "--profile", profile)
 }
 
 func runReviewIdentityCLI(t *testing.T, fixture *prLifecycleFixture, args ...string) (int, string) {

@@ -20,7 +20,7 @@ func (s *Service) recordWorkerSignalWithContinuity(
 	verdict *store.ReviewVerdictInput,
 	inPlace bool,
 ) (store.State, error) {
-	if verb != "done" || task.Type != "ship" || inPlace || project.IsWorkspace() {
+	if verb != "done" || task.Type != "change" || inPlace || project.IsWorkspace() {
 		return db.RecordWorkerSignalWithVerdict(ctx, task, verb, note, data, noticeKind, verdict)
 	}
 
@@ -38,7 +38,7 @@ func (s *Service) recordWorkerSignalWithContinuity(
 		"head_discontinuity",
 		"automatic validation instructions changed repeatedly while recording the done Signal",
 		true,
-		"Retry `posse holler done` after the validation instructions settle",
+		"Retry `posse signal done` after the validation instructions settle",
 	)
 }
 

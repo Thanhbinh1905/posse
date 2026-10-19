@@ -18,10 +18,10 @@ import (
 )
 
 func (s *Service) processCIObservation(ctx context.Context, db *store.DB, project store.Project, task store.Task, observation store.PRObservation, failures []failedCheck, forge repositoryForge, member string) error {
-	if task.Type != "ship" || observation.State != "OPEN" || len(failures) == 0 || observation.HeadSHA == "" || !ciTaskCanReceiveFix(task) {
+	if task.Type != "change" || observation.State != "OPEN" || len(failures) == 0 || observation.HeadSHA == "" || !ciTaskCanReceiveFix(task) {
 		return nil
 	}
-	if member == "" && (task.LandingMode != "pr" || task.GatedSHA != observation.HeadSHA) {
+	if member == "" && (task.MergeMode != "pr" || task.GatedSHA != observation.HeadSHA) {
 		return nil
 	}
 	plan, err := task.AdmittedPlan()
@@ -35,23 +35,23 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return err
 	}
-	if current.Type != "ship" || !ciTaskCanReceiveFix(current) {
+	if current.Type != "change" || !ciTaskCanReceiveFix(current) {
 		return nil
 	}
 	prURL := observation.PRURL
 	if member == "" {
-		if current.LandingMode != "pr" || current.PRURL != prURL || current.GatedSHA != observation.HeadSHA {
+		if current.MergeMode != "pr" || current.PRURL != prURL || current.GatedSHA != observation.HeadSHA {
 			return nil
 		}
 	} else {
-		var currentPR, gatedSHA, landingMode string
-		if err := db.QueryRowContext(ctx, `SELECT pr_url,gated_sha,landing_mode FROM task_repos WHERE task_id=? AND repo=?`, task.ID, member).Scan(&currentPR, &gatedSHA, &landingMode); err != nil {
+		var currentPR, gatedSHA, mergeMode string
+		if err := db.QueryRowContext(ctx, `SELECT pr_url,gated_sha,landing_mode FROM task_repos WHERE task_id=? AND repo=?`, task.ID, member).Scan(&currentPR, &gatedSHA, &mergeMode); err != nil {
 			if store.IsNotFound(err) {
 				return nil
 			}
 			return err
 		}
-		if landingMode != "pr" || currentPR != prURL || gatedSHA != observation.HeadSHA {
+		if mergeMode != "pr" || currentPR != prURL || gatedSHA != observation.HeadSHA {
 			return nil
 		}
 	}
@@ -117,7 +117,7 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 }
 
 func ciTaskCanReceiveFix(task store.Task) bool {
-	return task.State == store.StateDone || task.State == store.StateLanding
+	return task.State == store.StateDone || task.State == store.StateMerging
 }
 
 func ciPlanAllowsMember(plan *taskplan.Plan, member string) bool {

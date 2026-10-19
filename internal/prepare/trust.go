@@ -25,22 +25,22 @@ func ClaudeTrust(worktreePath, projectRoot string) error {
 	return registerClaudeTrust(worktreePath, projectRoot)
 }
 
-// ClaudeTrustWorkspace trusts a workspace Mount folder like the workspace root it
-// mirrors. members maps each member worktree in the Mount to its member checkout.
-func ClaudeTrustWorkspace(mountPath, workspaceRoot string, members map[string]string) error {
+// ClaudeTrustWorkspace trusts a workspace Sandbox folder like the workspace root it
+// mirrors. members maps each member worktree in the Sandbox to its member checkout.
+func ClaudeTrustWorkspace(sandboxPath, workspaceRoot string, members map[string]string) error {
 	for worktree, memberRoot := range members {
 		if err := validateLinkedWorktree(worktree, memberRoot); err != nil {
 			return fmt.Errorf("refuse Claude trust registration for %s: %w", worktree, err)
 		}
 	}
-	if resolvedMount, err := filepath.EvalSymlinks(mountPath); err != nil {
+	if resolvedSandbox, err := filepath.EvalSymlinks(sandboxPath); err != nil {
 		return err
 	} else if resolvedRoot, err := filepath.EvalSymlinks(workspaceRoot); err != nil {
 		return err
-	} else if filepath.Clean(resolvedMount) == filepath.Clean(resolvedRoot) {
-		return fmt.Errorf("refuse Claude trust registration: the Mount cannot be the workspace root")
+	} else if filepath.Clean(resolvedSandbox) == filepath.Clean(resolvedRoot) {
+		return fmt.Errorf("refuse Claude trust registration: the Sandbox cannot be the workspace root")
 	}
-	return registerClaudeTrust(mountPath, workspaceRoot)
+	return registerClaudeTrust(sandboxPath, workspaceRoot)
 }
 
 func registerClaudeTrust(worktreePath, projectRoot string) error {

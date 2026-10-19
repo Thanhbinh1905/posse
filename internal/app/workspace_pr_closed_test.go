@@ -11,7 +11,7 @@ import (
 )
 
 func TestWorkspaceClosedMemberRaisesDecisionWithoutReopeningTask(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n[repositories.worker]\nforge = \"github\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n[repositories.worker]\nforge = \"github\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
 	bin := filepath.Join(f.root, "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -38,8 +38,8 @@ func TestWorkspaceClosedMemberRaisesDecisionWithoutReopeningTask(t *testing.T) {
 		}
 	}
 	writeView("OPEN")
-	if code := f.run("land", "t1"); code != 0 {
-		t.Fatalf("land: %s", f.out.String())
+	if code := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge: %s", f.out.String())
 	}
 	writeView("CLOSED")
 	ctx := context.Background()
@@ -48,7 +48,7 @@ func TestWorkspaceClosedMemberRaisesDecisionWithoutReopeningTask(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if f.state() != store.StateLanding || f.repos()["worker"].State != store.TaskRepoLanding {
+	if f.state() != store.StateMerging || f.repos()["worker"].State != store.TaskRepoMerge {
 		t.Fatalf("closed Member changed Task: %s %#v", f.state(), f.repos())
 	}
 	decisions, err := f.db.Decisions(ctx, f.project.ID, true)

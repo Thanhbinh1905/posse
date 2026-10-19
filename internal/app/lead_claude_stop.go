@@ -36,7 +36,7 @@ func (s *Service) RunClaudeStop(input io.Reader, output io.Writer, args []string
 		if errors.Is(err, errClaudeRewake) {
 			return 2
 		}
-		fmt.Fprintf(output, "Posse Notice wait failed: %v. Inspect the Project; do not start a background Lookout. The next Stop hook renews the wait.\n", err)
+		fmt.Fprintf(output, "Posse Notice wait failed: %v. Inspect the Project; do not start a background Watch. The next Stop hook renews the wait.\n", err)
 		return 2
 	}
 	return 0
@@ -79,7 +79,7 @@ func (s *Service) claudeStop(ctx context.Context, input io.Reader, output io.Wri
 		return err
 	}
 	defer db.Close()
-	defer lookoutStopReason(home, os.Getpid()) // consume update-stop markers on cancellation too
+	defer watchStopReason(home, os.Getpid()) // consume update-stop markers on cancellation too
 	project, err := s.projectForCWD(bounded, db)
 	if err != nil {
 		return err
@@ -246,7 +246,7 @@ func (s *Service) writeLeadClaudeStop(home string, project store.Project) (strin
 	if err != nil {
 		return "", err
 	}
-	root := filepath.Join(home, "projects", project.Name, "lead-claude-lookout")
+	root := filepath.Join(home, "projects", project.Name, "lead-claude-watch")
 	command := "cd " + shellQuote(project.Root) + " && exec env POSSE_HOME=" + shellQuote(home) + " " + shellQuote(binary) + " _claude-stop"
 	settings := map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{
 		"type": "command", "command": command, "timeout": 300, "asyncRewake": true,

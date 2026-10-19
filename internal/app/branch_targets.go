@@ -79,7 +79,7 @@ func selectedBranchRef(ctx context.Context, root, branch, field string) (string,
 		if !found {
 			return "", axi.Failure("brief_invalid", fmt.Sprintf("%s branch %q does not exist on origin", field, branch), false, "Push the branch to origin or choose an existing branch")
 		}
-		// Admission is read-only. Mount acquisition fetches a selected base
+		// Admission is read-only. Sandbox acquisition fetches a selected base
 		// only after all choices have been admitted.
 		return "refs/remotes/origin/" + branch, nil
 	}
@@ -120,8 +120,8 @@ func taskTargetRef(ctx context.Context, project store.Project, task store.Task) 
 	return remoteRef, nil
 }
 
-func landedTaskTargetRef(ctx context.Context, project store.Project, task store.Task) (string, error) {
-	if task.LandingMode != "local" {
+func mergedTaskTargetRef(ctx context.Context, project store.Project, task store.Task) (string, error) {
+	if task.MergeMode != "local" {
 		return taskTargetRef(ctx, project, task)
 	}
 	ref := "refs/heads/" + taskTargetBranch(project, task)

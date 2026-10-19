@@ -22,7 +22,7 @@ func TestReportAcceptanceRequiresCurrentIndependentPassAndSurvivesRebuild(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Publication report", ReportKind: "spec"})
+	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Publication report", ReportKind: "spec"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,9 +40,9 @@ func TestReportAcceptanceRequiresCurrentIndependentPassAndSurvivesRebuild(t *tes
 		t.Fatal(err)
 	}
 	if _, err := db.AcceptReport(ctx, reportID, digest, "user", ""); err == nil || !strings.Contains(err.Error(), "torn-down") {
-		t.Fatalf("reported Scout was accepted before Teardown: %v", err)
+		t.Fatalf("reported Research was accepted before Teardown: %v", err)
 	}
-	if err := db.Transition(ctx, reportID, StateReported, StateTornDown, "cli", "Mount released"); err != nil {
+	if err := db.Transition(ctx, reportID, StateReported, StateTornDown, "cli", "Sandbox released"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.AcceptReport(ctx, reportID, digest, "lead", "User approves"); !errors.Is(err, ErrIndependentReportRequired) {

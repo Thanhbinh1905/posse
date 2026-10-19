@@ -40,11 +40,11 @@ type Defaults struct {
 	DispatchInheritance string   `toml:"dispatch_inheritance" json:"dispatch_inheritance"`
 	StallAfter          string   `toml:"stall_after" json:"stall_after"`
 	IdleAfter           string   `toml:"idle_after" json:"idle_after"`
-	AutoUnsaddle        string   `toml:"auto_unsaddle" json:"auto_unsaddle"`
+	AutoTeardown        string   `toml:"auto_teardown" json:"auto_teardown"`
 	AutoRecover         bool     `toml:"auto_recover" json:"auto_recover"`
 	RecoveryAttempts    int      `toml:"recovery_attempts" json:"recovery_attempts"`
 	RecoveryBackoff     string   `toml:"recovery_backoff" json:"recovery_backoff"`
-	LandingMode         string   `toml:"landing_mode" json:"landing_mode"`
+	MergeMode           string   `toml:"merge_mode" json:"merge_mode"`
 	TargetBranch        string   `toml:"target_branch" json:"target_branch"`
 	MergeMethod         string   `toml:"merge_method" json:"merge_method"`
 	Forge               string   `toml:"forge" json:"forge"`
@@ -71,7 +71,7 @@ type CILoop struct {
 	RerunCancelled int `toml:"rerun_cancelled" json:"rerun_cancelled"`
 }
 
-type Remuda struct {
+type Pool struct {
 	Clean    string   `toml:"clean" json:"clean"`
 	Setup    []string `toml:"setup" json:"setup"`
 	KeepIdle int      `toml:"keep_idle" json:"keep_idle"`
@@ -101,13 +101,13 @@ type Kind struct {
 // means NoticeDeliveryPrompt.
 const (
 	NoticeDeliveryPrompt         = "prompt"          // type a prompt when the pane is idle and unfocused
-	NoticeDeliveryLookout        = "lookout"         // Claude owns a bounded Stop hook; other kinds use a background Lookout
+	NoticeDeliveryWatch          = "watch"           // Claude owns a bounded Stop hook; other kinds use a background Watch
 	NoticeDeliveryCodexQueue     = "codex-queue"     // posse queues the prompt with `codex queue`
-	NoticeDeliveryPiExtension    = "pi-extension"    // a posse pi extension runs `posse lookout`
-	NoticeDeliveryOpenCodePlugin = "opencode-plugin" // a Lead-only plugin queues lookout batches through the session API
+	NoticeDeliveryPiExtension    = "pi-extension"    // a posse pi extension runs `posse watch`
+	NoticeDeliveryOpenCodePlugin = "opencode-plugin" // a Lead-only plugin queues watch batches through the session API
 )
 
-var NoticeDeliveries = []string{NoticeDeliveryPrompt, NoticeDeliveryLookout, NoticeDeliveryCodexQueue, NoticeDeliveryPiExtension, NoticeDeliveryOpenCodePlugin}
+var NoticeDeliveries = []string{NoticeDeliveryPrompt, NoticeDeliveryWatch, NoticeDeliveryCodexQueue, NoticeDeliveryPiExtension, NoticeDeliveryOpenCodePlugin}
 
 type Profile struct {
 	Kind   string   `toml:"kind" json:"kind"`
@@ -125,13 +125,13 @@ type Rule struct {
 type Autonomy struct {
 	Yolo   bool   `toml:"yolo" json:"yolo"`
 	Review string `toml:"review" json:"review"`
-	Land   string `toml:"land" json:"land"`
+	Merge  string `toml:"merge" json:"merge"`
 }
 
 // Repository is the per-member policy of a workspace Project.
 type Repository struct {
 	Review       string   `toml:"review" json:"review"`
-	LandingMode  string   `toml:"landing_mode" json:"landing_mode"`
+	MergeMode    string   `toml:"merge_mode" json:"merge_mode"`
 	TargetBranch string   `toml:"target_branch" json:"target_branch"`
 	Gate         []string `toml:"gate" json:"gate"`
 	Forge        string   `toml:"forge" json:"forge"`
@@ -150,7 +150,7 @@ type Config struct {
 	ReviewLoop          ReviewLoop            `toml:"review_loop" json:"review_loop"`
 	GateLoop            GateLoop              `toml:"gate_loop" json:"gate_loop"`
 	CILoop              CILoop                `toml:"ci_loop" json:"ci_loop"`
-	Remuda              Remuda                `toml:"remuda" json:"remuda"`
+	Pool                Pool                  `toml:"pool" json:"pool"`
 	Retention           Retention             `toml:"retention" json:"retention"`
 	Kinds               map[string]Kind       `toml:"kinds" json:"kinds"`
 	Profiles            map[string]Profile    `toml:"profiles" json:"profiles"`
@@ -262,7 +262,7 @@ func Load(home, projectName string) (Config, error) {
 	cfg.normalizeBuiltins()
 	if cfg.Autonomy.Yolo {
 		cfg.Autonomy.Review = "lead"
-		cfg.Autonomy.Land = "auto"
+		cfg.Autonomy.Merge = "auto"
 	}
 	if err := cfg.Validate(projectName != ""); err != nil {
 		return Config{}, err
@@ -278,6 +278,9 @@ func hasLeadLanguage(values map[string]any) bool {
 }
 
 func readMap(path string) (map[string]any, error) {
+	if err := migrateVocabularyFile(path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]any{}, nil
@@ -329,7 +332,7 @@ func applyProjectScalars(project map[string]any) map[string]any {
 	if !ok {
 		defaults = map[string]any{}
 	}
-	for _, key := range []string{"max_workers", "stall_after", "idle_after", "auto_unsaddle", "landing_mode", "merge_method", "forge", "pr_poll", "review", "gate"} {
+	for _, key := range []string{"max_workers", "stall_after", "idle_after", "auto_teardown", "merge_mode", "merge_method", "forge", "pr_poll", "review", "gate"} {
 		if value, found := project[key]; found {
 			defaults[key] = value
 			delete(project, key)
@@ -388,9 +391,9 @@ func defaultMap() map[string]any {
 	return map[string]any{
 		"identity": map[string]any{
 			"lead":   map[string]any{"name": "Lead", "persona": "", "language": "en", "address_user": ""},
-			"worker": map[string]any{"display_prefix": "rider"},
+			"worker": map[string]any{"display_prefix": "worker"},
 		},
-		"remuda":      map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
+		"pool":        map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
 		"retention":   map[string]any{"task_artifacts": "2160h"},
 		"review_loop": map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}},
 		"gate_loop":   map[string]any{"max_fix_rounds": 3},
@@ -398,11 +401,11 @@ func defaultMap() map[string]any {
 		"lead":        map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey":      map[string]any{"lead": false},
 		"defaults": map[string]any{
-			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_unsaddle": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "landing_mode": "pr",
+			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
 			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "none", "gate": []string{},
 		},
 		"kinds": map[string]any{
-			"claude":   map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryLookout, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},
+			"claude":   map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryWatch, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},
 			"codex":    map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-bypass-approvals-and-sandbox"}, "lead_auto_approve": true, "model_args": []string{"-m", "{model}"}, "effort_args": []string{"-c", "model_reasoning_effort={effort}"}, "resume_args": []string{"resume", "{session}"}, "system_prompt_args": []string{"-c", "developer_instructions={text}"}, "lead_args": []string{"--sandbox", "danger-full-access"}, "prepare": "codex-trust", "notice_delivery": NoticeDeliveryCodexQueue, "steer": true, "interrupt_keys": []string{"esc"}},
 			"pi":       map[string]any{"disabled": false, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--thinking", "{effort}"}, "resume_args": []string{"--session", "{session}"}, "system_prompt_args": []string{"--append-system-prompt", "{file}"}, "notice_delivery": NoticeDeliveryPiExtension, "steer": true, "interrupt_keys": []string{"esc"}},
 			"opencode": map[string]any{"disabled": false, "auto_approve_args": []string{"--auto"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "resume_args": []string{"--session", "{session}"}, "notice_delivery": NoticeDeliveryOpenCodePlugin, "interrupt_keys": []string{"esc"}},
@@ -417,7 +420,7 @@ func (c *Config) normalizeBuiltins() {
 		c.Kinds = map[string]Kind{}
 	}
 	if _, ok := c.Kinds["claude"]; !ok {
-		c.Kinds["claude"] = Kind{AutoApproveArgs: []string{"--dangerously-skip-permissions"}, LeadAutoApprove: true, ModelArgs: []string{"--model", "{model}"}, EffortArgs: []string{"--effort", "{effort}"}, ResumeArgs: []string{"--resume", "{session}"}, SystemPromptArgs: []string{"--append-system-prompt-file", "{file}"}, Prepare: "claude-trust", NoticeDelivery: NoticeDeliveryLookout, BackgroundCommands: true, Steer: true, InterruptKeys: []string{"ctrl+c"}}
+		c.Kinds["claude"] = Kind{AutoApproveArgs: []string{"--dangerously-skip-permissions"}, LeadAutoApprove: true, ModelArgs: []string{"--model", "{model}"}, EffortArgs: []string{"--effort", "{effort}"}, ResumeArgs: []string{"--resume", "{session}"}, SystemPromptArgs: []string{"--append-system-prompt-file", "{file}"}, Prepare: "claude-trust", NoticeDelivery: NoticeDeliveryWatch, BackgroundCommands: true, Steer: true, InterruptKeys: []string{"ctrl+c"}}
 	}
 	if _, ok := c.Kinds["codex"]; !ok {
 		c.Kinds["codex"] = Kind{AutoApproveArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}, LeadAutoApprove: true, ModelArgs: []string{"-m", "{model}"}, EffortArgs: []string{"-c", "model_reasoning_effort={effort}"}, ResumeArgs: []string{"resume", "{session}"}, SystemPromptArgs: []string{"-c", "developer_instructions={text}"}, LeadArgs: []string{"--sandbox", "danger-full-access"}, Prepare: "codex-trust", NoticeDelivery: NoticeDeliveryCodexQueue, Steer: true, InterruptKeys: []string{"esc"}}
@@ -428,8 +431,8 @@ func (c *Config) normalizeBuiltins() {
 	if _, ok := c.Kinds["opencode"]; !ok {
 		c.Kinds["opencode"] = Kind{AutoApproveArgs: []string{"--auto"}, LeadAutoApprove: true, ModelArgs: []string{"--model", "{model}"}, ResumeArgs: []string{"--session", "{session}"}, NoticeDelivery: NoticeDeliveryOpenCodePlugin, InterruptKeys: []string{"esc"}}
 	}
-	if c.Remuda.Clean == "" {
-		c.Remuda.Clean = "warm"
+	if c.Pool.Clean == "" {
+		c.Pool.Clean = "warm"
 	}
 	if c.Retention.TaskArtifacts == "" {
 		c.Retention.TaskArtifacts = "2160h"
@@ -474,11 +477,11 @@ func (c Config) Validate(projectFile bool) error {
 	if err != nil || prPoll <= 0 {
 		return &InvalidError{File: file, Key: "defaults.pr_poll", Reason: "must be a positive duration"}
 	}
-	if !oneOf(c.Defaults.AutoUnsaddle, "finished", "landed", "never") {
-		return &InvalidError{File: file, Key: "defaults.auto_unsaddle", Reason: "must be one of finished, landed, never"}
+	if !oneOf(c.Defaults.AutoTeardown, "finished", "merged", "never") {
+		return &InvalidError{File: file, Key: "defaults.auto_teardown", Reason: "must be one of finished, merged, never"}
 	}
-	if !oneOf(c.Defaults.LandingMode, "local", "pr", "no-mistakes") {
-		return &InvalidError{File: file, Key: "defaults.landing_mode", Reason: "must be local, pr or no-mistakes"}
+	if !oneOf(c.Defaults.MergeMode, "local", "pr", "no-mistakes") {
+		return &InvalidError{File: file, Key: "defaults.merge_mode", Reason: "must be local, pr or no-mistakes"}
 	}
 	if !oneOf(c.Defaults.Forge, "", "auto", "github", "gitlab") {
 		return &InvalidError{File: file, Key: "defaults.forge", Reason: "must be auto, github or gitlab"}
@@ -499,19 +502,19 @@ func (c Config) Validate(projectFile bool) error {
 	if err := ValidateReview(c.Defaults.Review); err != nil {
 		return &InvalidError{File: file, Key: "defaults.review", Reason: err.Error()}
 	}
-	if !oneOf(c.Remuda.Clean, "warm", "pristine") {
-		return &InvalidError{File: file, Key: "remuda.clean", Reason: "must be warm or pristine"}
+	if !oneOf(c.Pool.Clean, "warm", "pristine") {
+		return &InvalidError{File: file, Key: "pool.clean", Reason: "must be warm or pristine"}
 	}
 	if projectFile {
 		if c.Autonomy.Yolo {
 			c.Autonomy.Review = "lead"
-			c.Autonomy.Land = "auto"
+			c.Autonomy.Merge = "auto"
 		}
 		if c.Autonomy.Review != "" && !oneOf(c.Autonomy.Review, "ask", "lead") {
 			return &InvalidError{File: file, Key: "autonomy.review", Reason: "must be ask or lead"}
 		}
-		if c.Autonomy.Land != "" && !oneOf(c.Autonomy.Land, "ask", "auto") {
-			return &InvalidError{File: file, Key: "autonomy.land", Reason: "must be ask or auto"}
+		if c.Autonomy.Merge != "" && !oneOf(c.Autonomy.Merge, "ask", "auto") {
+			return &InvalidError{File: file, Key: "autonomy.merge", Reason: "must be ask or auto"}
 		}
 	} else if !reflect.DeepEqual(c.Autonomy, Autonomy{}) {
 		return &InvalidError{File: file, Key: "autonomy", Reason: "autonomy is valid only in a Project config"}
@@ -522,8 +525,8 @@ func (c Config) Validate(projectFile bool) error {
 		}
 	}
 	for i, rule := range c.Dispatch {
-		if rule.Type != "" && !oneOf(rule.Type, "ship", "scout", "review") {
-			return &InvalidError{File: file, Key: fmt.Sprintf("dispatch[%d].type", i), Reason: "must be ship, scout or review"}
+		if rule.Type != "" && !oneOf(rule.Type, "change", "research", "review") {
+			return &InvalidError{File: file, Key: fmt.Sprintf("dispatch[%d].type", i), Reason: "must be change, research or review"}
 		}
 		if rule.Use == "" {
 			return &InvalidError{File: file, Key: fmt.Sprintf("dispatch[%d].use", i), Reason: "must name a Profile"}
@@ -534,15 +537,15 @@ func (c Config) Validate(projectFile bool) error {
 	}
 	for name, profile := range c.Profiles {
 		if profile.Kind == "" {
-			return &InvalidError{File: file, Key: "profiles." + name + ".kind", Reason: "must name a Rider kind"}
+			return &InvalidError{File: file, Key: "profiles." + name + ".kind", Reason: "must name a Worker kind"}
 		}
 		kind := c.Kinds[profile.Kind]
 		profileFile := c.profileFile(name, file)
 		if profile.Model != "" && len(kind.ModelArgs) == 0 {
-			return &InvalidError{File: profileFile, Key: "profiles." + name + ".model", Reason: "Rider kind has no model_args template"}
+			return &InvalidError{File: profileFile, Key: "profiles." + name + ".model", Reason: "Worker kind has no model_args template"}
 		}
 		if profile.Effort != "" && len(kind.EffortArgs) == 0 {
-			return &InvalidError{File: profileFile, Key: "profiles." + name + ".effort", Reason: "Rider kind has no effort_args template"}
+			return &InvalidError{File: profileFile, Key: "profiles." + name + ".effort", Reason: "Worker kind has no effort_args template"}
 		}
 	}
 	for kind, profileName := range c.Lead.Profiles {
@@ -561,12 +564,12 @@ func (c Config) Validate(projectFile bool) error {
 		if kind.NoticeDelivery != "" && !oneOf(kind.NoticeDelivery, NoticeDeliveries...) {
 			return &InvalidError{File: file, Key: "kinds." + name + ".notice_delivery", Reason: "must be one of " + strings.Join(NoticeDeliveries, ", ")}
 		}
-		if name != "claude" && kind.NoticeDelivery == NoticeDeliveryLookout && !kind.BackgroundCommands {
-			return &InvalidError{File: file, Key: "kinds." + name + ".notice_delivery", Reason: "lookout requires background_commands = true"}
+		if name != "claude" && kind.NoticeDelivery == NoticeDeliveryWatch && !kind.BackgroundCommands {
+			return &InvalidError{File: file, Key: "kinds." + name + ".notice_delivery", Reason: "watch requires background_commands = true"}
 		}
 	}
-	if !oneOf(c.Remuda.Clean, "warm", "pristine") || c.Remuda.KeepIdle < 0 {
-		return &InvalidError{File: file, Key: "remuda", Reason: "clean must be warm or pristine and keep_idle cannot be negative"}
+	if !oneOf(c.Pool.Clean, "warm", "pristine") || c.Pool.KeepIdle < 0 {
+		return &InvalidError{File: file, Key: "pool", Reason: "clean must be warm or pristine and keep_idle cannot be negative"}
 	}
 	return nil
 }

@@ -29,7 +29,7 @@ func TestCallerRecognizesRegisteredNativeChildrenAndUnboundAgents(t *testing.T) 
 	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "scout", Title: "Native", PaneID: "w2:p1"}); err != nil {
+	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "research", Title: "Native", PaneID: "w2:p1"}); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(repo)
@@ -43,7 +43,7 @@ func TestCallerRecognizesRegisteredNativeChildrenAndUnboundAgents(t *testing.T) 
 		role string
 	}{
 		{"Lead child", []string{"HERDR_PANE_ID=w1:p1"}, "lead"},
-		{"native Rider child", []string{"HERDR_PANE_ID=w2:p1"}, "worker"},
+		{"native Worker child", []string{"HERDR_PANE_ID=w2:p1"}, "worker"},
 		{"unbound native agent", []string{"PI_CODING_AGENT=1"}, "agent"},
 		{"User shell", nil, "user"},
 	} {

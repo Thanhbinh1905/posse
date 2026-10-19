@@ -15,11 +15,11 @@ import (
 
 func TestWorkspacePRWatchRunsCILoopAgainstMemberGate(t *testing.T) {
 	configText := `[defaults]
-landing_mode = "local"
+merge_mode = "local"
 review = "none"
-auto_unsaddle = "never"
+auto_teardown = "never"
 [repositories.worker]
-landing_mode = "pr"
+merge_mode = "pr"
 [review_loop]
 enabled = true
 max_rounds = 3
@@ -30,7 +30,7 @@ max_fix_rounds = 3
 max_fix_rounds = 3
 rerun_cancelled = 1
 `
-	fixture := newWorkspaceLandFixture(t, configText, []string{"worker"}, []string{"worker"})
+	fixture := newWorkspaceMergeFixture(t, configText, []string{"worker"}, []string{"worker"})
 	ctx := context.Background()
 	workerRoot := filepath.Join(fixture.workspace, "worker")
 	remote := filepath.Join(fixture.root, "remotes", "worker.git")
@@ -41,19 +41,19 @@ rerun_cancelled = 1
 	repo := fixture.repos()["worker"]
 	repo.PRURL = "https://github.com/acme/worker/pull/7"
 	repo.GatedSHA = strings.TrimSpace(gitTest(t, repo.WorktreePath, "rev-parse", "refs/heads/"+fixture.task.Branch))
-	repo.State = store.TaskRepoLanding
+	repo.State = store.TaskRepoMerge
 	if err := fixture.db.UpdateTaskRepo(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 
-	brief := []byte("---\ntype: ship\ntitle: Workspace CI loop\ndone_when: checks pass\nrepos: [worker]\n---\nKeep the workspace member changes.\n")
+	brief := []byte("---\ntype: change\ntitle: Workspace CI loop\ndone_when: checks pass\nrepos: [worker]\n---\nKeep the workspace member changes.\n")
 	plan, err := taskplan.Resolve(taskplan.Request{
 		Brief: taskplan.Select("brief", "workspace.md", brief),
 		Execution: taskplan.Execution{Scope: "workspace", Base: "main", Target: "main", Members: []taskplan.Member{{
 			Name: "worker", Path: "worker", Base: "main", Target: "main", Delivery: "pr",
 		}}},
 		Launch: taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
-		Review: "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Review: "none", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
 		Paths: taskplan.Paths{Scratch: filepath.Join(fixture.home, "scratch", "stack", "t1"), Output: filepath.Join(fixture.home, "projects", "stack", "tasks", "t1")},
 		ValidationLoops: &taskplan.ValidationLoops{
 			Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"},

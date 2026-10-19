@@ -78,10 +78,10 @@ func TestNoticeHandoffSurvivesHarnessCrashAndAvoidsRecordedReplay(t *testing.T) 
 	script := `#!/bin/sh
 set -eu
 if [ "$POSSE_E2E_PHASE" = replay ]; then
-  "$POSSE_E2E_POSSE_BIN" lookout --json --quiet-routine --handoff --destination fake:session-1 --timeout 1 > "$POSSE_E2E_RECEIVED" 2>"$POSSE_TEST_ROOT/harness-error.log"
+  "$POSSE_E2E_POSSE_BIN" watch --json --quiet-routine --handoff --destination fake:session-1 --timeout 1 > "$POSSE_E2E_RECEIVED" 2>"$POSSE_TEST_ROOT/harness-error.log"
   exit 0
 fi
-"$POSSE_E2E_POSSE_BIN" lookout --json --quiet-routine --handoff --destination fake:session-1 > "$POSSE_E2E_RECEIVED" 2>"$POSSE_TEST_ROOT/harness-error.log"
+"$POSSE_E2E_POSSE_BIN" watch --json --quiet-routine --handoff --destination fake:session-1 > "$POSSE_E2E_RECEIVED" 2>"$POSSE_TEST_ROOT/harness-error.log"
 ID=$(sed -n 's/.*"delivery_id":"\([^"]*\)".*/\1/p' "$POSSE_E2E_RECEIVED")
 TOKEN=$(sed -n 's/.*"owner_token":"\([^"]*\)".*/\1/p' "$POSSE_E2E_RECEIVED")
 test -n "$ID"
@@ -99,7 +99,7 @@ case "$POSSE_E2E_PHASE" in
       printf '%s\n' "$ID" >> "$POSSE_E2E_INBOX"
       printf 'forge-effect\n' >> "$POSSE_TEST_ROOT/forge-effects.log"
     fi
-    "$POSSE_E2E_POSSE_BIN" lookout --json --receipt "$ID" --receipt-outcome accepted --receipt-token "$TOKEN" >/dev/null
+    "$POSSE_E2E_POSSE_BIN" watch --json --receipt "$ID" --receipt-outcome accepted --receipt-token "$TOKEN" >/dev/null
     exit 89
     ;;
   *) exit 2 ;;

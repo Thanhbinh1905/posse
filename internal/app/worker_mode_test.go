@@ -18,8 +18,8 @@ import (
 )
 
 type workerFixture struct {
-	root, repo, home, mount string
-	project                 store.Project
+	root, repo, home, sandbox string
+	project                   store.Project
 }
 
 func newWorkerFixture(t *testing.T) workerFixture {
@@ -28,8 +28,8 @@ func newWorkerFixture(t *testing.T) workerFixture {
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
 	home := filepath.Join(root, "posse")
-	mount := filepath.Join(home, "remuda", "shop", "mount-1")
-	gitTest(t, repo, "worktree", "add", "--detach", mount)
+	sandbox := filepath.Join(home, "pool", "shop", "sandbox-1")
+	gitTest(t, repo, "worktree", "add", "--detach", sandbox)
 	db, err := store.Open(home)
 	if err != nil {
 		t.Fatal(err)
@@ -43,17 +43,17 @@ func newWorkerFixture(t *testing.T) workerFixture {
 	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Work", State: store.StateSpawning, LandingMode: "local", PaneID: "w2:p1", WorktreePath: mount})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Work", State: store.StateSpawning, MergeMode: "local", PaneID: "w2:p1", WorktreePath: sandbox})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id,acquired_at,released_at) VALUES(?,?,?,?,?,0,0)`, project.ID, 1, mount, "held", taskID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id,acquired_at,released_at) VALUES(?,?,?,?,?,0,0)`, project.ID, 1, sandbox, "held", taskID); err != nil {
 		t.Fatal(err)
 	}
-	return workerFixture{root: root, repo: repo, home: home, mount: mount, project: project}
+	return workerFixture{root: root, repo: repo, home: home, sandbox: sandbox, project: project}
 }
 
 func runCLI(t *testing.T, service *Service, args ...string) (int, string) {
@@ -67,19 +67,19 @@ func runCLI(t *testing.T, service *Service, args ...string) (int, string) {
 func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	brief := filepath.Join(fixture.root, "brief.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: T\ndone_when: d\n---\nbody\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: T\ndone_when: d\n---\nbody\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	forbidden := [][]string{
-		{"ride", "--brief", brief},
+		{"start", "--brief", brief},
 		{"project", "add", "--name", "stray"},
 		{"project", "remove", "shop", "--yes"},
 		{"up", "--claude"},
 		{"setup", "--check"},
 		{"config", "set", "defaults.max_workers", "6"},
-		{"unsaddle", "t1"},
+		{"teardown", "t1"},
 		{"accept", "t1"},
-		{"roster"},
+		{"list"},
 		{},
 	}
 	for _, caller := range []struct {
@@ -95,8 +95,8 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 			t.Setenv(workerHomeEnv, fixture.home)
 			t.Chdir(fixture.root)
 		}},
-		{"mount", func(t *testing.T) {
-			t.Chdir(filepath.Join(fixture.mount))
+		{"sandbox", func(t *testing.T) {
+			t.Chdir(filepath.Join(fixture.sandbox))
 		}},
 	} {
 		t.Run(caller.name, func(t *testing.T) {
@@ -114,7 +114,7 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 	}
 }
 
-func TestNeedsDecisionRiderCanSignalWorkingAndGetsUsableRefusalHelp(t *testing.T) {
+func TestNeedsDecisionWorkerCanSignalWorkingAndGetsUsableRefusalHelp(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	db, err := store.Open(fixture.home)
 	if err != nil {
@@ -135,12 +135,12 @@ func TestNeedsDecisionRiderCanSignalWorkingAndGetsUsableRefusalHelp(t *testing.T
 	t.Setenv(workerHomeEnv, fixture.home)
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", task.PaneID)
-	t.Chdir(fixture.mount)
+	t.Chdir(fixture.sandbox)
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
 	service := testService(fixture.home, fake)
-	if code, output := runCLI(t, service, "holler", "working", "Resuming after my question"); code != 0 || !strings.Contains(output, "state: working") {
-		t.Fatalf("needs-decision Rider could not signal working: code=%d output=%s", code, output)
+	if code, output := runCLI(t, service, "signal", "working", "Resuming after my question"); code != 0 || !strings.Contains(output, "state: working") {
+		t.Fatalf("needs-decision Worker could not signal working: code=%d output=%s", code, output)
 	}
 	db, err = store.Open(fixture.home)
 	if err != nil {
@@ -155,20 +155,20 @@ func TestNeedsDecisionRiderCanSignalWorkingAndGetsUsableRefusalHelp(t *testing.T
 		db.Close()
 		t.Fatal(err)
 	}
-	if err := db.Transition(context.Background(), task.ID, store.StateDone, store.StateLanded, "cli", "landed"); err != nil {
+	if err := db.Transition(context.Background(), task.ID, store.StateDone, store.StateMerged, "cli", "merged"); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runCLI(t, service, "holler", "working", "Still working"); code == 0 || !strings.Contains(output, "Ask the Lead") || strings.Contains(output, "posse show") || strings.Contains(output, "posse status") {
-		t.Fatalf("Rider refusal help suggested an unusable command: code=%d output=%s", code, output)
+	if code, output := runCLI(t, service, "signal", "working", "Still working"); code == 0 || !strings.Contains(output, "Ask the Lead") || strings.Contains(output, "posse show") || strings.Contains(output, "posse status") {
+		t.Fatalf("Worker refusal help suggested an unusable command: code=%d output=%s", code, output)
 	}
 }
 
 func TestWorkingSignalReopensOwnCompletedTaskWithReason(t *testing.T) {
-	for _, initial := range []store.State{store.StateDone, store.StateLanding, store.StateStalled, store.StateNeedsDecision} {
+	for _, initial := range []store.State{store.StateDone, store.StateMerging, store.StateStalled, store.StateNeedsDecision} {
 		t.Run(string(initial), func(t *testing.T) {
 			fixture := newWorkerFixture(t)
 			ctx := context.Background()
@@ -182,7 +182,7 @@ func TestWorkingSignalReopensOwnCompletedTaskWithReason(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch initial {
-			case store.StateDone, store.StateLanding:
+			case store.StateDone, store.StateMerging:
 				if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
 					db.Close()
 					t.Fatal(err)
@@ -191,32 +191,32 @@ func TestWorkingSignalReopensOwnCompletedTaskWithReason(t *testing.T) {
 					db.Close()
 					t.Fatal(err)
 				}
-				if initial == store.StateLanding {
-					if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "gate passed"); err != nil {
+				if initial == store.StateMerging {
+					if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "gate passed"); err != nil {
 						db.Close()
 						t.Fatal(err)
 					}
-					if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "land --merge", "started", `{}`, os.Getpid()); err != nil {
+					if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "merge --execute", "started", `{}`, os.Getpid()); err != nil {
 						db.Close()
 						t.Fatal(err)
 					}
-					if err := db.CreateTaskRepos(ctx, task.ID, []store.TaskRepo{{Repo: "shop", WorktreePath: fixture.mount, LandingMode: "pr"}}); err != nil {
+					if err := db.CreateTaskRepos(ctx, task.ID, []store.TaskRepo{{Repo: "shop", WorktreePath: fixture.sandbox, MergeMode: "pr"}}); err != nil {
 						db.Close()
 						t.Fatal(err)
 					}
-					if err := db.UpdateTaskRepo(ctx, store.TaskRepo{TaskID: task.ID, Repo: "shop", WorktreePath: fixture.mount, LandingMode: "pr", State: store.TaskRepoLanding, GatedSHA: "old-member-gate", PRURL: "https://github.com/acme/shop/pull/1"}); err != nil {
+					if err := db.UpdateTaskRepo(ctx, store.TaskRepo{TaskID: task.ID, Repo: "shop", WorktreePath: fixture.sandbox, MergeMode: "pr", State: store.TaskRepoMerge, GatedSHA: "old-member-gate", PRURL: "https://github.com/acme/shop/pull/1"}); err != nil {
 						db.Close()
 						t.Fatal(err)
 					}
-					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, TaskID: task.ID, Kind: "land_ready", Summary: "Task is ready", DataJSON: `{}`}); err != nil {
+					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: "Task is ready", DataJSON: `{}`}); err != nil {
 						db.Close()
 						t.Fatal(err)
 					}
-					if _, err := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: fixture.project.ID, TaskID: task.ID, Origin: "land-ready", Kind: "land_ready", Question: "Land Task?", Options: []string{"land", "wait"}}); err != nil {
+					if _, err := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: fixture.project.ID, TaskID: task.ID, Origin: "merge-ready", Kind: "merge_ready", Question: "Merge Task?", Options: []string{"merge", "wait"}}); err != nil {
 						db.Close()
 						t.Fatal(err)
 					}
-					if initial == store.StateLanding {
+					if initial == store.StateMerging {
 						observed, err := db.TaskByID(ctx, fixture.project.ID, task.ID)
 						if err != nil {
 							db.Close()
@@ -224,13 +224,13 @@ func TestWorkingSignalReopensOwnCompletedTaskWithReason(t *testing.T) {
 						}
 						now := time.Now()
 						for _, status := range []string{"working", "idle", "working"} {
-							if _, err := db.ObserveCompletedRider(ctx, observed, task.PaneID, "generation", status, now); err != nil {
+							if _, err := db.ObserveCompletedWorker(ctx, observed, task.PaneID, "generation", status, now); err != nil {
 								db.Close()
 								t.Fatalf("watcher observation %s: %v", status, err)
 							}
 							now = now.Add(time.Second)
 						}
-					} else if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "land --open-pr", "pr.lookup", `{}`, os.Getpid()); err != nil {
+					} else if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "merge --open-pr", "pr.lookup", `{}`, os.Getpid()); err != nil {
 						db.Close()
 						t.Fatal(err)
 					}
@@ -253,11 +253,11 @@ func TestWorkingSignalReopensOwnCompletedTaskWithReason(t *testing.T) {
 			t.Setenv(workerHomeEnv, fixture.home)
 			t.Setenv("HERDR_ENV", "1")
 			t.Setenv("HERDR_PANE_ID", task.PaneID)
-			t.Chdir(fixture.mount)
+			t.Chdir(fixture.sandbox)
 			fake := herdr.NewFake()
 			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
 			service := testService(fixture.home, fake)
-			if code, output := runCLI(t, service, "holler", "working", reason); code != 0 || !strings.Contains(output, "state: working") {
+			if code, output := runCLI(t, service, "signal", "working", reason); code != 0 || !strings.Contains(output, "state: working") {
 				t.Fatalf("working Signal did not reopen %s Task: code=%d output=%s", initial, code, output)
 			}
 			db, err = store.Open(fixture.home)
@@ -274,8 +274,8 @@ func TestWorkingSignalReopensOwnCompletedTaskWithReason(t *testing.T) {
 				t.Fatalf("read Task transitions: %#v %v", transitions, err)
 			}
 			last := transitions[0]
-			if last.From != string(initial) || last.To != string(store.StateWorking) || last.Source != "rider" || last.Note != reason {
-				t.Fatalf("reopen transition = %#v; want Rider transition with quoted reason", last)
+			if last.From != string(initial) || last.To != string(store.StateWorking) || last.Source != "worker" || last.Note != reason {
+				t.Fatalf("reopen transition = %#v; want Worker transition with quoted reason", last)
 			}
 			signals, err := db.TaskSignals(ctx, task.ID, 10)
 			if err != nil || len(signals) == 0 || signals[0].Verb != "working" || signals[0].Note != reason {
@@ -287,24 +287,24 @@ func TestWorkingSignalReopensOwnCompletedTaskWithReason(t *testing.T) {
 			}
 			found := false
 			for _, notice := range notices {
-				if notice.TaskID == task.ID && notice.Kind == "rider_resumed" && strings.Contains(notice.Summary, `"`+reason+`"`) && strings.Contains(notice.DataJSON, reason) {
+				if notice.TaskID == task.ID && notice.Kind == "worker_resumed" && strings.Contains(notice.Summary, `"`+reason+`"`) && strings.Contains(notice.DataJSON, reason) {
 					found = true
 				}
 			}
 			if !found {
-				t.Fatalf("no rider_resumed Notice quoted %q: %#v", reason, notices)
+				t.Fatalf("no worker_resumed Notice quoted %q: %#v", reason, notices)
 			}
 			if _, err := db.IntentByTask(ctx, task.ID); !store.IsNotFound(err) {
-				t.Fatalf("pending Land intent was not canceled: %v", err)
+				t.Fatalf("pending Merge intent was not canceled: %v", err)
 			}
-			if initial == store.StateLanding {
+			if initial == store.StateMerging {
 				repos, err := db.TaskRepos(ctx, task.ID)
 				if err != nil || len(repos) != 1 || repos[0].State != store.TaskRepoOpen || repos[0].GatedSHA != "" {
-					t.Fatalf("reopened Task retained member Land evidence: %#v %v", repos, err)
+					t.Fatalf("reopened Task retained member Merge evidence: %#v %v", repos, err)
 				}
 				decisions, err := db.Decisions(ctx, fixture.project.ID, false)
 				if err != nil || len(decisions) != 1 || decisions[0].ObsoleteAt == 0 {
-					t.Fatalf("reopened Task retained its land_ready Decision: %#v %v", decisions, err)
+					t.Fatalf("reopened Task retained its merge_ready Decision: %#v %v", decisions, err)
 				}
 			}
 		})
@@ -327,11 +327,11 @@ func TestWorkingSignalRefusesWhilePullRequestMergeIsInFlight(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", "gate passed"); err != nil {
+	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "gate passed"); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "land --merge", "in_progress:pr.merge:shop", `{}`, os.Getpid()); err != nil {
+	if err := db.StartIntent(ctx, fixture.project.ID, task.ID, "merge --execute", "in_progress:pr.merge:shop", `{}`, os.Getpid()); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func TestWorkingSignalRefusesWhilePullRequestMergeIsInFlight(t *testing.T) {
 	}
 	now := time.Now()
 	for _, status := range []string{"working", "idle", "working"} {
-		if notice, err := db.ObserveCompletedRider(ctx, observed, task.PaneID, "generation", status, now); err != nil || notice != nil {
+		if notice, err := db.ObserveCompletedWorker(ctx, observed, task.PaneID, "generation", status, now); err != nil || notice != nil {
 			db.Close()
 			t.Fatalf("watcher reopened Task during in-flight merge at %s: notice=%#v err=%v", status, notice, err)
 		}
@@ -354,9 +354,9 @@ func TestWorkingSignalRefusesWhilePullRequestMergeIsInFlight(t *testing.T) {
 	t.Setenv(workerHomeEnv, fixture.home)
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", task.PaneID)
-	t.Chdir(fixture.mount)
+	t.Chdir(fixture.sandbox)
 	service := testService(fixture.home, herdr.NewFake())
-	if code, output := runCLI(t, service, "holler", "working", "The User asked me to make one more change."); code == 0 || !strings.Contains(output, "merge") || !strings.Contains(output, "in progress") {
+	if code, output := runCLI(t, service, "signal", "working", "The User asked me to make one more change."); code == 0 || !strings.Contains(output, "merge") || !strings.Contains(output, "in progress") {
 		t.Fatalf("working Signal did not clearly refuse an in-flight merge: code=%d output=%s", code, output)
 	}
 	db, err = store.Open(fixture.home)
@@ -365,7 +365,7 @@ func TestWorkingSignalRefusesWhilePullRequestMergeIsInFlight(t *testing.T) {
 	}
 	defer db.Close()
 	current, err := db.Task(ctx, fixture.project.ID, "t1")
-	if err != nil || current.State != store.StateLanding {
+	if err != nil || current.State != store.StateMerging {
 		t.Fatalf("in-flight merge refusal changed Task: %#v %v", current, err)
 	}
 	if _, err := db.IntentByTask(ctx, task.ID); err != nil {
@@ -378,7 +378,7 @@ func TestWorkingSignalRefusesWhilePullRequestMergeIsInFlight(t *testing.T) {
 }
 
 func TestWorkingSignalRejectsTerminalTaskStates(t *testing.T) {
-	for _, target := range []store.State{store.StateLanded, store.StateTornDown, store.StateFailed, store.StateLost} {
+	for _, target := range []store.State{store.StateMerged, store.StateTornDown, store.StateFailed, store.StateLost} {
 		t.Run(string(target), func(t *testing.T) {
 			fixture := newWorkerFixture(t)
 			ctx := context.Background()
@@ -392,12 +392,12 @@ func TestWorkingSignalRejectsTerminalTaskStates(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch target {
-			case store.StateLanded:
+			case store.StateMerged:
 				if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
 					db.Close()
 					t.Fatal(err)
 				}
-				if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanded, "cli", "landed"); err != nil {
+				if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerged, "cli", "merged"); err != nil {
 					db.Close()
 					t.Fatal(err)
 				}
@@ -422,9 +422,9 @@ func TestWorkingSignalRejectsTerminalTaskStates(t *testing.T) {
 			t.Setenv(workerHomeEnv, fixture.home)
 			t.Setenv("HERDR_ENV", "1")
 			t.Setenv("HERDR_PANE_ID", task.PaneID)
-			t.Chdir(fixture.mount)
+			t.Chdir(fixture.sandbox)
 			service := testService(fixture.home, herdr.NewFake())
-			if code, output := runCLI(t, service, "holler", "working", "Late follow-up"); code == 0 || !strings.Contains(output, "signal_state_invalid") {
+			if code, output := runCLI(t, service, "signal", "working", "Late follow-up"); code == 0 || !strings.Contains(output, "signal_state_invalid") {
 				t.Fatalf("working Signal reopened terminal %s Task: code=%d output=%s", target, code, output)
 			}
 			db, err = store.Open(fixture.home)
@@ -452,13 +452,13 @@ func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	gitTest(t, fixture.mount, "switch", "-c", "posse/t1")
-	if err := os.WriteFile(filepath.Join(fixture.mount, "instruction.txt"), []byte("applied\n"), 0o600); err != nil {
+	gitTest(t, fixture.sandbox, "switch", "-c", "posse/t1")
+	if err := os.WriteFile(filepath.Join(fixture.sandbox, "instruction.txt"), []byte("applied\n"), 0o600); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
-	gitTest(t, fixture.mount, "add", "instruction.txt")
-	gitTest(t, fixture.mount, "commit", "-m", "Apply delivered instruction")
+	gitTest(t, fixture.sandbox, "add", "instruction.txt")
+	gitTest(t, fixture.sandbox, "commit", "-m", "Apply delivered instruction")
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET branch='posse/t1',base_ref='main' WHERE id=?`, task.ID); err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -493,11 +493,11 @@ func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
 	t.Setenv(workerHomeEnv, fixture.home)
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", task.PaneID)
-	t.Chdir(fixture.mount)
+	t.Chdir(fixture.sandbox)
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
 	service := testService(fixture.home, fake)
-	if code, output := runCLI(t, service, "holler", "done", "Applied the delivered instruction"); code != 0 || !strings.Contains(output, "state: done") {
+	if code, output := runCLI(t, service, "signal", "done", "Applied the delivered instruction"); code != 0 || !strings.Contains(output, "state: done") {
 		t.Fatalf("done Signal after delivered instruction was rejected: code=%d output=%s", code, output)
 	}
 }
@@ -517,8 +517,8 @@ func TestWorkerMayExperimentAgainstATemporaryHome(t *testing.T) {
 }
 
 func TestWorkerProtocolRequiresIsolatedExperiments(t *testing.T) {
-	protocol := workerProtocol(store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "ship", LandingMode: "local"}, dispatch.Brief{DoneWhen: "done"}, "/tmp/launch.md", "/tmp/posse/scratch/shop/t3", "none", "English")
-	for _, want := range []string{"# Rider protocol", "isolated Herdr server", "POSSE_HOME under a temp dir", "never touch panes, tabs or workspaces you did not create", "A `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered", "first run `posse holler working \"<reason>\"` and wait for success before acting", "Files passed to `--findings` and `--report` may be in this Rider's worktree or this Task's scratch directory (`/tmp/posse/scratch/shop/t3`)"} {
+	protocol := workerProtocol(store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "change", MergeMode: "local"}, dispatch.Brief{DoneWhen: "done"}, "/tmp/launch.md", "/tmp/posse/scratch/shop/t3", "none", "English")
+	for _, want := range []string{"# Worker protocol", "isolated Herdr server", "POSSE_HOME under a temp dir", "never touch panes, tabs or workspaces you did not create", "A `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered", "first run `posse signal working \"<reason>\"` and wait for success before acting", "Files passed to `--findings` and `--report` may be in this Worker's worktree or this Task's scratch directory (`/tmp/posse/scratch/shop/t3`)"} {
 		if !strings.Contains(protocol, want) {
 			t.Fatalf("Worker protocol lacks %q:\n%s", want, protocol)
 		}
@@ -629,17 +629,17 @@ func TestWorkerIdentitySurvivesRemovedEnvironmentAndCwd(t *testing.T) {
 		env  []string
 	}{
 		{"marker", "/", []string{workerHomeEnv + "=" + fixture.home}},
-		{"mount", filepath.Join(fixture.mount, "internal"), nil},
+		{"sandbox", filepath.Join(fixture.sandbox, "internal"), nil},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			if err := os.MkdirAll(filepath.Join(fixture.mount, "internal"), 0o700); err != nil {
+			if err := os.MkdirAll(filepath.Join(fixture.sandbox, "internal"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			previous := procRoot
 			procRoot = fakeProc(t, testCase.cwd, testCase.env)
 			t.Cleanup(func() { procRoot = previous })
 			service := testService(fixture.home, herdr.NewFake())
-			for _, args := range [][]string{{"config", "set", "defaults.auto_unsaddle", "never"}, {"ride", "--brief", brief}} {
+			for _, args := range [][]string{{"config", "set", "defaults.auto_teardown", "never"}, {"start", "--brief", brief}} {
 				if code, output := runCLI(t, service, args...); code == 0 || !strings.Contains(output, "worker_forbidden") {
 					t.Fatalf("a descendant of a Worker ran `posse %s`: code=%d output=%s", strings.Join(args, " "), code, output)
 				}

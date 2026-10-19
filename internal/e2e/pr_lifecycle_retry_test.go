@@ -12,7 +12,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestRideRetriesRetryableStoreBusyBeforeTaskCreation(t *testing.T) {
+func TestStartRetriesRetryableStoreBusyBeforeTaskCreation(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	if err := os.MkdirAll(repo, 0o700); err != nil {
@@ -37,15 +37,15 @@ func TestRideRetriesRetryableStoreBusyBeforeTaskCreation(t *testing.T) {
 		repo: repo, binary: binary, leadEnv: []string{"POSSE_RETRY_MARKER=" + marker},
 		db: db, project: project,
 	}
-	output := fixture.runRideWithStoreBusyRetry(t, filepath.Join(root, "brief.md"), "retryable-ride")
+	output := fixture.runStartWithStoreBusyRetry(t, filepath.Join(root, "brief.md"), "retryable-start")
 	if !strings.Contains(output, "task: t1") {
 		t.Fatalf("successful retry output = %s", output)
 	}
 	if _, err := os.Stat(marker + ".second"); err != nil {
-		t.Fatalf("ride was not retried after retryable store_busy: %v", err)
+		t.Fatalf("start was not retried after retryable store_busy: %v", err)
 	}
 	var count int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM tasks WHERE project_id=? AND short_name=?`, project.ID, "retryable-ride").Scan(&count); err != nil || count != 0 {
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM tasks WHERE project_id=? AND short_name=?`, project.ID, "retryable-start").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("helper created %d Tasks while retrying a pre-create failure, err=%v", count, err)
 	}
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func TestPRWatchRetargetsOpenStackedPRAfterLowerMerge(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	ctx := context.Background()
 	gitTest(t, fixture.repo, "branch", "staging", "main")
 	gitTest(t, fixture.repo, "push", "origin", "staging")
@@ -22,7 +22,7 @@ func TestPRWatchRetargetsOpenStackedPRAfterLowerMerge(t *testing.T) {
 	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateDone, "worker", "lower work complete"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateLanding, "cli", "lower PR opened"); err != nil {
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerging, "cli", "lower PR opened"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET pr_url=?, target_branch='staging', gated_sha=? WHERE id=?`, lowerURL, fixture.headSHA, fixture.task.ID); err != nil {
@@ -33,8 +33,8 @@ func TestPRWatchRetargetsOpenStackedPRAfterLowerMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	upperID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
-		Seq: 2, Type: "ship", Title: "Upper Task", State: store.StateSpawning,
-		LandingMode: "pr", Branch: "posse/t2", BaseRef: "refs/remotes/origin/posse/t1",
+		Seq: 2, Type: "change", Title: "Upper Task", State: store.StateSpawning,
+		MergeMode: "pr", Branch: "posse/t2", BaseRef: "refs/remotes/origin/posse/t1",
 		TargetBranch: lower.Branch, PRURL: upperURL,
 	})
 	if err != nil {

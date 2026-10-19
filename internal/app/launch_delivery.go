@@ -16,7 +16,7 @@ import (
 const launchDeliveryTimeout = 2 * time.Minute
 
 // retryPendingLaunches runs on focus events and normal Project reconciliation
-// (including lookout ticks). Only a finished ride intent can be retried here.
+// (including watch ticks). Only a finished start intent can be retried here.
 func (s *Service) retryPendingLaunches(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot) error {
 	home, err := s.homePath()
 	if err != nil {

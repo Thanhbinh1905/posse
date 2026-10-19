@@ -47,15 +47,15 @@ func (a *t175Adapter) Call(ctx context.Context, method string, params map[string
 }
 
 func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *testing.T) {
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	ctx := context.Background()
-	task := f.ride(t, "t1", "Foreign restart", "foreign-restart")
+	task := f.start(t, "t1", "Foreign restart", "foreign-restart")
 	f.fail(t, "t1")
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: f.projectID, TaskID: task.ID, Kind: "worker_failed", Summary: "Rider failed", DataJSON: `{}`})
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: f.projectID, TaskID: task.ID, Kind: "worker_failed", Summary: "Worker failed", DataJSON: `{}`})
 	_ = db.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 	cli := app.New(f.home, adapter).CLI()
 	var output bytes.Buffer
 	cli.Out, cli.ErrOut = &output, &output
-	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
+	code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved this discard"})
 	if adapter.failures != 0 || ownedPID == 0 || foreignPID == 0 || ownedPID == foreignPID {
 		t.Fatalf("discard did not preserve the same-kind replacement sequence: failures=%d owned=%d foreign=%d", adapter.failures, ownedPID, foreignPID)
 	}
@@ -176,24 +176,24 @@ func TestT175OwnedToForeignSameKindRestartDuringProcessInspectionIsPreserved(t *
 		t.Fatal(err)
 	}
 	defer ro.Close()
-	mounts, err := ro.Mounts(ctx, f.projectID)
-	if err != nil || len(mounts) != 1 || mounts[0].State != "held" {
-		t.Fatalf("Mount after refused teardown = %#v, %v", mounts, err)
+	sandboxes, err := ro.Sandboxes(ctx, f.projectID)
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "held" {
+		t.Fatalf("Sandbox after refused teardown = %#v, %v", sandboxes, err)
 	}
 }
 
 // Replaces a Task-named process during the discard ownership check and verifies
-// that the live foreign replacement keeps the Mount held.
-func TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved(t *testing.T) {
-	f := newRiderTabsFixture(t)
+// that the live foreign replacement keeps the Sandbox held.
+func TestT175ForeignRestartDuringDiscardOwnerchangeCheckIsPreserved(t *testing.T) {
+	f := newWorkerTabsFixture(t)
 	ctx := context.Background()
-	task := f.ride(t, "t1", "Late foreign restart", "late-foreign-restart")
+	task := f.start(t, "t1", "Late foreign restart", "late-foreign-restart")
 	f.fail(t, "t1")
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: f.projectID, TaskID: task.ID, Kind: "worker_failed", Summary: "Rider failed", DataJSON: `{}`})
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: f.projectID, TaskID: task.ID, Kind: "worker_failed", Summary: "Worker failed", DataJSON: `{}`})
 	_ = db.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +281,7 @@ func TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved(t *testing.T) 
 	cli := app.New(f.home, adapter).CLI()
 	var output bytes.Buffer
 	cli.Out, cli.ErrOut = &output, &output
-	code := cli.Run([]string{"unsaddle", "t1", "--discard", "--user-approved", "User approved this discard"})
+	code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved this discard"})
 	if adapter.failures != 0 || ownedPID == 0 || foreignPID == 0 || ownedPID == foreignPID {
 		t.Fatalf("replacement missed the discard ownership-check boundary: failures=%d owned=%d foreign=%d", adapter.failures, ownedPID, foreignPID)
 	}
@@ -298,15 +298,15 @@ func TestT175ForeignRestartDuringDiscardOwnershipCheckIsPreserved(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mounts, mountErr := ro.Mounts(ctx, f.projectID)
+	sandboxes, sandboxErr := ro.Sandboxes(ctx, f.projectID)
 	_ = ro.Close()
-	t.Logf("owned PID=%d, foreign PID=%d, exit=%d, foreign alive=%v, file=%q, file error=%v, Task=%s, branch error=%v, Mounts=%#v, output=%s", ownedPID, foreignPID, code, foreignAlive, contents, fileErr, taskAfter.State, branchErr, mounts, output.String())
-	if code == 0 || !strings.Contains(output.String(), "discard_agent_identity_unavailable") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" || taskAfter.State != store.StateFailed || branchErr != nil || mountErr != nil || len(mounts) != 1 || mounts[0].State != "held" {
-		t.Fatalf("live foreign replacement was not refused safely: branch=%s mount error=%v output=%s", branchOutput, mountErr, output.String())
+	t.Logf("owned PID=%d, foreign PID=%d, exit=%d, foreign alive=%v, file=%q, file error=%v, Task=%s, branch error=%v, Sandboxes=%#v, output=%s", ownedPID, foreignPID, code, foreignAlive, contents, fileErr, taskAfter.State, branchErr, sandboxes, output.String())
+	if code == 0 || !strings.Contains(output.String(), "discard_agent_identity_unavailable") || !foreignAlive || fileErr != nil || string(contents) != "foreign work must survive\n" || taskAfter.State != store.StateFailed || branchErr != nil || sandboxErr != nil || len(sandboxes) != 1 || sandboxes[0].State != "held" {
+		t.Fatalf("live foreign replacement was not refused safely: branch=%s sandbox error=%v output=%s", branchOutput, sandboxErr, output.String())
 	}
 }
 
-func foregroundPID(t *testing.T, f *riderTabsFixture, paneID string) int {
+func foregroundPID(t *testing.T, f *workerTabsFixture, paneID string) int {
 	t.Helper()
 	raw, err := f.client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": paneID})
 	if err != nil {

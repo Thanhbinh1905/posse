@@ -25,13 +25,13 @@ const (
 )
 
 // Task member states. A member without commits ahead of its base is unchanged
-// and never Lands; the others move open -> gated (local) or landing (pr) -> landed.
+// and never Merges; the others move open -> gated (local) or merging (pr) -> merged.
 const (
 	TaskRepoOpen      = "open"
 	TaskRepoUnchanged = "unchanged"
 	TaskRepoGated     = "gated"
-	TaskRepoLanding   = "landing"
-	TaskRepoLanded    = "landed"
+	TaskRepoMerge     = "merging"
+	TaskRepoMerged    = "merged"
 )
 
 type ProjectRepo struct {
@@ -57,11 +57,11 @@ type TaskRepo struct {
 	WorktreePath string `toml:"worktree_path"`
 	BaseRef      string `toml:"base_ref"`
 	TargetBranch string `toml:"target_branch"`
-	LandingMode  string `toml:"landing_mode"`
+	MergeMode    string `toml:"landing_mode"`
 	State        string `toml:"state"`
 	GatedSHA     string `toml:"gated_sha"`
 	PRURL        string `toml:"pr_url"`
-	LandedRef    string `toml:"landed_ref"`
+	MergedRef    string `toml:"landed_ref"`
 }
 
 type TaskTargetChange struct {
@@ -213,7 +213,7 @@ func (db *DB) CreateTaskRepos(ctx context.Context, taskID int64, repos []TaskRep
 	now := time.Now().UnixMilli()
 	for _, repo := range repos {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id, repo, worktree_path, base_ref, target_branch, landing_mode, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)
-ON CONFLICT(task_id, repo) DO UPDATE SET worktree_path=excluded.worktree_path, base_ref=excluded.base_ref, target_branch=excluded.target_branch, landing_mode=excluded.landing_mode, updated_at=excluded.updated_at`, taskID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.LandingMode, now); err != nil {
+ON CONFLICT(task_id, repo) DO UPDATE SET worktree_path=excluded.worktree_path, base_ref=excluded.base_ref, target_branch=excluded.target_branch, landing_mode=excluded.landing_mode, updated_at=excluded.updated_at`, taskID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.MergeMode, now); err != nil {
 			return err
 		}
 	}
@@ -232,7 +232,7 @@ func (db *DB) TaskRepos(ctx context.Context, taskID int64) ([]TaskRepo, error) {
 	repos := []TaskRepo{}
 	for rows.Next() {
 		var repo TaskRepo
-		if err := rows.Scan(&repo.ID, &repo.TaskID, &repo.Repo, &repo.WorktreePath, &repo.BaseRef, &repo.TargetBranch, &repo.LandingMode, &repo.State, &repo.GatedSHA, &repo.PRURL, &repo.LandedRef); err != nil {
+		if err := rows.Scan(&repo.ID, &repo.TaskID, &repo.Repo, &repo.WorktreePath, &repo.BaseRef, &repo.TargetBranch, &repo.MergeMode, &repo.State, &repo.GatedSHA, &repo.PRURL, &repo.MergedRef); err != nil {
 			return nil, err
 		}
 		repos = append(repos, repo)
@@ -240,9 +240,9 @@ func (db *DB) TaskRepos(ctx context.Context, taskID int64) ([]TaskRepo, error) {
 	return repos, rows.Err()
 }
 
-// UpdateTaskRepo stores one member's landing progress.
+// UpdateTaskRepo stores one member's merging progress.
 func (db *DB) UpdateTaskRepo(ctx context.Context, repo TaskRepo) error {
-	result, err := db.ExecContext(ctx, `UPDATE task_repos SET state=?, gated_sha=?, pr_url=?, landed_ref=?, updated_at=? WHERE task_id=? AND repo=?`, repo.State, repo.GatedSHA, repo.PRURL, repo.LandedRef, time.Now().UnixMilli(), repo.TaskID, repo.Repo)
+	result, err := db.ExecContext(ctx, `UPDATE task_repos SET state=?, gated_sha=?, pr_url=?, landed_ref=?, updated_at=? WHERE task_id=? AND repo=?`, repo.State, repo.GatedSHA, repo.PRURL, repo.MergedRef, time.Now().UnixMilli(), repo.TaskID, repo.Repo)
 	if err != nil {
 		return err
 	}
@@ -285,12 +285,12 @@ func (db *DB) LatestMemberPRObservation(ctx context.Context, taskID int64, repo 
 type MemberPREffect struct {
 	Notices   []Notice
 	RepoState string // TaskRepoLanded, TaskRepoOpen or "" for no change
-	LandedRef string
+	MergedRef string
 }
 
 // RecordMemberPRObservation stores a new observation of a member's pull request,
 // its Notices and the member's new state in one transaction, then settles the
-// Task: landed once every changed member has Landed, done when a member's pull
+// Task: merged once every changed member has Merged, done when a member's pull
 // request closed without merging.
 func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observation PRObservation, effect MemberPREffect) (bool, error) {
 	tx, err := db.beginTxWithRetry(ctx)
@@ -311,7 +311,7 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		}
 		return false, err
 	}
-	if currentPRURL != observation.PRURL || currentRepoState == TaskRepoLanded {
+	if currentPRURL != observation.PRURL || currentRepoState == TaskRepoMerged {
 		return false, nil
 	}
 	if err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.ObservedAt); err != nil {
@@ -340,10 +340,10 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 	if effect.RepoState != "" {
 		now := time.Now().UnixMilli()
 		switch effect.RepoState {
-		case TaskRepoLanded:
-			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, landed_ref=?, updated_at=? WHERE task_id=? AND repo=? AND state IN ('landing','open','gated')`, TaskRepoLanded, effect.LandedRef, now, observation.TaskID, repo)
+		case TaskRepoMerged:
+			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, landed_ref=?, updated_at=? WHERE task_id=? AND repo=? AND state IN ('merging','open','gated')`, TaskRepoMerged, effect.MergedRef, now, observation.TaskID, repo)
 		case TaskRepoOpen:
-			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, gated_sha='', updated_at=? WHERE task_id=? AND repo=? AND state=?`, TaskRepoOpen, now, observation.TaskID, repo, TaskRepoLanding)
+			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, gated_sha='', updated_at=? WHERE task_id=? AND repo=? AND state=?`, TaskRepoOpen, now, observation.TaskID, repo, TaskRepoMerge)
 		}
 		if err != nil {
 			return false, err
@@ -359,8 +359,8 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 	return true, db.PersistTask(ctx, observation.TaskID)
 }
 
-// SettleWorkspaceTask moves a landing workspace Task to landed once every changed
-// member has Landed. It reports whether the Task moved.
+// SettleWorkspaceTask moves a merging workspace Task to merged once every changed
+// member has Merged. It reports whether the Task moved.
 func (db *DB) SettleWorkspaceTask(ctx context.Context, taskID int64) (bool, error) {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -385,17 +385,17 @@ func settleWorkspaceTaskTx(ctx context.Context, db *DB, tx *writeTx, taskID int6
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=?`, taskID).Scan(&state); err != nil {
 		return false, err
 	}
-	if state == StateLanded || state == StateTornDown || state == StateReported {
+	if state == StateMerged || state == StateTornDown || state == StateReported {
 		return false, nil
 	}
 	if reopen {
-		return true, transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, StateLanding, StateDone, "cli", reopenNote)
+		return true, transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, StateMerging, StateDone, "cli", reopenNote)
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT repo, state, landed_ref FROM task_repos WHERE task_id=? ORDER BY repo`, taskID)
 	if err != nil {
 		return false, err
 	}
-	landed := []string{}
+	merged := []string{}
 	for rows.Next() {
 		var repo, repoState, ref string
 		if err := rows.Scan(&repo, &repoState, &ref); err != nil {
@@ -404,8 +404,8 @@ func settleWorkspaceTaskTx(ctx context.Context, db *DB, tx *writeTx, taskID int6
 		}
 		switch repoState {
 		case TaskRepoUnchanged:
-		case TaskRepoLanded:
-			landed = append(landed, repo+"@"+ref)
+		case TaskRepoMerged:
+			merged = append(merged, repo+"@"+ref)
 		default:
 			rows.Close()
 			return false, nil
@@ -415,14 +415,14 @@ func settleWorkspaceTaskTx(ctx context.Context, db *DB, tx *writeTx, taskID int6
 	if err := rows.Err(); err != nil {
 		return false, err
 	}
-	if len(landed) == 0 {
+	if len(merged) == 0 {
 		return false, nil
 	}
-	note := "Every member Landed: " + strings.Join(landed, ", ")
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, strings.Join(landed, ","), time.Now().UnixMilli(), taskID); err != nil {
+	note := "Every member Merged: " + strings.Join(merged, ", ")
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET landed_ref=?, updated_at=? WHERE id=?`, strings.Join(merged, ","), time.Now().UnixMilli(), taskID); err != nil {
 		return false, err
 	}
-	return true, transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, state, StateLanded, "cli", note)
+	return true, transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, state, StateMerged, "cli", note)
 }
 
 func (db *DB) BeginTaskTargetChange(ctx context.Context, projectID, taskID int64, repo string, sourceTaskID int64, fromBranch, toBranch string) (TaskTargetChange, error) {

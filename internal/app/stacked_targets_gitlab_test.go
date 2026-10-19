@@ -45,8 +45,8 @@ func TestMergedLowerTaskRetargetsUpperGitLabMR(t *testing.T) {
 	const upperBranch = "posse/t2"
 	const upperURL = "https://git.example.com/group/sub/shop/-/merge_requests/18"
 	upperID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
-		Seq: 2, Type: "ship", Title: "Upper Task", State: store.StateSpawning,
-		LandingMode: "pr", Branch: upperBranch, BaseRef: "refs/remotes/origin/posse/t1",
+		Seq: 2, Type: "change", Title: "Upper Task", State: store.StateSpawning,
+		MergeMode: "pr", Branch: upperBranch, BaseRef: "refs/remotes/origin/posse/t1",
 		TargetBranch: lower.Branch, PRURL: upperURL,
 	})
 	if err != nil {
@@ -100,7 +100,7 @@ func TestMergedLowerTaskRetargetsUpperGitLabMR(t *testing.T) {
 }
 
 func TestWorkspaceStackedRetargetChangesOnlyTheMergedMember(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	ctx := context.Background()
 	workspaceRoot := filepath.Join(fixture.root, "workspace")
 	apiRoot := fixture.repo
@@ -115,26 +115,26 @@ func TestWorkspaceStackedRetargetChangesOnlyTheMergedMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lowerID, err := fixture.db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Lower", State: store.StateSpawning, LandingMode: "pr", Branch: "posse/lower"})
+	lowerID, err := fixture.db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Lower", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/lower"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.Transition(ctx, lowerID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	upperID, err := fixture.db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "ship", Title: "Upper", State: store.StateSpawning, LandingMode: "pr", Branch: "posse/upper"})
+	upperID, err := fixture.db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "change", Title: "Upper", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/upper"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.Transition(ctx, upperID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.CreateTaskRepos(ctx, lowerID, []store.TaskRepo{{Repo: "api", WorktreePath: apiRoot, TargetBranch: "staging", LandingMode: "pr"}}); err != nil {
+	if err := fixture.db.CreateTaskRepos(ctx, lowerID, []store.TaskRepo{{Repo: "api", WorktreePath: apiRoot, TargetBranch: "staging", MergeMode: "pr"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.CreateTaskRepos(ctx, upperID, []store.TaskRepo{
-		{Repo: "api", WorktreePath: apiRoot, TargetBranch: "posse/lower", LandingMode: "pr"},
-		{Repo: "worker", WorktreePath: workerRoot, TargetBranch: "main", LandingMode: "pr"},
+		{Repo: "api", WorktreePath: apiRoot, TargetBranch: "posse/lower", MergeMode: "pr"},
+		{Repo: "worker", WorktreePath: workerRoot, TargetBranch: "main", MergeMode: "pr"},
 	}); err != nil {
 		t.Fatal(err)
 	}

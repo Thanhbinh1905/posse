@@ -23,7 +23,7 @@ func TestFailedGroupAttemptRetriesAfterLeadStarts(t *testing.T) {
 
 func runFailedGroupAttemptRetriesAfterLeadStarts(t *testing.T, trigger string) {
 	t.Helper()
-	f := newRiderTabsFixture(t)
+	f := newWorkerTabsFixture(t)
 	t.Cleanup(func() { stopIsolatedFinalizers(t, f.root) })
 	startsLog := filepath.Join(f.root, "failed-group-starts.log")
 	failPrompts := filepath.Join(f.root, "fail-recovery-prompts")
@@ -37,7 +37,7 @@ func runFailedGroupAttemptRetriesAfterLeadStarts(t *testing.T, trigger string) {
   *) printf 'lead\n' >> "$POSSE_TEST_ROOT/failed-group-starts.log" ;;
 esac
 `
-	// Fail only automatic recovery's prompt delivery. The initial Rider and
+	// Fail only automatic recovery's prompt delivery. The initial Worker and
 	// later retry use the healthy harness.
 	script := strings.Replace(string(agent), "#!/bin/sh\n", "#!/bin/sh\n"+instrument, 1)
 	script = strings.Replace(script,
@@ -77,12 +77,12 @@ esac
 		return state
 	}
 
-	before := f.ride(t, "t1", "Real failed recovery", "real-failed-recovery")
+	before := f.start(t, "t1", "Real failed recovery", "real-failed-recovery")
 	if got := workerStarts(); got != 1 {
-		t.Fatalf("initial Rider starts=%d, want 1", got)
+		t.Fatalf("initial Worker starts=%d, want 1", got)
 	}
 	preservedPath := filepath.Join(before.WorktreePath, "review-held-work.txt")
-	if err := os.WriteFile(preservedPath, []byte("uncommitted Rider work\n"), 0o600); err != nil {
+	if err := os.WriteFile(preservedPath, []byte("uncommitted Worker work\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	branchBefore := gitTest(t, f.env, f.repo, "rev-parse", before.Branch)
@@ -90,7 +90,7 @@ esac
 	if err := os.WriteFile(failPrompts, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	closeRiderGroup(t, f)
+	closeWorkerGroup(t, f)
 	output := runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
 	state := readRecovery()
 	if state.Status != "pending" || state.Attempts != 1 || state.NextAttemptAt <= time.Now().UnixMilli() {
@@ -133,9 +133,9 @@ esac
 	f.leadEnv = setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
 	f.leadEnv = setEnv(f.leadEnv, "HERDR_TAB_ID", lead.TabID)
 	f.leadEnv = setEnv(f.leadEnv, "HERDR_WORKSPACE_ID", lead.WorkspaceID)
-	healthy := f.ride(t, "t2", "Healthy new Rider", "healthy-new-rider")
+	healthy := f.start(t, "t2", "Healthy new Worker", "healthy-new-worker")
 	if healthy.Launches != 1 || healthy.State != store.StateWorking || healthy.AgentServerStartedAt != f.snapshot(t).ServerStartedAt || time.Now().UnixMilli() >= retryAt {
-		t.Fatalf("new Rider did not start healthy in the current generation during backoff: %#v", healthy)
+		t.Fatalf("new Worker did not start healthy in the current generation during backoff: %#v", healthy)
 	}
 	state = readRecovery()
 	if state.Status != "pending" || state.Attempts != 1 || state.NextAttemptAt != retryAt {
@@ -156,15 +156,15 @@ esac
 	current := f.task(t, "t1")
 	state = readRecovery()
 	if current.State != store.StateWorking || current.Launches != before.Launches+2 || state.Status != "recovered" || state.Attempts != 2 || workerStarts() < 4 || leadStarts() != 1 {
-		t.Fatalf("%s did not recover the pending Rider once after backoff: before=%#v current=%#v recovery=%#v worker_starts=%d lead_starts=%d", trigger, before, current, state, workerStarts(), leadStarts())
+		t.Fatalf("%s did not recover the pending Worker once after backoff: before=%#v current=%#v recovery=%#v worker_starts=%d lead_starts=%d", trigger, before, current, state, workerStarts(), leadStarts())
 	}
 	if currentHealthy := f.task(t, "t2"); currentHealthy.Launches != healthy.Launches || currentHealthy.AgentName != healthy.AgentName || workerStarts() != 4 {
-		t.Fatalf("deferred group recovery restarted healthy new Rider: before=%#v after=%#v worker_starts=%d", healthy, currentHealthy, workerStarts())
+		t.Fatalf("deferred group recovery restarted healthy new Worker: before=%#v after=%#v worker_starts=%d", healthy, currentHealthy, workerStarts())
 	}
 	healthySnapshot := f.snapshot(t)
 	healthyPane, found := herdr.FindPane(healthySnapshot.Panes, healthy.PaneID, healthy.PaneLabel)
 	if !found || healthyPane.Agent == "" || healthyPane.AgentStatus == "exited" || healthyPane.AgentStatus == "stopped" {
-		t.Fatalf("deferred group recovery stopped healthy Rider agent: pane=%#v found=%v", healthyPane, found)
+		t.Fatalf("deferred group recovery stopped healthy Worker agent: pane=%#v found=%v", healthyPane, found)
 	}
 	if trigger == "plugin-event" {
 		output = runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
@@ -177,16 +177,16 @@ esac
 		t.Fatalf("second recovery trigger duplicated the completed retry: trigger=%s current=%#v after=%#v starts=%d output=%s", trigger, current, after, workerStarts(), output)
 	}
 	if afterHealthy := f.task(t, "t2"); afterHealthy.Launches != healthy.Launches || afterHealthy.AgentName != healthy.AgentName {
-		t.Fatalf("second recovery trigger restarted healthy new Rider: before=%#v after=%#v", healthy, afterHealthy)
+		t.Fatalf("second recovery trigger restarted healthy new Worker: before=%#v after=%#v", healthy, afterHealthy)
 	}
-	if current.MountID != before.MountID || current.Branch != before.Branch {
+	if current.SandboxID != before.SandboxID || current.Branch != before.Branch {
 		t.Fatalf("retry changed held work identity: before=%#v current=%#v", before, current)
 	}
 	work, err := os.ReadFile(preservedPath)
-	if err != nil || string(work) != "uncommitted Rider work\n" || gitTest(t, f.env, f.repo, "rev-parse", before.Branch) != branchBefore {
-		t.Fatalf("retry did not preserve Rider work: file=%q err=%v", work, err)
+	if err != nil || string(work) != "uncommitted Worker work\n" || gitTest(t, f.env, f.repo, "rev-parse", before.Branch) != branchBefore {
+		t.Fatalf("retry did not preserve Worker work: file=%q err=%v", work, err)
 	}
 	if locks := gitTest(t, f.env, f.repo, "worktree", "list", "--porcelain"); !strings.Contains(locks, "locked posse: held by t1") {
-		t.Fatalf("Mount lock lost after retry: %s", locks)
+		t.Fatalf("Sandbox lock lost after retry: %s", locks)
 	}
 }

@@ -42,11 +42,11 @@ func (s *Service) retitle(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if task.Type != "ship" || task.LandingMode != "pr" {
-		return axi.Failure("retitle_refused", "only PR-mode Ship Tasks can have a publish title", false)
+	if task.Type != "change" || task.MergeMode != "pr" {
+		return axi.Failure("retitle_refused", "only PR-mode Change Tasks can have a publish title", false)
 	}
-	if task.State == store.StateLanded || task.State == store.StateReported || task.State == store.StateTornDown {
-		return axi.Failure("retitle_refused", "a completed Task cannot be retitled", false, "Retitle an open PR before the Task Lands")
+	if task.State == store.StateMerged || task.State == store.StateReported || task.State == store.StateTornDown {
+		return axi.Failure("retitle_refused", "a completed Task cannot be retitled", false, "Retitle an open PR before the Task Merges")
 	}
 	if task.PRTitle != title {
 		if err := db.SetTaskPRTitle(ctx.Context, task.ID, title); err != nil {
@@ -56,6 +56,6 @@ func (s *Service) retitle(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{
 		{Key: "task", Value: taskIDString(task.Seq)},
 		{Key: "pr_title", Value: title},
-		{Key: "help", Value: []any{"The Rider's next `posse publish` will use this title"}},
+		{Key: "help", Value: []any{"The Worker's next `posse publish` will use this title"}},
 	})
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func TestPublishReusesPRAfterStackedRetarget(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	prURL := "https://github.com/acme/shop/pull/17"
 	upper, lower, targetFile := prepareStackedPublishFixture(t, fixture, prURL)
 	openPRs, err := json.Marshal([]map[string]string{{"url": prURL, "headRefName": upper.Branch, "headRefOid": fixture.headSHA}})
@@ -91,9 +91,9 @@ func TestPublishReusesMergeRequestAfterStackedRetarget(t *testing.T) {
 	}
 }
 
-func prepareStackedPublishFixture(t *testing.T, fixture *prLandingFixture, prURL string) (upper, lower store.Task, targetFile string) {
+func prepareStackedPublishFixture(t *testing.T, fixture *prMergeFixture, prURL string) (upper, lower store.Task, targetFile string) {
 	t.Helper()
-	attachPRFixtureMount(t, fixture)
+	attachPRFixtureSandbox(t, fixture)
 	ctx := context.Background()
 	const lowerBranch = "posse/lower"
 	const targetBranch = "staging"
@@ -112,7 +112,7 @@ func prepareStackedPublishFixture(t *testing.T, fixture *prLandingFixture, prURL
 		t.Fatal(err)
 	}
 	lowerID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
-		Seq: 2, Type: "ship", Title: "Lower Task", LandingMode: "pr",
+		Seq: 2, Type: "change", Title: "Lower Task", MergeMode: "pr",
 		Branch: lowerBranch, BaseRef: "refs/remotes/origin/main", TargetBranch: targetBranch,
 	})
 	if err != nil {

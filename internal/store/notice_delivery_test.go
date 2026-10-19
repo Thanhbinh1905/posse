@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestNoticeDeliveryOwnershipAndExactRetry(t *testing.T) {
+func TestNoticeDeliveryOwnerchangeAndExactRetry(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -241,7 +241,7 @@ func TestRejectedPrintedReceiptReopensAcknowledgedNotice(t *testing.T) {
 	}
 }
 
-func TestAckedUncertainReceiptOwnershipSurvivesRebuild(t *testing.T) {
+func TestAckedUncertainReceiptOwnerchangeSurvivesRebuild(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -530,7 +530,7 @@ func TestReplacementSessionHoldsPrintedBatchAsUncertain(t *testing.T) {
 	}
 }
 
-func TestNoticeDeliveryUncertaintyAndRebuildPreserveOwnership(t *testing.T) {
+func TestNoticeDeliveryUncertaintyAndRebuildPreserveOwnerchange(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)

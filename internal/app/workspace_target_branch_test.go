@@ -25,7 +25,7 @@ func TestWorkspaceTaskFreezesMemberTargetAndStartsFromBriefBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	configText := `[defaults]
-landing_mode = "local"
+merge_mode = "local"
 target_branch = "staging"
 `
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
@@ -53,7 +53,7 @@ target_branch = "staging"
 		t.Fatal(err)
 	}
 	service := testService(home, herdr.NewFake())
-	brief := dispatch.Brief{Type: "ship", Repos: []string{"worker"}, BaseByRepo: map[string]string{"worker": "staging"}}
+	brief := dispatch.Brief{Type: "change", Repos: []string{"worker"}, BaseByRepo: map[string]string{"worker": "staging"}}
 	members, _, err := service.planTaskMembers(ctx, db, project, cfg, brief, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ target_branch = "staging"
 	if len(members) != 1 || members[0].TargetBranch != "staging" || members[0].BaseRef != "refs/remotes/origin/staging" {
 		t.Fatalf("workspace branch plan = %+v", members)
 	}
-	taskID, _, err := createTaskWithSequence(ctx, db, project, home, store.Task{Type: "ship", Title: "Stack on staging", ShortName: "stack-staging", LandingMode: "local"})
+	taskID, _, err := createTaskWithSequence(ctx, db, project, home, store.Task{Type: "change", Title: "Stack on staging", ShortName: "stack-staging", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ target_branch = "staging"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.acquireWorkspaceMount(ctx, db, project, task, members, home, "warm", nil, "legacy"); err != nil {
+	if _, err := service.acquireWorkspaceSandbox(ctx, db, project, task, members, home, "warm", nil, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	task, err = db.TaskByID(ctx, project.ID, taskID)

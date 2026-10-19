@@ -44,8 +44,8 @@ func ensureNoMistakesInitialized(ctx context.Context, root string) error {
 }
 
 func isNoMistakesPolicySetting(key string) bool {
-	return key == "defaults.landing_mode" || key == "defaults.review" ||
-		strings.HasPrefix(key, "repositories.") && (strings.HasSuffix(key, ".landing_mode") || strings.HasSuffix(key, ".review"))
+	return key == "defaults.merge_mode" || key == "defaults.review" ||
+		strings.HasPrefix(key, "repositories.") && (strings.HasSuffix(key, ".merge_mode") || strings.HasSuffix(key, ".review"))
 }
 
 func noMistakesDeprecatedWarning(setting string) axi.Object {

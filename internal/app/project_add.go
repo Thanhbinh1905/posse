@@ -208,7 +208,7 @@ func (s *Service) projectRepoRows(ctx context.Context, db *store.DB, project sto
 		targetBranch, _ := configTargetBranch(cfg, repo.Name, repo.DefaultBranch)
 		rows = append(rows, axi.Object{
 			{Key: "name", Value: repo.Name}, {Key: "default_branch", Value: repo.DefaultBranch}, {Key: "target_branch", Value: targetBranch},
-			{Key: "remote", Value: shown}, {Key: "landing_mode", Value: savedMemberLandingMode(cfg, repo.Name, remote)},
+			{Key: "remote", Value: shown}, {Key: "merge_mode", Value: savedMemberMergeMode(cfg, repo.Name, remote)},
 			{Key: "status", Value: repo.Status}, {Key: "checkout_status", Value: checkoutStatus},
 			{Key: "checkout_checked_at", Value: checkedAt}, {Key: "checkout_reason", Value: watch.CheckoutReason},
 		})

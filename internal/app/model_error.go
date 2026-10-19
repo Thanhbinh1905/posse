@@ -163,7 +163,7 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 			return nil, err
 		}
 		if previous.Launch == task.Launches && previous.Status == "active" {
-			_, err := db.FinishModelErrorEpisode(ctx, task.ID, previous.Episode, "resolved", "Rider completed a turn without a recognized model error", nil, currentTime())
+			_, err := db.FinishModelErrorEpisode(ctx, task.ID, previous.Episode, "resolved", "Worker completed a turn without a recognized model error", nil, currentTime())
 			return nil, err
 		}
 		return nil, nil
@@ -232,16 +232,16 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 	}
 	if err != nil {
 		status := "blocked"
-		reason := "Automatic continue was withheld because the Rider pane was not safe to prompt"
+		reason := "Automatic continue was withheld because the Worker pane was not safe to prompt"
 		var failure *axi.Error
 		if errors.As(err, &failure) && failure.Code == "pane_focused" {
-			reason = "Automatic continue was withheld because the Rider pane is focused"
+			reason = "Automatic continue was withheld because the Worker pane is focused"
 		} else if errors.As(err, &failure) && failure.Code == "agent_blocked" {
-			reason = "Automatic continue was withheld because the Rider is blocked"
+			reason = "Automatic continue was withheld because the Worker is blocked"
 		} else if errors.As(err, &failure) && failure.Code == "model_error_message_queued" {
 			reason = "Automatic continue was withheld because a Lead instruction was queued"
 		} else if errors.As(err, &failure) && failure.Code == "model_error_not_idle" {
-			reason = "Automatic continue was withheld because the Rider was no longer idle"
+			reason = "Automatic continue was withheld because the Worker was no longer idle"
 		} else if errors.As(err, &failure) && failure.Code == "model_error_task_not_working" {
 			reason = "Automatic continue was withheld because the Task is no longer working"
 		} else if ctx.Err() != nil {
@@ -273,11 +273,11 @@ func (s *Service) promptModelErrorContinue(ctx context.Context, db *store.DB, ta
 			return err
 		}
 		if currentTask.State != store.StateWorking || currentTask.Launches != task.Launches || currentTask.PaneID != task.PaneID || currentTask.PaneLabel != task.PaneLabel || currentTask.HerdrWorkspaceID != task.HerdrWorkspaceID {
-			return axi.Failure("model_error_task_not_working", "Task state, launch, or Rider ownership changed during model-error backoff", false)
+			return axi.Failure("model_error_task_not_working", "Task state, launch, or Worker ownership changed during model-error backoff", false)
 		}
 		current, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 		if !found || current.PaneID != pane.PaneID || current.Agent != pane.Agent || (current.AgentStatus != "idle" && current.AgentStatus != "done") {
-			return axi.Failure("model_error_not_idle", "Rider is no longer at the end of an idle turn", false)
+			return axi.Failure("model_error_not_idle", "Worker is no longer at the end of an idle turn", false)
 		}
 		currentEpisode, err := db.TaskModelErrorEpisode(ctx, task.ID)
 		if err != nil {
@@ -288,7 +288,7 @@ func (s *Service) promptModelErrorContinue(ctx context.Context, db *store.DB, ta
 		}
 		_, err = db.OldestQueuedMessage(ctx, task.ID)
 		if err == nil {
-			return axi.Failure("model_error_message_queued", "a Lead instruction is queued for this Rider", false)
+			return axi.Failure("model_error_message_queued", "a Lead instruction is queued for this Worker", false)
 		}
 		if !store.IsNotFound(err) {
 			return err

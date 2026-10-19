@@ -164,26 +164,26 @@ func TestPathLeaseIsAtomicAcrossConcurrentProjects(t *testing.T) {
 	}
 }
 
-func TestLegacyMountOwnershipBecomesAPathLease(t *testing.T) {
+func TestLegacySandboxOwnerchangeBecomesAPathLease(t *testing.T) {
 	ctx := context.Background()
 	db, projectA, projectB := resourceDB(t)
-	taskID, err := db.CreateTask(ctx, projectA.ID, store.Task{Seq: 1, Type: "ship", Title: "Mounted writer"})
+	taskID, err := db.CreateTask(ctx, projectA.ID, store.Task{Seq: 1, Type: "change", Title: "Mounted writer"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mount, err := db.AcquireMount(ctx, projectA.ID, taskID, filepath.Join(t.TempDir(), "mounts"))
+	sandbox, err := db.AcquireSandbox(ctx, projectA.ID, taskID, filepath.Join(t.TempDir(), "sandboxes"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	manager := NewManager(db)
-	_, err = manager.AcquirePath(ctx, mount.Path, store.ResourceLeaseRequest{OwnerProjectID: projectB.ID, Owner: "overlapping writer", SourceKey: "overlapping-writer"})
+	_, err = manager.AcquirePath(ctx, sandbox.Path, store.ResourceLeaseRequest{OwnerProjectID: projectB.ID, Owner: "overlapping writer", SourceKey: "overlapping-writer"})
 	var conflict *store.ResourceLeaseConflict
-	if !errors.As(err, &conflict) || conflict.Lease.MountID != mount.ID {
-		t.Fatalf("path claim overlapping a legacy Mount = %v, want Mount lease conflict", err)
+	if !errors.As(err, &conflict) || conflict.Lease.SandboxID != sandbox.ID {
+		t.Fatalf("path claim overlapping a legacy Sandbox = %v, want Sandbox lease conflict", err)
 	}
 	leases, err := db.ResourceLeases(ctx, projectA.ID)
-	if err != nil || len(leases) != 1 || leases[0].MountID != mount.ID {
-		t.Fatalf("persisted Mount leases = %#v, %v", leases, err)
+	if err != nil || len(leases) != 1 || leases[0].SandboxID != sandbox.ID {
+		t.Fatalf("persisted Sandbox leases = %#v, %v", leases, err)
 	}
 }
 
@@ -226,11 +226,11 @@ func TestGitRefLeasesShareCommonDirAndAllowIndependentBranches(t *testing.T) {
 func TestIntentCannotFinishUntilItsResourceCustodyIsReconciled(t *testing.T) {
 	ctx := context.Background()
 	db, project, _ := resourceDB(t)
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "Land with a lease"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Merge with a lease"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.StartIntent(ctx, project.ID, taskID, "land", "merge", "{}", os.Getpid()); err != nil {
+	if err := db.StartIntent(ctx, project.ID, taskID, "merge", "merge", "{}", os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	intent, err := db.IntentByTask(ctx, taskID)
@@ -238,7 +238,7 @@ func TestIntentCannotFinishUntilItsResourceCustodyIsReconciled(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = NewManager(db).AcquirePath(ctx, filepath.Join(t.TempDir(), "root"), store.ResourceLeaseRequest{
-		OwnerProjectID: project.ID, OwnerTaskID: taskID, Owner: "Land t1", SourceKey: "land-intent-path", IntentID: intent.ID,
+		OwnerProjectID: project.ID, OwnerTaskID: taskID, Owner: "Merge t1", SourceKey: "merge-intent-path", IntentID: intent.ID,
 	})
 	if err != nil {
 		t.Fatal(err)

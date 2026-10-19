@@ -123,7 +123,7 @@ func newGitFetchTestWorktree(t *testing.T) (string, string) {
 	t.Helper()
 	root := newGitFetchTestRepo(t)
 	worktree := filepath.Join(t.TempDir(), "worktree")
-	command := exec.Command("git", "-C", root, "worktree", "add", "--quiet", "-b", "rider", worktree, "HEAD")
+	command := exec.Command("git", "-C", root, "worktree", "add", "--quiet", "-b", "worker", worktree, "HEAD")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v\n%s", err, output)
 	}

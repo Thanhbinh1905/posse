@@ -8,7 +8,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func riderTabLabel(name string, last bool) string {
+func treeTabLabel(name string, last bool) string {
 	branch := "├─"
 	if last {
 		branch = "└─"
@@ -39,7 +39,7 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 	if ctx.Err() != nil {
 		return
 	}
-	s.groupRiderWorkspaces(ctx, snapshot, project, tasks)
+	s.groupWorkerWorkspaces(ctx, snapshot, project, tasks)
 	labels, rows := projectTabPresentation(snapshot, project, tasks)
 	for _, tab := range snapshot.Tabs {
 		if ctx.Err() != nil {
@@ -86,7 +86,7 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 }
 
 // projectTabPresentation only claims tabs identified by a Project Lead pane or a
-// Task's labeled pane. Rider order follows the tab array from the snapshot.
+// Task's labeled pane. Worker order follows the tab array from the snapshot.
 func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) (map[string]string, map[string]string) {
 	labels := make(map[string]string)
 	rows := make(map[string]string)
@@ -122,7 +122,7 @@ func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, task
 		}
 	}
 
-	var riderTabs []struct {
+	var workerTabs []struct {
 		tab  herdr.Tab
 		name string
 	}
@@ -146,15 +146,15 @@ func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, task
 			}
 			continue
 		}
-		riderTabs = append(riderTabs, struct {
+		workerTabs = append(workerTabs, struct {
 			tab  herdr.Tab
 			name string
 		}{tab: tab, name: taskDisplayName(candidate.task)})
 	}
-	for index, rider := range riderTabs {
-		labels[rider.tab.TabID] = rider.name
-		if pane, found := findTaskPane(snapshot.Panes, owners[rider.tab.TabID].task); found && pane.TabID == rider.tab.TabID {
-			rows[pane.PaneID] = riderTabLabel(rider.name, index == len(riderTabs)-1)
+	for index, worker := range workerTabs {
+		labels[worker.tab.TabID] = worker.name
+		if pane, found := findTaskPane(snapshot.Panes, owners[worker.tab.TabID].task); found && pane.TabID == worker.tab.TabID {
+			rows[pane.PaneID] = treeTabLabel(worker.name, index == len(workerTabs)-1)
 		}
 	}
 	return labels, rows

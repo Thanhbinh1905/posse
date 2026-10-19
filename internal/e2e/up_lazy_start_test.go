@@ -89,7 +89,7 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 		"git":    gitScript,
 		"gh":     "#!/bin/sh\nprintf '%s\\tgh %s\\n' \"${HERDR_PANE_ID:-}\" \"$*\" >> \"$POSSE_TEST_FORGE_LOG\"\nexit 1\n",
 		"glab":   "#!/bin/sh\nprintf '%s\\tglab %s\\n' \"${HERDR_PANE_ID:-}\" \"$*\" >> \"$POSSE_TEST_FORGE_LOG\"\nexit 1\n",
-		"claude": "#!/bin/sh\nherdr pane report-agent \"$HERDR_PANE_ID\" --source posse.test --agent claude --state idle >/dev/null 2>&1 || true\ncase \"$PWD/\" in \"$POSSE_HOME/remuda/\"*) while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.test --agent claude --state working >/dev/null 2>&1 || true; done ;; *) printf 'started\\n' > \"$POSSE_TEST_LEAD_STARTED\"; while IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$POSSE_TEST_ROOT/lead.log\"; done ;; esac\n",
+		"claude": "#!/bin/sh\nherdr pane report-agent \"$HERDR_PANE_ID\" --source posse.test --agent claude --state idle >/dev/null 2>&1 || true\ncase \"$PWD/\" in \"$POSSE_HOME/pool/\"*) while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.test --agent claude --state working >/dev/null 2>&1 || true; done ;; *) printf 'started\\n' > \"$POSSE_TEST_LEAD_STARTED\"; while IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$POSSE_TEST_ROOT/lead.log\"; done ;; esac\n",
 	} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
@@ -149,7 +149,7 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte("[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"pr\"\npr_poll = \"1ms\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte("[lead]\nkind = \"claude\"\n\n[defaults]\nmerge_mode = \"pr\"\npr_poll = \"1ms\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,7 +232,7 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 		return err == nil && state.CheckoutStatus == "fetch_failed" && state.CheckoutCheckedAt > 0
 	}) {
 		state, _ := db.ProjectRepoWatchState(context.Background(), project.ID, "offline")
-		t.Fatalf("Lookout did not record the offline Member's checkout status: %+v", state)
+		t.Fatalf("Watch did not record the offline Member's checkout status: %+v", state)
 	}
 	show := runPosse(t, binary, workspaceRoot, env, "project", "show", "stack")
 	if !strings.Contains(show, "fetch_failed") || !strings.Contains(show, "could not fetch origin") {
@@ -247,22 +247,22 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 			t.Fatalf("offline Member fetch failure produced root_behind: %#v", notice)
 		}
 	}
-	t.Log("Lookout recorded the offline Member fetch failure without a false root_behind Notice")
+	t.Log("Watch recorded the offline Member fetch failure without a false root_behind Notice")
 
-	brief := filepath.Join(root, "good-member-ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: fix(good): verify lazy member fetch\ndone_when: the reachable Member Task starts\nrepos: [good]\n---\nChange only the reachable Member.\n"), 0o600); err != nil {
+	brief := filepath.Join(root, "good-member-change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: fix(good): verify lazy member fetch\ndone_when: the reachable Member Task starts\nrepos: [good]\n---\nChange only the reachable Member.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	leadEnv := setEnv(callerEnv, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	before, _ := os.ReadFile(gitLog)
-	if output := runPosse(t, binary, workspaceRoot, leadEnv, "ride", "--brief", brief, "--name", "verify-lazy-member"); !strings.Contains(output, "task: t1") {
-		t.Fatalf("Ship Task on the reachable Member did not start: %s", output)
+	if output := runPosse(t, binary, workspaceRoot, leadEnv, "start", "--brief", brief, "--name", "verify-lazy-member"); !strings.Contains(output, "task: t1") {
+		t.Fatalf("Change Task on the reachable Member did not start: %s", output)
 	}
 	if !waitForCondition(10*time.Second, func() bool {
 		return leadMemberCommands(gitLog, before, workspace.RootPane.PaneID, workspaceRoot, "good")
 	}) {
 		calls, _ := os.ReadFile(gitLog)
-		t.Fatalf("Ship Task did not fetch and resolve only its reachable Member: %s", calls)
+		t.Fatalf("Change Task did not fetch and resolve only its reachable Member: %s", calls)
 	}
 	calls, err := os.ReadFile(gitLog)
 	if err != nil {
@@ -270,8 +270,8 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 	}
 	for _, line := range appendedLogLines(calls, before) {
 		if pane, event, found := strings.Cut(line, "\t"); found && pane == workspace.RootPane.PaneID && event == "fetch" && strings.Contains(line, "offline") {
-			t.Fatalf("Ship Task touched the unrequested offline Member: %s", line)
+			t.Fatalf("Change Task touched the unrequested offline Member: %s", line)
 		}
 	}
-	t.Log("Ship Task fetched and resolved only the requested reachable Member")
+	t.Log("Change Task fetched and resolved only the requested reachable Member")
 }

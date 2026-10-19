@@ -27,9 +27,9 @@ import (
 func TestClaudeStopOverlapDeadlineAndGracefulStop(t *testing.T) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
-	// The test owns the poll claim below, so stop the independent Lookout
+	// The test owns the poll claim below, so stop the independent Watch
 	// before claiming it to avoid racing its startup poll.
-	stopBackgroundLookout(t, f)
+	stopBackgroundWatch(t, f)
 	ctx := context.Background()
 	// Hold a genuine poll claim as another maintenance owner. Stop renewals
 	// must neither overwrite it nor release another process's claim.
@@ -118,7 +118,7 @@ func TestClaudeStopOverlapDeadlineAndGracefulStop(t *testing.T) {
 	if err := f.db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts WHERE project_id=?`, f.project.ID).Scan(&receipt); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, f.binary, f.repo, f.leadEnv, "lookout", "--receipt", receipt, "--receipt-outcome", "accepted")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "watch", "--receipt", receipt, "--receipt-outcome", "accepted")
 	if output, err := newHook("600").CombinedOutput(); err == nil || !strings.Contains(string(output), "Posse Notice wait renewed") {
 		t.Fatalf("explicit resolution did not rearm the next Stop: %v %s", err, output)
 	}
@@ -191,7 +191,7 @@ func realClaudeEnv(f *prLifecycleFixture, server string) []string {
 	return env
 }
 
-func TestRealClaudeLookoutBackgroundLimit(t *testing.T) {
+func TestRealClaudeWatchBackgroundLimit(t *testing.T) {
 	claude, err := exec.LookPath("claude")
 	if err != nil {
 		t.Skip("real Claude executable is not installed")
@@ -201,7 +201,7 @@ func TestRealClaudeLookoutBackgroundLimit(t *testing.T) {
 	backgrounded := make(chan struct{}, 1)
 	server := claudeLocalModel(t, func(call int, body string) []map[string]any {
 		if call == 1 {
-			return []map[string]any{{"type": "tool_use", "id": "limit_probe", "name": "Bash", "input": map[string]any{"command": "exec " + shellQuote(f.binary) + " lookout --timeout 5000", "run_in_background": true, "timeout": 1000, "description": "Observe Lookout at the background ceiling"}}}
+			return []map[string]any{{"type": "tool_use", "id": "limit_probe", "name": "Bash", "input": map[string]any{"command": "exec " + shellQuote(f.binary) + " watch --timeout 5000", "run_in_background": true, "timeout": 1000, "description": "Observe Watch at the background ceiling"}}}
 		}
 		if call == 2 {
 			backgrounded <- struct{}{}
@@ -239,7 +239,7 @@ func TestRealClaudeLookoutBackgroundLimit(t *testing.T) {
 	select {
 	case <-backgrounded:
 	case <-ctx.Done():
-		t.Fatal("Claude did not start its background Lookout")
+		t.Fatal("Claude did not start its background Watch")
 	}
 	for {
 		select {
@@ -248,7 +248,7 @@ func TestRealClaudeLookoutBackgroundLimit(t *testing.T) {
 				t.Fatal("Claude exited before reporting the background deadline")
 			}
 			if strings.Contains(line, "was stopped after reaching its background time limit") {
-				t.Log("real Claude: 5s Lookout stopped by the configured 1000ms background deadline; no harness clock or code replacement")
+				t.Log("real Claude: 5s Watch stopped by the configured 1000ms background deadline; no harness clock or code replacement")
 				t.Log(line)
 				return
 			}
@@ -265,7 +265,7 @@ func TestRealClaudeStopRenewsAndDeliversPendingNotice(t *testing.T) {
 	}
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
-	plugin := filepath.Join(f.home, "projects", "shop", "lead-claude-lookout")
+	plugin := filepath.Join(f.home, "projects", "shop", "lead-claude-watch")
 	hookFile := filepath.Join(plugin, "hooks", "hooks.json")
 	// Shorten only Posse's wait, leaving the real harness lifecycle unchanged.
 	hooks := readTestFile(t, hookFile)

@@ -19,13 +19,13 @@ import (
 func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.landing_mode", "pr")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
 	brief := filepath.Join(f.root, "choice.md")
-	text := "---\ntype: ship\ntitle: Scoped choice\ndone_when: checked\nlanding_mode: local\nreview: none\n---\nKeep the scope small.\n"
+	text := "---\ntype: change\ntitle: Scoped choice\ndone_when: checked\nmerge_mode: local\nreview: none\n---\nKeep the scope small.\n"
 	if err := os.WriteFile(brief, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, output := runReviewIdentityCLI(t, f, "ride", "--brief", brief, "--name", "scoped-choice", "--profile", "author")
+	code, output := runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "scoped-choice", "--profile", "author")
 	if code != 1 || !strings.Contains(output, "brief_invalid") {
 		t.Fatalf("unapproved preference: %d %s", code, output)
 	}
@@ -34,7 +34,7 @@ func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 		t.Fatalf("refusal created Tasks: %#v %v", tasks, err)
 	}
 	const quote = "  Use local delivery and no review for this Task only.  "
-	code, output = runReviewIdentityCLI(t, f, "ride", "--brief", brief, "--name", "scoped-choice", "--profile", "author", "--user-approved", quote)
+	code, output = runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "scoped-choice", "--profile", "author", "--user-approved", quote)
 	if code != 0 {
 		t.Fatalf("scoped User choice refused: %d %s", code, output)
 	}
@@ -43,7 +43,7 @@ func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 	if err != nil || plan == nil || plan.Delivery != "local" || plan.Review != "none" || !strings.Contains(task.PlanJSON, quote) {
 		t.Fatalf("choice/provenance lost: %s %v", task.PlanJSON, err)
 	}
-	if task.AutonomyLand != "ask" || task.AutonomyReview != "ask" {
+	if task.AutonomyMerge != "ask" || task.AutonomyReview != "ask" {
 		t.Fatalf("preference escalated grants: %#v", task)
 	}
 }
@@ -51,7 +51,7 @@ func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.landing_mode", "pr")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
 	client := herdr.NewWithEnv("herdr", f.env)
 	before, err := client.Snapshot(context.Background())
 	if err != nil {
@@ -62,11 +62,11 @@ func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 		name, fields string
 		approval     []string
 	}{
-		{"lighter delivery", "landing_mode: local\n", nil},
+		{"lighter delivery", "merge_mode: local\n", nil},
 		{"lighter review", "review: none\n", nil},
-		{"blank quote", "landing_mode: local\n", []string{"--user-approved", " "}},
+		{"blank quote", "merge_mode: local\n", []string{"--user-approved", " "}},
 		{"unscoped quote", "", []string{"--user-approved", "Unscoped consent"}},
-		{"merge escalation", "landing_mode: local\nautonomy: { land: auto }\n", []string{"--user-approved", "Use local delivery"}},
+		{"merge escalation", "merge_mode: local\nautonomy: { merge: auto }\n", []string{"--user-approved", "Use local delivery"}},
 		{"decision escalation", "review: none\nautonomy: { review: lead }\n", []string{"--user-approved", "Skip review"}},
 		{"executable escalation", "gate: [evil]\n", []string{"--user-approved", "Skip review"}},
 		{"discard escalation", "discard: true\n", []string{"--user-approved", "Skip review"}},
@@ -74,15 +74,15 @@ func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 		{"repo branch map", "target: {api: main}\n", nil},
 		{"missing branch", "base: main\ntarget: missing\n", nil},
 		{"unsupported execution", "execution: in-place\n", nil},
-		{"uninitialized no-mistakes", "landing_mode: no-mistakes\n", nil},
+		{"uninitialized no-mistakes", "merge_mode: no-mistakes\n", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			brief := filepath.Join(f.root, "refused.md")
-			text := "---\ntype: ship\ntitle: Refused choice\ndone_when: checked\n" + tc.fields + "---\nIntent stays unchanged.\n"
+			text := "---\ntype: change\ntitle: Refused choice\ndone_when: checked\n" + tc.fields + "---\nIntent stays unchanged.\n"
 			if err := os.WriteFile(brief, []byte(text), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			args := append([]string{"ride", "--brief", brief, "--name", "refused-choice", "--profile", "author"}, tc.approval...)
+			args := append([]string{"start", "--brief", brief, "--name", "refused-choice", "--profile", "author"}, tc.approval...)
 			if code, output := runReviewIdentityCLI(t, f, args...); code == 0 {
 				t.Fatalf("incompatible choice admitted: %s", output)
 			}
@@ -94,9 +94,9 @@ func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 			if err != nil || len(intents) != 0 {
 				t.Fatalf("refusal created intents: %#v %v", intents, err)
 			}
-			mounts, err := f.db.Mounts(context.Background(), f.project.ID)
-			if err != nil || len(mounts) != 0 {
-				t.Fatalf("refusal allocated Mounts: %#v %v", mounts, err)
+			sandboxes, err := f.db.Sandboxes(context.Background(), f.project.ID)
+			if err != nil || len(sandboxes) != 0 {
+				t.Fatalf("refusal allocated Sandboxes: %#v %v", sandboxes, err)
 			}
 			if got := gitTest(t, f.env, f.repo, "for-each-ref", "--format=%(refname) %(objectname)"); got != branches {
 				t.Fatalf("refusal changed Git refs: %s", got)
@@ -112,10 +112,10 @@ func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 	}
 	gitTest(t, f.env, f.repo, "remote", "remove", "origin")
 	brief := filepath.Join(f.root, "no-origin.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: No origin\ndone_when: checked\nlanding_mode: pr\n---\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: No origin\ndone_when: checked\nmerge_mode: pr\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runReviewIdentityCLI(t, f, "ride", "--brief", brief, "--name", "no-origin", "--profile", "author"); code != 1 || !strings.Contains(output, "without origin") {
+	if code, output := runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "no-origin", "--profile", "author"); code != 1 || !strings.Contains(output, "without origin") {
 		t.Fatalf("PR without Git remote: %d %s", code, output)
 	}
 }
@@ -133,10 +133,10 @@ func TestAuthorizedFeatureBranchChoiceKeepsDefaultAndSurvivesRestart(t *testing.
 	gitTest(t, f.env, f.repo, "checkout", "main")
 	main := gitTest(t, f.env, f.repo, "rev-parse", "main")
 	brief := filepath.Join(f.root, "feature.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Release choice\ndone_when: checked\nbase: release/next\ntarget: release/next\n---\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Release choice\ndone_when: checked\nbase: release/next\ntarget: release/next\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runReviewIdentityCLI(t, f, "ride", "--brief", brief, "--name", "release-choice", "--profile", "author", "--user-approved", "Use the release branch for this Task"); code != 0 {
+	if code, output := runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "release-choice", "--profile", "author", "--user-approved", "Use the release branch for this Task"); code != 0 {
 		t.Fatalf("feature branch choice: %d %s", code, output)
 	}
 	task := f.mustTask(t, "t1")
@@ -192,17 +192,17 @@ func TestWorkspacePreferenceCompatibilityPrecedesBranchEffects(t *testing.T) {
 	}
 	env := setEnv(f.env, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	for _, fields := range []string{
-		"repos: [api, tool]\nlanding_mode: pr\nbase: main\n",
-		"repos: [api]\nlanding_mode: no-mistakes\n",
+		"repos: [api, tool]\nmerge_mode: pr\nbase: main\n",
+		"repos: [api]\nmerge_mode: no-mistakes\n",
 		"repos: [api]\ntarget: {tool: main}\n",
 		"repos: [missing]\n",
-		"landing_mode: local\n",
+		"merge_mode: local\n",
 	} {
 		brief := filepath.Join(f.root, "workspace-refused.md")
-		if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Workspace refusal\ndone_when: checked\n"+fields+"---\n"), 0o600); err != nil {
+		if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace refusal\ndone_when: checked\n"+fields+"---\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cmd := exec.Command(f.binary, "ride", "--brief", brief, "--name", "workspace-refusal", "--user-approved", "Use this workflow for this Task")
+		cmd := exec.Command(f.binary, "start", "--brief", brief, "--name", "workspace-refusal", "--user-approved", "Use this workflow for this Task")
 		cmd.Env, cmd.Dir = env, root
 		if output, err := cmd.CombinedOutput(); err == nil {
 			t.Fatalf("incompatible Member choice admitted: %s", output)
@@ -273,12 +273,12 @@ func TestPermissionTemplatesRequireConsentThroughCLI(t *testing.T) {
 		t.Fatalf("unbound native agent treated as human: %v %s", err, output)
 	}
 	if code, output := rideReviewIdentityTask(t, f, "Native actor", "author", ""); code != 0 {
-		t.Fatalf("native Rider: %d %s", code, output)
+		t.Fatalf("native Worker: %d %s", code, output)
 	}
 	task := f.mustTask(t, "t1")
-	worker := exec.Command("sh", "-c", "env -u HERDR_PANE_ID \"$@\"; result=$?; exit \"$result\"", "rider-child", f.binary, "config", "set", "kinds.claude.prepare", "", "--project", "shop", "--user-approved", "claimed consent")
+	worker := exec.Command("sh", "-c", "env -u HERDR_PANE_ID \"$@\"; result=$?; exit \"$result\"", "worker-child", f.binary, "config", "set", "kinds.claude.prepare", "", "--project", "shop", "--user-approved", "claimed consent")
 	worker.Env, worker.Dir = setEnv(f.env, "HERDR_PANE_ID", task.PaneID), f.repo
 	if output, err := worker.CombinedOutput(); err == nil || !strings.Contains(string(output), "worker_forbidden") {
-		t.Fatalf("registered Rider child escaped identity: %v %s", err, output)
+		t.Fatalf("registered Worker child escaped identity: %v %s", err, output)
 	}
 }

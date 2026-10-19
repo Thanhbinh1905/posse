@@ -77,8 +77,8 @@ func TestFreshSetupLeavesLeadAndProfilesImplicit(t *testing.T) {
 			}
 			adapter.SnapshotValue.Panes[0].Agent = testCase.leadKind
 			adapter.SnapshotValue.Panes[0].Label = "posse:fresh:lead"
-			briefPath := filepath.Join(root, "ship-brief.md")
-			brief := "---\ntype: ship\ntitle: First run\ndone_when: dispatch resolves the implicit Profile\n---\nRun the first Rider.\n"
+			briefPath := filepath.Join(root, "change-brief.md")
+			brief := "---\ntype: change\ntitle: First run\ndone_when: dispatch resolves the implicit Profile\n---\nRun the first Worker.\n"
 			if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -96,13 +96,13 @@ func TestFreshSetupLeavesLeadAndProfilesImplicit(t *testing.T) {
 				t.Fatalf("dispatch output is not JSON: %s: %v", dispatchOutput, err)
 			}
 			if result.Profile != "implicit:"+testCase.leadKind || result.DispatchRule != "implicit: lead kind" {
-				t.Fatalf("fresh ship dispatch = %#v, want implicit Profile of %q", result, testCase.leadKind)
+				t.Fatalf("fresh change dispatch = %#v, want implicit Profile of %q", result, testCase.leadKind)
 			}
 		})
 	}
 }
 
-func TestRideAndDispatchExplainMissingDefaultWithUnmatchedConfiguredRules(t *testing.T) {
+func TestStartAndDispatchExplainMissingDefaultWithUnmatchedConfiguredRules(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
@@ -118,19 +118,19 @@ func TestRideAndDispatchExplainMissingDefaultWithUnmatchedConfiguredRules(t *tes
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[profiles.review]\nkind='claude'\n[[dispatch]]\ntype='review'\nuse='review'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	briefPath := filepath.Join(root, "ship-brief.md")
-	brief := "---\ntype: ship\ntitle: Missing default\ndone_when: report setup guidance\n---\nThis should not start without a Profile.\n"
+	briefPath := filepath.Join(root, "change-brief.md")
+	brief := "---\ntype: change\ntitle: Missing default\ndone_when: report setup guidance\n---\nThis should not start without a Profile.\n"
 	if err := os.WriteFile(briefPath, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, command := range []string{"dispatch", "ride"} {
+	for _, command := range []string{"dispatch", "start"} {
 		t.Run(command, func(t *testing.T) {
 			output, errorsOut := &bytes.Buffer{}, &bytes.Buffer{}
 			cli := service.CLI()
 			cli.Out, cli.ErrOut = output, errorsOut
 			args := []string{command, "--brief", briefPath, "--json"}
-			if command == "ride" {
+			if command == "start" {
 				args = []string{command, "--brief", briefPath, "--name", "missing-default", "--json"}
 			}
 			if code := cli.Run(args); code != 1 {

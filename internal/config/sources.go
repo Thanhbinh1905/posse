@@ -51,7 +51,7 @@ func (c Config) EffectiveSources() (map[string][]string, error) {
 	}
 	if c.Autonomy.Yolo {
 		sources["autonomy.review"] = sources["autonomy.yolo"]
-		sources["autonomy.land"] = sources["autonomy.yolo"]
+		sources["autonomy.merge"] = sources["autonomy.yolo"]
 	}
 	return sources, nil
 }

@@ -33,44 +33,44 @@ var keySpecs = []KeySpec{
 	{Key: "identity.lead.persona", Type: TypeString, Default: "", Meaning: "Lead persona used only when speaking to the User."},
 	{Key: "identity.lead.language", Type: TypeString, Default: "en", Meaning: "Language for Lead messages to the User and neutral prose in Briefs, send instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence."},
 	{Key: "identity.lead.address_user", Type: TypeString, Default: "", Meaning: "How the Lead addresses the User."},
-	{Key: "identity.worker.display_prefix", Type: TypeString, Default: "rider", Meaning: "Deprecated; retained for compatibility and has no effect on Herdr labels or Task names."},
+	{Key: "identity.worker.display_prefix", Type: TypeString, Default: "worker", Meaning: "Deprecated; retained for compatibility and has no effect on Herdr labels or Task names."},
 	{Key: "lead.kind", Type: TypeString, Default: "", Meaning: "Default agent kind used by posse up."},
 	{Key: "lowkey.lead", Type: TypeBoolean, Default: false, Meaning: "Lowkey mode for the Lead: only report decisions and outcomes to the User. A display preference, not an autonomy grant."},
 	{Key: "lead.profiles.<kind>", Type: TypeString, Meaning: "Profile used by the Lead for this agent kind."},
-	{Key: "defaults.max_workers", Type: TypeInteger, Default: 4, Meaning: "Maximum concurrent Riders for a Project."},
+	{Key: "defaults.max_workers", Type: TypeInteger, Default: 4, Meaning: "Maximum concurrent Workers for a Project."},
 	{Key: "defaults.dispatch_inheritance", Type: TypeString, Allowed: []string{"kind", "lead_profile"}, Default: "kind", Meaning: "Profile inherited when no Dispatch Rule matches: the Lead's agent kind only, or its resolved Profile."},
-	{Key: "defaults.stall_after", Type: TypeDuration, Default: "20m", Meaning: "Time without output or worktree progress before a Rider is stalled."},
-	{Key: "defaults.idle_after", Type: TypeDuration, Default: "3m", Meaning: "Time a Rider may be idle without a Signal before a Notice is created."},
-	{Key: "defaults.auto_unsaddle", Type: TypeString, Allowed: []string{"finished", "landed", "never"}, Default: "finished", Meaning: "Whether completed Tasks are automatically Teardown after landing or Notice acknowledgement."},
-	{Key: "defaults.auto_recover", Type: TypeBoolean, Default: true, Meaning: "Whether plugin events and the Herdr startup hook restart the Lead and Riders after a Herdr restart or a closed Lead workspace; when false, `posse up` recovers them."},
-	{Key: "defaults.recovery_attempts", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic relaunch attempts per Rider recovery episode; exhaustion requires explicit relaunch."},
-	{Key: "defaults.recovery_backoff", Type: TypeDuration, Default: "5s", Meaning: "Initial delay between failed automatic Rider relaunches; doubles up to one minute."},
-	{Key: "defaults.landing_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Default: "pr", Meaning: "How Ship Task changes are Landed; no-mistakes is deprecated."},
-	{Key: "defaults.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for Ship Tasks; empty uses each repository's default branch."},
+	{Key: "defaults.stall_after", Type: TypeDuration, Default: "20m", Meaning: "Time without output or worktree progress before a Worker is stalled."},
+	{Key: "defaults.idle_after", Type: TypeDuration, Default: "3m", Meaning: "Time a Worker may be idle without a Signal before a Notice is created."},
+	{Key: "defaults.auto_teardown", Type: TypeString, Allowed: []string{"finished", "merged", "never"}, Default: "finished", Meaning: "Whether completed Tasks are automatically Teardown after merging or Notice acknowledgement."},
+	{Key: "defaults.auto_recover", Type: TypeBoolean, Default: true, Meaning: "Whether plugin events and the Herdr startup hook restart the Lead and Workers after a Herdr restart or a closed Lead workspace; when false, `posse up` recovers them."},
+	{Key: "defaults.recovery_attempts", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic relaunch attempts per Worker recovery episode; exhaustion requires explicit relaunch."},
+	{Key: "defaults.recovery_backoff", Type: TypeDuration, Default: "5s", Meaning: "Initial delay between failed automatic Worker relaunches; doubles up to one minute."},
+	{Key: "defaults.merge_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Default: "pr", Meaning: "How Change Task changes are Merged; no-mistakes is deprecated."},
+	{Key: "defaults.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for Change Tasks; empty uses each repository's default branch."},
 	{Key: "defaults.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Forge for this Project; auto detects from each repository remote."},
 	{Key: "repositories.<repository>.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override the forge for a member repository."},
 	{Key: "defaults.merge_method", Type: TypeString, Allowed: []string{"squash", "merge", "rebase"}, Default: "squash", Meaning: "Merge method used for pull requests."},
 	{Key: "defaults.pr_poll", Type: TypeDuration, Default: "2m", Meaning: "Minimum interval between pull request and Project checkout polls."},
-	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Default: "none", Meaning: "Independent-review evidence required to Land a Ship Task; does not grant merge authority.", UserOnly: true},
+	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Default: "none", Meaning: "Independent-review evidence required to Merge a Change Task; does not grant merge authority.", UserOnly: true},
 	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
-	{Key: "defaults.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in the Mount before a Ship Task may Land.", UserOnly: true},
-	{Key: "review_loop.enabled", Type: TypeBoolean, Default: true, Meaning: "Enable built-in Review Rounds for Ship Tasks.", UserOnly: true},
-	{Key: "review_loop.max_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum Review Rounds per Ship Task; may be lowered to 1 or 2.", UserOnly: true},
-	{Key: "review_loop.block_at", Type: TypeString, Allowed: []string{"P0", "P1", "P2"}, Default: "P1", Meaning: "Finding severity at or above which introduced findings block Land.", UserOnly: true},
+	{Key: "defaults.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in the Sandbox before a Change Task may Merge.", UserOnly: true},
+	{Key: "review_loop.enabled", Type: TypeBoolean, Default: true, Meaning: "Enable built-in Review Rounds for Change Tasks.", UserOnly: true},
+	{Key: "review_loop.max_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum Review Rounds per Change Task; may be lowered to 1 or 2.", UserOnly: true},
+	{Key: "review_loop.block_at", Type: TypeString, Allowed: []string{"P0", "P1", "P2"}, Default: "P1", Meaning: "Finding severity at or above which introduced findings block Merge.", UserOnly: true},
 	{Key: "review_loop.auto_start", Type: TypeBoolean, Default: true, Meaning: "Automatically admit the next Review Round after its Gate passes.", UserOnly: true},
 	{Key: "review_loop.docs", Type: TypeBoolean, Default: false, Meaning: "Include documentation gaps in the Review rubric.", UserOnly: true},
 	{Key: "review_loop.guidance", Type: TypeStringArray, Default: []string{}, Meaning: "Repository guidance paths supplied to Reviewers from the frozen target branch.", UserOnly: true},
-	{Key: "gate_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic Gate fix instructions per Ship Task; 0 disables them.", UserOnly: true},
-	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Ship Task; 0 disables them.", UserOnly: true},
-	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Ship Task.", UserOnly: true},
-	{Key: "repositories.<repo>.landing_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Meaning: "How this member repository of a workspace Project Lands; defaults to local without an origin, else the Project landing_mode. no-mistakes is deprecated and unavailable for workspace Tasks."},
+	{Key: "gate_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic Gate fix instructions per Change Task; 0 disables them.", UserOnly: true},
+	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Change Task; 0 disables them.", UserOnly: true},
+	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Change Task.", UserOnly: true},
+	{Key: "repositories.<repo>.merge_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Meaning: "How this member repository of a workspace Project Merges; defaults to local without an origin, else the Project merge_mode. no-mistakes is deprecated and unavailable for workspace Tasks."},
 	{Key: "repositories.<repo>.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for this workspace Member; overrides defaults.target_branch and the Member's default branch."},
-	{Key: "repositories.<repo>.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in this member's worktree before it may Land; replaces defaults.gate for the member.", UserOnly: true},
-	{Key: "remuda.clean", Type: TypeString, Allowed: []string{"warm", "pristine"}, Default: "warm", Meaning: "Whether released Mounts keep ignored files."},
-	{Key: "remuda.setup", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in a Mount after it is acquired.", UserOnly: true},
-	{Key: "remuda.keep_idle", Type: TypeInteger, Default: 4, Meaning: "Idle Mounts kept for each Project."},
-	{Key: "retention.task_artifacts", Type: TypeDuration, Default: "2160h", Meaning: "How long Teardown keeps Reports, saved Task attachments and approved discard-tip bundles; `posse remuda prune` removes expired artifacts."},
-	{Key: "kinds.<kind>.disabled", Type: TypeBoolean, Default: false, Meaning: "Disable this kind for new Rider dispatch without removing its historical or frozen launch settings."},
+	{Key: "repositories.<repo>.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in this member's worktree before it may Merge; replaces defaults.gate for the member.", UserOnly: true},
+	{Key: "pool.clean", Type: TypeString, Allowed: []string{"warm", "pristine"}, Default: "warm", Meaning: "Whether released Sandboxes keep ignored files."},
+	{Key: "pool.setup", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in a Sandbox after it is acquired.", UserOnly: true},
+	{Key: "pool.keep_idle", Type: TypeInteger, Default: 4, Meaning: "Idle Sandboxes kept for each Project."},
+	{Key: "retention.task_artifacts", Type: TypeDuration, Default: "2160h", Meaning: "How long Teardown keeps Reports, saved Task attachments and approved discard-tip bundles; `posse pool prune` removes expired artifacts."},
+	{Key: "kinds.<kind>.disabled", Type: TypeBoolean, Default: false, Meaning: "Disable this kind for new Worker dispatch without removing its historical or frozen launch settings."},
 	{Key: "kinds.<kind>.auto_approve_args", Type: TypeStringArray, Default: []string{}, Meaning: "Arguments that enable automatic approvals for this agent kind; Leads also get them by default when lead_auto_approve is true.", UserOnly: true},
 	{Key: "kinds.<kind>.lead_auto_approve", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": true, "opencode": true}, Meaning: "Whether Leads of this kind also get auto_approve_args; set false to keep the harness's approval prompts. User-only. Pi has no permission system.", UserOnly: true},
 	{Key: "kinds.<kind>.model_args", Type: TypeStringArray, Default: []string{}, Meaning: "Argument template for a Profile model; supports {model}.", UserOnly: true},
@@ -78,9 +78,9 @@ var keySpecs = []KeySpec{
 	{Key: "kinds.<kind>.resume_args", Type: TypeStringArray, Default: []string{}, Meaning: "Argument template for resuming a recorded agent session; supports {session}.", UserOnly: true},
 	{Key: "kinds.<kind>.system_prompt_args", Type: TypeStringArray, Default: map[string][]string{"claude": {"--append-system-prompt-file", "{file}"}, "codex": {"-c", "developer_instructions={text}"}, "pi": {"--append-system-prompt", "{file}"}}, Meaning: "Argument template that gives the Lead its instructions as a system prompt; supports {file} (the instructions file) and {text} (the complete instructions with whitespace preserved; Codex receives a TOML-quoted string).", UserOnly: true},
 	{Key: "kinds.<kind>.lead_args", Type: TypeStringArray, Default: map[string][]string{"codex": {"--sandbox", "danger-full-access"}}, Meaning: "Arguments every Lead of this kind gets so it can run posse commands; codex's default sandbox cannot write the posse home. Approvals are unchanged.", UserOnly: true},
-	{Key: "kinds.<kind>.background_commands", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": false, "pi": false}, Meaning: "Whether this agent kind can run a background command and be re-invoked when it exits; Riders of such kinds are told to background long commands."},
-	{Key: "kinds.<kind>.notice_delivery", Type: TypeString, Allowed: NoticeDeliveries, Default: map[string]string{"claude": NoticeDeliveryLookout, "codex": NoticeDeliveryCodexQueue, "pi": NoticeDeliveryPiExtension, "opencode": NoticeDeliveryOpenCodePlugin, "<other>": NoticeDeliveryPrompt}, Meaning: "How Notices reach a Lead: prompt (typed only when idle and unfocused), lookout (Claude-owned bounded Stop hook; background command for other kinds), codex-queue (codex session queue), pi-extension (Pi lookout extension), opencode-plugin (Lead-only OpenCode lookout and session API)."},
-	{Key: "kinds.<kind>.steer", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": true, "pi": true}, Meaning: "Allow sending to an unfocused Rider while it is working; unknown kinds default to false."},
+	{Key: "kinds.<kind>.background_commands", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": false, "pi": false}, Meaning: "Whether this agent kind can run a background command and be re-invoked when it exits; Workers of such kinds are told to background long commands."},
+	{Key: "kinds.<kind>.notice_delivery", Type: TypeString, Allowed: NoticeDeliveries, Default: map[string]string{"claude": NoticeDeliveryWatch, "codex": NoticeDeliveryCodexQueue, "pi": NoticeDeliveryPiExtension, "opencode": NoticeDeliveryOpenCodePlugin, "<other>": NoticeDeliveryPrompt}, Meaning: "How Notices reach a Lead: prompt (typed only when idle and unfocused), watch (Claude-owned bounded Stop hook; background command for other kinds), codex-queue (codex session queue), pi-extension (Pi watch extension), opencode-plugin (Lead-only OpenCode watch and session API)."},
+	{Key: "kinds.<kind>.steer", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": true, "pi": true}, Meaning: "Allow sending to an unfocused Worker while it is working; unknown kinds default to false."},
 	{Key: "kinds.<kind>.interrupt_keys", Type: TypeStringArray, Default: map[string][]string{"claude": {"ctrl+c"}, "codex": {"esc"}, "pi": {"esc"}, "opencode": {"esc"}}, Meaning: "Herdr logical key sequence that aborts a running turn; unknown kinds require an explicit sequence."},
 	{Key: "kinds.<kind>.prepare", Type: TypeString, Allowed: []string{"", "claude-trust", "codex-trust"}, Default: "", Meaning: "Built-in preparation step run before starting an agent.", UserOnly: true},
 	{Key: "profiles.<profile>.kind", Type: TypeString, Meaning: "Agent kind used by this Profile.", UserOnly: true},
@@ -89,9 +89,9 @@ var keySpecs = []KeySpec{
 	{Key: "profiles.<profile>.args", Type: TypeStringArray, Default: []string{}, Meaning: "Additional arguments passed to this Profile's agent.", UserOnly: true},
 	{Key: "dispatch", Type: TypeTableArray, Default: []any{}, Meaning: "Ordered dispatch rules that select a Profile."},
 	{Key: "dispatch.default.use", Type: TypeString, Default: "", Meaning: "Fallback Profile used when no dispatch rule matches."},
-	{Key: "autonomy.yolo", Type: TypeBoolean, Default: false, Meaning: "Shorthand granting the Lead review and landing autonomy.", UserOnly: true},
+	{Key: "autonomy.yolo", Type: TypeBoolean, Default: false, Meaning: "Shorthand granting the Lead review and merging autonomy.", UserOnly: true},
 	{Key: "autonomy.review", Type: TypeString, Allowed: []string{"ask", "lead"}, Default: "ask", Meaning: "Disposition of review findings: whether the Lead may decide without asking the User; never substitutes for review evidence.", UserOnly: true},
-	{Key: "autonomy.land", Type: TypeString, Allowed: []string{"ask", "auto"}, Default: "ask", Meaning: "Whether the Lead may Land changes without asking the User.", UserOnly: true},
+	{Key: "autonomy.merge", Type: TypeString, Allowed: []string{"ask", "auto"}, Default: "ask", Meaning: "Whether the Lead may Merge changes without asking the User.", UserOnly: true},
 }
 
 var namePart = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -122,10 +122,19 @@ func IsUserOnly(key string) bool {
 func ValidateSetting(key string, value any, projectFile bool) error {
 	spec, found := Lookup(key)
 	if !found {
-		return fmt.Errorf("unknown configuration key %q", key)
+		return fmt.Errorf("%s: %s", key, unknownKeyReason(key))
 	}
 	if strings.HasPrefix(key, "autonomy.") && !projectFile {
 		return fmt.Errorf("autonomy is valid only in a Project config")
+	}
+	if key == "dispatch" {
+		if entries, ok := tableEntries(value); ok {
+			for _, entry := range entries {
+				if replacement := legacyTaskType(entry["type"]); replacement != "" {
+					return fmt.Errorf("dispatch.type: %v was removed; use %s", entry["type"], replacement)
+				}
+			}
+		}
 	}
 	valid := false
 	switch spec.Type {
@@ -147,6 +156,12 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 		return fmt.Errorf("%s must be %s", key, spec.Type)
 	}
 	if text, ok := value.(string); ok {
+		if strings.HasSuffix(key, ".notice_delivery") && text == "lookout" {
+			return fmt.Errorf("%s: lookout was removed; use watch", key)
+		}
+		if strings.HasSuffix(key, "auto_teardown") && text == "landed" {
+			return fmt.Errorf("%s: landed was removed; use merged", key)
+		}
 		if key == "defaults.review" || strings.HasPrefix(key, "repositories.") && strings.HasSuffix(key, ".review") {
 			if err := ValidateReview(text); err != nil {
 				return err
@@ -162,7 +177,7 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 			}
 		}
 	}
-	if key == "remuda.keep_idle" {
+	if key == "pool.keep_idle" {
 		if number, ok := integerValue(value); ok && number < 0 {
 			return fmt.Errorf("%s cannot be negative", key)
 		}
@@ -193,6 +208,9 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 func ValidateSchemaMap(file string, values map[string]any, projectFile bool) error {
 	var walk func(string, any) error
 	walk = func(prefix string, value any) error {
+		if replacement := ReplacementKey(prefix); replacement != "" {
+			return &InvalidError{File: file, Key: prefix, Reason: "was removed; use " + replacement}
+		}
 		switch current := value.(type) {
 		case map[string]any:
 			if prefix == "dispatch" {
@@ -270,8 +288,11 @@ func validateDispatchValue(file, key string, value any, index int) error {
 	valid := false
 	switch key {
 	case "dispatch.type":
+		if replacement := legacyTaskType(value); replacement != "" {
+			return &InvalidError{File: file, Key: key, Reason: fmt.Sprintf("%v was removed; use %s", value, replacement)}
+		}
 		text, ok := value.(string)
-		valid = ok && oneOf(text, "ship", "scout", "review")
+		valid = ok && oneOf(text, "change", "research", "review")
 	case "dispatch.when", "dispatch.use":
 		_, valid = value.(string)
 	}
@@ -302,7 +323,7 @@ func schemaKeyMatches(pattern, key string) bool {
 
 func canonicalSchemaKey(key string) string {
 	switch key {
-	case "max_workers", "stall_after", "idle_after", "auto_unsaddle", "landing_mode", "merge_method", "forge", "pr_poll", "review", "gate":
+	case "max_workers", "stall_after", "idle_after", "auto_teardown", "merge_mode", "merge_method", "forge", "pr_poll", "review", "gate":
 		return "defaults." + key
 	}
 	return key
@@ -325,7 +346,7 @@ func knownContainer(prefix string) bool {
 
 func isProjectScalarAlias(key string) bool {
 	switch key {
-	case "landing_mode", "max_workers", "stall_after", "idle_after", "auto_unsaddle", "merge_method", "forge", "pr_poll", "review", "gate":
+	case "merge_mode", "max_workers", "stall_after", "idle_after", "auto_teardown", "merge_method", "forge", "pr_poll", "review", "gate":
 		return true
 	default:
 		return false

@@ -74,7 +74,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, sequence, err := createTaskWithSequence(ctx, db, project, home, store.Task{Type: "ship", Title: "Stable output", ShortName: "stable-output", BaseRef: "main"})
+	taskID, sequence, err := createTaskWithSequence(ctx, db, project, home, store.Task{Type: "change", Title: "Stable output", ShortName: "stable-output", BaseRef: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,10 +104,10 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	}
 	renders := make([]rendered, 0, 2)
 	configs := []string{
-		"[identity.lead]\nname = \"Marshal\"\npersona = \"nautical historian\"\nlanguage = \"vi\"\naddress_user = \"anh\"\n\n[identity.worker]\ndisplay_prefix = \"rider\"\n",
+		"[identity.lead]\nname = \"Marshal\"\npersona = \"nautical historian\"\nlanguage = \"vi\"\naddress_user = \"anh\"\n\n[identity.worker]\ndisplay_prefix = \"worker\"\n",
 		"[identity.lead]\nname = \"Archivist\"\npersona = \"formal botanist\"\nlanguage = \"vi\"\naddress_user = \"madame\"\n\n[identity.worker]\ndisplay_prefix = \"acorn\"\n",
 	}
-	brief := dispatch.Brief{Type: "ship", Title: task.Title, DoneWhen: "the output is stable", Body: "Make the output stable.\n\nUser intent: \"Keep this exact.\""}
+	brief := dispatch.Brief{Type: "change", Title: task.Title, DoneWhen: "the output is stable", Body: "Make the output stable.\n\nUser intent: \"Keep this exact.\""}
 	launchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(sequence), "launch.md")
 	t.Chdir(repo)
 	for _, text := range configs {

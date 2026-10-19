@@ -12,32 +12,32 @@ import (
 )
 
 type reviewVerdictFixture struct {
-	*prLandingFixture
+	*prMergeFixture
 	review     store.Task
 	reviewTree string
 }
 
-// newReviewVerdictFixture builds a completed Ship Task (t1, author profile
+// newReviewVerdictFixture builds a completed Change Task (t1, author profile
 // "author") and a working Review Task (t2, profile "reviewer") bound to it.
 func newReviewVerdictFixture(t *testing.T) *reviewVerdictFixture {
 	t.Helper()
 	ctx := context.Background()
-	base := newPRLandingFixture(t, "local", store.StateDone)
+	base := newPRMergeFixture(t, "local", store.StateDone)
 	if _, err := base.db.NextTaskLaunchWithIdentity(ctx, base.task.ID, "author", "model-a", true); err != nil {
 		t.Fatal(err)
 	}
-	ship, err := base.db.TaskByID(ctx, base.project.ID, base.task.ID)
+	change, err := base.db.TaskByID(ctx, base.project.ID, base.task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	base.task = ship
-	targets, err := shipCandidateTargets(ctx, base.db, base.project, ship)
+	base.task = change
+	targets, err := changeCandidateTargets(ctx, base.db, base.project, change)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reviewTree := filepath.Join(base.root, "review-mount")
+	reviewTree := filepath.Join(base.root, "review-sandbox")
 	gitTest(t, base.repo, "worktree", "add", "-b", "posse/t2", reviewTree, "refs/heads/posse/t1")
-	reviewID, err := base.db.CreateTask(ctx, base.project.ID, store.Task{Seq: 2, Type: "review", ReviewsTaskID: ship.ID, Title: "Review t1", State: store.StateSpawning, LandingMode: "local", Branch: "posse/t2", BaseRef: "posse/t1", WorktreePath: reviewTree, HerdrWorkspaceID: "w3", PaneID: "w3:p1", PaneLabel: "posse:shop:t2", ReviewTargets: targets})
+	reviewID, err := base.db.CreateTask(ctx, base.project.ID, store.Task{Seq: 2, Type: "review", ReviewsTaskID: change.ID, Title: "Review t1", State: store.StateSpawning, MergeMode: "local", Branch: "posse/t2", BaseRef: "posse/t1", WorktreePath: reviewTree, HerdrWorkspaceID: "w3", PaneID: "w3:p1", PaneLabel: "posse:shop:t2", ReviewTargets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,10 +59,10 @@ func newReviewVerdictFixture(t *testing.T) *reviewVerdictFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &reviewVerdictFixture{prLandingFixture: base, review: review, reviewTree: reviewTree}
+	return &reviewVerdictFixture{prMergeFixture: base, review: review, reviewTree: reviewTree}
 }
 
-func (f *reviewVerdictFixture) holler(t *testing.T, pane string, args ...string) (int, string) {
+func (f *reviewVerdictFixture) signal(t *testing.T, pane string, args ...string) (int, string) {
 	t.Helper()
 	for key, value := range map[string]string{"HERDR_PANE_ID": pane, workerHomeEnv: f.home} {
 		previous, present := os.LookupEnv(key)
@@ -75,31 +75,31 @@ func (f *reviewVerdictFixture) holler(t *testing.T, pane string, args ...string)
 			}
 		}(key, previous, present)
 	}
-	tree := map[string]string{f.review.PaneID: f.reviewTree, "w4:p1": filepath.Join(f.root, "legacy-mount")}[pane]
+	tree := map[string]string{f.review.PaneID: f.reviewTree, "w4:p1": filepath.Join(f.root, "legacy-sandbox")}[pane]
 	args = append([]string(nil), args...)
 	for i, arg := range args {
 		if arg == "report.md" && tree != "" {
 			args[i] = filepath.Join(tree, arg)
 		}
 	}
-	code, out, errOut := f.run(append([]string{"holler"}, args...)...)
+	code, out, errOut := f.run(append([]string{"signal"}, args...)...)
 	return code, out + errOut
 }
 
 func (f *reviewVerdictFixture) pass(t *testing.T) (store.ReviewVerdict, bool) {
 	t.Helper()
-	ship, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	change, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	verdict, ok, err := currentReviewPass(context.Background(), f.db, f.project, ship)
+	verdict, ok, err := currentReviewPass(context.Background(), f.db, f.project, change)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return verdict, ok
 }
 
-func (f *reviewVerdictFixture) commitToShip(t *testing.T) {
+func (f *reviewVerdictFixture) commitToChange(t *testing.T) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(f.worktree, "more.txt"), []byte("more\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -110,9 +110,9 @@ func (f *reviewVerdictFixture) commitToShip(t *testing.T) {
 
 func TestReviewVerdictRecordedFromPosseRecords(t *testing.T) {
 	f := newReviewVerdictFixture(t)
-	code, out := f.holler(t, f.review.PaneID, "done", "Looks right", "--report", "report.md", "--verdict", "pass")
+	code, out := f.signal(t, f.review.PaneID, "done", "Looks right", "--report", "report.md", "--verdict", "pass")
 	if code != 0 {
-		t.Fatalf("holler exit=%d %s", code, out)
+		t.Fatalf("signal exit=%d %s", code, out)
 	}
 	verdict, ok := f.pass(t)
 	if !ok {
@@ -132,26 +132,26 @@ func TestReviewVerdictRecordedFromPosseRecords(t *testing.T) {
 	}
 }
 
-func TestReviewVerdictRefusedForWrongRiderAndMalformedSignals(t *testing.T) {
+func TestReviewVerdictRefusedForWrongWorkerAndMalformedSignals(t *testing.T) {
 	f := newReviewVerdictFixture(t)
 	if err := f.db.Transition(context.Background(), f.task.ID, store.StateDone, store.StateWorking, "lead", "follow-up"); err != nil {
 		t.Fatal(err)
 	}
-	// A Ship Rider cannot record a verdict, whatever it names.
-	if code, out := f.holler(t, f.task.PaneID, "done", "x", "--verdict", "pass"); code == 0 || !strings.Contains(out, "signal_invalid") {
-		t.Fatalf("ship Rider verdict: %d %s", code, out)
+	// A Change Worker cannot record a verdict, whatever it names.
+	if code, out := f.signal(t, f.task.PaneID, "done", "x", "--verdict", "pass"); code == 0 || !strings.Contains(out, "signal_invalid") {
+		t.Fatalf("change Worker verdict: %d %s", code, out)
 	}
 	for _, args := range [][]string{
 		{"done", "x", "--report", "report.md", "--verdict", "approved"},
 		{"working", "x", "--verdict", "pass"},
 		{"done", "x", "--report", "report.md", "--verdict"},
 	} {
-		if code, out := f.holler(t, f.review.PaneID, args...); code == 0 {
+		if code, out := f.signal(t, f.review.PaneID, args...); code == 0 {
 			t.Fatalf("malformed %v accepted: %s", args, out)
 		}
 	}
-	// A Review Rider that omits the verdict records the Report but never qualifies.
-	if code, out := f.holler(t, f.review.PaneID, "done", "x", "--report", "report.md"); code != 0 {
+	// A Review Worker that omits the verdict records the Report but never qualifies.
+	if code, out := f.signal(t, f.review.PaneID, "done", "x", "--report", "report.md"); code != 0 {
 		t.Fatalf("done without verdict: %d %s", code, out)
 	}
 	if _, ok := f.pass(t); ok {
@@ -160,9 +160,9 @@ func TestReviewVerdictRefusedForWrongRiderAndMalformedSignals(t *testing.T) {
 	if _, err := f.db.ReviewVerdict(context.Background(), f.review.ID); err == nil {
 		t.Fatal("missing verdict recorded a row")
 	}
-	ship, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
-	if err != nil || ship.State != store.StateWorking {
-		t.Fatalf("ship state after refusals = %s, %v", ship.State, err)
+	change, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil || change.State != store.StateWorking {
+		t.Fatalf("change state after refusals = %s, %v", change.State, err)
 	}
 }
 
@@ -170,9 +170,9 @@ func TestReviewVerdictRefusedWithoutBoundTargetOrForOtherRevision(t *testing.T) 
 	f := newReviewVerdictFixture(t)
 	ctx := context.Background()
 	// A Review created before targets existed cannot record a verdict.
-	legacyTree := filepath.Join(f.root, "legacy-mount")
+	legacyTree := filepath.Join(f.root, "legacy-sandbox")
 	gitTest(t, f.repo, "worktree", "add", "-b", "posse/t3", legacyTree, "refs/heads/posse/t1")
-	legacyID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 3, Type: "review", ReviewsTaskID: f.task.ID, Title: "Legacy", LandingMode: "local", Branch: "posse/t3", WorktreePath: legacyTree, HerdrWorkspaceID: "w4", PaneID: "w4:p1", PaneLabel: "posse:shop:t3"})
+	legacyID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 3, Type: "review", ReviewsTaskID: f.task.ID, Title: "Legacy", MergeMode: "local", Branch: "posse/t3", WorktreePath: legacyTree, HerdrWorkspaceID: "w4", PaneID: "w4:p1", PaneLabel: "posse:shop:t3"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,12 +184,12 @@ func TestReviewVerdictRefusedWithoutBoundTargetOrForOtherRevision(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(legacyTree, "report.md"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := f.holler(t, "w4:p1", "done", "x", "--report", "report.md", "--verdict", "pass"); code == 0 || !strings.Contains(out, "review_target_unbound") {
+	if code, out := f.signal(t, "w4:p1", "done", "x", "--report", "report.md", "--verdict", "pass"); code == 0 || !strings.Contains(out, "review_target_unbound") {
 		t.Fatalf("legacy review verdict: %d %s", code, out)
 	}
 	// A Reviewer whose worktree never held the bound commit cannot record it.
-	f.commitToShip(t)
-	moved, err := shipCandidateTargets(ctx, f.db, f.project, f.task)
+	f.commitToChange(t)
+	moved, err := changeCandidateTargets(ctx, f.db, f.project, f.task)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,44 +199,44 @@ func TestReviewVerdictRefusedWithoutBoundTargetOrForOtherRevision(t *testing.T) 
 	if _, err := f.db.ExecContext(ctx, `INSERT INTO review_targets(task_id,repository,commit_sha) VALUES(?,?,?)`, f.review.ID, moved[0].Repository, moved[0].Commit); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := f.holler(t, f.review.PaneID, "done", "x", "--report", "report.md", "--verdict", "pass"); code == 0 || !strings.Contains(out, "review_target_missing") {
+	if code, out := f.signal(t, f.review.PaneID, "done", "x", "--report", "report.md", "--verdict", "pass"); code == 0 || !strings.Contains(out, "review_target_missing") {
 		t.Fatalf("unseen revision verdict: %d %s", code, out)
 	}
 }
 
-func TestReviewVerdictOnlyPassSatisfiesLandAndMovementInvalidatesIt(t *testing.T) {
+func TestReviewVerdictOnlyPassSatisfiesMergeAndMovementInvalidatesIt(t *testing.T) {
 	for _, tc := range []struct {
 		verdict string
-		land    bool
+		merge   bool
 	}{{"pass", true}, {"changes_requested", false}, {"inconclusive", false}} {
 		t.Run(tc.verdict, func(t *testing.T) {
 			f := newReviewVerdictFixture(t)
-			if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nlanding_mode = \"local\"\nreview = \"local\"\nauto_unsaddle = \"never\"\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\nreview = \"local\"\nauto_teardown = \"never\"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if code, out, _ := f.run("land", "t1"); code == 0 || !strings.Contains(out, "review_required") {
-				t.Fatalf("land without review: %d %s", code, out)
+			if code, out, _ := f.run("merge", "t1"); code == 0 || !strings.Contains(out, "review_required") {
+				t.Fatalf("merge without review: %d %s", code, out)
 			}
-			if code, out := f.holler(t, f.review.PaneID, "done", "x", "--report", "report.md", "--verdict", tc.verdict); code != 0 {
-				t.Fatalf("holler: %d %s", code, out)
+			if code, out := f.signal(t, f.review.PaneID, "done", "x", "--report", "report.md", "--verdict", tc.verdict); code != 0 {
+				t.Fatalf("signal: %d %s", code, out)
 			}
-			code, out, _ := f.run("land", "t1")
-			if got := !strings.Contains(out, "review_required"); got != tc.land {
-				t.Fatalf("land satisfied by %s = %v: %d %s", tc.verdict, got, code, out)
+			code, out, _ := f.run("merge", "t1")
+			if got := !strings.Contains(out, "review_required"); got != tc.merge {
+				t.Fatalf("merge satisfied by %s = %v: %d %s", tc.verdict, got, code, out)
 			}
 			if tc.verdict != "pass" {
 				return
 			}
 			// The candidate moves: the old pass has no current standing and is not rebound.
-			if err := f.db.Transition(context.Background(), f.task.ID, store.StateLanding, store.StateDone, "cli", "test"); err != nil && !strings.Contains(err.Error(), "state") {
+			if err := f.db.Transition(context.Background(), f.task.ID, store.StateMerging, store.StateDone, "cli", "test"); err != nil && !strings.Contains(err.Error(), "state") {
 				t.Fatal(err)
 			}
-			f.commitToShip(t)
+			f.commitToChange(t)
 			if _, ok := f.pass(t); ok {
 				t.Fatal("old pass is current for a moved candidate")
 			}
-			if code, out, _ := f.run("land", "t1"); code == 0 || !strings.Contains(out, "review_required") {
-				t.Fatalf("land after movement: %d %s", code, out)
+			if code, out, _ := f.run("merge", "t1"); code == 0 || !strings.Contains(out, "review_required") {
+				t.Fatalf("merge after movement: %d %s", code, out)
 			}
 			targets, err := f.db.ReviewTargets(context.Background(), f.review.ID)
 			if err != nil || len(targets) != 1 || targets[0].Commit == strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "refs/heads/posse/t1")) {
@@ -249,10 +249,10 @@ func TestReviewVerdictOnlyPassSatisfiesLandAndMovementInvalidatesIt(t *testing.T
 func TestReviewVerdictDuplicateCompletionAndTeardownRebuild(t *testing.T) {
 	f := newReviewVerdictFixture(t)
 	ctx := context.Background()
-	if code, out := f.holler(t, f.review.PaneID, "done", "first", "--report", "report.md", "--verdict", "pass"); code != 0 {
-		t.Fatalf("holler: %d %s", code, out)
+	if code, out := f.signal(t, f.review.PaneID, "done", "first", "--report", "report.md", "--verdict", "pass"); code != 0 {
+		t.Fatalf("signal: %d %s", code, out)
 	}
-	if code, out := f.holler(t, f.review.PaneID, "done", "again", "--report", "report.md", "--verdict", "changes_requested"); code == 0 || !strings.Contains(out, "signal_state_invalid") {
+	if code, out := f.signal(t, f.review.PaneID, "done", "again", "--report", "report.md", "--verdict", "changes_requested"); code == 0 || !strings.Contains(out, "signal_state_invalid") {
 		t.Fatalf("duplicate completion: %d %s", code, out)
 	}
 	if verdict, err := f.db.ReviewVerdict(ctx, f.review.ID); err != nil || verdict.Verdict != "pass" {
@@ -272,8 +272,8 @@ func TestReviewVerdictDuplicateCompletionAndTeardownRebuild(t *testing.T) {
 	}
 }
 
-func TestReviewAdmissionRefusesIncompleteShipAndPinsCompletedRevision(t *testing.T) {
-	fixture := newRideFixture(t)
+func TestReviewAdmissionRefusesIncompleteChangeAndPinsCompletedRevision(t *testing.T) {
+	fixture := newStartFixture(t)
 	configureReviewIdentityFixture(t, fixture, "[profiles.reviewer]\nkind = \"pi\"\nmodel = \"model-b\"\n")
 	seedReviewAuthor(t, fixture)
 	brief := filepath.Join(filepath.Dir(fixture.brief), "review-brief.md")
@@ -284,7 +284,7 @@ func TestReviewAdmissionRefusesIncompleteShipAndPinsCompletedRevision(t *testing
 		var output strings.Builder
 		cli := fixture.service.CLI()
 		cli.Out, cli.ErrOut = &output, &output
-		code := cli.Run([]string{"ride", "--brief", brief, "--name", "review-launch-identity", "--profile", "reviewer"})
+		code := cli.Run([]string{"start", "--brief", brief, "--name", "review-launch-identity", "--profile", "reviewer"})
 		return code, output.String()
 	}
 	db, err := store.Open(fixture.home)
@@ -296,13 +296,13 @@ func TestReviewAdmissionRefusesIncompleteShipAndPinsCompletedRevision(t *testing
 		t.Fatal(err)
 	}
 	if code, out := run(); code == 0 || !strings.Contains(out, "review_target_incomplete") {
-		t.Fatalf("review of a working Ship: %d %s", code, out)
+		t.Fatalf("review of a working Change: %d %s", code, out)
 	}
 	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE seq=1`); err != nil {
 		t.Fatal(err)
 	}
 	if code, out := run(); code != 0 {
-		t.Fatalf("review of a done Ship: %d %s", code, out)
+		t.Fatalf("review of a done Change: %d %s", code, out)
 	}
 	wantSHA := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/posse/author"))
 	var gotSHA string

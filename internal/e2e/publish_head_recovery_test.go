@@ -66,7 +66,7 @@ func t228SeedUnverifiedOpenPR(t *testing.T, f *t205PRFixture) string {
 	t.Helper()
 	// The fixture's 1ms PR poller runs git status in this same linked
 	// worktree. Stop that unrelated poller before mutating its index directly.
-	stopBackgroundLookout(t, f.prLifecycleFixture)
+	stopBackgroundWatch(t, f.prLifecycleFixture)
 	oldHead := strings.TrimSpace(gitTest(t, f.env, f.task.WorktreePath, "rev-parse", "HEAD"))
 	gitTest(t, f.env, f.task.WorktreePath, "push", "origin", "refs/heads/"+f.task.Branch+":refs/heads/"+f.task.Branch)
 	state := `{"url":"https://github.com/acme/shop/pull/17","title":"PR lifecycle change","body":""}`
@@ -94,9 +94,9 @@ func t228AssertCrash86(t *testing.T, output string, err error) {
 func t228WorkspaceFixture(t *testing.T) *t205PRFixture {
 	t.Helper()
 	f := t205NewPRFixture(t, "github")
-	// The fixture's 1ms PR poller reads the Rider worktree while these tests
+	// The fixture's 1ms PR poller reads the Worker worktree while these tests
 	// create commits and exercise direct publish recovery.
-	stopBackgroundLookout(t, f.prLifecycleFixture)
+	stopBackgroundWatch(t, f.prLifecycleFixture)
 	t228InstallForgeLag(t, f)
 	ctx := context.Background()
 	if _, err := f.db.ExecContext(ctx, "UPDATE projects SET kind='workspace', root=? WHERE id=?", f.root, f.project.ID); err != nil {
@@ -108,7 +108,7 @@ func t228WorkspaceFixture(t *testing.T) *t205PRFixture {
 	if _, err := f.db.ExecContext(ctx, "UPDATE tasks SET worktree_path=? WHERE id=?", filepath.Dir(f.task.WorktreePath), f.task.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.CreateTaskRepos(ctx, f.task.ID, []store.TaskRepo{{Repo: "repo", WorktreePath: f.task.WorktreePath, BaseRef: "main", LandingMode: "pr", State: store.TaskRepoOpen}}); err != nil {
+	if err := f.db.CreateTaskRepos(ctx, f.task.ID, []store.TaskRepo{{Repo: "repo", WorktreePath: f.task.WorktreePath, BaseRef: "main", MergeMode: "pr", State: store.TaskRepoOpen}}); err != nil {
 		t.Fatal(err)
 	}
 	return f

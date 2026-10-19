@@ -40,7 +40,7 @@ func TestSelectedBranchRefValidatesOriginBranchWithoutEffects(t *testing.T) {
 }
 
 func TestSyncTaskTargetFastForwardsTheFrozenNonDefaultBranch(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	baseSHA := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/main"))
 	gitTest(t, fixture.repo, "branch", "staging", "main")
 	gitTest(t, fixture.repo, "push", "origin", "staging")
@@ -69,7 +69,7 @@ func TestSyncTaskTargetFastForwardsTheFrozenNonDefaultBranch(t *testing.T) {
 	}
 }
 
-func TestLocalLandingUsesFrozenNonDefaultTarget(t *testing.T) {
+func TestLocalMergeUsesFrozenNonDefaultTarget(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	worktree := filepath.Join(root, "worktree")
@@ -95,6 +95,6 @@ func TestLocalLandingUsesFrozenNonDefaultTarget(t *testing.T) {
 		t.Fatalf("staging tip = %s, want Task tip %s", got, gatedSHA)
 	}
 	if _, err := gitOutput(context.Background(), repo, "cat-file", "-e", "refs/heads/main:change.txt"); err == nil {
-		t.Fatal("local Land changed the Project default branch instead of staging")
+		t.Fatal("local Merge changed the Project default branch instead of staging")
 	}
 }

@@ -23,34 +23,34 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestFailedLandIntentDoesNotPoisonNextCLICommand(t *testing.T) {
+func TestFailedMergeIntentDoesNotPoisonNextCLICommand(t *testing.T) {
 	harness := newIntentCLIHarness(t)
-	fixture := harness.newProject(t, "land-failure")
-	taskID, err := fixture.addShipTask(t, store.StateDone)
+	fixture := harness.newProject(t, "merge-failure")
+	taskID, err := fixture.addChangeTask(t, store.StateDone)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.repo, "user-edit.txt"), []byte("uncommitted\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, output := fixture.run(t, "", "land", taskID, "--merge", "--user-approved", "User approved this merge")
-	if code == 0 || !strings.Contains(output, "land_target_busy") {
-		t.Fatalf("land with an uncommitted Project edit = %d, %s", code, output)
+	code, output := fixture.run(t, "", "merge", taskID, "--execute", "--user-approved", "User approved this merge")
+	if code == 0 || !strings.Contains(output, "merge_target_busy") {
+		t.Fatalf("merge with an uncommitted Project edit = %d, %s", code, output)
 	}
-	code, output = fixture.run(t, "", "roster")
+	code, output = fixture.run(t, "", "list")
 	if code != 0 {
-		t.Fatalf("roster failed after the Land command returned: code=%d output=%s", code, output)
+		t.Fatalf("list failed after the Merge command returned: code=%d output=%s", code, output)
 	}
 	if err := fixture.openDB(t, func(db *store.DB) error {
 		if _, err := db.IntentByTask(context.Background(), fixture.taskDBID); !store.IsNotFound(err) {
-			return fmt.Errorf("failed Land left an intent: %v", err)
+			return fmt.Errorf("failed Merge left an intent: %v", err)
 		}
 		task, err := db.TaskByID(context.Background(), fixture.project.ID, fixture.taskDBID)
 		if err != nil {
 			return err
 		}
 		if task.State != store.StateDone {
-			return fmt.Errorf("failed Land left Task in %s, want done", task.State)
+			return fmt.Errorf("failed Merge left Task in %s, want done", task.State)
 		}
 		return nil
 	}); err != nil {
@@ -58,7 +58,7 @@ func TestFailedLandIntentDoesNotPoisonNextCLICommand(t *testing.T) {
 	}
 }
 
-func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
+func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 	harness := newIntentCLIHarness(t)
 	for _, scenario := range []struct {
 		name         string
@@ -69,7 +69,7 @@ func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			fixture := harness.newProject(t, strings.ReplaceAll(scenario.name, " ", "-"))
-			taskID, err := fixture.addShipTask(t, store.StateDone)
+			taskID, err := fixture.addChangeTask(t, store.StateDone)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -81,7 +81,7 @@ func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			configText = []byte(strings.Replace(string(configText), `auto_unsaddle = "never"`, `auto_unsaddle = "finished"`, 1))
+			configText = []byte(strings.Replace(string(configText), `auto_teardown = "never"`, `auto_teardown = "finished"`, 1))
 			if err := os.WriteFile(configPath, configText, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -123,20 +123,20 @@ func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 				}
 			}
 
-			landMarker := filepath.Join(fixture.root, "land-teardown-ready")
-			landEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "land:after:teardown.ready")
-			landEnv = setEnv(landEnv, "POSSE_INTENT_PAUSE_FILE", landMarker)
-			landOutput, landDone := startCLI(landEnv, "land", taskID, "--merge", "--user-approved", "User approved this local merge")
-			waitMarker(landMarker)
+			mergeMarker := filepath.Join(fixture.root, "merge-teardown-ready")
+			mergeEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "merge:after:teardown.ready")
+			mergeEnv = setEnv(mergeEnv, "POSSE_INTENT_PAUSE_FILE", mergeMarker)
+			mergeOutput, mergeDone := startCLI(mergeEnv, "merge", taskID, "--execute", "--user-approved", "User approved this local merge")
+			waitMarker(mergeMarker)
 
-			var landErr error
+			var mergeErr error
 			if scenario.failTeardown {
 				otherMarker := filepath.Join(fixture.root, "automatic-teardown-ready")
-				otherEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "unsaddle:after:panes.close")
+				otherEnv := setEnv(fixture.env, "POSSE_INTENT_PAUSE_AT", "teardown:after:panes.close")
 				otherEnv = setEnv(otherEnv, "POSSE_INTENT_PAUSE_FILE", otherMarker)
-				otherOutput, otherDone := startCLI(otherEnv, "roster")
+				otherOutput, otherDone := startCLI(otherEnv, "list")
 				waitMarker(otherMarker)
-				continueAt(landMarker)
+				continueAt(mergeMarker)
 				time.Sleep(time.Second)
 				var task store.Task
 				if err := fixture.openDB(t, func(db *store.DB) error {
@@ -153,76 +153,76 @@ func TestLocalLandReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 				if err := waitCLI("automatic Teardown", otherDone, otherOutput); err != nil {
 					t.Fatalf("automatic Teardown reconcile failed: %v output=%s", err, otherOutput.String())
 				}
-				landErr = waitCLI("local Land", landDone, landOutput)
+				mergeErr = waitCLI("local Merge", mergeDone, mergeOutput)
 			} else {
-				if code, output := fixture.run(t, "", "roster"); code != 0 {
+				if code, output := fixture.run(t, "", "list"); code != 0 {
 					t.Fatalf("automatic Teardown failed: code=%d output=%s", code, output)
 				}
-				continueAt(landMarker)
-				landErr = waitCLI("local Land", landDone, landOutput)
+				continueAt(mergeMarker)
+				mergeErr = waitCLI("local Merge", mergeDone, mergeOutput)
 			}
-			if (landErr != nil) != scenario.failTeardown {
-				t.Fatalf("local Land error=%v, want error=%v; output=%s", landErr, scenario.failTeardown, landOutput.String())
+			if (mergeErr != nil) != scenario.failTeardown {
+				t.Fatalf("local Merge error=%v, want error=%v; output=%s", mergeErr, scenario.failTeardown, mergeOutput.String())
 			}
-			teardownSuccessCount := strings.Count(landOutput.String(), "teardown: torn-down")
+			teardownSuccessCount := strings.Count(mergeOutput.String(), "teardown: torn-down")
 			wantTeardownSuccessCount := 1
 			if scenario.failTeardown {
 				wantTeardownSuccessCount = 0
 			}
 			if teardownSuccessCount != wantTeardownSuccessCount {
-				t.Fatalf("Land teardown success count=%d, want %d: %s", teardownSuccessCount, wantTeardownSuccessCount, landOutput.String())
+				t.Fatalf("Merge teardown success count=%d, want %d: %s", teardownSuccessCount, wantTeardownSuccessCount, mergeOutput.String())
 			}
 
 			var task store.Task
-			var mount store.Mount
-			var landedCount, tornDownCount, approvalCount, intentCount, incompleteCount int
+			var sandbox store.Sandbox
+			var mergedCount, tornDownCount, approvalCount, intentCount, incompleteCount int
 			if err := fixture.openDB(t, func(db *store.DB) error {
 				var err error
 				task, err = db.Task(context.Background(), fixture.project.ID, taskID)
 				if err != nil {
 					return err
 				}
-				mounts, err := db.Mounts(context.Background(), fixture.project.ID)
+				sandboxes, err := db.Sandboxes(context.Background(), fixture.project.ID)
 				if err != nil {
 					return err
 				}
-				for _, candidate := range mounts {
+				for _, candidate := range sandboxes {
 					if candidate.Path == task.WorktreePath {
-						mount = candidate
+						sandbox = candidate
 						break
 					}
 				}
 				query := `SELECT
-				 (SELECT COUNT(*) FROM transitions WHERE task_id=? AND to_state='landed'),
+				 (SELECT COUNT(*) FROM transitions WHERE task_id=? AND to_state='merged'),
 				 (SELECT COUNT(*) FROM transitions WHERE task_id=? AND to_state='torn-down'),
 				 (SELECT COUNT(*) FROM approvals WHERE task_id=? AND action='merge'),
 				 (SELECT COUNT(*) FROM intents WHERE task_id=?),
-				 (SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='unsaddle_incomplete')`
-				return db.QueryRowContext(context.Background(), query, task.ID, task.ID, task.ID, task.ID, task.ID).Scan(&landedCount, &tornDownCount, &approvalCount, &intentCount, &incompleteCount)
+				 (SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='teardown_incomplete')`
+				return db.QueryRowContext(context.Background(), query, task.ID, task.ID, task.ID, task.ID, task.ID).Scan(&mergedCount, &tornDownCount, &approvalCount, &intentCount, &incompleteCount)
 			}); err != nil {
 				t.Fatal(err)
 			}
-			wantState, wantMount, wantTornDown, wantIncomplete := store.StateTornDown, "idle", 1, 0
+			wantState, wantSandbox, wantTornDown, wantIncomplete := store.StateTornDown, "idle", 1, 0
 			if scenario.failTeardown {
-				wantState, wantMount, wantTornDown, wantIncomplete = store.StateLanded, "broken", 0, 1
+				wantState, wantSandbox, wantTornDown, wantIncomplete = store.StateMerged, "broken", 0, 1
 			}
-			if task.State != wantState || mount.State != wantMount || landedCount != 1 || tornDownCount != wantTornDown || approvalCount != 1 || intentCount != 0 || incompleteCount != wantIncomplete {
-				t.Fatalf("unexpected exactly-once outcome: state=%s mount=%s landed=%d torn-down=%d approvals=%d intents=%d incomplete=%d", task.State, mount.State, landedCount, tornDownCount, approvalCount, intentCount, incompleteCount)
+			if task.State != wantState || sandbox.State != wantSandbox || mergedCount != 1 || tornDownCount != wantTornDown || approvalCount != 1 || intentCount != 0 || incompleteCount != wantIncomplete {
+				t.Fatalf("unexpected exactly-once outcome: state=%s sandbox=%s merged=%d torn-down=%d approvals=%d intents=%d incomplete=%d", task.State, sandbox.State, mergedCount, tornDownCount, approvalCount, intentCount, incompleteCount)
 			}
 		})
 	}
 }
 
-func TestRideCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
+func TestStartCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
 	harness := newIntentCLIHarness(t)
-	fixture := harness.newProject(t, "ride-crash")
+	fixture := harness.newProject(t, "start-crash")
 	brief := filepath.Join(fixture.root, "brief.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Crash recovery\ndone_when: the recovery reaches a stable state\n---\nCreate a small change.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Crash recovery\ndone_when: the recovery reaches a stable state\n---\nCreate a small change.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, output := fixture.run(t, "ride:after:task.create", "ride", "--brief", brief, "--name", "crash-recovery")
+	code, output := fixture.run(t, "start:after:task.create", "start", "--brief", brief, "--name", "crash-recovery")
 	if code != 86 {
-		t.Fatalf("ride did not exit at the task-create crash point: code=%d output=%s", code, output)
+		t.Fatalf("start did not exit at the task-create crash point: code=%d output=%s", code, output)
 	}
 	var admittedJSON string
 	if err := fixture.openDB(t, func(db *store.DB) error {
@@ -238,20 +238,20 @@ func TestRideCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
 			return fmt.Errorf("crash lost admitted plan: %#v", plan)
 		}
 		admittedJSON = task.PlanJSON
-		mounts, err := db.Mounts(context.Background(), fixture.project.ID)
+		sandboxes, err := db.Sandboxes(context.Background(), fixture.project.ID)
 		if err != nil {
 			return err
 		}
-		if len(mounts) != 0 {
-			return fmt.Errorf("task-create crash allocated Mounts: %#v", mounts)
+		if len(sandboxes) != 0 {
+			return fmt.Errorf("task-create crash allocated Sandboxes: %#v", sandboxes)
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	code, output = fixture.run(t, "", "roster")
+	code, output = fixture.run(t, "", "list")
 	if code != 0 {
-		t.Fatalf("roster failed while recovering the interrupted ride: code=%d output=%s", code, output)
+		t.Fatalf("list failed while recovering the interrupted start: code=%d output=%s", code, output)
 	}
 	if err := fixture.openDB(t, func(db *store.DB) error {
 		intents, err := db.Intents(context.Background(), fixture.project.ID)
@@ -259,14 +259,14 @@ func TestRideCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
 			return err
 		}
 		if len(intents) != 0 {
-			return fmt.Errorf("ride recovery left %d intent(s)", len(intents))
+			return fmt.Errorf("start recovery left %d intent(s)", len(intents))
 		}
 		task, err := db.Task(context.Background(), fixture.project.ID, "t1")
 		if err != nil {
 			return err
 		}
 		if task.State != store.StateFailed {
-			return fmt.Errorf("ride recovery left Task in %s, want failed", task.State)
+			return fmt.Errorf("start recovery left Task in %s, want failed", task.State)
 		}
 		if task.PlanJSON != admittedJSON {
 			return fmt.Errorf("crash recovery changed the admitted plan")
@@ -280,14 +280,14 @@ func TestRideCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
 func TestStartupAndExplicitRecoveryDoNotDoubleRelaunch(t *testing.T) {
 	harness := newIntentCLIHarness(t)
 	fixture := harness.newProject(t, "concurrent-recovery")
-	_, err := fixture.addShipTask(t, store.StateWorking)
+	_, err := fixture.addChangeTask(t, store.StateWorking)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.attachTaskPane(t, "t1", true); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := fixture.run(t, "", "roster"); code != 0 {
+	if code, output := fixture.run(t, "", "list"); code != 0 {
 		t.Fatalf("initial reconcile failed: code=%d output=%s", code, output)
 	}
 	var before store.Task
@@ -354,7 +354,7 @@ requestsDrained:
 			t.Fatalf("%s did not finish after the recovery barrier opened: %s", result.label, result.out.String())
 		}
 	}
-	if code, output := fixture.run(t, "", "roster"); code != 0 {
+	if code, output := fixture.run(t, "", "list"); code != 0 {
 		t.Fatalf("post-recovery reconcile failed: code=%d output=%s", code, output)
 	}
 	var after store.Task
@@ -411,41 +411,41 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 		step    string
 		phase   string
 	}{
-		{command: "ride", step: "task.create", phase: "before"},
-		{command: "ride", step: "task.create", phase: "after"},
+		{command: "start", step: "task.create", phase: "before"},
+		{command: "start", step: "task.create", phase: "after"},
 	}
-	for _, step := range []string{"scratch.create", "mount.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"} {
+	for _, step := range []string{"scratch.create", "sandbox.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"} {
 		steps = append(steps, struct {
 			command string
 			step    string
 			phase   string
-		}{"ride", step, "before"}, struct {
+		}{"start", step, "before"}, struct {
 			command string
 			step    string
 			phase   string
-		}{"ride", step, "after"})
+		}{"start", step, "after"})
 	}
-	for _, step := range []string{"gate.record", "gate.run", "task.landing", "notice.create", "approval.record", "merge", "landed_ref.record", "task.landed"} {
+	for _, step := range []string{"gate.record", "gate.run", "task.merging", "notice.create", "approval.record", "merge", "merged_ref.record", "task.merged"} {
 		steps = append(steps, struct {
 			command string
 			step    string
 			phase   string
-		}{"land --merge", step, "before"}, struct {
+		}{"merge --execute", step, "before"}, struct {
 			command string
 			step    string
 			phase   string
-		}{"land --merge", step, "after"})
+		}{"merge --execute", step, "after"})
 	}
-	for _, step := range []string{"approval.record", "discard.capture", "panes.close", "scratch.remove", "mount.release", "branch.remove", "task.torn_down"} {
+	for _, step := range []string{"approval.record", "discard.capture", "panes.close", "scratch.remove", "sandbox.release", "branch.remove", "task.torn_down"} {
 		steps = append(steps, struct {
 			command string
 			step    string
 			phase   string
-		}{"unsaddle", step, "before"}, struct {
+		}{"teardown", step, "before"}, struct {
 			command string
 			step    string
 			phase   string
-		}{"unsaddle", step, "after"})
+		}{"teardown", step, "after"})
 	}
 	for _, step := range []string{"git.inspect", "pane.open", "agent.stop", "pane.label", "scratch.environment", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"} {
 		steps = append(steps, struct {
@@ -469,32 +469,32 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			var branchSHA, defaultSHA string
 			var err error
 			switch item.command {
-			case "ride":
+			case "start":
 				brief := filepath.Join(fixture.root, "brief.md")
-				if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: Crash matrix\ndone_when: the recovery settles the intent\n---\nCreate a small change.\n"), 0o600); err != nil {
+				if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Crash matrix\ndone_when: the recovery settles the intent\n---\nCreate a small change.\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				taskID = "t1"
-				args := []string{"ride", "--brief", brief, "--name", "crash-matrix"}
+				args := []string{"start", "--brief", brief, "--name", "crash-matrix"}
 				crashAt := item.command + ":" + item.phase + ":" + item.step
 				code, output := fixture.run(t, crashAt, args...)
 				assertCrashExit(t, code, output, crashAt)
-			case "land --merge":
-				taskID, err = fixture.addShipTask(t, store.StateDone)
+			case "merge --execute":
+				taskID, err = fixture.addChangeTask(t, store.StateDone)
 				if err != nil {
 					t.Fatal(err)
 				}
 				branchSHA = strings.TrimSpace(gitTest(t, fixture.harness.baseEnv, fixture.repo, "rev-parse", "refs/heads/posse/t1"))
 				defaultSHA = strings.TrimSpace(gitTest(t, fixture.harness.baseEnv, fixture.repo, "rev-parse", "refs/heads/main"))
 				crashAt := item.command + ":" + item.phase + ":" + item.step
-				code, output := fixture.run(t, crashAt, "land", taskID, "--merge", "--user-approved", "User approved the test merge")
+				code, output := fixture.run(t, crashAt, "merge", taskID, "--execute", "--user-approved", "User approved the test merge")
 				assertCrashExit(t, code, output, crashAt)
-			case "unsaddle":
+			case "teardown":
 				state := store.StateFailed
 				if item.step == "scratch.remove" {
 					state = store.StateLost
 				}
-				taskID, err = fixture.addShipTask(t, state)
+				taskID, err = fixture.addChangeTask(t, state)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -513,16 +513,16 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					t.Fatalf("close the exited fixture Task pane before discard: %v", err)
 				}
 				crashAt := item.command + ":" + item.phase + ":" + item.step
-				code, output := fixture.run(t, crashAt, "unsaddle", taskID, "--discard", "--user-approved", "User approved discard")
+				code, output := fixture.run(t, crashAt, "teardown", taskID, "--discard", "--user-approved", "User approved discard")
 				assertCrashExit(t, code, output, crashAt)
-				if item.step == "mount.release" && item.phase == "after" {
+				if item.step == "sandbox.release" && item.phase == "after" {
 					if err := fixture.openDB(t, func(db *store.DB) error {
 						var savedSHA string
 						if err := db.QueryRowContext(context.Background(), `SELECT branch_sha FROM approvals WHERE task_id=? AND action='discard' ORDER BY at DESC,id DESC LIMIT 1`, fixture.taskDBID).Scan(&savedSHA); err != nil {
 							return err
 						}
 						if savedSHA != branchSHA {
-							return fmt.Errorf("discard approval saved branch tip %q, want %q before Mount release", savedSHA, branchSHA)
+							return fmt.Errorf("discard approval saved branch tip %q, want %q before Sandbox release", savedSHA, branchSHA)
 						}
 						return nil
 					}); err != nil {
@@ -534,7 +534,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 				if item.step == "task.progress" {
 					initialState = store.StateWorking
 				}
-				taskID, err = fixture.addShipTask(t, initialState)
+				taskID, err = fixture.addChangeTask(t, initialState)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -547,23 +547,23 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 				code, output := fixture.run(t, crashAt, "relaunch", taskID)
 				assertCrashExit(t, code, output, crashAt)
 			}
-			code, output := fixture.run(t, "", "roster")
+			code, output := fixture.run(t, "", "list")
 			if code != 0 {
-				t.Fatalf("roster failed after recovery: code=%d output=%s", code, output)
+				t.Fatalf("list failed after recovery: code=%d output=%s", code, output)
 			}
 			harness.session.mu.Lock()
 			created := harness.session.workspaceCreates - workspaceCreates
-			var leftovers []herdr.Pane
+			var orphans []herdr.Pane
 			for _, pane := range harness.session.panes {
-				if pane.PaneID != fixture.project.LeadPaneID && strings.HasPrefix(pane.CWD, filepath.Join(fixture.home, "remuda")+string(os.PathSeparator)) {
-					leftovers = append(leftovers, pane)
+				if pane.PaneID != fixture.project.LeadPaneID && strings.HasPrefix(pane.CWD, filepath.Join(fixture.home, "pool")+string(os.PathSeparator)) {
+					orphans = append(orphans, pane)
 				}
 			}
 			harness.session.mu.Unlock()
 			if created != 0 {
-				t.Fatalf("%s created %d top-level Herdr workspaces; Riders open as linked worktrees", item.command, created)
+				t.Fatalf("%s created %d top-level Herdr workspaces; Workers open as linked worktrees", item.command, created)
 			}
-			if item.command == "ride" {
+			if item.command == "start" {
 				if err := fixture.openDB(t, func(db *store.DB) error {
 					task, err := db.Task(context.Background(), fixture.project.ID, taskID)
 					if store.IsNotFound(err) {
@@ -572,33 +572,33 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 						return err
 					}
 					// An interrupted spawn may leave a shell that was never bound
-					// during ownership proof. In that case, retain its pane and Mount
+					// during ownership proof. In that case, retain its pane and Sandbox
 					// rather than signal it based on CWD discovery alone.
-					if task.State == store.StateFailed && len(leftovers) != 0 {
-						if len(leftovers) != 1 || leftovers[0].Label != task.PaneLabel {
-							return fmt.Errorf("failed ride left unexpected Rider panes: %#v", leftovers)
+					if task.State == store.StateFailed && len(orphans) != 0 {
+						if len(orphans) != 1 || orphans[0].Label != task.PaneLabel {
+							return fmt.Errorf("failed start left unexpected Worker panes: %#v", orphans)
 						}
-						mounts, mountErr := db.Mounts(context.Background(), fixture.project.ID)
-						if mountErr != nil {
-							return mountErr
+						sandboxes, sandboxErr := db.Sandboxes(context.Background(), fixture.project.ID)
+						if sandboxErr != nil {
+							return sandboxErr
 						}
 						held := false
-						for _, mount := range mounts {
-							held = held || mount.ID == task.MountID && mount.TaskID == task.ID && mount.State == "held"
+						for _, sandbox := range sandboxes {
+							held = held || sandbox.ID == task.SandboxID && sandbox.TaskID == task.ID && sandbox.State == "held"
 						}
 						if !held {
-							return fmt.Errorf("failed ride left pane without retaining its Mount: %#v", mounts)
+							return fmt.Errorf("failed start left pane without retaining its Sandbox: %#v", sandboxes)
 						}
 						fixture.harness.session.mu.Lock()
-						shell := fixture.harness.session.shells[leftovers[0].PaneID]
+						shell := fixture.harness.session.shells[orphans[0].PaneID]
 						shellAlive := shell != nil && shell.alive()
 						fixture.harness.session.mu.Unlock()
 						if !shellAlive {
-							return fmt.Errorf("failed ride retained pane %s without its shell process", leftovers[0].PaneID)
+							return fmt.Errorf("failed start retained pane %s without its shell process", orphans[0].PaneID)
 						}
 					}
-					if task.State == store.StateWorking && (len(leftovers) != 1 || leftovers[0].Label != task.PaneLabel) {
-						return fmt.Errorf("working ride has panes %#v, want its one labeled Rider pane", leftovers)
+					if task.State == store.StateWorking && (len(orphans) != 1 || orphans[0].Label != task.PaneLabel) {
+						return fmt.Errorf("working start has panes %#v, want its one labeled Worker pane", orphans)
 					}
 					return nil
 				}); err != nil {
@@ -614,7 +614,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					return fmt.Errorf("crash recovery left %d intent(s): %#v", len(intents), intents)
 				}
 				task, err := db.Task(context.Background(), fixture.project.ID, taskID)
-				if item.command == "ride" && item.step == "task.create" && item.phase == "before" {
+				if item.command == "start" && item.step == "task.create" && item.phase == "before" {
 					if !store.IsNotFound(err) {
 						return fmt.Errorf("pre-create crash unexpectedly left a Task: %#v, %v", task, err)
 					}
@@ -624,23 +624,23 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					return err
 				}
 				switch item.command {
-				case "ride":
+				case "start":
 					if task.State != store.StateFailed && task.State != store.StateWorking {
-						return fmt.Errorf("ride recovery left Task in %s", task.State)
+						return fmt.Errorf("start recovery left Task in %s", task.State)
 					}
-				case "land --merge":
-					mergeCompleted := item.step == "merge" && item.phase == "after" || item.step == "landed_ref.record" || item.step == "task.landed"
+				case "merge --execute":
+					mergeCompleted := item.step == "merge" && item.phase == "after" || item.step == "merged_ref.record" || item.step == "task.merged"
 					wantState := store.StateDone
 					if mergeCompleted {
-						wantState = store.StateLanded
+						wantState = store.StateMerged
 					}
 					if task.State != wantState {
-						return fmt.Errorf("Land crash at %s/%s recovered Task to %s, want %s", item.phase, item.step, task.State, wantState)
+						return fmt.Errorf("Merge crash at %s/%s recovered Task to %s, want %s", item.phase, item.step, task.State, wantState)
 					}
-					if mergeCompleted && task.LandedRef != branchSHA || !mergeCompleted && task.LandedRef != "" {
-						return fmt.Errorf("Land crash at %s/%s recovered landed ref %q, merge completed=%v branch=%q", item.phase, item.step, task.LandedRef, mergeCompleted, branchSHA)
+					if mergeCompleted && task.MergedRef != branchSHA || !mergeCompleted && task.MergedRef != "" {
+						return fmt.Errorf("Merge crash at %s/%s recovered merged ref %q, merge completed=%v branch=%q", item.phase, item.step, task.MergedRef, mergeCompleted, branchSHA)
 					}
-				case "unsaddle":
+				case "teardown":
 					if task.State != store.StateTornDown {
 						return fmt.Errorf("discard crash at %s/%s recovered Task to %s, want torn-down", item.phase, item.step, task.State)
 					}
@@ -656,17 +656,17 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if item.command == "land --merge" {
-				mergeCompleted := item.step == "merge" && item.phase == "after" || item.step == "landed_ref.record" || item.step == "task.landed"
+			if item.command == "merge --execute" {
+				mergeCompleted := item.step == "merge" && item.phase == "after" || item.step == "merged_ref.record" || item.step == "task.merged"
 				wantDefaultSHA := defaultSHA
 				if mergeCompleted {
 					wantDefaultSHA = branchSHA
 				}
 				if got := strings.TrimSpace(gitTest(t, fixture.harness.baseEnv, fixture.repo, "rev-parse", "refs/heads/main")); got != wantDefaultSHA {
-					t.Fatalf("Land crash at %s/%s left default branch at %s, want %s", item.phase, item.step, got, wantDefaultSHA)
+					t.Fatalf("Merge crash at %s/%s left default branch at %s, want %s", item.phase, item.step, got, wantDefaultSHA)
 				}
 			}
-			if item.command == "unsaddle" {
+			if item.command == "teardown" {
 				scratchPath := filepath.Join(fixture.home, "scratch", fixture.project.Name, "t1")
 				if _, err := os.Stat(scratchPath); !os.IsNotExist(err) {
 					t.Fatalf("discard recovery kept Task scratch after %s/%s: %v", item.phase, item.step, err)
@@ -687,13 +687,13 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 					if approvals != wantApprovals || notices != wantNotices {
 						return fmt.Errorf("discard crash at %s/%s left %d approvals and %d intent_stuck Notices, want %d and %d", item.phase, item.step, approvals, notices, wantApprovals, wantNotices)
 					}
-					var mountState string
-					if err := db.QueryRowContext(context.Background(), `SELECT state FROM mounts WHERE path=?`, filepath.Join(fixture.home, "remuda", fixture.project.Name, "mount-1")).Scan(&mountState); err != nil {
+					var sandboxState string
+					if err := db.QueryRowContext(context.Background(), `SELECT state FROM mounts WHERE path=?`, filepath.Join(fixture.home, "pool", fixture.project.Name, "sandbox-1")).Scan(&sandboxState); err != nil {
 						return err
 					}
-					wantMountState := "idle"
-					if mountState != wantMountState {
-						return fmt.Errorf("discard crash at %s/%s left Mount %s, want %s", item.phase, item.step, mountState, wantMountState)
+					wantSandboxState := "idle"
+					if sandboxState != wantSandboxState {
+						return fmt.Errorf("discard crash at %s/%s left Sandbox %s, want %s", item.phase, item.step, sandboxState, wantSandboxState)
 					}
 					return nil
 				}); err != nil {
@@ -775,7 +775,7 @@ func (h *intentCLIHarness) newProject(t *testing.T, name string) *intentProjectF
 		t.Fatal(err)
 	}
 	initRepository(t, repo, remote, h.baseEnv)
-	configText := "[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\nmax_workers = 100\nstall_after = \"1h\"\nidle_after = \"1h\"\n\n[lead]\nkind = \"claude\"\n\n[kinds.claude]\nmodel_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{effort}\"]\n\n[profiles.deep]\nkind = \"claude\"\nmodel = \"sonnet\"\neffort = \"high\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	configText := "[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 100\nstall_after = \"1h\"\nidle_after = \"1h\"\n\n[lead]\nkind = \"claude\"\n\n[kinds.claude]\nmodel_args = [\"--model\", \"{model}\"]\neffort_args = [\"--effort\", \"{effort}\"]\n\n[profiles.deep]\nkind = \"claude\"\nmodel = \"sonnet\"\neffort = \"high\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -817,29 +817,29 @@ func (h *intentCLIHarness) newProject(t *testing.T, name string) *intentProjectF
 	return &intentProjectFixture{harness: h, root: root, repo: repo, home: home, env: env, project: project, dbPath: filepath.Join(home, "posse.db")}
 }
 
-func (f *intentProjectFixture) addShipTask(t *testing.T, state store.State) (string, error) {
+func (f *intentProjectFixture) addChangeTask(t *testing.T, state store.State) (string, error) {
 	t.Helper()
 	ctx := context.Background()
-	mountPath := filepath.Join(f.home, "remuda", f.project.Name, "mount-1")
-	if err := os.MkdirAll(filepath.Dir(mountPath), 0o700); err != nil {
+	sandboxPath := filepath.Join(f.home, "pool", f.project.Name, "sandbox-1")
+	if err := os.MkdirAll(filepath.Dir(sandboxPath), 0o700); err != nil {
 		return "", err
 	}
-	gitTest(t, f.harness.baseEnv, f.repo, "worktree", "add", "-b", "posse/t1", mountPath, "main")
-	if err := os.WriteFile(filepath.Join(mountPath, "change.txt"), []byte("worker change\n"), 0o600); err != nil {
+	gitTest(t, f.harness.baseEnv, f.repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
+	if err := os.WriteFile(filepath.Join(sandboxPath, "change.txt"), []byte("worker change\n"), 0o600); err != nil {
 		return "", err
 	}
-	gitTest(t, f.harness.baseEnv, mountPath, "add", "change.txt")
-	gitTest(t, f.harness.baseEnv, mountPath, "commit", "-m", "worker change")
+	gitTest(t, f.harness.baseEnv, sandboxPath, "add", "change.txt")
+	gitTest(t, f.harness.baseEnv, sandboxPath, "commit", "-m", "worker change")
 	db, err := store.Open(f.home)
 	if err != nil {
 		return "", err
 	}
-	taskID, err := db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "ship", Title: "Crash test", Profile: "deep", LandingMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: mountPath, PaneLabel: "posse:" + f.project.Name + ":t1", AutonomyLand: "ask"})
+	taskID, err := db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "change", Title: "Crash test", Profile: "deep", MergeMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: sandboxPath, PaneLabel: "posse:" + f.project.Name + ":t1", AutonomyMerge: "ask"})
 	if err == nil {
-		_, err = db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state) VALUES(?,1,?,'idle')`, f.project.ID, mountPath)
+		_, err = db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state) VALUES(?,1,?,'idle')`, f.project.ID, sandboxPath)
 	}
 	if err == nil {
-		_, err = db.AcquireMount(ctx, f.project.ID, taskID, filepath.Dir(mountPath))
+		_, err = db.AcquireSandbox(ctx, f.project.ID, taskID, filepath.Dir(sandboxPath))
 	}
 	if err == nil {
 		err = db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started")
@@ -1328,7 +1328,7 @@ func mapAgentValues(values map[string]herdr.Agent) []herdr.Agent {
 	return result
 }
 
-// posseAgentName builds a Rider's agent name as posse does: sanitized and cut
+// posseAgentName builds a Worker's agent name as posse does: sanitized and cut
 // to Herdr's 32-character agent name limit before the launch suffix.
 func posseAgentName(project string, sequence, launch int) string {
 	base := "posse-" + strings.Trim(regexp.MustCompile(`[^a-z0-9_-]+`).ReplaceAllString(strings.ToLower(project), "-"), "-_ ")

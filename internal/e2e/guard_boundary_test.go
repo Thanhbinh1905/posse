@@ -114,7 +114,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"python inspect environment with stdin", fmt.Sprintf("PYTHONINSPECT=1 python3 -c \"print('herdr')\" <<'PY'\nimport subprocess\nsubprocess.run(['herdr', 'workspace', 'rename', '%s', 'changed'], check=True)\nPY", id), true},
 		{"python inspect environment", "PYTHONINSPECT=1 python3 -c \"print('herdr')\"", true},
 		{"python redirected stdin", "python3 -c \"print('herdr')\" <<'PY'\nprint('post-command input')\nPY", true},
-		{"direct Rider push", "git push origin HEAD", true},
+		{"direct Worker push", "git push origin HEAD", true},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
 		{"type probe", "type herdr", false},

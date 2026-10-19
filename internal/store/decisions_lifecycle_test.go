@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestLandReadyDecisionIsObsoletedWhenLatestPRObservationIsStale(t *testing.T) {
+func TestMergeReadyDecisionIsObsoletedWhenLatestPRObservationIsStale(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
 	if err != nil {
@@ -18,20 +18,20 @@ func TestLandReadyDecisionIsObsoletedWhenLatestPRObservationIsStale(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "A", LandingMode: "pr"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, transition := range []struct {
 		from, to State
 		source   string
-	}{{StateSpawning, StateWorking, "cli"}, {StateWorking, StateDone, "worker"}, {StateDone, StateLanding, "cli"}} {
+	}{{StateSpawning, StateWorking, "cli"}, {StateWorking, StateDone, "worker"}, {StateDone, StateMerging, "cli"}} {
 		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	const prURL, head = "https://github.com/acme/shop/pull/1", "head-sha"
-	if err := db.UpdateTaskLanding(ctx, taskID, prURL, ""); err != nil {
+	if err := db.UpdateTaskMerge(ctx, taskID, prURL, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetTaskGatedSHA(ctx, taskID, head); err != nil {
@@ -45,7 +45,7 @@ func TestLandReadyDecisionIsObsoletedWhenLatestPRObservationIsStale(t *testing.T
 	if _, err := db.RecordPRObservation(ctx, observation, PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
-	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "pr_ready:" + prURL, Kind: "land_ready", Question: "Merge this PR?", Options: []string{"merge", "wait"}})
+	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "pr_ready:" + prURL, Kind: "merge_ready", Question: "Merge this PR?", Options: []string{"merge", "wait"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestAnswerRefusesResolvedSituationEvenBeforeReconciliation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "A", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}

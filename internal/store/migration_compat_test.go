@@ -96,7 +96,7 @@ func seedAcceptedReportForMigrationTest(t *testing.T, ctx context.Context, path 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "scout", Title: "Publication report", Profile: "author", ReportKind: "spec"})
+	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Publication report", Profile: "author", ReportKind: "spec"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func seedAcceptedReportForMigrationTest(t *testing.T, ctx context.Context, path 
 	if err := db.RecordReportBundle(ctx, reportID, digest, manifest); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, reportID, StateReported, StateTornDown, "cli", "Mount released"); err != nil {
+	if err := db.Transition(ctx, reportID, StateReported, StateTornDown, "cli", "Sandbox released"); err != nil {
 		t.Fatal(err)
 	}
 	reviewerID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "review", ReviewsTaskID: reportID, Title: "Independent report review", Profile: "reviewer"})

@@ -304,7 +304,7 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 		}
 	}
 	lead, found := findAppPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
-	// Lead lookout plugins acknowledge these without involving the Lead. Do
+	// Lead watch plugins acknowledge these without involving the Lead. Do
 	// not display a Herdr notification for a batch that needs no turn.
 	if found && lead.Agent != "" && extensionOwnsNotices(s.leadNoticeDelivery(project, lead.Agent)) {
 		home, err := s.homePath()
@@ -345,7 +345,7 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 		return configError(err)
 	}
 	delivery := s.leadNoticeDelivery(project, lead.Agent)
-	// Lead plugins own their lookout and quiet routine ack. A typed fallback
+	// Lead plugins own their watch and quiet routine ack. A typed fallback
 	// could race them and expose a lowkey Notice in the conversation.
 	if extensionOwnsNotices(delivery) {
 		return nil
@@ -361,12 +361,12 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 		// A failed queue leaves the Notices undelivered for the typed prompt below.
 	}
 	if (lead.AgentStatus == "idle" || lead.AgentStatus == "done") && !lead.Focused && snapshot.FocusedPaneID != lead.PaneID {
-		if delivery == config.NoticeDeliveryLookout {
-			processes, err := systemLookoutProcesses(home)
+		if delivery == config.NoticeDeliveryWatch {
+			processes, err := systemWatchProcesses(home)
 			if err != nil {
 				return err
 			}
-			if liveLeadLookout(project, processes) {
+			if liveLeadWatch(project, processes) {
 				return nil
 			}
 		}
@@ -478,7 +478,7 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 		return err
 	}
 	for _, task := range tasks {
-		if (task.State == store.StateDone && task.Type != "ship") || task.State == store.StateReported || task.State == store.StateLanded || task.State == store.StateTornDown || task.State == store.StateFailed || task.State == store.StateLost {
+		if (task.State == store.StateDone && task.Type != "change") || task.State == store.StateReported || task.State == store.StateMerged || task.State == store.StateTornDown || task.State == store.StateFailed || task.State == store.StateLost {
 			continue
 		}
 		active, err := db.HasDeliveryInProgress(ctx, task.ID, currentTime()-deliveryClaimTimeout.Milliseconds())

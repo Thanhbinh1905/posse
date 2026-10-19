@@ -20,12 +20,12 @@ func TestIntentPayloadUpdateRequiresCurrentOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "discard identities", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "discard identities", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	owner := os.Getpid()
-	if err := db.StartIntent(ctx, project.ID, taskID, "unsaddle", "started", `{}`, owner); err != nil {
+	if err := db.StartIntent(ctx, project.ID, taskID, "teardown", "started", `{}`, owner); err != nil {
 		t.Fatal(err)
 	}
 	intent, err := db.IntentByTask(ctx, taskID)
@@ -36,7 +36,7 @@ func TestIntentPayloadUpdateRequiresCurrentOwner(t *testing.T) {
 	if err := db.UpdateIntentPayload(ctx, intent.ID, owner, payload); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateIntentPayload(ctx, intent.ID, owner+1, `{"rider":"replacement"}`); !errors.Is(err, ErrIntentOwned) {
+	if err := db.UpdateIntentPayload(ctx, intent.ID, owner+1, `{"worker":"replacement"}`); !errors.Is(err, ErrIntentOwned) {
 		t.Fatalf("non-owner payload update = %v, want ErrIntentOwned", err)
 	}
 	current, err := db.IntentByTask(ctx, taskID)
@@ -62,13 +62,13 @@ func TestDiscardApprovalForIntentPinsFirstBranchTip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "discard approval", LandingMode: "local"})
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "discard approval", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	owner := os.Getpid()
-	quote := "User approved the stopped Rider's final tip"
-	if err := db.StartIntent(ctx, project.ID, taskID, "unsaddle", "started", `{"discard":true,"user_quote":"`+quote+`"}`, owner); err != nil {
+	quote := "User approved the stopped Worker's final tip"
+	if err := db.StartIntent(ctx, project.ID, taskID, "teardown", "started", `{"discard":true,"user_quote":"`+quote+`"}`, owner); err != nil {
 		t.Fatal(err)
 	}
 	intent, err := db.IntentByTask(ctx, taskID)

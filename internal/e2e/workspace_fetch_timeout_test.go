@@ -48,7 +48,7 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte("[defaults]\nlanding_mode = \"pr\"\npr_poll = \"1ms\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\npr_poll = \"1ms\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -147,19 +147,19 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 		t.Fatal(err)
 	}
 	project.HerdrWorkspaceID = workspace.Workspace.WorkspaceID
-	lookout, err := createTab(client, project.HerdrWorkspaceID, workspaceRoot, "posse:stack:lookout")
+	watch, err := createTab(client, project.HerdrWorkspaceID, workspaceRoot, "posse:stack:watch")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Call(ctx, "pane.rename", map[string]any{"pane_id": lookout.RootPane.PaneID, "label": "posse:stack:lookout"}); err != nil {
+	if _, err := client.Call(ctx, "pane.rename", map[string]any{"pane_id": watch.RootPane.PaneID, "label": "posse:stack:watch"}); err != nil {
 		t.Fatal(err)
 	}
-	lookoutPaneID := lookout.RootPane.PaneID
+	watchPaneID := watch.RootPane.PaneID
 	t.Cleanup(func() {
-		_, _ = client.Run(context.Background(), "pane", "send-keys", lookoutPaneID, "ctrl+c")
+		_, _ = client.Run(context.Background(), "pane", "send-keys", watchPaneID, "ctrl+c")
 	})
-	if _, err := client.Run(ctx, "pane", "run", lookoutPaneID, binary+" lookout --poll-only"); err != nil {
-		t.Fatalf("start isolated Lookout: %v", err)
+	if _, err := client.Run(ctx, "pane", "run", watchPaneID, binary+" watch --poll-only"); err != nil {
+		t.Fatalf("start isolated Watch: %v", err)
 	}
 
 	if !waitForCondition(12*time.Second, func() bool {
@@ -171,7 +171,7 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 		}
 		return true
 	}) {
-		t.Fatal("Lookout did not attempt to fetch both workspace Members")
+		t.Fatal("Watch did not attempt to fetch both workspace Members")
 	}
 	for _, member := range members {
 		state, err := db.ProjectRepoWatchState(ctx, project.ID, member.Name)

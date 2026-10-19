@@ -78,7 +78,7 @@ func (s *Service) raiseExpiredMessageDeliveryNotices(ctx context.Context, db *st
 func (s *Service) createMessageDeliveryUncertainNotice(ctx context.Context, db *store.DB, projectID int64, taskSeq int, message store.Message) (bool, error) {
 	task := taskIDString(taskSeq)
 	preview := clipRunes(strings.Join(strings.Fields(message.Body), " "), 48)
-	summary := fmt.Sprintf("Message #%d for %s may not have reached the Rider. Inspect with `posse peek %s` and `posse show %s --full`; send a replacement only if absent. Instruction: %q", message.ID, task, task, task, preview)
+	summary := fmt.Sprintf("Message #%d for %s may not have reached the Worker. Inspect with `posse peek %s` and `posse show %s --full`; send a replacement only if absent. Instruction: %q", message.ID, task, task, task, preview)
 	created, err := db.CreateMessageDeliveryUncertainNotice(ctx, projectID, message.TaskID, message.ID, summary, message.Body)
 	return created, err
 }
@@ -208,7 +208,7 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 	check := func(snapshot herdr.Snapshot) error {
 		pane, found := findAppPane(snapshot.Panes, paneID, task.PaneLabel)
 		if !found || pane.PaneID != paneID {
-			return axi.Failure("message_not_ready", "Rider is not ready for this message", true)
+			return axi.Failure("message_not_ready", "Worker is not ready for this message", true)
 		}
 		var err error
 		pane, compacting, err = s.piCompactingPane(ctx, pane)
@@ -216,7 +216,7 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 			return err
 		}
 		if queuedMessageReason(task, message, pane, snapshot, cfg) != "" {
-			return axi.Failure("message_not_ready", "Rider is not ready for this message", true)
+			return axi.Failure("message_not_ready", "Worker is not ready for this message", true)
 		}
 		// Herdr can keep the previous idle/done status when a modal matches
 		// an unknown detection rule (for example Claude's model picker).
@@ -235,7 +235,7 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 			return err
 		}
 		if response.Explain.State == "blocked" || response.Explain.State == "unknown" && !response.Explain.ScreenDetectionSkipped {
-			return axi.Failure("agent_ui_unknown", "Rider input is in a dialog or an unrecognized UI", true)
+			return axi.Failure("agent_ui_unknown", "Worker input is in a dialog or an unrecognized UI", true)
 		}
 		if response.Explain.ScreenDetectionSkipped {
 			// Pi's native status remains idle while its model picker is open;
@@ -253,7 +253,7 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 				return err
 			}
 			if screen.Read.Text == "" || inputDialogVisible(screen.Read.Text) {
-				return axi.Failure("agent_ui_unknown", "Rider input is in a dialog or an unrecognized UI", true)
+				return axi.Failure("agent_ui_unknown", "Worker input is in a dialog or an unrecognized UI", true)
 			}
 		}
 		return nil
@@ -287,7 +287,7 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 			if noticeErr == nil && created {
 				noticeErr = s.regenerateProjects(ctx, db)
 			}
-			uncertainErr := axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Rider pane before sending another instruction")
+			uncertainErr := axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Worker pane before sending another instruction")
 			if noticeErr != nil {
 				return false, "", errors.Join(uncertainErr, noticeErr)
 			}

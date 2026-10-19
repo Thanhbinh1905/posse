@@ -32,7 +32,7 @@ func taskScratchPath(home string, project store.Project, task store.Task) (strin
 
 func ensureTaskScratchForTask(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) (string, error) {
 	var path string
-	err := withMountStateLock(ctx, db, func() error {
+	err := withSandboxStateLock(ctx, db, func() error {
 		var err error
 		path, err = ensureTaskScratch(home, project, task)
 		return err

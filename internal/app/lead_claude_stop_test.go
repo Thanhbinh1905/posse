@@ -26,7 +26,7 @@ func TestClaudeStopPluginIsLeadOnlyAndBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(home, "projects", "shop", "lead-claude-lookout")
+	root := filepath.Join(home, "projects", "shop", "lead-claude-watch")
 	if !strings.Contains(strings.Join(launch.Args, " "), "--plugin-dir "+root) {
 		t.Fatalf("Claude Lead missing Stop plugin: %#v", launch.Args)
 	}
@@ -53,7 +53,7 @@ func TestClaudeStopPluginIsLeadOnlyAndBounded(t *testing.T) {
 	cfg.Kinds["claude"] = config.Kind{NoticeDelivery: config.NoticeDeliveryPrompt}
 	launch, err = service.prepareLeadLaunch(home, project, cfg, "claude")
 	if err != nil || strings.Contains(strings.Join(launch.Args, " "), root) {
-		t.Fatalf("non-Lookout Claude got Stop hook: %#v %v", launch, err)
+		t.Fatalf("non-Watch Claude got Stop hook: %#v %v", launch, err)
 	}
 }
 
@@ -84,7 +84,7 @@ func TestClaudeTranscriptReceiptRequiresUserText(t *testing.T) {
 func TestClaudeReceiptRestartPreservesExactBatchAndAcknowledgment(t *testing.T) {
 	for _, recorded := range []bool{true, false} {
 		t.Run(map[bool]string{true: "accepted after lease", false: "missing held"}[recorded], func(t *testing.T) {
-			db, project, _ := newLookoutTestProject(t)
+			db, project, _ := newWatchTestProject(t)
 			defer db.Close()
 			ctx := context.Background()
 			id, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "pending", DataJSON: `{}`})
@@ -126,7 +126,7 @@ func TestClaudeReceiptRestartPreservesExactBatchAndAcknowledgment(t *testing.T) 
 }
 
 func TestClaudeStopLeavesDownProjectStopped(t *testing.T) {
-	db, project, home := newLookoutTestProject(t)
+	db, project, home := newWatchTestProject(t)
 	defer db.Close()
 	if _, err := db.ExecContext(context.Background(), `UPDATE projects SET status='down' WHERE id=?`, project.ID); err != nil {
 		t.Fatal(err)
@@ -140,7 +140,7 @@ func TestClaudeStopLeavesDownProjectStopped(t *testing.T) {
 	if code := service.RunClaudeStop(strings.NewReader(input), &output, nil); code != 0 || output.Len() != 0 {
 		t.Fatalf("down Project rearmed its Stop hook: %d %s", code, output.String())
 	}
-	rows := lookoutRows([]lookoutProcess{{PID: 1, Kind: "lead", StopHook: true}}, true)
+	rows := watchRows([]watchProcess{{PID: 1, Kind: "lead", StopHook: true}}, true)
 	if !strings.Contains(rows[0][len(rows[0])-1].Value.(string), "next Claude Stop hook") {
 		t.Fatalf("update did not identify the hook restart owner: %#v", rows)
 	}

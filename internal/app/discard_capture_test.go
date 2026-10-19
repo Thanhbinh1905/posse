@@ -13,7 +13,7 @@ import (
 )
 
 func TestEnsureDiscardArtifactDirectoryRejectsSymlinkedProjectRoot(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	defer fixture.db.Close()
 	outside := filepath.Join(fixture.root, "outside-discard-root")
 	if err := os.MkdirAll(outside, 0o700); err != nil {
@@ -46,9 +46,9 @@ func TestEnsureDiscardArtifactDirectoryRejectsSymlinkedProjectRoot(t *testing.T)
 }
 
 func TestDiscardCaptureRemovesTemporaryGitRefOnBundleFailure(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	ctx := context.Background()
-	attachPRFixtureMount(t, fixture)
+	attachPRFixtureSandbox(t, fixture)
 	commit := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/posse/t1"))
 	base := strings.TrimSpace(gitTest(t, fixture.repo, "merge-base", commit, "main"))
 	artifactDir, err := ensureDiscardArtifactDirectory(fixture.home, fixture.project, fixture.task)
@@ -89,9 +89,9 @@ exec %q -C "$repo" "$@"
 }
 
 func TestCaptureApprovedDiscardTipAsRetainedGitBundle(t *testing.T) {
-	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	ctx := context.Background()
-	attachPRFixtureMount(t, fixture)
+	attachPRFixtureSandbox(t, fixture)
 	commit := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/posse/t1"))
 	if err := fixture.db.RecordApprovalWithBranch(ctx, fixture.task.ID, "discard", "approved discard", commit); err != nil {
 		t.Fatal(err)

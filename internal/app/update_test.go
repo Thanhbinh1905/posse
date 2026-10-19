@@ -43,7 +43,7 @@ func fakeRelease(t *testing.T, checksum string) (*httptest.Server, string) {
 	return server, url
 }
 
-func TestUpdateCheckReportsRunningLookouts(t *testing.T) {
+func TestUpdateCheckReportsRunningWatches(t *testing.T) {
 	home := t.TempDir()
 	db, err := store.Open(home)
 	if err != nil {
@@ -59,8 +59,8 @@ func TestUpdateCheckReportsRunningLookouts(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	lead := startUpdateLookoutProcess(t, home, "lookout")
-	lookoutTab := startUpdateLookoutProcess(t, home, "lookout", "--poll-only")
+	lead := startUpdateWatchProcess(t, home, "watch")
+	watchTab := startUpdateWatchProcess(t, home, "watch", "--poll-only")
 
 	server, url := fakeRelease(t, "bad")
 	defer server.Close()
@@ -68,26 +68,26 @@ func TestUpdateCheckReportsRunningLookouts(t *testing.T) {
 	service.Version = "0.1.0"
 	service.updateURL = url
 	code, output := runCLI(t, service, "update", "--check", "--json")
-	if code != 0 || !strings.Contains(output, `"lookouts"`) || !strings.Contains(output, `"project":"demo"`) || !strings.Contains(output, `"kind":"lead"`) || !strings.Contains(output, `"kind":"lookout_tab"`) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lead.command.Process.Pid)) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lookoutTab.command.Process.Pid)) {
-		t.Fatalf("update --check omitted running Lead/Lookout processes: %d %s", code, output)
+	if code != 0 || !strings.Contains(output, `"watches"`) || !strings.Contains(output, `"project":"demo"`) || !strings.Contains(output, `"kind":"lead"`) || !strings.Contains(output, `"kind":"watch_tab"`) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, lead.command.Process.Pid)) || !strings.Contains(output, fmt.Sprintf(`"pid":%d`, watchTab.command.Process.Pid)) {
+		t.Fatalf("update --check omitted running Lead/Watch processes: %d %s", code, output)
 	}
-	for _, process := range []updateLookoutHelper{lead, lookoutTab} {
+	for _, process := range []updateWatchHelper{lead, watchTab} {
 		if err := process.command.Process.Signal(syscall.Signal(0)); err != nil {
-			t.Fatalf("--check stopped lookout PID %d: %v", process.command.Process.Pid, err)
+			t.Fatalf("--check stopped watch PID %d: %v", process.command.Process.Pid, err)
 		}
 	}
 }
 
-type updateLookoutHelper struct {
+type updateWatchHelper struct {
 	command *exec.Cmd
 	stopped string
 }
 
-func startUpdateLookoutProcess(t *testing.T, home string, args ...string) updateLookoutHelper {
+func startUpdateWatchProcess(t *testing.T, home string, args ...string) updateWatchHelper {
 	t.Helper()
-	previousVerifier := lookoutExecutableVerifier
-	lookoutExecutableVerifier = func(string) bool { return true }
-	t.Cleanup(func() { lookoutExecutableVerifier = previousVerifier })
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
 	directory := t.TempDir()
 	binary := filepath.Join(directory, "posse")
 	source := filepath.Join(directory, "helper.go")
@@ -112,7 +112,7 @@ func main() {
 	build := exec.Command("go", "build", "-o", binary, source)
 	build.Dir = directory
 	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build native Lookout test process: %v\n%s", err, output)
+		t.Fatalf("build native Watch test process: %v\n%s", err, output)
 	}
 	command := exec.Command(binary, args...)
 	command.Dir = home
@@ -134,9 +134,9 @@ func main() {
 		}
 	})
 	if !waitForFile(2*time.Second, ready) {
-		t.Fatalf("lookout helper PID %d did not start", command.Process.Pid)
+		t.Fatalf("watch helper PID %d did not start", command.Process.Pid)
 	}
-	return updateLookoutHelper{command: command, stopped: stop}
+	return updateWatchHelper{command: command, stopped: stop}
 }
 
 func waitForFile(timeout time.Duration, path string) bool {
@@ -150,7 +150,7 @@ func waitForFile(timeout time.Duration, path string) bool {
 	return false
 }
 
-func TestUpdateRefusesRunningLookoutsUnlessRequested(t *testing.T) {
+func TestUpdateRefusesRunningWatchesUnlessRequested(t *testing.T) {
 	home := t.TempDir()
 	db, err := store.Open(home)
 	if err != nil {
@@ -162,8 +162,8 @@ func TestUpdateRefusesRunningLookoutsUnlessRequested(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	startUpdateLookoutProcess(t, home, "lookout")
-	startUpdateLookoutProcess(t, home, "lookout", "--poll-only")
+	startUpdateWatchProcess(t, home, "watch")
+	startUpdateWatchProcess(t, home, "watch", "--poll-only")
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
@@ -175,7 +175,7 @@ func TestUpdateRefusesRunningLookoutsUnlessRequested(t *testing.T) {
 	service.Version = "0.1.0"
 	service.updateURL = server.URL
 	code, output := runCLI(t, service, "update")
-	if code != 1 || !strings.Contains(output, "lookouts_running") || !strings.Contains(output, "demo") || !strings.Contains(output, "lookout_tab") || !strings.Contains(output, "lead") {
+	if code != 1 || !strings.Contains(output, "watches_running") || !strings.Contains(output, "demo") || !strings.Contains(output, "watch_tab") || !strings.Contains(output, "lead") {
 		t.Fatalf("update did not refuse with the running process list: %d %s", code, output)
 	}
 	if requests != 0 {
@@ -286,7 +286,7 @@ func TestUpdateRejectsAgentAndUnverifiedHerdrPanes(t *testing.T) {
 	}
 }
 
-func TestUpdateNeverInstallsInsideRiderTurn(t *testing.T) {
+func TestUpdateNeverInstallsInsideWorkerTurn(t *testing.T) {
 	home := t.TempDir()
 	db, err := store.Open(home)
 	if err != nil {
@@ -296,7 +296,7 @@ func TestUpdateNeverInstallsInsideRiderTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "scout", Title: "Check update", State: store.StateSpawning, LandingMode: "local", PaneID: "w1:p2"}); err != nil {
+	if _, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 1, Type: "research", Title: "Check update", State: store.StateSpawning, MergeMode: "local", PaneID: "w1:p2"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -306,7 +306,7 @@ func TestUpdateNeverInstallsInsideRiderTurn(t *testing.T) {
 	userShellUpdatePane(t, service)
 	code, output := runCLI(t, service, "update")
 	if code != 1 || !strings.Contains(output, "worker_forbidden") {
-		t.Fatalf("update from Rider pane: %d %s", code, output)
+		t.Fatalf("update from Worker pane: %d %s", code, output)
 	}
 }
 
@@ -470,9 +470,9 @@ func TestUpdateFromUserShellPaneBacksUpAndAtomicallyInstallsVerifiedArchive(t *t
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	lead := startUpdateLookoutProcess(t, home, "lookout")
-	lookoutTab := startUpdateLookoutProcess(t, home, "lookout", "--poll-only")
-	script := []byte("#!/bin/sh\ncase \"$1\" in _update-preflight) exit 0;; setup) printf installed > \"$POSSE_HOME/setup-called\";; lookout) printf v0.2.0 > \"$POSSE_HOME/new-binary-lookout\";; *) exit 1;; esac\n")
+	lead := startUpdateWatchProcess(t, home, "watch")
+	watchTab := startUpdateWatchProcess(t, home, "watch", "--poll-only")
+	script := []byte("#!/bin/sh\ncase \"$1\" in _update-preflight) exit 0;; setup) printf installed > \"$POSSE_HOME/setup-called\";; watch) printf v0.2.0 > \"$POSSE_HOME/new-binary-watch\";; *) exit 1;; esac\n")
 	var contents bytes.Buffer
 	gz := gzip.NewWriter(&contents)
 	tarball := tar.NewWriter(gz)
@@ -510,17 +510,17 @@ func TestUpdateFromUserShellPaneBacksUpAndAtomicallyInstallsVerifiedArchive(t *t
 	userShellUpdatePane(t, service)
 	service.Version = "0.1.0"
 	service.updateURL = url
-	code, output := runCLI(t, service, "update", "--stop-lookouts")
+	code, output := runCLI(t, service, "update", "--stop-watches")
 	if code != 0 {
-		t.Fatalf("update --stop-lookouts: %d %s", code, output)
+		t.Fatalf("update --stop-watches: %d %s", code, output)
 	}
-	if !strings.Contains(output, "stopped_lookouts") || !strings.Contains(output, "lookout_tab") || !strings.Contains(output, "lead") || !strings.Contains(output, "Lookout tab owner") || !strings.Contains(output, "Lead restarts") {
+	if !strings.Contains(output, "stopped_watches") || !strings.Contains(output, "watch_tab") || !strings.Contains(output, "lead") || !strings.Contains(output, "Watch tab owner") || !strings.Contains(output, "Lead restarts") {
 		t.Fatalf("update omitted stopped processes or restart owners: %s", output)
 	}
 	leadStopped := waitForFile(2*time.Second, lead.stopped)
-	tabStopped := waitForFile(2*time.Second, lookoutTab.stopped)
+	tabStopped := waitForFile(2*time.Second, watchTab.stopped)
 	if !leadStopped || !tabStopped {
-		t.Fatalf("update did not stop both lookouts: lead=%t tab=%t", leadStopped, tabStopped)
+		t.Fatalf("update did not stop both watches: lead=%t tab=%t", leadStopped, tabStopped)
 	}
 	got, err := os.ReadFile(binaryPath)
 	if err != nil || !bytes.Equal(got, script) {
@@ -532,13 +532,13 @@ func TestUpdateFromUserShellPaneBacksUpAndAtomicallyInstallsVerifiedArchive(t *t
 	if _, err := os.Stat(filepath.Join(home, "setup-called")); err != nil {
 		t.Fatalf("setup did not run: %v", err)
 	}
-	restart := exec.Command(binaryPath, "lookout", "--poll-only")
+	restart := exec.Command(binaryPath, "watch", "--poll-only")
 	restart.Env = []string{"POSSE_HOME=" + home}
 	if output, err := restart.CombinedOutput(); err != nil {
-		t.Fatalf("new binary did not restart its lookout: %v %s", err, output)
+		t.Fatalf("new binary did not restart its watch: %v %s", err, output)
 	}
-	if data, err := os.ReadFile(filepath.Join(home, "new-binary-lookout")); err != nil || string(data) != "v0.2.0" {
-		t.Fatalf("lookout did not run from the installed binary: %q %v", data, err)
+	if data, err := os.ReadFile(filepath.Join(home, "new-binary-watch")); err != nil || string(data) != "v0.2.0" {
+		t.Fatalf("watch did not run from the installed binary: %q %v", data, err)
 	}
 }
 
@@ -575,7 +575,7 @@ func TestIdleMigrationRefusesLiveTasksUnlessForced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "ship", Title: "active", LandingMode: "pr"})
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "active", MergeMode: "pr"})
 	if err != nil {
 		t.Fatal(err)
 	}

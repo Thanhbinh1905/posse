@@ -48,21 +48,21 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		return err
 	}
 	switch decision.Kind {
-	case "land_ready":
+	case "merge_ready":
 		if decision.Answer == "discard" && task.State == store.StateTornDown {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		}
 		if decision.Answer != "discard" {
 			state := "waiting"
-			if decision.Answer == "land" {
-				state = "land_ready"
+			if decision.Answer == "merge" {
+				state = "merge_ready"
 			}
-			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: state}, {Key: "help", Value: []any{"Run `posse land " + taskIDString(task.Seq) + " --merge` to Land this Task, or answer `discard` to tear it down"}}})
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: state}, {Key: "help", Value: []any{"Run `posse merge " + taskIDString(task.Seq) + " --execute` to Merge this Task, or answer `discard` to tear it down"}}})
 		}
 		if !canDiscardFromDecision(decision.Kind, task.State) || task.Launches != decision.TaskLaunches {
-			return axi.Failure("decision_refused", "land-ready Decision no longer applies to this Task state or Rider launch", false)
+			return axi.Failure("decision_refused", "merge-ready Decision no longer applies to this Task state or Worker launch", false)
 		}
-		if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+		if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
 			return err
 		}
 		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
@@ -70,8 +70,8 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		if decision.Answer == "discard" && task.State == store.StateTornDown {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		}
-		if task.Launches != decision.TaskLaunches || (task.State != store.StateDone && task.State != store.StateLanding) {
-			return axi.Failure("decision_refused", "worker-exited Decision no longer applies to this Task state or Rider launch", false)
+		if task.Launches != decision.TaskLaunches || (task.State != store.StateDone && task.State != store.StateMerging) {
+			return axi.Failure("decision_refused", "worker-exited Decision no longer applies to this Task state or Worker launch", false)
 		}
 		if decision.Answer == "relaunch" {
 			if _, err := s.relaunchTask(out.Context, db, home, project, cfg, task, ""); err != nil {
@@ -80,7 +80,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "working"}})
 		}
 		if decision.Answer == "discard" {
-			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
@@ -106,7 +106,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if task.State == store.StateTornDown {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 			}
-			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, false, decision.UserQuote); err != nil {
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, false, decision.UserQuote); err != nil {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}, {Key: "source_preserved", Value: true}})
@@ -118,7 +118,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if !canDiscardFromDecision(decision.Kind, task.State) {
 				return axi.Failure("decision_refused", "recovery Decision cannot discard a Task in state "+string(task.State), false)
 			}
-			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
@@ -134,10 +134,10 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				return err
 			}
 		}
-		if target.State == store.StateTornDown || target.State == store.StateLanded {
+		if target.State == store.StateTornDown || target.State == store.StateMerged {
 			return axi.Failure("decision_refused", "review target is already finished", false)
 		}
-		// The answer authorizes sharing the findings, not landing a Ship Task.
+		// The answer authorizes sharing the findings, not merging a Change Task.
 		file := "findings.toon"
 		if task.Type == "review" {
 			file = "report.md"
@@ -148,13 +148,13 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			return err
 		}
 		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "queued"}, {Key: "task", Value: taskIDString(target.Seq)}})
-	case "leftover":
-		if strings.HasPrefix(decision.Origin, "leftover:unrecoverable:") {
+	case "orphan":
+		if strings.HasPrefix(decision.Origin, "orphan:unrecoverable:") {
 			if decision.Answer == "repair" {
-				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "help", Value: []any{"Repair the Mount, then run `posse unsaddle " + taskIDString(task.Seq) + "` to retry Teardown"}}})
+				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "help", Value: []any{"Repair the Sandbox, then run `posse teardown " + taskIDString(task.Seq) + "` to retry Teardown"}}})
 			}
 			if task.State == store.StateTornDown {
-				if err := db.ObsoleteAppliedLeftoverDecision(out.Context, decision.ID); err != nil {
+				if err := db.ObsoleteAppliedOrphanDecision(out.Context, decision.ID); err != nil {
 					return err
 				}
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
@@ -162,21 +162,21 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if !store.IsApprovedDiscardSourceState(task.State) {
 				return axi.Failure("decision_refused", "Task cannot be discarded in state "+string(task.State), false)
 			}
-			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
 				return err
 			}
-			if err := db.ObsoleteAppliedLeftoverDecision(out.Context, decision.ID); err != nil {
+			if err := db.ObsoleteAppliedOrphanDecision(out.Context, decision.ID); err != nil {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		}
 		if decision.Answer == "discard" {
 			target := project.Root
-			ref := strings.TrimPrefix(decision.Origin, "leftover:")
+			ref := strings.TrimPrefix(decision.Origin, "orphan:")
 			if project.IsWorkspace() {
 				name, branch, ok := strings.Cut(ref, ":")
 				if !ok {
-					return fmt.Errorf("invalid workspace Leftover origin")
+					return fmt.Errorf("invalid workspace Orphan origin")
 				}
 				member, err := s.projectTarget(out.Context, db, project, name)
 				if err != nil {
@@ -191,10 +191,10 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 					return err
 				}
 			}
-			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "leftover_discarded"}})
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "orphan_discarded"}})
 		}
-		branch := strings.TrimPrefix(decision.Origin, "leftover:")
-		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "leftover", Value: branch}, {Key: "help", Value: []any{"Write a Ship Brief for the follow-up and run `posse ride --brief <file> [--name <display-name>] --from-leftover " + strconv.FormatInt(id, 10) + "`"}}})
+		branch := strings.TrimPrefix(decision.Origin, "orphan:")
+		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "orphan", Value: branch}, {Key: "help", Value: []any{"Write a Change Brief for the follow-up and run `posse start --brief <file> [--name <display-name>] --from-orphan " + strconv.FormatInt(id, 10) + "`"}}})
 	case "pr_closed":
 		if decision.Answer == "discard" {
 			if task.State == store.StateTornDown {
@@ -208,8 +208,8 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				if err != nil {
 					return err
 				}
-				if task.State == store.StateLanded || task.State == store.StateTornDown {
-					return axi.Failure("decision_refused", "Task has landed; use normal Teardown so unmerged work is preserved", false)
+				if task.State == store.StateMerged || task.State == store.StateTornDown {
+					return axi.Failure("decision_refused", "Task has merged; use normal Teardown so unmerged work is preserved", false)
 				}
 				url := closedPRDecisionURL(decision.Origin)
 				state := ""
@@ -248,7 +248,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if !canDiscardFromDecision(decision.Kind, task.State) {
 				return axi.Failure("decision_refused", "closed-PR Decision cannot discard a Task in state "+string(task.State), false)
 			}
-			if _, err := s.unsaddleTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
@@ -301,13 +301,13 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if task.State == store.StateLanding || task.State == store.StateDone {
+		if task.State == store.StateMerging || task.State == store.StateDone {
 			if err := db.Transition(out.Context, task.ID, task.State, store.StateWorking, "lead", "User chose to reopen and relaunch"); err != nil {
 				return err
 			}
 			task.State = store.StateWorking
 		}
-		if task.State == store.StateLanded || task.State == store.StateTornDown {
+		if task.State == store.StateMerged || task.State == store.StateTornDown {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: string(task.State)}})
 		}
 		relaunched, err := s.relaunchTask(out.Context, db, home, project, cfg, task, "")
@@ -315,7 +315,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			return err
 		}
 		if invalidURL {
-			if _, err := s.herdrCall(out.Context, "agent.prompt", map[string]any{"target": relaunched.Pane, "text": "The previous URL " + url + " was not a pull request. Publish a real pull request for this Task and report its new URL with `posse holler done`."}); err != nil {
+			if _, err := s.herdrCall(out.Context, "agent.prompt", map[string]any{"target": relaunched.Pane, "text": "The previous URL " + url + " was not a pull request. Publish a real pull request for this Task and report its new URL with `posse signal done`."}); err != nil {
 				return err
 			}
 		}
@@ -332,12 +332,12 @@ func canDiscardFromDecision(kind string, state store.State) bool {
 	case "recovery":
 		return state == store.StateFailed || state == store.StateLost
 	case "worker_exited":
-		return state == store.StateDone || state == store.StateLanding
-	case "land_ready":
-		return state == store.StateLanding
+		return state == store.StateDone || state == store.StateMerging
+	case "merge_ready":
+		return state == store.StateMerging
 	case "pr_closed":
-		return state != store.StateReported && state != store.StateLanded
-	case "leftover":
+		return state != store.StateReported && state != store.StateMerged
+	case "orphan":
 		return true
 	default:
 		return false

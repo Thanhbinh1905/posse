@@ -9,15 +9,15 @@ import (
 )
 
 func TestAdmittedExplicitBaseDoesNotFollowLaterBranchMoves(t *testing.T) {
-	f := newRideFixture(t)
+	f := newStartFixture(t)
 	gitTest(t, f.repo, "branch", "release/next")
 	initial := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "release/next"))
-	text := "---\ntype: ship\ntitle: Launch probe\ndone_when: checked\nbase: release/next\ntarget: release/next\n---\n"
+	text := "---\ntype: change\ntitle: Launch probe\ndone_when: checked\nbase: release/next\ntarget: release/next\n---\n"
 	if err := os.WriteFile(f.brief, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := f.ride(t); code != 0 {
-		t.Fatalf("ride: %d %s", code, output)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start: %d %s", code, output)
 	}
 	task, _ := f.onlyTask(t)
 	plan, err := task.AdmittedPlan()
@@ -35,7 +35,7 @@ func TestAdmittedExplicitBaseDoesNotFollowLaterBranchMoves(t *testing.T) {
 	gitTest(t, task.WorktreePath, "add", "task.txt")
 	gitTest(t, task.WorktreePath, "commit", "-m", "Task change")
 	gitTest(t, f.repo, "branch", "-f", "release/next", task.Branch)
-	if err := validateShipSignal(context.Background(), task); err != nil {
+	if err := validateChangeSignal(context.Background(), task); err != nil {
 		t.Fatalf("moved base changed completion proof: %v", err)
 	}
 	base, err := taskCheckoutBase(context.Background(), f.repo, task, "", task.BaseRef)

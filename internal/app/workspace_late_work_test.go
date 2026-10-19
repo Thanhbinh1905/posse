@@ -12,7 +12,7 @@ import (
 )
 
 func TestWorkspaceMemberCommittedAfterFirstPollCannotBeSkippedAsUnchanged(t *testing.T) {
-	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
 	bin := filepath.Join(f.root, "bin")
 	_ = os.MkdirAll(bin, 0o700)
 	viewPath := filepath.Join(f.root, "gh-view.json")
@@ -54,8 +54,8 @@ func TestWorkspaceMemberCommittedAfterFirstPollCannotBeSkippedAsUnchanged(t *tes
 	if err := f.service.pollWorkspacePullRequests(ctx, f.db, f.project, f.config(), true); err != nil {
 		t.Fatal(err)
 	}
-	if f.state() == store.StateLanded {
-		t.Fatal("Task Landed without the later member commit")
+	if f.state() == store.StateMerged {
+		t.Fatal("Task Merged without the later member commit")
 	}
 	if got := f.repos()["e2e-tool"].State; got != store.TaskRepoOpen {
 		t.Fatalf("member commit was skipped: %s", got)
@@ -74,8 +74,8 @@ func TestWorkspaceMemberCommittedAfterFirstPollCannotBeSkippedAsUnchanged(t *tes
 	if err := snapshotUnmergedMemberWork(ctx, f.db, memberProject, memberTask, member.Repo); err != nil {
 		t.Fatal(err)
 	}
-	if got := gitTest(t, target.Root, "show", "refs/heads/"+f.task.Branch+"-leftover:later.txt"); got != "later work\n" {
-		t.Fatalf("committed Leftover lost: %q", got)
+	if got := gitTest(t, target.Root, "show", "refs/heads/"+f.task.Branch+"-orphan:later.txt"); got != "later work\n" {
+		t.Fatalf("committed Orphan lost: %q", got)
 	}
 	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
 	if err != nil || len(decisions) == 0 {

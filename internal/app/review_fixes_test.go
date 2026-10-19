@@ -14,7 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func forcePushBareMain(t *testing.T, fixture *prLandingFixture) string {
+func forcePushBareMain(t *testing.T, fixture *prMergeFixture) string {
 	checkout := filepath.Join(fixture.root, "rewrite")
 	gitTest(t, fixture.root, "clone", "--branch", "main", fixture.remote, checkout)
 	gitTest(t, checkout, "config", "user.name", "x")
@@ -25,7 +25,7 @@ func forcePushBareMain(t *testing.T, fixture *prLandingFixture) string {
 }
 
 func TestReviewForcePushedOriginIsRefusedOnCheckedOutDefault(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	before := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/main"))
 	forcePushBareMain(t, fixture)
 	cfg, _ := config.Load(fixture.home, fixture.project.Name)
@@ -38,7 +38,7 @@ func TestReviewForcePushedOriginIsRefusedOnCheckedOutDefault(t *testing.T) {
 }
 
 func TestReviewForcePushedOriginIsRefusedWhenDefaultNotCheckedOut(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	gitTest(t, fixture.repo, "checkout", "-b", "feature")
 	before := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/main"))
 	forcePushBareMain(t, fixture)
@@ -52,7 +52,7 @@ func TestReviewForcePushedOriginIsRefusedWhenDefaultNotCheckedOut(t *testing.T) 
 }
 
 func TestReviewNoOriginDoesNothing(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	gitTest(t, fixture.repo, "remote", "remove", "origin")
 	cfg, _ := config.Load(fixture.home, fixture.project.Name)
 	result, err := fixture.service.syncProjectRoot(context.Background(), fixture.db, fixture.project, cfg, true)
@@ -66,20 +66,20 @@ func TestReviewNoOriginDoesNothing(t *testing.T) {
 
 // Two watched PRs in different repositories wedge prepareProject.
 func TestReviewCrossRepoPRsWedgeReconcile(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, out, e := fixture.run("land", "t1"); code != 0 {
-		t.Fatalf("land %s %s", out, e)
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, out, e := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge %s %s", out, e)
 	}
 	ctx := context.Background()
-	id, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "ship", Title: "other", State: store.StateSpawning, LandingMode: "no-mistakes", Branch: "posse/t2", BaseRef: "main", AutonomyLand: "ask"})
+	id, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "other", State: store.StateSpawning, MergeMode: "no-mistakes", Branch: "posse/t2", BaseRef: "main", AutonomyMerge: "ask"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = fixture.db.Transition(ctx, id, store.StateSpawning, store.StateWorking, "cli", "x")
 	_ = fixture.db.Transition(ctx, id, store.StateWorking, store.StateDone, "cli", "x")
-	_ = fixture.db.UpdateTaskLanding(ctx, id, "https://github.com/other/fork/pull/3", "")
-	_ = fixture.db.Transition(ctx, id, store.StateDone, store.StateLanding, "cli", "x")
-	_, _ = fixture.db.ExecContext(ctx, `UPDATE tasks SET state='landing', pr_url='https://github.com/other/fork/pull/3' WHERE id=?`, id)
+	_ = fixture.db.UpdateTaskMerge(ctx, id, "https://github.com/other/fork/pull/3", "")
+	_ = fixture.db.Transition(ctx, id, store.StateDone, store.StateMerging, "cli", "x")
+	_, _ = fixture.db.ExecContext(ctx, `UPDATE tasks SET state='merging', pr_url='https://github.com/other/fork/pull/3' WHERE id=?`, id)
 	cfg, _ := config.Load(fixture.home, fixture.project.Name)
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
@@ -106,9 +106,9 @@ func TestReviewCrossRepoPRsWedgeReconcile(t *testing.T) {
 	fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
 	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w3:p1", WorkspaceID: "w3", Label: "posse:shop:t2", Agent: "claude", AgentStatus: "idle"})
 	_, _ = fixture.db.ExecContext(ctx, `UPDATE tasks SET pane_id='w3:p1', herdr_workspace_id='w3', pane_label='posse:shop:t2' WHERE id=?`, id)
-	worktree3 := filepath.Join(fixture.root, "mount-t3")
+	worktree3 := filepath.Join(fixture.root, "sandbox-t3")
 	gitTest(t, fixture.repo, "worktree", "add", "-b", "posse/t3", worktree3, "refs/heads/main")
-	task3, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 3, Type: "ship", Title: "working task", State: store.StateSpawning, LandingMode: "pr", Branch: "posse/t3", BaseRef: "main", WorktreePath: worktree3, HerdrWorkspaceID: "w4", PaneID: "w4:p1", PaneLabel: "posse:shop:t3"})
+	task3, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 3, Type: "change", Title: "working task", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t3", BaseRef: "main", WorktreePath: worktree3, HerdrWorkspaceID: "w4", PaneID: "w4:p1", PaneLabel: "posse:shop:t3"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestReviewCrossRepoPRsWedgeReconcile(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w4:p1", WorkspaceID: "w4", Label: "posse:shop:t3", CWD: worktree3, Agent: "claude", AgentStatus: "working"})
-	for _, args := range [][]string{{"show", "t1"}, {}, {"roster"}} {
+	for _, args := range [][]string{{"show", "t1"}, {}, {"list"}} {
 		if _, err := fixture.db.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=0`); err != nil {
 			t.Fatal(err)
 		}
@@ -129,32 +129,32 @@ func TestReviewCrossRepoPRsWedgeReconcile(t *testing.T) {
 	fixture.test.Chdir(worktree3)
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = &fixture.output, &fixture.errOut
-	if code := cli.Run([]string{"holler", "working", "Still making progress"}); code != 0 {
-		t.Fatalf("holler was blocked by another Task's PR watch failure: exit=%d output=%s error=%s", code, fixture.output.String(), fixture.errOut.String())
+	if code := cli.Run([]string{"signal", "working", "Still making progress"}); code != 0 {
+		t.Fatalf("signal was blocked by another Task's PR watch failure: exit=%d output=%s error=%s", code, fixture.output.String(), fixture.errOut.String())
 	}
 	fixture.test.Chdir(fixture.repo)
-	if code, output, errOutput := fixture.run("lookout", "--timeout", "1"); code != 0 {
-		t.Fatalf("lookout was blocked by another Task's PR watch failure: exit=%d output=%s error=%s", code, output, errOutput)
+	if code, output, errOutput := fixture.run("watch", "--timeout", "1"); code != 0 {
+		t.Fatalf("watch was blocked by another Task's PR watch failure: exit=%d output=%s error=%s", code, output, errOutput)
 	}
 }
 
-// A landed Task whose auto teardown fails wedges every reconcile.
+// A merged Task whose auto teardown fails wedges every reconcile.
 func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	configText := "[defaults]\nlanding_mode = \"pr\"\nmerge_method = \"squash\"\nauto_unsaddle = \"landed\"\n"
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	configText := "[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"merged\"\n"
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, out, e := fixture.run("land", "t1"); code != 0 {
-		t.Fatalf("land %s %s", out, e)
+	if code, out, e := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge %s %s", out, e)
 	}
 	fake := fixture.service.Herdr.(*herdr.Fake)
 	fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", fixture.headSHA, fixture.headSHA)
-	worktree2 := filepath.Join(fixture.root, "mount-t2")
+	worktree2 := filepath.Join(fixture.root, "sandbox-t2")
 	gitTest(t, fixture.repo, "worktree", "add", "-b", "posse/t2", worktree2, "refs/heads/main")
-	task2, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "ship", Title: "other", State: store.StateSpawning, LandingMode: "pr", Branch: "posse/t2", BaseRef: "main", WorktreePath: worktree2, HerdrWorkspaceID: "w3", PaneID: "w3:p1", PaneLabel: "posse:shop:t2"})
+	task2, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "other", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main", WorktreePath: worktree2, HerdrWorkspaceID: "w3", PaneID: "w3:p1", PaneLabel: "posse:shop:t2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 		}
 		return count
 	}
-	for i, args := range [][]string{{"show", "t1"}, {}, {"roster"}, {"show", "t1"}} {
+	for i, args := range [][]string{{"show", "t1"}, {}, {"list"}, {"show", "t1"}} {
 		if i == 0 {
 			_, _ = fixture.db.ExecContext(context.Background(), `UPDATE project_watch_state SET pr_polled_at=0`)
 		}
@@ -187,8 +187,8 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 		}
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
-	if err != nil || countNoticeKind(notices, "unsaddle_incomplete") != 1 {
-		t.Fatalf("automatic Teardown failure Notice count = %d, want one: %#v, %v", countNoticeKind(notices, "unsaddle_incomplete"), notices, err)
+	if err != nil || countNoticeKind(notices, "teardown_incomplete") != 1 {
+		t.Fatalf("automatic Teardown failure Notice count = %d, want one: %#v, %v", countNoticeKind(notices, "teardown_incomplete"), notices, err)
 	}
 	if fake.CallCount("pane.close") != 0 || fake.CallCount("tab.close") != 0 || fake.CallCount("workspace.close") != 0 {
 		t.Fatalf("automatic Teardown issued an unconditional close RPC: %#v", fake.Calls)
@@ -196,12 +196,12 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 	fixture.test.Chdir(worktree2)
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = &fixture.output, &fixture.errOut
-	if code := cli.Run([]string{"holler", "working", "Task two still works"}); code != 0 {
-		t.Fatalf("holler was blocked by another Task's teardown failure: exit=%d output=%s error=%s", code, fixture.output.String(), fixture.errOut.String())
+	if code := cli.Run([]string{"signal", "working", "Task two still works"}); code != 0 {
+		t.Fatalf("signal was blocked by another Task's teardown failure: exit=%d output=%s error=%s", code, fixture.output.String(), fixture.errOut.String())
 	}
 	fixture.test.Chdir(fixture.repo)
-	if code, output, errOutput := fixture.run("lookout", "--timeout", "1"); code != 0 {
-		t.Fatalf("lookout was blocked by another Task's teardown failure: exit=%d output=%s error=%s", code, output, errOutput)
+	if code, output, errOutput := fixture.run("watch", "--timeout", "1"); code != 0 {
+		t.Fatalf("watch was blocked by another Task's teardown failure: exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	if got := snapshotCalls(); got < 4 {
 		t.Fatalf("automatic Teardown did not keep reconciling the surviving pane: %d snapshots", got)
@@ -210,9 +210,9 @@ func TestReviewAutoTeardownFailureWedgesReconcile(t *testing.T) {
 
 // A hanging gh stalls every reconciling command.
 func TestReviewHangingGHStallsShow(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, out, e := fixture.run("land", "t1"); code != 0 {
-		t.Fatalf("land %s %s", out, e)
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, out, e := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge %s %s", out, e)
 	}
 	script := "#!/bin/sh\nexec sleep 30\n"
 	if err := os.WriteFile(filepath.Join(fixture.bin, "gh"), []byte(script), 0o700); err != nil {
@@ -228,11 +228,11 @@ func TestReviewHangingGHStallsShow(t *testing.T) {
 	}
 }
 
-// Closed PR -> done -> land again: task is stuck in landing with no Notice.
-func TestReviewRelandAfterClosedPR(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, out, e := fixture.run("land", "t1"); code != 0 {
-		t.Fatalf("land %s %s", out, e)
+// Closed PR -> done -> merge again: task is stuck in merging with no Notice.
+func TestReviewRemergeAfterClosedPR(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, out, e := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge %s %s", out, e)
 	}
 	cfg, _ := config.Load(fixture.home, fixture.project.Name)
 	ctx := context.Background()
@@ -241,9 +241,9 @@ func TestReviewRelandAfterClosedPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("POSSE_TEST_GH_URL", "https://github.com/acme/shop/pull/18")
-	code, out, e := fixture.run("land", "t1")
+	code, out, e := fixture.run("merge", "t1")
 	if code == 0 || !strings.Contains(out, "pr_closed") {
-		t.Fatalf("closed PR was re-landed without a Decision: output=%s error=%s", out, e)
+		t.Fatalf("closed PR was re-merged without a Decision: output=%s error=%s", out, e)
 	}
 	task, _ := fixture.db.Task(ctx, fixture.project.ID, "t1")
 	notices, _ := fixture.db.Notices(ctx, fixture.project.ID, false)
@@ -252,22 +252,22 @@ func TestReviewRelandAfterClosedPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	decisions, decisionErr := fixture.db.Decisions(ctx, fixture.project.ID, true)
-	if task.State != store.StateLanding || task.PRURL != "https://github.com/acme/shop/pull/17" || observations != 1 || countNoticeKind(notices, "pr_closed") != 1 || decisionErr != nil || len(decisions) != 1 || decisions[0].Kind != "pr_closed" {
+	if task.State != store.StateMerging || task.PRURL != "https://github.com/acme/shop/pull/17" || observations != 1 || countNoticeKind(notices, "pr_closed") != 1 || decisionErr != nil || len(decisions) != 1 || decisions[0].Kind != "pr_closed" {
 		t.Fatalf("closed PR did not raise a stable Decision: task=%#v notices=%#v decisions=%#v err=%v", task, notices, decisions, decisionErr)
 	}
 }
 
 // pr_conflict instructions merge origin/main, keeping the Worker branch pushable without force.
 func TestReviewMergedConflictBranchPush(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
-	if code, out, e := fixture.run("land", "t1"); code != 0 {
-		t.Fatalf("land %s %s", out, e)
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, out, e := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge %s %s", out, e)
 	}
 	updateBareMain(t, fixture, "upstream.txt", "x\n")
 	gitTest(t, fixture.worktree, "fetch", "origin")
 	gitTest(t, fixture.worktree, "merge", "--no-edit", "origin/main")
 	ctx := context.Background()
-	_ = fixture.db.Transition(ctx, fixture.task.ID, store.StateLanding, store.StateWorking, "lead", "fix")
+	_ = fixture.db.Transition(ctx, fixture.task.ID, store.StateMerging, store.StateWorking, "lead", "fix")
 	_ = fixture.db.ClearTaskGatedSHA(ctx, fixture.task.ID)
 	newHead := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
 	fixture.setGHHead(t, newHead)
@@ -277,22 +277,22 @@ func TestReviewMergedConflictBranchPush(t *testing.T) {
 	if code, out, e := fixture.run("publish", "Merged conflict fix"); code != 0 {
 		t.Fatalf("publish fix: %d %s %s", code, out, e)
 	}
-	if code, out, e := fixture.run("holler", "done", "Merged conflict fix", "--pr", "https://github.com/acme/shop/pull/17"); code != 0 {
+	if code, out, e := fixture.run("signal", "done", "Merged conflict fix", "--pr", "https://github.com/acme/shop/pull/17"); code != 0 {
 		t.Fatalf("signal fix: %d %s %s", code, out, e)
 	}
-	code, out, e := fixture.run("land", "t1")
+	code, out, e := fixture.run("merge", "t1")
 	if code != 0 {
-		t.Fatalf("merged conflict fix could not land without rebasing: exit=%d output=%s error=%s", code, out, e)
+		t.Fatalf("merged conflict fix could not merge without rebasing: exit=%d output=%s error=%s", code, out, e)
 	}
 }
 
 func TestReviewInterruptedPRCreateIsAdoptedOnReconcile(t *testing.T) {
-	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
 	if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "land --open-pr", "done:pr.create", `{}`, 2147483647); err != nil {
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "merge --open-pr", "done:pr.create", `{}`, 2147483647); err != nil {
 		t.Fatal(err)
 	}
 	openPRs := filepath.Join(fixture.root, "open-prs.json")
@@ -308,7 +308,7 @@ func TestReviewInterruptedPRCreateIsAdoptedOnReconcile(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateLanding || task.PRURL != "https://github.com/acme/shop/pull/18" {
+	if err != nil || task.State != store.StateMerging || task.PRURL != "https://github.com/acme/shop/pull/18" {
 		t.Fatalf("interrupted PR create was not adopted: task=%#v err=%v", task, err)
 	}
 	intents, err := fixture.db.Intents(ctx, fixture.project.ID)
@@ -320,12 +320,12 @@ func TestReviewInterruptedPRCreateIsAdoptedOnReconcile(t *testing.T) {
 func TestInspectionDefersOpenPRRecoveryUntilLeadIsLive(t *testing.T) {
 	for _, status := range []string{"stopped", "exited"} {
 		t.Run(status, func(t *testing.T) {
-			fixture := newPRLandingFixture(t, "pr", store.StateDone)
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
 			ctx := context.Background()
 			if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
 				t.Fatal(err)
 			}
-			if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "land --open-pr", "done:pr.create", `{}`, 2147483647); err != nil {
+			if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "merge --open-pr", "done:pr.create", `{}`, 2147483647); err != nil {
 				t.Fatal(err)
 			}
 			fixture.service.Herdr.(*herdr.Fake).SnapshotValue.Panes[0].AgentStatus = status
@@ -346,7 +346,7 @@ func TestInspectionDefersOpenPRRecoveryUntilLeadIsLive(t *testing.T) {
 
 func TestReviewReconcileFailuresDoNotBlockCommandSurface(t *testing.T) {
 	t.Run("checkout sync", func(t *testing.T) {
-		fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+		fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 		workerRoot := addReviewWorkingTask(t, fixture, 2)
 		offlineRemote := fixture.remote + ".offline"
 		if err := os.Rename(fixture.remote, offlineRemote); err != nil {
@@ -365,13 +365,13 @@ func TestReviewReconcileFailuresDoNotBlockCommandSurface(t *testing.T) {
 	})
 
 	t.Run("interrupted intent", func(t *testing.T) {
-		fixture := newPRLandingFixture(t, "pr", store.StateDone)
+		fixture := newPRMergeFixture(t, "pr", store.StateDone)
 		workerRoot := addReviewWorkingTask(t, fixture, 2)
 		ctx := context.Background()
 		if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
 			t.Fatal(err)
 		}
-		if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "land --open-pr", "done:pr.create", `{}`, 2147483647); err != nil {
+		if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "merge --open-pr", "done:pr.create", `{}`, 2147483647); err != nil {
 			t.Fatal(err)
 		}
 		t.Setenv("POSSE_TEST_GH_FAIL", "1")
@@ -387,7 +387,7 @@ func TestReviewReconcileFailuresDoNotBlockCommandSurface(t *testing.T) {
 	})
 
 	t.Run("Herdr snapshot unavailable", func(t *testing.T) {
-		fixture := newPRLandingFixture(t, "pr", store.StateWorking)
+		fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 		workerRoot := addReviewWorkingTask(t, fixture, 2)
 		fake := fixture.service.Herdr.(*herdr.Fake)
 		fake.Errors["session.snapshot"] = &herdr.Error{Code: "herdr_unavailable", Message: "simulated snapshot outage"}
@@ -398,9 +398,9 @@ func TestReviewReconcileFailuresDoNotBlockCommandSurface(t *testing.T) {
 	})
 
 	t.Run("timed out gh", func(t *testing.T) {
-		fixture := newPRLandingFixture(t, "pr", store.StateDone)
+		fixture := newPRMergeFixture(t, "pr", store.StateDone)
 		workerRoot := addReviewWorkingTask(t, fixture, 2)
-		if code, output, errOutput := fixture.run("land", "t1"); code != 0 {
+		if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 			t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 		}
 		if _, err := fixture.db.AckNotices(context.Background(), fixture.project.ID, []string{"all"}); err != nil {
@@ -416,13 +416,13 @@ func TestReviewReconcileFailuresDoNotBlockCommandSurface(t *testing.T) {
 	})
 }
 
-func addReviewWorkingTask(t *testing.T, fixture *prLandingFixture, sequence int) string {
+func addReviewWorkingTask(t *testing.T, fixture *prMergeFixture, sequence int) string {
 	t.Helper()
-	worktree := filepath.Join(fixture.root, fmt.Sprintf("mount-t%d", sequence))
+	worktree := filepath.Join(fixture.root, fmt.Sprintf("sandbox-t%d", sequence))
 	branch := fmt.Sprintf("posse/t%d", sequence)
 	gitTest(t, fixture.repo, "worktree", "add", "-b", branch, worktree, "refs/heads/main")
 	taskID, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{
-		Seq: sequence, Type: "ship", Title: "working task", State: store.StateSpawning, LandingMode: "pr", Branch: branch,
+		Seq: sequence, Type: "change", Title: "working task", State: store.StateSpawning, MergeMode: "pr", Branch: branch,
 		BaseRef: "main", WorktreePath: worktree, HerdrWorkspaceID: fmt.Sprintf("w%d", sequence+1),
 		PaneID: fmt.Sprintf("w%d:p1", sequence+1), PaneLabel: fmt.Sprintf("posse:shop:t%d", sequence),
 	})
@@ -441,9 +441,9 @@ func addReviewWorkingTask(t *testing.T, fixture *prLandingFixture, sequence int)
 	return worktree
 }
 
-func assertReviewCommandSurface(t *testing.T, fixture *prLandingFixture, workerRoot string, forcePRPoll bool) {
+func assertReviewCommandSurface(t *testing.T, fixture *prMergeFixture, workerRoot string, forcePRPoll bool) {
 	t.Helper()
-	for _, args := range [][]string{{}, {"roster"}, {"show", "t1"}} {
+	for _, args := range [][]string{{}, {"list"}, {"show", "t1"}} {
 		if forcePRPoll {
 			if _, err := fixture.db.ExecContext(context.Background(), `UPDATE project_watch_state SET pr_polled_at=0`); err != nil {
 				t.Fatal(err)
@@ -457,8 +457,8 @@ func assertReviewCommandSurface(t *testing.T, fixture *prLandingFixture, workerR
 	fixture.test.Chdir(workerRoot)
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = &fixture.output, &fixture.errOut
-	if code := cli.Run([]string{"holler", "working", "still making progress"}); code != 0 {
-		t.Fatalf("holler failed during reconciliation: exit=%d output=%s error=%s", code, fixture.output.String(), fixture.errOut.String())
+	if code := cli.Run([]string{"signal", "working", "still making progress"}); code != 0 {
+		t.Fatalf("signal failed during reconciliation: exit=%d output=%s error=%s", code, fixture.output.String(), fixture.errOut.String())
 	}
 	fixture.test.Chdir(fixture.repo)
 	if forcePRPoll {
@@ -466,7 +466,7 @@ func assertReviewCommandSurface(t *testing.T, fixture *prLandingFixture, workerR
 			t.Fatal(err)
 		}
 	}
-	if code, output, errOutput := fixture.run("lookout", "--timeout", "1"); code != 0 {
-		t.Fatalf("lookout failed during reconciliation: exit=%d output=%s error=%s", code, output, errOutput)
+	if code, output, errOutput := fixture.run("watch", "--timeout", "1"); code != 0 {
+		t.Fatalf("watch failed during reconciliation: exit=%d output=%s error=%s", code, output, errOutput)
 	}
 }

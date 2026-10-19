@@ -18,7 +18,7 @@ type reviewVerdictFixture struct {
 	ctx    context.Context
 	home   string
 	db     *DB
-	ship   int64
+	change int64
 	review int64
 }
 
@@ -35,11 +35,11 @@ func newReviewVerdictFixture(t *testing.T, targets []ReviewTarget) reviewVerdict
 	if err != nil {
 		t.Fatal(err)
 	}
-	ship, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "ship", Title: "Ship", LandingMode: "local", Branch: "posse/ship"})
+	change, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Change", MergeMode: "local", Branch: "posse/change"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	review, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "review", ReviewsTaskID: ship, Title: "Review", LandingMode: "local", ReviewTargets: targets})
+	review, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "review", ReviewsTaskID: change, Title: "Review", MergeMode: "local", ReviewTargets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func newReviewVerdictFixture(t *testing.T, targets []ReviewTarget) reviewVerdict
 	if err := db.Transition(ctx, review, StateSpawning, StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	return reviewVerdictFixture{ctx: ctx, home: home, db: db, ship: ship, review: review}
+	return reviewVerdictFixture{ctx: ctx, home: home, db: db, change: change, review: review}
 }
 
 func (f reviewVerdictFixture) task(t *testing.T, id int64) Task {
@@ -117,18 +117,18 @@ func TestReviewVerdictRefusalLeavesNoSignalAndKeepsTaskWorking(t *testing.T) {
 
 func TestReviewVerdictRefusedForNonReviewTasks(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
-	if err := f.db.Transition(f.ctx, f.ship, StateSpawning, StateWorking, "cli", "started"); err != nil {
+	if err := f.db.Transition(f.ctx, f.change, StateSpawning, StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, f.ship), "done", "x", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewPass, ReportSHA256: reportHash})
+	_, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, f.change), "done", "x", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewPass, ReportSHA256: reportHash})
 	if !errors.Is(err, ErrReviewVerdictType) {
-		t.Fatalf("ship verdict error = %v", err)
+		t.Fatalf("change verdict error = %v", err)
 	}
-	if f.task(t, f.ship).State != StateWorking || f.signalCount(t, f.ship) != 0 {
-		t.Fatal("refused ship verdict was partially recorded")
+	if f.task(t, f.change).State != StateWorking || f.signalCount(t, f.change) != 0 {
+		t.Fatal("refused change verdict was partially recorded")
 	}
-	if _, err := f.db.CreateTask(f.ctx, f.task(t, f.ship).ProjectID, Task{Seq: 3, Type: "scout", Title: "Scout", ReviewTargets: []ReviewTarget{{Repository: "shop", Commit: reviewShaA}}}); !errors.Is(err, ErrReviewVerdictType) {
-		t.Fatalf("scout with review targets error = %v", err)
+	if _, err := f.db.CreateTask(f.ctx, f.task(t, f.change).ProjectID, Task{Seq: 3, Type: "research", Title: "Research", ReviewTargets: []ReviewTarget{{Repository: "shop", Commit: reviewShaA}}}); !errors.Is(err, ErrReviewVerdictType) {
+		t.Fatalf("research with review targets error = %v", err)
 	}
 }
 
@@ -181,17 +181,17 @@ func TestCurrentReviewPassRequiresPassOnCurrentCandidate(t *testing.T) {
 			if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, f.review), "done", "x", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: tc.verdict, ReportSHA256: reportHash}); err != nil {
 				t.Fatal(err)
 			}
-			_, got, err := f.db.CurrentReviewPass(f.ctx, f.ship, tc.candidate, nil)
+			_, got, err := f.db.CurrentReviewPass(f.ctx, f.change, tc.candidate, nil)
 			if err != nil || got != tc.want {
 				t.Fatalf("current pass = %v, %v; want %v", got, err, tc.want)
 			}
 		})
 	}
 	f := newReviewVerdictFixture(t, old)
-	if _, _, err := f.db.CurrentReviewPass(f.ctx, f.ship, old, nil); err != nil {
+	if _, _, err := f.db.CurrentReviewPass(f.ctx, f.change, old, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, got, _ := f.db.CurrentReviewPass(f.ctx, f.ship, old, nil); got {
+	if _, got, _ := f.db.CurrentReviewPass(f.ctx, f.change, old, nil); got {
 		t.Fatal("a Review Task without a verdict qualified")
 	}
 }
@@ -221,7 +221,7 @@ func TestReviewTargetsAndVerdictSurviveRebuild(t *testing.T) {
 	if err != nil || !SameReviewTargets(rebuilt, targets) {
 		t.Fatalf("rebuilt targets = %#v, %v", rebuilt, err)
 	}
-	if _, got, err := f.db.CurrentReviewPass(f.ctx, f.ship, targets, nil); err != nil || !got {
+	if _, got, err := f.db.CurrentReviewPass(f.ctx, f.change, targets, nil); err != nil || !got {
 		t.Fatalf("rebuilt pass current = %v, %v", got, err)
 	}
 }

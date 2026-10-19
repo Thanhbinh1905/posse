@@ -232,7 +232,7 @@ func t208PrepareSnapshotRebuild(t *testing.T, f *t205PRFixture) {
 		ProjectID: f.project.ID,
 		TaskID:    f.task.ID,
 		Origin:    "t208-rebuild-fixture",
-		Kind:      "rider_question",
+		Kind:      "worker_question",
 		Question:  "Fixture rebuild blocker",
 		Options:   []string{"continue", "stop"},
 	}); err != nil {
@@ -265,11 +265,11 @@ func t205NewPRFixture(t *testing.T, forge string) *t205PRFixture {
 			t.Fatal(err)
 		}
 	}
-	brief := filepath.Join(f.root, "ship.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nReview fixture.\n"), 0o600); err != nil {
+	brief := filepath.Join(f.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nReview fixture.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, f.binary, f.repo, f.leadEnv, "ride", "--brief", brief, "--name", "pr-lifecycle-change")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", brief, "--name", "pr-lifecycle-change")
 	task := f.mustTask(t, "t1")
 	readyPath := filepath.Join(f.root, "worker-ready-t1")
 	if !waitForCondition(15*time.Second, func() bool {
@@ -279,7 +279,7 @@ func t205NewPRFixture(t *testing.T, forge string) *t205PRFixture {
 		_, err := os.Stat(readyPath)
 		return err == nil
 	}) {
-		t.Fatal("Rider did not finish its initial commit")
+		t.Fatal("Worker did not finish its initial commit")
 	}
 	env := setEnv(f.leadEnv, "HERDR_PANE_ID", task.PaneID)
 	env = setEnv(env, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)

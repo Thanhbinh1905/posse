@@ -21,10 +21,10 @@ type discardPullRequest struct {
 }
 
 func (s *Service) discardPullRequests(ctx context.Context, db *store.DB, project store.Project, task store.Task) ([]discardPullRequest, error) {
-	// A landed Task's recorded PR is already authoritative. The only approved
-	// discard path from landed is the unrecoverable-Leftover Decision, which
+	// A merged Task's recorded PR is already authoritative. The only approved
+	// discard path from merged is the unrecoverable-Orphan Decision, which
 	// must dispose of local unsaved work without treating the merged PR as open.
-	if task.State == store.StateLanded {
+	if task.State == store.StateMerged {
 		return nil, nil
 	}
 	if !project.IsWorkspace() {
@@ -70,7 +70,7 @@ func (s *Service) requireDiscardPullRequestsUnmerged(ctx context.Context, db *st
 
 // closeAndVerifyDiscardPullRequests is idempotent across retries: already
 // CLOSED requests are accepted, OPEN requests are closed, and every close is
-// followed by a fresh forge read. It runs before pane or Mount teardown.
+// followed by a fresh forge read. It runs before pane or Sandbox teardown.
 func (s *Service) closeAndVerifyDiscardPullRequests(ctx context.Context, db *store.DB, requests []discardPullRequest, cfg config.Config) error {
 	for _, request := range requests {
 		if err := verifyDiscardPRStillRecorded(ctx, db, request); err != nil {
@@ -106,7 +106,7 @@ func (s *Service) closeAndVerifyDiscardPullRequests(ctx context.Context, db *sto
 		case "MERGED":
 			return discardMergedPullRequest(request)
 		case "OPEN":
-			return axi.Failure("pr_close_failed", "forge left the recorded pull request open; discard keeps the Mount held", true, strings.TrimSpace(closeOutput), errorText(closeErr))
+			return axi.Failure("pr_close_failed", "forge left the recorded pull request open; discard keeps the Sandbox held", true, strings.TrimSpace(closeOutput), errorText(closeErr))
 		default:
 			return axi.Failure("pr_close_failed", "forge returned an unsupported pull request state after close", true, verified.State, strings.TrimSpace(closeOutput), errorText(closeErr))
 		}
@@ -226,14 +226,14 @@ func verifyDiscardPRStillRecorded(ctx context.Context, db *store.DB, request dis
 		return err
 	}
 	if current.State != request.task.State {
-		if current.State == store.StateLanded {
+		if current.State == store.StateMerged {
 			return discardMergedPullRequest(request)
 		}
-		return axi.Failure("pr_discard_raced", "Task state changed while verifying its recorded pull request; discard keeps the Mount held", true)
+		return axi.Failure("pr_discard_raced", "Task state changed while verifying its recorded pull request; discard keeps the Sandbox held", true)
 	}
 	if request.repo == "" {
 		if current.PRURL != request.url || current.GatedSHA != request.task.GatedSHA {
-			return axi.Failure("pr_discard_raced", "recorded pull request changed while discard was in progress; discard keeps the Mount held", true)
+			return axi.Failure("pr_discard_raced", "recorded pull request changed while discard was in progress; discard keeps the Sandbox held", true)
 		}
 		return nil
 	}
@@ -244,16 +244,16 @@ func verifyDiscardPRStillRecorded(ctx context.Context, db *store.DB, request dis
 	for _, repo := range repos {
 		if repo.Repo == request.repo {
 			if repo.PRURL != request.url || repo.GatedSHA != request.task.GatedSHA {
-				return axi.Failure("pr_discard_raced", "recorded Member pull request changed while discard was in progress; discard keeps the Mount held", true)
+				return axi.Failure("pr_discard_raced", "recorded Member pull request changed while discard was in progress; discard keeps the Sandbox held", true)
 			}
 			return nil
 		}
 	}
-	return axi.Failure("pr_discard_raced", "recorded Member pull request disappeared while discard was in progress; discard keeps the Mount held", true)
+	return axi.Failure("pr_discard_raced", "recorded Member pull request disappeared while discard was in progress; discard keeps the Sandbox held", true)
 }
 
 func discardMergedPullRequest(request discardPullRequest) error {
-	return axi.Failure("pr_merged", "recorded pull request has merged; approved discard was refused", false, request.url, fmt.Sprintf("Run `posse show %s` to inspect its Land state", taskIDString(request.task.Seq)))
+	return axi.Failure("pr_merged", "recorded pull request has merged; approved discard was refused", false, request.url, fmt.Sprintf("Run `posse show %s` to inspect its Merge state", taskIDString(request.task.Seq)))
 }
 
 func errorText(err error) string {
