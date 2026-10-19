@@ -265,6 +265,13 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	fixture.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", first.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	fixture.requireNotice(t, "t1", "pr_checks_failed")
+	var queued, rounds int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, first.ID).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("disabled CI loop queued %d automatic instructions: %v", queued, err)
+	}
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, first.ID).Scan(&rounds); err != nil || rounds != 0 {
+		t.Fatalf("disabled CI loop recorded %d fix rounds: %v", rounds, err)
+	}
 
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Fix the failing unit check and report done again."); !strings.Contains(output, "delivered") {
 		t.Fatalf("PR fix instruction was not delivered: %s", output)
@@ -1959,7 +1966,8 @@ esac
 	}
 
 	home := filepath.Join(root, "posse")
-	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"finished\"\npr_poll = \"1ms\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	// Lifecycle tests exercise explicit Lead instructions; CI auto-fixes have fake-forge coverage elsewhere.
+	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"finished\"\npr_poll = \"1ms\"\n\n[ci_loop]\nmax_fix_rounds = 0\nrerun_cancelled = 0\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
