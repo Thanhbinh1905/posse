@@ -676,14 +676,14 @@ type Task struct {
 	Profile        string `toml:"profile"`
 	DispatchRule   string `toml:"dispatch_rule"`
 	PlanJSON       string `toml:"plan_json,omitempty"`
-	MergeMode      string `toml:"merge_mode"`
+	MergeMode      string `toml:"landing_mode"`
 	AutonomyReview string `toml:"autonomy_review"`
-	AutonomyMerge  string `toml:"autonomy_merge"`
+	AutonomyMerge  string `toml:"autonomy_land"`
 	Branch         string `toml:"branch"`
 	BaseRef        string `toml:"base_ref"`
 	TargetBranch   string `toml:"target_branch"`
 	WorktreePath   string `toml:"worktree_path"`
-	SandboxID      int64  `toml:"sandbox_id"`
+	SandboxID      int64  `toml:"mount_id"`
 	Launches       int    `toml:"launches"`
 	// ReviewTargets is read only when a Review Task is created; the store keeps
 	// the bound commits in review_targets.
@@ -699,7 +699,7 @@ type Task struct {
 	IdleSince            int64          `toml:"idle_since"`
 	AgentServerStartedAt string         `toml:"agent_server_started_at"`
 	PRURL                string         `toml:"pr_url"`
-	MergedRef            string         `toml:"merged_ref"`
+	MergedRef            string         `toml:"landed_ref"`
 	LastOutputHash       string         `toml:"last_output_hash"`
 	LastWorktreeHash     string         `toml:"last_worktree_hash"`
 	LastProgressAt       int64          `toml:"last_progress_at"`

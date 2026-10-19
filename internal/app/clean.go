@@ -157,7 +157,7 @@ func (s *Service) clean(ctx *axi.Context, args []string) error {
 			}
 		}
 	}
-	help := "Run `posse clean --yes` to teardown finished Tasks, stop their recorded processes, and reclaim their Task scratch and held Sandboxes"
+	help := "Run `posse clean --yes` to tear down finished Tasks, stop their recorded processes, and reclaim their Task scratch and held Sandboxes"
 	return ctx.Print(axi.Object{{Key: "clean", Value: rows}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{help}}})
 }
 

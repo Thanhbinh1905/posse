@@ -1,0 +1,31 @@
+version = 1
+
+[project]
+id = 1
+uuid = "__PROJECT_UUID__"
+name = "shop"
+root = "__PROJECT_ROOT__"
+default_branch = "main"
+down_at = 1234
+
+[task]
+id = 41
+project_id = 1
+seq = 1
+type = "ship"
+title = 'User said "Rider must land"'
+state = "done"
+profile = "deep"
+landing_mode = "pr"
+autonomy_review = "ask"
+autonomy_land = "ask"
+branch = "posse/historical-recovery"
+base_ref = "main"
+target_branch = "main"
+worktree_path = "__WORKTREE_PATH__"
+mount_id = 17
+launches = 2
+pr_url = "https://github.com/acme/shop/pull/17"
+landed_ref = "0123456789abcdef0123456789abcdef01234567"
+created_at = 123456
+updated_at = 234567

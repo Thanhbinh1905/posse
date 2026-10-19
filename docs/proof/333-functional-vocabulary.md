@@ -48,6 +48,23 @@ Published SQL migrations and identifiers remain unchanged: `mounts`, `mount_id`,
 
 New Projects allocate `pool/<project>/sandbox-<n>`. Existing `remuda/<project>/mount-<n>` paths are not relocated because processes and Git registrations depend on them. A Sandbox is worktree/process containment, not a security boundary.
 
+## Delta review #771: persisted Task snapshot keys
+
+The `b9b8d5e` merge normalization incorrectly changed four persisted Task TOML tags. The real CLI reproduction deleted SQLite and rebuilt from a literal 0.14 `task.toml`: Task 41 survived, but `MergeMode`, `AutonomyMerge` and `MergedRef` were empty and `SandboxID` was zero, without a decoder error. This was a production snapshot-compatibility regression introduced in this branch, not a Posse harness failure.
+
+The canonical Go fields now retain the historical persisted identifiers `landing_mode`, `autonomy_land`, `mount_id` and `landed_ref`. No CLI/config aliases were introduced. A handwritten 0.14 fixture avoids generating legacy test data with the current serializer; `Test014TaskSnapshotRebuildPreservesMergeAuthorityAndSandbox` runs `recover --rebuild` as the User after database loss, asserts all four fields, Task/PR identity and User text, and verifies the held Sandbox link/path. It failed before the fix and passed afterward. Independent decoder and writer contract tests also failed before the fix and now pass, including zero undecoded fixture keys.
+
+The exact retained `lookout` adapter command now skips Watch supervision, with a red/green regression asserting that delivery-only commands do not probe supervision. Clean help uses the verb "tear down".
+
+Verification on unchanged delta Go sources:
+
+- Full `go test ./internal/store ./internal/app -count=1 -timeout=30m`: exit 0; store 121.980s, app 560.640s.
+- Eight recovery/0.14 compatibility E2Es, including cold database loss, moved Projects and stale sidecars, stopped Projects, legacy Workspace recovery, Notice receipts and retained adapters: exit 0, 37.790s. The new Task snapshot E2E is assigned to shard 1.
+- Focused snapshot, supervision and CLI recovery race tests: exit 0; store 1.031s, app 15.648s.
+- Formatting, build, tagged vet/staticcheck 2026.2.1, stable generation, tagged all-package compilation and both shard self-checks: exit 0.
+
+Task-local evidence is `instruction-771-{rebuild,snapshot-keys,supervision}-{red,green}.log`, `instruction-771-full-unit.log/.exit`, `instruction-771-recovery-e2e.log/.exit`, `instruction-771-focused-race.log/.exit` and `instruction-771-static.log/.exit`. Main remained `2422226`; ordinary merge reported already up to date. The four-shard results below remain evidence for their named earlier heads, not this changed executable head. All final refreshed-head CI checks remain required before authorized Merge, with this PR last in release ordering.
+
 ## Release integration #770
 
 Main `2422226` adds #348's E2E stabilization, #341's hidden supervised observation and update re-exec, and #323's Task process containment. Their behavior is retained with canonical names, including `posse clean`, cgroups/marker ownership, residual-process refusal, hidden Watch identity/heartbeat/repair and binary-replacement re-exec. Historical-pane cleanup retains the recorded 0.14 pane and Project-workspace checks, and refuses an agent replacing that pane.
@@ -76,7 +93,7 @@ Final verification passed at unchanged Go head `58b7be0`:
 
 All four original runners used their unchanged 15-minute budgets and count 1, with no Go or manifest edits during execution. Focused race checks passed at the production-equivalent `b9b8d5e` (app 61.017s, store 17.805s, plus config, dispatch and taskplan; AXI had no tests selected by that pattern). The subsequent commit changes only the Decision E2E fixture and documentation. Experiments used isolated homes/config and removed inherited `HERDR_*`; normal shared Go caches stayed in place. Post-run `git fetch origin; git merge --no-ff origin/main` reported already up to date, and the Task scratch process scan found zero remaining CWDs.
 
-Task-local evidence: `instruction-770-rerun-{unit,shard-1,shard-2,shard-3,shard-4,static}.log` with exit receipts; `instruction-770-final-race.log`; `instruction-770-receipt-{red,green}.log`; `instruction-770-decision-answer-claim-{red,green}.log`; and `instruction-770-vocabulary-audit-final.log`. Only proof documentation and the stale `orphanBase` Go comment follow the verified head; executable code and test behavior are unchanged. Final published-head CI remains required before Merge; do not infer it from older green CI. The verification below records earlier heads, not this final integration.
+Task-local evidence: `instruction-770-rerun-{unit,shard-1,shard-2,shard-3,shard-4,static}.log` with exit receipts; `instruction-770-final-race.log`; `instruction-770-receipt-{red,green}.log`; `instruction-770-decision-answer-claim-{red,green}.log`; and `instruction-770-vocabulary-audit-final.log`. Before #771, only proof documentation and the stale `orphanBase` Go comment followed the verified head; executable code and test behavior were unchanged. Final published-head CI remains required before Merge; do not infer it from older green CI. The verification below records earlier heads, not this final integration.
 
 ## Verification evidence before #770
 

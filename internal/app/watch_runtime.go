@@ -369,7 +369,7 @@ func watchRuntimeEnvironment(parent []string, home string, project store.Project
 
 func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args []string) {
 	// A Notice acknowledgement is delivery work, not a Project maintenance boundary.
-	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "watch" || command == "remove" || command == "_update-preflight" {
+	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "watch" || command == "lookout" || command == "remove" || command == "_update-preflight" {
 		return
 	}
 	binary, err := os.Executable()
