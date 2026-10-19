@@ -33,7 +33,7 @@ Additional regressions cover:
 - admitted-plan versions 1/2 retaining exact serialized bytes, hashes and selected-input evidence;
 - historical snapshot Notice/Decision/lease normalization without changing evidence or ownership;
 - preserving a literal User option `land`, interrupted Workspace Merge intent and historical discard process authority;
-- replacement of only the recorded historical observer, preserving unrelated panes and replacement agents;
+- removal of only the recorded historical observer without a visible Watch pane, preserving unrelated panes and replacement agents;
 - canonical root help, config schema and replacement-specific command/flag errors;
 - retained 0.14 Pi/OpenCode handoff and receipt argv through the real CLI, while non-adapter old-name calls still fail;
 - malformed first-open config retaining its filename and `config_invalid` diagnostic;
@@ -56,7 +56,11 @@ Main now owns migrations 53/54 and ADR 0025. The unreleased vocabulary migration
 
 `Test014LookoutReexecReportsReplacement` executes retained old observer argv into the new binary. Poll-only, timeout and help calls exit 2 with `posse lookout was removed; use posse watch`; the exact retained Pi/OpenCode handoff/receipt protocols still pass. The real binary-inode replacement E2E verifies canonical Watch re-exec separately. Historical private process bindings remain custody readers, not input aliases. `pool prune` reports `orphan_panes`, distinct from saved Orphan work; native ownership names and stale test/comment wording are corrected.
 
-Final integrated-head Gate and all four E2E shards are being run. The verification below records earlier heads, not this integration.
+At integrated head `b9b8d5e`, full units passed (app 759.155s, store 140.091s); build, tagged vet/staticcheck, stable generation, both shard self-checks and focused race checks passed. E2E shards 1/2/4 passed in 762.681/632.257/783.215s. Shard 3 failed its immediate Decision delivery assertion while the answered Notice existed with `DeliveredAt=0`.
+
+Seventy unchanged focused repetitions passed. Holding an earlier Notice's claim also passed, so that experiment did not reproduce the failure. Pinning the answer Notice itself in a valid in-flight claim reproduced the immediate assertion failure in 3/3 runs. The fixture now releases that claim after the CLI commits the User answer, then requires the real hidden Watch to deliver within ten seconds; it retains the exact User quote, delivered-state and correct Lead-prompt checks. Ten pinned runs passed in 36.966s. No production delivery or ownership guard changed. The original failing run's exact interleaving was not captured; the pinned case demonstrates the supported asynchronous state, not a proven trace of that run.
+
+All four shards and the Gate are being rerun after this fixture change. The verification below records earlier heads, not this final integration.
 
 ## Verification evidence before #770
 

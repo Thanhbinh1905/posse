@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -28,6 +29,13 @@ func TestDecisionCLIFromLeadAndUserShellDeliversAnswerToLead(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: f.taskDBID, Kind: "task_failed", Summary: "Worker failed"}); err != nil {
+		t.Fatal(err)
+	}
+	// A test-only trigger pins a valid in-flight answer delivery before
+	// foreground or hidden Watch delivery can win it. Release it only after
+	// the CLI commits the answer, then require the real Watch to deliver it.
+	const deliveryOwner = "decision-answer-overlap"
+	if _, err := db.ExecContext(context.Background(), `CREATE TRIGGER e2e_hold_answer_delivery AFTER INSERT ON notices WHEN NEW.kind='decision_answered' BEGIN UPDATE notices SET claim_token='decision-answer-overlap',claimed_at=NEW.created_at WHERE id=NEW.id; END`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -65,18 +73,38 @@ func TestDecisionCLIFromLeadAndUserShellDeliversAnswerToLead(t *testing.T) {
 		if d.Answer != "relaunch" || d.UserQuote != "Please relaunch the Worker" {
 			return fmt.Errorf("quoted answer: %#v", d)
 		}
-		notices, e := db.Notices(context.Background(), f.project.ID, false)
-		if e != nil {
-			return e
+		var noticeID int64
+		var owner string
+		if err := db.QueryRowContext(context.Background(), `SELECT id,claim_token FROM notices WHERE project_id=? AND kind='decision_answered' AND json_extract(data_json,'$.decision_id')=?`, f.project.ID, failedID).Scan(&noticeID, &owner); err != nil {
+			return err
 		}
-		for _, n := range notices {
-			if n.Kind == "decision_answered" && n.DeliveredAt > 0 {
-				return nil
-			}
+		if owner != deliveryOwner {
+			return fmt.Errorf("answer delivery did not remain in flight: owner=%q", owner)
 		}
-		return fmt.Errorf("decision_answered did not reach Lead: %#v", notices)
+		if _, err := db.ExecContext(context.Background(), `DROP TRIGGER e2e_hold_answer_delivery`); err != nil {
+			return err
+		}
+		return db.RollbackNoticeClaim(context.Background(), f.project.ID, []int64{noticeID}, deliveryOwner)
 	}); err != nil {
 		t.Fatal(err)
+	}
+	var deliveryErr error
+	if !waitForCondition(10*time.Second, func() bool {
+		deliveryErr = f.openDB(t, func(db *store.DB) error {
+			notices, err := db.Notices(context.Background(), f.project.ID, false)
+			if err != nil {
+				return err
+			}
+			for _, notice := range notices {
+				if notice.Kind == "decision_answered" && notice.DeliveredAt > 0 {
+					return nil
+				}
+			}
+			return fmt.Errorf("decision_answered did not reach Lead: %#v", notices)
+		})
+		return deliveryErr == nil
+	}) {
+		t.Fatal(deliveryErr)
 	}
 	h.session.mu.Lock()
 	received := false

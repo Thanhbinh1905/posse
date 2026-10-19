@@ -49,6 +49,21 @@ When Watch maintenance resumes, the recorded pre-upgrade observer pane is closed
 
 Stored global and Project config is migrated once before validation. A migration marker prevents reintroduced old keys from becoming aliases. Migration preserves a `.v014` copy of changed config for rollback and fails on conflicting old/new keys instead of choosing one. Changed config is re-encoded, so its comments and layout are retained only in the backup. Unchanged config retains its exact bytes and receives a sidecar marker. Legacy preference files remain data sources; the old command is removed.
 
+## Script and layout compatibility
+
+Public output and Herdr tokens change immediately; custom scripts and layouts must use the new spellings. Persisted SQL names and immutable evidence keep the compatibility rules above.
+
+| Previous spelling | Release spelling |
+| --- | --- |
+| `ack.auto_unsaddled` | `ack.auto_torn_down` |
+| Project summary `lookout` | `watch` |
+| Update `lookouts`, `stopped_lookouts`, `reexec_lookouts` | `watches`, `stopped_watches`, `reexec_watches` |
+| Update process kind `poller` | `watch` |
+| Pool `mount`, `mounts` | `sandbox`, `sandboxes` |
+| Sweep `orphans` | Pool prune `orphan_panes` |
+| Herdr token `posse_mount` | `posse_sandbox` |
+| Private process bindings `POSSE_LOOKOUT_*` | `POSSE_WATCH_*`; historical bindings are custody readers only |
+
 ## User upgrade steps
 
 The first upgrade runs through the installed 0.14 binary, so use `posse update --stop-lookouts`, not `--stop-watches`. The updater runs the new `posse setup` for integrations; run it manually after another installation method. Refresh optional global skills with `posse setup --global-skills` if previously installed. Restart every running Lead with `posse up --replace` from a User shell in that Project. Pi/OpenCode Leads keep their old adapter in memory until restart; the hidden machine protocol prevents silent Notice loss during this transition. Later updates use `--stop-watches`.

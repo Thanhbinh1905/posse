@@ -1,6 +1,6 @@
 # Go, as one static binary, with our own AXI layer
 
-posse is written in Go and ships as a single static `posse` binary. It is called constantly and in short bursts (every Herdr event runs `posse _ingest`, and Leads and Workers call it on every step), it mostly drives processes (`git`, `gh`, `herdr`, agent CLIs), and it has to keep working for years without a runtime to install or upgrade. Go gives a dependency-free binary, a stable toolchain, and a pure-Go SQLite (`modernc.org/sqlite`) with no cgo.
+posse is written in Go and distributed as a single static `posse` binary. It is called constantly and in short bursts (every Herdr event runs `posse _ingest`, and Leads and Workers call it on every step), it mostly drives processes (`git`, `gh`, `herdr`, agent CLIs), and it has to keep working for years without a runtime to install or upgrade. Go gives a dependency-free binary, a stable toolchain, and a pure-Go SQLite (`modernc.org/sqlite`) with no cgo.
 
 ## Considered Options
 
