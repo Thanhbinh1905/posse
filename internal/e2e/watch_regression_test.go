@@ -274,6 +274,8 @@ func TestConcurrentWatchTeardownRaisesNoFalseReason(t *testing.T) {
 	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
 	showAfterActiveTeardown(t, f, "t1")
+	assertNoValidationFixRound(t, f, "t1", "gate")
+	assertNoValidationFixRound(t, f, "t1", "freshness")
 	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
 	if err != nil {
 		t.Fatal(err)

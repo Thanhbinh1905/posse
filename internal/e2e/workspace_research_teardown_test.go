@@ -16,7 +16,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// TestWorkspaceScoutTeardownPreservesMemberAndRootAttachments exercises Report,
+// TestWorkspaceResearchTeardownPreservesMemberAndRootAttachments exercises Report,
 // ack, and Teardown for one- and two-Member Research Tasks on a reused workspace Sandbox.
 func TestWorkspaceResearchTeardownPreservesMemberAndRootAttachments(t *testing.T) {
 	root := newFixtureRoot(t, fixturePrefix("workspace-research-"))
@@ -712,6 +712,11 @@ esac
 		if err := os.WriteFile(filepath.Join(root, "research-mode"), []byte("missing-baseline"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		// Keep the Lead busy so Watch does not race the direct ack with a
+		// prompt-delivery claim while this subtest repairs the baseline.
+		if _, err := client.Run(context.Background(), "pane", "report-agent", leadPane.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+			t.Fatalf("mark workspace Lead busy for direct Report ack: %v", err)
+		}
 		brief := filepath.Join(root, "t9.md")
 		contents := "---\ntype: research\ntitle: repair-baseline\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
 		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
@@ -771,25 +776,17 @@ esac
 			t.Fatalf("repair-baseline Task has no task_done Notice: %#v", notices)
 		}
 		ackOutput := ""
-		// A concurrent Notice delivery can temporarily own the acknowledgement.
-		// Reissue it after delivery settles rather than only waiting for teardown.
-		if !waitForCondition(30*time.Second, func() bool {
-			command := exec.Command(binary, "ack", noticeID)
-			command.Dir, command.Env = workspace, leadEnv
-			output, commandErr := command.CombinedOutput()
-			ackOutput = string(output)
-			if commandErr != nil && !strings.Contains(ackOutput, `"intent_active"`) {
-				t.Fatalf("ack repaired Report: %v\n%s", commandErr, output)
+		ackedOrTornDown := waitForCondition(15*time.Second, func() bool {
+			ackOutput = runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
+			if strings.Contains(ackOutput, "acknowledged: 1") {
+				return true
 			}
 			current, err := db.Task(context.Background(), project.ID, "t9")
 			return err == nil && current.State == store.StateTornDown
-		}) {
-			current, taskErr := db.Task(context.Background(), project.ID, "t9")
-			sandbox, sandboxErr := db.SandboxByTask(context.Background(), task.ID)
-			transitions, transitionErr := db.TaskTransitions(context.Background(), task.ID, 20)
-			allNotices, noticeErr := db.Notices(context.Background(), project.ID, true)
-			intents, intentErr := db.Intents(context.Background(), project.ID)
-			t.Fatalf("ack or an already-committed acknowledgement did not repair Report Teardown: %s; task=%#v err=%v sandbox=%#v err=%v transitions=%#v err=%v notices=%#v err=%v intents=%#v err=%v", ackOutput, current, taskErr, sandbox, sandboxErr, transitions, transitionErr, allNotices, noticeErr, intents, intentErr)
+		})
+		if !ackedOrTornDown {
+			current, _ := db.Task(context.Background(), project.ID, "t9")
+			t.Fatalf("ack or an already-committed acknowledgement did not repair Report Teardown: %s; task=%#v", ackOutput, current)
 		}
 		if !waitForCondition(30*time.Second, func() bool {
 			current, err := db.Task(context.Background(), project.ID, "t9")
