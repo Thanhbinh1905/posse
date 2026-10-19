@@ -79,6 +79,7 @@ type Querier interface {
 	ResourceLeasesByScope(ctx context.Context, arg ResourceLeasesByScopeParams) ([]ResourceLeasesByScopeRow, error)
 	ResourceMountLeases(ctx context.Context) ([]ResourceMountLeasesRow, error)
 	SetProjectLead(ctx context.Context, arg SetProjectLeadParams) error
+	SetTaskContainment(ctx context.Context, arg SetTaskContainmentParams) error
 	SetTaskGatedSHA(ctx context.Context, arg SetTaskGatedSHAParams) error
 	SetTaskPRTitle(ctx context.Context, arg SetTaskPRTitleParams) (sql.Result, error)
 	StallTasks(ctx context.Context, projectID int64) ([]Task, error)

@@ -220,8 +220,7 @@ func TestLookoutKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) 
 	// Hold only the offline checkout-sync lock while Lookout performs its
 	// target freshness fetch and reaches the deliberate Forge stall. This lets
 	// the test install the blackhole route before checkout sync can fetch.
-	syncLockOwner := exec.Command("sh", "-c", `exec 9>"$1"; flock -x 9; printf 'locked\n'; exec sleep 60`, "offline-sync-lock", filepath.Join(offlineRoot, ".git", "posse-sync.lock"))
-	syncLockOwner.Env = env
+	syncLockOwner := newE2ELockOwner("offline-sync-lock", filepath.Join(offlineRoot, ".git", "posse-sync.lock"), env)
 	lockReady, err := syncLockOwner.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

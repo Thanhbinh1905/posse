@@ -59,8 +59,7 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 			}
 			// STOP only after acquisition, removing the original test's timing
 			// window. The child retains the same kernel lock as a paused Lookout.
-			owner := exec.Command("sh", "-c", `exec 9>"$1"; flock -x 9; printf 'locked\n'; exec sleep 60`, "lock-owner", path)
-			owner.Env = f.env
+			owner := newE2ELockOwner("lock-owner", path, f.env)
 			ready, err := owner.StdoutPipe()
 			if err != nil {
 				t.Fatal(err)

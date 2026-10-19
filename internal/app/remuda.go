@@ -1035,6 +1035,7 @@ type ownedProcessRoot struct {
 	path               string
 	includeOpenFiles   bool
 	includeMappedFiles bool
+	excluded           map[int]bool
 }
 
 type ownedProcess struct {
@@ -1043,6 +1044,9 @@ type ownedProcess struct {
 }
 
 func verifyNoTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
+	if processes := taskContainmentProcessDetails(task); len(processes) > 0 {
+		return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, fmt.Sprint(processes), "No process was stopped or signalled. Inspect the Mount and scratch processes, then retry discard")
+	}
 	roots, err := taskOwnedProcessRoots(ctx, db, home, project, task)
 	if err != nil {
 		return err
@@ -1428,6 +1432,13 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 	procRoot := filepath.Join("/proc", strconv.Itoa(pid))
 	if cwd, err := os.Readlink(filepath.Join(procRoot, "cwd")); err == nil {
 		for _, root := range roots {
+			excluded, err := ownedProcessRootExcludesPID(pid, root)
+			if err != nil {
+				return true, false
+			}
+			if excluded {
+				continue
+			}
 			if processPathInsideRoot(cwd, root.path) {
 				references = true
 				break
@@ -1435,7 +1446,11 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 		}
 	}
 	for _, root := range roots {
-		if !root.includeOpenFiles {
+		excluded, err := ownedProcessRootExcludesPID(pid, root)
+		if err != nil {
+			return true, false
+		}
+		if excluded || !root.includeOpenFiles {
 			continue
 		}
 		entries, err := os.ReadDir(filepath.Join(procRoot, "fd"))
@@ -1451,7 +1466,11 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 		}
 	}
 	for _, root := range roots {
-		if !root.includeMappedFiles {
+		excluded, err := ownedProcessRootExcludesPID(pid, root)
+		if err != nil {
+			return true, false
+		}
+		if excluded || !root.includeMappedFiles {
 			continue
 		}
 		maps, err := os.ReadFile(filepath.Join(procRoot, "maps"))
@@ -1467,6 +1486,13 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 		}
 	}
 	return references, fileReference
+}
+
+func ownedProcessRootExcludesPID(pid int, root ownedProcessRoot) (bool, error) {
+	if len(root.excluded) == 0 {
+		return false, nil
+	}
+	return taskProcessHasExcludedAncestor(pid, root.excluded)
 }
 
 func procMapPath(line string) string {

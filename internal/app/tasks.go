@@ -528,8 +528,21 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
+	task, err = ensureTaskContainmentIdentity(ctx.Context, db, task)
+	if err != nil {
+		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+		return err
+	}
 	if err := s.runIntentStep(ctx.Context, db, intent, "scratch.environment", func() error {
-		return exportTaskScratch(ctx.Context, s, opened.PaneID, scratchPath)
+		return exportTaskScratch(ctx.Context, s, opened.PaneID, scratchPath, task.ContainmentMarker)
+	}); err != nil {
+		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+		return err
+	}
+	if err := s.runIntentStep(ctx.Context, db, intent, "containment.setup", func() error {
+		var setupErr error
+		task, setupErr = s.setupTaskContainment(ctx.Context, db, project, task, opened.PaneID, scratchPath)
+		return setupErr
 	}); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
@@ -2429,6 +2442,10 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	if err != nil {
 		return failure(err)
 	}
+	task, err = ensureTaskContainmentIdentity(ctx, db, task)
+	if err != nil {
+		return failure(err)
+	}
 	if !found {
 		var opened openedTab
 		if err := track("pane.open", func() error {
@@ -2477,7 +2494,14 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	s.relabelProjectTabs(ctx, db, project)
 	if err := track("scratch.environment", func() error {
-		return exportTaskScratch(ctx, s, pane.PaneID, scratchPath)
+		return exportTaskScratch(ctx, s, pane.PaneID, scratchPath, task.ContainmentMarker)
+	}); err != nil {
+		return failure(err)
+	}
+	if err := track("containment.setup", func() error {
+		var setupErr error
+		task, setupErr = s.setupTaskContainment(ctx, db, project, task, pane.PaneID, scratchPath)
+		return setupErr
 	}); err != nil {
 		return failure(err)
 	}
