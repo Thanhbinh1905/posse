@@ -121,45 +121,61 @@ type Paths struct {
 	Output  string `json:"output"`
 }
 
+type ValidationLoops struct {
+	Review            config.ReviewLoop `json:"review_loop"`
+	Gate              config.GateLoop   `json:"gate_loop"`
+	CI                config.CILoop     `json:"ci_loop"`
+	BriefReviewRounds int               `json:"brief_review_rounds,omitempty"`
+}
+
+func (loops ValidationLoops) MaxReviewRounds() int {
+	if loops.BriefReviewRounds > 0 {
+		return loops.BriefReviewRounds
+	}
+	return loops.Review.MaxRounds
+}
+
 type Plan struct {
-	Version        int           `json:"version"`
-	Revision       int           `json:"revision"`
-	PreviousSHA256 string        `json:"previous_sha256,omitempty"`
-	Type           string        `json:"type"`
-	Outcome        string        `json:"outcome"`
-	Executor       string        `json:"executor"`
-	Execution      Execution     `json:"execution"`
-	Review         string        `json:"review"`
-	ReviewOf       int64         `json:"review_of,omitempty"`
-	Delivery       string        `json:"delivery"`
-	Grants         []Grant       `json:"grants"`
-	Preferences    []Preference  `json:"preferences,omitempty"`
-	UserChoice     *UserChoice   `json:"user_choice,omitempty"`
-	Inputs         []Input       `json:"inputs"`
-	Paths          Paths         `json:"paths"`
-	Launch         Launch        `json:"launch"`
-	Gate           []string      `json:"gate"`
-	MergeMethod    string        `json:"merge_method"`
-	ProseLanguage  string        `json:"prose_language,omitempty"`
-	Remuda         config.Remuda `json:"remuda"`
+	Version         int              `json:"version"`
+	Revision        int              `json:"revision"`
+	PreviousSHA256  string           `json:"previous_sha256,omitempty"`
+	Type            string           `json:"type"`
+	Outcome         string           `json:"outcome"`
+	Executor        string           `json:"executor"`
+	Execution       Execution        `json:"execution"`
+	Review          string           `json:"review"`
+	ReviewOf        int64            `json:"review_of,omitempty"`
+	Delivery        string           `json:"delivery"`
+	Grants          []Grant          `json:"grants"`
+	Preferences     []Preference     `json:"preferences,omitempty"`
+	UserChoice      *UserChoice      `json:"user_choice,omitempty"`
+	Inputs          []Input          `json:"inputs"`
+	Paths           Paths            `json:"paths"`
+	Launch          Launch           `json:"launch"`
+	Gate            []string         `json:"gate"`
+	ValidationLoops *ValidationLoops `json:"validation_loops,omitempty"`
+	MergeMethod     string           `json:"merge_method"`
+	ProseLanguage   string           `json:"prose_language,omitempty"`
+	Remuda          config.Remuda    `json:"remuda"`
 }
 
 type Request struct {
-	Brief         Input
-	Inputs        []Input
-	Execution     Execution
-	Launch        Launch
-	Review        string
-	ReviewOf      int64
-	Delivery      string
-	Autonomy      config.Autonomy
-	ConfigSources []string
-	UserChoice    *UserChoice
-	Paths         Paths
-	Gate          []string
-	MergeMethod   string
-	ProseLanguage string
-	Remuda        config.Remuda
+	Brief           Input
+	Inputs          []Input
+	Execution       Execution
+	Launch          Launch
+	Review          string
+	ReviewOf        int64
+	Delivery        string
+	Autonomy        config.Autonomy
+	ConfigSources   []string
+	UserChoice      *UserChoice
+	Paths           Paths
+	Gate            []string
+	ValidationLoops *ValidationLoops
+	MergeMethod     string
+	ProseLanguage   string
+	Remuda          config.Remuda
 }
 
 // Resolve interprets the admitted Brief contract after callers resolve repository facts.
@@ -167,6 +183,18 @@ func Resolve(r Request) (Plan, error) {
 	brief, err := dispatch.ParseBriefText(string(r.Brief.Bytes))
 	if err != nil {
 		return Plan{}, err
+	}
+	var validationLoops *ValidationLoops
+	if brief.Type == "ship" && r.ValidationLoops != nil {
+		frozen := *r.ValidationLoops
+		frozen.Review.Guidance = append([]string(nil), frozen.Review.Guidance...)
+		if brief.ReviewRounds > frozen.Review.MaxRounds {
+			return Plan{}, &dispatch.BriefError{Field: "review_rounds", Reason: "cannot exceed the configured review_loop.max_rounds"}
+		}
+		frozen.BriefReviewRounds = brief.ReviewRounds
+		validationLoops = &frozen
+	} else if brief.ReviewRounds > 0 {
+		return Plan{}, &dispatch.BriefError{Field: "review_rounds", Reason: "cannot be frozen without review loop configuration"}
 	}
 	userChoice := r.UserChoice != nil
 	delivery, autonomy, err := dispatch.ResolveDelivery(brief, r.Delivery, r.Autonomy, userChoice)
@@ -205,7 +233,7 @@ func Resolve(r Request) (Plan, error) {
 		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.land", Value: autonomy.Land, Source: landSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
-		Gate: r.Gate, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Remuda: r.Remuda}
+		Gate: r.Gate, ValidationLoops: validationLoops, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Remuda: r.Remuda}
 	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
 	for i, explicit := range []bool{brief.LandingMode != "", brief.Review != ""} {
 		if explicit {
@@ -244,15 +272,16 @@ func Resolve(r Request) (Plan, error) {
 	// Snapshot interpreted configuration fields consumed by the contract, not
 	// entire TOML files, other Profiles or unrelated forge content.
 	settings, err := json.Marshal(struct {
-		Execution     Execution     `json:"execution"`
-		Review        string        `json:"review"`
-		Delivery      string        `json:"delivery"`
-		Grants        []Grant       `json:"grants"`
-		Gate          []string      `json:"gate"`
-		MergeMethod   string        `json:"merge_method"`
-		ProseLanguage string        `json:"prose_language"`
-		Remuda        config.Remuda `json:"remuda"`
-	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.MergeMethod, p.ProseLanguage, p.Remuda})
+		Execution       Execution        `json:"execution"`
+		Review          string           `json:"review"`
+		Delivery        string           `json:"delivery"`
+		Grants          []Grant          `json:"grants"`
+		Gate            []string         `json:"gate"`
+		ValidationLoops *ValidationLoops `json:"validation_loops,omitempty"`
+		MergeMethod     string           `json:"merge_method"`
+		ProseLanguage   string           `json:"prose_language"`
+		Remuda          config.Remuda    `json:"remuda"`
+	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.ValidationLoops, p.MergeMethod, p.ProseLanguage, p.Remuda})
 	if err != nil {
 		return Plan{}, err
 	}
@@ -409,6 +438,37 @@ func (p Plan) Validate() error {
 	}
 	if brief.Type != p.Type {
 		return invalid("selected Brief has another Task type")
+	}
+	if p.ValidationLoops == nil {
+		if brief.ReviewRounds > 0 {
+			return invalid("Brief review_rounds is not frozen in the plan")
+		}
+	} else {
+		if p.Type != "ship" {
+			return invalid("validation loops are only valid for Ship Tasks")
+		}
+		settings := []struct {
+			key   string
+			value any
+		}{
+			{"review_loop.enabled", p.ValidationLoops.Review.Enabled},
+			{"review_loop.max_rounds", p.ValidationLoops.Review.MaxRounds},
+			{"review_loop.block_at", p.ValidationLoops.Review.BlockAt},
+			{"review_loop.auto_start", p.ValidationLoops.Review.AutoStart},
+			{"review_loop.docs", p.ValidationLoops.Review.Docs},
+			{"review_loop.guidance", p.ValidationLoops.Review.Guidance},
+			{"gate_loop.max_fix_rounds", p.ValidationLoops.Gate.MaxFixRounds},
+			{"ci_loop.max_fix_rounds", p.ValidationLoops.CI.MaxFixRounds},
+			{"ci_loop.rerun_cancelled", p.ValidationLoops.CI.RerunCancelled},
+		}
+		for _, setting := range settings {
+			if err := config.ValidateSetting(setting.key, setting.value, false); err != nil {
+				return invalid(err.Error())
+			}
+		}
+		if brief.ReviewRounds != p.ValidationLoops.BriefReviewRounds || p.ValidationLoops.BriefReviewRounds > p.ValidationLoops.Review.MaxRounds {
+			return invalid("frozen review_rounds does not match or exceeds the selected config")
+		}
 	}
 	if brief.Execution != "" && brief.Execution != p.Execution.Mode || strings.Join(brief.Paths, "\x00") != strings.Join(p.Execution.Paths, "\x00") {
 		return invalid("selected Brief execution scope does not match the admitted plan")

@@ -22,7 +22,7 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	if len(parsed.Positionals) != 1 {
 		return axi.Usage("land requires one Task id")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -75,8 +75,10 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 		// Pull request evidence binds to the gated forge head, not the Mount tip.
 		return s.landPullRequest(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
 	}
-	if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
-		return err
+	if task.State != store.StateDone || !autoStartReviewLoop(plan) {
+		if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
+			return err
+		}
 	}
 	if project.IsWorkspace() {
 		return s.landWorkspace(ctx, db, project, cfg, task, parsed.Bool("merge"), strings.TrimSpace(parsed.Flags["user-approved"]))
@@ -149,16 +151,21 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 		if err := runLandStep("gate.record", func() error { return db.SetTaskGatedSHA(ctx.Context, task.ID, gatedSHA) }); err != nil {
 			return err
 		}
-		if err := runLandStep("gate.run", func() error { return runGates(ctx.Context, cfg, task) }); err != nil {
-			_, noticeErr := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "gate_failed", Summary: task.Title + ": " + truncate(err.Error(), 240), DataJSON: `{}`})
-			if noticeErr != nil {
-				return noticeErr
+		task.GatedSHA = gatedSHA
+		if gateErr := runLandStep("gate.run", func() error { return runGates(ctx.Context, cfg, task) }); gateErr != nil {
+			if err := recordGateFailure(ctx.Context, db, project, task, gatedSHA, "", gateErr); err != nil {
+				return err
 			}
 			if finishErr := finishLandIntent(); finishErr != nil {
 				return finishErr
 			}
 			_ = s.deliverNotices(ctx.Context, db, project)
-			return axi.Failure("gate_failed", err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
+			return axi.Failure("gate_failed", gateErr.Error(), false, gateFailureHelp(task))
+		}
+		if started, err := s.maybeAutoStartReviewRound(ctx, db, home, project, task); err != nil {
+			return err
+		} else if started {
+			return nil
 		}
 		if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {
 			return err
@@ -349,7 +356,7 @@ func runGates(ctx context.Context, cfg config.Config, task store.Task) error {
 	for _, gate := range cfg.Defaults.Gate {
 		output, err := commandOutput(ctx, task.WorktreePath, gate)
 		if err != nil {
-			return fmt.Errorf("gate %q failed: %s", gate, truncate(strings.TrimSpace(output), 1200))
+			return newGateCommandFailure(gate, output, err)
 		}
 	}
 	return nil
@@ -619,7 +626,10 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				return result, shaErr
 			}
 		}
-		if err := s.runIntentStep(ctx, db, intent, "approval.record", func() error { return db.RecordApprovalWithBranch(ctx, task.ID, "discard", quote, branchSHA) }); err != nil {
+		if err := s.runIntentStep(ctx, db, intent, "approval.record", func() error {
+			_, err := db.RecordDiscardApprovalForIntent(ctx, intent.ID, intent.ProcessID, task.ID, quote, branchSHA)
+			return err
+		}); err != nil {
 			return result, err
 		}
 	}
@@ -902,13 +912,6 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
 					merged := false
-					targetRef, targetErr := landedTaskTargetRef(ctx, project, task)
-					if targetErr != nil {
-						return targetErr
-					}
-					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, targetRef); mergeErr == nil {
-						merged = true
-					}
 					if task.State == store.StateLanded && (task.LandingMode == "pr" || task.LandingMode == "no-mistakes") {
 						observation, observationErr := db.LatestPRObservation(ctx, task.ID)
 						if observationErr != nil && !store.IsNotFound(observationErr) {
@@ -918,7 +921,16 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 							if sha != observation.HeadSHA {
 								return nil // Preserve work added after the merged PR head.
 							}
-							merged = true // Squash and rebase merges need not contain the branch ref.
+							merged = true // The recorded merge is enough even if its target ref disappeared.
+						}
+					}
+					if !merged {
+						targetRef, targetErr := landedTaskTargetRef(ctx, project, task)
+						if targetErr != nil {
+							return targetErr
+						}
+						if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, targetRef); mergeErr == nil {
+							merged = true
 						}
 					}
 					if merged {

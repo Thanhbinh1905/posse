@@ -273,6 +273,40 @@ func TestLoadRejectsUnknownAndInvalidKeys(t *testing.T) {
 	}
 }
 
+func TestValidationLoopDefaultsAndProjectOverrides(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, filepath.Join(home, "config.toml"), `[review_loop]
+max_rounds = 2
+guidance = ["docs/review.md"]
+
+[gate_loop]
+max_fix_rounds = 0
+
+[ci_loop]
+max_fix_rounds = 1
+rerun_cancelled = 0
+`)
+	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), `[review_loop]
+max_rounds = 1
+auto_start = false
+`)
+	cfg, err := Load(home, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReviewLoop.MaxRounds != 1 || cfg.ReviewLoop.AutoStart || cfg.ReviewLoop.BlockAt != "P1" || !cfg.ReviewLoop.Enabled || !reflect.DeepEqual(cfg.ReviewLoop.Guidance, []string{"docs/review.md"}) {
+		t.Fatalf("effective review loop = %#v", cfg.ReviewLoop)
+	}
+	if cfg.GateLoop.MaxFixRounds != 0 || cfg.CILoop.MaxFixRounds != 1 || cfg.CILoop.RerunCancelled != 0 {
+		t.Fatalf("effective fix loops = gate %#v, ci %#v", cfg.GateLoop, cfg.CILoop)
+	}
+
+	writeConfig(t, filepath.Join(home, "config.toml"), "[review_loop]\nmax_rounds = 4\n")
+	if _, err := Load(home, ""); err == nil || !strings.Contains(err.Error(), "review_loop.max_rounds") {
+		t.Fatalf("max_rounds=4 config error = %v", err)
+	}
+}
+
 func TestDispatchInheritanceAndDisabledKindDefaults(t *testing.T) {
 	home := t.TempDir()
 	cfg, err := Load(home, "")

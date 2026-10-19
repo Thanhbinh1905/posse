@@ -136,7 +136,12 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "setting", Value: key}, {Key: "value", Value: value}, {Key: "help", Value: []any{"Run `posse config show --effective` to inspect merged settings"}}})
+	result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "setting", Value: key}, {Key: "value", Value: value}}
+	if parsed.Positionals[1] == "no-mistakes" && isNoMistakesPolicySetting(key) {
+		result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning(key)}})
+	}
+	result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse config show --effective` to inspect merged settings"}})
+	return ctx.Print(result)
 }
 
 func (s *Service) configUnset(ctx *axi.Context, args []string) error {

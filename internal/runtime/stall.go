@@ -69,7 +69,16 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 			failures = append(failures, fmt.Errorf("read Rider pane %s: %w", taskID(task.Seq), err))
 			continue
 		}
-		worktree, err := progress.WorktreeFingerprint(ctx, task.WorktreePath, project.IsDirectory())
+		directoryWorktree := project.IsDirectory()
+		if project.IsWorkspace() {
+			members, err := db.TaskRepos(ctx, task.ID)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("read Rider member repositories %s: %w", taskID(task.Seq), err))
+				continue
+			}
+			directoryWorktree = len(members) == 0
+		}
+		worktree, err := progress.WorktreeFingerprint(ctx, task.WorktreePath, directoryWorktree)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("read Rider worktree %s: %w", taskID(task.Seq), err))
 			continue
@@ -155,9 +164,10 @@ func (SystemProgress) ReadPane(ctx context.Context, adapter herdr.Adapter, paneI
 	return "", fmt.Errorf("pane.read result did not include text")
 }
 
-// WorktreeFingerprint uses Git state for Mounts and file contents for explicit
-// directory Projects, which may have no Git metadata or no commits yet.
-func (SystemProgress) WorktreeFingerprint(ctx context.Context, path string, directoryProject bool) (string, error) {
+// WorktreeFingerprint uses Git state for repository Mounts and workspace Mounts
+// with Members. Directory Projects and memberless workspace Mounts use file
+// contents because they have no Git worktree.
+func (SystemProgress) WorktreeFingerprint(ctx context.Context, path string, directoryWorktree bool) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("worktree path is empty")
 	}
@@ -168,7 +178,7 @@ func (SystemProgress) WorktreeFingerprint(ctx context.Context, path string, dire
 	if !info.IsDir() {
 		return "", fmt.Errorf("worktree path is not a directory")
 	}
-	if directoryProject {
+	if directoryWorktree {
 		return directoryFingerprint(ctx, path)
 	}
 	if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {

@@ -33,6 +33,15 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	}
 	first := f.ride(t, "t1", "Native first", "native-first")
 	second := f.ride(t, "t2", "Native second", "native-second")
+	staleProjectDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleProject, err := staleProjectDB.ProjectByID(context.Background(), f.projectID)
+	_ = staleProjectDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	snap := f.snapshot(t)
 	if snap.FocusedPaneID != f.leadPaneID {
 		t.Fatalf("ride stole focus: %s", snap.FocusedPaneID)
@@ -217,24 +226,58 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": second.HerdrWorkspaceID}); err != nil {
 		t.Fatalf("close the exited Rider child workspace: %v", err)
 	}
-	project := f.project(t)
 	var lead herdr.Pane
-	for _, pane := range snap.Panes {
-		if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == "posse:shop:lead" && pane.Agent != "" {
-			lead = pane
-			break
+	if !waitForCondition(5*time.Second, func() bool {
+		project := f.project(t)
+		for _, pane := range f.snapshot(t).Panes {
+			if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == "posse:shop:lead" && pane.Agent != "" {
+				lead = pane
+				return true
+			}
 		}
-	}
-	if lead.PaneID == "" {
-		t.Fatalf("could not match the persisted Lead to its Herdr pane: project=%#v", project)
+		return false
+	}) {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			t.Fatalf("recovered Lead identity did not settle before child Teardown: open store: %v", err)
+		}
+		project, projectErr := db.ProjectByID(context.Background(), f.projectID)
+		recovery, recoveryErr := db.ProjectRecovery(context.Background(), f.projectID)
+		firstRecovery, firstRecoveryErr := db.TaskRecovery(context.Background(), first.ID)
+		secondRecovery, secondRecoveryErr := db.TaskRecovery(context.Background(), second.ID)
+		_ = db.Close()
+		logs, logErr := f.client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.group-e2e"})
+		t.Logf("Project=%#v recovery=%#v first=%#v second=%#v errors=%v/%v/%v/%v hook logs=%s log error=%v", project, recovery, firstRecovery, secondRecovery, projectErr, recoveryErr, firstRecoveryErr, secondRecoveryErr, logs, logErr)
+		t.Fatalf("recovered Lead identity did not settle before child Teardown: Project=%#v err=%v", project, projectErr)
 	}
 	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", lead.WorkspaceID)
 	leadEnv = setEnv(leadEnv, "HERDR_TAB_ID", lead.TabID)
+	if role := runPosse(t, f.binary, f.repo, leadEnv, "_context"); !strings.Contains(role, "role: lead\nproject: shop") {
+		t.Fatalf("recovered Lead caller did not resolve as Lead before child Teardown: %s", role)
+	}
 	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": f.userBefore.RootPane.PaneID}); err != nil {
 		t.Fatal(err)
 	}
 	focusedBeforeClose := f.snapshot(t).FocusedPaneID
+	// A delayed reconciliation can still carry the pre-recovery Lead identity.
+	// Reproduce that stale observation after the recovered Lead has settled.
+	staleObservationDB, err := store.OpenAt(filepath.Join(f.home, "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := staleObservationDB.UpdateProjectObservation(context.Background(), staleProject, staleProject.LeadPaneID, staleProject.HerdrWorkspaceID, time.Now().UnixMilli()); err != nil {
+		_ = staleObservationDB.Close()
+		t.Fatal(err)
+	}
+	currentProject, err := staleObservationDB.ProjectByID(context.Background(), f.projectID)
+	_ = staleObservationDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentProject.LeadPaneID != lead.PaneID || currentProject.HerdrWorkspaceID != lead.WorkspaceID {
+		t.Fatalf("stale observation reverted the recovered Lead identity: got %#v, want pane=%s workspace=%s", currentProject, lead.PaneID, lead.WorkspaceID)
+	}
 	runPosse(t, f.binary, f.repo, leadEnv, "unsaddle", "t2", "--discard", "--user-approved", "User approved the child teardown test")
 	snap = f.snapshot(t)
 	if snap.FocusedPaneID != focusedBeforeClose {

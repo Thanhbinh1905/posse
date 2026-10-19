@@ -113,12 +113,24 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		Review: review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
 		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
-		Gate:  cfg.Defaults.Gate, MergeMethod: cfg.Defaults.MergeMethod, Remuda: config.Remuda{Clean: cfg.Remuda.Clean, Setup: cfg.Remuda.Setup}})
+		Gate:  cfg.Defaults.Gate, ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, Gate: cfg.GateLoop, CI: cfg.CILoop},
+		MergeMethod: cfg.Defaults.MergeMethod, Remuda: config.Remuda{Clean: cfg.Remuda.Clean, Setup: cfg.Remuda.Setup}})
 }
 
 // Restore files absent after a crash from the admitted inputs, never from
 // mutable Brief, preferences or Profile sources. Existing launch text is kept.
 func restoreAdmittedLaunchFiles(project store.Project, task store.Task, plan *taskplan.Plan) error {
+	roundFiles := make(map[string][]byte)
+	for _, input := range plan.Inputs {
+		if input.Role == "review-round-file" {
+			roundFiles[input.Source] = input.Bytes
+		}
+	}
+	if len(roundFiles) > 0 {
+		if err := writeReviewRoundFiles(plan.Paths.Output, roundFiles); err != nil {
+			return err
+		}
+	}
 	briefPath := filepath.Join(plan.Paths.Output, "brief.md")
 	if _, err := os.Stat(briefPath); os.IsNotExist(err) {
 		if err := writeFile(briefPath, plan.Inputs[0].Bytes); err != nil {
@@ -190,6 +202,9 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 }
 
 func admittedPlanFailure(err error) error {
+	if _, ok := err.(*dispatch.BriefError); ok {
+		return axi.Failure("brief_invalid", err.Error(), false)
+	}
 	return axi.Failure("plan_invalid", fmt.Sprintf("Task execution plan refused: %v", err), false)
 }
 

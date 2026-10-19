@@ -140,6 +140,16 @@ func TestLookoutLogsAndRetriesMaintenanceContention(t *testing.T) {
 	}
 }
 
+func TestShowDefersTaskStateRaceDuringObservation(t *testing.T) {
+	fixture := newPRLandingFixture(t, "local", store.StateWorking)
+	fixture.service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = store.ErrStateRace
+
+	code, output, errOut := fixture.run("show", "t1")
+	if code != 0 || !strings.Contains(output, "t1") || !strings.Contains(errOut, "Project observations were deferred") {
+		t.Fatalf("show did not return its durable Task view after a concurrent state change: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+}
+
 func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 	fixture := newPRLandingFixture(t, "local", store.StateWorking)
 	writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
@@ -152,6 +162,9 @@ func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(context.Background(), `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, fixture.project.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	code, output, errOut := fixture.run("roster", "--json")
 	if code != 0 || strings.Contains(output, "store_busy") || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "Some Task observations were deferred") {
@@ -161,6 +174,52 @@ func TestRosterShowsDurableViewDuringObservationContention(t *testing.T) {
 	code, output, errOut = fixture.run("--json")
 	if code != 0 || strings.Contains(output, "store_busy") || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "Project observations were deferred") {
 		t.Fatalf("dashboard did not show its durable Project view with a deferral note: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+}
+
+func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
+	commands := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "lead", args: []string{"lead"}, want: "instructions"},
+		{name: "show", args: []string{"show", "t1"}, want: "t1"},
+		{name: "project show", args: []string{"project", "show"}, want: "shop"},
+		{name: "remuda", args: []string{"remuda"}, want: "mounts"},
+		{name: "peek", args: []string{"peek", "t1"}, want: "output"},
+	}
+	for _, command := range commands {
+		t.Run(command.name, func(t *testing.T) {
+			fixture := newPRLandingFixture(t, "local", store.StateWorking)
+			project, err := fixture.db.ProjectByID(context.Background(), fixture.project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if command.name == "peek" {
+				fixture.service.Herdr.(*herdr.Fake).Results["pane.read"] = []byte(`{"text":"worker output"}`)
+			}
+			t.Setenv("HERDR_PANE_ID", project.LeadPaneID)
+			t.Setenv("HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+			writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			tx, err := writer.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.ExecContext(context.Background(), `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, fixture.project.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			code, output, errOut := fixture.run(command.args...)
+			if code != 0 || !strings.Contains(output, command.want) || !strings.Contains(errOut, "Project observations were deferred") || strings.Contains(output+errOut, "store_busy") {
+				t.Fatalf("%s did not return its durable view during observation contention: exit=%d output=%s stderr=%s", command.name, code, output, errOut)
+			}
+		})
 	}
 }
 
@@ -175,18 +234,29 @@ func TestHollerDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	}
 
 	const taskCount = 256
+	tx, err := fixture.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
 	for seq := 2; seq <= taskCount; seq++ {
-		id, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
-			Seq: seq, Type: "scout", Title: fmt.Sprintf("Review %d", seq), LandingMode: "local",
-			WorktreePath: filepath.Join(fixture.root, fmt.Sprintf("task-%d", seq)), PaneID: "w3:p1",
-			PaneLabel: fmt.Sprintf("posse:shop:t%d", seq), HerdrWorkspaceID: "w3",
-		})
+		result, err := tx.ExecContext(ctx, `INSERT INTO tasks(project_id,seq,type,title,state,landing_mode,worktree_path,pane_id,pane_label,herdr_workspace_id,created_at,updated_at) VALUES(?,?,?,?,'working',?,?,?,?,?,1,1)`,
+			fixture.project.ID, seq, "scout", fmt.Sprintf("Review %d", seq), "local",
+			filepath.Join(fixture.root, fmt.Sprintf("task-%d", seq)), "w3:p1",
+			fmt.Sprintf("posse:shop:t%d", seq), "w3")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := fixture.db.Transition(ctx, id, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		taskID, err := result.LastInsertId()
+		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,'spawning','working','cli','started',1)`, taskID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET updated_at=1 WHERE project_id=?`, fixture.project.ID); err != nil {
 		t.Fatal(err)

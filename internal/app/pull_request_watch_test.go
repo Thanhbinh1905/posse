@@ -159,6 +159,10 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 			if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil || queued != 1 {
 				t.Fatalf("repeated watcher polls duplicated the freshness instruction: queued=%d err=%v", queued, err)
 			}
+			var expectedHead, kind string
+			if err := fixture.db.QueryRowContext(context.Background(), `SELECT expected_base_head,kind FROM validation_fix_rounds WHERE ship_task_id=?`, fixture.task.ID).Scan(&expectedHead, &kind); err != nil || expectedHead != fixture.headSHA || kind != "freshness" {
+				t.Fatalf("freshness instruction binding = %q kind=%q err=%v, want %q/freshness", expectedHead, kind, err, fixture.headSHA)
+			}
 			for _, required := range []string{targetTip, "origin/main", "Merge origin/main", "rerun the configured Gate", "never rebase a pushed branch", "posse publish"} {
 				if !strings.Contains(body, required) {
 					t.Errorf("freshness instruction omitted %q: %s", required, body)
@@ -204,6 +208,11 @@ func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T)
 	if code, output, stderr := fixture.run("holler", "done", "Worker completion summary", "--pr", url); code != 0 {
 		t.Fatalf("done: %d %s %s", code, output, stderr)
 	}
+	poll() // The Task became done after its green PR observation was recorded.
+	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
+		t.Fatalf("green PR did not produce land_ready when the Task became done: notices=%#v err=%v", notices, err)
+	}
 	if code, output, stderr := fixture.run("land", "t1"); code != 0 {
 		t.Fatalf("land: %d %s %s", code, output, stderr)
 	}
@@ -211,10 +220,10 @@ func TestPRWatchRaisesLandReadyWhenTaskEntersLandingAfterPRIsGreen(t *testing.T)
 	if err != nil || task.State != store.StateLanding {
 		t.Fatalf("land did not move the Task to landing: task=%#v err=%v", task, err)
 	}
-	poll() // The forge observation is unchanged, but the Task is now landing.
+	poll() // The unchanged green observation must not duplicate land_ready.
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
 	if err != nil || countNoticeKind(notices, "land_ready") != 1 {
-		t.Fatalf("green PR did not produce one land_ready Notice after the Task entered landing: notices=%#v err=%v", notices, err)
+		t.Fatalf("repeated ready observation duplicated land_ready after Landing: notices=%#v err=%v", notices, err)
 	}
 	poll()
 	notices, err = fixture.db.Notices(ctx, fixture.project.ID, false)
@@ -325,6 +334,179 @@ func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
 	var rows int
 	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pr_observations WHERE task_id=?`, task.ID).Scan(&rows); err != nil || rows != 4 {
 		t.Fatalf("observation history has %d rows, want four distinct changes: %v", rows, err)
+	}
+}
+
+func TestPRWatchRerunsCancelledCheckOnceThenQueuesOneCIFixRound(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoop(t, fixture, 3, 1)
+	t.Setenv("POSSE_TEST_GH_CANCELLED", "1")
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll := func() {
+		t.Helper()
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	poll()
+	var reruns, fixes int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_rerun_requested'`, fixture.task.ID).Scan(&reruns); err != nil || reruns != 1 {
+		t.Fatalf("cancelled check rerun notices=%d err=%v", reruns, err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.task.ID).Scan(&fixes); err != nil || fixes != 0 {
+		t.Fatalf("fix rounds after first cancellation=%d err=%v", fixes, err)
+	}
+
+	poll()
+	poll()
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.task.ID).Scan(&fixes); err != nil || fixes != 1 {
+		t.Fatalf("repeated cancelled observation fix rounds=%d err=%v, want one", fixes, err)
+	}
+	var queued, rerunNotices, queuedNotices int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("queued CI instructions=%d err=%v, want one", queued, err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_rerun_requested'`, fixture.task.ID).Scan(&rerunNotices); err != nil || rerunNotices != 1 {
+		t.Fatalf("rerun notices=%d err=%v, want one", rerunNotices, err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, fixture.task.ID).Scan(&queuedNotices); err != nil || queuedNotices != 1 {
+		t.Fatalf("CI fix notices=%d err=%v, want one", queuedNotices, err)
+	}
+	var body string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"unit", "https://github.com/acme/shop/actions/runs/123/job/456", "unit failed log", "User intent (verbatim)"} {
+		if !strings.Contains(body, required) {
+			t.Errorf("CI fix instruction omitted %q: %s", required, body)
+		}
+	}
+	ghLog, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(ghLog), "run rerun --failed 123 --repo acme/shop") != 1 || !strings.Contains(string(ghLog), "run view --job 456 --log-failed --repo acme/shop") {
+		t.Fatalf("fake forge rerun/log commands = %q", ghLog)
+	}
+}
+
+func TestGitLabPRWatchRetriesCancelledJobAndQueuesOneCIFixRound(t *testing.T) {
+	fixture := gitlabFixture(t, store.StateDone)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://git.example.com/group/sub/shop/-/merge_requests/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoop(t, fixture, 3, 1)
+	fixture.setGitLabState(t, "opened", "mergeable", "canceled", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll := func() {
+		t.Helper()
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poll()
+	poll()
+	poll()
+	var reruns, fixes, queued int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_rerun_requested'`, fixture.task.ID).Scan(&reruns); err != nil || reruns != 1 {
+		t.Fatalf("GitLab cancelled job rerun notices=%d err=%v", reruns, err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.task.ID).Scan(&fixes); err != nil || fixes != 1 {
+		t.Fatalf("GitLab CI fix rounds=%d err=%v", fixes, err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("GitLab queued CI instructions=%d err=%v", queued, err)
+	}
+	var body string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, "unit failed log") || !strings.Contains(body, "https://git.example.com/group/sub/shop/-/jobs/77") {
+		t.Fatalf("GitLab CI fix instruction omitted job evidence: %s", body)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(log), "ci retry 77 --repo https://git.example.com/group/sub/shop") != 1 {
+		t.Fatalf("GitLab retry commands = %q", log)
+	}
+}
+
+func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoop(t, fixture, 1, 0)
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll := func() {
+		t.Helper()
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poll()
+	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
+	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	poll()
+	poll()
+	var exhausted, queued int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_exhausted'`, fixture.task.ID).Scan(&exhausted); err != nil || exhausted != 1 {
+		t.Fatalf("CI exhausted notices=%d err=%v, want one", exhausted, err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("CI fix messages=%d err=%v, want one", queued, err)
+	}
+}
+
+func TestPRWatchDoesNotStartCILoopForStaleGatedHead(t *testing.T) {
+	fixture := newPRLandingFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskLanding(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoop(t, fixture, 3, 1)
+	t.Setenv("POSSE_TEST_GH_CANCELLED", "1")
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET gated_sha=? WHERE id=?`, strings.Repeat("f", 40), fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`,
+		`SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_rerun_requested'`,
+		`SELECT COUNT(*) FROM notices WHERE task_id=? AND kind IN ('ci_fix_queued','ci_fix_exhausted')`,
+	} {
+		var count int
+		if err := fixture.db.QueryRowContext(ctx, query, fixture.task.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("stale observation side effect count=%d for %q err=%v", count, query, err)
+		}
 	}
 }
 

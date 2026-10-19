@@ -16,9 +16,6 @@ import (
 const ReconcileBudget = store.ObservationWriteBudget
 const AgentAbsentGrace = 2 * time.Minute
 
-// Ignore brief status flicker and the tail of the turn that signalled done.
-const CompletedRiderBusyGrace = 5 * time.Second
-
 type RunResult struct {
 	Snapshot           herdr.Snapshot
 	Notices            []store.Notice
@@ -193,8 +190,11 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		return fmt.Errorf("update observation: %w", err)
 	}
 	pane, found := findPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-	busy := found && pane.Agent != "" && pane.AgentStatus == "working"
-	resumed, err := db.ObserveCompletedRider(ctx, task, pane.PaneID, snapshot.ServerStartedAt, busy, now, CompletedRiderBusyGrace)
+	status := ""
+	if found && pane.Agent != "" {
+		status = pane.AgentStatus
+	}
+	resumed, err := db.ObserveCompletedRider(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, now)
 	if err != nil {
 		return nil, observationFailure(err)
 	}
@@ -221,12 +221,16 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	}
 	absentSince := task.AgentAbsentSince
 	agentPresent := pane.Agent != ""
-	session := sessionref.Sanitize(pane.Agent, task.AgentSession)
+	session := task.AgentSession
 	sessionKind := task.AgentSessionKind
-	if len(pane.AgentSession) > 0 && string(pane.AgentSession) != "null" {
-		if reported := sessionref.Sanitize(pane.Agent, string(pane.AgentSession)); reported != "" {
-			session = reported
-			sessionKind = sessionref.NormalizeKind(pane.Agent)
+	// A session without an agent name has no safe owner kind to persist.
+	if agentPresent {
+		session = sessionref.Sanitize(pane.Agent, task.AgentSession)
+		if len(pane.AgentSession) > 0 && string(pane.AgentSession) != "null" {
+			if reported := sessionref.Sanitize(pane.Agent, string(pane.AgentSession)); reported != "" {
+				session = reported
+				sessionKind = sessionref.NormalizeKind(pane.Agent)
+			}
 		}
 	}
 	if !agentPresent {
@@ -326,7 +330,7 @@ func reconcileLeadObservation(ctx context.Context, db *store.DB, project store.P
 	} else if absentSince == 0 {
 		absentSince = now.UnixMilli()
 	}
-	return db.UpdateProjectObservation(ctx, project.ID, paneID, workspaceID, absentSince)
+	return db.UpdateProjectObservation(ctx, project, paneID, workspaceID, absentSince)
 }
 
 func hasRecordedSession(session string) bool {

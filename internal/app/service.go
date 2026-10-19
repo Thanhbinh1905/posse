@@ -79,11 +79,33 @@ func normalizeCommandError(err error) error {
 func deferObservationContention(ctx *axi.Context, err error, message string) error {
 	// File-lock waits guard maintenance state, so keep them visible to callers.
 	var lockWait *fileLockWaitError
-	if err == nil || !store.IsOnlyBusy(err) || errors.As(err, &lockWait) {
+	if err == nil || (!store.IsOnlyBusy(err) && !isOnlyStateRace(err)) || errors.As(err, &lockWait) {
 		return err
 	}
 	fmt.Fprintln(ctx.ErrOut, message)
 	return nil
+}
+
+func isOnlyStateRace(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !isOnlyStateRace(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return isOnlyStateRace(wrapped.Unwrap())
+	}
+	return err == store.ErrStateRace
 }
 
 func (s *Service) commands() *axi.Command {
@@ -123,9 +145,12 @@ func (s *Service) commands() *axi.Command {
 		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Rider message before delivery begins.", Handler: s.unsend},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Rider output.", Handler: s.peek},
 		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Rider.", Handler: s.keys},
-		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Send the configured abort keys and verify the Rider stopped its busy turn.", Handler: s.interrupt},
+		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Interrupt a working Rider and verify it stopped; report when no working turn can be interrupted.", Handler: s.interrupt},
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Rider in the same execution root, optionally with another Profile.", Handler: s.relaunch},
 		{Name: "land", Summary: "Land a completed Ship Task; PR merges require the gated head to include the target branch.", Handler: s.land},
+		{Name: "review", Summary: "Inspect and admit built-in Review Rounds.", Subcommands: []*axi.Command{
+			{Name: "start", Usage: "$ review start <ship> [--profile <name>] [--name <short>]", Summary: "Admit the next numbered Review Round with its frozen delta scope.", Handler: s.reviewStart},
+		}},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "unsaddle", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Mount work with User approval and verified Rider shutdown.", Handler: s.teardown},
 		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the poll-only Lookout.", Handler: s.wait},

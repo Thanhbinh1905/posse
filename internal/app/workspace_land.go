@@ -32,9 +32,6 @@ func (s *Service) workspaceMembers(ctx context.Context, db *store.DB, project st
 	if err != nil {
 		return nil, err
 	}
-	if len(repos) == 0 {
-		return nil, axi.Failure("land_refused", "workspace Task has no member repositories", false)
-	}
 	members := make([]memberLanding, 0, len(repos))
 	for _, repo := range repos {
 		target, err := s.projectTarget(ctx, db, project, repo.Repo)
@@ -67,19 +64,26 @@ func (s *Service) landWorkspace(out *axi.Context, db *store.DB, project store.Pr
 	if merge && task.AutonomyLand != "auto" && quote == "" {
 		return axi.Failure("land_approval_required", "merging a workspace Task needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
 	}
-	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, workspaceLandIntent)
-	if err != nil {
-		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
-	}
-	defer func() {
-		if finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID); returnErr == nil && finishErr != nil && !errors.Is(finishErr, store.ErrIntentOwned) {
-			returnErr = finishErr
-		}
-	}()
 	members, err := s.workspaceMembers(ctx, db, project, task)
 	if err != nil {
 		return err
 	}
+	if len(members) == 0 {
+		return axi.Failure("land_refused", "workspace Task has no member repositories", false)
+	}
+	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, workspaceLandIntent)
+	if err != nil {
+		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+	}
+	intentOpen := true
+	defer func() {
+		if !intentOpen {
+			return
+		}
+		if finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID); returnErr == nil && finishErr != nil && !errors.Is(finishErr, store.ErrIntentOwned) {
+			returnErr = finishErr
+		}
+	}()
 	if task.State == store.StateDone {
 		if err := s.openWorkspaceLanding(ctx, db, project, cfg, task, intent, members); err != nil {
 			_ = s.deliverNotices(ctx, db, project)
@@ -89,6 +93,30 @@ func (s *Service) landWorkspace(out *axi.Context, db *store.DB, project store.Pr
 		if members, err = s.workspaceMembers(ctx, db, project, task); err != nil {
 			return err
 		}
+	}
+	if plan, planErr := task.AdmittedPlan(); planErr != nil {
+		return admittedPlanFailure(planErr)
+	} else if autoStartReviewLoop(plan) {
+		home, homeErr := s.homePath()
+		if homeErr != nil {
+			return homeErr
+		}
+		if finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID); finishErr != nil {
+			return finishErr
+		}
+		intentOpen = false
+		started, startErr := s.maybeAutoStartReviewRound(out, db, home, project, task)
+		if startErr != nil {
+			return startErr
+		}
+		if started {
+			return nil
+		}
+		intent, err = s.startTaskIntent(ctx, db, project.ID, task.ID, workspaceLandIntent)
+		if err != nil {
+			return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+		}
+		intentOpen = true
 	}
 	if !merge {
 		for _, member := range members {
@@ -210,12 +238,11 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 				return prefixFailure(repo.Repo, err)
 			}
 		}
-		if err := s.runIntentStep(ctx, db, intent, "gate.run:"+repo.Repo, func() error { return runMemberGates(ctx, memberGates(cfg, repo.Repo), repo.WorktreePath) }); err != nil {
-			_, noticeErr := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "gate_failed", Summary: gated.Title + ": " + truncate(err.Error(), 240), DataJSON: marshalJSON(map[string]any{"repo": repo.Repo})})
-			if noticeErr != nil {
-				return noticeErr
+		if gateErr := s.runIntentStep(ctx, db, intent, "gate.run:"+repo.Repo, func() error { return runMemberGates(ctx, memberGates(cfg, repo.Repo), repo.WorktreePath) }); gateErr != nil {
+			if err := recordGateFailure(ctx, db, project, gated, gatedSHA, repo.Repo, gateErr); err != nil {
+				return err
 			}
-			return axi.Failure("gate_failed", repo.Repo+": "+err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
+			return axi.Failure("gate_failed", repo.Repo+": "+gateErr.Error(), false, gateFailureHelp(gated))
 		}
 		if current, err := gitOutput(ctx, repo.WorktreePath, "rev-parse", "refs/heads/"+task.Branch); err != nil {
 			return memberFailure(repo.Repo, err)
@@ -274,8 +301,14 @@ func (s *Service) openWorkspaceLanding(ctx context.Context, db *store.DB, projec
 	if changed == 0 {
 		return axi.Failure("land_refused", "no member of "+taskIDString(task.Seq)+" has commits to Land", false, "Send the Rider an instruction with `posse send`")
 	}
-	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
-		return err
+	plan, planErr := task.AdmittedPlan()
+	if planErr != nil {
+		return admittedPlanFailure(planErr)
+	}
+	if !autoStartReviewLoop(plan) {
+		if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+			return err
+		}
 	}
 	note := "Every changed member is gated or has an open pull request"
 	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateLanding, "cli", note); err != nil {
@@ -469,7 +502,7 @@ func runMemberGates(ctx context.Context, gates []string, worktree string) error 
 	for _, gate := range gates {
 		output, err := commandOutput(ctx, worktree, gate)
 		if err != nil {
-			return fmt.Errorf("gate %q failed: %s", gate, truncate(strings.TrimSpace(output), 1200))
+			return newGateCommandFailure(gate, output, err)
 		}
 	}
 	return nil
@@ -557,6 +590,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		target      pollTarget
 		observation store.PRObservation
 		checks      []failedCheck
+		forge       repositoryForge
 		err         error
 	}
 	type memberGroup struct {
@@ -678,7 +712,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 						}
 					}
 				}
-				results <- pollResult{target: target, observation: observation, checks: checks, err: err}
+				results <- pollResult{target: target, observation: observation, checks: checks, forge: forge, err: err}
 			}
 		}()
 	}
@@ -742,6 +776,13 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			processingErr = err
 			cancelPoll()
 			continue
+		}
+		if observation.State == "OPEN" {
+			if err := s.processCIObservation(ctx, db, project, member.task, observation, result.checks, result.forge, member.repo.Repo); err != nil {
+				processingErr = err
+				cancelPoll()
+				continue
+			}
 		}
 		if observation.State == "MERGED" {
 			mergedTargets = append(mergedTargets, result.target)

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
@@ -140,6 +142,44 @@ func (f *workspaceLandFixture) state() store.State {
 }
 
 const localWorkspaceConfig = "[defaults]\nlanding_mode = \"local\"\nauto_unsaddle = \"never\"\n"
+
+func TestWorkspacePRPollAndDiscardSkipMemberlessScout(t *testing.T) {
+	f := newWorkspaceLandFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	scoutID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
+		Seq: 2, Type: "scout", Title: "Root-only Scout", State: store.StateSpawning,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, scoutID, store.StateSpawning, store.StateWorking, "cli", "fixture Rider started"); err != nil {
+		t.Fatal(err)
+	}
+	scout, err := f.db.TaskByID(ctx, f.project.ID, scoutID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.service.pollWorkspacePullRequests(ctx, f.db, f.project, f.config(), true); err != nil {
+		t.Fatalf("memberless Scout broke workspace PR polling: %v", err)
+	}
+	requests, err := f.service.discardPullRequests(ctx, f.db, f.project, scout)
+	if err != nil || len(requests) != 0 {
+		t.Fatalf("memberless Scout discard PRs = %#v, %v; want no PRs and no error", requests, err)
+	}
+	if err := f.db.Transition(ctx, scout.ID, store.StateWorking, store.StateDone, "worker", "fixture completed"); err != nil {
+		t.Fatal(err)
+	}
+	scout, err = f.db.TaskByID(ctx, f.project.ID, scoutID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.service.landWorkspace(&axi.Context{Context: ctx}, f.db, f.project, f.config(), scout, false, "")
+	var refusal *axi.Error
+	if !errors.As(err, &refusal) || refusal.Code != "land_refused" {
+		t.Fatalf("Land with no selected Members error = %v, want land_refused", err)
+	}
+}
 
 func TestWorkspacePRLandingQueuesFreshnessBeforeMemberGate(t *testing.T) {
 	f := newWorkspaceLandFixture(t, "[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"never\"\ngate = [\"touch gate-ran\"]\n", []string{"worker"}, []string{"worker"})

@@ -78,7 +78,8 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	if len(signals) > 0 && signals[0].Verb == "done" {
 		after = signals[0].At
 	}
-	_, _, err = db.QueueMessageOnceAfter(ctx, task.ID, instruction, true, after)
+	dedupeKey := fmt.Sprintf("freshness:%s:%s:%s:%d", member, headSHA, freshness.Tip, after)
+	_, err = db.QueueValidationFixInstruction(ctx, task.ID, "freshness", headSHA, dedupeKey, instruction)
 	return err
 }
 

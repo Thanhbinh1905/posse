@@ -81,8 +81,11 @@ type prWatchTarget struct {
 }
 
 type failedCheck struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	Cancelled bool   `json:"cancelled,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	JobID     string `json:"job_id,omitempty"`
 }
 
 type checkSnapshot struct {
@@ -208,13 +211,12 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 				return err
 			}
 			task.GatedSHA = gatedSHA
-			if err := runGates(ctx, cfg, task); err != nil {
-				_, noticeErr := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "gate_failed", Summary: task.Title + ": " + truncate(err.Error(), 240), DataJSON: `{}`})
-				if noticeErr != nil {
-					return noticeErr
+			if gateErr := runGates(ctx, cfg, task); gateErr != nil {
+				if err := recordGateFailure(ctx, db, project, task, gatedSHA, "", gateErr); err != nil {
+					return err
 				}
 				_ = s.deliverNotices(ctx, db, project)
-				return axi.Failure("gate_failed", err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
+				return axi.Failure("gate_failed", gateErr.Error(), false, gateFailureHelp(task))
 			}
 			currentSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 			if err != nil {
@@ -231,6 +233,15 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 					return errors.Join(err, clearErr)
 				}
 				return err
+			}
+			home, err := s.homePath()
+			if err != nil {
+				return err
+			}
+			if started, err := s.maybeAutoStartReviewRound(out, db, home, project, task); err != nil {
+				return err
+			} else if started {
+				return nil
 			}
 			if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
 				return err
@@ -306,7 +317,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	if forge.Kind == "gitlab" {
 		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
 	}
-	args := []string{"pr", "list", "--state", "open", "--base", taskTargetBranch(project, task), "--head", task.Branch, "--json", "url,headRefName,headRefOid", "--limit", "5"}
+	args := []string{"pr", "list", "--state", "open", "--head", task.Branch, "--json", "url,headRefName,headRefOid,baseRefName,headRepository", "--limit", "100"}
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()
 	var urlValue, lastHead string
@@ -328,9 +339,12 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 			}
 			return "", false, axi.Failure("pr_list_failed", "could not find an existing open pull request for the Task branch", true, truncate(err.Error(), 1200))
 		}
-		candidateURL, candidateHead, found, err := openPullRequestForBranch(output, task.Branch)
+		candidateURL, candidateHead, found, mismatch, err := openPullRequestForBranchTarget(output, task.Branch, taskTargetBranch(project, task), forge.Path)
 		if err != nil {
 			return "", false, axi.Failure("pr_list_failed", "gh pr list returned invalid pull request data", true, err.Error())
+		}
+		if mismatch != nil {
+			return "", false, pullRequestTargetMismatch(mismatch.URL, mismatch.BaseRefName, taskTargetBranch(project, task))
 		}
 		if !found {
 			if !foundOpenPR {
@@ -491,25 +505,80 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 	return nil
 }
 
-func openPullRequestForBranch(output, branch string) (string, string, bool, error) {
-	var pullRequests []struct {
-		URL         string `json:"url"`
-		HeadRefName string `json:"headRefName"`
-		HeadRefOID  string `json:"headRefOid"`
-	}
+type openGitHubPullRequest struct {
+	URL            string `json:"url"`
+	HeadRefName    string `json:"headRefName"`
+	HeadRefOID     string `json:"headRefOid"`
+	BaseRefName    string `json:"baseRefName"`
+	HeadRepository struct {
+		NameWithOwner string `json:"nameWithOwner"`
+	} `json:"headRepository"`
+}
+
+func openPullRequestsForBranch(output, branch string) ([]openGitHubPullRequest, error) {
+	var pullRequests []openGitHubPullRequest
 	if err := json.Unmarshal([]byte(output), &pullRequests); err != nil {
-		return "", "", false, err
+		return nil, err
 	}
+	matches := make([]openGitHubPullRequest, 0, len(pullRequests))
 	for _, pull := range pullRequests {
 		if pull.HeadRefName != branch {
 			continue
 		}
 		if _, err := pullRequestReferenceFromURL(pull.URL); err != nil {
-			return "", "", false, err
+			return nil, err
 		}
-		return pull.URL, pull.HeadRefOID, true, nil
+		matches = append(matches, pull)
 	}
-	return "", "", false, nil
+	return matches, nil
+}
+
+func openPullRequestForBranchTarget(output, branch, target, repository string) (string, string, bool, *openGitHubPullRequest, error) {
+	pullRequests, err := openPullRequestsForBranch(output, branch)
+	if err != nil {
+		return "", "", false, nil, err
+	}
+	var targetMatch, targetMismatch *openGitHubPullRequest
+	for i := range pullRequests {
+		pull := &pullRequests[i]
+		if pull.HeadRepository.NameWithOwner != "" && !strings.EqualFold(pull.HeadRepository.NameWithOwner, repository) {
+			continue
+		}
+		if pull.BaseRefName == "" || pull.BaseRefName == target {
+			if targetMatch == nil {
+				targetMatch = pull
+			}
+		} else if targetMismatch == nil {
+			targetMismatch = pull
+		}
+	}
+	if targetMatch != nil {
+		return targetMatch.URL, targetMatch.HeadRefOID, true, nil, nil
+	}
+	if targetMismatch != nil {
+		return "", "", false, targetMismatch, nil
+	}
+	return "", "", false, nil, nil
+}
+
+func openPullRequestForBranch(output, branch string) (string, string, bool, error) {
+	pullRequests, err := openPullRequestsForBranch(output, branch)
+	if err != nil {
+		return "", "", false, err
+	}
+	if len(pullRequests) == 0 {
+		return "", "", false, nil
+	}
+	return pullRequests[0].URL, pullRequests[0].HeadRefOID, true, nil
+}
+
+func pullRequestTargetMismatch(prURL, actual, expected string) error {
+	return axi.Failure(
+		"pr_target_mismatch",
+		fmt.Sprintf("open PR/MR %s for the Task branch targets %q, but the Task's frozen target is %q", prURL, actual, expected),
+		false,
+		"Retarget the existing PR/MR to "+expected+" or close it before retrying `posse publish`",
+	)
 }
 
 func pullRequestHeadMismatch(actual, expected string) error {
@@ -732,11 +801,18 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 	if changes == "" {
 		return "", "", axi.Failure("pr_changes_failed", "Task branch has no commit subjects for the pull request body", false)
 	}
+	changedFiles, err := gitOutput(ctx, task.WorktreePath, "diff", "--name-only", "-z", task.BaseRef+"...HEAD")
+	if err != nil {
+		return "", "", axi.Failure("pr_changes_failed", "could not inspect Task files for the pull request body", false, err.Error())
+	}
+	documentation := documentationChecklistForChangedFiles(strings.Split(changedFiles, "\x00"))
 	verification = verificationChecklist(verification)
+	proof = stripDuplicatePublishHeading(proof, "Proof")
 	proof = strings.TrimSpace(proof)
 	if proof == "" {
 		proof = "_No proof supplied._"
 	}
+	risk = stripDuplicatePublishHeading(risk, "Risk And Rollback")
 	risk = strings.TrimSpace(risk)
 	if risk == "" {
 		risk = "Risk: not stated\nRollback: revert this PR"
@@ -753,7 +829,7 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 		"## Verification\n\n" + verification,
 		"## Proof\n\n" + proof,
 		"## Risk And Rollback\n\n" + risk,
-		"## Documentation\n\n" + documentationChecklist,
+		"## Documentation\n\n" + documentation,
 	}, "\n\n") + "\n"
 	title := task.PRTitle
 	if title == "" {
@@ -787,6 +863,53 @@ func verificationChecklist(value string) string {
 
 const documentationChecklist = `- [ ] Documentation updated for this change
 - [ ] CLAUDE.md/AGENTS.md updated if needed`
+
+func documentationChecklistForChangedFiles(files []string) string {
+	documentationUpdated, agentGuidanceUpdated := false, false
+	for _, file := range files {
+		file = strings.TrimPrefix(strings.ReplaceAll(file, "\\", "/"), "./")
+		if file == "" {
+			continue
+		}
+		lower := strings.ToLower(file)
+		base := lower[strings.LastIndex(lower, "/")+1:]
+		extension := ""
+		if dot := strings.LastIndex(base, "."); dot >= 0 {
+			extension = base[dot:]
+		}
+		if strings.HasPrefix(lower, "docs/") || strings.HasPrefix(base, "readme") || oneOfString(extension, ".md", ".mdx", ".rst", ".adoc") {
+			documentationUpdated = true
+		}
+		if base == "claude.md" || base == "agents.md" {
+			agentGuidanceUpdated = true
+		}
+	}
+	documentationCheck, guidanceCheck := " ", " "
+	if documentationUpdated {
+		documentationCheck = "x"
+	}
+	if agentGuidanceUpdated {
+		guidanceCheck = "x"
+	}
+	return "- [" + documentationCheck + "] Documentation updated for this change\n- [" + guidanceCheck + "] CLAUDE.md/AGENTS.md updated if needed"
+}
+
+func stripDuplicatePublishHeading(value, section string) string {
+	value = strings.TrimSpace(value)
+	line, rest, hasRest := strings.Cut(value, "\n")
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "#") {
+		return value
+	}
+	heading := strings.TrimSpace(strings.TrimRight(strings.TrimLeft(line, "#"), "#"))
+	if !strings.EqualFold(strings.Join(strings.Fields(heading), " "), strings.Join(strings.Fields(section), " ")) {
+		return value
+	}
+	if !hasRest {
+		return ""
+	}
+	return strings.TrimSpace(rest)
+}
 
 func pullRequestURLFromOutput(output string) (string, error) {
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
@@ -916,10 +1039,9 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 			continue
 		}
 		if !freshness.Fresh {
+			// The target may have advanced because this PR just merged. Defer
+			// queuing a sync instruction until GraphQL confirms the PR is open.
 			staleBeforeQuery[task.ID] = true
-			if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.LandingMode, freshness, headSHA); err != nil {
-				return err
-			}
 		}
 	}
 	forge, forgeErr := forgeForRepository(ctx, project.Root, cfg, "")
@@ -1132,6 +1254,11 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		if err != nil {
 			return err
 		}
+		if observed.current.State == "OPEN" {
+			if err := s.processCIObservation(ctx, db, project, observed.task, observed.current, observed.failures, forge, ""); err != nil {
+				return err
+			}
+		}
 		if recorded && observed.current.State == "CLOSED" {
 			if err := raiseClosedPRDecision(ctx, db, project, observed.task, observed.current.PRURL); err != nil {
 				return err
@@ -1234,7 +1361,7 @@ func pullRequestGraphQLQuery(targets []prWatchTarget) (string, []prWatchTarget) 
     contexts(first: 100) {
       nodes {
         __typename
-        ... on CheckRun { name status conclusion detailsUrl }
+        ... on CheckRun { databaseId name status conclusion detailsUrl checkSuite { workflowRun { databaseId } } }
         ... on StatusContext { context state targetUrl }
       }
     }
@@ -1320,15 +1447,26 @@ func makePRObservation(projectID int64, task store.Task, pull *ghPullRequest, no
 		if url == "" {
 			url, _ = node["targetUrl"].(string)
 		}
-		failed := false
+		failed, cancelled := false, false
+		checkRunID, jobID := "", ""
 		if typename == "CheckRun" {
 			conclusion, _ := node["conclusion"].(string)
+			cancelled = strings.EqualFold(conclusion, "CANCELLED")
 			failed = oneOfString(strings.ToUpper(conclusion), "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
+			jobID = forgeIDString(node["databaseId"])
+			if suite, ok := node["checkSuite"].(map[string]any); ok {
+				if workflow, ok := suite["workflowRun"].(map[string]any); ok {
+					checkRunID = forgeIDString(workflow["databaseId"])
+				}
+			}
+			if checkRunID == "" {
+				checkRunID = githubActionsRunID(url)
+			}
 		} else {
 			failed = oneOfString(strings.ToUpper(status), "ERROR", "FAILURE")
 		}
 		if failed {
-			checks.Failures = append(checks.Failures, failedCheck{Name: name, URL: url})
+			checks.Failures = append(checks.Failures, failedCheck{Name: name, URL: url, Cancelled: cancelled, RunID: checkRunID, JobID: jobID})
 		}
 	}
 	if checks.State == "FAILURE" && len(checks.Failures) == 0 {

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -264,6 +265,13 @@ func TestPRLandingLifecycleAndExternalMerge(t *testing.T) {
 	fixture.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", first.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	fixture.requireNotice(t, "t1", "pr_checks_failed")
+	var queued, rounds int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, first.ID).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("disabled CI loop queued %d automatic instructions: %v", queued, err)
+	}
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, first.ID).Scan(&rounds); err != nil || rounds != 0 {
+		t.Fatalf("disabled CI loop recorded %d fix rounds: %v", rounds, err)
+	}
 
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Fix the failing unit check and report done again."); !strings.Contains(output, "delivered") {
 		t.Fatalf("PR fix instruction was not delivered: %s", output)
@@ -498,9 +506,6 @@ func TestExpiredQueuedMessageCrashRaisesNotice(t *testing.T) {
 func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
-	// Keep the poll-only Lookout from queuing the same target-sync instruction
-	// before this test exercises the direct Land freshness guard.
-	stopBackgroundLookout(t, fixture)
 	projectConfig := filepath.Join(fixture.home, "projects", "shop", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
 		t.Fatal(err)
@@ -552,6 +557,9 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	fixture.writeGraphQL(t, "pr2", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", second.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
+	// Isolate the explicit Land check from the independent watcher, which can
+	// deliver its own target-sync instruction and reopen t2 first.
+	pauseFixtureBackgroundLookout(t, fixture.root, fixture.env, fixture.db, fixture.project.ID)
 
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge"); !strings.Contains(output, "landing") {
 		t.Fatalf("first PR did not merge: %s", output)
@@ -561,6 +569,7 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	beforeSecondMerge := fixture.mustTask(t, "t2")
 	command := exec.Command(fixture.binary, "land", "t2", "--merge")
 	command.Dir, command.Env = fixture.repo, fixture.leadEnv
 	output, err := command.CombinedOutput()
@@ -572,9 +581,10 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	}
 	targetTip := strings.TrimSpace(gitTest(t, fixture.env, fixture.remote, "rev-parse", "refs/heads/main"))
 	if !strings.Contains(string(output), `"pr_branch_behind"`) || !strings.Contains(string(output), targetTip) {
-		currentTask, taskErr := fixture.db.TaskByID(context.Background(), fixture.project.ID, second.ID)
-		transitions, transitionsErr := fixture.db.TaskTransitions(context.Background(), second.ID, 20)
-		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s\nTask state: %s (%v)\nTransitions: %#v (%v)", err, output, targetTip, currentTask.State, taskErr, transitions, transitionsErr)
+		afterSecondMerge, taskErr := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
+		transitions, transitionErr := fixture.db.TaskTransitions(context.Background(), second.ID, 30)
+		recovery, recoveryErr := fixture.db.ProjectRecovery(context.Background(), fixture.project.ID)
+		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s\nTask state before/after: %q -> %q (err=%v)\ntransitions: %#v (err=%v)\nproject recovery: %#v (err=%v)", err, output, targetTip, beforeSecondMerge.State, afterSecondMerge.State, taskErr, transitions, transitionErr, recovery, recoveryErr)
 	}
 	var instruction string
 	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, second.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Merge origin/main") {
@@ -807,6 +817,58 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedRider(t *testing.T) {
 	}
 }
 
+func TestWorkerExitedDoneTaskWithOpenPRCanBeDiscarded(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "done-open-pr.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a completed Task with a recorded open PR.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.rideAndComplete(t, brief, "t1")
+	const prURL = "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskLanding(context.Background(), task.ID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", head)
+	fixture.exitRider(t, "t1")
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": task.PaneID}); err != nil {
+		t.Fatalf("remove exited Rider pane before observation: %v", err)
+	}
+	stopBackgroundLookout(t, fixture)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "roster")
+
+	current := fixture.mustTask(t, "t1")
+	if current.State != store.StateDone || current.PRURL != prURL {
+		t.Fatalf("fixture did not retain a done Task with its open PR: %#v", current)
+	}
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "worker_exited" || !slices.Contains(decisions[0].Options, "discard") {
+		t.Fatalf("worker-exited discard Decision = %#v, %v", decisions, err)
+	}
+	const quote = "User approved discarding the completed Task with its open PR"
+	decisionID := strconv.FormatInt(decisions[0].ID, 10)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decide", decisionID, "discard", "--user-approved", quote)
+	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "apply", decisionID)
+	if !strings.Contains(output, "torn-down") {
+		t.Fatalf("worker-exited discard did not tear down the done Task: %s", output)
+	}
+	if current := fixture.mustTask(t, "t1"); current.State != store.StateTornDown || current.PRURL != prURL {
+		t.Fatalf("discard did not preserve the Task's PR history: %#v", current)
+	}
+	if _, err := os.Stat(fixture.ghPRClosed); err != nil {
+		t.Fatalf("discard did not close the recorded open PR: %v", err)
+	}
+	observation, err := fixture.db.LatestPRObservation(context.Background(), task.ID)
+	if err != nil || observation.State != "CLOSED" || observation.PRURL != prURL {
+		t.Fatalf("discard did not retain a verified PR closure observation: %#v %v", observation, err)
+	}
+	if _, err := fixture.db.MountByTask(context.Background(), task.ID); !store.IsNotFound(err) {
+		t.Fatalf("discard did not release the completed Task's Mount: %v", err)
+	}
+}
+
 func TestApprovedDiscardClosesAndVerifiesRecordedPR(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
@@ -836,6 +898,101 @@ func TestApprovedDiscardClosesAndVerifiesRecordedPR(t *testing.T) {
 	}
 	if _, err := fixture.db.MountByTask(context.Background(), task.ID); !store.IsNotFound(err) {
 		t.Fatalf("verified discard did not release the Mount: %v", err)
+	}
+}
+
+func TestLookoutCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": task.PaneID}); err != nil {
+		t.Fatalf("close the exited Task pane before discard: %v", err)
+	}
+	closeStarted := filepath.Join(fixture.root, "gh-close-started")
+	closeRelease := filepath.Join(fixture.root, "gh-close-release")
+	command := exec.Command(fixture.binary, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this Task")
+	command.Dir = fixture.repo
+	command.Env = setEnv(fixture.leadEnv, "POSSE_TEST_GH_CLOSE_STARTED", closeStarted)
+	command.Env = setEnv(command.Env, "POSSE_TEST_GH_CLOSE_RELEASE", closeRelease)
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			_ = os.WriteFile(closeRelease, []byte("release\n"), 0o600)
+			_ = command.Process.Kill()
+		}
+	})
+	if !waitForCondition(15*time.Second, func() bool {
+		_, err := os.Stat(closeStarted)
+		return err == nil
+	}) {
+		t.Fatalf("discard did not reach the recorded PR close call: %s", output.String())
+	}
+	// This concurrent observation is the Lookout side of the close/Teardown
+	// race: it records the now-closed PR and raises its normal follow-up.
+	fixture.writeGraphQL(t, "pr1", "CLOSED", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", task.GatedSHA)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundClosedDecision := false
+	for _, decision := range decisions {
+		foundClosedDecision = foundClosedDecision || decision.TaskID == task.ID && decision.Kind == "pr_closed"
+	}
+	if !foundClosedDecision {
+		t.Fatalf("concurrent Lookout observation did not raise pr_closed: %#v", decisions)
+	}
+	if err := os.WriteFile(closeRelease, []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	released = true
+	if err := command.Wait(); err != nil {
+		t.Fatalf("discard lost the close/Teardown race: %v output=%s", err, output.String())
+	}
+	if current := fixture.mustTask(t, "t1"); current.State != store.StateTornDown {
+		t.Fatalf("concurrent Lookout observation changed approved discard custody: %#v", current)
+	}
+	decisions, err = fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decision := range decisions {
+		if decision.TaskID == task.ID {
+			t.Fatalf("closed-PR Decision remained pending after discard Teardown: %#v", decision)
+		}
+	}
+}
+
+func TestLandReadyDecisionCanDiscardUnlandedPR(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", task.GatedSHA)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	fixture.requireNotice(t, "t1", "land_ready")
+	output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decisions")
+	if !strings.Contains(output, "discard") {
+		t.Fatalf("land_ready Decision omitted discard: %s", output)
+	}
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "land_ready" || !slices.Contains(decisions[0].Options, "discard") {
+		t.Fatalf("land_ready Decision = %#v, %v", decisions, err)
+	}
+	const quote = "User approved discarding the ready but unlanded PR"
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decide", strconv.FormatInt(decisions[0].ID, 10), "discard", "--user-approved", quote)
+	output = runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "apply", strconv.FormatInt(decisions[0].ID, 10))
+	if !strings.Contains(output, "torn-down") || fixture.mustTask(t, "t1").State != store.StateTornDown {
+		t.Fatalf("land_ready discard did not complete Teardown: %s task=%#v", output, fixture.mustTask(t, "t1"))
+	}
+	if _, err := os.Stat(fixture.ghPRClosed); err != nil {
+		t.Fatalf("land_ready discard did not close the recorded PR: %v", err)
 	}
 }
 
@@ -1716,6 +1873,7 @@ case "$PWD/" in
     "$POSSE_E2E_POSSE_BIN" publish "Worker committed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
     "$POSSE_E2E_POSSE_BIN" holler done "Worker committed $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
+    : > "$POSSE_TEST_ROOT/worker-idle-$task_id"
     while IFS= read -r instruction; do
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
       while [ -e "$POSSE_TEST_ROOT/pause-fix-commit" ]; do sleep 0.02; done
@@ -1804,6 +1962,10 @@ case "$1 $2" in
     if [ -e "$POSSE_TEST_GH_CLOSE_FAIL" ]; then printf 'close failed\n' >&2; exit 1; fi
     if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then printf 'already merged\n' >&2; exit 1; fi
     : > "$POSSE_TEST_GH_PR_CLOSED"
+    if [ -n "${POSSE_TEST_GH_CLOSE_STARTED:-}" ]; then
+      : > "$POSSE_TEST_GH_CLOSE_STARTED"
+      while [ ! -e "$POSSE_TEST_GH_CLOSE_RELEASE" ]; do sleep 0.02; done
+    fi
     printf 'Closed\n' ;;
   "pr merge") : > "$POSSE_TEST_GH_MERGE"; printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
@@ -1820,7 +1982,8 @@ esac
 	}
 
 	home := filepath.Join(root, "posse")
-	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"finished\"\npr_poll = \"1ms\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	// Lifecycle tests exercise explicit Lead instructions; CI auto-fixes have fake-forge coverage elsewhere.
+	configText := "[lead]\nkind = \"claude\"\n\n[defaults]\nlanding_mode = \"pr\"\nauto_unsaddle = \"finished\"\npr_poll = \"1ms\"\n\n[ci_loop]\nmax_fix_rounds = 0\nrerun_cancelled = 0\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2054,6 +2217,15 @@ func (fixture *prLifecycleFixture) rideAndComplete(t *testing.T, brief, taskID s
 		t.Fatal(err)
 	}
 	fixture.waitTaskState(t, taskID, store.StateDone)
+	// The done Signal is persisted before the fake Rider's final Herdr status
+	// update completes. Wait so teardown tests do not race that Mount child.
+	idleMarker := filepath.Join(fixture.root, "worker-idle-"+taskID)
+	if !waitForCondition(10*time.Second, func() bool {
+		_, err := os.Stat(idleMarker)
+		return err == nil
+	}) {
+		t.Fatalf("fake Rider %s did not finish its post-signal idle report", taskID)
+	}
 	return fixture.mustTask(t, taskID)
 }
 
