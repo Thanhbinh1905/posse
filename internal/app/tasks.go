@@ -1681,6 +1681,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return err
 	}
 	reason := "agent_not_ready"
+	var blockedByMessageID int64
 	var sendPane herdr.Pane
 	paneFound := false
 	compacting := false
@@ -1718,6 +1719,10 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		earlierPending := false
 		if queueErr == nil && paneFound {
 			attemptedReason = queuedMessageReason(task, candidate, sendPane, snapshot, cfg)
+			if attemptedReason != "" && candidate.ID != messageID {
+				earlierPending = true
+				blockedByMessageID = candidate.ID
+			}
 			if attemptedReason == "" {
 				wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, candidate, sendPane.PaneID, cfg)
 				if err != nil {
@@ -1727,6 +1732,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 				if !wasDelivered {
 					if candidate.ID != messageID && deliveryReason != "" && deliveryReason != "delivery_in_progress" {
 						earlierPending = true
+						blockedByMessageID = candidate.ID
 					} else {
 						attemptedReason = deliveryReason
 					}
@@ -1780,8 +1786,14 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"
 		} else if reason == "blocked" || reason == "agent_ui_unknown" {
 			help = "Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's dialog before retrying; use `posse keys " + taskIDString(task.Seq) + " <key...>` for a blocked permission prompt"
+		} else if blockedByMessageID != 0 {
+			help = fmt.Sprintf("Earlier message #%d is ahead in the queue; inspect it with `posse show %s`", blockedByMessageID, taskIDString(task.Seq))
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})
+		result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}}
+		if blockedByMessageID != 0 {
+			result = append(result, axi.Field{Key: "blocked_by_message", Value: blockedByMessageID})
+		}
+		return ctx.Print(result)
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"}}})
 }
