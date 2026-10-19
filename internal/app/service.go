@@ -61,8 +61,11 @@ func (s *Service) structureStoreErrors(command *axi.Command) {
 		handler := command.Handler
 		name := command.Name
 		command.Handler = func(ctx *axi.Context, args []string) error {
-			s.superviseLookoutPollers(ctx, name, args)
-			return normalizeCommandError(handler(ctx, args))
+			err := normalizeCommandError(handler(ctx, args))
+			if err == nil {
+				s.superviseLookoutPollers(ctx, name, args)
+			}
+			return err
 		}
 	}
 	for _, subcommand := range command.Subcommands {
@@ -530,10 +533,14 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 					return cfg, err
 				}
-				if !options.pollerObservation {
-					if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, options.allowRecovery, allowNetworkRecovery); err != nil {
-						return cfg, err
+				if options.pollerObservation {
+					if leadAgentStarted(project, result.Snapshot) {
+						if err := s.reconcilePollerIntents(ctx, db, project); err != nil {
+							return cfg, err
+						}
 					}
+				} else if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, options.allowRecovery, allowNetworkRecovery); err != nil {
+					return cfg, err
 				}
 				fresh, err := db.ProjectByID(ctx, project.ID)
 				if err != nil {
