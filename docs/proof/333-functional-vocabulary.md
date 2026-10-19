@@ -60,7 +60,23 @@ At integrated head `b9b8d5e`, full units passed (app 759.155s, store 140.091s); 
 
 Seventy unchanged focused repetitions passed. Holding an earlier Notice's claim also passed, so that experiment did not reproduce the failure. Pinning the answer Notice itself in a valid in-flight claim reproduced the immediate assertion failure in 3/3 runs. The fixture now releases that claim after the CLI commits the User answer, then requires the real hidden Watch to deliver within ten seconds; it retains the exact User quote, delivered-state and correct Lead-prompt checks. Ten pinned runs passed in 36.966s. No production delivery or ownership guard changed. The original failing run's exact interleaving was not captured; the pinned case demonstrates the supported asynchronous state, not a proven trace of that run.
 
-All four shards and the Gate are being rerun after this fixture change. The verification below records earlier heads, not this final integration.
+Final verification passed at unchanged Go head `58b7be0`:
+
+| Check | Result |
+| --- | --- |
+| `go build ./...` | pass |
+| Tagged `go vet` and staticcheck 2026.2.1 | pass |
+| `go generate ./... && git diff --exit-code` | pass |
+| Formatting and both shard self-checks | pass |
+| `go test ./... -count=1 -timeout=30m` | pass; app 758.762s, store 141.172s |
+| `scripts/run-e2e-shard.sh 1` | exit 0; 757.390s |
+| `scripts/run-e2e-shard.sh 2` | exit 0; 624.442s |
+| `scripts/run-e2e-shard.sh 3` | exit 0; 640.105s |
+| `scripts/run-e2e-shard.sh 4` | exit 0; 781.679s |
+
+All four original runners used their unchanged 15-minute budgets and count 1, with no Go or manifest edits during execution. Focused race checks passed at the production-equivalent `b9b8d5e` (app 61.017s, store 17.805s, plus config, dispatch and taskplan; AXI had no tests selected by that pattern). The subsequent commit changes only the Decision E2E fixture and documentation. Experiments used isolated homes/config and removed inherited `HERDR_*`; normal shared Go caches stayed in place. Post-run `git fetch origin; git merge --no-ff origin/main` reported already up to date, and the Task scratch process scan found zero remaining CWDs.
+
+Task-local evidence: `instruction-770-rerun-{unit,shard-1,shard-2,shard-3,shard-4,static}.log` with exit receipts; `instruction-770-final-race.log`; `instruction-770-receipt-{red,green}.log`; `instruction-770-decision-answer-claim-{red,green}.log`; and `instruction-770-vocabulary-audit-final.log`. Only documentation follows the verified Go head. Final published-head CI remains required before Merge; do not infer it from older green CI. The verification below records earlier heads, not this final integration.
 
 ## Verification evidence before #770
 
