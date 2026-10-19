@@ -96,7 +96,7 @@ func TestLowkeyToggleAndWatchWakeWithoutRestart(t *testing.T) {
 	if cfg, err := config.Load(home, "shop"); err != nil || !cfg.Lowkey.Lead {
 		t.Fatalf("lowkey not persisted: %#v %v", cfg.Lowkey, err)
 	}
-	if got := run("lead"); !strings.Contains(got, "Lowkey mode on") || !strings.Contains(got, "posse ack <ids>") || !strings.Contains(got, "acknowledge silently") || !strings.Contains(got, "root_fetch_failing") || !strings.Contains(got, "head_discontinuity") || !strings.Contains(got, "gate_fix_exhausted") {
+	if got := run("lead"); !strings.Contains(got, "Lowkey mode on") || !strings.Contains(got, "posse ack <ids>") || !strings.Contains(got, "acknowledge silently") || !strings.Contains(got, "root_fetch_failing") || !strings.Contains(got, "pr_watch_recovered") || !strings.Contains(got, "root_fetch_recovered") || !strings.Contains(got, "head_discontinuity") || !strings.Contains(got, "gate_fix_exhausted") {
 		t.Fatal(got)
 	}
 	if got := run(); !strings.Contains(got, "lowkey: true") || strings.Contains(got, "project{name,mode,autonomy,lead}") {

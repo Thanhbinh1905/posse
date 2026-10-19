@@ -723,7 +723,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 
 	mergedAny := false
 	mergedTargets := []pollTarget{}
-	failures := []string{}
+	hasMemberFailure := false
 	var processingErr error
 	for result := range results {
 		if processingErr != nil {
@@ -731,7 +731,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		}
 		task, member := result.target.task, result.target.member
 		if result.err != nil {
-			failures = append(failures, member.repo.Repo+": "+truncate(result.err.Error(), 240))
+			hasMemberFailure = true
 			if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, result.err, now); err != nil {
 				processingErr = err
 				cancelPoll()
@@ -756,6 +756,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			}
 			branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
 			if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
+				hasMemberFailure = true
 				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
 					processingErr = err
 					cancelPoll()
@@ -763,6 +764,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				continue
 			}
 			if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
+				hasMemberFailure = true
 				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
 					processingErr = err
 					cancelPoll()
@@ -820,8 +822,16 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			return err
 		}
 	}
-	if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), truncate(strings.Join(failures, "; "), 1000)); err != nil {
-		return err
+	if claimProject {
+		if hasMemberFailure || targetCount == 0 {
+			// Per-Member failures have their own persistent streaks. A poll with
+			// no watched PRs also cannot prove that the forge has recovered.
+			if err := db.RecordPRPollAttempt(ctx, project.ID, now.UnixMilli()); err != nil {
+				return err
+			}
+		} else if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), ""); err != nil {
+			return err
+		}
 	}
 	if mergedAny && syncRoot {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {

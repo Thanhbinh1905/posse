@@ -231,6 +231,9 @@ func TestWorkspaceFetchTimeoutNoticeCoalescesAndResets(t *testing.T) {
 	if countWorkspaceNoticeKind(notices, "root_fetch_failing") != 0 {
 		t.Fatalf("successful recovery did not clear the active fetch-failure Notice: %#v", notices)
 	}
+	if countWorkspaceNoticeKind(notices, "root_fetch_recovered") != 1 {
+		t.Fatalf("successful recovery created %d root fetch recovery Notices, want one: %#v", countWorkspaceNoticeKind(notices, "root_fetch_recovered"), notices)
+	}
 
 	alphaRoot := filepath.Join(workspaceRoot, "alpha")
 	remoteClone := filepath.Join(root, "alpha-remote-work")

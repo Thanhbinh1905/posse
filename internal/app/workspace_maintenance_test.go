@@ -184,3 +184,57 @@ func TestWorkspaceMaintenanceContinuesAfterMemberForgeDiscoveryFailure(t *testin
 		}
 	}
 }
+
+func TestWorkspaceMemberPRFailureDoesNotAlsoRaiseProjectFailureNotice(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, `[defaults]
+merge_mode = "pr"
+auto_teardown = "merged"
+pr_poll = "1ms"
+forge = "auto"
+`, []string{"backend"}, []string{"backend"})
+	ctx := context.Background()
+	backendRoot := filepath.Join(f.workspace, "backend")
+	backendURL := "https://github.com/acme/backend.git"
+	gitTest(t, backendRoot, "remote", "set-url", "origin", backendURL)
+	gitTest(t, backendRoot, "config", "url.file://"+filepath.Join(f.root, "remotes", "backend.git")+".insteadOf", backendURL)
+	repo := f.repos()["backend"]
+	repo.PRURL = "https://github.com/acme/backend/pull/1"
+	repo.GatedSHA = strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "backend"), "rev-parse", "HEAD"))
+	if err := f.db.UpdateTaskRepo(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(f.root, "failure-bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := f.db.RecordPRPoll(ctx, f.project.ID, 1, "previous global failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 6; attempt++ {
+		if err := f.service.pollWorkspacePullRequestsForRepo(ctx, f.db, f.project, f.config(), true, nil, "", true, true, ""); err != nil {
+			t.Fatalf("Member poll %d failed: %v", attempt+1, err)
+		}
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failureNotices []store.Notice
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" {
+			failureNotices = append(failureNotices, notice)
+		}
+	}
+	if len(failureNotices) != 1 || failureNotices[0].TaskID != f.task.ID {
+		t.Fatalf("one failing Member outage created %d PR failure Notices, want one Task-scoped Notice: %#v", len(failureNotices), failureNotices)
+	}
+	state, err := f.db.ProjectWatchState(ctx, f.project.ID)
+	if err != nil || state.PRConsecutiveFailures != 1 {
+		t.Fatalf("Member-scoped failures changed the existing project-wide failure streak: %+v, %v", state, err)
+	}
+}

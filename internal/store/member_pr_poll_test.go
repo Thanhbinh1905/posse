@@ -61,6 +61,72 @@ func TestMemberPRPollClaimsAreIndependentAndDurable(t *testing.T) {
 	}
 }
 
+func TestPRPollFailureNoticeUpdatesAndRecoversOnce(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := db.RecordPRPoll(ctx, project.ID, int64(attempt), "forge timed out"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 1 {
+		t.Fatalf("persistent project poll failure did not create one Notice: %#v, %v", notices, err)
+	}
+	failureID := notices[0].ID
+	if _, err := db.ExecContext(ctx, `UPDATE notices SET acked_at=? WHERE id=?`, 4, failureID); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 4; attempt <= 6; attempt++ {
+		if _, err := db.RecordPRPoll(ctx, project.ID, int64(attempt), "connection reset"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 1 || notices[0].ID != failureID || !strings.Contains(notices[0].DataJSON, "connection reset") {
+		t.Fatalf("persistent project failure did not update its Notice in place: %#v, %v", notices, err)
+	}
+	if err := db.RecordPRPollAttempt(ctx, project.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	state, err := db.ProjectWatchState(ctx, project.ID)
+	if err != nil || state.PRConsecutiveFailures != 6 {
+		t.Fatalf("poll without a successful forge observation cleared the failure episode: %+v, %v", state, err)
+	}
+	if _, err := db.RecordPRPoll(ctx, project.ID, 8, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RecordPRPoll(ctx, project.ID, 9, ""); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_recovered") != 1 || countKind(notices, "pr_watch_failing") != 1 {
+		t.Fatalf("successful poll did not create exactly one recovery Notice: %#v, %v", notices, err)
+	}
+	for _, notice := range notices {
+		if notice.ID == failureID && notice.AckedAt == 0 {
+			t.Fatalf("recovered project failure Notice is still active: %#v", notice)
+		}
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := db.RecordPRPoll(ctx, project.ID, int64(attempt+9), "new outage"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 2 || countKind(notices, "pr_watch_recovered") != 1 {
+		t.Fatalf("new project outage did not start a distinct episode: %#v, %v", notices, err)
+	}
+}
+
 func TestPRTaskWatchFailuresRaiseAfterThree(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
@@ -114,6 +180,77 @@ func TestPRTaskWatchFailuresRaiseAfterThree(t *testing.T) {
 		if failures, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, repo, prURL, 6, "forge CLI timed out", "Member PR watch failed three times"); err != nil || failures != 1 {
 			t.Fatalf("independent %s Member failure count=%d err=%v, want 1", repo, failures, err)
 		}
+	}
+}
+
+func TestPRTaskWatchFailureNoticeUpdatesInPlaceAndRecoversOnce(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/acme/shop/pull/1"
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "First PR", MergeMode: "pr", PRURL: prURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, int64(attempt), "timeout", "PR watch failed three times: timeout"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 1 {
+		t.Fatalf("persistent failure did not create one Notice: %#v, %v", notices, err)
+	}
+	failureID := notices[0].ID
+	if _, err := db.ExecContext(ctx, `UPDATE notices SET acked_at=? WHERE id=?`, 4, failureID); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 4; attempt <= 6; attempt++ {
+		if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, int64(attempt), "connection refused", "PR watch failed three times: connection refused"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 1 || notices[0].ID != failureID || !strings.Contains(notices[0].DataJSON, "connection refused") {
+		t.Fatalf("persistent failure did not update its Notice in place: %#v, %v", notices, err)
+	}
+
+	task, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := PRObservation{ProjectID: project.ID, TaskID: taskID, PRURL: prURL, State: "OPEN", ObservedAt: 7}
+	if _, err := db.RecordPRObservation(ctx, observation, PRObservationEffect{}, task); err != nil {
+		t.Fatal(err)
+	}
+	observation.ObservedAt++
+	if _, err := db.RecordPRObservation(ctx, observation, PRObservationEffect{}, task); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_recovered") != 1 || countKind(notices, "pr_watch_failing") != 1 {
+		t.Fatalf("successful poll did not create exactly one recovery Notice: %#v, %v", notices, err)
+	}
+	for _, notice := range notices {
+		if notice.ID == failureID && notice.AckedAt == 0 {
+			t.Fatalf("recovered failure Notice is still active: %#v", notice)
+		}
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, int64(attempt+8), "new outage", "PR watch failed three times: new outage"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 2 || countKind(notices, "pr_watch_recovered") != 1 {
+		t.Fatalf("new outage did not start a distinct failure episode: %#v, %v", notices, err)
 	}
 }
 

@@ -131,7 +131,7 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 		t.Fatal(err)
 	}
 	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
-		Seq: 1, Type: "change", Title: "Observed change", MergeMode: "pr", Branch: "posse/t1",
+		Seq: 1, Type: "change", Title: "Observed change", MergeMode: "pr", Branch: "posse/t1", TargetBranch: "main", WorktreePath: f.repo,
 		PRURL: "https://github.com/acme/shop/pull/17", HerdrWorkspaceID: f.project.HerdrWorkspaceID,
 		PaneID: worker.RootPane.PaneID, PaneLabel: workerLabel, AgentName: "claude",
 	})
@@ -218,8 +218,14 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 		t.Fatal(err)
 	}
 	workload.runWatchs(t, f, 2, 3*time.Second)
-	if got := len(observationNotices(t, f, "pr_watch_failing")); got > 1 {
-		t.Fatalf("outage raised %d pr_watch_failing Notices, want at most one", got)
+	outageNotices := observationNotices(t, f, "pr_watch_failing")
+	if len(outageNotices) > 1 {
+		taskFailures := prTaskWatchFailureCount(t, f.db, taskID)
+		var projectFailures int
+		if err := f.db.QueryRowContext(ctx, `SELECT pr_consecutive_failures FROM project_watch_state WHERE project_id=?`, f.project.ID).Scan(&projectFailures); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("outage raised %d pr_watch_failing Notices, want at most one; task failure streak=%d project failure streak=%d notices=%#v", len(outageNotices), taskFailures, projectFailures, outageNotices)
 	}
 	if err := os.Remove(filepath.Join(f.root, "gh-exit-nonzero")); err != nil {
 		t.Fatal(err)
@@ -230,6 +236,9 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 	}
 	if got := len(observationNotices(t, f, "pr_checks_failed")); got != 2 {
 		t.Fatalf("outage recovery repeated observed facts: %d checks Notices, want 2", got)
+	}
+	if got := len(observationNotices(t, f, "pr_watch_recovered")); got != 1 {
+		t.Fatalf("successful poll created %d PR recovery Notices, want one", got)
 	}
 
 	// The actionable wake is one receipt-backed batch; accepting it leaves
