@@ -13,6 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func TestPRLandingRefusesStaleHeadBeforeGate(t *testing.T) {
@@ -1101,6 +1102,41 @@ type prLandingFixture struct {
 	errOut    bytes.Buffer
 }
 
+func freezeCILoop(t *testing.T, fixture *prLandingFixture, maxFixRounds, rerunCancelled int) {
+	t.Helper()
+	brief := []byte("---\ntype: ship\ntitle: CI loop test\ndone_when: checks are resolved\n---\nUser intent (verbatim): Retain this exact request.\n")
+	plan, err := taskplan.Resolve(taskplan.Request{
+		Brief:     taskplan.Select("brief", "ship.md", brief),
+		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
+		Launch:    taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
+		Review:    "none", Delivery: "pr", Autonomy: config.Autonomy{Review: "ask", Land: "ask"},
+		Paths: taskplan.Paths{Scratch: filepath.Join(fixture.home, "scratch", "shop", "t1"), Output: filepath.Join(fixture.home, "projects", "shop", "tasks", "t1")},
+		ValidationLoops: &taskplan.ValidationLoops{
+			Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"},
+			Gate:   config.GateLoop{MaxFixRounds: 3},
+			CI:     config.CILoop{MaxFixRounds: maxFixRounds, RerunCancelled: rerunCancelled},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET plan_json=?,gated_sha=? WHERE id=?`, encoded, fixture.headSHA, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, fixture.task.ID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, err = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newPRLandingFixture(t *testing.T, mode string, state store.State) *prLandingFixture {
 	t.Helper()
 	root := t.TempDir()
@@ -1221,6 +1257,8 @@ set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 if [ "${POSSE_TEST_GH_FAIL:-}" != "" ]; then printf 'fake gh unavailable\n' >&2; exit 1; fi
 case "$1 $2" in
+  "run rerun") printf 'rerun requested\n' ;;
+  "run view") printf 'unit failed log\n' ;;
   "api graphql")
     if [ -n "${POSSE_TEST_GH_ADVANCE_SHA:-}" ]; then
       git -C "$POSSE_TEST_GH_ADVANCE_REPO" push origin "$POSSE_TEST_GH_ADVANCE_SHA:refs/heads/${POSSE_TEST_GH_ADVANCE_BRANCH:-main}" >/dev/null
@@ -1286,6 +1324,9 @@ esac
 	t.Setenv("POSSE_TEST_GH_BODY", "")
 	t.Setenv("POSSE_TEST_GH_EDIT_BODY", filepath.Join(fixture.root, "gh-edited-body.md"))
 	t.Setenv("POSSE_TEST_GH_FAIL", "")
+	t.Setenv("POSSE_TEST_GH_CANCELLED", "")
+	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "")
+	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "")
 	t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", "")
 	t.Setenv("POSSE_TEST_GH_ADVANCE_REPO", fixture.repo)
 	t.Setenv("POSSE_TEST_GH_ADVANCE_BRANCH", "main")
@@ -1317,7 +1358,16 @@ func (fixture *prLandingFixture) setGraphQLState(t *testing.T, state, checks, re
 	t.Helper()
 	contexts := []any{}
 	if checks == "FAILURE" {
-		contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://checks.example/unit"})
+		conclusion, detailsURL := "FAILURE", defaultValue(os.Getenv("POSSE_TEST_GH_FAILURE_URL"), "https://checks.example/unit")
+		checkName := defaultValue(os.Getenv("POSSE_TEST_GH_FAILURE_NAME"), "unit")
+		checkRun := map[string]any{"__typename": "CheckRun", "name": checkName, "status": "COMPLETED", "conclusion": conclusion, "detailsUrl": detailsURL}
+		if os.Getenv("POSSE_TEST_GH_CANCELLED") == "1" {
+			checkRun["conclusion"] = "CANCELLED"
+			checkRun["detailsUrl"] = "https://github.com/acme/shop/actions/runs/123/job/456"
+			checkRun["databaseId"] = 456
+			checkRun["checkSuite"] = map[string]any{"workflowRun": map[string]any{"databaseId": 123}}
+		}
+		contexts = append(contexts, checkRun)
 	}
 	response := map[string]any{"data": map[string]any{"repo1": map[string]any{"pr1": map[string]any{
 		"url": "https://github.com/acme/shop/pull/17", "state": state, "headRefOid": head, "baseRefName": defaultValue(os.Getenv("POSSE_TEST_GH_BASE_BRANCH"), "main"), "mergeable": mergeable, "reviewDecision": review,

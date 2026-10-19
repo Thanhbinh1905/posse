@@ -81,8 +81,11 @@ type prWatchTarget struct {
 }
 
 type failedCheck struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	Cancelled bool   `json:"cancelled,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	JobID     string `json:"job_id,omitempty"`
 }
 
 type checkSnapshot struct {
@@ -1199,6 +1202,11 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		if err != nil {
 			return err
 		}
+		if observed.current.State == "OPEN" {
+			if err := s.processCIObservation(ctx, db, project, observed.task, observed.current, observed.failures, forge, ""); err != nil {
+				return err
+			}
+		}
 		if recorded && observed.current.State == "CLOSED" {
 			if err := raiseClosedPRDecision(ctx, db, project, observed.task, observed.current.PRURL); err != nil {
 				return err
@@ -1301,7 +1309,7 @@ func pullRequestGraphQLQuery(targets []prWatchTarget) (string, []prWatchTarget) 
     contexts(first: 100) {
       nodes {
         __typename
-        ... on CheckRun { name status conclusion detailsUrl }
+        ... on CheckRun { databaseId name status conclusion detailsUrl checkSuite { workflowRun { databaseId } } }
         ... on StatusContext { context state targetUrl }
       }
     }
@@ -1387,15 +1395,26 @@ func makePRObservation(projectID int64, task store.Task, pull *ghPullRequest, no
 		if url == "" {
 			url, _ = node["targetUrl"].(string)
 		}
-		failed := false
+		failed, cancelled := false, false
+		checkRunID, jobID := "", ""
 		if typename == "CheckRun" {
 			conclusion, _ := node["conclusion"].(string)
+			cancelled = strings.EqualFold(conclusion, "CANCELLED")
 			failed = oneOfString(strings.ToUpper(conclusion), "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
+			jobID = forgeIDString(node["databaseId"])
+			if suite, ok := node["checkSuite"].(map[string]any); ok {
+				if workflow, ok := suite["workflowRun"].(map[string]any); ok {
+					checkRunID = forgeIDString(workflow["databaseId"])
+				}
+			}
+			if checkRunID == "" {
+				checkRunID = githubActionsRunID(url)
+			}
 		} else {
 			failed = oneOfString(strings.ToUpper(status), "ERROR", "FAILURE")
 		}
 		if failed {
-			checks.Failures = append(checks.Failures, failedCheck{Name: name, URL: url})
+			checks.Failures = append(checks.Failures, failedCheck{Name: name, URL: url, Cancelled: cancelled, RunID: checkRunID, JobID: jobID})
 		}
 	}
 	if checks.State == "FAILURE" && len(checks.Failures) == 0 {
