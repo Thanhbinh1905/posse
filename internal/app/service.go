@@ -453,7 +453,7 @@ type projectPreparationOptions struct {
 	pollRepositories                bool
 	allowRunningLeadNetworkRecovery bool
 	deliverMessages                 bool
-	passiveObservation              bool
+	pollerObservation               bool
 }
 
 func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery, deliverMessages bool) (config.Config, error) {
@@ -465,10 +465,10 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 	})
 }
 
-// The detached poller observes repository state; command boundaries recover
-// interrupted intents and the Lead harness owns queued messages and Notices.
+// The detached poller may deliver queued instructions, but command boundaries
+// recover interrupted intents and the Lead harness owns Notice delivery.
 func (s *Service) prepareProjectPollerObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
-	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{passiveObservation: true})
+	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{deliverMessages: true, pollerObservation: true})
 }
 
 func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, project store.Project, options projectPreparationOptions) (config.Config, error) {
@@ -485,10 +485,8 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 	if err != nil {
 		return config.Config{}, configError(err)
 	}
-	if !options.passiveObservation {
-		if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
-			return cfg, err
-		}
+	if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
+		return cfg, err
 	}
 	herdrReady := false
 	allowNetworkRecovery := options.allowRecovery
@@ -532,7 +530,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 					return cfg, err
 				}
-				if !options.passiveObservation {
+				if !options.pollerObservation {
 					if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, options.allowRecovery, allowNetworkRecovery); err != nil {
 						return cfg, err
 					}
@@ -542,7 +540,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 					return cfg, err
 				}
 				s.relabelProjectTabs(ctx, db, fresh)
-				if options.deliverMessages && !options.passiveObservation {
+				if options.deliverMessages {
 					if err := s.deliverQueuedMessagesWithConfig(ctx, db, fresh, result.Snapshot, cfg); err != nil && !isHerdrUnavailable(err) {
 						return cfg, herdrError(err)
 					}
@@ -558,10 +556,8 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 			return cfg, err
 		}
 	}
-	if !options.passiveObservation {
-		if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
-			return cfg, err
-		}
+	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
+		return cfg, err
 	}
 	if options.pollRepositories {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
@@ -582,7 +578,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 		if err != nil {
 			return cfg, err
 		}
-		if !options.passiveObservation {
+		if !options.pollerObservation {
 			if err := s.deliverNotices(ctx, db, fresh); err != nil && !isHerdrUnavailable(err) {
 				return cfg, herdrError(err)
 			}
