@@ -74,7 +74,7 @@ For a Ship Task with the loop enabled, after its done Signal:
 
 1. Freshness: if the head lacks the frozen target tip, Posse queues the existing merge instruction (ADR 0019).
 2. Gate: `posse land` runs the Gates at the head. A failure queues a Gate Fix Round while budget remains, otherwise raises `gate_failed` for the Lead.
-3. Review: with `review_loop.auto_start = true`, Posse admits the next round once the Gate passes. Otherwise the Lead runs `posse review start`.
+3. Review: with `review_loop.auto_start = true`, Posse admits the next round once the Gate passes and an eligible reviewer Profile resolves. If none resolves, auto-start records one readiness Notice and does not fail Land solely for that reason; other selected-review checks still apply. Explicit `posse review start` reports the Profile or identity error. With auto-start disabled, the Lead runs `posse review start`.
 4. CI: the PR watch runs on the published head in parallel with review. Failures queue CI Fix Rounds or cancelled-check reruns.
 5. Land: requires the selected evidence, a green observation and the current target at one head (existing D03), and no blocking finding.
 

@@ -232,6 +232,15 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 				}
 				return err
 			}
+			home, err := s.homePath()
+			if err != nil {
+				return err
+			}
+			if started, err := s.maybeAutoStartReviewRound(out, db, home, project, task); err != nil {
+				return err
+			} else if started {
+				return nil
+			}
 			if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
 				return err
 			}
