@@ -278,8 +278,15 @@ func TestReconcileKeepsDoneTaskAndNoticesWorkerExitOnce(t *testing.T) {
 		t.Fatalf("done Task became lost: %#v, %v", updated, err)
 	}
 	var count int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='worker_exited'`, task.ID).Scan(&count); err != nil || count != 1 {
+	var dataJSON string
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*),MAX(data_json) FROM notices WHERE task_id=? AND kind='worker_exited'`, task.ID).Scan(&count, &dataJSON); err != nil || count != 1 {
 		t.Fatalf("worker_exited Notice count = %d, %v", count, err)
+	}
+	var data struct {
+		TaskLaunches int `json:"task_launches"`
+	}
+	if err := json.Unmarshal([]byte(dataJSON), &data); err != nil || data.TaskLaunches != updated.Launches {
+		t.Fatalf("worker_exited Notice launch identity = %#v, data=%s, launches=%d: %v", data, dataJSON, updated.Launches, err)
 	}
 }
 
@@ -622,6 +629,48 @@ func TestIngestSanitizesReportedAgentSession(t *testing.T) {
 	updated, err = db.Task(ctx, project.ID, "t1")
 	if err != nil || updated.AgentSession != "claude-session" || updated.AgentSessionKind != "claude" {
 		t.Fatalf("reported Claude session was not recorded with its owner kind: %#v, %v", updated, err)
+	}
+}
+
+func TestReconcileDoesNotProcessLostTaskSessionObservation(t *testing.T) {
+	ctx := context.Background()
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateLost, "cli", "Rider pane disappeared"); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := herdr.Snapshot{Panes: []herdr.Pane{{
+		PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel,
+		Agent: "claude", AgentStatus: "idle", AgentSession: json.RawMessage(`{"session_id":"empty-conversation"}`),
+	}}}
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, snapshot, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.AgentSession != "" || updated.AgentSessionKind != "" {
+		t.Fatalf("lost Task session observation was processed: %#v, %v", updated, err)
+	}
+}
+
+func TestIngestDoesNotEraseSessionOwnerWhenAgentIdentityIsMissing(t *testing.T) {
+	ctx := context.Background()
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, "claude-session", "claude", 0, 0, "generation-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := herdr.Snapshot{Panes: []herdr.Pane{{
+		PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel,
+		AgentStatus: "idle", AgentSession: json.RawMessage(`{"session_id":"replacement-session"}`),
+	}}}
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, snapshot, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.AgentSession != "claude-session" || updated.AgentSessionKind != "claude" {
+		t.Fatalf("session without a reported agent changed known ownership: %#v, %v", updated, err)
 	}
 }
 

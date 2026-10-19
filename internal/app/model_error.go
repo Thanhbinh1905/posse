@@ -52,11 +52,13 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 		}
 		lowerErrorLine := strings.ToLower(errorLine)
 		var message string
+		streamErrorPrefix := false
 		switch {
 		case strings.HasPrefix(lowerErrorLine, "error:"):
 			message = strings.TrimSpace(errorLine[len("Error:"):])
 		case strings.HasPrefix(lowerErrorLine, "stream error:"):
 			message = errorLine
+			streamErrorPrefix = true
 		default:
 			continue
 		}
@@ -65,6 +67,9 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 			continue
 		}
 		for _, pattern := range patterns {
+			if streamErrorPrefix && pattern.kind != "model_stream_error" {
+				continue
+			}
 			if strings.Contains(message, pattern.marker) {
 				return pattern.kind, pattern.marker, true
 			}
@@ -94,13 +99,25 @@ func piErrorInsideToolOutput(lines []string, errorLine int) bool {
 			return true
 		}
 	}
-	return false
+	// A border immediately after the error help line closes this panel. A
+	// border after a blank footer gap may instead close an earlier panel in
+	// a truncated pane tail.
+	return errorLine+2 < len(lines) && piTerminalBorder(strings.TrimSpace(lines[errorLine+2]))
 }
 
 func piFooterOnly(lines []string) bool {
+	cwdSeen, statusSeen := false, false
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "/") || strings.HasPrefix(line, "~/") || strings.Contains(line, "%/") || piTerminalBorder(line) {
+		if line == "" || piTerminalBorder(line) {
+			continue
+		}
+		if strings.Contains(line, "%/") {
+			statusSeen = true
+			continue
+		}
+		if !cwdSeen && !statusSeen && (strings.HasPrefix(line, "/") || strings.HasPrefix(line, "~/")) {
+			cwdSeen = true
 			continue
 		}
 		return false

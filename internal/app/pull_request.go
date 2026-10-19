@@ -81,8 +81,11 @@ type prWatchTarget struct {
 }
 
 type failedCheck struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	Cancelled bool   `json:"cancelled,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	JobID     string `json:"job_id,omitempty"`
 }
 
 type checkSnapshot struct {
@@ -798,11 +801,18 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 	if changes == "" {
 		return "", "", axi.Failure("pr_changes_failed", "Task branch has no commit subjects for the pull request body", false)
 	}
+	changedFiles, err := gitOutput(ctx, task.WorktreePath, "diff", "--name-only", "-z", task.BaseRef+"...HEAD")
+	if err != nil {
+		return "", "", axi.Failure("pr_changes_failed", "could not inspect Task files for the pull request body", false, err.Error())
+	}
+	documentation := documentationChecklistForChangedFiles(strings.Split(changedFiles, "\x00"))
 	verification = verificationChecklist(verification)
+	proof = stripDuplicatePublishHeading(proof, "Proof")
 	proof = strings.TrimSpace(proof)
 	if proof == "" {
 		proof = "_No proof supplied._"
 	}
+	risk = stripDuplicatePublishHeading(risk, "Risk And Rollback")
 	risk = strings.TrimSpace(risk)
 	if risk == "" {
 		risk = "Risk: not stated\nRollback: revert this PR"
@@ -819,7 +829,7 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 		"## Verification\n\n" + verification,
 		"## Proof\n\n" + proof,
 		"## Risk And Rollback\n\n" + risk,
-		"## Documentation\n\n" + documentationChecklist,
+		"## Documentation\n\n" + documentation,
 	}, "\n\n") + "\n"
 	title := task.PRTitle
 	if title == "" {
@@ -853,6 +863,53 @@ func verificationChecklist(value string) string {
 
 const documentationChecklist = `- [ ] Documentation updated for this change
 - [ ] CLAUDE.md/AGENTS.md updated if needed`
+
+func documentationChecklistForChangedFiles(files []string) string {
+	documentationUpdated, agentGuidanceUpdated := false, false
+	for _, file := range files {
+		file = strings.TrimPrefix(strings.ReplaceAll(file, "\\", "/"), "./")
+		if file == "" {
+			continue
+		}
+		lower := strings.ToLower(file)
+		base := lower[strings.LastIndex(lower, "/")+1:]
+		extension := ""
+		if dot := strings.LastIndex(base, "."); dot >= 0 {
+			extension = base[dot:]
+		}
+		if strings.HasPrefix(lower, "docs/") || strings.HasPrefix(base, "readme") || oneOfString(extension, ".md", ".mdx", ".rst", ".adoc") {
+			documentationUpdated = true
+		}
+		if base == "claude.md" || base == "agents.md" {
+			agentGuidanceUpdated = true
+		}
+	}
+	documentationCheck, guidanceCheck := " ", " "
+	if documentationUpdated {
+		documentationCheck = "x"
+	}
+	if agentGuidanceUpdated {
+		guidanceCheck = "x"
+	}
+	return "- [" + documentationCheck + "] Documentation updated for this change\n- [" + guidanceCheck + "] CLAUDE.md/AGENTS.md updated if needed"
+}
+
+func stripDuplicatePublishHeading(value, section string) string {
+	value = strings.TrimSpace(value)
+	line, rest, hasRest := strings.Cut(value, "\n")
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "#") {
+		return value
+	}
+	heading := strings.TrimSpace(strings.TrimRight(strings.TrimLeft(line, "#"), "#"))
+	if !strings.EqualFold(strings.Join(strings.Fields(heading), " "), strings.Join(strings.Fields(section), " ")) {
+		return value
+	}
+	if !hasRest {
+		return ""
+	}
+	return strings.TrimSpace(rest)
+}
 
 func pullRequestURLFromOutput(output string) (string, error) {
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
@@ -1197,6 +1254,11 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 		if err != nil {
 			return err
 		}
+		if observed.current.State == "OPEN" {
+			if err := s.processCIObservation(ctx, db, project, observed.task, observed.current, observed.failures, forge, ""); err != nil {
+				return err
+			}
+		}
 		if recorded && observed.current.State == "CLOSED" {
 			if err := raiseClosedPRDecision(ctx, db, project, observed.task, observed.current.PRURL); err != nil {
 				return err
@@ -1299,7 +1361,7 @@ func pullRequestGraphQLQuery(targets []prWatchTarget) (string, []prWatchTarget) 
     contexts(first: 100) {
       nodes {
         __typename
-        ... on CheckRun { name status conclusion detailsUrl }
+        ... on CheckRun { databaseId name status conclusion detailsUrl checkSuite { workflowRun { databaseId } } }
         ... on StatusContext { context state targetUrl }
       }
     }
@@ -1385,15 +1447,26 @@ func makePRObservation(projectID int64, task store.Task, pull *ghPullRequest, no
 		if url == "" {
 			url, _ = node["targetUrl"].(string)
 		}
-		failed := false
+		failed, cancelled := false, false
+		checkRunID, jobID := "", ""
 		if typename == "CheckRun" {
 			conclusion, _ := node["conclusion"].(string)
+			cancelled = strings.EqualFold(conclusion, "CANCELLED")
 			failed = oneOfString(strings.ToUpper(conclusion), "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
+			jobID = forgeIDString(node["databaseId"])
+			if suite, ok := node["checkSuite"].(map[string]any); ok {
+				if workflow, ok := suite["workflowRun"].(map[string]any); ok {
+					checkRunID = forgeIDString(workflow["databaseId"])
+				}
+			}
+			if checkRunID == "" {
+				checkRunID = githubActionsRunID(url)
+			}
 		} else {
 			failed = oneOfString(strings.ToUpper(status), "ERROR", "FAILURE")
 		}
 		if failed {
-			checks.Failures = append(checks.Failures, failedCheck{Name: name, URL: url})
+			checks.Failures = append(checks.Failures, failedCheck{Name: name, URL: url, Cancelled: cancelled, RunID: checkRunID, JobID: jobID})
 		}
 	}
 	if checks.State == "FAILURE" && len(checks.Failures) == 0 {
