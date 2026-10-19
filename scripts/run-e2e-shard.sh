@@ -5,6 +5,7 @@ set -eu
 # Keep this list complete so newly added tests cannot silently go unsharded.
 assignments='
 1 Test014ProjectVocabularyUpgradePreservesTasksSandboxesAndOpenPR
+1 Test014MalformedConfigRetainsFilenameAndErrorCode
 1 TestFailedRecoveryBoundWithRealHerdr
 1 TestStoppedWorkerPaneCanBeRelaunched
 1 TestProjectCommandDoesNotWaitForeverForStoppedLockOwner
@@ -50,6 +51,7 @@ assignments='
 1 TestUnsendDoesNotDeliverQueuedMessageE2E
 1 TestRealPiInterruptStopsBusyTurnE2E
 1 TestT229RebuildPreservesStoppedProject
+2 Test014LeadAdapterVocabularyHandoffAndReceipt
 2 TestLegacyWorkerTabsAfterWorktreeUpgrade
 2 TestNoticeHandoffSurvivesHarnessCrashAndAvoidsRecordedReplay
 2 TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns
