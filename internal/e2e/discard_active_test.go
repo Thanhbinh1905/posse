@@ -154,14 +154,36 @@ esac
 		t.Fatalf("worker_exited Notice count = %d, want one", workerExited)
 	}
 
-	plain := exec.Command(f.binary, "unsaddle", "t1")
-	plain.Dir, plain.Env = f.repo, f.leadEnv
-	if output, err := plain.CombinedOutput(); err == nil || !strings.Contains(string(output), "teardown_refused") {
-		t.Fatalf("plain unsaddle was not refused: err=%v output=%s", err, output)
+	decisionOutput := runPosse(t, f.binary, f.repo, f.leadEnv, "decisions")
+	if !strings.Contains(decisionOutput, "kind: worker_exited") || !strings.Contains(decisionOutput, "relaunch") || !strings.Contains(decisionOutput, "discard") {
+		t.Fatalf("worker_exited did not offer a relaunch/discard Decision: %s", decisionOutput)
 	}
-	output := runPosse(t, f.binary, f.repo, f.leadEnv, "unsaddle", "t1", "--discard", "--user-approved", "User approved discarding this completed Task")
+	decisionDB, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := decisionDB.Decisions(context.Background(), f.projectID, true)
+	if closeErr := decisionDB.Close(); err != nil || closeErr != nil {
+		t.Fatalf("read worker_exited Decision: %v (close: %v)", err, closeErr)
+	}
+	if len(decisions) != 1 || decisions[0].Kind != "worker_exited" {
+		t.Fatalf("pending worker_exited Decisions = %#v", decisions)
+	}
+	decision := decisions[0]
+	const decisionQuote = "User approved discarding this completed Task"
+	runPosse(t, f.binary, f.repo, f.leadEnv, "decide", fmt.Sprint(decision.ID), "discard", "--user-approved", decisionQuote)
+	crashAt := "unsaddle:after:approval.record"
+	interrupted := exec.Command(f.binary, "apply", fmt.Sprint(decision.ID))
+	interrupted.Dir, interrupted.Env = f.repo, setEnv(f.leadEnv, "POSSE_INTENT_CRASH_AT", crashAt)
+	interruptedOutput, interruptedErr := interrupted.CombinedOutput()
+	exit, ok := interruptedErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("approved discard did not interrupt after recording approval: err=%v output=%s", interruptedErr, interruptedOutput)
+	}
+	assertCrashExit(t, exit.ExitCode(), string(interruptedOutput), crashAt)
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "apply", fmt.Sprint(decision.ID))
 	if !strings.Contains(output, "torn-down") {
-		t.Fatalf("approved discard did not report teardown: %s", output)
+		t.Fatalf("applying worker_exited discard did not report teardown: %s", output)
 	}
 	if current := f.task(t, "t1"); current.State != store.StateTornDown {
 		t.Fatalf("approved discard left Task in %s", current.State)
