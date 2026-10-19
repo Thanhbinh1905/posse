@@ -39,10 +39,10 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		env = setEnv(env, "HERDR_PANE_ID", task.PaneID)
 		return setEnv(env, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
 	}
-	runSignal := func(task store.Task, args ...string) (int, string) {
+	runSignalAt := func(task store.Task, dir string, args ...string) (int, string) {
 		t.Helper()
 		command := exec.Command(fixture.binary, args...)
-		command.Dir, command.Env = task.WorktreePath, workerEnv(task)
+		command.Dir, command.Env = dir, workerEnv(task)
 		output, err := command.CombinedOutput()
 		if err == nil {
 			return 0, string(output)
@@ -53,11 +53,14 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		t.Fatalf("run Worker Signal: %v", err)
 		return 1, string(output)
 	}
+	runSignal := func(task store.Task, args ...string) (int, string) {
+		return runSignalAt(task, task.WorktreePath, args...)
+	}
 	assertRejected := func(task store.Task, flag, path string) {
 		t.Helper()
 		code, output := runSignal(task, "signal", "needs-decision", "Need review", flag, path)
 		taskScratch := filepath.Join(fixture.home, "scratch", "shop", "t"+strconv.Itoa(task.Seq))
-		if code == 0 || !strings.Contains(output, "signal_invalid") || !strings.Contains(output, task.WorktreePath) || !strings.Contains(output, taskScratch) {
+		if code == 0 || !strings.Contains(output, "signal_invalid") || !strings.Contains(output, "Signal files must be inside") || !strings.Contains(output, task.WorktreePath) || !strings.Contains(output, taskScratch) {
 			t.Fatalf("foreign %s path was not refused with both allowed locations: code=%d output=%s", flag, code, output)
 		}
 	}
@@ -73,6 +76,12 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		return err == nil && string(contents) == "task findings\n"
 	}) {
 		t.Fatal("accepted findings file was not copied into the Task record")
+	}
+	if code, output := runSignal(change, "signal", "needs-decision", "Need review", "--report", filepath.Join(changeScratch, "findings.md")); code != 0 {
+		t.Fatalf("own Task scratch --report failed: code=%d output=%s", code, output)
+	}
+	if contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "report.md")); err != nil || string(contents) != "task findings\n" {
+		t.Fatalf("own Task scratch report was not copied: %q %v", contents, err)
 	}
 	assertRejected(otherChange, "--findings", filepath.Join(changeScratch, "foreign-findings.md"))
 	assertRejected(otherChange, "--findings", filepath.Join(otherChangeScratch, "findings-symlink.md"))
@@ -101,7 +110,10 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 			t.Fatalf("foreign --report path was not refused with both allowed locations: code=%d output=%s", code, output)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(researchScratch, "report.md"), []byte("Task report\n"), 0o600); err != nil {
+	if err := os.Mkdir(filepath.Join(research.WorktreePath, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(research.WorktreePath, "report.md"), []byte("Task report\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	launch, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t3", "launch.md"))
@@ -113,8 +125,8 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 			t.Errorf("Worker protocol omitted %q:\n%s", want, launch)
 		}
 	}
-	if code, output := runSignal(research, "signal", "done", "Research complete", "--report", filepath.Join(researchScratch, "report.md")); code != 0 {
-		t.Fatalf("own Task scratch --report failed: code=%d output=%s", code, output)
+	if code, output := runSignalAt(research, filepath.Join(research.WorktreePath, "nested"), "signal", "done", "Research complete", "--report", "report.md"); code != 0 {
+		t.Fatalf("worktree-relative --report from a Worker subdirectory failed: code=%d output=%s", code, output)
 	}
 	if !waitForCondition(10*time.Second, func() bool {
 		contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t3", "report.md"))

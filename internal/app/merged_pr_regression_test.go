@@ -74,6 +74,41 @@ func TestWorkspaceOpenMemberMergedMerges(t *testing.T) {
 	}
 }
 
+func TestMergedPRTeardownUsesMergeObservationWhenTargetBranchWasDeleted(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	ctx := context.Background()
+	const targetBranch = "posse/lower"
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET target_branch=? WHERE id=?`, targetBranch, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateDone, "worker", "Worker completed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerging, "cli", "Gate passed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateMerging, store.StateMerged, "cli", "PR merged"); err != nil {
+		t.Fatal(err)
+	}
+	insertObservation(t, fixture.db, fixture.project.ID, fixture.task.ID, "https://github.com/acme/shop/pull/17", fixture.headSHA, "MERGED", fixture.headSHA)
+	removeFixtureTaskPane(fixture)
+
+	if code, output, stderr := fixture.run("teardown", "t1"); code != 0 {
+		t.Fatalf("teardown after merged PR target deletion: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown {
+		t.Fatalf("Task after merged-PR teardown = %#v, %v", task, err)
+	}
+	if _, err := gitOutput(ctx, fixture.repo, "rev-parse", "refs/heads/posse/t1"); err == nil {
+		t.Fatal("merged Task branch was not removed")
+	}
+}
+
 func insertObservation(t *testing.T, db *store.DB, projectID, taskID int64, url, head, state, merge string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO pr_observations(project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, '{}', '', '', ?, 1)`, projectID, taskID, url, head, state, merge); err != nil {

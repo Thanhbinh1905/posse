@@ -912,13 +912,6 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
 					merged := false
-					targetRef, targetErr := mergedTaskTargetRef(ctx, project, task)
-					if targetErr != nil {
-						return targetErr
-					}
-					if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, targetRef); mergeErr == nil {
-						merged = true
-					}
 					if task.State == store.StateMerged && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
 						observation, observationErr := db.LatestPRObservation(ctx, task.ID)
 						if observationErr != nil && !store.IsNotFound(observationErr) {
@@ -928,7 +921,16 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 							if sha != observation.HeadSHA {
 								return nil // Preserve work added after the merged PR head.
 							}
-							merged = true // Squash and rebase merges need not contain the branch ref.
+							merged = true // The recorded merge is enough even if its target ref disappeared.
+						}
+					}
+					if !merged {
+						targetRef, targetErr := mergedTaskTargetRef(ctx, project, task)
+						if targetErr != nil {
+							return targetErr
+						}
+						if _, mergeErr := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", ref, targetRef); mergeErr == nil {
+							merged = true
 						}
 					}
 					if merged {

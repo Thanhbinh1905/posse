@@ -457,7 +457,11 @@ func resolveSignalFile(home string, project store.Project, task store.Task, supp
 	}
 	allowedRoots := []string{worktreeRoot, validatedScratchRoot}
 	allowedLocations := fmt.Sprintf("the Worker's worktree (%s) or this Task's scratch directory (%s)", worktreeRoot, scratchRoot)
-	filePath, err := filepath.Abs(supplied)
+	filePath := supplied
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(worktreeRoot, filePath)
+	}
+	filePath, err = filepath.Abs(filePath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -474,7 +478,7 @@ func resolveSignalFile(home string, project store.Project, task store.Task, supp
 		}
 	}
 	if !insideAllowedRoot {
-		return "", nil, fmt.Errorf("report and findings files must be inside %s", allowedLocations)
+		return "", nil, fmt.Errorf("Signal files must be inside %s", allowedLocations)
 	}
 	contents, err := os.ReadFile(filePath)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -761,11 +762,14 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 	for _, tc := range []struct {
 		name, wantState, wantReason   string
 		rejectPrompt, headWaitForIdle bool
+		focused                       bool
 		wantPromptCalls               int
+		wantBlocker                   bool
 	}{
-		{"accepted", "delivered", "steered", false, true, 1},
-		{"rejected", "queued", "compacting", true, true, 1},
-		{"earlier steerable message pending", "queued", "earlier_message_pending", true, false, 2},
+		{name: "accepted", wantState: "delivered", wantReason: "steered", headWaitForIdle: true, wantPromptCalls: 1},
+		{name: "rejected", wantState: "queued", wantReason: "compacting", rejectPrompt: true, headWaitForIdle: true, wantPromptCalls: 1},
+		{name: "earlier steerable message pending", wantState: "queued", wantReason: "earlier_message_pending", rejectPrompt: true, wantPromptCalls: 2},
+		{name: "earlier --queue message blocks focused Worker", wantState: "queued", wantReason: "earlier_message_pending", headWaitForIdle: true, focused: true, wantBlocker: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -797,7 +801,14 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 			}
 
 			fake := herdr.NewFake()
-			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "unknown"}}}
+			focusedPaneID := ""
+			if tc.focused {
+				focusedPaneID = "w2:p1"
+			}
+			fake.SnapshotValue = herdr.Snapshot{
+				FocusedPaneID: focusedPaneID,
+				Panes:         []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "unknown", Focused: tc.focused}},
+			}
 			fake.Results["pane.read"] = []byte(`{"read":{"text":"\nAuto-compacting...\n"}}`)
 			if tc.rejectPrompt {
 				fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_not_ready", Message: "Pi is compacting"}
@@ -815,6 +826,9 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 			}
 			if fake.CallCount("agent.prompt") != tc.wantPromptCalls {
 				t.Fatalf("agent.prompt calls = %d, want %d", fake.CallCount("agent.prompt"), tc.wantPromptCalls)
+			}
+			if tc.wantBlocker && (!strings.Contains(output.String(), "blocked_by_message: "+strconv.FormatInt(headID, 10)) || strings.Contains(output.String(), "waiting_for_idle (--queue)")) {
+				t.Fatalf("later message did not identify the earlier blocker: %s", output.String())
 			}
 			db, err = store.Open(home)
 			if err != nil {
