@@ -42,13 +42,31 @@ func reviewIdentityFixture(t *testing.T) *prLifecycleFixture {
 	for _, kind := range []string{"claude", "codex", "pi", "opencode"} {
 		script := "#!/bin/sh\n" +
 			"printf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$POSSE_TEST_ROOT/review-identity-args.log\"\n" +
-			"herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state idle >/dev/null 2>&1\n" +
+			"if herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state idle >/dev/null 2>&1; then printf '%s\\t%s\\n' \"$HERDR_PANE_ID\" \"$PWD\" >> \"$POSSE_TEST_ROOT/review-identity-ready.log\"; fi\n" +
 			"while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state working >/dev/null 2>&1; done\n"
 		if err := os.WriteFile(filepath.Join(fixture.root, "bin", kind), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return fixture
+}
+
+func waitForReviewIdentityAgent(t *testing.T, fixture *prLifecycleFixture, paneID string) {
+	t.Helper()
+	if !waitForCondition(5*time.Second, func() bool {
+		data, err := os.ReadFile(filepath.Join(fixture.root, "review-identity-ready.log"))
+		if err != nil {
+			return false
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, paneID+"\t") {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("fake review agent did not become ready for pane %s", paneID)
+	}
 }
 
 func rideReviewIdentityTask(t *testing.T, fixture *prLifecycleFixture, title, profile, reviewOf string) (int, string) {
@@ -159,6 +177,7 @@ func TestReviewRejectsAttachedSessionSelectors(t *testing.T) {
 
 func TestReviewResumeTemplateRejectsSecondSessionSelector(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
+	stopBackgroundLookout(t, fixture)
 	const authorSession = "99e0a111-1ad9-4010-a1a1-1e2944973bce"
 	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
@@ -167,13 +186,19 @@ func TestReviewResumeTemplateRejectsSecondSessionSelector(t *testing.T) {
 		t.Fatalf("initial independent review: code=%d %s", code, output)
 	}
 	review := fixture.mustTask(t, "t2")
+	waitForReviewIdentityAgent(t, fixture, review.PaneID)
 	if _, err := fixture.db.ExecContext(context.Background(), "UPDATE tasks SET agent_session=?,agent_session_kind='claude' WHERE id=?", `{"session_id":"review-session"}`, review.ID); err != nil {
 		t.Fatal(err)
 	}
 	resumeArgs, _ := json.Marshal([]string{"--resume", "{session}", "-r" + authorSession})
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.claude.resume_args", string(resumeArgs))
 	code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
-	requireReviewIdentityRefusal(t, code, output)
+	if code != 1 || !strings.Contains(output, "review_identity_ineligible") {
+		after, taskErr := fixture.db.TaskByID(context.Background(), fixture.project.ID, review.ID)
+		args, _ := os.ReadFile(filepath.Join(fixture.root, "review-identity-args.log"))
+		config, _ := os.ReadFile(filepath.Join(fixture.home, "config.toml"))
+		t.Fatalf("expected review independence refusal, got code=%d\n%s\nTask before=%#v after=%#v (%v)\nlaunch args=%s\nconfig=%s", code, output, review, after, taskErr, args, config)
+	}
 }
 
 func TestReviewRejectsAttachedCodexModelConfig(t *testing.T) {
@@ -197,10 +222,12 @@ func TestReviewRejectsAttachedCodexModelConfig(t *testing.T) {
 
 func TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
+	stopBackgroundLookout(t, fixture)
 	if code, output := rideReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
 		t.Fatalf("author spawn: code=%d %s", code, output)
 	}
 	author := fixture.mustTask(t, "t1")
+	waitForReviewIdentityAgent(t, fixture, author.PaneID)
 	if _, err := fixture.db.ExecContext(context.Background(), "UPDATE tasks SET agent_session=?,agent_session_kind='claude' WHERE id=?", `{"session_id":"author-session"}`, author.ID); err != nil {
 		t.Fatal(err)
 	}

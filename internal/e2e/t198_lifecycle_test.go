@@ -267,6 +267,16 @@ while IFS= read -r line; do :; done
 		if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(root)) == 0 }) {
 			t.Fatal("fixture Lookout did not stop before creating the unrelated Task")
 		}
+		// Prevent the active Lead from restarting its poll-only Lookout while
+		// the synthetic Task moves through states without a Rider pane.
+		recovery, err := db.LookoutRecovery(context.Background(), project.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recovery.RetryAt = time.Now().Add(time.Hour).UnixMilli()
+		if err := db.SetLookoutRecovery(context.Background(), project.ID, recovery); err != nil {
+			t.Fatal(err)
+		}
 		otherID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 2, Type: "scout", Title: "Other Task"})
 		if err != nil {
 			t.Fatal(err)
@@ -276,8 +286,8 @@ while IFS= read -r line; do :; done
 			source   string
 		}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateReported, "cli"}} {
 			if err := db.Transition(context.Background(), otherID, transition.from, transition.to, transition.source, "isolated other Task fixture"); err != nil {
-				current, stateErr := db.TaskByID(context.Background(), project.ID, otherID)
-				t.Fatalf("transition other Task %s -> %s failed: %v; current=%#v lookup=%v", transition.from, transition.to, err, current, stateErr)
+				current, readErr := db.TaskByID(context.Background(), project.ID, otherID)
+				t.Fatalf("transition unrelated Task %s -> %s failed: %v; current=%#v lookup=%v", transition.from, transition.to, err, current, readErr)
 			}
 		}
 	}
