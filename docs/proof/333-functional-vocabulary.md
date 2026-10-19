@@ -28,6 +28,7 @@ Additional regressions cover:
 - one-time config migration, original-byte backup, idempotence, conflicts and rejection of reintroduced keys;
 - admitted-plan versions 1/2 retaining exact serialized bytes, hashes and selected-input evidence;
 - historical snapshot Notice/Decision/lease normalization without changing evidence or ownership;
+- preserving a literal User option `land`, interrupted Workspace Merge intent and historical discard process authority;
 - replacement of only the recorded historical observer, preserving unrelated panes and replacement agents;
 - canonical root help, config schema and replacement-specific command/flag errors.
 
@@ -41,14 +42,18 @@ New Projects allocate `pool/<project>/sandbox-<n>`. Existing `remuda/<project>/m
 
 Commands and final outcomes are recorded in the PR verification entries. Task-local transcripts include `gate-unit.log`, `canonical-vocabulary.log`, `contracts-final.log`, `upgrade-e2e.log`, `retained-shell-settlement.log`, `e2e-final-{1,2,3,4}.log`, `vet-canonical.log` and `staticcheck-canonical.log`.
 
-The full unit suite passed with a 30-minute timeout: app tests took 1044 seconds on the shared host. The earlier timeout stack was in SQLite `fsync`, not a lock deadlock. The final PR verification distinguishes complete-suite results from focused reruns and any remaining CI dependency.
+The full unit suite passed with a 30-minute timeout before the final migration refinements and merge from main: app tests took 1044 seconds on the shared host. The earlier timeout stack was in SQLite `fsync`, not a lock deadlock. Final-code vocabulary regressions also pass under the race detector across app, config, dispatch, store and taskplan. Formatting, vet, staticcheck, regeneration and shard-assignment checks pass.
 
-A teardown E2E setup race was reproduced with the real CLI: Herdr had cleared `pane.Agent` but still exposed the exited agent in its agent registry. The fixture now waits for both observations to settle. The retained-shell regression passed three consecutive runs with that change; production ownership checks were not weakened.
+All four E2E shards were attempted. Shard 1's test process passed in 877 seconds, but its shell wrapper was invalidated by an in-flight manifest edit after the test returned; this was verification sequencing, not a product failure. Shard 2 passed in 736 seconds. Shard 3 exposed the fixture races described below. Shard 4 exhausted its 15-minute budget while its current test had run for only 15 seconds. The post-merge focused E2E run passed in 196.559 seconds: `Test014ProjectVocabularyUpgradePreservesTasksSandboxesAndOpenPR`, `TestTeardownStopsRetainedShellByVerifiedIdentity`, `TestWorkspaceResearchTeardownPreservesMemberAndRootAttachments`, `TestPRMergeLifecycleAndExternalMerge` and `TestPRMergeAcceptsFollowUpBeforeFailureNotice`. The remaining full final-head Gate/E2E verification is a CI dependency under the Brief's shared-host-load exception, not a claim that all four final-head shards passed.
+
+Main's #339 stabilization was merged before final checks. Its merged-PR freshness fix is retained, and its new text uses the canonical names. This PR must merge after the other release work.
+
+A teardown E2E setup race was reproduced with the real CLI: Herdr had cleared `pane.Agent` but still exposed the exited agent in its agent registry. The fixture now waits for both observations to settle. The retained-shell regression passed three consecutive runs with that change; production ownership checks were not weakened. Workspace fixtures now respect retryable interrupted-intent conflicts, use main's busy-Lead/direct-ack stabilization and avoid exposing an unbound synthetic reviewer as a live Task to the Watch.
 
 ## Risk and rollback
 
 This is a deliberate breaking vocabulary cut for scripts and new input. The migration changes persisted domain values, so an old binary must not open the upgraded database. Config migration keeps changed original files as `.v014`; unchanged files keep their bytes and receive a `.vocabulary` marker. Conflicting keys stop the upgrade without choosing a value.
 
-Before deployment, stop Project processes and take a complete Posse-home backup, including the database and SQLite sidecars, config, snapshots, Task plans and preferences. To roll back, stop upgraded processes, restore that complete pre-upgrade home and `.v014` config backups, then reinstall 0.14. Do not downgrade against migrated state or relocate existing worktrees. Reverting the code alone does not reverse stored domain values.
+Before deployment, stop Project processes and back up the complete Posse home, including the database and SQLite sidecars, config, snapshots, Task plans and preferences, together with each Project's Git metadata and worktree registrations. To roll back, stop upgraded processes, preserve post-upgrade commits and PRs, restore the pre-upgrade home and Git metadata plus `.v014` config backups, then reinstall 0.14. Do not downgrade against migrated state or relocate existing worktrees. Reverting the code alone does not reverse stored domain values.
 
 Closes #333, #334, #335, #336, #337, #338.

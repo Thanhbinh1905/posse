@@ -78,7 +78,7 @@ func lockClaimedSandbox(ctx context.Context, db *store.DB, project store.Project
 	return lockAvailableSandbox(ctx, db, project, sandbox, task)
 }
 
-// Call under withMountStateLock before claiming an idle checkout, or after
+// Call under withSandboxStateLock before claiming an idle checkout, or after
 // claiming a new checkout. Git protects the checkout before it becomes held.
 func lockAvailableSandbox(ctx context.Context, db *store.DB, project store.Project, sandbox store.Sandbox, task store.Task) error {
 	current, err := sandboxLockReason(ctx, project.Root, sandbox.Path)

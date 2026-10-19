@@ -440,7 +440,7 @@ func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 	for attempts := 0; attempts < 64; attempts++ {
 		var sandbox store.Sandbox
 		err := withSandboxStateLock(ctx, db, func() error {
-			// Protect the oldest idle checkout before AcquireMount can expose
+			// Protect the oldest idle checkout before AcquireSandbox can expose
 			// it as held. New checkouts are created with Git's atomic --lock.
 			sandboxes, err := db.Sandboxes(ctx, project.ID)
 			if err != nil {
