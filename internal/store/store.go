@@ -1653,6 +1653,11 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	if err := db.PersistTask(ctx, task.ID); err != nil {
 		log.Printf("posse: Signal %q committed for Task %d, but recovery snapshot refresh failed: %v", verb, task.ID, err)
 	}
+	if verdict != nil && verdict.Findings != nil && task.ReviewsTaskID > 0 {
+		if err := db.PersistTask(ctx, task.ReviewsTaskID); err != nil {
+			log.Printf("posse: Review findings committed for Ship Task %d, but recovery snapshot refresh failed: %v", task.ReviewsTaskID, err)
+		}
+	}
 	return current, nil
 }
 
