@@ -157,13 +157,6 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 		}
 		_ = handle.Close()
 	}()
-	if !processHasTaskMarker(pid, marker) {
-		t.Fatalf("detached ControlMaster PID %d lost its inherited Task marker", pid)
-	}
-	parent, err := mountProcessParentID(pid)
-	if err != nil || parent > 1 && processHasTaskMarker(parent, marker) {
-		t.Fatalf("ControlMaster PID %d still appears to have a Rider parent %d: %v", pid, parent, err)
-	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		processes := processDetails([]int{pid})
@@ -174,6 +167,13 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 			t.Fatalf("fake ControlMaster command did not exec: %#v", processes)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if !processHasTaskMarker(pid, marker) {
+		t.Fatalf("detached ControlMaster PID %d lost its inherited Task marker", pid)
+	}
+	parent, err := mountProcessParentID(pid)
+	if err != nil || parent > 1 && processHasTaskMarker(parent, marker) {
+		t.Fatalf("ControlMaster PID %d still appears to have a Rider parent %d: %v", pid, parent, err)
 	}
 
 	preserved, err := stopTaskProcessContainment(context.Background(), store.Task{ContainmentMode: "marker", ContainmentMarker: marker})
