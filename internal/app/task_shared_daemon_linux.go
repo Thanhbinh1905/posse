@@ -11,6 +11,14 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func taskSharedProcessExclusions(task store.Task) ([]taskProcessDetail, map[int]bool, error) {
+	pids, err := detachedSharedTaskProcessPIDs(task)
+	if err != nil {
+		return nil, nil, err
+	}
+	return processDetails(pids), taskProcessPIDSet(pids), nil
+}
+
 func detachedSharedTaskProcessPIDs(task store.Task) ([]int, error) {
 	owned := map[int]bool{}
 	if task.ContainmentMode == "cgroup" && task.ContainmentPath != "" {
@@ -134,6 +142,8 @@ func isSharedTaskDaemonCommand(comm string, args []string) bool {
 	comm = strings.ToLower(comm)
 
 	switch {
+	case comm == "ssh" && strings.HasPrefix(command, "ssh: ") && strings.HasSuffix(command, " [mux]"):
+		return true
 	case commandName == "ssh":
 		return strings.Contains(" "+command+" ", " -m ") || strings.Contains(command, "controlmaster=yes") || strings.Contains(command, "controlmaster=auto") || strings.Contains(command, "controlpersist=")
 	case strings.Contains(command, "org.gradle.launcher.daemon.bootstrap.gradledaemon"):

@@ -583,6 +583,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		return result, s.unsaddleIncomplete(ctx, db, project, task, "pane inspection", err)
 	}
 	var stopped []string
+	var inPlaceShellPID int
 	var riderPlan *discardRiderPlan
 	if discardable {
 		riderPlan, err = s.retainDiscardRider(ctx, db, project, task, intent, panePlan)
@@ -644,9 +645,11 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	if !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
 			if inPlace && len(taskContainmentProcessDetails(task)) > 0 {
-				if _, err := s.verifyInPlaceForegroundOwnership(ctx, project, task); err != nil {
+				paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
+				if err != nil {
 					return err
 				}
+				inPlaceShellPID = paneInfo.ShellPID
 				if task.AgentName != "" && processIdentityCapabilityError() != "" {
 					snapshot, err := s.snapshot(ctx)
 					if err != nil {
@@ -668,17 +671,19 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			} else if processAuthorization != nil {
 				signalGuard = processAuthorization.guardSignal
 			}
-			if _, containmentErr := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard); containmentErr != nil {
+			preservedProcesses, containmentErr := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard, inPlaceShellPID)
+			if containmentErr != nil {
 				return containmentErr
 			}
+			excluded := taskProcessDetailsPIDSet(preservedProcesses)
 			if mountHeld {
-				mountStopped, stopErr := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
+				mountStopped, stopErr := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization, excluded)
 				if stopErr != nil {
 					return stopErr
 				}
 				stopped = append(stopped, mountStopped...)
 			}
-			scratchStopped, stopErr := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization)
+			scratchStopped, stopErr := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization, excluded)
 			if stopErr != nil {
 				return stopErr
 			}
@@ -718,10 +723,14 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			}
 			return retireEmptyTaskCgroup(task)
 		}
+		_, excluded, err := taskSharedProcessExclusions(task)
+		if err != nil {
+			return err
+		}
 		if !mountHeld {
 			return nil
 		}
-		newlyStopped, err := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization)
+		newlyStopped, err := stopMountProcessesAuthorized(task.WorktreePath, processAuthorization, excluded)
 		if err != nil {
 			return err
 		}
@@ -821,11 +830,28 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 				return err
 			}
 		} else {
-			newlyStopped, err := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization)
+			_, excluded, err := taskSharedProcessExclusions(task)
+			if err != nil {
+				return err
+			}
+			newlyStopped, err := stopTaskScratchProcessesAuthorized(home, project, task, processAuthorization, excluded)
 			if err != nil {
 				return err
 			}
 			stopped = append(stopped, newlyStopped...)
+			scratchProcesses, err := taskScratchProcessDetails(home, project, task)
+			if err != nil {
+				return err
+			}
+			for _, process := range scratchProcesses {
+				preserved, err := taskProcessHasExcludedAncestor(process.PID, excluded)
+				if err != nil {
+					return fmt.Errorf("verify preserved daemon process %d before removing Task scratch: %w", process.PID, err)
+				}
+				if preserved {
+					return fmt.Errorf("cannot remove Task scratch while preserved shared daemon process %d (%s) still references it", process.PID, process.Command)
+				}
+			}
 		}
 		return removeTaskScratch(home, project, task)
 	}); err != nil {
@@ -861,6 +887,37 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 		paneResult = latestPanes
 		if discardable && mountHeld {
 			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
+				return err
+			}
+		}
+		if !discardable {
+			var signalGuard taskProcessSignalGuard
+			shellPID := 0
+			if inPlace {
+				signalGuard = func(pid int, _ syscall.Signal) error {
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid)
+				}
+				if len(taskContainmentProcessDetails(task)) > 0 {
+					paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
+					if err != nil {
+						return err
+					}
+					shellPID = paneInfo.ShellPID
+				}
+			} else if processAuthorization != nil {
+				signalGuard = processAuthorization.guardSignal
+			}
+			if _, err := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard, shellPID); err != nil {
+				return err
+			}
+			preservedProcesses, _, err := taskSharedProcessExclusions(task)
+			if err != nil {
+				return err
+			}
+			if len(preservedProcesses) > 0 {
+				return fmt.Errorf("cannot release the Task Mount while preserving detached shared daemon processes: %s", describeSharedTaskProcesses(preservedProcesses))
+			}
+			if err := retireEmptyTaskCgroup(task); err != nil {
 				return err
 			}
 		}

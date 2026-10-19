@@ -74,7 +74,7 @@ func (s *Service) releaseMountWithAuthorization(ctx context.Context, db *store.D
 	})
 }
 
-func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthorization) ([]string, error) {
+func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthorization, excluded ...map[int]bool) ([]string, error) {
 	if message := processIdentityCapabilityError(); message != "" {
 		return nil, fmt.Errorf("%s; refusing to signal processes or reset the Mount", message)
 	}
@@ -88,6 +88,11 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 		return nil, resolveErr
 	}
 	pids, err := mountProcessIDs(root)
+	if err != nil {
+		return nil, err
+	}
+	excludedPIDs := mergeTaskProcessExclusions(excluded...)
+	pids, err = excludeTaskProcessTree(pids, excludedPIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +134,7 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 		handles[pid] = handle
 		allPIDs = append(allPIDs, pid)
 	}
-	if err := verifyMountProcessSet(root, handles, transients, authorization, false); err != nil {
+	if err := verifyMountProcessSet(root, handles, transients, authorization, false, excludedPIDs); err != nil {
 		return nil, err
 	}
 	for _, handle := range handles {
@@ -139,7 +144,7 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := verifyMountProcessSet(root, handles, transients, authorization, true); err != nil {
+		if err := verifyMountProcessSet(root, handles, transients, authorization, true, excludedPIDs); err != nil {
 			return nil, err
 		}
 		alive, err := mountHandlesInMount(handles, root)
@@ -162,10 +167,14 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if err := verifyMountProcessSet(root, handles, transients, authorization, true); err != nil {
+		if err := verifyMountProcessSet(root, handles, transients, authorization, true, excludedPIDs); err != nil {
 			return nil, err
 		}
 		survivors, err := mountProcessIDs(root)
+		if err != nil {
+			return nil, err
+		}
+		survivors, err = excludeTaskProcessTree(survivors, excludedPIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -185,11 +194,19 @@ func stopMountProcessesAuthorized(path string, authorization *mountProcessAuthor
 	if err != nil {
 		return nil, err
 	}
+	survivors, err = excludeTaskProcessTree(survivors, excludedPIDs)
+	if err != nil {
+		return nil, err
+	}
 	return processLabels(allPIDs), fmt.Errorf("mount processes survived teardown: %v", survivors)
 }
 
-func verifyMountProcessSet(root string, handles, transients map[int]*mountProcessHandle, authorization *mountProcessAuthorization, waitForTransients bool) error {
+func verifyMountProcessSet(root string, handles, transients map[int]*mountProcessHandle, authorization *mountProcessAuthorization, waitForTransients bool, excluded map[int]bool) error {
 	pids, err := mountProcessIDs(root)
+	if err != nil {
+		return err
+	}
+	pids, err = excludeTaskProcessTree(pids, excluded)
 	if err != nil {
 		return err
 	}
@@ -275,10 +292,10 @@ func processLabels(pids []int) []string {
 	return labels
 }
 
-func stopTaskScratchProcessesAuthorized(home string, project store.Project, task store.Task, authorization *mountProcessAuthorization) ([]string, error) {
+func stopTaskScratchProcessesAuthorized(home string, project store.Project, task store.Task, authorization *mountProcessAuthorization, excluded ...map[int]bool) ([]string, error) {
 	root, err := validatedTaskScratchRoot(home, project, task)
 	if err != nil {
 		return nil, err
 	}
-	return stopAuthorizedOwnedProcesses([]ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true}}, authorization)
+	return stopAuthorizedOwnedProcesses([]ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true, excluded: mergeTaskProcessExclusions(excluded...)}}, authorization)
 }

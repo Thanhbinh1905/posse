@@ -485,7 +485,10 @@ func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project 
 		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task pane before signaling", true, err.Error())
 	}
 	pane, found := findTaskPane(snapshot.Panes, task)
-	if !found || !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
+	if !found {
+		return paneProcessInfo{}, nil // No pane remains to contain a foreign foreground; process containment remains authoritative.
+	}
+	if !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
 		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "could not verify the in-place Task pane before signaling", true)
 	}
 	info, err := s.mountPaneProcessInfo(ctx, pane.PaneID)

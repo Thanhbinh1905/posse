@@ -144,11 +144,16 @@ func TestTeardownPreservesDetachedSSHControlMaster(t *testing.T) {
 	f := newRiderTabsFixture(t)
 	task := f.ride(t, "t1", "Detached SSH ControlMaster", "ssh-control-master")
 	pidPath := filepath.Join(f.root, "ssh-control-master.pid")
+	childPIDPath := filepath.Join(f.root, "ssh-control-child.pid")
+	masterScriptPath := filepath.Join(f.root, "ssh-control-master.sh")
+	ordinaryPIDPath := filepath.Join(f.root, "ordinary-task-process.pid")
 	socketPath := filepath.Join(f.root, "ssh-control.sock")
-	var master teardownFixtureProcess
+	var master, child, ordinary teardownFixtureProcess
 	t.Cleanup(func() {
-		if teardownFixtureProcessRunning(master) {
-			_ = syscall.Kill(master.PID, syscall.SIGKILL)
+		for _, process := range []teardownFixtureProcess{master, child, ordinary} {
+			if teardownFixtureProcessRunning(process) {
+				_ = syscall.Kill(process.PID, syscall.SIGKILL)
+			}
 		}
 	})
 	raw, err := f.client.Call(context.Background(), "tab.create", map[string]any{
@@ -165,9 +170,20 @@ func TestTeardownPreservesDetachedSSHControlMaster(t *testing.T) {
 	if err := json.Unmarshal(raw, &shellTab); err != nil || shellTab.RootPane.PaneID == "" {
 		t.Fatalf("Herdr shell tab response = %s: %v", raw, err)
 	}
-	command := `setsid bash -c 'echo $$ > "$1"; exec -a "ssh -M -S $2" sleep 300' e2e-control-master ` + shellQuote(pidPath) + ` ` + shellQuote(socketPath) + ` >/dev/null 2>&1 </dev/null &`
+	masterScript := `#!/usr/bin/env bash
+echo $$ > "$1"
+exec -a "ssh -M -S $2" bash -c 'sleep 300 & echo $! > "$1"; wait' e2e-control-child "$3"
+`
+	if err := os.WriteFile(masterScriptPath, []byte(masterScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := `setsid bash ` + shellQuote(masterScriptPath) + ` ` + shellQuote(pidPath) + ` ` + shellQuote(socketPath) + ` ` + shellQuote(childPIDPath) + ` >/dev/null 2>&1 </dev/null &`
 	if _, err := f.client.Run(context.Background(), "pane", "run", shellTab.RootPane.PaneID, command); err != nil {
 		t.Fatalf("start detached fake ControlMaster through Herdr: %v", err)
+	}
+	ordinaryCommand := `setsid bash -c 'echo $$ > "$1"; exec sleep 300' e2e-ordinary ` + shellQuote(ordinaryPIDPath) + ` >/dev/null 2>&1 </dev/null &`
+	if _, err := f.client.Run(context.Background(), "pane", "run", shellTab.RootPane.PaneID, ordinaryCommand); err != nil {
+		t.Fatalf("start ordinary detached Task process through Herdr: %v", err)
 	}
 	if !waitForCondition(5*time.Second, func() bool {
 		contents, err := os.ReadFile(pidPath)
@@ -183,6 +199,44 @@ func TestTeardownPreservesDetachedSSHControlMaster(t *testing.T) {
 	if err != nil || pid <= 1 {
 		t.Fatalf("ControlMaster PID = %q: %v", pidBytes, err)
 	}
+	if !waitForCondition(5*time.Second, func() bool {
+		contents, err := os.ReadFile(childPIDPath)
+		return err == nil && len(strings.TrimSpace(string(contents))) > 0
+	}) {
+		t.Fatal("detached ControlMaster child did not record its PID")
+	}
+	childPIDBytes, err := os.ReadFile(childPIDPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(childPIDBytes)))
+	if err != nil || childPID <= 1 {
+		t.Fatalf("ControlMaster child PID = %q: %v", childPIDBytes, err)
+	}
+	childBootID, childStartTime, err := store.ProcessIdentityForPID(childPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child = teardownFixtureProcess{PID: childPID, BootID: childBootID, StartTime: childStartTime}
+	if !waitForCondition(5*time.Second, func() bool {
+		contents, err := os.ReadFile(ordinaryPIDPath)
+		return err == nil && len(strings.TrimSpace(string(contents))) > 0
+	}) {
+		t.Fatal("ordinary detached Task process did not record its PID")
+	}
+	ordinaryPIDBytes, err := os.ReadFile(ordinaryPIDPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryPID, err := strconv.Atoi(strings.TrimSpace(string(ordinaryPIDBytes)))
+	if err != nil || ordinaryPID <= 1 {
+		t.Fatalf("ordinary Task process PID = %q: %v", ordinaryPIDBytes, err)
+	}
+	ordinaryBootID, ordinaryStartTime, err := store.ProcessIdentityForPID(ordinaryPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary = teardownFixtureProcess{PID: ordinaryPID, BootID: ordinaryBootID, StartTime: ordinaryStartTime}
 	bootID, startTime, err := store.ProcessIdentityForPID(pid)
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +273,12 @@ func TestTeardownPreservesDetachedSSHControlMaster(t *testing.T) {
 	if !teardownFixtureProcessRunning(master) {
 		t.Fatalf("Teardown signalled detached ControlMaster PID %d", pid)
 	}
+	if !teardownFixtureProcessRunning(child) {
+		t.Fatalf("Teardown signalled descendant %d of detached ControlMaster %d", childPID, pid)
+	}
+	if !waitForCondition(3*time.Second, func() bool { return !teardownFixtureProcessRunning(ordinary) }) {
+		t.Fatalf("Teardown preserved ordinary Task process PID %d along with the shared daemon", ordinaryPID)
+	}
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +306,9 @@ func TestTeardownPreservesDetachedSSHControlMaster(t *testing.T) {
 	}
 	if current := f.task(t, "t1"); current.State != store.StateTornDown {
 		t.Fatalf("Task after retry = %s", current.State)
+	}
+	if teardownFixtureProcessRunning(child) {
+		t.Fatalf("Teardown left descendant %d of the exited ControlMaster running", childPID)
 	}
 }
 

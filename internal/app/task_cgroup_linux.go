@@ -275,24 +275,28 @@ func retireEmptyTaskCgroup(task store.Task) error {
 }
 
 func stopTaskCgroup(ctx context.Context, task store.Task) error {
-	return stopTaskCgroupWithGuard(ctx, task, nil)
-}
-
-func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard taskProcessSignalGuard) error {
-	if task.ContainmentPath == "" {
-		return nil
-	}
-	if err := validateTaskCgroupPath(task.ContainmentPath, task); err != nil {
-		return err
-	}
 	preserved, err := detachedSharedTaskProcessPIDs(task)
 	if err != nil {
+		return err
+	}
+	if err := stopTaskCgroupWithGuard(ctx, task, nil, taskProcessPIDSet(preserved), 0); err != nil {
 		return err
 	}
 	if len(preserved) > 0 {
 		processes := processDetails(preserved)
 		return fmt.Errorf("preserving detached shared daemon processes outside the Rider's parent chain: %s", describeSharedTaskProcesses(processes))
 	}
+	return nil
+}
+
+func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard taskProcessSignalGuard, excluded map[int]bool, paneShellPID int) error {
+	if task.ContainmentPath == "" {
+		return nil
+	}
+	if err := validateTaskCgroupPath(task.ContainmentPath, task); err != nil {
+		return err
+	}
+	excludedPIDs := excluded
 	if _, err := os.Stat(task.ContainmentPath); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
@@ -308,9 +312,13 @@ func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard tas
 	started := time.Now()
 	deadline := started.Add(8 * time.Second)
 	for time.Now().Before(deadline) {
-		pids, err := cgroupProcesses(task.ContainmentPath)
+		allPIDs, err := cgroupProcesses(task.ContainmentPath)
 		if err != nil {
 			return fmt.Errorf("inspect Task cgroup: %w", err)
+		}
+		pids, err := excludeTaskProcessTree(allPIDs, excludedPIDs)
+		if err != nil {
+			return err
 		}
 		for _, pid := range pids {
 			if !processInCgroup(pid, task.ContainmentPath) {
@@ -349,7 +357,8 @@ func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard tas
 			handles[pid] = handle
 		}
 		alive := false
-		for pid, handle := range handles {
+		for _, pid := range taskProcessSignalOrder(handles, paneShellPID) {
+			handle := handles[pid]
 			isAlive, err := handle.Alive()
 			if err != nil {
 				return err
@@ -370,11 +379,18 @@ func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard tas
 			}
 		}
 		if len(pids) == 0 && !alive {
+			if len(allPIDs) > 0 {
+				return nil // Only intentionally preserved shared daemons remain in the Task cgroup.
+			}
 			return removeEmptyTaskCgroup(task.ContainmentPath)
 		}
 		time.Sleep(75 * time.Millisecond)
 	}
 	remaining, err := cgroupProcesses(task.ContainmentPath)
+	if err != nil {
+		return err
+	}
+	remaining, err = excludeTaskProcessTree(remaining, excludedPIDs)
 	if err != nil {
 		return err
 	}

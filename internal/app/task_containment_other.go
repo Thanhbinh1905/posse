@@ -21,7 +21,7 @@ func stopTaskProcessContainment(context.Context, store.Task) ([]taskProcessDetai
 	return nil, nil
 }
 
-func stopTaskProcessContainmentWithGuard(context.Context, store.Task, taskProcessSignalGuard) ([]taskProcessDetail, error) {
+func stopTaskProcessContainmentWithGuard(context.Context, store.Task, taskProcessSignalGuard, ...int) ([]taskProcessDetail, error) {
 	return nil, nil
 }
 
@@ -34,6 +34,29 @@ func retireEmptyTaskCgroup(store.Task) error {
 }
 
 func taskContainmentProcessDetails(store.Task) []taskProcessDetail { return nil }
+
+func taskSharedProcessExclusions(store.Task) ([]taskProcessDetail, map[int]bool, error) {
+	return nil, map[int]bool{}, nil
+}
+
+func describeSharedTaskProcesses([]taskProcessDetail) string { return "" }
+
+func taskProcessHasExcludedAncestor(pid int, excluded map[int]bool) (bool, error) {
+	return excluded[pid], nil
+}
+
+func excludeTaskProcessTree(pids []int, excluded map[int]bool) ([]int, error) {
+	if len(excluded) == 0 {
+		return pids, nil
+	}
+	result := make([]int, 0, len(pids))
+	for _, pid := range pids {
+		if !excluded[pid] {
+			result = append(result, pid)
+		}
+	}
+	return result, nil
+}
 
 func taskScratchProcessDetails(string, store.Project, store.Task) ([]taskProcessDetail, error) {
 	return nil, nil

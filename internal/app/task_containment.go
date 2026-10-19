@@ -19,6 +19,34 @@ type taskProcessDetail struct {
 	Ports   []int  `json:"ports,omitempty"`
 }
 
+func taskProcessPIDSet(pids []int) map[int]bool {
+	result := make(map[int]bool, len(pids))
+	for _, pid := range pids {
+		if pid > 1 {
+			result[pid] = true
+		}
+	}
+	return result
+}
+
+func mergeTaskProcessExclusions(groups ...map[int]bool) map[int]bool {
+	result := map[int]bool{}
+	for _, group := range groups {
+		for pid := range group {
+			result[pid] = true
+		}
+	}
+	return result
+}
+
+func taskProcessDetailsPIDSet(processes []taskProcessDetail) map[int]bool {
+	pids := make([]int, 0, len(processes))
+	for _, process := range processes {
+		pids = append(pids, process.PID)
+	}
+	return taskProcessPIDSet(pids)
+}
+
 func ensureTaskContainmentIdentity(ctx context.Context, db *store.DB, task store.Task) (store.Task, error) {
 	if task.ContainmentMarker != "" {
 		marker, err := hex.DecodeString(task.ContainmentMarker)

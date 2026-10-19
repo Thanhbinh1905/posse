@@ -12,6 +12,7 @@ func TestSharedTaskDaemonCommandRecognition(t *testing.T) {
 		want bool
 	}{
 		{name: "ssh ControlMaster", comm: "ssh", args: []string{"ssh", "-M", "-S", "/home/user/.ssh/control", "host"}, want: true},
+		{name: "detached OpenSSH ControlPersist mux title", comm: "ssh", args: []string{"ssh: /home/user/.ssh/cm-123 [mux]"}, want: true},
 		{name: "ssh ControlPersist", comm: "ssh", args: []string{"ssh", "-o", "ControlMaster=auto", "-o", "ControlPersist=10m", "host"}, want: true},
 		{name: "Gradle daemon", comm: "java", args: []string{"java", "org.gradle.launcher.daemon.bootstrap.GradleDaemon", "9.0"}, want: true},
 		{name: "Kotlin daemon", comm: "java", args: []string{"java", "org.jetbrains.kotlin.daemon.KotlinCompileDaemon", "--daemon"}, want: true},

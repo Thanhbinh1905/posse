@@ -176,10 +176,35 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 		t.Fatalf("ControlMaster PID %d still appears to have a Rider parent %d: %v", pid, parent, err)
 	}
 
-	preserved, err := stopTaskProcessContainment(context.Background(), store.Task{ContainmentMode: "marker", ContainmentMarker: marker})
-	if err == nil || !strings.Contains(err.Error(), "preserving detached shared daemon") {
-		t.Fatalf("Task teardown did not report the detached shared daemon: %v", err)
+	ordinary := exec.Command("sleep", "300")
+	ordinary.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "ordinary.pid"), 0)
+	if err := ordinary.Start(); err != nil {
+		t.Fatal(err)
 	}
+	ordinaryWaited := false
+	defer func() {
+		if !ordinaryWaited {
+			_ = ordinary.Process.Kill()
+			_ = ordinary.Wait()
+		}
+	}()
+	ordinaryHandle, err := openMountProcessHandle(ordinary.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ordinaryHandle.Close()
+
+	preserved, err := stopTaskProcessContainment(context.Background(), store.Task{ContainmentMode: "marker", ContainmentMarker: marker})
+	if err != nil {
+		t.Fatalf("Task teardown stopped at the shared daemon instead of stopping other processes: %v", err)
+	}
+	if alive, err := ordinaryHandle.Alive(); err != nil || alive {
+		t.Fatalf("ordinary Task process survived containment: alive=%t err=%v", alive, err)
+	}
+	if err := ordinary.Wait(); err == nil {
+		t.Fatal("ordinary Task process exited without a signal")
+	}
+	ordinaryWaited = true
 	alive, err := handle.Alive()
 	if err != nil || !alive {
 		t.Fatalf("detached ControlMaster was signalled: alive=%t err=%v", alive, err)
@@ -236,6 +261,107 @@ func TestInPlaceContainmentPreservesForeignForegroundProcess(t *testing.T) {
 	alive, err := handle.Alive()
 	if err != nil || !alive {
 		t.Fatalf("foreign foreground PID %d was signalled: alive=%t err=%v", command.Process.Pid, alive, err)
+	}
+}
+
+func TestInPlaceContainmentStopsMarkedProcessAfterPaneDisappears(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	command := exec.Command("sleep", "300")
+	command.Dir = root
+	command.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "unused"), 0)
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	defer func() {
+		if !waited {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !processHasTaskMarker(command.Process.Pid, marker) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !processHasTaskMarker(command.Process.Pid, marker) {
+		t.Fatal("marked in-place process did not start")
+	}
+
+	project := store.Project{ID: 1, Name: "local", Root: root, Kind: store.ProjectKindDirectory, HerdrWorkspaceID: "w1"}
+	task := store.Task{ID: 2, Seq: 1, WorktreePath: root, HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:local:t1", ContainmentMode: "marker", ContainmentMarker: marker}
+	fake := herdr.NewFake()
+	service := testService(t.TempDir(), fake)
+	if _, err := stopTaskProcessContainmentWithGuard(context.Background(), task, func(pid int, _ syscall.Signal) error {
+		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid)
+	}); err != nil {
+		t.Fatalf("in-place Teardown failed after the Task pane disappeared: %v", err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- command.Wait() }()
+	select {
+	case err := <-waitErr:
+		waited = true
+		if err == nil {
+			t.Fatal("marked process exited without a signal")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-place Teardown left the marker-owned process running after the pane disappeared")
+	}
+}
+
+func TestTaskContainmentSignalsPaneShellLast(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	var commands []*exec.Cmd
+	var pids []int
+	for _, name := range []string{"other", "shell"} {
+		command := exec.Command("sh", "-c", `echo $$ > "$1"; exec sleep 300`, "test", filepath.Join(root, name+".pid"))
+		command.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, name+".ready"), 0)
+		command.Stdout, command.Stderr = io.Discard, io.Discard
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		commands = append(commands, command)
+		defer func(command *exec.Cmd) {
+			if command.ProcessState == nil {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			}
+		}(command)
+		pidPath := filepath.Join(root, name+".pid")
+		if !waitForTaskContainmentFile(5*time.Second, pidPath) {
+			t.Fatalf("%s process did not record its PID", name)
+		}
+		pidBytes, err := os.ReadFile(pidPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+		if err != nil || pid != command.Process.Pid {
+			t.Fatalf("%s process PID = %q, command PID %d: %v", name, pidBytes, command.Process.Pid, err)
+		}
+		pids = append(pids, pid)
+	}
+	otherPID, shellPID := pids[0], pids[1]
+	var signalOrder []int
+	_, err := stopTaskProcessContainmentWithGuard(context.Background(), store.Task{ContainmentMode: "cgroup", ContainmentMarker: marker}, func(pid int, signal syscall.Signal) error {
+		if signal == syscall.SIGTERM {
+			signalOrder = append(signalOrder, pid)
+		}
+		return nil
+	}, shellPID)
+	if err != nil {
+		t.Fatalf("stop pane processes: %v", err)
+	}
+	if len(signalOrder) != 2 || signalOrder[0] != otherPID || signalOrder[1] != shellPID {
+		t.Fatalf("SIGTERM order = %v, want other process %d before pane shell %d", signalOrder, otherPID, shellPID)
+	}
+	for _, command := range commands {
+		if err := command.Wait(); err != nil {
+			// Both test processes deliberately ignore SIGTERM and must be killed.
+		}
 	}
 }
 
