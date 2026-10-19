@@ -224,7 +224,12 @@ func checkLookoutRestore(t *testing.T, clearGeneration bool) {
 	if err := client.StopIsolatedServer(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Second)
+	if !waitForCondition(5*time.Second, func() bool {
+		_, err := client.Snapshot(context.Background())
+		return err != nil
+	}) {
+		t.Fatal("isolated Herdr server remained available after stop")
+	}
 	startServer(t, client)
 	env := f.env
 	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"} {

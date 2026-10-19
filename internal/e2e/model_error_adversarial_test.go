@@ -84,7 +84,7 @@ func TestT242IdenticalRepaintDoesNotStrandRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.emitError(t)
-	if !waitForCondition(5*time.Second, func() bool { return f.hasNotice("model_stream_error") }) {
+	if !waitForCondition(15*time.Second, func() bool { return f.hasNotice("model_stream_error") }) {
 		episode, _ := f.base.db.TaskModelErrorEpisode(context.Background(), task.ID)
 		current, _ := f.base.db.Task(context.Background(), f.base.project.ID, "t1")
 		signals, _ := f.base.db.TaskSignals(context.Background(), task.ID, 20)

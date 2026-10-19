@@ -9,12 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 // userPaneEnv is a User shell in the given workspace, as Herdr exports it.
 func (f *riderTabsFixture) userPaneEnv(workspace workspaceResult) []string {
 	env := setEnv(f.env, "HERDR_ENV", "1")
+	env = setEnv(env, "HERDR_SOCKET_PATH", herdr.IsolatedTestSocketPath(f.root))
 	env = setEnv(env, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	env = setEnv(env, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
 	return setEnv(env, "HERDR_TAB_ID", workspace.RootPane.TabID)

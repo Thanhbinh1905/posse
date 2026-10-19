@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -55,11 +56,31 @@ func TestLookoutRecoveryBackoffSurvivesLeadRearm(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := exec.Command(f.binary, "lookout", "--ack", "all", "--timeout", "500")
+	command := exec.Command(f.binary, "lookout", "--ack", "all", "--timeout", "30000")
 	command.Dir, command.Env = f.repo, f.leadEnv
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("re-armed Lead lookout: %v\n%s", err, output)
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ready := waitForCondition(10*time.Second, func() bool {
+		state, err := f.db.LookoutRecovery(ctx, f.project.ID)
+		if err != nil || state.FailedStarts != 4 || state.PaneID == before[0].PaneID {
+			return false
+		}
+		panes := lookoutPanes(t, client)
+		return len(panes) == 1 && panes[0].TabID != before[0].TabID
+	})
+	if !ready {
+		_ = command.Process.Signal(syscall.SIGTERM)
+		_ = command.Wait()
+		t.Fatalf("persisted failed-start retry did not replace exactly one tab: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("stop re-armed Lead lookout: %v", err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("re-armed Lead lookout: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
 	panes := lookoutPanes(t, client)
 	if len(panes) != 1 || panes[0].TabID == before[0].TabID {

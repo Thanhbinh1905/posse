@@ -559,7 +559,7 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
 	// Isolate the explicit Land check from the independent watcher, which can
 	// deliver its own target-sync instruction and reopen t2 first.
-	stopBackgroundLookout(t, fixture)
+	pauseFixtureBackgroundLookout(t, fixture.root, fixture.env, fixture.db, fixture.project.ID)
 
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge"); !strings.Contains(output, "landing") {
 		t.Fatalf("first PR did not merge: %s", output)
@@ -1271,6 +1271,8 @@ func TestMergedPRAutoTearsDownEvenWhenAutoUnsaddleIsNever(t *testing.T) {
 func TestPRLandingAcceptsFollowUpBeforeFailureNotice(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
+	// Test direct message delivery without a poll-only Lookout racing to claim it.
+	stopBackgroundLookout(t, fixture)
 	brief := filepath.Join(fixture.root, "follow-up.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR follow-up\ndone_when: follow-up is committed\n---\nAllow follow-up work while the PR is landing.\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1338,7 +1340,20 @@ func TestLandReadyBeforeMergeDoesNotRaiseLatePROpened(t *testing.T) {
 	}) {
 		t.Fatal("PR watcher did not raise land_ready")
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge", "--user-approved", "User approved the pull request")
+	var mergeOutput []byte
+	var mergeErr error
+	for attempt := 1; attempt <= 6; attempt++ {
+		command := exec.Command(fixture.binary, "land", "t1", "--merge", "--user-approved", "User approved the pull request")
+		command.Dir, command.Env = fixture.repo, fixture.leadEnv
+		mergeOutput, mergeErr = command.CombinedOutput()
+		if mergeErr == nil || !strings.Contains(string(mergeOutput), `"pr_merge_busy"`) || !strings.Contains(string(mergeOutput), "another repository sync or pull request merge is in progress") {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+	}
+	if mergeErr != nil {
+		t.Fatalf("retryable Land contention did not clear: %v\n%s", mergeErr, mergeOutput)
+	}
 
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
@@ -2008,7 +2023,7 @@ esac
 		// This mode calls up outside the pane and has no live Lead to answer
 		// its detached startup finalizer. Stop it now; it otherwise waits 30s
 		// after a Herdr restart and outlives cleanup.
-		runPosse(t, binary, repo, callerEnv, "up", "--name", "shop", "--yes")
+		runPRLifecycleUp(t, binary, repo, callerEnv)
 		stopLeadFinalizers(t, root, binary)
 	}
 	opened, err := store.Open(home)
@@ -2045,6 +2060,26 @@ esac
 		ghTitle: filepath.Join(root, "gh-title.txt"), ghPRClosed: filepath.Join(root, "gh-pr-closed"),
 		ghCloseFail: filepath.Join(root, "gh-close-fail"), db: opened, project: project,
 	}
+}
+
+func runPRLifecycleUp(t *testing.T, binary, repo string, env []string) {
+	t.Helper()
+	for attempt := 1; attempt <= 6; attempt++ {
+		command := exec.Command(binary, "up", "--name", "shop", "--yes")
+		command.Dir, command.Env = repo, env
+		output, err := command.CombinedOutput()
+		if err == nil {
+			return
+		}
+		// Open/migration contention happens before `up` can register a Project;
+		// retry only that explicitly retryable, side-effect-free startup failure.
+		if !strings.Contains(string(output), `"store_busy"`) || !strings.Contains(string(output), "while opening or migrating the database") {
+			t.Fatalf("posse up --name shop --yes: %v\n%s", err, output)
+		}
+		t.Logf("retry posse up after retryable database-open contention (attempt %d/6): %s", attempt, strings.TrimSpace(string(output)))
+		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+	}
+	t.Fatal("posse up remained blocked by retryable database-open contention after six attempts")
 }
 
 func paneForegroundMatches(raw json.RawMessage, want string) bool {
