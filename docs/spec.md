@@ -999,7 +999,7 @@ Inside one member of an unregistered workspace, `posse up` registers that reposi
 
 ## 25. Built-in validation
 
-Status: Config and plan freezing are implemented. The interim refusal and deprecation visibility in 25.17 are also implemented; the Review Loop, Gate Fix Rounds, CI loop, head continuity and Posse-owned PR evidence are not. The built-in validation loop replaces the `no-mistakes` Landing Mode and review policy for `pr` and `local` delivery. It has five parts: the Review Loop (25.2-25.11), Gate Fix Rounds (25.12), the CI loop (25.13), head continuity (25.14) and Posse-owned PR evidence (25.15). It changes how validation is done, not whether review is required: `defaults.review` still selects the evidence Land needs (section 13, D02). Every part reads only Posse config (User-only) and the Task's frozen target branch.
+Status: Config and plan freezing are implemented. The interim refusal and deprecation visibility in 25.17 are also implemented, as are Gate Fix Rounds. The Review Loop, CI loop, head continuity and Posse-owned PR evidence remain unimplemented. The built-in validation loop replaces the `no-mistakes` Landing Mode and review policy for `pr` and `local` delivery. It has five parts: the Review Loop (25.2-25.11), Gate Fix Rounds (25.12), the CI loop (25.13), head continuity (25.14) and Posse-owned PR evidence (25.15). It changes how validation is done, not whether review is required: `defaults.review` still selects the evidence Land needs (section 13, D02). Every part reads only Posse config (User-only) and the Task's frozen target branch.
 
 ### 25.1 Configuration
 

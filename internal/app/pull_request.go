@@ -211,13 +211,12 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 				return err
 			}
 			task.GatedSHA = gatedSHA
-			if err := runGates(ctx, cfg, task); err != nil {
-				_, noticeErr := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "gate_failed", Summary: task.Title + ": " + truncate(err.Error(), 240), DataJSON: `{}`})
-				if noticeErr != nil {
-					return noticeErr
+			if gateErr := runGates(ctx, cfg, task); gateErr != nil {
+				if err := recordGateFailure(ctx, db, project, task, gatedSHA, "", gateErr); err != nil {
+					return err
 				}
 				_ = s.deliverNotices(ctx, db, project)
-				return axi.Failure("gate_failed", err.Error(), false, "Fix the gate failure on the Task branch, then run `posse send "+taskIDString(task.Seq)+" <instruction>`")
+				return axi.Failure("gate_failed", gateErr.Error(), false, gateFailureHelp(task))
 			}
 			currentSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 			if err != nil {
