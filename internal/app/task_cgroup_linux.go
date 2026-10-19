@@ -212,6 +212,13 @@ func processInCgroup(pid int, cgroupPath string) bool {
 	return err == nil && (current == relative || strings.HasPrefix(current, strings.TrimSuffix(relative, "/")+"/"))
 }
 
+func processInTaskCgroup(pid int, task store.Task) bool {
+	if pid <= 1 || task.ContainmentMode != "cgroup" || task.ContainmentPath == "" {
+		return false
+	}
+	return validateTaskCgroupPath(task.ContainmentPath, task) == nil && processInCgroup(pid, task.ContainmentPath)
+}
+
 func cgroupProcesses(cgroupPath string) ([]int, error) {
 	if _, err := taskCgroupRelativePath(cgroupPath); err != nil {
 		return nil, err

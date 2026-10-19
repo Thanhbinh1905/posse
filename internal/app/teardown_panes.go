@@ -512,7 +512,7 @@ func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project 
 	return info, nil
 }
 
-func (s *Service) verifyInPlaceProcessSignalOwnership(ctx context.Context, project store.Project, task store.Task, pid int) error {
+func (s *Service) verifyInPlaceProcessSignalOwnership(ctx context.Context, project store.Project, task store.Task, pid, recordedShellPID int) error {
 	info, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
 	if err != nil {
 		return err
@@ -520,8 +520,14 @@ func (s *Service) verifyInPlaceProcessSignalOwnership(ctx context.Context, proje
 	if pid > 1 && info.ShellPID == pid {
 		return nil
 	}
+	if processInTaskCgroup(pid, task) {
+		return nil // Delegated cgroup membership independently proves Task ownership.
+	}
 	if task.ContainmentMarker != "" && processHasTaskMarker(pid, task.ContainmentMarker) {
 		return nil // Pane disappearance is safe for a process independently owned by the Task marker.
+	}
+	if pid > 1 && pid == recordedShellPID && info.ShellPID != recordedShellPID {
+		return errPaneShellNotRecorded
 	}
 	return axi.Failure("task_process_identity_unavailable", fmt.Sprintf("process %d is neither marked for the Task nor the verified in-place pane shell", pid), true)
 }

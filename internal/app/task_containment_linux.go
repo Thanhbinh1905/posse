@@ -178,12 +178,13 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 	started := time.Now()
 	deadline := started.Add(8 * time.Second)
 	excludedPIDs := excluded
+	skipPaneShell := false
 	for time.Now().Before(deadline) {
 		pids, err := markedTaskPIDs(marker)
 		if err != nil {
 			return nil, err
 		}
-		if paneShellPID > 1 {
+		if paneShellPID > 1 && !skipPaneShell {
 			pids = append(pids, paneShellPID)
 			sort.Ints(pids)
 			pids = uniqueProcessIDs(pids)
@@ -192,8 +193,19 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 		if err != nil {
 			return nil, err
 		}
+		paneShellSkippedThisPass := false
 		for _, pid := range pids {
 			paneShell := pid == paneShellPID && paneShellPID > 1
+			if paneShell && signalGuard != nil && !processHasTaskMarker(pid, marker) {
+				if err := signalGuard(pid, 0); err != nil {
+					if forgetStalePaneShellProcess(pid, paneShellPID, marker, handles, terminated, err) {
+						skipPaneShell = true
+						paneShellSkippedThisPass = true
+						continue
+					}
+					return processDetails(pids), err
+				}
+			}
 			if existing := handles[pid]; existing != nil {
 				alive, err := existing.Alive()
 				if err != nil {
@@ -229,6 +241,9 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 			}
 			handles[pid] = handle
 		}
+		if paneShellSkippedThisPass {
+			pids = removeTaskProcessPID(pids, paneShellPID)
+		}
 		alive := false
 		for _, pid := range taskProcessSignalOrder(handles, paneShellPID) {
 			handle := handles[pid]
@@ -239,17 +254,27 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 			if !isAlive {
 				continue
 			}
-			alive = true
 			if !terminated[pid] {
 				if err := handle.Signal(syscall.SIGTERM); err != nil {
+					if forgetStalePaneShellProcess(pid, paneShellPID, marker, handles, terminated, err) {
+						skipPaneShell = true
+						pids = removeTaskProcessPID(pids, pid)
+						continue
+					}
 					return processDetails(pids), err
 				}
 				terminated[pid] = true
 			} else if time.Since(started) >= 2*time.Second {
 				if err := handle.Signal(syscall.SIGKILL); err != nil {
+					if forgetStalePaneShellProcess(pid, paneShellPID, marker, handles, terminated, err) {
+						skipPaneShell = true
+						pids = removeTaskProcessPID(pids, pid)
+						continue
+					}
 					return processDetails(pids), err
 				}
 			}
+			alive = true
 		}
 		otherPIDs := 0
 		for _, pid := range pids {
@@ -282,6 +307,28 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 		}
 	}
 	return processDetails(remaining), fmt.Errorf("task processes survived marker shutdown: %v", remaining)
+}
+
+func forgetStalePaneShellProcess(pid, paneShellPID int, marker string, handles map[int]*mountProcessHandle, terminated map[int]bool, err error) bool {
+	if pid != paneShellPID || paneShellPID <= 1 || processHasTaskMarker(pid, marker) || !errors.Is(err, errPaneShellNotRecorded) {
+		return false
+	}
+	if handle := handles[pid]; handle != nil {
+		_ = handle.Close()
+		delete(handles, pid)
+	}
+	delete(terminated, pid)
+	return true
+}
+
+func removeTaskProcessPID(pids []int, pid int) []int {
+	filtered := pids[:0]
+	for _, candidate := range pids {
+		if candidate != pid {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
 }
 
 func uniqueProcessIDs(pids []int) []int {

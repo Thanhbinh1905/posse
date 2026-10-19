@@ -46,6 +46,13 @@ herdr pane report-agent "$HERDR_PANE_ID" --source posse.e2e --agent claude --sta
 while [ ! -e "$POSSE_E2E_SIGNAL_GATE" ]; do sleep 0.05; done
 printf 'in-place E2E change\n' > src/created.txt
 posse holler done 'E2E changed the approved directory without a commit' >> "$POSSE_E2E_AGENT_LOG" 2>&1 || { echo 'done signal failed' >> "$POSSE_E2E_AGENT_LOG"; exit 1; }
+if [ -n "${POSSE_E2E_UNMARKED_CGROUP_CHILD_GATE:-}" ]; then
+  while [ ! -e "$POSSE_E2E_UNMARKED_CGROUP_CHILD_GATE" ]; do sleep 0.05; done
+  IFS= read -r cgroup_child_mode < "$POSSE_E2E_UNMARKED_CGROUP_CHILD_GATE"
+  if [ "$cgroup_child_mode" = run ]; then
+    /usr/bin/env -i /bin/sh -c 'printf "%s\\n" "$$" > "$1"; exec /bin/sleep 300' e2e-unmarked-cgroup-child "$POSSE_E2E_UNMARKED_CGROUP_CHILD_PID" >/dev/null 2>&1 &
+  fi
+fi
 if [ -n "${POSSE_E2E_FOREGROUND_VIM:-}" ]; then
   printf '%s\n' "$$" > "$POSSE_E2E_FOREGROUND_VIM"
   exec python3 -c 'import ctypes, time; ctypes.CDLL(None).prctl(15, ctypes.c_char_p(b"vim"), 0, 0, 0); time.sleep(300)'
@@ -58,18 +65,21 @@ while IFS= read -r line; do :; done
 		t.Fatal(err)
 	}
 	for _, testCase := range []struct {
-		name              string
-		withGit           bool
-		foreignForeground bool
+		name                string
+		withGit             bool
+		foreignForeground   bool
+		unmarkedCgroupChild bool
 	}{
 		{name: "plain"},
 		{name: "git", withGit: true},
 		{name: "foreign foreground", foreignForeground: true},
+		{name: "unmarked cgroup child", unmarkedCgroupChild: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			withGit := testCase.withGit
 			foreignForeground := testCase.foreignForeground
-			if foreignForeground && runtime.GOOS != "linux" {
+			unmarkedCgroupChild := testCase.unmarkedCgroupChild
+			if (foreignForeground || unmarkedCgroupChild) && runtime.GOOS != "linux" {
 				t.Skip("process-containment signal guards are Linux-specific")
 			}
 			caseRoot := newFixtureRoot(t, herdr.TestRootName())
@@ -85,6 +95,12 @@ while IFS= read -r line; do :; done
 			foreignPIDPath := filepath.Join(caseRoot, "foreign-foreground.pid")
 			if foreignForeground {
 				env = setEnv(env, "POSSE_E2E_FOREGROUND_VIM", foreignPIDPath)
+			}
+			unmarkedChildPIDPath := filepath.Join(caseRoot, "unmarked-cgroup-child.pid")
+			unmarkedChildGatePath := filepath.Join(caseRoot, "unmarked-cgroup-child.gate")
+			if unmarkedCgroupChild {
+				env = setEnv(env, "POSSE_E2E_UNMARKED_CGROUP_CHILD_PID", unmarkedChildPIDPath)
+				env = setEnv(env, "POSSE_E2E_UNMARKED_CGROUP_CHILD_GATE", unmarkedChildGatePath)
 			}
 			env = setEnv(env, "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			env = setEnv(env, "GIT_AUTHOR_NAME", "Posse E2E")
@@ -155,6 +171,24 @@ while IFS= read -r line; do :; done
 			if !strings.Contains(output, "state: working") {
 				t.Fatalf("ride did not start: %s", output)
 			}
+			if unmarkedCgroupChild {
+				stateDB, err := store.OpenReadOnly(home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				startedTask, taskErr := stateDB.Task(context.Background(), project.ID, "t1")
+				closeErr := stateDB.Close()
+				if taskErr != nil || closeErr != nil {
+					t.Fatalf("read cgroup mode before releasing fake Rider: task=%#v err=%v/%v", startedTask, taskErr, closeErr)
+				}
+				mode := "skip"
+				if startedTask.ContainmentMode == "cgroup" {
+					mode = "run"
+				}
+				if err := os.WriteFile(unmarkedChildGatePath, []byte(mode+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := os.WriteFile(filepath.Join(caseRoot, "signal.done"), []byte("go\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -178,6 +212,7 @@ while IFS= read -r line; do :; done
 			if err != nil || len(tasks) != 1 || tasks[0].State != store.StateReported || tasks[0].Branch != "" || tasks[0].MountID != 0 {
 				t.Fatalf("completed in-place Task = %#v, %v", tasks, err)
 			}
+			task := tasks[0]
 			leases, err := db.ResourceLeases(context.Background(), project.ID)
 			if err != nil || len(leases) != 1 {
 				t.Fatalf("in-place lease was not held through completion: %#v, %v", leases, err)
@@ -198,9 +233,18 @@ while IFS= read -r line; do :; done
 					t.Fatalf("reported in-place Task has no task_done Notice: %#v", notices)
 				}
 			}
-			paneID := tasks[0].PaneID
+			paneID := task.PaneID
 			if paneID == "" {
 				t.Fatal("in-place Task has no Rider pane")
+			}
+			if unmarkedCgroupChild && task.ContainmentMode != "cgroup" {
+				if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": paneID}); err != nil {
+					t.Fatalf("close Rider pane before skipping unavailable cgroup case: %v", err)
+				}
+				if output := runPosse(t, binary, directory, leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
+					t.Fatalf("clean up marker-mode Rider before skipping cgroup case: %s", output)
+				}
+				t.Skip("Task cgroup mode is unavailable in this environment")
 			}
 			if contents, err := os.ReadFile(filepath.Join(directory, "src", "created.txt")); err != nil || string(contents) != "in-place E2E change\n" {
 				t.Fatalf("in-place source change missing: %q, %v", contents, err)
@@ -216,6 +260,39 @@ while IFS= read -r line; do :; done
 				}
 			}
 			_ = db.Close()
+			var unmarkedChild teardownFixtureProcess
+			if unmarkedCgroupChild {
+				t.Cleanup(func() {
+					if unmarkedChild.PID > 1 && teardownFixtureProcessRunning(unmarkedChild) && e2eProcessInTaskCgroup(unmarkedChild.PID, task.ContainmentPath) {
+						_ = syscall.Kill(unmarkedChild.PID, syscall.SIGKILL)
+					}
+				})
+				if !waitForCondition(10*time.Second, func() bool {
+					pidBytes, err := os.ReadFile(unmarkedChildPIDPath)
+					if err != nil {
+						return false
+					}
+					pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+					if err != nil || pid <= 1 {
+						return false
+					}
+					bootID, startTime, err := store.ProcessIdentityForPID(pid)
+					if err != nil {
+						return false
+					}
+					unmarkedChild = teardownFixtureProcess{PID: pid, BootID: bootID, StartTime: startTime}
+					return true
+				}) {
+					t.Fatal("env -i cgroup child did not start")
+				}
+				environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", unmarkedChild.PID))
+				if err != nil || strings.Contains(string(environ), "POSSE_TASK_ID=") {
+					t.Fatalf("env -i child still carries a Task marker: %q err=%v", environ, err)
+				}
+				if !e2eProcessInTaskCgroup(unmarkedChild.PID, task.ContainmentPath) {
+					t.Fatalf("unmarked child PID %d is outside Task cgroup %s", unmarkedChild.PID, task.ContainmentPath)
+				}
+			}
 			if foreignForeground {
 				var foreignPID int
 				var foreignBootID, foreignStartTime string
@@ -320,11 +397,16 @@ while IFS= read -r line; do :; done
 				}
 				return
 			}
-			if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": paneID}); err != nil {
-				t.Fatalf("close the completed Rider pane before normal Teardown: %v", err)
+			if !unmarkedCgroupChild {
+				if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": paneID}); err != nil {
+					t.Fatalf("close the completed Rider pane before normal Teardown: %v", err)
+				}
 			}
 			if output := runPosse(t, binary, directory, leadEnv, "unsaddle", "t1"); !strings.Contains(output, "torn-down") {
 				t.Fatalf("unsaddle did not finish: %s", output)
+			}
+			if unmarkedCgroupChild && !waitForCondition(5*time.Second, func() bool { return !teardownFixtureProcessRunning(unmarkedChild) }) {
+				t.Fatalf("Teardown left env -i Task cgroup process %d running", unmarkedChild.PID)
 			}
 			if contents, err := os.ReadFile(filepath.Join(directory, "src", "created.txt")); err != nil || string(contents) != "in-place E2E change\n" {
 				t.Fatalf("Teardown did not preserve source changes: %q, %v", contents, err)

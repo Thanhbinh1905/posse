@@ -13,6 +13,8 @@ import (
 
 type taskProcessSignalGuard func(int, syscall.Signal) error
 
+var errPaneShellNotRecorded = errors.New("task pane shell is no longer the recorded process")
+
 type taskProcessDetail struct {
 	PID     int    `json:"pid"`
 	Command string `json:"command"`

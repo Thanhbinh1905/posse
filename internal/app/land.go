@@ -666,7 +666,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			signalGuard := taskProcessSignalGuard(nil)
 			if inPlace {
 				signalGuard = func(pid int, _ syscall.Signal) error {
-					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid)
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, inPlaceShellPID)
 				}
 			} else if processAuthorization != nil {
 				signalGuard = processAuthorization.guardSignal
@@ -895,7 +895,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 			shellPID := 0
 			if inPlace {
 				signalGuard = func(pid int, _ syscall.Signal) error {
-					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid)
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, shellPID)
 				}
 				if len(taskContainmentProcessDetails(task)) > 0 {
 					paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
