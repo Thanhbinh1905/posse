@@ -108,8 +108,9 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 	}
 	rows := make([]any, 0, len(items))
 	for _, item := range items {
-		rows = append(rows, map[string]any{"kind": item.kind, "item": item.label, "path": item.path, "state": item.state, "size_bytes": item.bytes, "reason": item.reason})
+		rows = append(rows, map[string]any{"kind": item.kind, "item": item.label, "path": item.path, "state": item.state, "size_bytes": item.bytes, "reason": item.reason, "applied": false})
 	}
+	var pruneErr error
 	if parsed.Bool("yes") {
 		for index, item := range items {
 			if err := s.applyPruneItem(ctx.Context, db, home, project, item); err != nil {
@@ -121,19 +122,32 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 					}
 					continue
 				}
-				return err
+				pruneErr = err
+				break
 			}
+			rows[index].(map[string]any)["applied"] = true
 		}
 	}
-	orphans, err := s.pruneOrphanPanes(ctx, db, project, parsed.Bool("yes"))
-	if err != nil {
-		return err
+	var orphans axi.Object
+	if pruneErr == nil {
+		orphans, pruneErr = s.pruneOrphanPanes(ctx, db, project, parsed.Bool("yes"))
 	}
 	result := axi.Object{{Key: "project", Value: project.Name}, {Key: "prune", Value: rows}, {Key: "dry_run", Value: !parsed.Bool("yes")}, {Key: "help", Value: []any{"Run `posse pool prune --yes` to remove these safe, Posse-owned items"}}}
 	for _, field := range orphans {
 		if field.Key == "orphans" || field.Key == "closed_panes" {
 			result = append(result, field)
 		}
+	}
+	if pruneErr != nil {
+		var structured *axi.Error
+		if !errors.As(normalizeCommandError(pruneErr), &structured) {
+			structured = axi.Failure("prune_incomplete", pruneErr.Error(), true, "Inspect the applied rows and retry `posse pool prune` after resolving the failure")
+		}
+		result = append(result, axi.Field{Key: "error", Value: structured})
+		if err := ctx.Print(result); err != nil {
+			return errors.Join(pruneErr, err)
+		}
+		return axi.Reported(structured)
 	}
 	return ctx.Print(result)
 }
@@ -238,8 +252,11 @@ func (s *Service) applyPruneItem(ctx context.Context, db *store.DB, home string,
 	switch item.kind {
 	case "sandbox":
 		claimed, err := db.ClaimSandboxPrune(ctx, project.ID, item.sandbox.ID)
-		if err != nil || !claimed {
+		if err != nil {
 			return err
+		}
+		if !claimed {
+			return axi.Failure("prune_skipped", "Sandbox ownership changed since prune was planned", false)
 		}
 		var removeErr error
 		if project.IsWorkspace() {

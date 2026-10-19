@@ -16,26 +16,21 @@ const vocabularyMarker = "# posse vocabulary: 1\n"
 
 // ReplacementKey is shared by validation and the one-time stored-config upgrade.
 func ReplacementKey(key string) string {
-	parts := strings.Split(key, ".")
-	changed := false
-	for i, part := range parts {
-		replacement := part
-		switch {
-		case i == 0 && part == "remuda":
-			replacement = "pool"
-		case part == "landing_mode":
-			replacement = "merge_mode"
-		case part == "auto_unsaddle":
-			replacement = "auto_teardown"
-		case i > 0 && parts[i-1] == "autonomy" && part == "land":
-			replacement = "merge"
-		}
-		if replacement != part {
-			parts[i], changed = replacement, true
-		}
+	switch key {
+	case "remuda":
+		return "pool"
+	case "defaults.landing_mode":
+		return "defaults.merge_mode"
+	case "defaults.auto_unsaddle":
+		return "defaults.auto_teardown"
+	case "autonomy.land":
+		return "autonomy.merge"
 	}
-	if changed {
-		return strings.Join(parts, ".")
+	if strings.HasPrefix(key, "remuda.") {
+		return "pool." + strings.TrimPrefix(key, "remuda.")
+	}
+	if strings.HasPrefix(key, "repositories.") && strings.HasSuffix(key, ".landing_mode") && len(key) > len("repositories.")+len(".landing_mode") {
+		return strings.TrimSuffix(key, ".landing_mode") + ".merge_mode"
 	}
 	return ""
 }
@@ -76,7 +71,7 @@ func migrateVocabularyFile(path string) error {
 	}
 	values := map[string]any{}
 	if _, err := toml.Decode(string(data), &values); err != nil {
-		return err
+		return &InvalidError{File: path, Key: tomlErrorKey(err), Cause: err}
 	}
 	changed, err := migrateVocabularyMap(values, "")
 	if err != nil {

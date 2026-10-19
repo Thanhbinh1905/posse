@@ -4,7 +4,7 @@ Implements epic #333 and slices #334-#338 in one release cut. ADR 0025 records t
 
 ## Observable contract
 
-The CLI exposes `start`, `signal`, `teardown`, `watch`, `pool`, `list`, `merge` and `preferences`. Removed commands are hidden rejection entries, not working aliases. Rejection includes `--help` and does not invoke an operation.
+The CLI exposes `start`, `signal`, `teardown`, `watch`, `pool`, `list`, `merge` and `preferences`. Removed User commands are hidden rejection entries, not working aliases. Rejection includes `--help` and does not invoke an operation. The stored 0.14 Pi/OpenCode adapter's exact JSON `lookout --handoff`/`--receipt` protocol is the sole runtime exception, using canonical Watch caller and receipt-ownership checks.
 
 ```text
 $ posse ride
@@ -18,6 +18,10 @@ exit=2
 
 Merge preparation is `posse merge <task>`. Integration is `posse merge <task> --execute`, with the existing approval, Gate, Review and freshness checks. New Briefs use `change`, `research`, `merge_mode`, `autonomy.merge` and `execution: sandbox`.
 
+## User upgrade steps
+
+The installed 0.14 binary requires `posse update --stop-lookouts`; it cannot accept the new `--stop-watches` flag. After installation, run the new `posse setup`, refresh previously installed global skills with `posse setup --global-skills`, and restart every running Lead with `posse up --replace` from a User shell in each Project. This reloads the adapter and instructions held in memory. The hidden compatibility path keeps in-flight Pi/OpenCode Notice handoffs and receipts working until restart; it does not make other old commands or flags valid.
+
 ## Upgrade regression
 
 `Test014ProjectVocabularyUpgradePreservesTasksSandboxesAndOpenPR` runs the real CLI with an isolated Herdr server and home. It creates historical Task and Notice values, an existing worktree and branch, an open PR observation and old config. Opening the upgraded Project migrates stored vocabulary, preserves Task IDs, paths, PR identity and quoted User text, lists the existing Sandbox, prepares the existing PR for Merge and rejects removed commands.
@@ -30,7 +34,13 @@ Additional regressions cover:
 - historical snapshot Notice/Decision/lease normalization without changing evidence or ownership;
 - preserving a literal User option `land`, interrupted Workspace Merge intent and historical discard process authority;
 - replacement of only the recorded historical observer, preserving unrelated panes and replacement agents;
-- canonical root help, config schema and replacement-specific command/flag errors.
+- canonical root help, config schema and replacement-specific command/flag errors;
+- retained 0.14 Pi/OpenCode handoff and receipt argv through the real CLI, while non-adapter old-name calls still fail;
+- malformed first-open config retaining its filename and `config_invalid` diagnostic;
+- partial `pool prune --yes` results retaining applied rows alongside an orphan-pane failure;
+- interrupted intent steps preserving Member names and nested execution-status wrappers;
+- anchored config approval keys, including `preferences.rider`, without rewriting names, values or User quotes;
+- interrupted Orphan snapshots reusing historical `-leftover` refs and one Decision instead of creating duplicate branches.
 
 ## Persisted compatibility
 
@@ -50,9 +60,15 @@ Main's #339 stabilization was merged before final checks. Its merged-PR freshnes
 
 A teardown E2E setup race was reproduced with the real CLI: Herdr had cleared `pane.Agent` but still exposed the exited agent in its agent registry. The fixture now waits for both observations to settle. The retained-shell regression passed three consecutive runs with that change; production ownership checks were not weakened. Workspace fixtures now respect retryable interrupted-intent conflicts, use main's busy-Lead/direct-ack stabilization and avoid exposing an unbound synthetic reviewer as a live Task to the Watch.
 
+## Round 1 review
+
+The review's concrete failures were reproduced before fixing them. `review-round1-e2e-red.log` records both retained adapters exiting 2 and malformed config returning `internal_error` without a filename. `review-round1-red.log` records hidden partial prune effects, duplicate Orphan refs, rewritten intent Member names, over-matched approval keys and unchanged real-format lease owners. Regression commands and their green results are recorded in the refreshed PR.
+
+The #328 merge at `0f32f67` already resolves P1-2: its new files use `ChangeTaskID`, Change Task, Worker, `start` and `signal`. The merge retained the Finding Ledger and shared Signal-file resolver without rebasing.
+
 ## Risk and rollback
 
-This is a deliberate breaking vocabulary cut for scripts and new input. The migration changes persisted domain values, so an old binary must not open the upgraded database. Config migration keeps changed original files as `.v014`; unchanged files keep their bytes and receive a `.vocabulary` marker. Conflicting keys stop the upgrade without choosing a value.
+This is a deliberate breaking vocabulary cut for scripts and new input. The migration changes persisted domain values, so an old binary must not open the upgraded database. Config migration keeps changed original files as `.v014`; changed files are re-encoded without comments/layout, which remain in that backup. Unchanged files keep their bytes and receive a `.vocabulary` marker. Conflicting keys stop the upgrade without choosing a value.
 
 Before deployment, stop Project processes and back up the complete Posse home, including the database and SQLite sidecars, config, snapshots, Task plans and preferences, together with each Project's Git metadata and worktree registrations. To roll back, stop upgraded processes, preserve post-upgrade commits and PRs, restore the pre-upgrade home and Git metadata plus `.v014` config backups, then reinstall 0.14. Do not downgrade against migrated state or relocate existing worktrees. Reverting the code alone does not reverse stored domain values.
 

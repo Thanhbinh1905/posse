@@ -53,7 +53,10 @@ func snapshotUnmergedMemberWork(ctx context.Context, db *store.DB, project store
 				return nil
 			}
 		}
-		name := task.Branch + "-orphan"
+		name, err := orphanSnapshotBranch(ctx, project.Root, task.Branch)
+		if err != nil {
+			return err
+		}
 		orphanRef := "refs/heads/" + name
 		if previous, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", orphanRef); err == nil {
 			if previous != tip {
@@ -76,13 +79,28 @@ func snapshotUnmergedMemberWork(ctx context.Context, db *store.DB, project store
 	return persistOrphanSnapshot(ctx, db, project, task, member)
 }
 
+// A 0.14 Teardown may have written its snapshot ref before recording a
+// Decision. Reuse that ref without renaming it or creating a second snapshot.
+func orphanSnapshotBranch(ctx context.Context, root, branch string) (string, error) {
+	legacy := branch + "-leftover"
+	if _, err := gitOutput(ctx, root, "rev-parse", "--verify", "refs/heads/"+legacy); err == nil {
+		return legacy, nil
+	} else if !isMissingGitRef(err) {
+		return "", err
+	}
+	return branch + "-orphan", nil
+}
+
 func persistOrphanSnapshot(ctx context.Context, db *store.DB, project store.Project, task store.Task, member string) error {
 	path := task.WorktreePath
 	head, err := gitOutput(ctx, path, "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
-	name := task.Branch + "-orphan"
+	name, err := orphanSnapshotBranch(ctx, project.Root, task.Branch)
+	if err != nil {
+		return err
+	}
 	ref := "refs/heads/" + name
 	// A merge-only follow-up contains no content to carry forward. Compare
 	// both the merged head and the current target, including staged edits.

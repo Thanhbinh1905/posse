@@ -27,6 +27,15 @@ curl -fsSL https://raw.githubusercontent.com/Thanhbinh1905/posse/main/install.sh
 
 The installer downloads a release to `~/.local/bin` by default and offers to set up Herdr integrations and configuration. Posse skills are injected only into sessions it launches; `posse setup --global-skills` optionally installs them for ordinary agent sessions. To install without setup, pass `--no-setup` after `sh -s --`. Run `posse setup` later to complete setup. Pass `--help` after `sh -s --` to see all options.
 
+### Upgrading from 0.14
+
+1. Back up the full Posse home and Project Git metadata as described in [ADR 0025](docs/adr/0025-functional-vocabulary.md).
+2. From a User shell, run the installed 0.14 binary with `posse update --stop-lookouts`. That binary does not know `--stop-watches`; use the new flag only after upgrading.
+3. Run `posse setup` with the new binary. If you installed optional global skills, also run `posse setup --global-skills` so agents do not learn removed commands from stale copies.
+4. Restart every running Lead: from a User shell in each Project, run `posse up --replace`. Running Pi/OpenCode Leads retain their old adapters in memory. Their exact machine handoff/receipt calls remain supported during the transition, but restarting loads the new adapter and instructions.
+
+Stored Tasks, config and paths upgrade automatically; existing worktrees are not moved. Removed User commands and flags fail with their replacement names.
+
 ## Get started
 
 1. Open a Herdr pane in your repository or workspace folder and run `posse up`. It asks once before registering an unregistered Project.

@@ -48,7 +48,8 @@ type Command struct {
 	Usage   string
 	Summary string
 	Hidden  bool
-	// ReplacedBy is an error-only tombstone, including for --help requests.
+	// ReplacedBy rejects removed input, including --help. An optional Handler
+	// may accept a narrowly scoped, persisted runtime protocol.
 	ReplacedBy  string
 	Handler     func(*Context, []string) error
 	Subcommands []*Command
@@ -226,7 +227,7 @@ func (a *App) Run(args []string) int {
 		return 0
 	}
 	if command, path, ok := a.resolve(filtered); ok {
-		if command.ReplacedBy != "" {
+		if command.ReplacedBy != "" && (command.Handler == nil || hasFlag(filtered, "--help", "-h")) {
 			return a.printError(ctx, Usage(fmt.Sprintf("%s %s was removed; use %s %s", a.Name, strings.Join(path, " "), a.Name, command.ReplacedBy)))
 		}
 		if hasFlag(filtered, "--help", "-h") {

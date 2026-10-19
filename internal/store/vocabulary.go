@@ -71,8 +71,8 @@ func normalizeProjectSnapshotVocabulary(state *projectStateSnapshot) {
 		if strings.HasPrefix(lease.SourceKey, "mount:") {
 			lease.SourceKey = "sandbox:" + strings.TrimPrefix(lease.SourceKey, "mount:")
 		}
-		if strings.HasPrefix(lease.Owner, "mount ") {
-			lease.Owner = "sandbox " + strings.TrimPrefix(lease.Owner, "mount ")
+		if lease.SandboxID != 0 {
+			lease.Owner = strings.Replace(lease.Owner, " mount-", " sandbox-", 1)
 		}
 	}
 }

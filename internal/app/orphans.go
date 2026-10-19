@@ -103,12 +103,17 @@ func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store
 		}
 		sort.Strings(paneIDs)
 		rows = append(rows, map[string]any{"label": label, "panes": paneIDs})
+	}
+	result := func() axi.Object {
+		return axi.Object{{Key: "project", Value: project.Name}, {Key: "orphans", Value: rows}, {Key: "closed_panes", Value: closed}, {Key: "dry_run", Value: !apply}, {Key: "help", Value: []any{"Run `posse pool prune --yes` to close these orphan panes"}}}
+	}
+	for _, row := range rows {
 		if !apply {
 			continue
 		}
-		for _, paneID := range paneIDs {
+		for _, paneID := range row.(map[string]any)["panes"].([]string) {
 			if _, err := s.herdrCall(ctx.Context, "pane.close", map[string]any{"pane_id": paneID}); err != nil && !missingPaneError(err) {
-				return nil, err
+				return result(), err
 			}
 			closed = append(closed, paneID)
 		}
@@ -116,7 +121,7 @@ func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store
 	if apply {
 		verified, err := s.snapshot(ctx.Context)
 		if err != nil {
-			return nil, err
+			return result(), err
 		}
 		closedSet := make(map[string]bool, len(closed))
 		for _, paneID := range closed {
@@ -124,14 +129,14 @@ func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store
 		}
 		for _, pane := range verified.Panes {
 			if closedSet[pane.PaneID] {
-				return nil, axi.Failure("prune_incomplete", fmt.Sprintf("orphan pane %s remains open", pane.PaneID), true)
+				return result(), axi.Failure("prune_incomplete", fmt.Sprintf("orphan pane %s remains open", pane.PaneID), true)
 			}
 			if _, selected := unknown[pane.Label]; selected {
-				return nil, axi.Failure("prune_incomplete", fmt.Sprintf("orphan label %s remains", pane.Label), true)
+				return result(), axi.Failure("prune_incomplete", fmt.Sprintf("orphan label %s remains", pane.Label), true)
 			}
 		}
 	}
-	return axi.Object{{Key: "project", Value: project.Name}, {Key: "orphans", Value: rows}, {Key: "closed_panes", Value: closed}, {Key: "dry_run", Value: !apply}, {Key: "help", Value: []any{"Run `posse pool prune --yes` to close these orphan panes"}}}, nil
+	return result(), nil
 }
 
 func ownsUnknownPane(snapshot herdr.Snapshot, pane herdr.Pane, project string, sequence int, sandboxes []store.Sandbox) bool {
