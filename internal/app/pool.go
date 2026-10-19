@@ -106,7 +106,7 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 			items = append(items, registration)
 		}
 	}
-	rows := make([]any, 0, len(items))
+	rows := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		rows = append(rows, map[string]any{"kind": item.kind, "item": item.label, "path": item.path, "state": item.state, "size_bytes": item.bytes, "reason": item.reason, "applied": false})
 	}
@@ -116,16 +116,14 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 			if err := s.applyPruneItem(ctx.Context, db, home, project, item); err != nil {
 				var commandError *axi.Error
 				if errors.As(err, &commandError) && commandError.Code == "prune_skipped" {
-					if row, ok := rows[index].(map[string]any); ok {
-						row["state"] = "skipped"
-						row["reason"] = commandError.Message
-					}
+					rows[index]["state"] = "skipped"
+					rows[index]["reason"] = commandError.Message
 					continue
 				}
 				pruneErr = err
 				break
 			}
-			rows[index].(map[string]any)["applied"] = true
+			rows[index]["applied"] = true
 		}
 	}
 	var orphans axi.Object

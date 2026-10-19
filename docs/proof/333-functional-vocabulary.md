@@ -64,7 +64,7 @@ A teardown E2E setup race was reproduced with the real CLI: Herdr had cleared `p
 
 The review's concrete failures were reproduced before fixing them. `review-round1-e2e-red.log` records both retained adapters exiting 2 and malformed config returning `internal_error` without a filename. `review-round1-red.log` records hidden partial prune effects, duplicate Orphan refs, rewritten intent Member names, over-matched approval keys and unchanged real-format lease owners. Regression commands and their green results are recorded in the refreshed PR.
 
-The #328 merge at `0f32f67` already resolves P1-2: its new files use `ChangeTaskID`, Change Task, Worker, `start` and `signal`. The merge retained the Finding Ledger and shared Signal-file resolver without rebasing.
+The #328 merge at `0f32f67` already resolves P1-2: its new files use `ChangeTaskID`, Change Task, Worker, `start` and `signal`. The merge retained the Finding Ledger and shared Signal-file resolver without rebasing. Main's #325 Gate Fix Rounds were then merged at `dfba532`, preserving bounded fix rounds and carrying functional vocabulary into the new code and fixtures. A further red/green regression ensures Gate fix instructions read admitted historical Briefs as stored data and retain the User's intent verbatim.
 
 ## Risk and rollback
 

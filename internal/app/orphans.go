@@ -94,7 +94,11 @@ func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store
 		labels = append(labels, label)
 	}
 	sort.Strings(labels)
-	rows := make([]any, 0)
+	type orphanRow struct {
+		Label string   `json:"label"`
+		Panes []string `json:"panes"`
+	}
+	rows := make([]orphanRow, 0)
 	closed := []string{}
 	for _, label := range labels {
 		paneIDs := make([]string, 0, len(unknown[label]))
@@ -102,7 +106,7 @@ func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store
 			paneIDs = append(paneIDs, pane.PaneID)
 		}
 		sort.Strings(paneIDs)
-		rows = append(rows, map[string]any{"label": label, "panes": paneIDs})
+		rows = append(rows, orphanRow{Label: label, Panes: paneIDs})
 	}
 	result := func() axi.Object {
 		return axi.Object{{Key: "project", Value: project.Name}, {Key: "orphans", Value: rows}, {Key: "closed_panes", Value: closed}, {Key: "dry_run", Value: !apply}, {Key: "help", Value: []any{"Run `posse pool prune --yes` to close these orphan panes"}}}
@@ -111,7 +115,7 @@ func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store
 		if !apply {
 			continue
 		}
-		for _, paneID := range row.(map[string]any)["panes"].([]string) {
+		for _, paneID := range row.Panes {
 			if _, err := s.herdrCall(ctx.Context, "pane.close", map[string]any{"pane_id": paneID}); err != nil && !missingPaneError(err) {
 				return result(), err
 			}
