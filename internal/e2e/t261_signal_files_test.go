@@ -39,10 +39,10 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		env = setEnv(env, "HERDR_PANE_ID", task.PaneID)
 		return setEnv(env, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
 	}
-	runSignal := func(task store.Task, args ...string) (int, string) {
+	runSignalAt := func(task store.Task, dir string, args ...string) (int, string) {
 		t.Helper()
 		command := exec.Command(fixture.binary, args...)
-		command.Dir, command.Env = task.WorktreePath, riderEnv(task)
+		command.Dir, command.Env = dir, riderEnv(task)
 		output, err := command.CombinedOutput()
 		if err == nil {
 			return 0, string(output)
@@ -53,11 +53,14 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		t.Fatalf("run Rider Signal: %v", err)
 		return 1, string(output)
 	}
+	runSignal := func(task store.Task, args ...string) (int, string) {
+		return runSignalAt(task, task.WorktreePath, args...)
+	}
 	assertRejected := func(task store.Task, flag, path string) {
 		t.Helper()
 		code, output := runSignal(task, "holler", "needs-decision", "Need review", flag, path)
 		taskScratch := filepath.Join(fixture.home, "scratch", "shop", "t"+strconv.Itoa(task.Seq))
-		if code == 0 || !strings.Contains(output, "signal_invalid") || !strings.Contains(output, task.WorktreePath) || !strings.Contains(output, taskScratch) {
+		if code == 0 || !strings.Contains(output, "signal_invalid") || !strings.Contains(output, "Signal files must be inside") || !strings.Contains(output, task.WorktreePath) || !strings.Contains(output, taskScratch) {
 			t.Fatalf("foreign %s path was not refused with both allowed locations: code=%d output=%s", flag, code, output)
 		}
 	}
@@ -101,7 +104,10 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 			t.Fatalf("foreign --report path was not refused with both allowed locations: code=%d output=%s", code, output)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(scoutScratch, "report.md"), []byte("Task report\n"), 0o600); err != nil {
+	if err := os.Mkdir(filepath.Join(scout.WorktreePath, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scout.WorktreePath, "report.md"), []byte("Task report\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	launch, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t3", "launch.md"))
@@ -113,8 +119,8 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 			t.Errorf("Rider protocol omitted %q:\n%s", want, launch)
 		}
 	}
-	if code, output := runSignal(scout, "holler", "done", "Scout complete", "--report", filepath.Join(scoutScratch, "report.md")); code != 0 {
-		t.Fatalf("own Task scratch --report failed: code=%d output=%s", code, output)
+	if code, output := runSignalAt(scout, filepath.Join(scout.WorktreePath, "nested"), "holler", "done", "Scout complete", "--report", "report.md"); code != 0 {
+		t.Fatalf("worktree-relative --report from a Rider subdirectory failed: code=%d output=%s", code, output)
 	}
 	if !waitForCondition(10*time.Second, func() bool {
 		contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t3", "report.md"))

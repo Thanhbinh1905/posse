@@ -92,7 +92,9 @@ func TestSelectedReviewPolicyLocalLand(t *testing.T) {
 func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	stopBackgroundLookout(t, f)
-	// No explicit review setting: the built-in policy is none.
+	// No explicit review setting: the built-in policy is none. Keep the Gate
+	// failure manual so this test isolates review and merge authority.
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "gate_loop.max_fix_rounds", "0", "--user-approved", "Keep this test on the manual Gate failure path")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["exit 1"]`)
 	if code, out := rideReviewIdentityTask(t, f, "No independent review", "author", ""); code != 0 {
 		t.Fatalf("ride: %d %s", code, out)

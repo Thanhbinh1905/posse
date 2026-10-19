@@ -1367,7 +1367,20 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return axi.Failure("signal_invalid", "a Scout or Review Task requires --report <file>", false, fmt.Sprintf("Store the report in the Rider's worktree (%s) or this Task's scratch directory (%s)", task.WorktreePath, scratchPath))
 		}
 	}
+	var reviewFindings *store.ReviewFindingsInput
+	var findingsContents []byte
 	if verb == "done" {
+		if task.Type == "review" {
+			reviewFindings, findingsContents, err = reviewRoundForSignal(ctx.Context, db, home, project, task, parsed.Flags["findings"])
+			if err != nil {
+				return err
+			}
+			if reviewFindings != nil && !verdictGiven {
+				return axi.Failure("signal_invalid", "a numbered Review Round requires --verdict <pass|changes_requested|inconclusive>", false)
+			}
+		} else if parsed.Flags["findings"] != "" {
+			return axi.Failure("signal_invalid", "--findings on a done Signal is only valid for a numbered Review Round", false)
+		}
 		pending, err := db.HasPendingTaskInstructions(ctx.Context, task.ID)
 		if err != nil {
 			if store.IsBusy(err) {
@@ -1393,6 +1406,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		if _, err := copySignalFile(home, project, task, parsed.Flags["report"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
+		}
+		if reviewFindings != nil {
+			if err := writeReviewFindingsArtifact(project, task, home, findingsContents); err != nil {
+				return err
+			}
 		}
 		for _, path := range attachments {
 			if err := saveExplicitAttachment(task, home, project, path); err != nil {
@@ -1450,7 +1468,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		verdict = &store.ReviewVerdictInput{Verdict: verdictFlag, ReportSHA256: digest}
+		verdict = &store.ReviewVerdictInput{Verdict: verdictFlag, ReportSHA256: digest, Findings: reviewFindings}
 	}
 	state, err := s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, inPlace)
 	if err != nil {
@@ -1462,6 +1480,18 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		if errors.Is(err, store.ErrReviewTargetUnbound) {
 			return axi.Failure("review_target_unbound", "this Review Task has no bound Ship revision, so it cannot record a verdict", false)
+		}
+		if errors.Is(err, store.ErrReviewFindingsRequired) {
+			return axi.Failure("review_findings_required", "a numbered Review Round requires --findings <file>", false)
+		}
+		if errors.Is(err, store.ErrReviewFindingsUnexpected) {
+			return axi.Failure("review_findings_unexpected", "--findings is only valid for a numbered Review Round", false)
+		}
+		if errors.Is(err, store.ErrReviewVerdictInconsistent) {
+			return axi.Failure("review_verdict_inconsistent", err.Error(), false)
+		}
+		if errors.Is(err, store.ErrReviewFindingsInvalid) {
+			return axi.Failure("review_findings_invalid", err.Error(), false)
 		}
 		if errors.Is(err, store.ErrQueuedInstructionsPending) {
 			return queuedInstructionsPendingFailure(task)
@@ -1664,6 +1694,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return err
 	}
 	reason := "agent_not_ready"
+	var blockedByMessageID int64
 	var sendPane herdr.Pane
 	paneFound := false
 	compacting := false
@@ -1701,6 +1732,10 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		earlierPending := false
 		if queueErr == nil && paneFound {
 			attemptedReason = queuedMessageReason(task, candidate, sendPane, snapshot, cfg)
+			if attemptedReason != "" && candidate.ID != messageID {
+				earlierPending = true
+				blockedByMessageID = candidate.ID
+			}
 			if attemptedReason == "" {
 				wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, candidate, sendPane.PaneID, cfg)
 				if err != nil {
@@ -1710,6 +1745,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 				if !wasDelivered {
 					if candidate.ID != messageID && deliveryReason != "" && deliveryReason != "delivery_in_progress" {
 						earlierPending = true
+						blockedByMessageID = candidate.ID
 					} else {
 						attemptedReason = deliveryReason
 					}
@@ -1763,8 +1799,14 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"
 		} else if reason == "blocked" || reason == "agent_ui_unknown" {
 			help = "Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's dialog before retrying; use `posse keys " + taskIDString(task.Seq) + " <key...>` for a blocked permission prompt"
+		} else if blockedByMessageID != 0 {
+			help = fmt.Sprintf("Earlier message #%d is ahead in the queue; inspect it with `posse show %s`", blockedByMessageID, taskIDString(task.Seq))
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})
+		result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}}
+		if blockedByMessageID != 0 {
+			result = append(result, axi.Field{Key: "blocked_by_message", Value: blockedByMessageID})
+		}
+		return ctx.Print(result)
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Rider's response"}}})
 }
@@ -2801,42 +2843,9 @@ func validateShipSignal(ctx context.Context, task store.Task) error {
 }
 
 func copySignalFile(home string, project store.Project, task store.Task, supplied, destination string) (string, error) {
-	worktreeRoot, err := filepath.Abs(task.WorktreePath)
+	path, contents, err := resolveSignalFile(home, project, task, supplied)
 	if err != nil {
 		return "", err
-	}
-	scratchRoot, err := taskScratchPath(home, project, task)
-	if err != nil {
-		return "", err
-	}
-	validatedScratchRoot, err := validatedTaskScratchRoot(home, project, task)
-	if err != nil {
-		return "", fmt.Errorf("invalid Task scratch directory %s; Signal files must be inside the Rider's worktree (%s) or this Task's scratch directory: %w", scratchRoot, worktreeRoot, err)
-	}
-	allowedRoots := []string{worktreeRoot, validatedScratchRoot}
-	allowedLocations := fmt.Sprintf("the Rider's worktree (%s) or this Task's scratch directory (%s)", worktreeRoot, scratchRoot)
-	path, err := filepath.Abs(supplied)
-	if err != nil {
-		return "", err
-	}
-	path, err = filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", fmt.Errorf("cannot resolve Signal file %q; files must be inside %s: %w", supplied, allowedLocations, err)
-	}
-	insideAllowedRoot := false
-	for _, root := range allowedRoots {
-		relative, relErr := filepath.Rel(root, path)
-		if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			insideAllowedRoot = true
-			break
-		}
-	}
-	if !insideAllowedRoot {
-		return "", fmt.Errorf("report and findings files must be inside %s", allowedLocations)
-	}
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read Signal file %q inside %s: %w", supplied, allowedLocations, err)
 	}
 	if err := writeFile(destination, contents); err != nil {
 		return "", err
