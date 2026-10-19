@@ -644,7 +644,7 @@ func (s *Service) unsaddleTask(ctx context.Context, db *store.DB, project store.
 	}
 	if !discardable {
 		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
-			if inPlace && len(taskContainmentProcessDetails(task)) > 0 {
+			if inPlace {
 				paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
 				if err != nil {
 					return err

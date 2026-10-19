@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,8 +39,14 @@ func TestE2ELockOwnerCannotOutliveTestProcess(t *testing.T) {
 	env = setEnv(env, lockOwnerPIDEnv, pidPath)
 	child := exec.Command(os.Args[0], "-test.run=^TestE2ELockOwnerCannotOutliveTestProcess$")
 	child.Env = env
-	if output, err := child.CombinedOutput(); err == nil {
-		t.Fatalf("parent test process exited normally; expected SIGKILL: %s", output)
+	output, err := child.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("parent test process did not exit from SIGKILL: err=%v output=%s", err, output)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("parent test process exit = %v, want SIGKILL: output=%s", exitErr, output)
 	}
 
 	contents, err := os.ReadFile(pidPath)
@@ -60,8 +67,10 @@ func TestE2ELockOwnerCannotOutliveTestProcess(t *testing.T) {
 			_ = syscall.Kill(owner.PID, syscall.SIGKILL)
 		}
 	})
-	if waitForCondition(2*time.Second, func() bool { return teardownFixtureProcessRunning(owner) }) {
-		t.Fatalf("lock owner %d survived its test process", pid)
+	if !waitForCondition(2*time.Second, func() bool { return !teardownFixtureProcessRunning(owner) }) {
+		stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		commandLine, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		t.Fatalf("lock owner %d survived its test process: stat=%q cmdline=%q", pid, stat, commandLine)
 	}
 	if err := exec.Command("flock", "-n", lockPath, "true").Run(); err != nil {
 		t.Fatalf("lock owner %d retained its lock after parent death: %v", pid, err)
