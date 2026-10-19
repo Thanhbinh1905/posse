@@ -221,12 +221,16 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	}
 	absentSince := task.AgentAbsentSince
 	agentPresent := pane.Agent != ""
-	session := sessionref.Sanitize(pane.Agent, task.AgentSession)
+	session := task.AgentSession
 	sessionKind := task.AgentSessionKind
-	if len(pane.AgentSession) > 0 && string(pane.AgentSession) != "null" {
-		if reported := sessionref.Sanitize(pane.Agent, string(pane.AgentSession)); reported != "" {
-			session = reported
-			sessionKind = sessionref.NormalizeKind(pane.Agent)
+	// A session without an agent name has no safe owner kind to persist.
+	if agentPresent {
+		session = sessionref.Sanitize(pane.Agent, task.AgentSession)
+		if len(pane.AgentSession) > 0 && string(pane.AgentSession) != "null" {
+			if reported := sessionref.Sanitize(pane.Agent, string(pane.AgentSession)); reported != "" {
+				session = reported
+				sessionKind = sessionref.NormalizeKind(pane.Agent)
+			}
 		}
 	}
 	if !agentPresent {

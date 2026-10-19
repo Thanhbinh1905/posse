@@ -2236,7 +2236,17 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	kindChanged := kind != taskKind(cfg, task)
 	prepareChanged := kindChanged || plan != nil && kindConfig.Prepare != plan.Launch.Kind.Prepare
 	session := ""
-	if sessionref.NormalizeKind(task.AgentSessionKind) == sessionref.NormalizeKind(kind) {
+	sessionOwner := sessionref.NormalizeKind(task.AgentSessionKind)
+	// Legacy Tasks have no owner column value; infer only from their stored or
+	// frozen Profile, never from a requested relaunch override.
+	if sessionOwner == "" && sessionref.Sanitize("", task.AgentSession) != "" {
+		if plan != nil {
+			sessionOwner = sessionref.NormalizeKind(plan.Launch.Profile.Kind)
+		} else if storedProfile, ok := dispatch.StoredProfile(cfg, task.Profile, task.DispatchRule); ok {
+			sessionOwner = sessionref.NormalizeKind(storedProfile.Kind)
+		}
+	}
+	if sessionOwner == sessionref.NormalizeKind(kind) {
 		session = agentSessionID(kind, task.AgentSession)
 	}
 	startArgs := workerAgentArgs(profile, kindConfig, session)
