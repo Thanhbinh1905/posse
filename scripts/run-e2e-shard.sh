@@ -277,6 +277,11 @@ if [ "$#" -ne 1 ]; then
   echo "usage: $0 <1|2|3|4>|--self-test" >&2
   exit 2
 fi
+count=${POSSE_E2E_COUNT:-1}
+case "$count" in
+  ''|*[!0-9]*|0) echo "POSSE_E2E_COUNT must be a positive integer" >&2; exit 2 ;;
+esac
+timeout=${POSSE_E2E_TIMEOUT:-15m}
 shard=$1
 case "$shard" in
   1|2|3|4) ;;
@@ -288,4 +293,4 @@ validate_assignments "$listed" "$assignments"
 pattern=$(printf '%s\n' "$assignments" | awk -v shard="$shard" '$1 == shard { if (count++) printf "|"; printf "%s", $2 } END { print "" }')
 printf 'Running E2E shard %s/4\n' "$shard"
 # Recovery-heavy shards take up to eleven minutes locally; allow bounded runner variance.
-go test -tags=e2e -count=1 -timeout=15m ./internal/e2e -run "^(${pattern})$"
+go test -tags=e2e -count="$count" -timeout="$timeout" ./internal/e2e -run "^(${pattern})$"

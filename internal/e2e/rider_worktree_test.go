@@ -159,8 +159,14 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	}
 	if !waitForCondition(30*time.Second, func() bool {
 		a, b := f.task(t, "t1"), f.task(t, "t2")
-		_, leadReady := findLeadInSnapshot(f.snapshot(t))
-		return leadReady && a.Launches > firstBeforeLeadClose.Launches && b.Launches > secondBeforeLeadClose.Launches
+		project := f.project(t)
+		snapshot := f.snapshot(t)
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == "posse:shop:lead" {
+				return a.Launches > firstBeforeLeadClose.Launches && b.Launches > secondBeforeLeadClose.Launches
+			}
+		}
+		return false
 	}) {
 		db, err := store.OpenReadOnly(f.home)
 		if err == nil {
@@ -211,9 +217,20 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": second.HerdrWorkspaceID}); err != nil {
 		t.Fatalf("close the exited Rider child workspace: %v", err)
 	}
-	lead, _ := findLeadInSnapshot(snap)
+	project := f.project(t)
+	var lead herdr.Pane
+	for _, pane := range snap.Panes {
+		if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == "posse:shop:lead" && pane.Agent != "" {
+			lead = pane
+			break
+		}
+	}
+	if lead.PaneID == "" {
+		t.Fatalf("could not match the persisted Lead to its Herdr pane: project=%#v", project)
+	}
 	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", lead.WorkspaceID)
+	leadEnv = setEnv(leadEnv, "HERDR_TAB_ID", lead.TabID)
 	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": f.userBefore.RootPane.PaneID}); err != nil {
 		t.Fatal(err)
 	}

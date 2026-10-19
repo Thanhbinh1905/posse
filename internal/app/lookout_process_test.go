@@ -198,11 +198,18 @@ func TestFreshLookoutPaneWaitsWithoutBlockingPastStartupGrace(t *testing.T) {
 	if fake.CallCount("tab.close") != 0 || fake.CallCount("tab.create") != 0 {
 		t.Fatalf("fresh pane was replaced inside its startup grace: %#v", fake.Calls)
 	}
-	// The short test grace can expire before this database read under -race.
-	time.Sleep(lookoutStartupGracePeriod + 10*time.Millisecond)
 	state, err := db.LookoutRecovery(ctx, project.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if remaining := time.Until(time.UnixMilli(state.RetryAt)); remaining > 0 {
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-time.After(time.Second):
+			t.Fatal("persisted Lookout startup grace did not expire")
+		}
 	}
 	graceStarted, graceFinished := startedAt.Add(lookoutStartupGracePeriod).UnixMilli(), finishedAt.Add(lookoutStartupGracePeriod).UnixMilli()
 	if state.PaneID != pane.PaneID || state.RetryAt < graceStarted || state.RetryAt > graceFinished || state.FailedStarts != 0 || state.NoticeRaised {

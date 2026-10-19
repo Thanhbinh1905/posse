@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -444,8 +445,8 @@ rows = [["state_icon", "machine", { token = "workspace", rules = [{ starts_with 
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build posse: %v\n%s", err, output)
 	}
-	// The fake Rider stays working until torn down; the fake Lead reports
-	// activity when prompted so its detached startup finalizer can finish.
+	// The fake Rider stays working until torn down. Keep the fake Lead alive
+	// so its detached startup finalizer can observe the agent.
 	agent := `#!/bin/sh
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 case "$PWD/" in
@@ -506,10 +507,60 @@ esac
 		t.Fatal(err)
 	}
 	callerEnv := setEnv(env, "HERDR_ENV", "1")
+	callerEnv = setEnv(callerEnv, "HERDR_SOCKET_PATH", herdr.IsolatedTestSocketPath(root))
 	callerEnv = setEnv(callerEnv, "HERDR_PANE_ID", lead.RootPane.PaneID)
 	callerEnv = setEnv(callerEnv, "HERDR_WORKSPACE_ID", lead.Workspace.WorkspaceID)
 	callerEnv = setEnv(callerEnv, "HERDR_TAB_ID", lead.RootPane.TabID)
-	runPosse(t, binary, repo, callerEnv, "up", "--name", "shop", "--yes")
+	agentInput, leadInput, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := exec.Command(binary, "up", "--name", "shop", "--yes")
+	up.Dir, up.Env, up.Stdin = repo, callerEnv, agentInput
+	up.Stdout, up.Stderr = io.Discard, io.Discard
+	if err := up.Start(); err != nil {
+		_ = agentInput.Close()
+		_ = leadInput.Close()
+		t.Fatalf("start posse up: %v", err)
+	}
+	_ = agentInput.Close()
+	t.Cleanup(func() {
+		_ = leadInput.Close()
+		if up.Process != nil {
+			_ = up.Process.Kill()
+			_ = up.Wait()
+		}
+	})
+	if !waitForCondition(10*time.Second, func() bool {
+		snapshot, err := client.Snapshot(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID == lead.RootPane.PaneID && pane.Agent != "" && pane.AgentStatus == "idle" {
+				return true
+			}
+		}
+		return false
+	}) {
+		snapshot, _ := client.Snapshot(context.Background())
+		t.Fatalf("posse up did not start the Lead agent: %#v", snapshot.Panes)
+	}
+	if !waitForCondition(10*time.Second, func() bool {
+		details, err := fixtureProcessDetails(root)
+		if err != nil {
+			return false
+		}
+		for _, detail := range details {
+			if strings.Contains(detail, " _finalize-lead") {
+				return false
+			}
+		}
+		return true
+	}) {
+		details, _ := fixtureProcessDetails(root)
+		t.Fatalf("Lead startup finalizer did not finish: %v", details)
+	}
 	db, err := store.OpenReadOnly(home)
 	if err != nil {
 		t.Fatal(err)

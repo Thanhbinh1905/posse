@@ -35,7 +35,16 @@ func showAfterActiveTeardown(t *testing.T, f *prLifecycleFixture, taskID string)
 func finishShowAfterTeardown(t *testing.T, f *prLifecycleFixture, taskID string, output []byte, err error) (string, error) {
 	t.Helper()
 	if err != nil && !strings.Contains(string(output), `"teardown_in_progress"`) {
-		return "", fmt.Errorf("posse show %s: %w\n%s", taskID, err, output)
+		task, taskErr := f.db.Task(context.Background(), f.project.ID, taskID)
+		stateRaceDuringTeardown := strings.Contains(string(output), "Task state changed concurrently") && taskErr == nil && (task.State == store.StateLanded || task.State == store.StateTornDown)
+		if !stateRaceDuringTeardown {
+			var transitions []store.TransitionRecord
+			var transitionsErr error
+			if taskErr == nil {
+				transitions, transitionsErr = f.db.TaskTransitions(context.Background(), task.ID, 20)
+			}
+			return "", fmt.Errorf("posse show %s: %w\n%s\nTask=%#v (%v)\nTransitions=%#v (%v)", taskID, err, output, task, taskErr, transitions, transitionsErr)
+		}
 	}
 	if !waitForCondition(30*time.Second, func() bool {
 		task, taskErr := f.db.Task(context.Background(), f.project.ID, taskID)
