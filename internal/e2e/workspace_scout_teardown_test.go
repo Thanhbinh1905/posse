@@ -707,6 +707,11 @@ esac
 		if err := os.WriteFile(filepath.Join(root, "scout-mode"), []byte("missing-baseline"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		// Keep the Lead busy so Lookout does not race the direct ack with a
+		// prompt-delivery claim while this subtest repairs the baseline.
+		if _, err := client.Run(context.Background(), "pane", "report-agent", leadPane.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+			t.Fatalf("mark workspace Lead busy for direct Report ack: %v", err)
+		}
 		brief := filepath.Join(root, "t9.md")
 		contents := "---\ntype: scout\ntitle: repair-baseline\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
 		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
@@ -767,17 +772,18 @@ esac
 		}) {
 			t.Fatal("repair-baseline Task's task_done Notice was not delivered before acknowledgement")
 		}
-		ackOutput := runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
-		if !strings.Contains(ackOutput, "acknowledged: 1") && !waitForCondition(30*time.Second, func() bool {
+		ackOutput := ""
+		ackedOrTornDown := waitForCondition(15*time.Second, func() bool {
+			ackOutput = runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
+			if strings.Contains(ackOutput, "acknowledged: 1") {
+				return true
+			}
 			current, err := db.Task(context.Background(), project.ID, "t9")
 			return err == nil && current.State == store.StateTornDown
-		}) {
-			current, taskErr := db.Task(context.Background(), project.ID, "t9")
-			mount, mountErr := db.MountByTask(context.Background(), task.ID)
-			transitions, transitionErr := db.TaskTransitions(context.Background(), task.ID, 20)
-			allNotices, noticeErr := db.Notices(context.Background(), project.ID, true)
-			intents, intentErr := db.Intents(context.Background(), project.ID)
-			t.Fatalf("ack or an already-committed acknowledgement did not repair Report Teardown: %s; task=%#v err=%v mount=%#v err=%v transitions=%#v err=%v notices=%#v err=%v intents=%#v err=%v", ackOutput, current, taskErr, mount, mountErr, transitions, transitionErr, allNotices, noticeErr, intents, intentErr)
+		})
+		if !ackedOrTornDown {
+			current, _ := db.Task(context.Background(), project.ID, "t9")
+			t.Fatalf("ack or an already-committed acknowledgement did not repair Report Teardown: %s; task=%#v", ackOutput, current)
 		}
 		if !waitForCondition(30*time.Second, func() bool {
 			current, err := db.Task(context.Background(), project.ID, "t9")
