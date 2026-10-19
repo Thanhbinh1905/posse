@@ -151,11 +151,11 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	if !recoveredNotice {
 		t.Fatalf("no group-close recovery Notice: %#v", notices)
 	}
-	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPanes(t, f.client)) > 0 && len(lookoutPIDs(f.root)) > 0 }) {
-		t.Fatal("foreign-primary recovery did not restart Lookout")
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Fatal("foreign-primary recovery did not preserve the hidden Lookout poller")
 	}
-	if panes, processes := lookoutPanes(t, f.client), lookoutPIDs(f.root); len(panes) != 1 || len(processes) != 1 {
-		t.Fatalf("group recovery left Lookouts: panes=%d processes=%d", len(panes), len(processes))
+	if panes, processes := lookoutPanes(t, f.client), lookoutPIDs(f.root); len(panes) != 0 || len(processes) != 1 {
+		t.Fatalf("group recovery left visible or duplicate Lookouts: panes=%d processes=%d", len(panes), len(processes))
 	}
 	// The primary row uses the same close-group operation as a foreign primary.
 	firstBeforeLeadClose, secondBeforeLeadClose := f.task(t, "t1"), f.task(t, "t2")
@@ -191,12 +191,24 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 		t.Fatalf("Lead group close did not restore both Riders: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
 	}
 	snap = f.snapshot(t)
-	assertRecoveredRiderRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
-	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPanes(t, f.client)) > 0 && len(lookoutPIDs(f.root)) > 0 }) {
-		t.Fatal("Lead-primary recovery did not restart Lookout")
+	if !waitForCondition(10*time.Second, func() bool {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		project, err := db.ProjectByID(context.Background(), f.projectID)
+		return err == nil && project.LeadPaneID != "" && project.LeadLabel != ""
+	}) {
+		t.Fatal("Lead recovery did not finish recording its identity")
 	}
-	if panes, processes := lookoutPanes(t, f.client), lookoutPIDs(f.root); len(panes) != 1 || len(processes) != 1 {
-		t.Fatalf("Lead group close left Lookouts: panes=%d processes=%d", len(panes), len(processes))
+	snap = f.snapshot(t)
+	assertRecoveredRiderRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Fatal("Lead-primary recovery did not preserve the hidden Lookout poller")
+	}
+	if panes, processes := lookoutPanes(t, f.client), lookoutPIDs(f.root); len(panes) != 0 || len(processes) != 1 {
+		t.Fatalf("Lead group close left visible or duplicate Lookouts: panes=%d processes=%d", len(panes), len(processes))
 	}
 	db, err = store.OpenReadOnly(f.home)
 	if err != nil {
@@ -278,7 +290,18 @@ func TestRidersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing
 	if currentProject.LeadPaneID != lead.PaneID || currentProject.HerdrWorkspaceID != lead.WorkspaceID {
 		t.Fatalf("stale observation reverted the recovered Lead identity: got %#v, want pane=%s workspace=%s", currentProject, lead.PaneID, lead.WorkspaceID)
 	}
-	runPosse(t, f.binary, f.repo, leadEnv, "unsaddle", "t2", "--discard", "--user-approved", "User approved the child teardown test")
+	command := exec.Command(f.binary, "unsaddle", "t2", "--discard", "--user-approved", "User approved the child teardown test")
+	command.Dir, command.Env = f.repo, leadEnv
+	commandOutput, commandErr := command.CombinedOutput()
+	if commandErr != nil {
+		db, dbErr := store.OpenReadOnly(f.home)
+		if dbErr == nil {
+			project, projectErr := db.ProjectByName(context.Background(), "shop")
+			db.Close()
+			t.Fatalf("posse unsaddle t2 failed: %v\n%s\ncontext=%s leadPane=%s project=%#v projectErr=%v", commandErr, commandOutput, runPosse(t, f.binary, f.repo, leadEnv, "_context"), lead.PaneID, project, projectErr)
+		}
+		t.Fatalf("posse unsaddle t2 failed: %v\n%s\nopen project: %v", commandErr, commandOutput, dbErr)
+	}
 	snap = f.snapshot(t)
 	if snap.FocusedPaneID != focusedBeforeClose {
 		t.Fatalf("Teardown stole focus: before %s after %s", focusedBeforeClose, snap.FocusedPaneID)

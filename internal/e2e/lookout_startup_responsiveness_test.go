@@ -5,33 +5,20 @@ package e2e
 import (
 	"bufio"
 	"bytes"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
 
-func TestLookoutStartupGraceHonorsTimeoutAndSIGTERM(t *testing.T) {
-	f := newPRLifecycleFixtureWithSlowLoginShell(t)
+func TestLookoutWaitHonorsTimeoutAndSIGTERMWithoutVisibleShell(t *testing.T) {
+	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
-		t.Fatal("initial Lookout did not start")
+		t.Fatalf("hidden Project poller did not start: %v", lookoutPIDs(f.root))
 	}
-	stuckShell := filepath.Join(f.root, "bin", "slow-login-shell")
-	if err := os.WriteFile(stuckShell, []byte("#!/bin/sh\nsleep 300\nexec /bin/sh -l\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, pid := range lookoutPIDs(f.root) {
-		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if !waitForCondition(5*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 0 }) {
-		t.Fatal("Lookout did not stop")
-	}
+	stopLiveLookoutPoller(t, f.root)
 
 	for _, mode := range []string{"timeout", "SIGTERM"} {
 		timeout := "500"
@@ -55,11 +42,13 @@ func TestLookoutStartupGraceHonorsTimeoutAndSIGTERM(t *testing.T) {
 		go func() {
 			defer close(readDone)
 			scanner := bufio.NewScanner(stderr)
+			readySignaled := false
 			for scanner.Scan() {
 				line := scanner.Text()
 				stderrOutput.WriteString(line + "\n")
-				if strings.Contains(line, "Lookout acknowledgement committed:") {
+				if !readySignaled && strings.Contains(line, "Lookout acknowledgement committed:") {
 					close(ready)
+					readySignaled = true
 				}
 			}
 		}()
@@ -85,7 +74,10 @@ func TestLookoutStartupGraceHonorsTimeoutAndSIGTERM(t *testing.T) {
 			t.Fatalf("lookout %s: %v; stdout=%s stderr=%s", mode, err, stdout.String(), stderrOutput.String())
 		}
 		if elapsed > 2*time.Second {
-			t.Errorf("lookout %s took %s during startup grace", mode, elapsed)
+			t.Errorf("lookout %s took %s", mode, elapsed)
 		}
+	}
+	if pids := lookoutPIDs(f.root); len(pids) != 1 {
+		t.Fatalf("Lookout wait left %d hidden pollers: %v", len(pids), pids)
 	}
 }

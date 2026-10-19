@@ -44,8 +44,32 @@ func prBranchBehindFailure(taskSeq int, headSHA string, freshness prTargetFreshn
 		"pr_branch_behind",
 		message,
 		false,
-		"Posse queued an instruction to merge origin/"+freshness.Branch+" into the Task branch, rerun the Gate, republish, and report done before retrying `posse land "+taskIDString(taskSeq)+"`; never rebase a pushed branch",
+		"Merge origin/"+freshness.Branch+" into the Task branch, rerun the Gate, republish, and report done before retrying `posse land "+taskIDString(taskSeq)+"`; never rebase a pushed branch",
 	)
+}
+
+func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	if task.State != store.StateWorking || task.Type != "ship" || task.PRURL == "" || task.LandingMode != "pr" && task.LandingMode != "no-mistakes" {
+		return nil
+	}
+	observation, err := db.LatestPRObservation(ctx, task.ID)
+	if store.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if observation.PRURL != task.PRURL || observation.State != "OPEN" || observation.HeadSHA == "" {
+		return nil
+	}
+	freshness, err := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
+	if err != nil {
+		return err
+	}
+	if freshness.Fresh {
+		return nil
+	}
+	return prBranchBehindFailure(task.Seq, observation.HeadSHA, freshness)
 }
 
 func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, landingMode string, freshness prTargetFreshness, headSHA string) error {

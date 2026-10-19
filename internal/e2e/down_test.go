@@ -83,6 +83,9 @@ func TestDownKeepsProjectStoppedUntilUp(t *testing.T) {
 	if project := f.project(t); !project.IsDown() || project.LeadPaneID != "" {
 		t.Fatalf("down did not record the Project down: %#v", project)
 	}
+	if pids := lookoutPIDs(f.root); len(pids) != 0 {
+		t.Fatalf("down left hidden Lookout pollers running: %v", pids)
+	}
 	if output := runPosse(t, f.binary, f.root, f.env, "--json"); !strings.Contains(output, `"lead":"down"`) {
 		t.Fatalf("the dashboard did not show the Lead down: %s", output)
 	}
@@ -108,6 +111,9 @@ func TestDownKeepsProjectStoppedUntilUp(t *testing.T) {
 	f.upInNewWorkspace(t)
 	if project := f.project(t); project.IsDown() {
 		t.Fatalf("posse up left the Project down: %#v", project)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(lookoutPIDs(f.root)) == 1 }) {
+		t.Fatalf("posse up did not restart exactly one hidden poller: %v", lookoutPIDs(f.root))
 	}
 }
 

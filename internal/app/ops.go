@@ -267,11 +267,17 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Bool("repair") {
 		return s.repairLookout(ctx, db, home, project)
 	}
+	// Adapter handoffs and receipt decisions own Notice delivery, not maintenance.
+	if !parsed.Bool("poll-only") && !parsed.Bool("handoff") && parsed.Flags["receipt"] == "" {
+		if err := s.ensureLookoutPoller(ctx.Context, db, home, project); err != nil {
+			fmt.Fprintf(ctx.ErrOut, "Lookout supervision for %s failed: %v\n", project.Name, err)
+		}
+	}
 	if parsed.Bool("poll-only") {
 		if parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Flags["destination"] != "" || parsed.Flags["receipt"] != "" || parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" || parsed.Bool("quiet-routine") || parsed.Bool("handoff") {
 			return axi.Usage("--poll-only cannot deliver or acknowledge Notices")
 		}
-		return s.watchPullRequestsInLookoutTab(ctx, db, project, timeout, stopSignals)
+		return s.runProjectLookoutPoller(ctx, db, project, timeout, stopSignals)
 	}
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
@@ -338,7 +344,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		deadline = time.Now().Add(timeout)
 	}
 	lastHerdrReconcile := time.Time{}
-	lookoutPaneID := ""
+	lastReexecCheck := time.Time{}
 	for {
 		select {
 		case <-stopSignals:
@@ -412,93 +418,6 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					}
 				} else {
 					lastHerdrReconcile = time.Now()
-					if snapshot, err := s.snapshot(ctx.Context); err == nil {
-						for _, pane := range snapshot.Panes {
-							if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
-								lookoutPaneID = pane.PaneID
-								break
-							}
-						}
-					}
-				}
-			} else {
-				// Poll PRs at their configured cadence, without a full Herdr
-				// reconciliation on every tick. Recheck the Lookout tab when its
-				// process is absent or its pane has not been observed yet.
-				home, err := s.homePath()
-				if err != nil {
-					return err
-				}
-				processRunning := lookoutPaneID != "" && lookoutProcessRunning(lookoutPaneID, home)
-				if processRunning {
-					if err := markLookoutRunning(ctx.Context, db, project.ID, lookoutPaneID); err != nil {
-						return err
-					}
-				} else {
-					needsSnapshot := lookoutPaneID != ""
-					if !needsSnapshot {
-						state, err := db.LookoutRecovery(ctx.Context, project.ID)
-						if err != nil {
-							return err
-						}
-						needsSnapshot = state.PaneID != ""
-					}
-					if needsSnapshot {
-						if snapshot, err := s.snapshot(ctx.Context); err == nil {
-							paneID := ""
-							for _, pane := range snapshot.Panes {
-								if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
-									paneID = pane.PaneID
-									break
-								}
-							}
-							lookoutPaneID = paneID
-							if paneID == "" {
-								// A closed tab is not a failed startup. Recreate it at once
-								// and begin a fresh startup grace period.
-								if err := resetLookoutRecovery(ctx.Context, db, project.ID); err != nil {
-									return err
-								}
-							} else if lookoutProcessRunning(paneID, home) {
-								if err := markLookoutRunning(ctx.Context, db, project.ID, paneID); err != nil {
-									return err
-								}
-								processRunning = true
-							}
-							due := paneID == ""
-							if !due {
-								due, err = lookoutRecoveryDue(ctx.Context, db, project.ID, paneID, time.Now())
-								if err != nil {
-									return err
-								}
-							}
-							if !processRunning && due {
-								if err := s.ensureLookoutTab(ctx.Context, db, project, snapshot, false); err != nil {
-									return err
-								}
-								if fresh, err := s.snapshot(ctx.Context); err == nil {
-									for _, pane := range fresh.Panes {
-										if pane.Label == lookoutTabLabel(project) && pane.WorkspaceID == project.HerdrWorkspaceID {
-											lookoutPaneID = pane.PaneID
-											break
-										}
-									}
-								}
-								failures, noticeRaised, err := lookoutStartFailureNotice(ctx.Context, db, project.ID)
-								if err != nil {
-									return err
-								}
-								if failures >= lookoutStartFailureNoticeAfter && !noticeRaised {
-									if _, err := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "pr_watch_failing", Summary: "Lookout failed to start after repeated retries; recovery will continue with backoff", DataJSON: `{}`}); err != nil {
-										return err
-									}
-									if err := markLookoutStartFailureNotice(ctx.Context, db, project.ID); err != nil {
-										return err
-									}
-								}
-							}
-						}
-					}
 				}
 			}
 			if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
@@ -613,6 +532,21 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			}
 			return s.regenerateProjects(ctx.Context, db)
 		}
+		if time.Since(lastReexecCheck) >= time.Second {
+			home, err := s.homePath()
+			if err != nil {
+				return err
+			}
+			if len(os.Args) > 1 && os.Args[1] == "_claude-stop" {
+				// The hook cannot re-exec after consuming stdin. Its setup-manifest binary may differ, so only an explicit marker can request one rewake.
+				if lookoutReexecRequested(home, os.Getpid()) {
+					return s.reportLookoutStopped(ctx, project, false)
+				}
+			} else if err := s.reexecLookoutIfUpdated(project.ID, nil); err != nil {
+				return err
+			}
+			lastReexecCheck = time.Now()
+		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			home, err := s.homePath()
 			if err != nil {
@@ -647,7 +581,7 @@ func (s *Service) reportLookoutStopped(ctx *axi.Context, project store.Project, 
 	reason := lookoutStopReason(home, os.Getpid())
 	help := "The Lead should restart `posse lookout` on its next wake"
 	if pollOnly {
-		help = "The Lookout tab owner will restart this process on its next tick"
+		help = "The Project poller supervisor repairs this process on the next posse command"
 	}
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "state", Value: "stopped"}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}})
 }

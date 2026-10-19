@@ -45,7 +45,7 @@ func forgeCalls(t *testing.T, f *prLifecycleFixture) int {
 	return calls
 }
 
-// runPollers runs the fixture's real poll-only Lookout tab beside `count`
+// runPollers runs the fixture's real hidden poller beside `count`
 // foreground producers (ordinary Posse calls reconcile PRs too) for one window.
 func (w *observationWorkload) runPollers(t *testing.T, f *prLifecycleFixture, count int, window time.Duration) {
 	t.Helper()

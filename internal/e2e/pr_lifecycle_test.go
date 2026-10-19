@@ -5,8 +5,10 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -557,10 +559,6 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	fixture.writeGraphQL(t, "pr2", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", second.GatedSHA)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
-	// Isolate the explicit Land check from the independent watcher, which can
-	// deliver its own target-sync instruction and reopen t2 first.
-	pauseFixtureBackgroundLookout(t, fixture.root, fixture.env, fixture.db, fixture.project.ID)
-
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "land", "t1", "--merge"); !strings.Contains(output, "landing") {
 		t.Fatalf("first PR did not merge: %s", output)
 	}
@@ -569,6 +567,9 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Keep the supervised poller active and let its stale-target instruction
+	// reopen t2 before checking that Land preserves the specific refusal.
+	fixture.waitTaskState(t, "t2", store.StateWorking)
 	beforeSecondMerge := fixture.mustTask(t, "t2")
 	command := exec.Command(fixture.binary, "land", "t2", "--merge")
 	command.Dir, command.Env = fixture.repo, fixture.leadEnv
@@ -584,11 +585,30 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 		afterSecondMerge, taskErr := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
 		transitions, transitionErr := fixture.db.TaskTransitions(context.Background(), second.ID, 30)
 		recovery, recoveryErr := fixture.db.ProjectRecovery(context.Background(), fixture.project.ID)
-		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s\nTask state before/after: %q -> %q (err=%v)\ntransitions: %#v (err=%v)\nproject recovery: %#v (err=%v)", err, output, targetTip, beforeSecondMerge.State, afterSecondMerge.State, taskErr, transitions, transitionErr, recovery, recoveryErr)
+		poller, pollerErr := fixture.db.LookoutPoller(context.Background(), fixture.project.ID)
+		messageRows, messageErr := fixture.db.QueryContext(context.Background(), `SELECT id,status,body,created_at,delivered_at FROM messages WHERE task_id=? ORDER BY id`, second.ID)
+		var messages []string
+		if messageErr == nil {
+			defer messageRows.Close()
+			for messageRows.Next() {
+				var id, createdAt int64
+				var status, body string
+				var deliveredAt sql.NullInt64
+				if scanErr := messageRows.Scan(&id, &status, &body, &createdAt, &deliveredAt); scanErr != nil {
+					messages = append(messages, "scan error: "+scanErr.Error())
+					break
+				}
+				messages = append(messages, fmt.Sprintf("id=%d status=%s created=%d delivered=%v body=%q", id, status, createdAt, deliveredAt, body))
+			}
+			if rowsErr := messageRows.Err(); rowsErr != nil {
+				messageErr = rowsErr
+			}
+		}
+		t.Fatalf("stale PR refusal did not name the missing target commit: %v\n%s\nmissing target: %s\nTask state before/after: %q -> %q (err=%v)\ntransitions: %#v (err=%v)\nproject recovery: %#v (err=%v)\nLookout poller: %#v (err=%v)\nmessages: %#v (err=%v)", err, output, targetTip, beforeSecondMerge.State, afterSecondMerge.State, taskErr, transitions, transitionErr, recovery, recoveryErr, poller, pollerErr, messages, messageErr)
 	}
 	var instruction string
-	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, second.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Merge origin/main") {
-		t.Fatalf("Posse did not queue an actionable target-sync instruction: body=%q err=%v", instruction, err)
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status IN ('queued','claimed','interrupting','submitting','delivered') ORDER BY id DESC LIMIT 1`, second.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Merge origin/main") {
+		t.Fatalf("Posse did not retain an actionable target-sync instruction: body=%q err=%v", instruction, err)
 	}
 	if _, err := os.Stat(fixture.ghMerge); !os.IsNotExist(err) {
 		t.Fatalf("stale PR reached the forge merge command: %v", err)
@@ -1571,31 +1591,15 @@ func TestWorkerPublishDistinguishesMovedHeadFromLagTimeout(t *testing.T) {
 func TestUpDefersInterruptedOpenPRRecoveryUntilLeadStarts(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
+	client := herdr.NewWithEnv("herdr", fixture.env)
 	brief := filepath.Join(fixture.root, "deferred-pr-recovery.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: ship\ntitle: PR create recovery\ndone_when: committed change exists\n---\nExercise deferred recovery of an interrupted PR creation.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.rideAndCommitLegacy(t, brief, "t1")
 
-	client := herdr.NewWithEnv("herdr", fixture.env)
-	snapshot, err := client.Snapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, pane := range snapshot.Panes {
-		if pane.Label != "posse:shop:lookout" || pane.WorkspaceID != fixture.project.HerdrWorkspaceID {
-			continue
-		}
-		if _, err := client.Run(context.Background(), "pane", "send-keys", pane.PaneID, "ctrl+c"); err != nil {
-			t.Fatalf("stop fixture Lookout before injecting interrupted intent: %v", err)
-		}
-		if pane.TabID != "" {
-			if _, err := client.Call(context.Background(), "tab.close", map[string]any{"tab_id": pane.TabID}); err != nil {
-				t.Fatalf("close fixture Lookout tab: %v", err)
-			}
-		}
-		break
-	}
+	// Keep the independent poller from racing the injected interrupted intent.
+	stopBackgroundLookout(t, fixture)
 
 	crashEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "land --open-pr:after:pr.create")
 	command := exec.Command(fixture.binary, "land", "t1")

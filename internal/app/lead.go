@@ -357,6 +357,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 			return herdrError(err)
 		}
 	}
+	if err := s.cleanupLegacyLookoutTabs(ctx.Context, project, snapshot); err != nil {
+		return err
+	}
 	callerPaneID := os.Getenv("HERDR_PANE_ID")
 	callerWorkspaceID := os.Getenv("HERDR_WORKSPACE_ID")
 	if callerPaneID == "" || callerWorkspaceID == "" {
@@ -452,9 +455,15 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 	if err := db.SetProjectLead(ctx.Context, project.ID, callerWorkspaceID, leadPane.PaneID, label); err != nil {
 		return err
 	}
-	project.HerdrWorkspaceID = callerWorkspaceID
+	project, err = db.ProjectByID(ctx.Context, project.ID)
+	if err != nil {
+		return err
+	}
 	s.relabelProjectTabs(ctx.Context, db, project)
-	if err := s.ensureLookoutTab(ctx.Context, db, project, snapshot, false); err != nil {
+	if err := s.cleanupLegacyLookoutTabs(ctx.Context, project, snapshot); err != nil {
+		return err
+	}
+	if err := s.ensureLookoutPoller(ctx.Context, db, home, project); err != nil {
 		return err
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {

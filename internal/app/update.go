@@ -159,9 +159,6 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return axi.Failure("lookout_discovery_failed", err.Error(), false, "Check process-table access and run `posse update --check` again")
 	}
-	if !parsed.Bool("check") && !parsed.Bool("stop-lookouts") && len(lookouts) > 0 {
-		return lookoutsRunningFailure(lookouts)
-	}
 	release, err := s.fetchRelease(ctx.Context, tag)
 	if err != nil {
 		message := err.Error()
@@ -178,7 +175,7 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 		}
 		help := []any{updateInstallHelp}
 		if len(lookouts) > 0 {
-			help = append(help, "Stop running lookouts with `posse update --stop-lookouts` before installing")
+			help = append(help, "Running Lookouts re-exec automatically after an update; pass `--stop-lookouts` only to force-stop them")
 		}
 		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "lookouts", Value: lookoutRows(lookouts, false)}, {Key: "help", Value: help}})
 	}
@@ -190,12 +187,11 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 	if err := s.installRelease(ctx.Context, release, parsed.Bool("force"), parsed.Bool("stop-lookouts"), &installed, &stopped); err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "installed", Value: release.Tag}, {Key: "binary", Value: installed.binary}, {Key: "backup", Value: installed.backup}, {Key: "stopped_lookouts", Value: lookoutRows(stopped, true)}, {Key: "help", Value: []any{"Run `posse doctor` to verify the update"}}})
-}
-
-func lookoutsRunningFailure(processes []lookoutProcess) error {
-	message := "Posse update is blocked while lookouts are running: " + formatLookoutProcesses(processes)
-	return axi.Failure("lookouts_running", message, false, "Run `posse update --stop-lookouts` to stop them before updating")
+	result := axi.Object{{Key: "installed", Value: release.Tag}, {Key: "binary", Value: installed.binary}, {Key: "backup", Value: installed.backup}, {Key: "stopped_lookouts", Value: lookoutRows(stopped, true)}, {Key: "reexec_lookouts", Value: lookoutRows(installed.reexecLookouts, true)}, {Key: "help", Value: []any{"Run `posse doctor` to verify the update"}}}
+	if installed.reexecWarning != "" {
+		result = append(result, axi.Field{Key: "lookout_reexec_warning", Value: installed.reexecWarning})
+	}
+	return ctx.Print(result)
 }
 
 func lookoutRows(processes []lookoutProcess, includeRestart bool) []axi.Object {
@@ -207,9 +203,9 @@ func lookoutRows(processes []lookoutProcess, includeRestart bool) []axi.Object {
 			{Key: "kind", Value: process.Kind},
 		}
 		if includeRestart {
-			restart := "The Lead restarts its background lookout on its next wake"
+			restart := "The Lead restarts its background Lookout on its next wake"
 			if process.PollOnly {
-				restart = "The Lookout tab owner restarts this process on its next tick"
+				restart = "The Project poller re-execs this process after installation, or the next posse command repairs it"
 			} else if process.StopHook {
 				restart = "The next Claude Stop hook owns the next bounded Notice wait"
 			} else if process.QuietRoutine {
@@ -278,7 +274,11 @@ func (s *Service) requireUserUpdateCaller(ctx context.Context, home string) erro
 
 // installRelease is called only after explicit consent, either by `update` or
 // by an interactive shell's `up` prompt.
-type updateInstallResult struct{ binary, backup string }
+type updateInstallResult struct {
+	binary, backup string
+	reexecLookouts []lookoutProcess
+	reexecWarning  string
+}
 
 func (s *Service) installRelease(ctx context.Context, release githubRelease, force, stopLookouts bool, installed *updateInstallResult, stopped *[]lookoutProcess) error {
 	home, err := s.homePath()
@@ -291,9 +291,6 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 	lookouts, err := s.runningLookouts(ctx, home)
 	if err != nil {
 		return axi.Failure("lookout_discovery_failed", err.Error(), false, "Check process-table access and run `posse update --check` again")
-	}
-	if len(lookouts) > 0 && !stopLookouts {
-		return lookoutsRunningFailure(lookouts)
 	}
 	manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName))
 	if err != nil {
@@ -433,6 +430,13 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 		return axi.Failure("setup_failed", fmt.Sprintf("installed %s but setup failed: %s", release.Tag, strings.TrimSpace(string(output))), false, "Run `posse setup` after resolving the reported problem")
 	}
 	installed.binary, installed.backup = destination, backup
+	if !stopLookouts && len(lookouts) > 0 {
+		if err := requestLookoutReexec(home, lookouts); err != nil {
+			installed.reexecWarning = err.Error()
+		} else {
+			installed.reexecLookouts = lookouts
+		}
+	}
 	return nil
 }
 func (s *Service) downloadAsset(ctx context.Context, url string, limit int64) ([]byte, error) {

@@ -50,21 +50,26 @@ func New(home string, adapter herdr.Adapter) *Service {
 func (s *Service) CLI() *axi.App {
 	root := s.commands()
 	s.guardWorkers(root, nil)
-	structureStoreErrors(root)
+	s.structureStoreErrors(root)
 	return &axi.App{Name: "posse", Root: root}
 }
 
 // Apply storage error classification at every command boundary, including
 // reconcile failures from preparation and failures after a Signal is recorded.
-func structureStoreErrors(command *axi.Command) {
+func (s *Service) structureStoreErrors(command *axi.Command) {
 	if command.Handler != nil {
 		handler := command.Handler
+		name := command.Name
 		command.Handler = func(ctx *axi.Context, args []string) error {
-			return normalizeCommandError(handler(ctx, args))
+			err := normalizeCommandError(handler(ctx, args))
+			if err == nil {
+				s.superviseLookoutPollers(ctx, name, args)
+			}
+			return err
 		}
 	}
 	for _, subcommand := range command.Subcommands {
-		structureStoreErrors(subcommand)
+		s.structureStoreErrors(subcommand)
 	}
 }
 
@@ -153,7 +158,7 @@ func (s *Service) commands() *axi.Command {
 		}},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "unsaddle", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Mount work with User approval and verified Rider shutdown.", Handler: s.teardown},
-		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the poll-only Lookout.", Handler: s.wait},
+		{Name: "lookout", Usage: "$ lookout [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the Project poller.", Handler: s.wait},
 		{Name: "remuda", Summary: "List a Project's Remuda or prune safe, Posse-owned leftovers.", Handler: s.remuda},
 		{Name: "sweep", Usage: "$ sweep [--yes]", Summary: "Review or close orphan Task panes.", Handler: s.sweep},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
@@ -446,7 +451,31 @@ func (s *Service) prepareProjectModeWithRecoveryPolicy(ctx context.Context, db *
 	return s.prepareProjectModeWithMessageDelivery(ctx, db, project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery, true)
 }
 
+type projectPreparationOptions struct {
+	allowRecovery                   bool
+	pollRepositories                bool
+	allowRunningLeadNetworkRecovery bool
+	deliverMessages                 bool
+	pollerObservation               bool
+}
+
 func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery, deliverMessages bool) (config.Config, error) {
+	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{
+		allowRecovery:                   allowRecovery,
+		pollRepositories:                pollRepositories,
+		allowRunningLeadNetworkRecovery: allowRunningLeadNetworkRecovery,
+		deliverMessages:                 deliverMessages,
+	})
+}
+
+// The detached poller may deliver queued instructions and Notices when no
+// extension or live Lead lookout owns Notice delivery. Command boundaries
+// recover interrupted intents.
+func (s *Service) prepareProjectPollerObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
+	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{deliverMessages: true, pollerObservation: true})
+}
+
+func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, project store.Project, options projectPreparationOptions) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
 		_ = s.regenerateProjects(ctx, db)
@@ -464,7 +493,7 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 		return cfg, err
 	}
 	herdrReady := false
-	allowNetworkRecovery := allowRecovery
+	allowNetworkRecovery := options.allowRecovery
 	if s.Herdr != nil {
 		if err := s.Herdr.CheckProtocol(ctx); err != nil {
 			if !isHerdrUnavailable(err) {
@@ -473,7 +502,7 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 		} else {
 			var result runtime.RunResult
 			var runErr error
-			if allowRecovery {
+			if options.allowRecovery {
 				result, runErr = s.reconcileProject(ctx, db, project, cfg, false)
 			} else {
 				claim, err := db.ProjectRecovery(ctx, project.ID)
@@ -501,11 +530,17 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 					}
 				}
 				herdrReady = true
-				allowNetworkRecovery = allowNetworkRecovery || allowRunningLeadNetworkRecovery && leadAgentStarted(project, result.Snapshot)
+				allowNetworkRecovery = allowNetworkRecovery || options.allowRunningLeadNetworkRecovery && leadAgentStarted(project, result.Snapshot)
 				if err := s.reconcileTaskPanes(ctx, db, project, result.Snapshot); err != nil {
 					return cfg, err
 				}
-				if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, allowRecovery, allowNetworkRecovery); err != nil {
+				if options.pollerObservation {
+					if leadAgentStarted(project, result.Snapshot) {
+						if err := s.reconcilePollerIntents(ctx, db, project); err != nil {
+							return cfg, err
+						}
+					}
+				} else if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, options.allowRecovery, allowNetworkRecovery); err != nil {
 					return cfg, err
 				}
 				fresh, err := db.ProjectByID(ctx, project.ID)
@@ -513,7 +548,7 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 					return cfg, err
 				}
 				s.relabelProjectTabs(ctx, db, fresh)
-				if deliverMessages {
+				if options.deliverMessages {
 					if err := s.deliverQueuedMessagesWithConfig(ctx, db, fresh, result.Snapshot, cfg); err != nil && !isHerdrUnavailable(err) {
 						return cfg, herdrError(err)
 					}
@@ -524,7 +559,7 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 			}
 		}
 	}
-	if pollRepositories {
+	if options.pollRepositories {
 		if err := s.pollProjectPullRequests(ctx, db, project, cfg, false); err != nil {
 			return cfg, err
 		}
@@ -532,14 +567,14 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
 		return cfg, err
 	}
-	if pollRepositories {
+	if options.pollRepositories {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, false); err != nil {
 			return cfg, err
 		}
 		_, _ = s.availableUpdate(ctx, db, &project)
 	}
 	if herdrReady {
-		if pollRepositories {
+		if options.pollRepositories {
 			if err := s.autoTeardownLandedTasks(ctx, db, project, cfg); err != nil {
 				return cfg, err
 			}

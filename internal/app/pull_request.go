@@ -126,6 +126,9 @@ func (s *Service) landPullRequest(out *axi.Context, db *store.DB, project store.
 	}()
 	if merge {
 		if task.State != store.StateDone && task.State != store.StateLanding {
+			if err := workingPRBehindFailure(ctx, db, project, task); err != nil {
+				return err
+			}
 			return axi.Failure("land_refused", "Task must be done or landing before Land", false)
 		}
 		if task.AutonomyLand != "auto" && userQuote == "" {

@@ -50,6 +50,9 @@ func (s *Service) land(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	if parsed.Bool("merge") {
 		if task.State != store.StateDone && task.State != store.StateLanding {
+			if err := workingPRBehindFailure(ctx.Context, db, project, task); err != nil {
+				return err
+			}
 			return axi.Failure("land_refused", "Task must be done or landing before Land", false)
 		}
 		if task.AutonomyLand != "auto" && strings.TrimSpace(parsed.Flags["user-approved"]) == "" {
