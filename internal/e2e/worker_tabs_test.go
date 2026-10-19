@@ -91,7 +91,7 @@ func TestListRecoversRestartWithoutStartupHook(t *testing.T) {
 }
 
 func TestTaskNamesBranchesAndLegacyRecoveryRemainIndependent(t *testing.T) {
-	f := newWorkerTabsFixture(t)
+	f := newWorkerTabsFixtureWithManualWatchOwner(t)
 	ctx := context.Background()
 	db, err := store.Open(f.home)
 	if err != nil {
@@ -448,6 +448,14 @@ func cleanupEmptyFixtureTaskCgroups(t *testing.T, home string) {
 }
 
 func newWorkerTabsFixture(t *testing.T) *workerTabsFixture {
+	return newWorkerTabsFixtureWithOptions(t, false)
+}
+
+func newWorkerTabsFixtureWithManualWatchOwner(t *testing.T) *workerTabsFixture {
+	return newWorkerTabsFixtureWithOptions(t, true)
+}
+
+func newWorkerTabsFixtureWithOptions(t *testing.T, manualWatchOwner bool) *workerTabsFixture {
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("tabs-"))
 	home := filepath.Join(root, "posse")
@@ -460,6 +468,9 @@ func newWorkerTabsFixture(t *testing.T) *workerTabsFixture {
 		}
 	}
 	env := isolatedE2EEnv(t, root)
+	if manualWatchOwner {
+		env = setEnv(env, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
+	}
 	for key, value := range map[string]string{
 		"POSSE_TEST_ROOT": root, "POSSE_E2E_WORKTREES": worktrees,
 		"PATH":            binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -630,6 +641,11 @@ esac
 	if project.HerdrWorkspaceID != lead.Workspace.WorkspaceID || project.LeadPaneID != lead.RootPane.PaneID {
 		t.Fatalf("Lead did not start in the calling pane: %#v", project)
 	}
+	if manualWatchOwner {
+		if pids := watchPIDs(root); len(pids) != 0 {
+			t.Fatalf("manual Watch owner unexpectedly started hidden pollers: %v", pids)
+		}
+	}
 	fixture := &workerTabsFixture{
 		root: root, repo: repo, home: home, binary: binary, env: env,
 		leadEnv: callerEnv, client: client, server: server,
@@ -676,7 +692,8 @@ func (f *workerTabsFixture) assertRenderedSidebar(t *testing.T, first, second st
 		t.Skip("script is required to capture an isolated Herdr client")
 	}
 	cmd := exec.Command("script", "-q", "-c", "stty rows 45 cols 160; timeout 4 herdr", "/dev/null")
-	cmd.Env = setEnv(f.env, "TERM", "xterm-256color")
+	cmd.Env = setEnv(f.env, "HERDR_SOCKET_PATH", herdr.IsolatedTestSocketPath(f.root))
+	cmd.Env = setEnv(cmd.Env, "TERM", "xterm-256color")
 	cmd.Dir = f.repo
 	// An EOF on script's stdin is sent to the active Herdr pane as Ctrl-D.
 	// Keep the pipe's writer open until the client detaches; a file descriptor

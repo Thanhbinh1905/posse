@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -120,9 +121,19 @@ func TestObservationWorkloadDiscoversForgeResultsWithoutModelTurns(t *testing.T)
 		t.Fatalf("poll-only Watch did not start: %v", watchPIDs(f.root))
 	}
 
+	client := herdr.NewWithEnv("herdr", f.env)
+	workerLabel := "posse:shop:t1"
+	worker, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, workerLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Run(ctx, "pane", "report-agent", worker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+		t.Fatal(err)
+	}
 	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
 		Seq: 1, Type: "change", Title: "Observed change", MergeMode: "pr", Branch: "posse/t1",
-		PRURL: "https://github.com/acme/shop/pull/17",
+		PRURL: "https://github.com/acme/shop/pull/17", HerdrWorkspaceID: f.project.HerdrWorkspaceID,
+		PaneID: worker.RootPane.PaneID, PaneLabel: workerLabel, AgentName: "claude",
 	})
 	if err != nil {
 		t.Fatal(err)

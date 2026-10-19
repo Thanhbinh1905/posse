@@ -227,7 +227,7 @@ func TestPrunePreservesBranchAdvancedAfterFinalCheck(t *testing.T) {
 }
 
 func TestPruneReclaimsMappedCacheStorage(t *testing.T) {
-	f := newPRLifecycleFixture(t)
+	f := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer f.db.Close()
 	scratch := filepath.Join(f.home, "scratch", "shop", "t999")
 	if err := os.MkdirAll(scratch, 0o700); err != nil {

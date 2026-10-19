@@ -361,7 +361,8 @@ func assertNativeWorktreeSidebar(t *testing.T, f *workerTabsFixture, names ...st
 	var output []byte
 	for attempt := 0; attempt < 3; attempt++ {
 		cmd := exec.Command("script", "-q", "-c", "stty rows 45 cols 160; timeout 4 herdr", "/dev/null")
-		cmd.Env = setEnv(f.env, "TERM", "xterm-256color")
+		cmd.Env = setEnv(f.env, "HERDR_SOCKET_PATH", herdr.IsolatedTestSocketPath(f.root))
+		cmd.Env = setEnv(cmd.Env, "TERM", "xterm-256color")
 		cmd.Dir = f.repo
 		input, keepOpen, err := os.Pipe()
 		if err != nil {
