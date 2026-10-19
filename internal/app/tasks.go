@@ -1689,6 +1689,10 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		earlierPending := false
 		if queueErr == nil && paneFound {
 			attemptedReason = queuedMessageReason(task, candidate, sendPane, snapshot, cfg)
+			if attemptedReason != "" && candidate.ID != messageID {
+				earlierPending = true
+				blockedByMessageID = candidate.ID
+			}
 			if attemptedReason == "" {
 				wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, candidate, sendPane.PaneID, cfg)
 				if err != nil {

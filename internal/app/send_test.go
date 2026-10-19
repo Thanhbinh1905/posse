@@ -762,13 +762,14 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 	for _, tc := range []struct {
 		name, wantState, wantReason   string
 		rejectPrompt, headWaitForIdle bool
+		focused                       bool
 		wantPromptCalls               int
 		wantBlocker                   bool
 	}{
-		{"accepted", "delivered", "steered", false, true, 1, false},
-		{"rejected", "queued", "compacting", true, true, 1, false},
-		{"earlier steerable message pending", "queued", "earlier_message_pending", true, false, 2, false},
-		{"earlier --queue message pending", "queued", "earlier_message_pending", false, true, 0, true},
+		{name: "accepted", wantState: "delivered", wantReason: "steered", headWaitForIdle: true, wantPromptCalls: 1},
+		{name: "rejected", wantState: "queued", wantReason: "compacting", rejectPrompt: true, headWaitForIdle: true, wantPromptCalls: 1},
+		{name: "earlier steerable message pending", wantState: "queued", wantReason: "earlier_message_pending", rejectPrompt: true, wantPromptCalls: 2},
+		{name: "earlier --queue message blocks focused Rider", wantState: "queued", wantReason: "earlier_message_pending", headWaitForIdle: true, focused: true, wantBlocker: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -800,7 +801,14 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 			}
 
 			fake := herdr.NewFake()
-			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "unknown"}}}
+			focusedPaneID := ""
+			if tc.focused {
+				focusedPaneID = "w2:p1"
+			}
+			fake.SnapshotValue = herdr.Snapshot{
+				FocusedPaneID: focusedPaneID,
+				Panes:         []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "unknown", Focused: tc.focused}},
+			}
 			fake.Results["pane.read"] = []byte(`{"read":{"text":"\nAuto-compacting...\n"}}`)
 			if tc.rejectPrompt {
 				fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_not_ready", Message: "Pi is compacting"}
