@@ -1040,10 +1040,9 @@ func (s *Service) pollProjectPullRequestsWithLandedCallback(ctx context.Context,
 			continue
 		}
 		if !freshness.Fresh {
+			// The target may have advanced because this PR just merged. Defer
+			// queuing a sync instruction until GraphQL confirms the PR is open.
 			staleBeforeQuery[task.ID] = true
-			if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.LandingMode, freshness, headSHA); err != nil {
-				return err
-			}
 		}
 	}
 	forge, forgeErr := forgeForRepository(ctx, project.Root, cfg, "")
