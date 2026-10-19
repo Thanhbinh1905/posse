@@ -31,7 +31,7 @@ The installer downloads a release to `~/.local/bin` by default and offers to set
 
 1. Back up the full Posse home and Project Git metadata as described in [ADR 0025](docs/adr/0025-functional-vocabulary.md).
 2. From a User shell, run the installed 0.14 binary with `posse update --stop-lookouts`. That binary does not know `--stop-watches`; use the new flag only after upgrading.
-3. Run `posse setup` with the new binary. If you installed optional global skills, also run `posse setup --global-skills` so agents do not learn removed commands from stale copies.
+3. `posse update` runs the new `posse setup` for integrations; run it manually after another installation method. If you installed optional global skills, also run `posse setup --global-skills` so agents do not learn removed commands from stale copies.
 4. Restart every running Lead: from a User shell in each Project, run `posse up --replace`. Running Pi/OpenCode Leads retain their old adapters in memory. Their exact machine handoff/receipt calls remain supported during the transition, but restarting loads the new adapter and instructions.
 
 Stored Tasks, config and paths upgrade automatically; existing worktrees are not moved. Removed User commands and flags fail with their replacement names.

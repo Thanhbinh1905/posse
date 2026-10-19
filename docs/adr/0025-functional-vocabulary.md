@@ -49,6 +49,6 @@ Stored global and Project config is migrated once before validation. A migration
 
 ## User upgrade steps
 
-The first upgrade runs through the installed 0.14 binary, so use `posse update --stop-lookouts`, not `--stop-watches`. After installation, run `posse setup` and refresh optional global skills with `posse setup --global-skills` if previously installed. Restart every running Lead with `posse up --replace` from a User shell in that Project. Pi/OpenCode Leads keep their old adapter in memory until restart; the hidden machine protocol prevents silent Notice loss during this transition. Later updates use `--stop-watches`.
+The first upgrade runs through the installed 0.14 binary, so use `posse update --stop-lookouts`, not `--stop-watches`. The updater runs the new `posse setup` for integrations; run it manually after another installation method. Refresh optional global skills with `posse setup --global-skills` if previously installed. Restart every running Lead with `posse up --replace` from a User shell in that Project. Pi/OpenCode Leads keep their old adapter in memory until restart; the hidden machine protocol prevents silent Notice loss during this transition. Later updates use `--stop-watches`.
 
 Rollback requires restoring the pre-upgrade home/database backup and any `.v014` config backups before reinstalling the previous binary. Do not run an older binary against migrated state.
