@@ -770,7 +770,12 @@ esac
 			current, err := db.Task(context.Background(), project.ID, "t9")
 			return err == nil && current.State == store.StateTornDown
 		}) {
-			t.Fatalf("ack or an already-committed acknowledgement did not repair Report Teardown: %s", ackOutput)
+			current, taskErr := db.Task(context.Background(), project.ID, "t9")
+			mount, mountErr := db.MountByTask(context.Background(), task.ID)
+			transitions, transitionErr := db.TaskTransitions(context.Background(), task.ID, 20)
+			allNotices, noticeErr := db.Notices(context.Background(), project.ID, true)
+			intents, intentErr := db.Intents(context.Background(), project.ID)
+			t.Fatalf("ack or an already-committed acknowledgement did not repair Report Teardown: %s; task=%#v err=%v mount=%#v err=%v transitions=%#v err=%v notices=%#v err=%v intents=%#v err=%v", ackOutput, current, taskErr, mount, mountErr, transitions, transitionErr, allNotices, noticeErr, intents, intentErr)
 		}
 		if !waitForCondition(30*time.Second, func() bool {
 			current, err := db.Task(context.Background(), project.ID, "t9")
