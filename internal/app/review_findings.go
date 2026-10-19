@@ -297,14 +297,14 @@ func readReviewDeltaInput(task store.Task) ([]byte, error) {
 		return nil, err
 	}
 	if plan == nil {
-		return nil, fmt.Errorf("Review Task has no admitted plan")
+		return nil, fmt.Errorf("review task has no admitted plan")
 	}
 	for _, input := range plan.Inputs {
 		if input.Role == "review-round-file" && input.Source == "review/delta.patch" {
 			return append([]byte(nil), input.Bytes...), nil
 		}
 	}
-	return nil, fmt.Errorf("Review Task has no frozen review/delta.patch")
+	return nil, fmt.Errorf("review task has no frozen review/delta.patch")
 }
 
 func buildReviewFindingsInput(ctx context.Context, db *store.DB, project store.Project, review store.Task, contents []byte, rounds []store.ReviewRound, blockAt string) (*store.ReviewFindingsInput, error) {
