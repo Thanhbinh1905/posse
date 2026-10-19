@@ -29,6 +29,8 @@ func TestLookoutPollerDiscoversAndTearsDownMergedPR(t *testing.T) {
 	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, landing.GatedSHA)
 	// No Lead command drives this reconcile. The hidden Project poller observes the merge.
 	f.waitTaskState(t, "t1", store.StateTornDown)
+	assertNoValidationFixRound(t, f, "t1", "gate")
+	assertNoValidationFixRound(t, f, "t1", "freshness")
 	f.requireNotice(t, "t1", "pr_merged")
 }
 
@@ -54,6 +56,8 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 	if task.State != store.StateTornDown || task.LandedRef != merge {
 		t.Fatalf("merged PR not torn down: %#v", task)
 	}
+	assertNoValidationFixRound(t, f, "t1", "gate")
+	assertNoValidationFixRound(t, f, "t1", "freshness")
 	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +74,18 @@ func TestMergedPRHasExactlyOneVisibleTeardownReason(t *testing.T) {
 	decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
 	if err != nil || len(decisions) != 1 || decisions[0].Kind != "leftover" {
 		t.Fatalf("Leftover Decision: %#v %v", decisions, err)
+	}
+}
+
+func assertNoValidationFixRound(t *testing.T, f *prLifecycleFixture, taskID, kind string) {
+	t.Helper()
+	task := f.mustTask(t, taskID)
+	var count int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind=?`, task.ID, kind).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("merged PR queued %s fix rounds after merge: %d", kind, count)
 	}
 }
 
