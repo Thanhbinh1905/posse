@@ -538,7 +538,8 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				return err
 			}
 			if len(os.Args) > 1 && os.Args[1] == "_claude-stop" {
-				if lookoutUpdatePending(home, os.Getpid()) {
+				// The hook cannot re-exec after consuming stdin. Its setup-manifest binary may differ, so only an explicit marker can request one rewake.
+				if lookoutReexecRequested(home, os.Getpid()) {
 					return s.reportLookoutStopped(ctx, project, false)
 				}
 			} else if err := s.reexecLookoutIfUpdated(project.ID, nil); err != nil {

@@ -125,6 +125,70 @@ func TestClaudeReceiptRestartPreservesExactBatchAndAcknowledgment(t *testing.T) 
 	}
 }
 
+func TestClaudeStopDoesNotRewakeFromMismatchedSetupBinaryWithoutMarker(t *testing.T) {
+	db, project, home := newLookoutTestProject(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runningBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherBinary := filepath.Join(home, "other-posse")
+	contents, err := os.ReadFile(runningBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherBinary, contents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: otherBinary}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(lookoutReexecMarker(home, os.Getpid())); !os.IsNotExist(err) {
+		t.Fatalf("re-exec marker unexpectedly exists before the hook: %v", err)
+	}
+	previousVerifier := lookoutExecutableVerifier
+	lookoutExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { lookoutExecutableVerifier = previousVerifier })
+	previousArgs := os.Args
+	os.Args = []string{"posse", "_claude-stop"}
+	t.Cleanup(func() { os.Args = previousArgs })
+	t.Chdir(project.Root)
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("HERDR_PANE_ID", "")
+	service := testService(home, nil)
+	service.herdrContext = func() bool { return false }
+	var output bytes.Buffer
+	input := `{"hook_event_name":"Stop","session_id":"session","transcript_path":"unused"}`
+	runHook := func() int {
+		output.Reset()
+		return service.RunClaudeStop(strings.NewReader(input), &output, []string{"--timeout", "1000"})
+	}
+	started := time.Now()
+	code := runHook()
+	if code != 2 || !strings.Contains(output.String(), "Posse Notice wait renewed") {
+		t.Fatalf("hook treated a manifest mismatch as an update rewake: code=%d elapsed=%s output=%q", code, time.Since(started), output.String())
+	}
+
+	marker := lookoutReexecMarker(home, os.Getpid())
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := runHook(); code != 2 || output.Len() != 0 {
+		t.Fatalf("explicit update marker did not request one quiet rewake: code=%d output=%q", code, output.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("explicit update marker was not consumed: %v", err)
+	}
+	if code := runHook(); code != 2 || !strings.Contains(output.String(), "Posse Notice wait renewed") {
+		t.Fatalf("consumed update marker caused another rewake: code=%d output=%q", code, output.String())
+	}
+}
+
 func TestClaudeStopLeavesDownProjectStopped(t *testing.T) {
 	db, project, home := newLookoutTestProject(t)
 	defer db.Close()

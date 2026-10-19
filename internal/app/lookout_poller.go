@@ -568,8 +568,13 @@ func (s *Service) handleLeadLookoutUpdate(ctx *axi.Context, project store.Projec
 	return s.reexecLookoutIfUpdated(project.ID, nil)
 }
 
+func lookoutReexecRequested(home string, pid int) bool {
+	_, err := os.Stat(lookoutReexecMarker(home, pid))
+	return err == nil
+}
+
 func lookoutUpdatePending(home string, pid int) bool {
-	if _, err := os.Stat(lookoutReexecMarker(home, pid)); err == nil {
+	if lookoutReexecRequested(home, pid) {
 		return true
 	}
 	installed, installedOK := currentLookoutExecutable(home)
