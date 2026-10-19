@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// leftoverBase creates an unreferenced commit on the selected target branch.
+// orphanBase creates an unreferenced commit on the selected target branch.
 // The saved snapshot itself can contain commits already squash-merged, so only
 // its tree difference from the merged head belongs in the new Task.
 func orphanBase(ctx context.Context, root, snapshotRef, mergedRef, targetRef string) (string, error) {
