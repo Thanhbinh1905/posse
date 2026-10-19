@@ -375,11 +375,20 @@ esac
 				if output, err := answer.CombinedOutput(); err != nil {
 					t.Fatalf("answer leftover discard: %v\n%s", err, output)
 				}
+				crashAt := "unsaddle:after:approval.record"
 				apply := exec.Command(binary, "apply", fmt.Sprint(repairDiscardID))
+				apply.Dir, apply.Env = workspace, setEnv(leadEnv, "POSSE_INTENT_CRASH_AT", crashAt)
+				output, err = apply.CombinedOutput()
+				if exit, ok := err.(*exec.ExitError); !ok {
+					t.Fatalf("approved Report discard did not interrupt after approval.record: %v\n%s", err, output)
+				} else {
+					assertCrashExit(t, exit.ExitCode(), string(output), crashAt)
+				}
+				apply = exec.Command(binary, "apply", fmt.Sprint(repairDiscardID))
 				apply.Dir, apply.Env = workspace, leadEnv
 				output, err = apply.CombinedOutput()
 				if err != nil || !strings.Contains(string(output), "torn-down") {
-					t.Fatalf("apply answered leftover discard: %v\n%s", err, output)
+					t.Fatalf("retry apply after interrupted Report discard: %v\n%s", err, output)
 				}
 				current, err = db.Task(context.Background(), project.ID, test.taskID)
 				if err != nil || current.State != store.StateTornDown {
@@ -694,6 +703,101 @@ esac
 		return
 	}
 
+	if !t.Run("restore acquisition baseline and retry Report Teardown", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(root, "scout-mode"), []byte("missing-baseline"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		brief := filepath.Join(root, "t9.md")
+		contents := "---\ntype: scout\ntitle: repair-baseline\ndone_when: report and member evidence are preserved\nrepos: [backend]\n---\nInspect the backend member and attach evidence.\n"
+		if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, binary, workspace, leadEnv, "ride", "--brief", brief, "--name", "repair-baseline")
+		task, err := db.Task(context.Background(), project.ID, "t9")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := prepareLegacyWorkspaceScout(t, db, project, workspace, env, root, task, false); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForCondition(60*time.Second, func() bool {
+			current, err := db.Task(context.Background(), project.ID, "t9")
+			return err == nil && current.State == store.StateReported
+		}) {
+			current, _ := db.Task(context.Background(), project.ID, "t9")
+			t.Fatalf("repair-baseline Scout did not report: %#v", current)
+		}
+		task, err = db.Task(context.Background(), project.ID, "t9")
+		if err != nil {
+			t.Fatal(err)
+		}
+		baselinePath := filepath.Join(root, "posse", "projects", "stack", ".workspace-root-baselines", "t9.json")
+		baseline, err := os.ReadFile(baselinePath)
+		if err != nil {
+			t.Fatalf("read acquisition baseline: %v", err)
+		}
+		if err := os.Remove(baselinePath); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(binary, "unsaddle", "t9")
+		command.Dir, command.Env = workspace, leadEnv
+		output, err := command.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "acquisition baseline") {
+			t.Fatalf("missing-baseline Teardown = %v, want preservation refusal; output:\n%s", err, output)
+		}
+		if current, err := db.Task(context.Background(), project.ID, "t9"); err != nil || current.State != store.StateReported {
+			t.Fatalf("Task after missing-baseline refusal = %#v, %v", current, err)
+		}
+		if err := os.WriteFile(baselinePath, baseline, 0o600); err != nil {
+			t.Fatalf("restore acquisition baseline for retry: %v", err)
+		}
+		notices, err := db.Notices(context.Background(), project.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		noticeID := ""
+		for _, notice := range notices {
+			if notice.TaskID == task.ID && notice.Kind == "task_done" {
+				noticeID = fmt.Sprint(notice.ID)
+				break
+			}
+		}
+		if noticeID == "" {
+			t.Fatalf("repair-baseline Task has no task_done Notice: %#v", notices)
+		}
+		ackOutput := runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
+		if !strings.Contains(ackOutput, "acknowledged: 1") && !waitForCondition(30*time.Second, func() bool {
+			current, err := db.Task(context.Background(), project.ID, "t9")
+			return err == nil && current.State == store.StateTornDown
+		}) {
+			t.Fatalf("ack or an already-committed acknowledgement did not repair Report Teardown: %s", ackOutput)
+		}
+		if !waitForCondition(30*time.Second, func() bool {
+			current, err := db.Task(context.Background(), project.ID, "t9")
+			return err == nil && current.State == store.StateTornDown
+		}) {
+			current, _ := db.Task(context.Background(), project.ID, "t9")
+			t.Fatalf("restored baseline did not allow Teardown retry: %#v", current)
+		}
+		savedDir := filepath.Join(root, "posse", "projects", "stack", "tasks", "t9")
+		for path, want := range map[string]string{"report.md": "Report for " + task.WorktreePath + "\nSee new-root-evidence.txt\n", "new-root-evidence.txt": "new root evidence\n"} {
+			if contents, err := os.ReadFile(filepath.Join(savedDir, path)); err != nil || string(contents) != want {
+				t.Errorf("repaired Teardown attachment %s = %q, want %q: %v", path, contents, want, err)
+			}
+		}
+		decisions, err := db.Decisions(context.Background(), project.ID, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decision := range decisions {
+			if decision.TaskID == task.ID {
+				t.Fatalf("repaired Teardown left a pending Decision: %#v", decision)
+			}
+		}
+	}) {
+		return
+	}
+
 	if firstReportDigest == "" {
 		t.Fatal("publication-bound Scout Report has no sealed digest")
 	}
@@ -707,7 +811,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	reviewerID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 9, Type: "review", ReviewsTaskID: reportTask.ID, Title: "Independent Report review", Profile: "report-reviewer"})
+	reviewerID, err := db.CreateTask(context.Background(), project.ID, store.Task{Seq: 10, Type: "review", ReviewsTaskID: reportTask.ID, Title: "Independent Report review", Profile: "report-reviewer"})
 	if err != nil {
 		t.Fatal(err)
 	}

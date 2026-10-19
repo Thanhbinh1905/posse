@@ -108,7 +108,7 @@ func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
 	verification := "go test ./internal/app -> pass\ngo vet ./... -> pass"
 	proof := "![Updated settings](https://example.com/settings.png)\n\nTests passed in CI."
 	risk := "Risk: low\nRollback: revert the merge commit"
-	if code, output, stderr := fixture.run("publish", "Worker completion summary", "--verify", verification, "--proof", proof, "--risk", risk); code != 0 {
+	if code, output, stderr := fixture.run("publish", "Worker completion summary", "--verify", verification, "--proof", "## Proof\n\n"+proof, "--risk", "## Risk and rollback\n\n"+risk); code != 0 {
 		t.Fatalf("publish: %d %s %s", code, output, stderr)
 	}
 	log, err := os.ReadFile(fixture.ghLog)
@@ -121,7 +121,7 @@ func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
 		"## Verification\n\n- [x] go test ./internal/app -> pass\n- [x] go vet ./... -> pass\n\n" +
 		"## Proof\n\n" + proof + "\n\n" +
 		"## Risk And Rollback\n\n" + risk + "\n\n" +
-		"## Documentation\n\n- [ ] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
+		"## Documentation\n\n- [x] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
 	token := managedPublishTokenFromLog(string(log))
 	if token == "" || !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody, token)) {
 		t.Fatalf("PR body did not match the tokenized seven-section template: %q", log)

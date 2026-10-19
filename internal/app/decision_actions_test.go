@@ -18,6 +18,33 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestDiscardDecisionEligibilityIsScopedByKind(t *testing.T) {
+	for _, test := range []struct {
+		kind  string
+		state store.State
+		want  bool
+	}{
+		{kind: "recovery", state: store.StateFailed, want: true},
+		{kind: "recovery", state: store.StateReported},
+		{kind: "recovery", state: store.StateLanded},
+		{kind: "worker_exited", state: store.StateDone, want: true},
+		{kind: "worker_exited", state: store.StateReported},
+		{kind: "land_ready", state: store.StateLanding, want: true},
+		{kind: "land_ready", state: store.StateLanded},
+		{kind: "pr_closed", state: store.StateFailed, want: true},
+		{kind: "pr_closed", state: store.StateReported},
+		{kind: "pr_closed", state: store.StateLanded},
+		{kind: "leftover", state: store.StateReported, want: true},
+		{kind: "leftover", state: store.StateLanded, want: true},
+	} {
+		t.Run(test.kind+"/"+string(test.state), func(t *testing.T) {
+			if got := canDiscardFromDecision(test.kind, test.state); got != test.want {
+				t.Fatalf("canDiscardFromDecision(%q, %q) = %t, want %t", test.kind, test.state, got, test.want)
+			}
+		})
+	}
+}
+
 func TestTeardownStopsMountWriterBeforeSnapshot(t *testing.T) {
 	f := newPRLandingFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
