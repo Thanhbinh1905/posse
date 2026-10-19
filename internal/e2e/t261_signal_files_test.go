@@ -68,7 +68,7 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(changeScratch, "findings.md"), []byte("task findings\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runSignal(change, "signal", "needs-decision", "Need review", "--findings", filepath.Join(changeScratch, "findings.md"), "--report", filepath.Join(changeScratch, "findings.md")); code != 0 {
+	if code, output := runSignal(change, "signal", "needs-decision", "Need review", "--findings", filepath.Join(changeScratch, "findings.md")); code != 0 {
 		t.Fatalf("own Task scratch --findings failed: code=%d output=%s", code, output)
 	}
 	if !waitForCondition(10*time.Second, func() bool {
@@ -76,9 +76,6 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		return err == nil && string(contents) == "task findings\n"
 	}) {
 		t.Fatal("accepted findings file was not copied into the Task record")
-	}
-	if contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "report.md")); err != nil || string(contents) != "task findings\n" {
-		t.Fatalf("own Task scratch report was not copied: %q %v", contents, err)
 	}
 	assertRejected(otherChange, "--findings", filepath.Join(changeScratch, "foreign-findings.md"))
 	assertRejected(otherChange, "--findings", filepath.Join(otherChangeScratch, "findings-symlink.md"))
@@ -132,4 +129,21 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 		t.Fatal("accepted report file was not copied into the Task record")
 	}
 	fixture.waitState(t, "t3", store.StateReported)
+
+	// Keep the own-scratch done Report coverage as well as the subdirectory
+	// worktree-relative Report case above. Reports belong to Research/Review.
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", researchBrief, "--name", "research-scratch-report")
+	fixture.waitState(t, "t4", store.StateWorking)
+	scratchResearch := fixture.task(t, "t4")
+	report := filepath.Join(fixture.home, "scratch", "shop", "t4", "report.md")
+	if err := os.WriteFile(report, []byte("Scratch report\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runSignal(scratchResearch, "signal", "done", "Research complete", "--report", report); code != 0 {
+		t.Fatalf("own Task scratch done --report failed: code=%d output=%s", code, output)
+	}
+	fixture.waitState(t, "t4", store.StateReported)
+	if contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t4", "report.md")); err != nil || string(contents) != "Scratch report\n" {
+		t.Fatalf("own Task scratch done Report was not copied: %q %v", contents, err)
+	}
 }
