@@ -35,6 +35,8 @@ func retireEmptyTaskCgroup(store.Task) error {
 
 func taskContainmentProcessDetails(store.Task) []taskProcessDetail { return nil }
 
+func processHasTaskMarker(int, string) bool { return false }
+
 func taskSharedProcessExclusions(store.Task) ([]taskProcessDetail, map[int]bool, error) {
 	return nil, map[int]bool{}, nil
 }

@@ -183,17 +183,23 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 		if err != nil {
 			return nil, err
 		}
+		if paneShellPID > 1 {
+			pids = append(pids, paneShellPID)
+			sort.Ints(pids)
+			pids = uniqueProcessIDs(pids)
+		}
 		pids, err = excludeTaskProcessTree(pids, excludedPIDs)
 		if err != nil {
 			return nil, err
 		}
 		for _, pid := range pids {
+			paneShell := pid == paneShellPID && paneShellPID > 1
 			if existing := handles[pid]; existing != nil {
 				alive, err := existing.Alive()
 				if err != nil {
 					return processDetails(pids), err
 				}
-				if alive || !processHasTaskMarker(pid, marker) {
+				if alive || !paneShell && !processHasTaskMarker(pid, marker) {
 					continue
 				}
 				bootID, startTime, err := store.ProcessIdentityForPID(pid)
@@ -204,17 +210,17 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 				delete(handles, pid)
 				delete(terminated, pid)
 			}
-			if !processHasTaskMarker(pid, marker) {
+			if !paneShell && !processHasTaskMarker(pid, marker) {
 				continue
 			}
 			handle, err := openMountProcessHandle(pid)
 			if err != nil {
-				if !processHasTaskMarker(pid, marker) {
+				if processGone(err) || !paneShell && !processHasTaskMarker(pid, marker) {
 					continue // The observed instance exited before its pidfd was opened.
 				}
 				return processDetails(pids), fmt.Errorf("cannot safely stop marked Task process %d: %w", pid, err)
 			}
-			if !processHasTaskMarker(pid, marker) {
+			if !paneShell && !processHasTaskMarker(pid, marker) {
 				_ = handle.Close()
 				continue
 			}
@@ -245,7 +251,13 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 				}
 			}
 		}
-		if len(pids) == 0 && !alive {
+		otherPIDs := 0
+		for _, pid := range pids {
+			if pid != paneShellPID {
+				otherPIDs++
+			}
+		}
+		if otherPIDs == 0 && !alive {
 			return nil, nil
 		}
 		time.Sleep(75 * time.Millisecond)
@@ -258,7 +270,31 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 	if err != nil {
 		return nil, err
 	}
+	if shellHandle := handles[paneShellPID]; paneShellPID > 1 && shellHandle != nil {
+		alive, err := shellHandle.Alive()
+		if err != nil {
+			return processDetails(remaining), err
+		}
+		if alive {
+			remaining = append(remaining, paneShellPID)
+			sort.Ints(remaining)
+			remaining = uniqueProcessIDs(remaining)
+		}
+	}
 	return processDetails(remaining), fmt.Errorf("task processes survived marker shutdown: %v", remaining)
+}
+
+func uniqueProcessIDs(pids []int) []int {
+	if len(pids) < 2 {
+		return pids
+	}
+	unique := pids[:1]
+	for _, pid := range pids[1:] {
+		if pid != unique[len(unique)-1] {
+			unique = append(unique, pid)
+		}
+	}
+	return unique
 }
 
 func taskProcessSignalOrder(handles map[int]*mountProcessHandle, paneShellPID int) []int {

@@ -319,6 +319,15 @@ func TestTaskContainmentSignalsPaneShellLast(t *testing.T) {
 	for _, name := range []string{"other", "shell"} {
 		command := exec.Command("sh", "-c", `echo $$ > "$1"; exec sleep 300`, "test", filepath.Join(root, name+".pid"))
 		command.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, name+".ready"), 0)
+		if name == "shell" {
+			filtered := make([]string, 0, len(command.Env))
+			for _, entry := range command.Env {
+				if !strings.HasPrefix(entry, "POSSE_TASK_ID=") {
+					filtered = append(filtered, entry)
+				}
+			}
+			command.Env = filtered
+		}
 		command.Stdout, command.Stderr = io.Discard, io.Discard
 		if err := command.Start(); err != nil {
 			t.Fatal(err)
@@ -346,7 +355,7 @@ func TestTaskContainmentSignalsPaneShellLast(t *testing.T) {
 	}
 	otherPID, shellPID := pids[0], pids[1]
 	var signalOrder []int
-	_, err := stopTaskProcessContainmentWithGuard(context.Background(), store.Task{ContainmentMode: "cgroup", ContainmentMarker: marker}, func(pid int, signal syscall.Signal) error {
+	_, err := stopTaskProcessContainmentWithGuard(context.Background(), store.Task{ContainmentMode: "marker", ContainmentMarker: marker}, func(pid int, signal syscall.Signal) error {
 		if signal == syscall.SIGTERM {
 			signalOrder = append(signalOrder, pid)
 		}
@@ -358,9 +367,15 @@ func TestTaskContainmentSignalsPaneShellLast(t *testing.T) {
 	if len(signalOrder) != 2 || signalOrder[0] != otherPID || signalOrder[1] != shellPID {
 		t.Fatalf("SIGTERM order = %v, want other process %d before pane shell %d", signalOrder, otherPID, shellPID)
 	}
-	for _, command := range commands {
-		if err := command.Wait(); err != nil {
-			// Both test processes deliberately ignore SIGTERM and must be killed.
+	for index, command := range commands {
+		waited := make(chan error, 1)
+		go func() { waited <- command.Wait() }()
+		select {
+		case <-waited:
+		case <-time.After(2 * time.Second):
+			_ = command.Process.Kill()
+			<-waited
+			t.Fatalf("Task-owned process %d did not stop", pids[index])
 		}
 	}
 }

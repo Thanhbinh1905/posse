@@ -512,9 +512,18 @@ func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project 
 	return info, nil
 }
 
-func (s *Service) verifyInPlaceProcessSignalOwnership(ctx context.Context, project store.Project, task store.Task, _ int) error {
-	_, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
-	return err
+func (s *Service) verifyInPlaceProcessSignalOwnership(ctx context.Context, project store.Project, task store.Task, pid int) error {
+	info, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
+	if err != nil {
+		return err
+	}
+	if pid > 1 && info.ShellPID == pid {
+		return nil
+	}
+	if task.ContainmentMarker != "" && processHasTaskMarker(pid, task.ContainmentMarker) {
+		return nil // Pane disappearance is safe for a process independently owned by the Task marker.
+	}
+	return axi.Failure("task_process_identity_unavailable", fmt.Sprintf("process %d is neither marked for the Task nor the verified in-place pane shell", pid), true)
 }
 
 func shellOnlyPaneInMount(snapshot herdr.Snapshot, pane herdr.Pane, mountPath string) bool {

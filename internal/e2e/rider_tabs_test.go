@@ -767,6 +767,11 @@ func (f *riderTabsFixture) exitRider(t *testing.T, taskID string) {
 		for _, pane := range snapshot.Panes {
 			if pane.PaneID == task.PaneID {
 				lastPane = pane
+				for _, agent := range snapshot.Agents {
+					if agent.PaneID == task.PaneID && agent.Name != "" {
+						return false // Agent ownership metadata settles after the pane foreground.
+					}
+				}
 				return pane.Agent == ""
 			}
 		}
