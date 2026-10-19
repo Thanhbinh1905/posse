@@ -717,9 +717,19 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 		t.Fatalf("valid PR did not enter merging: %s", output)
 	}
 	valid := fixture.mustTask(t, "t1")
+	badWorkerLabel := "posse:shop:t2"
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	badWorker, err := createTab(client, fixture.project.HerdrWorkspaceID, fixture.repo, badWorkerLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Run(context.Background(), "pane", "report-agent", badWorker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+		t.Fatal(err)
+	}
 	badID, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{
 		Seq: 2, Type: "change", Title: "inaccessible old PR", State: store.StateSpawning,
-		MergeMode: "pr", Branch: "posse/old-pr", BaseRef: "main",
+		MergeMode: "pr", Branch: "posse/old-pr", BaseRef: "main", HerdrWorkspaceID: fixture.project.HerdrWorkspaceID,
+		PaneID: badWorker.RootPane.PaneID, PaneLabel: badWorkerLabel, AgentName: "claude",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1102,7 +1112,7 @@ func prepareDiscardPRTask(t *testing.T, fixture *prLifecycleFixture) store.Task 
 }
 
 func TestClosedPRDiscardRechecksForgeStateBeforeTeardown(t *testing.T) {
-	fixture := newPRLifecycleFixture(t)
+	fixture := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer fixture.db.Close()
 	ctx := context.Background()
 	gitTest(t, fixture.env, fixture.repo, "branch", "posse/t1")
@@ -1797,7 +1807,16 @@ func newPRLifecycleFixtureWithSlowLoginShell(t *testing.T) *prLifecycleFixture {
 	return newPRLifecycleFixtureWithLeadAndShell(t, false, true)
 }
 
+// Use this fixture for tests that create synthetic Tasks and own their lifecycle.
+func newPRLifecycleFixtureWithManualWatchOwner(t *testing.T) *prLifecycleFixture {
+	return newPRLifecycleFixtureWithOptions(t, false, false, true)
+}
+
 func newPRLifecycleFixtureWithLeadAndShell(t *testing.T, liveLead, slowLoginShell bool) *prLifecycleFixture {
+	return newPRLifecycleFixtureWithOptions(t, liveLead, slowLoginShell, false)
+}
+
+func newPRLifecycleFixtureWithOptions(t *testing.T, liveLead, slowLoginShell, manualWatchOwner bool) *prLifecycleFixture {
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("pr-"))
 	binDir := filepath.Join(root, "bin")
@@ -1815,6 +1834,9 @@ func newPRLifecycleFixtureWithLeadAndShell(t *testing.T, liveLead, slowLoginShel
 	}
 	env := isolatedE2EEnv(t, root)
 	env = setEnv(env, "POSSE_TEST_ROOT", root)
+	if manualWatchOwner {
+		env = setEnv(env, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
+	}
 	env = setEnv(env, "POSSE_E2E_WORKTREES", worktrees)
 	env = setEnv(env, "POSSE_E2E_FIX_GATE", fixGate)
 	env = setEnv(env, "POSSE_E2E_SIGNAL_GATE", filepath.Join(root, "signal-gates"))
@@ -2058,6 +2080,11 @@ esac
 	}
 	if _, err := client.Run(context.Background(), "pane", "report-agent", project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
 		t.Fatalf("mark isolated Lead busy: %v", err)
+	}
+	if manualWatchOwner {
+		if pids := watchPIDs(root); len(pids) != 0 {
+			t.Fatalf("manual Watch owner unexpectedly started hidden pollers: %v", pids)
+		}
 	}
 	return &prLifecycleFixture{
 		root: root, repo: repo, remote: remote, home: home, binary: binary,

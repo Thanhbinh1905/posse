@@ -15,7 +15,7 @@ import (
 )
 
 func TestT229RecreatedDatabaseProjectIDCollision(t *testing.T) {
-	f := newPRLifecycleFixture(t)
+	f := newPRLifecycleFixtureWithManualWatchOwner(t)
 	ctx := context.Background()
 	t.Cleanup(func() {
 		if f.db != nil {

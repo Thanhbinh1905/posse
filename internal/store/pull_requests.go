@@ -143,6 +143,23 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 			return 0, nil
 		}
 	}
+	var previousPRURL string
+	err = tx.QueryRowContext(ctx, `SELECT pr_url FROM pr_task_watch_failures WHERE project_id=? AND task_id=? AND repo=?`, projectID, taskID, repo).Scan(&previousPRURL)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	noticeChanged := false
+	if previousPRURL != "" && previousPRURL != prURL {
+		result, err := tx.ExecContext(ctx, `UPDATE notices SET acked_at=COALESCE(acked_at,?) WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=? AND acked_at IS NULL`, at, projectID, taskID, previousPRURL, repo)
+		if err != nil {
+			return 0, err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		noticeChanged = rows > 0
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pr_task_watch_failures(project_id,task_id,repo,pr_url) VALUES (?,?,?,?)`, projectID, taskID, repo, prURL); err != nil {
 		return 0, err
 	}
@@ -153,7 +170,7 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 	if err := tx.QueryRowContext(ctx, `SELECT consecutive_failures FROM pr_task_watch_failures WHERE project_id=? AND task_id=? AND repo=?`, projectID, taskID, repo).Scan(&failures); err != nil {
 		return 0, err
 	}
-	if failures == 3 {
+	if failures >= 3 {
 		fields := map[string]any{"pr_url": prURL, "consecutive_failures": failures, "error": failure}
 		if repo != "" {
 			fields["repo"] = repo
@@ -162,20 +179,30 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 		if err != nil {
 			return 0, err
 		}
-		var exists bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND data_json=? AND acked_at IS NULL)`, projectID, taskID, string(data)).Scan(&exists); err != nil {
+		var noticeID int64
+		var existingSummary, existingData string
+		err = tx.QueryRowContext(ctx, `SELECT id,summary,data_json FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=? AND id>COALESCE((SELECT MAX(id) FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_recovered' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=?),0) ORDER BY id DESC LIMIT 1`, projectID, taskID, prURL, repo, projectID, taskID, prURL, repo).Scan(&noticeID, &existingSummary, &existingData)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return 0, err
 		}
-		if !exists {
-			if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, TaskID: taskID, Kind: "pr_watch_failing", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if failures == 3 {
+				if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, TaskID: taskID, Kind: "pr_watch_failing", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
+					return 0, err
+				}
+				noticeChanged = true
+			}
+		} else if existingSummary != summary || existingData != string(data) {
+			if _, err := tx.ExecContext(ctx, `UPDATE notices SET summary=?,data_json=? WHERE id=?`, summary, string(data), noticeID); err != nil {
 				return 0, err
 			}
+			noticeChanged = true
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	if failures == 3 {
+	if noticeChanged {
 		if err := db.PersistProject(ctx, projectID); err != nil {
 			return 0, err
 		}
@@ -208,6 +235,11 @@ func (db *DB) ReleasePRPoll(ctx context.Context, projectID int64, token string) 
 	return err
 }
 
+func (db *DB) RecordPRPollAttempt(ctx context.Context, projectID int64, at int64) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO project_watch_state(project_id,pr_polled_at) VALUES (?,?) ON CONFLICT(project_id) DO UPDATE SET pr_polled_at=excluded.pr_polled_at`, projectID, at)
+	return err
+}
+
 func (db *DB) RecordPRPoll(ctx context.Context, projectID int64, at int64, failureSummary string) (int, error) {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -215,6 +247,10 @@ func (db *DB) RecordPRPoll(ctx context.Context, projectID int64, at int64, failu
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO project_watch_state(project_id) VALUES (?)`, projectID); err != nil {
+		return 0, err
+	}
+	var previousFailures int
+	if err := tx.QueryRowContext(ctx, `SELECT pr_consecutive_failures FROM project_watch_state WHERE project_id=?`, projectID).Scan(&previousFailures); err != nil {
 		return 0, err
 	}
 	if failureSummary == "" {
@@ -230,19 +266,49 @@ func (db *DB) RecordPRPoll(ctx context.Context, projectID int64, at int64, failu
 	if err := tx.QueryRowContext(ctx, `SELECT pr_consecutive_failures FROM project_watch_state WHERE project_id=?`, projectID).Scan(&failures); err != nil {
 		return 0, err
 	}
-	if failures == 3 {
+	noticeChanged := false
+	if failureSummary == "" && previousFailures >= 3 {
+		data, err := json.Marshal(map[string]any{"consecutive_failures": previousFailures})
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE notices SET acked_at=COALESCE(acked_at,?) WHERE project_id=? AND task_id IS NULL AND kind='pr_watch_failing'`, at, projectID); err != nil {
+			return 0, err
+		}
+		if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "pr_watch_recovered", Summary: "Pull request polling recovered", DataJSON: string(data), CreatedAt: at}); err != nil {
+			return 0, err
+		}
+		noticeChanged = true
+	} else if failureSummary != "" && failures >= 3 {
 		data, err := json.Marshal(map[string]any{"consecutive_failures": failures, "error": failureSummary})
 		if err != nil {
 			return 0, err
 		}
-		if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "pr_watch_failing", Summary: "Pull request polling failed three times: " + failureSummary, DataJSON: string(data), CreatedAt: at}); err != nil {
+		summary := "Pull request polling failed three times: " + failureSummary
+		var noticeID int64
+		var existingSummary, existingData string
+		err = tx.QueryRowContext(ctx, `SELECT id,summary,data_json FROM notices WHERE project_id=? AND task_id IS NULL AND kind='pr_watch_failing' AND id>COALESCE((SELECT MAX(id) FROM notices WHERE project_id=? AND task_id IS NULL AND kind='pr_watch_recovered'),0) ORDER BY id DESC LIMIT 1`, projectID, projectID).Scan(&noticeID, &existingSummary, &existingData)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return 0, err
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			if failures == 3 {
+				if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "pr_watch_failing", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
+					return 0, err
+				}
+				noticeChanged = true
+			}
+		} else if existingSummary != summary || existingData != string(data) {
+			if _, err := tx.ExecContext(ctx, `UPDATE notices SET summary=?,data_json=? WHERE id=?`, summary, string(data), noticeID); err != nil {
+				return 0, err
+			}
+			noticeChanged = true
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	if failures == 3 {
+	if noticeChanged {
 		if err := db.PersistProject(ctx, projectID); err != nil {
 			return 0, err
 		}
@@ -297,19 +363,49 @@ func (db *DB) RecordRepoFetchFailure(ctx context.Context, projectID int64, repo 
 }
 
 // RecordRepoFetchSuccess resets one repository's failure streak. The active
-// Project Notice is acknowledged once no repository remains above the threshold.
+// Project Notice is acknowledged once no repository remains above the threshold,
+// and one recovery Notice marks that transition.
 func (db *DB) RecordRepoFetchSuccess(ctx context.Context, projectID int64, repo string, at int64) error {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if at == 0 {
+		at = time.Now().UnixMilli()
+	}
+	before, err := repoFetchFailuresTx(ctx, tx, projectID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE repo_fetch_failures SET consecutive_failures=0,last_error='',updated_at=? WHERE project_id=? AND repo=?`, at, projectID, repo); err != nil {
 		return err
 	}
 	changed, err := refreshRepoFetchFailureNoticeTx(ctx, tx, projectID, at, false)
 	if err != nil {
 		return err
+	}
+	remaining, err := repoFetchFailuresTx(ctx, tx, projectID)
+	if err != nil {
+		return err
+	}
+	if len(before) > 0 && len(remaining) == 0 {
+		data, err := json.Marshal(map[string]any{"repositories": before})
+		if err != nil {
+			return err
+		}
+		var names []string
+		for _, failure := range before {
+			name := failure.Repo
+			if name == "" {
+				name = "Project"
+			}
+			names = append(names, name)
+		}
+		if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "root_fetch_recovered", Summary: "Origin fetch recovered for " + strings.Join(names, ", "), DataJSON: string(data), CreatedAt: at}); err != nil {
+			return err
+		}
+		changed = true
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -320,25 +416,26 @@ func (db *DB) RecordRepoFetchSuccess(ctx context.Context, projectID int64, repo 
 	return nil
 }
 
-func refreshRepoFetchFailureNoticeTx(ctx context.Context, tx *writeTx, projectID int64, at int64, create bool) (bool, error) {
+func repoFetchFailuresTx(ctx context.Context, tx *writeTx, projectID int64) ([]repoFetchFailure, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT repo,consecutive_failures,last_error FROM repo_fetch_failures WHERE project_id=? AND consecutive_failures>=? ORDER BY repo`, projectID, repoFetchFailureNoticeAfter)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
+	defer rows.Close()
 	var failures []repoFetchFailure
 	for rows.Next() {
 		var failure repoFetchFailure
 		if err := rows.Scan(&failure.Repo, &failure.ConsecutiveFailures, &failure.Error); err != nil {
-			_ = rows.Close()
-			return false, err
+			return nil, err
 		}
 		failures = append(failures, failure)
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return false, err
-	}
-	if err := rows.Close(); err != nil {
+	return failures, rows.Err()
+}
+
+func refreshRepoFetchFailureNoticeTx(ctx context.Context, tx *writeTx, projectID int64, at int64, create bool) (bool, error) {
+	failures, err := repoFetchFailuresTx(ctx, tx, projectID)
+	if err != nil {
 		return false, err
 	}
 	if len(failures) == 0 {
@@ -365,7 +462,7 @@ func refreshRepoFetchFailureNoticeTx(ctx context.Context, tx *writeTx, projectID
 	summary := "Origin fetch has failed for three consecutive attempts in " + strings.Join(names, ", ")
 	var existingID int64
 	var existingSummary, existingData string
-	err = tx.QueryRowContext(ctx, `SELECT id,summary,data_json FROM notices WHERE project_id=? AND kind='root_fetch_failing' AND acked_at IS NULL ORDER BY id DESC LIMIT 1`, projectID).Scan(&existingID, &existingSummary, &existingData)
+	err = tx.QueryRowContext(ctx, `SELECT id,summary,data_json FROM notices WHERE project_id=? AND kind='root_fetch_failing' AND id>COALESCE((SELECT MAX(id) FROM notices WHERE project_id=? AND kind='root_fetch_recovered'),0) ORDER BY id DESC LIMIT 1`, projectID, projectID).Scan(&existingID, &existingSummary, &existingData)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
@@ -373,10 +470,12 @@ func refreshRepoFetchFailureNoticeTx(ctx context.Context, tx *writeTx, projectID
 		if !create {
 			return false, nil
 		}
-		if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "root_fetch_failing", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
-			return false, err
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, Kind: "root_fetch_failing", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
-		return true, nil
 	}
 	if existingSummary == summary && existingData == string(data) {
 		return false, nil
@@ -499,7 +598,8 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	if current.PRURL != observation.PRURL || current.State != expected.State || current.GatedSHA != expected.GatedSHA || current.PRURL != expected.PRURL {
 		return false, nil
 	}
-	if err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, "", observation.PRURL, observation.ObservedAt); err != nil {
+	recoveredWatch, err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, "", observation.PRURL, observation.ObservedAt)
+	if err != nil {
 		return false, err
 	}
 	unchanged := err == nil && samePRObservation(previous, observation)
@@ -544,7 +644,7 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
-	changed := !unchanged || transitioned
+	changed := !unchanged || transitioned || recoveredWatch
 	if transitioned {
 		if err := db.PersistTask(ctx, observation.TaskID); err != nil {
 			return false, err
@@ -557,12 +657,45 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	return changed, nil
 }
 
-func resetPRTaskWatchFailuresTx(ctx context.Context, tx *writeTx, projectID, taskID int64, repo, prURL string, at int64) error {
+func resetPRTaskWatchFailuresTx(ctx context.Context, tx *writeTx, projectID, taskID int64, repo, prURL string, at int64) (bool, error) {
 	if at == 0 {
 		at = time.Now().UnixMilli()
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE pr_task_watch_failures SET consecutive_failures=0,last_error='',updated_at=? WHERE project_id=? AND task_id=? AND repo=? AND pr_url=?`, at, projectID, taskID, repo, prURL)
-	return err
+	var failures int
+	err := tx.QueryRowContext(ctx, `SELECT consecutive_failures FROM pr_task_watch_failures WHERE project_id=? AND task_id=? AND repo=? AND pr_url=?`, projectID, taskID, repo, prURL).Scan(&failures)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	recovered := failures >= 3
+	if recovered {
+		var taskSeq int
+		if err := tx.QueryRowContext(ctx, `SELECT seq FROM tasks WHERE project_id=? AND id=?`, projectID, taskID).Scan(&taskSeq); err != nil {
+			return false, err
+		}
+		fields := map[string]any{"pr_url": prURL}
+		summary := "PR watch recovered for Task t" + strconv.Itoa(taskSeq)
+		if repo != "" {
+			fields["repo"] = repo
+			summary += " (" + repo + ")"
+		}
+		data, err := json.Marshal(fields)
+		if err != nil {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE notices SET acked_at=COALESCE(acked_at,?) WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=?`, at, projectID, taskID, prURL, repo); err != nil {
+			return false, err
+		}
+		if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, TaskID: taskID, Kind: "pr_watch_recovered", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pr_task_watch_failures SET consecutive_failures=0,last_error='',updated_at=? WHERE project_id=? AND task_id=? AND repo=? AND pr_url=?`, at, projectID, taskID, repo, prURL); err != nil {
+		return false, err
+	}
+	return recovered, nil
 }
 
 func latestPRObservationTx(ctx context.Context, tx *writeTx, taskID int64) (PRObservation, error) {

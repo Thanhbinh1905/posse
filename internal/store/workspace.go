@@ -314,7 +314,8 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 	if currentPRURL != observation.PRURL || currentRepoState == TaskRepoMerged {
 		return false, nil
 	}
-	if err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.ObservedAt); err != nil {
+	recoveredWatch, err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.ObservedAt)
+	if err != nil {
 		return false, err
 	}
 	var previous PRObservation
@@ -325,7 +326,13 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 	}
 	unchanged := err == nil && samePRObservation(previous, observation)
 	if unchanged && effect.RepoState == "" {
-		return false, tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		if recoveredWatch {
+			return true, db.PersistTask(ctx, observation.TaskID)
+		}
+		return false, nil
 	}
 	if !unchanged {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, repo, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {

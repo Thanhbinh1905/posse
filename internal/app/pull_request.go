@@ -1014,8 +1014,7 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		watched = append(watched, task)
 	}
 	if len(watched) == 0 {
-		_, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), "")
-		return err
+		return db.RecordPRPollAttempt(ctx, project.ID, now.UnixMilli())
 	}
 	targets := make([]prWatchTarget, 0, len(watched))
 	failedTasks := make(map[int64]error)
@@ -1126,11 +1125,6 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 				pulls[target.Task.ID] = pull
 			}
 		}
-		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
-			return err
-		}
-	} else if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
-		return err
 	}
 	gitlabObservations := make(map[int64]store.PRObservation)
 	gitlabFailures := make(map[int64][]failedCheck)
@@ -1142,6 +1136,17 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		}
 		gitlabObservations[task.ID] = observation
 		gitlabFailures[task.ID] = failures
+	}
+	if globalFailure != "" {
+		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
+			return err
+		}
+	} else if len(failedTasks) > 0 {
+		if err := db.RecordPRPollAttempt(ctx, project.ID, now.UnixMilli()); err != nil {
+			return err
+		}
+	} else if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), ""); err != nil {
+		return err
 	}
 	type pendingObservation struct {
 		task      store.Task
