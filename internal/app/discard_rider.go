@@ -38,9 +38,11 @@ type discardRiderPlan struct {
 }
 
 type discardIntentPayload struct {
-	Discard   bool              `json:"discard"`
-	UserQuote string            `json:"user_quote"`
-	Rider     *discardRiderPlan `json:"rider,omitempty"`
+	Discard                  bool              `json:"discard"`
+	UserQuote                string            `json:"user_quote"`
+	Rider                    *discardRiderPlan `json:"rider,omitempty"`
+	DiscardApprovalRecorded  bool              `json:"discard_approval_recorded,omitempty"`
+	DiscardApprovalBranchSHA string            `json:"discard_approval_branch_sha,omitempty"`
 }
 
 func discardIdentityRefused(reason string) error {

@@ -43,7 +43,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least two options")
 	}
 	switch request.Kind {
-	case "land_ready", "recovery", "review", "rider_question", "leftover", "pr_closed":
+	case "land_ready", "recovery", "worker_exited", "review", "rider_question", "leftover", "pr_closed":
 	default:
 		return Decision{}, fmt.Errorf("invalid Decision kind %q", request.Kind)
 	}
@@ -279,6 +279,30 @@ func (db *DB) DecisionSourceNotices(ctx context.Context, projectID int64) ([]Not
 	return result, rows.Err()
 }
 
+// UnansweredWorkerExitedNotices returns completion Notices skipped by an older
+// decision cursor, unless their Task has since reopened or a Decision exists.
+func (db *DB) UnansweredWorkerExitedNotices(ctx context.Context, projectID int64) ([]Notice, error) {
+	rows, err := db.QueryContext(ctx, `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
+		FROM notices n JOIN tasks t ON t.id=n.task_id
+		WHERE n.project_id=? AND n.kind='worker_exited' AND t.state IN ('done','landing')
+		AND (json_extract(n.data_json,'$.task_launches')=t.launches OR (json_type(n.data_json,'$.task_launches') IS NULL AND t.launches=1))
+		AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id)
+		ORDER BY n.id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Notice{}
+	for rows.Next() {
+		var n Notice
+		if err := rows.Scan(&n.ID, &n.ProjectID, &n.TaskID, &n.Kind, &n.Summary, &n.DataJSON, &n.CreatedAt, &n.DeliveredAt, &n.AckedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, n)
+	}
+	return result, rows.Err()
+}
+
 // AdvanceDecisionNoticeCursor marks all Notices up to id evaluated, including
 // unrelated kinds and those that did not require a Decision. It is monotonic.
 func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int64) error {
@@ -294,13 +318,15 @@ func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int
 func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) error {
 	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=CASE kind
 		WHEN 'land_ready' THEN CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE id=decisions.task_id AND state<>'landing') THEN 'Task left landing' ELSE 'PR is no longer ready to merge' END
+		WHEN 'worker_exited' THEN 'Task reopened or Rider launch changed'
 		WHEN 'pr_closed' THEN 'Closed PR was reopened, replaced or Task discarded'
 		WHEN 'leftover' THEN 'Unrecoverable Leftover resolved during Teardown'
 		ELSE 'Task no longer failed or lost' END
-		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('land_ready','recovery','pr_closed','leftover')
+		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('land_ready','recovery','worker_exited','pr_closed','leftover')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=decisions.task_id AND
 		((kind='land_ready' AND (t.state<>'landing' OR (t.landing_mode IN ('pr','no-mistakes') AND NOT EXISTS(SELECT 1 FROM pr_observations p WHERE p.task_id=t.id AND p.pr_url=t.pr_url AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url) AND p.state='OPEN' AND p.head_sha=t.gated_sha AND json_extract(p.checks,'$.state')='SUCCESS' AND p.review NOT IN ('CHANGES_REQUESTED','REVIEW_REQUIRED') AND p.mergeable='MERGEABLE'))))
 		OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))
+		OR (kind='worker_exited' AND (t.state NOT IN ('done','landing') OR t.launches<>decisions.task_launches))
 		OR (kind='pr_closed' AND ((decisions.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR decisions.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url)) OR (decisions.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
 		OR (kind='leftover' AND decisions.origin LIKE 'leftover:unrecoverable:%' AND t.state='torn-down')))`, time.Now().UnixMilli(), projectID)
 	if err != nil {
@@ -314,7 +340,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
-	if decision.Kind != "land_ready" && decision.Kind != "recovery" && decision.Kind != "pr_closed" && decision.Kind != "leftover" {
+	if decision.Kind != "land_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "leftover" {
 		return "", nil
 	}
 	var state State
@@ -336,6 +362,9 @@ func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision)
 	}
 	if decision.Kind == "recovery" && (state != StateFailed && state != StateLost || launches != decision.TaskLaunches) {
 		return "Task no longer failed or lost", nil
+	}
+	if decision.Kind == "worker_exited" && (state != StateDone && state != StateLanding || launches != decision.TaskLaunches) {
+		return "Task reopened or Rider launch changed", nil
 	}
 	if decision.Kind == "pr_closed" {
 		var owned bool

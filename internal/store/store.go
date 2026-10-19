@@ -2694,7 +2694,13 @@ func (db *DB) CreateNotice(ctx context.Context, notice Notice) (int64, error) {
 }
 
 func (db *DB) CreateWorkerExitedNotice(ctx context.Context, task Task, now time.Time) error {
-	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO notices(project_id, task_id, kind, summary, data_json, created_at) VALUES (?, ?, 'worker_exited', ?, '{}', ?)`, task.ProjectID, task.ID, task.Title+" Rider exited after signaling done", now.UnixMilli()); err != nil {
+	dataJSON, err := json.Marshal(struct {
+		TaskLaunches int `json:"task_launches"`
+	}{TaskLaunches: task.Launches})
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO notices(project_id, task_id, kind, summary, data_json, created_at) VALUES (?, ?, 'worker_exited', ?, ?, ?)`, task.ProjectID, task.ID, task.Title+" Rider exited after signaling done", string(dataJSON), now.UnixMilli()); err != nil {
 		return err
 	}
 	return db.PersistProject(ctx, task.ProjectID)
