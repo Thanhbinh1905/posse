@@ -200,8 +200,17 @@ done
 	runPosse(t, binary, repo, env, "preferences", "set", "worker", "--file", workerPreferences, "--project", "shop")
 	runPosse(t, binary, repo, leadEnv, "relaunch", "t1")
 	afterUpdate, err := os.ReadFile(launchPath)
-	if err != nil || string(afterUpdate) != string(launchSnapshot) || strings.Contains(string(afterUpdate), updatedWorkerPreferences) {
-		t.Fatalf("editing preferences changed an existing Worker snapshot during relaunch: before=%q after=%q err=%v", launchSnapshot, afterUpdate, err)
+	normalizeTurnToken := func(contents []byte) string {
+		lines := strings.Split(string(contents), "\n")
+		for index := range lines {
+			if strings.HasPrefix(lines[index], "Current Worker turn token: ") {
+				lines[index] = "Current Worker turn token: <current>"
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	if err != nil || normalizeTurnToken(afterUpdate) != normalizeTurnToken(launchSnapshot) || !strings.Contains(string(launchSnapshot), "Current Worker turn token: `launch:1`") || !strings.Contains(string(afterUpdate), "Current Worker turn token: `launch:2`") || strings.Contains(string(afterUpdate), updatedWorkerPreferences) {
+		t.Fatalf("relaunch changed the admitted Worker snapshot beyond its turn token: before=%q after=%q err=%v", launchSnapshot, afterUpdate, err)
 	}
 	for _, path := range []string{filepath.Join(root, "posse", "config.toml"), filepath.Join(root, "posse", "projects", "shop", "config.toml")} {
 		content, err := os.ReadFile(path)

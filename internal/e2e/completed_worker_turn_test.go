@@ -46,14 +46,16 @@ case "$PWD/" in
     IFS= read -r request || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     printf 'signal working %s\\n' "$request" >> "$POSSE_TEST_ROOT/worker-delivery.log"
-    "$POSSE_E2E_POSSE_BIN" signal working "$request" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+    working_result=$("$POSSE_E2E_POSSE_BIN" signal working "$request")
+    printf '%s\n' "$working_result" >> "$POSSE_TEST_ROOT/worker-delivery.log"
+    turn_token=$(printf '%s\n' "$working_result" | grep -o 'turn_token: "[^"]*"' | cut -d '"' -f2)
     : > "$POSSE_TEST_ROOT/follow-up-working-$task_id"
     printf 'direct User follow-up\n' > "follow-up-$task_id.txt"
     git add "follow-up-$task_id.txt"
     git commit -m "direct User follow-up $task_id" >/dev/null
     printf 'publish Published direct User follow-up %s\\n' "$task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log"
     "$POSSE_E2E_POSSE_BIN" publish "Published direct User follow-up $task_id" --verify "focused E2E -> passed" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
-    "$POSSE_E2E_POSSE_BIN" signal done "Completed direct User follow-up $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+    "$POSSE_E2E_POSSE_BIN" signal done "Completed direct User follow-up $task_id" --pr "$pr_url" --turn "$turn_token" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
     : > "$POSSE_TEST_ROOT/follow-up-done-$task_id"
     while IFS= read -r instruction; do printf '%s\n' "$instruction" >> "$POSSE_TEST_ROOT/worker-delivery.log"; done
     ;;

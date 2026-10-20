@@ -6,7 +6,7 @@ While a poller lives, a forge result becomes a Notice without a model turn: `Tes
 
 | Harness | Wake path | Focused composer | Evidence |
 | --- | --- | --- | --- |
-| Claude | bounded `Stop` hook, `asyncRewake` | not touched | `TestClaudeStopOverlapDeadlineAndGracefulStop`, `TestRealClaudeStopRenewsAndDeliversPendingNotice`, [#111](111-claude-stop-watch.md) |
+| Claude | receipt-backed background Bash Watch | not touched | `TestRealClaudeBackgroundWatchWakesOnlyForNotice`, [#360](360-claude-background-watch.md) |
 | Pi | in-process extension, `pi.sendMessage` follow-up | not touched | `TestPiExtensionSessionReplacementOwnsOneLookoutGeneration`, `pi_notice_*.mjs` fixtures |
 | OpenCode | plugin, `session.prompt` after `session.idle` | not touched | `TestOpenCodeQueuesNoticeBatchDuringBusyTurn`, `TestOpenCodePromptOutcomesFollowReceiptEvidence` |
 | Codex | `codex queue --thread` | draft stays | `TestCodexLeadReceivesNoticesThroughItsQueueWhileFocusedAndBusy`, `TestFailedCodexQueueFallsBackToTypedPromptOnlyWhenUnfocused` |
@@ -35,7 +35,7 @@ Two tests count what observation costs, with API calls and CPU kept apart from m
 
 - `forge_calls` counts `gh api graphql` invocations.
 - `poller_arms` counts producer invocations; `handoff_arms` and `actionable_wakes` count receipt-backed Watch arms and printed batches. An accepted batch did not wake again.
-- The tests measure API and CPU cost only and report no token savings. Claude's quiet renewal still costs one short model turn every four minutes.
+- The tests measure API and CPU cost only and report no token savings. Claude's background Watch makes no model requests while it waits quietly.
 
 ## Limits
 

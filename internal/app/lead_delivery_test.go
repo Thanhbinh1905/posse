@@ -409,7 +409,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 
 	claude := launch("claude")
 	plugin := filepath.Join(home, "projects", "shop", "lead-claude-lowkey")
-	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-watch")}) || claude.TypedPrompt != "" ||
+	if !equalStrings(claude.Args, []string{"--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0]}) || claude.TypedPrompt != "" ||
 		claude.Env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] != "1" || claude.Env["POSSE_LOWKEY_CONFIG"] != config.ConfigPath(home, "shop") ||
 		claude.Env["POSSE_LOWKEY_GLOBAL_CONFIG"] != config.ConfigPath(home, "") || claude.Env["POSSE_LOWKEY_NOTICES_DIR"] != claudeNoticeDirectory(home, "shop") {
 		t.Fatalf("claude launch = %#v", claude)
@@ -817,7 +817,7 @@ func TestIdentityTextLabelsSetFieldsOnly(t *testing.T) {
 
 func TestNoticeRulesForbidPollingForEveryDelivery(t *testing.T) {
 	for delivery, wake := range map[string]string{
-		config.NoticeDeliveryWatch:          "End your turn and let the Stop hook wake you.",
+		config.NoticeDeliveryWatch:          "After starting the waiter, end your turn and let it wake you.",
 		config.NoticeDeliveryCodexQueue:     "End your turn and let that message wake you.",
 		config.NoticeDeliveryPiExtension:    "End your turn and let that message wake you.",
 		config.NoticeDeliveryOpenCodePlugin: "End your turn and let that message wake you.",
@@ -827,8 +827,15 @@ func TestNoticeRulesForbidPollingForEveryDelivery(t *testing.T) {
 		if !strings.Contains(rule, noPollRule) || !strings.Contains(rule, wake) {
 			t.Errorf("%s Notice rule = %q", delivery, rule)
 		}
-		if delivery == config.NoticeDeliveryWatch && !strings.Contains(rule, "A stopped hook does not restart itself; the next normal Stop owns the next wait.") {
-			t.Errorf("Claude Lead watch restart rule = %q", rule)
+		if delivery == config.NoticeDeliveryWatch {
+			for _, expected := range []string{"--handoff", "CLAUDE_CODE_SESSION_ID", "without model turns", "`Read` on the output file", "exact Notice IDs", "receipt is accepted"} {
+				if !strings.Contains(rule, expected) {
+					t.Errorf("Claude Lead watch rule omitted %q: %q", expected, rule)
+				}
+			}
+			if strings.Contains(rule, "Stop hook") {
+				t.Errorf("Claude Lead watch rule still relies on a Stop hook: %q", rule)
+			}
 		}
 	}
 }

@@ -477,6 +477,7 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP TABLE notice_delivery_receipts`,
+		`DROP TABLE task_turn_tokens`,
 		`DROP INDEX projects_project_uuid_idx`,
 		`ALTER TABLE projects DROP COLUMN project_uuid`,
 		`ALTER TABLE tasks DROP COLUMN agent_session_kind`,
@@ -614,6 +615,7 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		`DROP TABLE review_findings`,
 		`DROP TABLE review_patterns`,
 		`DROP TABLE review_rounds`,
+		`DROP TABLE task_turn_tokens`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`,
@@ -800,6 +802,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`DROP TABLE review_findings`,
 		`DROP TABLE review_patterns`,
 		`DROP TABLE review_rounds`,
+		`DROP TABLE task_turn_tokens`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {

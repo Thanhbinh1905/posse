@@ -23,9 +23,10 @@ import (
 )
 
 type TaskSnapshot struct {
-	Version int     `toml:"version"`
-	Project Project `toml:"project"`
-	Task    Task    `toml:"task"`
+	Version         int     `toml:"version"`
+	Project         Project `toml:"project"`
+	Task            Task    `toml:"task"`
+	WorkerTurnToken string  `toml:"worker_turn_token,omitempty"`
 	// LaunchIdentities retain the configured author and reviewer identity for
 	// every recorded Task launch. Missing numbers are left missing so rebuilds
 	// can report legacy or interrupted history as unknown rather than infer it.
@@ -328,13 +329,17 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if err != nil {
 		return err
 	}
+	turnToken, err := db.TaskTurnToken(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	if admitted != nil {
 		if len(plans) < admitted.Revision {
 			return fmt.Errorf("missing plan revision history for Task %d", taskID)
 		}
 		plans = plans[:admitted.Revision]
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, TargetChanges: targetChanges, PlanRevisions: plans}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, TargetChanges: targetChanges, PlanRevisions: plans}
 	if task.Type == "review" {
 		if snapshot.ReviewTargets, err = db.ReviewTargets(ctx, taskID); err != nil {
 			return err
@@ -1044,6 +1049,11 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, "", task.State, "cli", "Rebuilt from atomic Task snapshot", task.UpdatedAt); err != nil {
 			return err
+		}
+		if snapshot.WorkerTurnToken != "" {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_turn_tokens(task_id,token,updated_at) VALUES(?,?,?)`, task.ID, snapshot.WorkerTurnToken, task.UpdatedAt); err != nil {
+				return err
+			}
 		}
 		for _, review := range snapshot.ReportReviews {
 			reviewerSnapshot, exists := snapshotTasks[review.ReviewTaskID]

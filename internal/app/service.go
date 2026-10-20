@@ -139,7 +139,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Orphan or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
 		{Name: "start", Usage: "$ start --brief <file> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>]", Summary: "Start a Worker from a Brief with an optional display name.", Handler: s.spawn},
-		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Worker's Signal; done is refused while queued instructions remain undelivered.", Handler: s.signal},
+		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--turn <token>] [--findings <file>] [--report <file>]", Summary: "Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Change Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Worker's next publish will use.", Handler: s.retitle},
 		{Name: "brief", Summary: "Reprint this Worker's launch Brief.", Handler: s.brief},

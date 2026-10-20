@@ -22,7 +22,7 @@ import (
 
 const claudeStopWait = 4 * time.Minute
 
-// RunClaudeStop is a Claude-owned asyncRewake Stop hook, not a detached relay.
+// RunClaudeStop preserves the asyncRewake path for already-running Claude Leads. New Leads use a background Watch.
 // Every invocation expires before the harness's five-minute hook deadline. Exit
 // 2 asks Claude to handle a Notice or finish a quiet renewal turn; its next Stop
 // owns the next wait. SIGTERM and session teardown never ask for another turn.
@@ -246,28 +246,4 @@ func claudeTranscriptHasReceipt(ctx context.Context, path, marker string) (bool,
 		}
 	}
 	return false, scanner.Err()
-}
-
-func (s *Service) writeLeadClaudeStop(home string, project store.Project) (string, error) {
-	binary, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	root := filepath.Join(home, "projects", project.Name, "lead-claude-watch")
-	command := "cd " + shellQuote(project.Root) + " && exec env POSSE_HOME=" + shellQuote(home) + " " + shellQuote(binary) + " _claude-stop"
-	settings := map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{
-		"type": "command", "command": command, "timeout": 300, "asyncRewake": true,
-	}}}}}}
-	data, err := json.Marshal(settings)
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(root, "hooks", "hooks.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", err
-	}
-	if err := writeFile(path, data); err != nil {
-		return "", err
-	}
-	return root, nil
 }

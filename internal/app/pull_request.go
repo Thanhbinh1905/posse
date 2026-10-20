@@ -1575,6 +1575,30 @@ func decodeChecks(value string) checkSnapshot {
 	return checks
 }
 
+func rejectFailedObservedPRChecks(ctx context.Context, db *store.DB, taskID int64, repo, prURL, headSHA string) error {
+	var observation store.PRObservation
+	var err error
+	if repo == "" {
+		observation, err = db.LatestPRObservation(ctx, taskID)
+	} else {
+		observation, err = db.LatestMemberPRObservation(ctx, taskID, repo)
+	}
+	if err != nil {
+		if store.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if observation.PRURL != prURL || observation.HeadSHA != headSHA {
+		return nil
+	}
+	checks := decodeChecks(observation.Checks)
+	if checks.State == "FAILURE" || len(checks.Failures) > 0 {
+		return axi.Failure("checks_failed", "current pull request head has failed required checks", false, "Fix the failed checks and publish the current head before signalling done")
+	}
+	return nil
+}
+
 func failedCheckNames(failures []failedCheck) string {
 	names := make([]string, 0, len(failures))
 	for _, failure := range failures {

@@ -32,7 +32,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		"Send a message, optionally queueing it or interrupting and redirecting a busy Worker.",
 		"Withdraw a queued Worker message before delivery begins.",
 		"Interrupt a working Worker and verify it stopped; report when no working turn can be interrupted.",
-		"Record a Worker's Signal; done is refused while queued instructions remain undelivered.",
+		"Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("posse --help omitted summary %q: %s", want, help)
