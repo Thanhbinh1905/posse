@@ -51,8 +51,8 @@ var keySpecs = []KeySpec{
 	{Key: "repositories.<repository>.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override the forge for a member repository."},
 	{Key: "defaults.merge_method", Type: TypeString, Allowed: []string{"squash", "merge", "rebase"}, Default: "squash", Meaning: "Merge method used for pull requests."},
 	{Key: "defaults.pr_poll", Type: TypeDuration, Default: "2m", Meaning: "Minimum interval between pull request and Project checkout polls."},
-	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Default: "none", Meaning: "Independent-review evidence required to Merge a Change Task; does not grant merge authority.", UserOnly: true},
-	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "local", "no-mistakes"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
+	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Default: "none", Meaning: "Review evidence required to Merge a Change Task. full-pipeline is selectable and frozen but unavailable until VP-C validation ships; no-mistakes is deprecated.", UserOnly: true},
+	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
 	{Key: "defaults.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in the Sandbox before a Change Task may Merge.", UserOnly: true},
 	{Key: "review_loop.enabled", Type: TypeBoolean, Default: true, Meaning: "Enable built-in Review Rounds for Change Tasks.", UserOnly: true},
 	{Key: "review_loop.max_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum Review Rounds per Change Task; may be lowered to 1 or 2.", UserOnly: true},
@@ -87,6 +87,7 @@ var keySpecs = []KeySpec{
 	{Key: "profiles.<profile>.model", Type: TypeString, Default: "", Meaning: "Model argument value supplied through the kind template."},
 	{Key: "profiles.<profile>.effort", Type: TypeString, Default: "", Meaning: "Reasoning effort supplied through the kind template."},
 	{Key: "profiles.<profile>.args", Type: TypeStringArray, Default: []string{}, Meaning: "Additional arguments passed to this Profile's agent.", UserOnly: true},
+	{Key: "workflows.<workflow>.stages", Type: TypeTableArray, Meaning: "Ordered User-owned workflow stages; a Project replaces a named workflow as a whole.", UserOnly: true},
 	{Key: "dispatch", Type: TypeTableArray, Default: []any{}, Meaning: "Ordered dispatch rules that select a Profile."},
 	{Key: "dispatch.default.use", Type: TypeString, Default: "", Meaning: "Fallback Profile used when no dispatch rule matches."},
 	{Key: "autonomy.yolo", Type: TypeBoolean, Default: false, Meaning: "Shorthand granting the Lead review and merging autonomy.", UserOnly: true},
@@ -164,7 +165,11 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 	case TypeStringArray:
 		valid = stringArray(value)
 	case TypeTableArray:
-		valid = dispatchRules(value)
+		if key == "dispatch" {
+			valid = dispatchRules(value)
+		} else if isWorkflowStagesKey(key) {
+			_, valid = workflowTableEntries(value)
+		}
 	}
 	if !valid {
 		return fmt.Errorf("%s must be %s", key, spec.Type)
@@ -230,7 +235,7 @@ func ValidateSchemaMap(file string, values map[string]any, projectFile bool) err
 // SchemaValidationErrors reports every independently invalid setting in a
 // config map so an edit can distinguish pre-existing errors from new ones.
 func SchemaValidationErrors(file string, values map[string]any, projectFile bool) []error {
-	var issues []error
+	issues := workflowSchemaValidationErrors(file, values)
 	var walk func(string, any)
 	walk = func(prefix string, value any) {
 		if replacement := ReplacementKey(prefix); replacement != "" {
@@ -262,6 +267,9 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 				walk(path, current[key])
 			}
 		case []map[string]any:
+			if isWorkflowStagesKey(prefix) {
+				return
+			}
 			if prefix != "dispatch" {
 				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: prefix + " must be an array of tables"})
 				return
@@ -276,6 +284,18 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 						issues = append(issues, err)
 					}
 				}
+			}
+		case []any:
+			if isWorkflowStagesKey(prefix) {
+				if _, ok := workflowTableEntries(current); ok {
+					return
+				}
+			}
+			key := canonicalSchemaKey(prefix)
+			if _, found := Lookup(key); !found {
+				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "unknown configuration key"})
+			} else if err := ValidateSetting(key, current, projectFile); err != nil {
+				issues = append(issues, &InvalidError{File: file, Key: key, Reason: strings.TrimPrefix(err.Error(), key+" ")})
 			}
 		default:
 			if prefix == "" {

@@ -303,7 +303,11 @@ func rewriteVocabularyValue(contents string, start, end int, path []string, patc
 	if !ok {
 		return nil
 	}
-	updated := migrateVocabularyString(strings.Join(path, "."), value)
+	fullPath := strings.Join(path, ".")
+	updated := migrateVocabularyString(fullPath, value)
+	if isReviewPolicyPath(fullPath) && value == "local" {
+		updated = "quick"
+	}
 	if updated != value {
 		*patches = append(*patches, vocabularyTextPatch{start: left, end: right, replacement: preserveTOMLString(contents[left:right], updated)})
 	}

@@ -114,7 +114,7 @@ func passReview(t *testing.T, f *prLifecycleFixture, change store.Task, title st
 }
 
 func TestPRMergeBindsHeadObservationAndLocalVerdict(t *testing.T) {
-	f := reviewEvidenceFixture(t, "local")
+	f := reviewEvidenceFixture(t, "quick")
 	change := publishCandidate(t, f, "PR lifecycle change", "author", 17)
 	requireRefusal(t, f, "review_required", "merge", "t1")
 	passReview(t, f, change, "First review")
@@ -161,7 +161,7 @@ func TestPRMergeBindsHeadObservationAndLocalVerdict(t *testing.T) {
 }
 
 func TestExternalMergeWithoutEvidenceIsPolicyViolation(t *testing.T) {
-	f := reviewEvidenceFixture(t, "local")
+	f := reviewEvidenceFixture(t, "quick")
 	change := publishCandidate(t, f, "External merge change", "author", 17)
 	stopBackgroundWatch(t, f)
 	merge := f.mergeOnLocalOrigin(t, change, "t1")

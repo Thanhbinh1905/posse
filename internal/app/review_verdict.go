@@ -129,7 +129,7 @@ func reviewVerdictQualifies(ctx context.Context, db *store.DB, change store.Task
 }
 
 // currentReviewPass reports the pass verdict, if any, that qualifies the Change
-// Task's present candidate for local review.
+// Task's present candidate for quick review.
 func currentReviewPass(ctx context.Context, db *store.DB, project store.Project, change store.Task) (store.ReviewVerdict, bool, error) {
 	candidate, err := changeCandidateTargets(ctx, db, project, change)
 	if err != nil {
@@ -189,8 +189,10 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 	for _, selected := range policies {
 		switch selected {
 		case "none":
-		case "local", "always":
+		case "quick", "local", "always":
 			local = true
+		case "full-pipeline":
+			return fullPipelineNotReady(task)
 		case "no-mistakes":
 			receipt = true
 		default:
@@ -199,7 +201,7 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 	}
 	if receipt {
 		if project.IsWorkspace() {
-			return axi.Failure("review_receipt_unsupported", "Task "+taskIDString(task.Seq)+" selects no-mistakes review for a workspace Member; no-mistakes cannot produce Member receipts", false, "Select local or none review for workspace Members")
+			return axi.Failure("review_receipt_unsupported", "Task "+taskIDString(task.Seq)+" selects no-mistakes review for a workspace Member; no-mistakes cannot produce Member receipts", false, "Select quick or none review for workspace Members")
 		}
 		if err := requireNoMistakesReceipt(ctx, db, project, task, commit); err != nil {
 			return err
@@ -209,6 +211,10 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 		return requireReviewPass(ctx, db, project, task, commit)
 	}
 	return nil
+}
+
+func fullPipelineNotReady(task store.Task) error {
+	return axi.Failure("full_pipeline_not_ready", "full-pipeline validation has not shipped; this Task cannot be promoted or merged", false, "Select `none` or `quick` for production Tasks until VP-C lands")
 }
 
 // selectedReviewPolicies lists the admitted policy of the Task, or of each

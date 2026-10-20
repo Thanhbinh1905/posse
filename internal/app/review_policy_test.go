@@ -42,12 +42,14 @@ func freezeReviewPolicy(t *testing.T, f *reviewVerdictFixture, policy string, ve
 
 func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 	for _, tc := range []struct {
-		policy  string
-		version int
-		blocked bool
+		policy           string
+		version          int
+		blocked          bool
+		blockedAfterPass bool
 	}{
-		{"none", taskplan.Version, false}, {"local", taskplan.Version, true}, {"no-mistakes", taskplan.Version, true},
-		{"always", 1, true}, {"on_risk", 1, false}, {"never", 1, false},
+		{"none", taskplan.Version, false, false}, {"quick", taskplan.Version, true, false}, {"local", 3, true, false},
+		{"full-pipeline", taskplan.Version, true, true}, {"no-mistakes", taskplan.Version, true, true},
+		{"always", 1, true, false}, {"on_risk", 1, false, false}, {"never", 1, false, false},
 	} {
 		t.Run(tc.policy, func(t *testing.T) {
 			f := newReviewVerdictFixture(t)
@@ -69,15 +71,21 @@ func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 				t.Fatalf("verdict: %d %s", code, out)
 			}
 			err = requireSelectedReview(context.Background(), f.db, f.project, cfg, f.task)
-			if (err != nil) != (tc.policy == "no-mistakes") {
-				t.Fatalf("policy with local pass: %v", err)
+			if (err != nil) != tc.blockedAfterPass {
+				t.Fatalf("policy with review pass: %v", err)
+			}
+			if tc.policy == "full-pipeline" {
+				var refusal *axi.Error
+				if !errors.As(err, &refusal) || refusal.Code != "full_pipeline_not_ready" {
+					t.Fatalf("full-pipeline did not fail closed: %v", err)
+				}
 			}
 		})
 	}
 }
 
 func TestWorkspaceSelectedReviewOverridesStayFrozen(t *testing.T) {
-	f := newWorkspaceMergeFixture(t, localWorkspaceConfig+"review='local'\n[repositories.backend]\nreview='none'\n[repositories.worker]\nreview='no-mistakes'\n", []string{"backend", "worker"}, []string{"backend"})
+	f := newWorkspaceMergeFixture(t, localWorkspaceConfig+"review='quick'\n[repositories.backend]\nreview='none'\n[repositories.worker]\nreview='no-mistakes'\n", []string{"backend", "worker"}, []string{"backend"})
 	ctx := context.Background()
 	task, err := f.db.TaskByID(ctx, f.project.ID, f.task.ID)
 	if err != nil {
@@ -121,7 +129,7 @@ func TestLocalReviewRecheckedAfterGateAndBeforeMerge(t *testing.T) {
 	for _, boundary := range []string{"gate", "merging"} {
 		t.Run(boundary, func(t *testing.T) {
 			f := newReviewVerdictFixture(t)
-			configText := "[defaults]\nmerge_mode='local'\nreview='local'\nauto_teardown='never'\n"
+			configText := "[defaults]\nmerge_mode='local'\nreview='quick'\nauto_teardown='never'\n"
 			if boundary == "gate" {
 				// The Gate changes the candidate after the initial evidence check.
 				script := filepath.Join(f.root, "invalidate-review")

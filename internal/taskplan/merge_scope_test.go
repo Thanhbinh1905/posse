@@ -9,7 +9,7 @@ import (
 
 func TestWorkspaceScopePreservesScopedPreferencesAndPinnedBase(t *testing.T) {
 	r := request("change")
-	r.Delivery, r.Review = "pr", "local"
+	r.Delivery, r.Review = "pr", "quick"
 	r.Brief = taskplan.Select("brief", "scoped-workspace.md", []byte("---\ntype: change\ntitle: Scoped workspace\ndone_when: checked\nrepos: [api]\nroot_context: read-only\nmerge_mode: local\nreview: none\nbase: release/next\ntarget: release/next\n---\n"))
 	commit := strings.Repeat("a", 40)
 	r.Execution = taskplan.Execution{Scope: "workspace", Members: []taskplan.Member{{

@@ -15,6 +15,20 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
+func resolveWorkflowSelection(cfg config.Config, name string) (*config.WorkflowSelection, error) {
+	if name == "" {
+		return nil, nil
+	}
+	workflow, found, err := cfg.ResolveWorkflow(name)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, unknownWorkflow(name, "")
+	}
+	return &workflow, nil
+}
+
 func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) (taskplan.Launch, error) {
 	kind, ok := kinds[resolution.Resolved.Kind]
 	if !ok {
@@ -36,6 +50,10 @@ func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) 
 
 func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice) (taskplan.Plan, error) {
 	brief, err := dispatch.ParseBriefText(string(briefData))
+	if err != nil {
+		return taskplan.Plan{}, err
+	}
+	workflow, err := resolveWorkflowSelection(cfg, brief.Workflow)
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
@@ -114,7 +132,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
 		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		Gate:  cfg.Defaults.Gate, ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, Gate: cfg.GateLoop, CI: cfg.CILoop},
-		MergeMethod: cfg.Defaults.MergeMethod, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup}})
+		MergeMethod: cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup}})
 }
 
 // Restore files absent after a crash from the admitted inputs, never from

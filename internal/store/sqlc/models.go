@@ -575,6 +575,29 @@ type Transition struct {
 	At        int64
 }
 
+type ValidationCandidate struct {
+	ID                int64
+	TaskID            int64
+	Repo              string
+	Generation        int64
+	SubmittedSha      string
+	CandidateSha      string
+	TargetSha         string
+	ExpectedRemoteSha string
+	ObservedAuthorSha string
+	RefName           string
+	WorktreePath      string
+	State             string
+	PromotedSha       string
+	Summary           string
+	Verification      string
+	Proof             string
+	Risk              string
+	Refresh           int64
+	CreatedAt         int64
+	UpdatedAt         int64
+}
+
 type ValidationFixRound struct {
 	ID               int64
 	ChangeTaskID     int64

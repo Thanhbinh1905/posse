@@ -21,6 +21,57 @@ import (
 	"time"
 )
 
+func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
+	if testProcessHasHerdrAncestor(os.Getpid()) {
+		t.Skip("release update fixture requires a process tree outside an active Herdr session")
+	}
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("official v0.15.0 release fixture is Linux amd64")
+	}
+	f := newPRLifecycleFixtureWithManualWatchOwner(t)
+	defer f.db.Close()
+	// Update runs setup against the running binary, which refuses binaries
+	// under /tmp. Keep the release fixture in the Task scratch root when set;
+	// CI's /tmp default falls back to /var/tmp like the 0.14 upgrade test.
+	binaryRoot := filepath.Clean(os.TempDir())
+	if binaryRoot == "/tmp" || strings.HasPrefix(binaryRoot, "/tmp/") {
+		binaryRoot = "/var/tmp"
+	}
+	stableBinaryDir := newFixtureRootAt(t, binaryRoot, fixturePrefix("official-update-installed-"))
+	legacyBinary := downloadOfficialReleaseBinary(t, stableBinaryDir, "v0.15.0")
+	home := filepath.Join(f.root, "official-015-home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := setEnv(f.env, "POSSE_HOME", home)
+	configPath := filepath.Join(home, "config.toml")
+	original := []byte("# posse vocabulary: 1\n# Keep this User comment.\n[defaults]\nreview = 'local' # Existing review behavior\nmerge_mode = 'local' # Local delivery is unchanged\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, legacyBinary, f.repo, env, "config", "show"); code != 0 || !strings.Contains(output, "review") {
+		t.Fatalf("official v0.15.0 did not load its legacy review config: code=%d output=%s", code, output)
+	}
+
+	release := makeUpdateTestRelease(t, f.binary, "v0.15.1")
+	proxyURL, certPath := startUpdateReleaseProxy(t, release)
+	updateEnv := setEnv(env, "HTTPS_PROXY", proxyURL)
+	updateEnv = setEnv(updateEnv, "https_proxy", proxyURL)
+	updateEnv = setEnv(updateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
+	updateEnv = setEnv(updateEnv, "no_proxy", "localhost,127.0.0.1,::1")
+	updateEnv = setEnv(updateEnv, "SSL_CERT_FILE", certPath)
+	if code, output := runReleaseCLI(t, legacyBinary, f.repo, updateEnv, "update", "--version", release.tag); code != 0 {
+		t.Fatalf("v0.15.0 update failed: code=%d output=%s", code, output)
+	}
+	want := "# posse vocabulary: 2\n# Keep this User comment.\n[defaults]\nreview = 'quick' # Existing review behavior\nmerge_mode = 'local' # Local delivery is unchanged\n"
+	if got, err := os.ReadFile(configPath); err != nil || string(got) != want {
+		t.Fatalf("update did not migrate config in place: %q err=%v; want %q", got, err, want)
+	}
+	if backup, err := os.ReadFile(configPath + ".v015"); err != nil || !bytes.Equal(backup, original) {
+		t.Fatalf("update did not retain the original config bytes: %q err=%v", backup, err)
+	}
+}
+
 func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	if testProcessHasHerdrAncestor(os.Getpid()) {
 		t.Skip("release update fixture requires a process tree outside an active Herdr session")

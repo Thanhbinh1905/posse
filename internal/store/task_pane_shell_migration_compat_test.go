@@ -15,6 +15,7 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 	}
 	for _, statement := range []string{
 		`DROP TABLE member_watch_errors`,
+		`DROP TABLE validation_candidates`,
 		`DROP TABLE task_turn_tokens`,
 		`DELETE FROM goose_db_version WHERE version_id >= 56`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 56`,
@@ -36,7 +37,7 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 		t.Fatalf("open database after pane shell migration renumbering: %v", err)
 	}
 	defer db.Close()
-	for _, table := range []string{"task_turn_tokens", "member_watch_errors"} {
+	for _, table := range []string{"task_turn_tokens", "member_watch_errors", "validation_candidates"} {
 		var exists int
 		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)`, table).Scan(&exists); err != nil || exists != 1 {
 			t.Fatalf("table %s after migration renumbering exists=%d, err=%v", table, exists, err)
@@ -50,7 +51,7 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []int64{56, 57, 58} {
+	for _, version := range []int64{56, 57, 58, 59} {
 		var applied int
 		var expected, recorded string
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM goose_db_version WHERE version_id=? AND is_applied=1`, version).Scan(&applied); err != nil || applied != 1 {
