@@ -137,7 +137,17 @@ func (authorization *sandboxProcessAuthorization) setSignalGuard(pid int, guard 
 
 func (authorization *sandboxProcessAuthorization) guardSignal(pid int, signal syscall.Signal) error {
 	handle := authorization.handle(pid)
-	if handle == nil || handle.signalGuard == nil {
+	if handle == nil {
+		return fmt.Errorf("PID %d was not retained during Task ownership proof; preserving it", pid)
+	}
+	alive, err := verifySandboxProcessHandleIfAlive(pid, handle)
+	if err != nil {
+		return err
+	}
+	if !alive {
+		return nil
+	}
+	if handle.signalGuard == nil {
 		return nil
 	}
 	return handle.signalGuard(signal)

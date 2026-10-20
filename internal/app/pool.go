@@ -877,37 +877,24 @@ func releaseSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 	})
 }
 
-func requireNoSandboxProcesses(path string, approvedDiscard bool, preservedCWD ...map[int]bool) error {
+func requireNoSandboxProcesses(path string, approvedDiscard bool) error {
 	root, err := normalizeOwnedProcessRoot(path)
 	if err != nil {
 		return err
 	}
-	processRoot := ownedProcessRoot{path: root, includeOpenFiles: true, includeMappedFiles: true, excludedExact: mergeTaskProcessExclusions(preservedCWD...)}
-	pids, err := processIDsInRoots([]ownedProcessRoot{processRoot})
+	pids, err := processIDsInRoots([]ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true}})
 	if err != nil {
 		return err
 	}
 	if len(pids) == 0 {
 		return nil
 	}
-	labels := make([]string, len(pids))
-	for index, pid := range pids {
-		labels[index] = strconv.Itoa(pid)
-	}
+	processes := taskOwnedProcessDetails(pids)
+	description := describeTaskProcesses(processes)
 	if approvedDiscard {
-		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Sandbox while processes remain", true, strings.Join(labels, ","), "No process was stopped or signalled. Inspect the Sandbox processes, then retry discard")
+		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Sandbox while processes still reference it: "+description, true, "No process was stopped or signalled. Inspect the listed processes, then retry discard")
 	}
-	message := "cannot release the Sandbox because live processes were not authorized during ownership proof: " + strings.Join(labels, ",")
-	preservedPIDs := mergeTaskProcessExclusions(preservedCWD...)
-	if len(preservedPIDs) > 0 {
-		shared := make([]string, 0, len(preservedPIDs))
-		for pid := range preservedPIDs {
-			shared = append(shared, strconv.Itoa(pid))
-		}
-		sort.Strings(shared)
-		message = "preserving detached shared daemon PID(s) " + strings.Join(shared, ",") + "; " + message
-	}
-	return axi.Failure("sandbox_process_identity_unavailable", message, true, strings.Join(labels, ","), "Inspect the Sandbox processes and retry Teardown after they exit")
+	return axi.Failure("sandbox_processes_present", "cannot release the Sandbox while live processes still reference it: "+description, true, "Stop or wait for the listed processes to exit, then retry Teardown. The Sandbox remains held until no process has it as its cwd, open file, or mapped file")
 }
 
 func finishReleasingSandbox(ctx context.Context, db *store.DB, project store.Project, sandbox store.Sandbox, task store.Task) error {

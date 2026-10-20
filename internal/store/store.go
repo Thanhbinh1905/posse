@@ -641,7 +641,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, MergedRef: task.MergedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
 		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now, PlanJson: planJSON,
-		ReportKind: task.ReportKind,
+		ReportKind: task.ReportKind, PaneShellIdentity: task.PaneShellIdentity,
 	})
 	if err != nil {
 		return 0, err
@@ -729,6 +729,7 @@ type Task struct {
 	HerdrWorkspaceID     string         `toml:"herdr_workspace_id"`
 	PaneID               string         `toml:"pane_id"`
 	PaneLabel            string         `toml:"pane_label"`
+	PaneShellIdentity    string         `toml:"pane_shell_identity,omitempty"`
 	AgentName            string         `toml:"agent_name"`
 	AgentSession         string         `toml:"agent_session"`
 	AgentSessionKind     string         `toml:"agent_session_kind"`
@@ -2625,7 +2626,18 @@ func taskFromDB(row dbgen.Task) Task {
 		PRURL: row.PrUrl, MergedRef: row.MergedRef, LastOutputHash: row.LastOutputHash,
 		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson,
-		ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath, ContainmentMarker: row.ContainmentMarker}
+		ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath, ContainmentMarker: row.ContainmentMarker,
+		PaneShellIdentity: row.PaneShellIdentity}
+}
+
+func (db *DB) UpdateTaskPaneShellIdentity(ctx context.Context, taskID int64, identity string) error {
+	if identity == "" {
+		return fmt.Errorf("Task pane shell identity cannot be empty")
+	}
+	if err := db.queries.SetTaskPaneShellIdentity(ctx, dbgen.SetTaskPaneShellIdentityParams{PaneShellIdentity: identity, UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) UpdateTaskContainment(ctx context.Context, taskID int64, mode, path, marker string) error {

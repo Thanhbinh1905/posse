@@ -12,6 +12,10 @@ type sandboxProcessHandle struct {
 	signalGuard func(syscall.Signal) error
 }
 
+func sandboxProcessExecutableIdentity(pid int) (string, error) {
+	return "", fmt.Errorf("process executable identity is unsupported on this platform for PID %d", pid)
+}
+
 func sandboxProcessGroupID(pid int) (int, error) {
 	return 0, fmt.Errorf("process group is unsupported on this platform for PID %d", pid)
 }
@@ -31,6 +35,8 @@ func openSandboxProcessHandle(pid int) (*sandboxProcessHandle, error) {
 func (handle *sandboxProcessHandle) PID() int { return handle.pid }
 
 func (handle *sandboxProcessHandle) Identity() string { return "" }
+
+func (handle *sandboxProcessHandle) ExecutableIdentity() string { return "" }
 
 func (handle *sandboxProcessHandle) Signal(syscall.Signal) error {
 	return fmt.Errorf("process-instance signaling is unsupported on this platform")

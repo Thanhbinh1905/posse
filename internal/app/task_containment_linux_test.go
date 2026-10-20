@@ -252,8 +252,15 @@ func TestInPlaceContainmentPreservesForeignForegroundProcess(t *testing.T) {
 	}
 	fake.Results["pane.process_info"] = processInfo
 	service := testService(t.TempDir(), fake)
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	for _, pid := range []int{os.Getpid(), command.Process.Pid} {
+		if _, err := authorization.bind(pid); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_, err = stopTaskProcessContainmentWithGuard(context.Background(), task, func(pid int, _ syscall.Signal) error {
-		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, os.Getpid())
+		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, os.Getpid(), command.Process.Pid, authorization)
 	})
 	if err == nil || !strings.Contains(err.Error(), "foreign foreground process") {
 		t.Fatalf("foreign pane foreground was not refused: %v", err)
@@ -293,8 +300,13 @@ func TestInPlaceContainmentStopsMarkedProcessAfterPaneDisappears(t *testing.T) {
 	task := store.Task{ID: 2, Seq: 1, WorktreePath: root, HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:local:t1", ContainmentMode: "marker", ContainmentMarker: marker}
 	fake := herdr.NewFake()
 	service := testService(t.TempDir(), fake)
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	if _, err := authorization.bind(command.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := stopTaskProcessContainmentWithGuard(context.Background(), task, func(pid int, _ syscall.Signal) error {
-		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, 0)
+		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, 0, 0, authorization)
 	}); err != nil {
 		t.Fatalf("in-place Teardown failed after the Task pane disappeared: %v", err)
 	}
@@ -309,6 +321,39 @@ func TestInPlaceContainmentStopsMarkedProcessAfterPaneDisappears(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("in-place Teardown left the marker-owned process running after the pane disappeared")
 	}
+}
+
+func TestTaskPaneShellGetsShortSIGKILLGrace(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	ready := filepath.Join(root, "ready")
+	command := exec.Command("python3", "-c", `import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(__import__("os").environ["TASK_TEST_READY"],"w").write(str(__import__("os").getpid())); time.sleep(300)`)
+	command.Env = taskContainmentTestEnvironment(marker, ready, 0)
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	defer func() {
+		if !waited {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	}()
+	if !waitForTaskContainmentFile(5*time.Second, ready) {
+		t.Fatal("pane-shell fixture did not start")
+	}
+	started := time.Now()
+	if _, err := stopMarkedTaskProcesses(marker, nil, nil, command.Process.Pid); err != nil {
+		t.Fatalf("stop pane-shell fixture: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 1500*time.Millisecond {
+		t.Fatalf("pane-shell SIGKILL phase took %s, want less than 1.5s", elapsed)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("pane-shell fixture exited without a signal")
+	}
+	waited = true
 }
 
 func TestTaskContainmentSignalsPaneShellLast(t *testing.T) {
@@ -407,7 +452,7 @@ func TestTaskContainmentSkipsReusedPaneShellPID(t *testing.T) {
 	task := store.Task{ID: 2, Seq: 1, WorktreePath: root, HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:local:t1", ContainmentMode: "cgroup", ContainmentMarker: marker}
 	service := testService(t.TempDir(), herdr.NewFake())
 	_, err = stopTaskProcessContainmentWithGuard(context.Background(), task, func(pid int, signal syscall.Signal) error {
-		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, command.Process.Pid)
+		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, command.Process.Pid, 0, nil)
 	}, command.Process.Pid)
 	if err != nil {
 		t.Fatalf("Teardown blocked on an unmarked process reusing a stale pane shell PID: %v", err)

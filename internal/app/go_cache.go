@@ -13,8 +13,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 const (
@@ -114,17 +112,26 @@ func validateWorkerGoBuildCachePath(cachePath, home string) error {
 	return nil
 }
 
-func (s *Service) trimWorkerGoBuildCache(ctx context.Context, db *store.DB, home string) (string, error) {
-	var detail string
-	err := withSandboxStateLock(ctx, db, func() error {
-		var err error
-		detail, err = trimWorkerGoBuildCacheOnce(ctx, home, time.Now())
-		return err
-	})
-	return detail, err
+func (s *Service) trimWorkerGoBuildCache(ctx context.Context, home string) (string, error) {
+	cachePath, err := ensureWorkerGoBuildCache(home)
+	if err != nil {
+		return "", err
+	}
+	posseHome := filepath.Dir(filepath.Dir(cachePath))
+	lockPath := filepath.Join(posseHome, "cache", "worker-go-build-trim.lock")
+	lock, err := acquireFileLock(ctx, lockPath)
+	if err != nil {
+		return "", fmt.Errorf("acquire Worker GOCACHE maintenance lock: %w", err)
+	}
+	defer lock.Close()
+	return trimWorkerGoBuildCacheOnce(ctx, home, time.Now())
 }
 
-func trimWorkerGoBuildCacheOnce(_ context.Context, home string, now time.Time) (string, error) {
+func trimWorkerGoBuildCacheOnce(ctx context.Context, home string, now time.Time) (string, error) {
+	return trimWorkerGoBuildCacheWithProcessCheck(ctx, home, now, activeGoBuildProcesses)
+}
+
+func trimWorkerGoBuildCacheWithProcessCheck(_ context.Context, home string, now time.Time, activeProcesses func() ([]string, error)) (string, error) {
 	marker := filepath.Join(home, "cache", "worker-go-build-trim.stamp")
 	if info, err := os.Stat(marker); err == nil && now.Sub(info.ModTime()) < sharedGoBuildCacheTrimInterval {
 		return "", nil
@@ -155,7 +162,7 @@ func trimWorkerGoBuildCacheOnce(_ context.Context, home string, now time.Time) (
 		}
 		return "", nil
 	}
-	active, err := activeGoBuildProcesses()
+	active, err := activeProcesses()
 	if err != nil {
 		return "", fmt.Errorf("inspect Go build activity: %w", err)
 	}

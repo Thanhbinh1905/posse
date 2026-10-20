@@ -93,7 +93,7 @@ func (s *Service) repairPoolSandbox(ctx *axi.Context, args []string) error {
 			return axi.Failure("sandbox_repair_git_metadata", err.Error(), true, "Repair the checkout's Git metadata, then retry `posse pool repair`")
 		}
 		if hasTask {
-			if err := preserveReportAttachments(ctx.Context, db, home, project, task); err != nil {
+			if err := preserveBrokenSandboxAttachments(ctx.Context, db, home, project, task); err != nil {
 				return axi.Failure("sandbox_repair_preservation_failed", err.Error(), true, "Resolve the attachment conflict without deleting the Sandbox, then retry `posse pool repair`")
 			}
 		} else if status != "" {

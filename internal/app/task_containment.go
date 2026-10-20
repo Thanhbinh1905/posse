@@ -102,6 +102,20 @@ func (s *Service) setupTaskContainment(ctx context.Context, db *store.DB, projec
 		task.ContainmentPath = ""
 	}
 	task.ContainmentMode = mode
+	if s.Herdr != nil && processIdentityCapabilityError() == "" {
+		paneInfo, err := s.sandboxPaneProcessInfo(ctx, paneID)
+		if err != nil {
+			return task, fmt.Errorf("verify new Task pane shell identity: %w", err)
+		}
+		identity, err := sandboxProcessExecutableIdentity(paneInfo.ShellPID)
+		if err != nil {
+			return task, fmt.Errorf("record new Task pane shell identity: %w", err)
+		}
+		task.PaneShellIdentity = identity
+		if err := db.UpdateTaskPaneShellIdentity(ctx, task.ID, identity); err != nil {
+			return task, fmt.Errorf("persist new Task pane shell identity: %w", err)
+		}
+	}
 	if err := db.UpdateTaskContainment(ctx, task.ID, mode, task.ContainmentPath, task.ContainmentMarker); err != nil {
 		cleanupErr := stopTaskCgroup(ctx, task)
 		return task, fmt.Errorf("persist Task process containment mode: %w", errors.Join(err, cleanupErr))

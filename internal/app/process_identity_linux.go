@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,14 +17,27 @@ import (
 )
 
 type sandboxProcessHandle struct {
-	pid         int
-	fd          int
-	bootID      string
-	startTime   string
-	signalGuard func(syscall.Signal) error
+	pid                int
+	fd                 int
+	bootID             string
+	startTime          string
+	executableIdentity string
+	signalGuard        func(syscall.Signal) error
 }
 
 func processIdentityCapabilityError() string { return "" }
+
+func sandboxProcessExecutableIdentity(pid int) (string, error) {
+	info, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	if err != nil {
+		return "", err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("process executable for PID %d has no Linux file identity", pid)
+	}
+	return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino), nil
+}
 
 func sandboxProcessGroupID(pid int) (int, error) {
 	fields, err := sandboxProcessStatFields(pid)
@@ -38,21 +52,6 @@ func sandboxProcessGroupID(pid int) (int, error) {
 		return 0, fmt.Errorf("invalid process group for PID %d", pid)
 	}
 	return group, nil
-}
-
-func sandboxProcessSessionID(pid int) (int, error) {
-	fields, err := sandboxProcessStatFields(pid)
-	if err != nil {
-		return 0, err
-	}
-	if len(fields) < 4 {
-		return 0, fmt.Errorf("process stat for PID %d has no session ID", pid)
-	}
-	session, err := strconv.Atoi(fields[3])
-	if err != nil || session <= 0 {
-		return 0, fmt.Errorf("invalid session ID for PID %d", pid)
-	}
-	return session, nil
 }
 
 func sandboxProcessParentID(pid int) (int, error) {
@@ -87,6 +86,10 @@ func openSandboxProcessHandle(pid int) (*sandboxProcessHandle, error) {
 	if err != nil {
 		return nil, err
 	}
+	executableIdentity, err := sandboxProcessExecutableIdentity(pid)
+	if err != nil {
+		return nil, fmt.Errorf("inspect executable image for PID %d: %w", pid, err)
+	}
 	fd, err := openPIDFD(pid)
 	if err != nil {
 		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) {
@@ -94,7 +97,7 @@ func openSandboxProcessHandle(pid int) (*sandboxProcessHandle, error) {
 		}
 		return nil, fmt.Errorf("open pidfd for PID %d: %w", pid, err)
 	}
-	handle := &sandboxProcessHandle{pid: pid, fd: fd, bootID: bootID, startTime: startTime}
+	handle := &sandboxProcessHandle{pid: pid, fd: fd, bootID: bootID, startTime: startTime, executableIdentity: executableIdentity}
 	currentBootID, currentStartTime, err := store.ProcessIdentityForPID(pid)
 	if err != nil || currentBootID != bootID || currentStartTime != startTime {
 		_ = handle.Close()
@@ -103,12 +106,22 @@ func openSandboxProcessHandle(pid int) (*sandboxProcessHandle, error) {
 		}
 		return nil, fmt.Errorf("PID %d changed process identity while opening pidfd", pid)
 	}
+	currentExecutableIdentity, err := sandboxProcessExecutableIdentity(pid)
+	if err != nil || currentExecutableIdentity != executableIdentity {
+		_ = handle.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("PID %d changed executable image while opening pidfd", pid)
+	}
 	return handle, nil
 }
 
 func (handle *sandboxProcessHandle) PID() int { return handle.pid }
 
 func (handle *sandboxProcessHandle) Identity() string { return handle.bootID + "/" + handle.startTime }
+
+func (handle *sandboxProcessHandle) ExecutableIdentity() string { return handle.executableIdentity }
 
 func openPIDFD(pid int) (int, error) {
 	for {

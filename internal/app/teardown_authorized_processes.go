@@ -28,25 +28,15 @@ func (s *Service) releaseSandboxWithAuthorization(ctx context.Context, db *store
 	if sandbox.ID == 0 || sandbox.TaskID != task.ID || (sandbox.State != "held" && sandbox.State != "releasing") {
 		return nil, nil
 	}
-	var taskShared, preservedCWD map[int]bool
+	var taskShared map[int]bool
 	if !approvedDiscard {
 		_, taskShared, err = taskSharedProcessExclusions(task)
 		if err != nil {
 			return nil, err
 		}
-		preservedCWD, err = detachedSharedDaemonCWDOnlyPIDs(sandbox.Path, taskShared)
-		if err != nil {
-			return nil, fmt.Errorf("verify detached shared daemons before Sandbox release: %w", err)
-		}
 	}
 	if sandbox.State == "releasing" || approvedDiscard {
-		if !approvedDiscard {
-			preservedCWD, err = detachedSharedDaemonCWDOnlyPIDs(sandbox.Path, taskShared)
-			if err != nil {
-				return nil, fmt.Errorf("recheck detached shared daemons before Sandbox release: %w", err)
-			}
-		}
-		if err := requireNoSandboxProcesses(sandbox.Path, approvedDiscard, preservedCWD); err != nil {
+		if err := requireNoSandboxProcesses(sandbox.Path, approvedDiscard); err != nil {
 			return nil, err
 		}
 	}
@@ -55,16 +45,12 @@ func (s *Service) releaseSandboxWithAuthorization(ctx context.Context, db *store
 	}
 	var killed []string
 	if !approvedDiscard {
-		killed, err = stopSandboxProcessesAuthorizedWithCWDExclusions(sandbox.Path, authorization, taskShared, preservedCWD)
+		killed, err = stopSandboxProcessesAuthorized(sandbox.Path, authorization, taskShared)
 		if err != nil {
 			return killed, err
 		}
-		preservedCWD, err = detachedSharedDaemonCWDOnlyPIDs(sandbox.Path, taskShared)
-		if err != nil {
-			return killed, fmt.Errorf("recheck detached shared daemons before Sandbox reset: %w", err)
-		}
 	}
-	if err := requireNoSandboxProcesses(sandbox.Path, approvedDiscard, preservedCWD); err != nil {
+	if err := requireNoSandboxProcesses(sandbox.Path, approvedDiscard); err != nil {
 		return killed, err
 	}
 	var resetErr error
@@ -96,10 +82,6 @@ func (s *Service) releaseSandboxWithAuthorization(ctx context.Context, db *store
 }
 
 func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAuthorization, excluded ...map[int]bool) ([]string, error) {
-	return stopSandboxProcessesAuthorizedWithCWDExclusions(path, authorization, mergeTaskProcessExclusions(excluded...), nil)
-}
-
-func stopSandboxProcessesAuthorizedWithCWDExclusions(path string, authorization *sandboxProcessAuthorization, taskExcluded, preservedCWD map[int]bool) ([]string, error) {
 	if message := processIdentityCapabilityError(); message != "" {
 		return nil, fmt.Errorf("%s; refusing to signal processes or reset the Sandbox", message)
 	}
@@ -116,12 +98,11 @@ func stopSandboxProcessesAuthorizedWithCWDExclusions(path string, authorization 
 	if err != nil {
 		return nil, err
 	}
-	excludedPIDs := mergeTaskProcessExclusions(taskExcluded)
+	excludedPIDs := mergeTaskProcessExclusions(excluded...)
 	pids, err = excludeTaskProcessTree(pids, excludedPIDs)
 	if err != nil {
 		return nil, err
 	}
-	pids = excludeExactProcessIDs(pids, preservedCWD)
 	allPIDs := make([]int, 0, len(pids))
 	handles := make(map[int]*sandboxProcessHandle, len(pids))
 	transients := make(map[int]*sandboxProcessHandle)
@@ -160,7 +141,7 @@ func stopSandboxProcessesAuthorizedWithCWDExclusions(path string, authorization 
 		handles[pid] = handle
 		allPIDs = append(allPIDs, pid)
 	}
-	if err := verifySandboxProcessSet(root, handles, transients, authorization, false, excludedPIDs, preservedCWD); err != nil {
+	if err := verifySandboxProcessSet(root, handles, transients, authorization, false, excludedPIDs); err != nil {
 		return nil, err
 	}
 	for _, handle := range handles {
@@ -170,7 +151,7 @@ func stopSandboxProcessesAuthorizedWithCWDExclusions(path string, authorization 
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := verifySandboxProcessSet(root, handles, transients, authorization, true, excludedPIDs, preservedCWD); err != nil {
+		if err := verifySandboxProcessSet(root, handles, transients, authorization, true, excludedPIDs); err != nil {
 			return nil, err
 		}
 		alive, err := sandboxHandlesInSandbox(handles, root)
@@ -193,7 +174,7 @@ func stopSandboxProcessesAuthorizedWithCWDExclusions(path string, authorization 
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if err := verifySandboxProcessSet(root, handles, transients, authorization, true, excludedPIDs, preservedCWD); err != nil {
+		if err := verifySandboxProcessSet(root, handles, transients, authorization, true, excludedPIDs); err != nil {
 			return nil, err
 		}
 		survivors, err := sandboxProcessIDs(root)
@@ -204,7 +185,6 @@ func stopSandboxProcessesAuthorizedWithCWDExclusions(path string, authorization 
 		if err != nil {
 			return nil, err
 		}
-		survivors = excludeExactProcessIDs(survivors, preservedCWD)
 		if len(survivors) == 0 {
 			return processLabels(allPIDs), nil
 		}
@@ -225,7 +205,6 @@ func stopSandboxProcessesAuthorizedWithCWDExclusions(path string, authorization 
 	if err != nil {
 		return nil, err
 	}
-	survivors = excludeExactProcessIDs(survivors, preservedCWD)
 	return processLabels(allPIDs), fmt.Errorf("sandbox processes survived teardown: %v", survivors)
 }
 
@@ -239,7 +218,7 @@ func excludeExactProcessIDs(pids []int, excluded map[int]bool) []int {
 	return filtered
 }
 
-func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxProcessHandle, authorization *sandboxProcessAuthorization, waitForTransients bool, excluded, preservedCWD map[int]bool) error {
+func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxProcessHandle, authorization *sandboxProcessAuthorization, waitForTransients bool, excluded map[int]bool) error {
 	pids, err := sandboxProcessIDs(root)
 	if err != nil {
 		return err
@@ -248,7 +227,6 @@ func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxPr
 	if err != nil {
 		return err
 	}
-	pids = excludeExactProcessIDs(pids, preservedCWD)
 	for _, pid := range pids {
 		handle, found := handles[pid]
 		if !found {

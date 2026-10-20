@@ -34,9 +34,12 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 	if err := db.UpdateTaskContainment(ctx, taskID, "marker", "", "task-marker-snapshot"); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.UpdateTaskPaneShellIdentity(ctx, taskID, "dev:inode:123"); err != nil {
+		t.Fatal(err)
+	}
 	snapshotPath := db.TaskSnapshotPath(project.Name, 1)
 	snapshot, err := os.ReadFile(snapshotPath)
-	if err != nil || !strings.Contains(string(snapshot), `state = "working"`) {
+	if err != nil || !strings.Contains(string(snapshot), `state = "working"`) || !strings.Contains(string(snapshot), `pane_shell_identity = "dev:inode:123"`) {
 		t.Fatalf("atomic Task snapshot = %s, %v", snapshot, err)
 	}
 	backupDir := filepath.Join(home, "backup")
@@ -65,7 +68,7 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 		t.Fatalf("rebuild count = %d, %v", count, err)
 	}
 	rebuilt, err := db.Task(ctx, project.ID, "t1")
-	if err != nil || rebuilt.State != StateWorking || rebuilt.AgentSession != `{"session_id":"pi-session"}` || rebuilt.AgentSessionKind != "pi" || rebuilt.ContainmentMode != "marker" || rebuilt.ContainmentMarker != "task-marker-snapshot" {
+	if err != nil || rebuilt.State != StateWorking || rebuilt.AgentSession != `{"session_id":"pi-session"}` || rebuilt.AgentSessionKind != "pi" || rebuilt.ContainmentMode != "marker" || rebuilt.ContainmentMarker != "task-marker-snapshot" || rebuilt.PaneShellIdentity != "dev:inode:123" {
 		t.Fatalf("rebuilt task lost its session owner: %#v, %v", rebuilt, err)
 	}
 	if err := db.Close(); err != nil {

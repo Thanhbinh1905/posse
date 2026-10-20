@@ -170,13 +170,13 @@ func processHasTaskMarker(pid int, marker string) bool {
 func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, excluded map[int]bool, paneShellPID int) ([]taskProcessDetail, error) {
 	handles := map[int]*sandboxProcessHandle{}
 	terminated := map[int]bool{}
+	terminatedAt := map[int]time.Time{}
 	defer func() {
 		for _, handle := range handles {
 			_ = handle.Close()
 		}
 	}()
-	started := time.Now()
-	deadline := started.Add(8 * time.Second)
+	deadline := time.Now().Add(8 * time.Second)
 	excludedPIDs := excluded
 	skipPaneShell := false
 	for time.Now().Before(deadline) {
@@ -264,14 +264,21 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 					return processDetails(pids), err
 				}
 				terminated[pid] = true
-			} else if time.Since(started) >= 2*time.Second {
-				if err := handle.Signal(syscall.SIGKILL); err != nil {
-					if forgetStalePaneShellProcess(pid, paneShellPID, marker, handles, terminated, err) {
-						skipPaneShell = true
-						pids = removeTaskProcessPID(pids, pid)
-						continue
+				terminatedAt[pid] = time.Now()
+			} else {
+				grace := 2 * time.Second
+				if pid == paneShellPID {
+					grace = 250 * time.Millisecond
+				}
+				if time.Since(terminatedAt[pid]) >= grace {
+					if err := handle.Signal(syscall.SIGKILL); err != nil {
+						if forgetStalePaneShellProcess(pid, paneShellPID, marker, handles, terminated, err) {
+							skipPaneShell = true
+							pids = removeTaskProcessPID(pids, pid)
+							continue
+						}
+						return processDetails(pids), err
 					}
-					return processDetails(pids), err
 				}
 			}
 			alive = true

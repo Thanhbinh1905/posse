@@ -4,6 +4,15 @@ package app
 
 import "testing"
 
+func TestKnownSharedSSHMasterDaemonCommandRecognition(t *testing.T) {
+	if !knownSharedSSHMasterDaemonCommand("ssh", []string{"ssh: /home/user/.ssh/cm-123 [mux]"}) {
+		t.Fatal("OpenSSH's rewritten argv title was not recognized with comm=ssh")
+	}
+	if knownSharedSSHMasterDaemonCommand("ssh", []string{"ssh", "host", "true"}) {
+		t.Fatal("ordinary SSH client was recognized as a shared master")
+	}
+}
+
 func TestSharedTaskDaemonCommandRecognition(t *testing.T) {
 	cases := []struct {
 		name string

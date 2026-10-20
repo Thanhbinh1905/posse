@@ -82,6 +82,7 @@ type Querier interface {
 	SetTaskContainment(ctx context.Context, arg SetTaskContainmentParams) error
 	SetTaskGatedSHA(ctx context.Context, arg SetTaskGatedSHAParams) error
 	SetTaskPRTitle(ctx context.Context, arg SetTaskPRTitleParams) (sql.Result, error)
+	SetTaskPaneShellIdentity(ctx context.Context, arg SetTaskPaneShellIdentityParams) error
 	StallTasks(ctx context.Context, projectID int64) ([]Task, error)
 	Task(ctx context.Context, arg TaskParams) (Task, error)
 	TaskByID(ctx context.Context, arg TaskByIDParams) (Task, error)

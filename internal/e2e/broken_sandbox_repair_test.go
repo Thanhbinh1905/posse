@@ -4,9 +4,11 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -17,6 +19,14 @@ import (
 
 func TestPoolRepairRecoversBrokenSandboxWithoutLosingWork(t *testing.T) {
 	f := newWorkerTabsFixture(t)
+	configPath := filepath.Join(f.home, "config.toml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(config, []byte("\n[pool]\nclean = \"pristine\"\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	trackedDir := filepath.Join(f.repo, "docs")
 	if err := os.MkdirAll(trackedDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -24,7 +34,14 @@ func TestPoolRepairRecoversBrokenSandboxWithoutLosingWork(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(trackedDir, "spec.md"), []byte("baseline\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, f.env, f.repo, "add", "docs/spec.md")
+	if err := os.WriteFile(filepath.Join(trackedDir, "delete-me.md"), []byte("tracked baseline slated for deletion\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitignore := filepath.Join(f.repo, ".gitignore")
+	if err := os.WriteFile(gitignore, []byte("ignored-cache/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, f.repo, "add", ".gitignore", "docs/spec.md", "docs/delete-me.md")
 	gitTest(t, f.env, f.repo, "commit", "-m", "add repair fixture")
 
 	task := f.start(t, "t1", "Repair broken Sandbox", "repair-broken-sandbox")
@@ -36,6 +53,17 @@ func TestPoolRepairRecoversBrokenSandboxWithoutLosingWork(t *testing.T) {
 	}
 	untrackedPath := filepath.Join(task.WorktreePath, "untracked-evidence.txt")
 	if err := os.WriteFile(untrackedPath, []byte("recoverable untracked work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ignoredPath := filepath.Join(task.WorktreePath, "ignored-cache", "state.json")
+	if err := os.MkdirAll(filepath.Dir(ignoredPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ignoredPath, []byte("recoverable ignored state\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deletedPath := filepath.Join(task.WorktreePath, "docs", "delete-me.md")
+	if err := os.Remove(deletedPath); err != nil {
 		t.Fatal(err)
 	}
 	rw, err := store.Open(f.home)
@@ -177,15 +205,32 @@ func TestPoolRepairRecoversBrokenSandboxWithoutLosingWork(t *testing.T) {
 	if !registered {
 		t.Fatalf("repaired Sandbox is missing from Git worktree registrations")
 	}
+	savedRoot := filepath.Join(f.home, "projects", "shop", "tasks", "t1")
 	for _, saved := range []struct {
 		path string
 		want string
 	}{
-		{filepath.Join(f.home, "projects", "shop", "tasks", "t1", "docs", "spec.md"), "recoverable tracked work\n"},
-		{filepath.Join(f.home, "projects", "shop", "tasks", "t1", "untracked-evidence.txt"), "recoverable untracked work\n"},
+		{filepath.Join(savedRoot, "docs", "spec.md"), "recoverable tracked work\n"},
+		{filepath.Join(savedRoot, "untracked-evidence.txt"), "recoverable untracked work\n"},
+		{filepath.Join(savedRoot, "ignored-cache", "state.json"), "recoverable ignored state\n"},
 	} {
 		if contents, err := os.ReadFile(saved.path); err != nil || string(contents) != saved.want {
 			t.Fatalf("repair did not preserve work at %s: %q %v", saved.path, contents, err)
 		}
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(savedRoot, "saved-work.json"))
+	if err != nil {
+		t.Fatalf("repair did not save its work-state manifest: %v", err)
+	}
+	var manifest struct {
+		Version      int      `json:"version"`
+		IgnoredFiles []string `json:"ignored_files"`
+		DeletedFiles []string `json:"deleted_files"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("decode saved-work manifest: %v", err)
+	}
+	if manifest.Version != 1 || !slices.Contains(manifest.IgnoredFiles, "ignored-cache/state.json") || !slices.Contains(manifest.DeletedFiles, "docs/delete-me.md") {
+		t.Fatalf("saved-work manifest omitted ignored files or tracked deletions: %#v", manifest)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,9 +107,9 @@ func TestConcurrentStartsDoNotReportSandboxMissingDuringCheckout(t *testing.T) {
 		t.Fatal("first Task did not complete its start")
 	}
 
-	// Simulate a false-positive Notice from an older build. A successful
-	// reconciliation of the now-present checkout must resolve it so a later
-	// real disappearance is not hidden by HasNotice.
+	// Simulate a false-positive Notice from an older build. Reconciliation
+	// should preserve the Lead's original Notice and record that the checkout
+	// returned, so a later real disappearance remains a separate episode.
 	db, err = store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
@@ -130,10 +131,17 @@ func TestConcurrentStartsDoNotReportSandboxMissingDuringCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	missingRemainsOpen := false
+	recoveredNotice := false
 	for _, notice := range staleOpen {
-		if notice.Kind == "sandbox_missing" && notice.TaskID == f.task(t, "t1").ID {
-			t.Fatalf("verified checkout did not resolve its stale missing-Sandbox Notice: %#v", notice)
+		if notice.TaskID != f.task(t, "t1").ID {
+			continue
 		}
+		missingRemainsOpen = missingRemainsOpen || notice.Kind == "sandbox_missing"
+		recoveredNotice = recoveredNotice || notice.Kind == "sandbox_recovered"
+	}
+	if !missingRemainsOpen || !recoveredNotice {
+		t.Fatalf("checkout recovery should preserve the original Notice and raise one recovered Notice: %#v", staleOpen)
 	}
 
 	// The same Task must still produce a Notice if its checkout genuinely goes
@@ -146,29 +154,77 @@ func TestConcurrentStartsDoNotReportSandboxMissingDuringCheckout(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(blockedPath, ".git")); !os.IsNotExist(err) {
 		t.Fatalf("fixture worktree metadata still exists after removal: %v", err)
 	}
-	// Start another real Task to run Sandbox reconciliation again. `list`
-	// reports the recorded state but does not perform this recovery pass.
+	// Start another real Task to run Sandbox reconciliation after the genuine
+	// checkout loss.
 	fifth, fifthOutput := startCommand("concurrent-5")
 	if err := fifth.Run(); err != nil {
 		t.Fatalf("start Task after genuine checkout loss: %v\n%s", err, fifthOutput.String())
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err = db.Notices(context.Background(), f.projectID, false)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	missingNotices := 0
+	latestMissingID := int64(0)
+	for _, notice := range notices {
+		if notice.TaskID == f.task(t, "t1").ID && notice.Kind == "sandbox_missing" {
+			missingNotices++
+			latestMissingID = notice.ID
+		}
+	}
+	if missingNotices != 2 || latestMissingID == 0 {
+		_ = db.Close()
+		t.Fatalf("genuine checkout loss should create one Notice after the recovered episode, got %d: %#v", missingNotices, notices)
+	}
+	if _, err := db.AckNotices(context.Background(), f.projectID, []string{strconv.FormatInt(latestMissingID, 10)}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later start must not create another missing Notice merely because the
+	// Lead acknowledged the active episode.
+	for _, taskID := range []string{"t2", "t3", "t4", "t5"} {
+		current := f.task(t, taskID)
+		markTaskReported(t, f, current)
+		f.exitWorker(t, taskID)
+		if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", taskID); !strings.Contains(output, "torn-down") {
+			t.Fatalf("Teardown %s before repeating reconciliation: %s", taskID, output)
+		}
+	}
+	sixth, sixthOutput := startCommand("concurrent-6")
+	if err := sixth.Run(); err != nil {
+		t.Fatalf("start after acknowledging missing-Sandbox Notice: %v\n%s", err, sixthOutput.String())
 	}
 	db, err = store.OpenReadOnly(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	notices, err = db.Notices(context.Background(), f.projectID, true)
+	notices, err = db.Notices(context.Background(), f.projectID, false)
+	_ = db.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
-	missingNotices := 0
+	missingNotices = 0
 	for _, notice := range notices {
 		if notice.TaskID == f.task(t, "t1").ID && notice.Kind == "sandbox_missing" {
 			missingNotices++
 		}
 	}
-	if missingNotices != 1 {
-		t.Fatalf("later real missing checkout should create exactly one Notice, got %d: %#v", missingNotices, notices)
+	if missingNotices != 2 {
+		t.Fatalf("acknowledged missing episode was duplicated on retry, got %d Notices: %#v", missingNotices, notices)
+	}
+	markTaskReported(t, f, f.task(t, "t6"))
+	f.exitWorker(t, "t6")
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t6"); !strings.Contains(output, "torn-down") {
+		t.Fatalf("Teardown t6: %s", output)
 	}
 	if !strings.Contains(firstOutput.String(), "task: t1") {
 		t.Fatalf("first start output omitted its Task: %s", firstOutput.String())

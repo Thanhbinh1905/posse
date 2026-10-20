@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -40,7 +41,10 @@ type workspaceRootFingerprint struct {
 	SymlinkTarget string `json:"symlink_target,omitempty"`
 }
 
-const workspaceRootBaselineVersion = 1
+const (
+	workspaceRootBaselineVersion = 1
+	savedWorkManifestName        = "saved-work.json"
+)
 
 func workspaceRootBaselinePath(home string, project store.Project, task store.Task) string {
 	return filepath.Join(home, "projects", project.Name, ".workspace-root-baselines", taskIDString(task.Seq)+".json")
@@ -152,10 +156,18 @@ func reportAttachmentGitArgs(baseRef string) [][]string {
 
 // preserveReportAttachments saves the Worker's non-ignored, unmerged files at
 // their worktree-relative paths next to report.md before the Sandbox is reset.
-// Workspace Members are enumerated repository by repository, and shared-root
-// files are compared with the prelaunch Sandbox snapshot. A retry may encounter
-// the same saved files but never removes or replaces them.
 func preserveReportAttachments(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
+	return preserveReportAttachmentsWithOptions(ctx, db, home, project, task, false)
+}
+
+// preserveBrokenSandboxAttachments also captures ignored files and records
+// tracked deletions before pristine repair removes them from the Sandbox.
+func preserveBrokenSandboxAttachments(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
+	return preserveReportAttachmentsWithOptions(ctx, db, home, project, task, true)
+}
+
+// A retry may encounter the same saved files but never removes or replaces them.
+func preserveReportAttachmentsWithOptions(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, preserveIgnored bool) error {
 	if task.WorktreePath == "" {
 		return nil
 	}
@@ -204,24 +216,55 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 	}
 
 	paths := map[string]reportAttachmentSource{}
+	ignoredFiles := []string{}
+	deletedFiles := []string{}
 	for _, repository := range repositories {
-		for _, args := range reportAttachmentGitArgs(repository.baseRef) {
+		attachmentArgs := reportAttachmentGitArgs(repository.baseRef)
+		if preserveIgnored {
+			attachmentArgs = append(attachmentArgs, []string{"ls-files", "--others", "--ignored", "--exclude-standard", "-z"})
+		}
+		for _, args := range attachmentArgs {
 			output, err := gitOutputRaw(ctx, repository.path, args...)
 			if err != nil {
 				return fmt.Errorf("list Report attachments in %s: %w", repository.path, err)
 			}
+			ignoredListing := len(args) > 2 && args[0] == "ls-files" && slices.Contains(args, "--ignored")
 			for _, name := range nulPaths(output) {
 				if repository.relative == "" && name == reportBundleManifestName {
 					return fmt.Errorf("%s is reserved for the Posse Report bundle", reportBundleManifestName)
 				}
-				if name == "" || filepath.IsAbs(name) || name == ".git" || strings.HasPrefix(name, ".git"+string(os.PathSeparator)) || filepath.Clean(name) != name || name == ".." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) {
-					return fmt.Errorf("unsafe Report attachment path %q", name)
+				if preserveIgnored && repository.relative == "" && name == savedWorkManifestName {
+					return fmt.Errorf("%s is reserved for Posse's repair manifest", savedWorkManifestName)
+				}
+				if err := validateReportAttachmentPath(name); err != nil {
+					return err
 				}
 				relative := name
 				if repository.relative != "" {
 					relative = filepath.Join(repository.relative, name)
 				}
 				paths[relative] = reportAttachmentSource{root: repository.path, name: name}
+				if ignoredListing {
+					ignoredFiles = append(ignoredFiles, relative)
+				}
+			}
+		}
+		if preserveIgnored {
+			for _, args := range reportDeletedGitArgs(repository.baseRef) {
+				output, err := gitOutputRaw(ctx, repository.path, args...)
+				if err != nil {
+					return fmt.Errorf("list tracked deletions in %s: %w", repository.path, err)
+				}
+				for _, name := range nulPaths(output) {
+					if err := validateReportAttachmentPath(name); err != nil {
+						return err
+					}
+					relative := name
+					if repository.relative != "" {
+						relative = filepath.Join(repository.relative, name)
+					}
+					deletedFiles = append(deletedFiles, relative)
+				}
 			}
 		}
 	}
@@ -290,7 +333,77 @@ func preserveReportAttachments(ctx context.Context, db *store.DB, home string, p
 			return err
 		}
 	}
+	if preserveIgnored {
+		if err := writeSavedWorkManifest(destination, ignoredFiles, deletedFiles); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func validateReportAttachmentPath(name string) error {
+	if name == "" || filepath.IsAbs(name) || name == ".git" || strings.HasPrefix(name, ".git"+string(os.PathSeparator)) || filepath.Clean(name) != name || name == ".." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("unsafe Report attachment path %q", name)
+	}
+	return nil
+}
+
+func reportDeletedGitArgs(baseRef string) [][]string {
+	args := make([][]string, 0, 2)
+	if baseRef != "" {
+		args = append(args, []string{"diff", "--diff-filter=D", "--name-only", "-z", baseRef, "HEAD"})
+	}
+	return append(args, []string{"diff", "--diff-filter=D", "--name-only", "-z", "HEAD"})
+}
+
+func writeSavedWorkManifest(destination string, ignoredFiles, deletedFiles []string) error {
+	manifest := struct {
+		Version      int      `json:"version"`
+		IgnoredFiles []string `json:"ignored_files,omitempty"`
+		DeletedFiles []string `json:"deleted_files,omitempty"`
+	}{Version: 1}
+	manifestPath := filepath.Join(destination, savedWorkManifestName)
+	if err := safeAttachmentDestination(destination, manifestPath); err != nil {
+		return err
+	}
+	info, err := os.Lstat(manifestPath)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("saved-work manifest path is not a regular file")
+		}
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return fmt.Errorf("decode existing saved-work manifest: %w", err)
+		}
+		if manifest.Version != 1 {
+			return fmt.Errorf("unsupported saved-work manifest version %d", manifest.Version)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	manifest.IgnoredFiles = append(manifest.IgnoredFiles, ignoredFiles...)
+	manifest.DeletedFiles = append(manifest.DeletedFiles, deletedFiles...)
+	manifest.IgnoredFiles = sortedUniqueStrings(manifest.IgnoredFiles)
+	manifest.DeletedFiles = sortedUniqueStrings(manifest.DeletedFiles)
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFile(manifestPath, data)
+}
+
+func sortedUniqueStrings(values []string) []string {
+	sort.Strings(values)
+	result := values[:0]
+	for _, value := range values {
+		if len(result) == 0 || result[len(result)-1] != value {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 // workspaceRootReportAttachments finds new or changed files in a workspace

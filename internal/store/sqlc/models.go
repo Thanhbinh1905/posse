@@ -493,6 +493,7 @@ type Task struct {
 	ContainmentMode      string
 	ContainmentPath      string
 	ContainmentMarker    string
+	PaneShellIdentity    string
 }
 
 type TaskLaunchIdentity struct {

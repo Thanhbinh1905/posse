@@ -28,19 +28,7 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 	if len(processes) == 0 {
 		return nil
 	}
-	labels := make([]string, 0, len(processes))
-	for _, process := range processes {
-		label := fmt.Sprintf("PID %d %s", process.PID, process.Command)
-		if len(process.Ports) > 0 {
-			ports := make([]string, len(process.Ports))
-			for i, port := range process.Ports {
-				ports[i] = fmt.Sprintf("%d", port)
-			}
-			label += " (listening ports " + strings.Join(ports, ",") + ")"
-		}
-		labels = append(labels, label)
-	}
-	summary := fmt.Sprintf("%s teardown blocked by residual processes: %s", taskDisplayName(task), strings.Join(labels, "; "))
+	summary := fmt.Sprintf("%s teardown blocked by residual processes: %s", taskDisplayName(task), describeTaskProcesses(processes))
 	notices, err := db.Notices(ctx, project.ID, false)
 	if err != nil {
 		return err
@@ -58,6 +46,26 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 		return err
 	}
 	return nil
+}
+
+func describeTaskProcesses(processes []taskProcessDetail) string {
+	labels := make([]string, 0, len(processes))
+	for _, process := range processes {
+		command := strings.TrimSpace(process.Command)
+		if command == "" {
+			command = "unknown command"
+		}
+		label := fmt.Sprintf("PID %d %s", process.PID, command)
+		if len(process.Ports) > 0 {
+			ports := make([]string, len(process.Ports))
+			for index, port := range process.Ports {
+				ports[index] = fmt.Sprintf("%d", port)
+			}
+			label += " (listening ports " + strings.Join(ports, ",") + ")"
+		}
+		labels = append(labels, label)
+	}
+	return strings.Join(labels, "; ")
 }
 
 func mergeTaskProcessDetails(groups ...[]taskProcessDetail) []taskProcessDetail {

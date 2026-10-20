@@ -586,7 +586,8 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		return result, s.teardownIncomplete(ctx, db, project, task, "pane inspection", err)
 	}
 	var stopped []string
-	var inPlaceShellPID int
+	var inPlaceShellPID, inPlaceForegroundPID int
+	var inPlaceAuthorization *sandboxProcessAuthorization
 	var workerPlan *discardWorkerPlan
 	if discardable {
 		workerPlan, err = s.retainDiscardWorker(ctx, db, project, task, intent, panePlan)
@@ -646,13 +647,15 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		}
 	}
 	if !discardable {
-		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
+		processStopErr := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
 			if inPlace {
-				paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
+				paneInfo, authorization, err := s.retainInPlaceTaskProcesses(ctx, db, project, task)
 				if err != nil {
 					return err
 				}
 				inPlaceShellPID = paneInfo.ShellPID
+				inPlaceForegroundPID = paneInfo.ForegroundProcessGroup
+				inPlaceAuthorization = authorization
 				if task.AgentName != "" && processIdentityCapabilityError() != "" {
 					snapshot, err := s.snapshot(ctx)
 					if err != nil {
@@ -669,7 +672,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			signalGuard := taskProcessSignalGuard(nil)
 			if inPlace {
 				signalGuard = func(pid int, _ syscall.Signal) error {
-					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, inPlaceShellPID)
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, inPlaceShellPID, inPlaceForegroundPID, inPlaceAuthorization)
 				}
 			} else if processAuthorization != nil {
 				signalGuard = processAuthorization.guardSignal
@@ -692,8 +695,12 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			}
 			stopped = append(stopped, scratchStopped...)
 			return nil
-		}); err != nil {
-			return result, s.teardownIncomplete(ctx, db, project, task, "Task process shutdown", err)
+		})
+		if inPlaceAuthorization != nil {
+			defer inPlaceAuthorization.Close()
+		}
+		if processStopErr != nil {
+			return result, s.teardownIncomplete(ctx, db, project, task, "Task process shutdown", processStopErr)
 		}
 	}
 	var paneResult teardownPanes
@@ -896,24 +903,31 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		if !discardable {
 			var signalGuard taskProcessSignalGuard
 			shellPID := 0
-			if inPlace {
-				signalGuard = func(pid int, _ syscall.Signal) error {
-					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, shellPID)
+			if inPlace && inPlaceAuthorization == nil && processIdentityCapabilityError() == "" {
+				paneInfo, authorization, proofErr := s.retainInPlaceTaskProcesses(ctx, db, project, task)
+				if proofErr != nil {
+					return proofErr
 				}
-				if len(taskContainmentProcessDetails(task)) > 0 {
-					paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
-					if err != nil {
-						return err
-					}
-					shellPID = paneInfo.ShellPID
+				inPlaceShellPID = paneInfo.ShellPID
+				inPlaceForegroundPID = paneInfo.ForegroundProcessGroup
+				inPlaceAuthorization = authorization
+				if authorization != nil {
+					defer authorization.Close()
+				}
+			}
+			if inPlace {
+				shellPID = inPlaceShellPID
+				signalGuard = func(pid int, _ syscall.Signal) error {
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, inPlaceShellPID, inPlaceForegroundPID, inPlaceAuthorization)
 				}
 			} else if processAuthorization != nil {
 				signalGuard = processAuthorization.guardSignal
 			}
-			if _, err := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard, shellPID); err != nil {
+			preservedProcesses, err := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard, shellPID)
+			if err != nil {
 				return err
 			}
-			if err := retireEmptyTaskCgroup(task); err != nil {
+			if err := retireEmptyTaskCgroupWithPreserved(task, taskProcessDetailsPIDSet(preservedProcesses)); err != nil {
 				return err
 			}
 		}
@@ -1045,7 +1059,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {
 		return result, err
 	}
-	if detail, err := s.trimWorkerGoBuildCache(ctx, db, home); err != nil {
+	if detail, err := s.trimWorkerGoBuildCache(ctx, home); err != nil {
 		result.CacheMaintenance = "warning: " + err.Error()
 	} else {
 		result.CacheMaintenance = detail

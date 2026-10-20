@@ -3,7 +3,6 @@
 package app
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -134,72 +133,6 @@ func knownSharedTaskDaemon(pid int) (bool, error) {
 	return isSharedTaskDaemonCommand(strings.TrimSpace(string(comm)), args), nil
 }
 
-func detachedSharedDaemonCWDOnlyPIDs(path string, taskShared map[int]bool) (map[int]bool, error) {
-	root, err := normalizeOwnedProcessRoot(path)
-	if err != nil {
-		return nil, err
-	}
-	pids, err := sandboxProcessIDs(root)
-	if err != nil {
-		return nil, err
-	}
-	preserved := make(map[int]bool)
-	for _, pid := range pids {
-		if !taskShared[pid] {
-			continue
-		}
-		bootID, startTime, err := store.ProcessIdentityForPID(pid)
-		if processGone(err) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("retain process identity for Sandbox PID %d: %w", pid, err)
-		}
-		shared, err := knownSharedSSHMasterDaemon(pid)
-		if processGone(err) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("inspect Sandbox PID %d: %w", pid, err)
-		}
-		if !shared {
-			continue
-		}
-		session, err := sandboxProcessSessionID(pid)
-		if processGone(err) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("inspect session for shared Sandbox daemon %d: %w", pid, err)
-		}
-		if session != pid {
-			continue
-		}
-		onlyCWD, err := processReferencesSandboxOnlyByCWD(pid, root)
-		if processGone(err) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("inspect Sandbox references for shared daemon %d: %w", pid, err)
-		}
-		if !onlyCWD {
-			continue
-		}
-		currentBootID, currentStartTime, err := store.ProcessIdentityForPID(pid)
-		if processGone(err) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("recheck shared Sandbox daemon %d: %w", pid, err)
-		}
-		if bootID != currentBootID || startTime != currentStartTime {
-			return nil, fmt.Errorf("shared Sandbox daemon PID %d changed identity during ownership proof", pid)
-		}
-		preserved[pid] = true
-	}
-	return preserved, nil
-}
-
 func knownSharedSSHMasterDaemon(pid int) (bool, error) {
 	commandLine, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(pid), "cmdline"))
 	if err != nil {
@@ -210,56 +143,11 @@ func knownSharedSSHMasterDaemon(pid int) (bool, error) {
 		return false, err
 	}
 	args := strings.Fields(strings.Join(strings.Split(strings.TrimRight(string(commandLine), "\x00"), "\x00"), " "))
-	command := strings.ToLower(strings.Join(args, " "))
-	commandName := ""
-	if len(args) > 0 {
-		commandName = strings.ToLower(filepath.Base(args[0]))
-	}
-	commName := strings.ToLower(strings.TrimSpace(string(comm)))
-	if strings.HasPrefix(commName, "ssh: ") && strings.HasSuffix(commName, " [mux]") {
-		return true, nil
-	}
-	if commandName != "ssh" {
-		return false, nil
-	}
-	return strings.Contains(command, "controlpersist=") || strings.Contains(command, "controlmaster=yes") || strings.Contains(command, "controlmaster=auto") || strings.Contains(" "+command+" ", " -m "), nil
+	return knownSharedSSHMasterDaemonCommand(strings.TrimSpace(string(comm)), args), nil
 }
 
-func processReferencesSandboxOnlyByCWD(pid int, root string) (bool, error) {
-	procRoot := filepath.Join("/proc", fmt.Sprint(pid))
-	cwd, err := os.Readlink(filepath.Join(procRoot, "cwd"))
-	if err != nil {
-		return false, err
-	}
-	if !processPathInsideRoot(cwd, root) {
-		return false, nil
-	}
-	entries, err := os.ReadDir(filepath.Join(procRoot, "fd"))
-	if err != nil {
-		return false, err
-	}
-	for _, entry := range entries {
-		path, err := os.Readlink(filepath.Join(procRoot, "fd", entry.Name()))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		if processPathInsideRoot(path, root) {
-			return false, nil
-		}
-	}
-	maps, err := os.ReadFile(filepath.Join(procRoot, "maps"))
-	if err != nil {
-		return false, err
-	}
-	for _, line := range strings.Split(string(maps), "\n") {
-		if mapped := procMapPath(line); mapped != "" && processPathInsideRoot(mapped, root) {
-			return false, nil
-		}
-	}
-	return true, nil
+func knownSharedSSHMasterDaemonCommand(comm string, args []string) bool {
+	return isSharedTaskDaemonCommand(comm, args)
 }
 
 func isSharedTaskDaemonCommand(comm string, args []string) bool {
