@@ -109,7 +109,7 @@ func isFullPipelineTask(task store.Task, repo string) bool {
 
 func authorBranchHead(ctx context.Context, task store.Task) (string, string, error) {
 	if task.Branch == "" || task.WorktreePath == "" {
-		return "", "", fmt.Errorf("Task has no author branch or checkout")
+		return "", "", fmt.Errorf("task has no author branch or checkout")
 	}
 	branch, branchErr := gitOutput(ctx, task.WorktreePath, "symbolic-ref", "--quiet", "HEAD")
 	head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
@@ -418,7 +418,6 @@ func (s *Service) ensureCandidateCheckout(ctx context.Context, db *store.DB, hom
 		if err := updateGitRef(ctx, task.WorktreePath, candidate.RefName, candidate.CandidateSHA, strings.Repeat("0", len(candidate.CandidateSHA))); err != nil {
 			return axi.Failure("candidate_ref_create_failed", "could not restore the private candidate ref", true, err.Error())
 		}
-		refHead = candidate.CandidateSHA
 	} else if refHead != candidate.CandidateSHA {
 		if gitAncestor(ctx, task.WorktreePath, candidate.CandidateSHA, refHead) {
 			if err := db.AdvanceValidationCandidate(ctx, candidate.ID, candidate.CandidateSHA, refHead); err != nil {
