@@ -45,7 +45,14 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updateCode, updateOutput := runReleaseCLI(t, legacyBinary, f.repo, env, "update", "--version", "v0.15.0")
+	officialRelease := downloadOfficialReleaseAsset(t, "v0.15.0")
+	officialProxyURL, officialCertPath := startUpdateReleaseProxy(t, officialRelease)
+	officialUpdateEnv := setEnv(env, "HTTPS_PROXY", officialProxyURL)
+	officialUpdateEnv = setEnv(officialUpdateEnv, "https_proxy", officialProxyURL)
+	officialUpdateEnv = setEnv(officialUpdateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
+	officialUpdateEnv = setEnv(officialUpdateEnv, "no_proxy", "localhost,127.0.0.1,::1")
+	officialUpdateEnv = setEnv(officialUpdateEnv, "SSL_CERT_FILE", officialCertPath)
+	updateCode, updateOutput := runReleaseCLI(t, legacyBinary, f.repo, officialUpdateEnv, "update", "--version", "v0.15.0")
 	if updateCode != 1 || !strings.Contains(updateOutput, "setup_failed") || !strings.Contains(updateOutput, "installed v0.15.0") || !strings.Contains(updateOutput, "legacy review policy") {
 		t.Fatalf("official v0.14.0 update did not reproduce the 0.15.0 setup failure: code=%d output=%s", updateCode, updateOutput)
 	}
@@ -158,6 +165,46 @@ func makeUpdateTestRelease(t *testing.T, binaryPath, tag string) testReleaseAsse
 
 func downloadOfficialReleaseBinary(t *testing.T, root, tag string) string {
 	t.Helper()
+	asset := downloadOfficialReleaseAsset(t, tag)
+	gz, err := gzip.NewReader(bytes.NewReader(asset.archive))
+	if err != nil {
+		t.Fatalf("open official %s release archive: %v", tag, err)
+	}
+	defer gz.Close()
+	reader := tar.NewReader(gz)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read official %s release archive: %v", tag, err)
+		}
+		if header.Name != "posse" || header.Typeflag != tar.TypeReg {
+			continue
+		}
+		if header.Size < 1 || header.Size > 150<<20 {
+			t.Fatalf("official %s release binary has invalid size %d", tag, header.Size)
+		}
+		binary, err := io.ReadAll(io.LimitReader(reader, header.Size))
+		if err != nil {
+			t.Fatalf("extract official %s release binary: %v", tag, err)
+		}
+		binaryPath := filepath.Join(root, "release-"+strings.TrimPrefix(tag, "v"), "posse")
+		if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(binaryPath, binary, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return binaryPath
+	}
+	t.Fatalf("official %s release archive does not contain posse", tag)
+	return ""
+}
+
+func downloadOfficialReleaseAsset(t *testing.T, tag string) testReleaseAsset {
+	t.Helper()
 	assetName := fmt.Sprintf("posse_%s_linux_amd64.tar.gz", strings.TrimPrefix(tag, "v"))
 	baseURL := "https://github.com/Thanhbinh1905/posse/releases/download/" + tag + "/"
 	client := &http.Client{Timeout: 2 * time.Minute}
@@ -196,39 +243,5 @@ func downloadOfficialReleaseBinary(t *testing.T, root, tag string) string {
 	if !verified {
 		t.Fatalf("official %s release checksum did not match %s", tag, assetName)
 	}
-	gz, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		t.Fatalf("open official %s release archive: %v", tag, err)
-	}
-	defer gz.Close()
-	reader := tar.NewReader(gz)
-	for {
-		header, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("read official %s release archive: %v", tag, err)
-		}
-		if header.Name != "posse" || header.Typeflag != tar.TypeReg {
-			continue
-		}
-		if header.Size < 1 || header.Size > 150<<20 {
-			t.Fatalf("official %s release binary has invalid size %d", tag, header.Size)
-		}
-		binary, err := io.ReadAll(io.LimitReader(reader, header.Size))
-		if err != nil {
-			t.Fatalf("extract official %s release binary: %v", tag, err)
-		}
-		binaryPath := filepath.Join(root, "release-"+strings.TrimPrefix(tag, "v"), "posse")
-		if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(binaryPath, binary, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		return binaryPath
-	}
-	t.Fatalf("official %s release archive does not contain posse", tag)
-	return ""
+	return testReleaseAsset{tag: tag, archive: archive, archiveName: assetName, checksum: hex.EncodeToString(actual[:])}
 }
