@@ -404,7 +404,7 @@ func validateWorkflowResultCoverageTx(ctx context.Context, tx *sql.Tx, projectID
 
 func (db *DB) RecordWorkflowAdvance(ctx context.Context, projectID, taskID int64, advance WorkflowAdvance, userQuote string) (Decision, error) {
 	if strings.TrimSpace(userQuote) == "" || advance.UserQuote != userQuote {
-		return Decision{}, fmt.Errorf("User quote is required and must match the workflow stage Decision")
+		return Decision{}, fmt.Errorf("user quote is required and must match the workflow stage Decision")
 	}
 	origin, err := WorkflowDecisionOrigin(advance)
 	if err != nil {

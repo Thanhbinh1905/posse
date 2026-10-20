@@ -17,7 +17,7 @@ func TestWorkflowProfileIsFrozenWithSourceAndDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow := &config.WorkflowSelection{Name: "feature", Profile: profile, Source: "/home/user/.posse/config.toml", SHA256: digest}
+	workflow := &config.WorkflowSelection{Name: "feature", Profile: profile, Source: "/home/user/.posse/config.toml", SHA256: digest, RunID: "new", StageName: "Build", StageIndex: 0}
 	r := request("change")
 	r.Brief = taskplan.Select("brief", "change.md", []byte("---\ntype: change\ntitle: Frozen workflow\ndone_when: checked\nworkflow: feature\n---\n"))
 	r.Workflow = workflow
@@ -40,6 +40,23 @@ func TestWorkflowProfileIsFrozenWithSourceAndDigest(t *testing.T) {
 	if err != nil || decoded.Workflow.Profile.Stages[0].Name != "Build" || decoded.Workflow.SHA256 != digest {
 		t.Fatalf("workflow did not survive plan round-trip: %#v %v", decoded.Workflow, err)
 	}
+	var legacy map[string]any
+	if err := json.Unmarshal([]byte(encoded), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy["version"] = float64(4)
+	legacyWorkflow := legacy["workflow"].(map[string]any)
+	delete(legacyWorkflow, "run_id")
+	delete(legacyWorkflow, "stage_name")
+	delete(legacyWorkflow, "stage_index")
+	legacyBytes, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPlan, err := taskplan.Decode(string(legacyBytes))
+	if err != nil || legacyPlan.Version != 4 || legacyPlan.Workflow == nil || legacyPlan.Workflow.RunID != "" {
+		t.Fatalf("pre-run workflow plan no longer decodes as historical data: %#v %v", legacyPlan, err)
+	}
 }
 
 func TestWorkflowDigestPreservesLargeNumericBounds(t *testing.T) {
@@ -50,7 +67,7 @@ func TestWorkflowDigestPreservesLargeNumericBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow := &config.WorkflowSelection{Name: "feature", Profile: profile, Source: "user-config.toml", SHA256: digest}
+	workflow := &config.WorkflowSelection{Name: "feature", Profile: profile, Source: "user-config.toml", SHA256: digest, RunID: "new", StageName: "Build", StageIndex: 0}
 	r := request("change")
 	r.Brief = taskplan.Select("brief", "change.md", []byte("---\ntype: change\ntitle: Large bound\ndone_when: checked\nworkflow: feature\n---\n"))
 	r.Workflow = workflow
@@ -70,14 +87,14 @@ func TestWorkflowMustMatchBriefAndDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow := &config.WorkflowSelection{Name: "feature", Profile: profile, Source: "user-config.toml", SHA256: digest}
+	workflow := &config.WorkflowSelection{Name: "feature", Profile: profile, Source: "user-config.toml", SHA256: digest, RunID: "new", StageName: "Build", StageIndex: 0}
 	r := request("change")
 	plan, err := taskplan.Resolve(r)
 	if err != nil || plan.Workflow != nil {
 		t.Fatalf("no-profile direct path changed: %#v %v", plan.Workflow, err)
 	}
 	r.Workflow = workflow
-	if _, err := taskplan.Resolve(r); err == nil || !strings.Contains(err.Error(), "frozen workflow does not match") {
+	if _, err := taskplan.Resolve(r); err == nil || !strings.Contains(err.Error(), "workflow") {
 		t.Fatalf("unselected workflow was admitted: %v", err)
 	}
 	r.Brief = taskplan.Select("brief", "change.md", []byte("---\ntype: change\ntitle: Frozen workflow\ndone_when: checked\nworkflow: feature\n---\n"))

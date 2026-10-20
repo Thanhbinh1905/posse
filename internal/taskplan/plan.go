@@ -15,7 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 4
+const Version = 5
 
 var workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
 
@@ -340,7 +340,7 @@ func (p Plan) Validate() error {
 		if !config.LegacyReview(p.Review) {
 			return invalid("unsupported legacy review policy")
 		}
-	} else if p.Version < Version {
+	} else if p.Version < 4 {
 		if err := config.ValidateHistoricalReview(p.Review); err != nil {
 			return invalid(err.Error())
 		}
@@ -353,7 +353,7 @@ func (p Plan) Validate() error {
 	if p.Execution.Scope == "workspace" && p.Delivery == "no-mistakes" {
 		return invalid("no-mistakes delivery is unsupported for Workspaces")
 	}
-	if p.Version == Version && p.Review == "full-pipeline" && p.Delivery == "no-mistakes" {
+	if p.Version >= 4 && p.Review == "full-pipeline" && p.Delivery == "no-mistakes" {
 		return invalid("full-pipeline cannot use no-mistakes delivery")
 	}
 	if p.Execution.Mode == "in-place" {
@@ -424,7 +424,7 @@ func (p Plan) Validate() error {
 		}
 		if p.Version >= 2 {
 			validateReview := config.ValidateReview
-			if p.Version < Version {
+			if p.Version < 4 {
 				validateReview = config.ValidateHistoricalReview
 			}
 			if err := validateReview(member.Review); err != nil {
@@ -485,7 +485,7 @@ func (p Plan) Validate() error {
 		}
 		runtimeBound := p.Workflow.RunID != "" || p.Workflow.StageName != "" || p.Workflow.StageIndex != 0
 		if !runtimeBound {
-			if brief.Workflow == "" || brief.WorkflowRun != "" || brief.Stage != "" {
+			if p.Version >= Version || brief.Workflow == "" || brief.WorkflowRun != "" || brief.Stage != "" {
 				return invalid("frozen workflow does not match the selected Brief or lacks run and stage identity")
 			}
 		} else {

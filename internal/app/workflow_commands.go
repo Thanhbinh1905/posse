@@ -333,7 +333,7 @@ func workflowNoneTaskResultIdentity(ctx context.Context, db *store.DB, project s
 		return "torn-down", nil
 	}
 	if task.State != store.StateMerged {
-		return "", fmt.Errorf("Change Task t%d is not merged or torn down", task.Seq)
+		return "", fmt.Errorf("change Task t%d is not merged or torn down", task.Seq)
 	}
 	if project.IsWorkspace() {
 		repos, err := db.TaskRepos(ctx, task.ID)
@@ -341,7 +341,7 @@ func workflowNoneTaskResultIdentity(ctx context.Context, db *store.DB, project s
 			return "", err
 		}
 		if len(repos) == 0 {
-			return "", fmt.Errorf("merged Workspace Change Task t%d has no Member results", task.Seq)
+			return "", fmt.Errorf("merged workspace Change Task t%d has no Member results", task.Seq)
 		}
 		parts := make([]string, 0, len(repos))
 		for _, repo := range repos {
@@ -351,7 +351,7 @@ func workflowNoneTaskResultIdentity(ctx context.Context, db *store.DB, project s
 			case store.TaskRepoUnchanged:
 				parts = append(parts, repo.Repo+"=unchanged")
 			default:
-				return "", fmt.Errorf("Workspace Change Task t%d Member %s is not merged", task.Seq, repo.Repo)
+				return "", fmt.Errorf("workspace Change Task t%d Member %s is not merged", task.Seq, repo.Repo)
 			}
 		}
 		sort.Strings(parts)
