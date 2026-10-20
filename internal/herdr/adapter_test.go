@@ -196,8 +196,16 @@ func TestValidateIsolatedEnvironmentRejectsArbitraryTMPDIR(t *testing.T) {
 	}
 	t.Setenv("TMPDIR", tmpRoot)
 	t.Setenv("POSSE_E2E_TMP_ROOT", "")
-	if _, err := ValidateIsolatedEnvironment(IsolatedTestEnvironment(root)); err == nil {
-		t.Fatal("accepted an isolated Herdr fixture directly under an arbitrary TMPDIR")
+	env := IsolatedTestEnvironment(root)
+	for i, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "POSSE_E2E_TMP_ROOT" {
+			env = append(env[:i], env[i+1:]...)
+			break
+		}
+	}
+	if _, err := ValidateIsolatedEnvironment(env); err == nil {
+		t.Fatal("accepted an isolated Herdr fixture without explicit task scratch authorization")
 	}
 }
 
