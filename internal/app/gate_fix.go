@@ -69,7 +69,15 @@ func recordGateFailure(ctx context.Context, db *store.DB, project store.Project,
 		return nil
 	}
 
-	instruction := gateFixInstruction(task, plan.Inputs, headSHA, member, gateErr)
+	candidatePath := ""
+	if isFullPipelineTask(task, member) {
+		candidate, err := db.LatestValidationCandidate(ctx, task.ID, member)
+		if err != nil {
+			return err
+		}
+		candidatePath = candidate.WorktreePath
+	}
+	instruction := gateFixInstruction(task, plan.Inputs, headSHA, member, candidatePath, gateErr)
 	dedupeKey, err := gateFixDedupeKey(ctx, db, task, member, headSHA)
 	if err != nil {
 		return err
@@ -119,7 +127,7 @@ func gateFailureNoticeData(headSHA, member string, gateErr error) map[string]any
 	return data
 }
 
-func gateFixInstruction(task store.Task, inputs []taskplan.Input, headSHA, member string, gateErr error) string {
+func gateFixInstruction(task store.Task, inputs []taskplan.Input, headSHA, member, candidatePath string, gateErr error) string {
 	var command, exitStatus, outputTail string
 	var details *gateCommandFailure
 	if errors.As(gateErr, &details) {
@@ -134,7 +142,11 @@ func gateFixInstruction(task store.Task, inputs []taskplan.Input, headSHA, membe
 		fmt.Fprintf(&instruction, "Workspace member: %s\n", member)
 	}
 	fmt.Fprintf(&instruction, "\nGated head: %s\nFailed command: %s\nExit status: %s\nOutput tail:\n%s\n\n", headSHA, command, exitStatus, outputTail)
-	instruction.WriteString("Fix the Gate failure, commit your changes, then signal `done` again using this Task's normal delivery workflow. The new head must descend from the gated head above.\n")
+	if isFullPipelineTask(task, member) {
+		fmt.Fprintf(&instruction, "Fix this Gate failure in the private candidate checkout at `%s`, commit the fix there, then run `posse validate status`. The new head must descend from the gated head above. A changed candidate must return through Review -> test -> docs -> lint; promote only with `posse publish` from the private candidate checkout. Do not push or edit the published Task branch.\n", candidatePath)
+	} else {
+		instruction.WriteString("Fix the Gate failure, commit your changes, then signal `done` again using this Task's normal delivery workflow. The new head must descend from the gated head above.\n")
+	}
 	if len(inputs) > 0 {
 		// Inputs were already admitted and may retain exact 0.14 Brief bytes.
 		brief, err := dispatch.ParseHistoricalBriefText(string(inputs[0].Bytes))

@@ -97,8 +97,16 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("publish_refused", "only a working PR-mode Change Worker with its own Task branch can publish", false)
 	}
 	cwd, err := currentDir()
-	if err != nil || !pathWithin(task.WorktreePath, cwd) {
-		return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox", false)
+	if err != nil {
+		return axi.Failure("publish_refused", "could not resolve the current directory", false)
+	}
+	candidateCWD := false
+	if isFullPipelineTask(task, repoFilter) {
+		candidate, candidateErr := db.LatestValidationCandidate(out.Context, task.ID, repoFilter)
+		candidateCWD = candidateErr == nil && pathWithin(candidate.WorktreePath, cwd)
+	}
+	if !pathWithin(task.WorktreePath, cwd) && !candidateCWD {
+		return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox or its private candidate checkout", false)
 	}
 	var member *memberMerge
 	if project.IsWorkspace() {
@@ -121,8 +129,16 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("publish_refused", "only a PR-mode Change Task may be published without --repo", false)
 		}
 		root, err := gitTop(out.Context, "")
-		if err != nil || !samePath(root, task.WorktreePath) {
-			return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox", false)
+		expectedRoot := task.WorktreePath
+		if candidateCWD {
+			candidate, candidateErr := db.LatestValidationCandidate(out.Context, task.ID, repoFilter)
+			if candidateErr != nil {
+				return candidateErr
+			}
+			expectedRoot = candidate.WorktreePath
+		}
+		if err != nil || !samePath(root, expectedRoot) {
+			return axi.Failure("publish_refused", "publish must run at the Task Sandbox or its private candidate checkout", false)
 		}
 	}
 	if isFullPipelineTask(task, repoFilter) {
@@ -149,6 +165,16 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("publish_refused", "Task branch moved while publish was inspecting the Sandbox", true, "Retry `posse publish` after the branch settles")
 	}
 	if isFullPipelineTask(task, repoFilter) {
+		if candidateCWD {
+			candidate, err := db.LatestValidationCandidate(out.Context, task.ID, repoFilter)
+			if err != nil {
+				return err
+			}
+			if err := s.ensureCandidateCheckout(out.Context, db, home, task, candidate); err != nil {
+				return err
+			}
+			return s.promotePrivateCandidate(out, db, home, project, task, repoFilter, cfg)
+		}
 		return s.submitPrivateCandidate(out, db, home, project, task, repoFilter, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
 	}
 	forge, err := forgeForRepository(out.Context, project.Root, cfg, parsed.Flags["repo"])

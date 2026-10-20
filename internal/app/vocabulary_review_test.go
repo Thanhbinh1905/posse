@@ -17,7 +17,7 @@ import (
 func TestGateFixInstructionPreservesHistoricalBriefIntent(t *testing.T) {
 	original := "---\ntype: ship\ntitle: Old Brief\ndone_when: checked\n---\nUser said Rider must land.\n"
 	input := taskplan.Select("brief", "/stored/brief.md", []byte(original))
-	instruction := gateFixInstruction(store.Task{Seq: 1}, []taskplan.Input{input}, "gated-head", "", errors.New("lint failed"))
+	instruction := gateFixInstruction(store.Task{Seq: 1}, []taskplan.Input{input}, "gated-head", "", "", errors.New("lint failed"))
 	if !strings.Contains(instruction, "User said Rider must land.") {
 		t.Fatalf("Gate fix lost the historical User intent: %s", instruction)
 	}

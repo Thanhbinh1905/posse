@@ -18,6 +18,17 @@ import (
 // merging: its branch tip in the Project repository, or in each changed Member
 // of a workspace.
 func changeCandidateTargets(ctx context.Context, db *store.DB, project store.Project, change store.Task) ([]store.ReviewTarget, error) {
+	plan, planErr := change.AdmittedPlan()
+	if planErr != nil {
+		return nil, admittedPlanFailure(planErr)
+	}
+	if !project.IsWorkspace() && plan != nil && (plan.Review == "full-pipeline" || isFullPipelineTask(change, project.Name)) {
+		candidate, err := db.LatestValidationCandidate(ctx, change.ID, "")
+		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+			return nil, axi.Failure("candidate_missing", "full-pipeline review requires an active private candidate", false, "Submit the Task with `posse publish` before starting its Review")
+		}
+		return []store.ReviewTarget{{Repository: project.Name, Commit: candidate.CandidateSHA}}, nil
+	}
 	if change.Branch == "" {
 		return nil, fmt.Errorf("task %s has no branch", taskIDString(change.Seq))
 	}
@@ -42,8 +53,22 @@ func changeCandidateTargets(ctx context.Context, db *store.DB, project store.Pro
 		return nil, err
 	}
 	var targets []store.ReviewTarget
+	memberReviews := map[string]string{}
+	if plan != nil {
+		for _, member := range plan.Execution.Members {
+			memberReviews[member.Name] = member.Review
+		}
+	}
 	for _, repo := range repos {
 		if repo.State == store.TaskRepoUnchanged {
+			continue
+		}
+		if memberReviews[repo.Repo] == "full-pipeline" {
+			candidate, err := db.LatestValidationCandidate(ctx, change.ID, repo.Repo)
+			if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+				return nil, axi.Failure("candidate_missing", "full-pipeline review requires an active private candidate for Member "+repo.Repo, false, "Submit the Member with `posse publish --repo "+repo.Repo+"` before starting its Review")
+			}
+			targets = append(targets, store.ReviewTarget{Repository: repo.Repo, Commit: candidate.CandidateSHA})
 			continue
 		}
 		root, found := paths[repo.Repo]
@@ -185,14 +210,14 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 	if err != nil {
 		return err
 	}
-	local, receipt := false, false
+	local, receipt, fullPipeline := false, false, false
 	for _, selected := range policies {
 		switch selected {
 		case "none":
 		case "quick", "local", "always":
 			local = true
 		case "full-pipeline":
-			return fullPipelineNotReady(task)
+			fullPipeline = true
 		case "no-mistakes":
 			receipt = true
 		default:
@@ -207,14 +232,13 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 			return err
 		}
 	}
+	if fullPipeline {
+		return requireFullPipelineValidationAt(ctx, db, project, task, commit)
+	}
 	if local {
 		return requireReviewPass(ctx, db, project, task, commit)
 	}
 	return nil
-}
-
-func fullPipelineNotReady(task store.Task) error {
-	return axi.Failure("full_pipeline_not_ready", "full-pipeline validation has not shipped; this Task cannot be promoted or merged", false, "Select `none` or `quick` for production Tasks until VP-C lands")
 }
 
 // selectedReviewPolicies lists the admitted policy of the Task, or of each

@@ -141,6 +141,13 @@ func (s *Service) planTaskMembersWithChoice(ctx context.Context, db *store.DB, p
 		}
 		if reviewed != nil {
 			member.BaseRef = reviewed.Branch
+			if isFullPipelineTask(*reviewed, member.Name) {
+				candidate, err := db.LatestValidationCandidate(ctx, reviewed.ID, member.Name)
+				if err != nil {
+					return nil, "", axi.Failure("candidate_missing", "private candidate disappeared before Review admission for Member "+member.Name, false)
+				}
+				member.BaseRef = candidate.RefName
+			}
 		}
 		if mergeRank[member.MergeMode] > mergeRank[taskMode] {
 			taskMode = member.MergeMode

@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,7 +47,7 @@ func submitCandidateForTest(t *testing.T, fixture *prMergeFixture) error {
 	t.Helper()
 	return fixture.service.submitPrivateCandidate(
 		&axi.Context{Context: context.Background(), Out: &bytes.Buffer{}}, fixture.db, fixture.home,
-		fixture.project, fixture.task, "", "Candidate summary", "go test ./... -> passed", "proof", "Risk: none\nRollback: revert", false,
+		fixture.project, fixture.task, "", "Candidate summary", "go test ./... -> passed", "Intent proof: verified", "Risk: low\nRollback: revert", false,
 	)
 }
 
@@ -66,11 +67,83 @@ func runCandidatePromotionForTest(t *testing.T, fixture *prMergeFixture) error {
 
 func submitThroughCLI(t *testing.T, fixture *prMergeFixture) (string, string) {
 	t.Helper()
-	code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./... -> passed")
+	code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./... -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
 	if code != 0 {
 		t.Fatalf("full-pipeline publish exit=%d output=%s stderr=%s", code, output, stderr)
 	}
 	return output, stderr
+}
+
+func recordCandidateReviewPass(t *testing.T, fixture *prMergeFixture, candidateHead string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := fixture.db.NextTaskLaunchWithIdentity(ctx, fixture.task.ID, "author", "model-a", true); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	fixture.task, err = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
+		Seq: 2, Type: "review", ReviewsTaskID: fixture.task.ID, Title: "Independent candidate review", State: store.StateSpawning,
+		MergeMode: "local", ReviewTargets: []store.ReviewTarget{{Repository: fixture.project.Name, Commit: candidateHead}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.NextTaskLaunchWithIdentity(ctx, reviewID, "reviewer", "model-b", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, reviewID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	review, err := fixture.db.TaskByID(ctx, fixture.project.ID, reviewID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, err := fixture.db.RecordWorkerSignalWithVerdict(ctx, review, "done", "Review passed", map[string]string{}, "task_done", &store.ReviewVerdictInput{
+		Verdict: store.ReviewPass, ReportSHA256: strings.Repeat("a", 64),
+	}); err != nil || state != store.StateReported {
+		t.Fatalf("record independent candidate Review: state=%s err=%v", state, err)
+	}
+}
+
+func runCandidateCLI(t *testing.T, fixture *prMergeFixture, candidate store.ValidationCandidate, args ...string) (int, string, string) {
+	t.Helper()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(candidate.WorktreePath); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(previous) }()
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	fixture.output.Reset()
+	fixture.errOut.Reset()
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = &fixture.output, &fixture.errOut
+	code := cli.Run(args)
+	return code, fixture.output.String(), fixture.errOut.String()
+}
+
+func recordCandidateStages(t *testing.T, fixture *prMergeFixture) {
+	t.Helper()
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("test stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"); code != 0 {
+		t.Fatalf("docs stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "lint", "--proof", "Configured Gates passed", "--coverage", "No repository workflow jobs are configured locally"); code != 0 {
+		t.Fatalf("lint stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
 }
 
 func addCandidateFix(t *testing.T, fixture *prMergeFixture) string {
@@ -87,7 +160,7 @@ func addCandidateFix(t *testing.T, fixture *prMergeFixture) string {
 	return strings.TrimSpace(gitTest(t, candidate.WorktreePath, "rev-parse", "HEAD"))
 }
 
-func TestFullPipelineReviewCannotMergeBeforeVPC(t *testing.T) {
+func TestFullPipelineMergeRequiresSubmittedValidatedCandidate(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	installFullPipelinePlan(t, fixture)
 	cfg, err := fixture.service.prepareProject(context.Background(), fixture.db, fixture.project)
@@ -95,8 +168,8 @@ func TestFullPipelineReviewCannotMergeBeforeVPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = requireSelectedReview(context.Background(), fixture.db, fixture.project, cfg, fixture.task)
-	if err == nil || !strings.Contains(err.Error(), "full-pipeline validation has not shipped") {
-		t.Fatalf("full-pipeline merge check error=%v, want explicit VP-C block", err)
+	if err == nil || !strings.Contains(err.Error(), "no submitted private candidate") {
+		t.Fatalf("full-pipeline merge check error=%v, want private candidate barrier", err)
 	}
 }
 
@@ -121,6 +194,122 @@ func TestFullPipelinePublishSubmitsPrivateCandidateWithoutPushing(t *testing.T) 
 	}
 }
 
+func TestFullPipelineStagesAreOrderedAndCandidateMovementInvalidatesThem(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, _ := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent verified"); code != 1 || !strings.Contains(output, "validation_review_required") {
+		t.Fatalf("test skipped the required Review stage: exit=%d output=%s", code, output)
+	}
+	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
+	if code, output, _ := runCandidateCLI(t, fixture, candidate, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; description complete"); code != 1 || !strings.Contains(output, "validation_stage_order") {
+		t.Fatalf("docs skipped the required Test stage: exit=%d output=%s", code, output)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("test stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, _ := runCandidateCLI(t, fixture, candidate, "validate", "lint", "--proof", "Gates passed", "--coverage", "no local workflows configured"); code != 1 || !strings.Contains(output, "validation_stage_order") {
+		t.Fatalf("lint skipped the required Docs stage: exit=%d output=%s", code, output)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"); code != 0 {
+		t.Fatalf("docs stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "lint", "--proof", "Configured Gates passed", "--coverage", "No repository workflow jobs are configured locally"); code != 0 {
+		t.Fatalf("lint stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	addCandidateFix(t, fixture)
+	candidate, err = fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "status"); code != 0 {
+		t.Fatalf("refresh candidate validation status: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	candidate, err = fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stages, err := fixture.db.ValidationStages(context.Background(), fixture.task.ID)
+	if err != nil || len(stages) != 3 {
+		t.Fatalf("stage history=%+v err=%v", stages, err)
+	}
+	for _, stage := range stages {
+		if stage.Status != "invalidated" || stage.InvalidatedSHA != candidate.CandidateSHA {
+			t.Fatalf("candidate change did not invalidate %s result: %+v", stage.Stage, stage)
+		}
+	}
+	if remote, err := remoteBranchHead(context.Background(), fixture.worktree, "refs/heads/posse/t1"); err != nil || remote != "" {
+		t.Fatalf("validation or invalidation published before a fresh complete sequence: remote=%q err=%v", remote, err)
+	}
+}
+
+func TestFullPipelineTargetMovementInvalidatesAndRefreshesCandidate(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	oldCandidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, oldCandidate.CandidateSHA)
+	recordCandidateStages(t, fixture)
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance frozen target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	if code, output, stderr := runCandidateCLI(t, fixture, oldCandidate, "validate", "status"); code != 0 || !strings.Contains(output, "target_current: false") || !strings.Contains(output, "publication_ready: false") {
+		t.Fatalf("target movement did not revoke validation readiness: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	stages, err := fixture.db.ValidationStages(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range stages {
+		if stage.Status != "invalidated" {
+			t.Fatalf("target movement retained a passed local stage: %+v", stage)
+		}
+	}
+	if err := runCandidatePromotionForTest(t, fixture); err == nil || !strings.Contains(err.Error(), "frozen target moved after local validation") {
+		t.Fatalf("promotion accepted a candidate with a moved target: %v", err)
+	}
+	if remote, err := remoteBranchHead(context.Background(), fixture.worktree, "refs/heads/posse/t1"); err != nil || remote != "" {
+		t.Fatalf("target-stale candidate was published: remote=%q err=%v", remote, err)
+	}
+	submitThroughCLI(t, fixture)
+	newCandidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newCandidate.ID == oldCandidate.ID || newCandidate.State != store.ValidationCandidateActive || newCandidate.TargetSHA == oldCandidate.TargetSHA {
+		t.Fatalf("target refresh did not create a new candidate binding: old=%+v new=%+v", oldCandidate, newCandidate)
+	}
+}
+
+func TestFullPipelineRepairsReturnThroughPrivateCandidateValidation(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("admitted plan=%v err=%v", plan, err)
+	}
+	observation := store.PRObservation{HeadSHA: fixture.headSHA}
+	check := failedCheck{Name: "unit", URL: "https://example.test/check/1"}
+	ci := renderCIFixInstruction(fixture.task, plan, observation, "https://example.test/pr/1", "", []failedCheck{check}, map[string]string{"unit": "failed"})
+	for _, required := range []string{"submit a private candidate", "Review -> test -> docs -> lint", "do not push the fix directly", "from that candidate checkout to promote it"} {
+		if !strings.Contains(strings.ToLower(ci), strings.ToLower(required)) {
+			t.Errorf("full-pipeline CI instruction omitted %q: %s", required, ci)
+		}
+	}
+	gate := gateFixInstruction(fixture.task, plan.Inputs, fixture.headSHA, "", "/private/candidate", newGateCommandFailure("go test ./...", "failed", errors.New("exit 1")))
+	for _, required := range []string{"/private/candidate", "Review -> test -> docs -> lint", "from the private candidate checkout", "Do not push"} {
+		if !strings.Contains(gate, required) {
+			t.Errorf("full-pipeline Gate instruction omitted %q: %s", required, gate)
+		}
+	}
+}
+
 func TestCandidatePromotionFastForwardsTaskBranchAndOrigin(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
@@ -128,6 +317,8 @@ func TestCandidatePromotionFastForwardsTaskBranchAndOrigin(t *testing.T) {
 	submitted := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
 	submitThroughCLI(t, fixture)
 	candidateHead := addCandidateFix(t, fixture)
+	recordCandidateReviewPass(t, fixture, candidateHead)
+	recordCandidateStages(t, fixture)
 	fixture.setGHHead(t, candidateHead)
 	fixture.setGraphQLState(t, "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidateHead)
 	if err := runCandidatePromotionForTest(t, fixture); err != nil {
@@ -156,6 +347,9 @@ func TestCandidatePromotionRefusesMovedRemoteAndDirtySandbox(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			candidateHead := strings.TrimSpace(gitTest(t, candidate.WorktreePath, "rev-parse", "HEAD"))
+			recordCandidateReviewPass(t, fixture, candidateHead)
+			recordCandidateStages(t, fixture)
 			if scenario == "remote moved" {
 				if err := os.WriteFile(filepath.Join(fixture.repo, "remote-only.txt"), []byte("external change\n"), 0o600); err != nil {
 					t.Fatal(err)
