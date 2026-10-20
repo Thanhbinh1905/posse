@@ -497,7 +497,7 @@ func TestInPlaceStartCompletesGitAndPlainDirectoriesWithoutCommitOrMerge(t *test
 				{"ticket closure", "Close the ticket", "---\ntype: change\ntitle: Close the ticket\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nticket: 148\n---\n", "in_place_ticket_unsupported"},
 				{"issue references", "Add an issue reference", "---\ntype: change\ntitle: Add an issue reference\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nrefs: [18]\n---\n", "in_place_ticket_unsupported"},
 				{"Review", "Review a branch", "---\ntype: review\ntitle: Review a branch\ndone_when: report is saved\nreview_of: t1\nexecution: in-place\npaths: [src]\n---\n", "in_place_review_unsupported"},
-				{"Review policy", "Review local edits", "---\ntype: change\ntitle: Review local edits\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nreview: local\n---\n", "in_place_review_unsupported"},
+				{"Review policy", "Review local edits", "---\ntype: change\ntitle: Review local edits\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nreview: quick\n---\n", "in_place_review_unsupported"},
 				{"Git ref", "Edit from a base ref", "---\ntype: change\ntitle: Edit from a base ref\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nbase: main\n---\n", "in_place_git_scope_unsupported"},
 				{"no-mistakes", "Run no-mistakes", "---\ntype: change\ntitle: Run no-mistakes\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nmerge_mode: no-mistakes\n---\n", "in_place_delivery_unsupported"},
 			} {

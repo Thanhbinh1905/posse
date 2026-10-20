@@ -26,7 +26,15 @@ func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
 	}
 	f := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer f.db.Close()
-	legacyBinary := downloadOfficialReleaseBinary(t, f.root, "v0.15.0")
+	// Update runs setup against the running binary, which refuses binaries
+	// under /tmp. Keep the release fixture in the Task scratch root when set;
+	// CI's /tmp default falls back to /var/tmp like the 0.14 upgrade test.
+	binaryRoot := filepath.Clean(os.TempDir())
+	if binaryRoot == "/tmp" || strings.HasPrefix(binaryRoot, "/tmp/") {
+		binaryRoot = "/var/tmp"
+	}
+	stableBinaryDir := newFixtureRootAt(t, binaryRoot, fixturePrefix("official-update-installed-"))
+	legacyBinary := downloadOfficialReleaseBinary(t, stableBinaryDir, "v0.15.0")
 	home := filepath.Join(f.root, "official-015-home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
