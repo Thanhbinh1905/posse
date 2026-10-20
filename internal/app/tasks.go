@@ -256,8 +256,16 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if reviewed.Branch == "" {
 			return axi.Failure("brief_invalid", "the reviewed Task has no branch to inspect", false)
 		}
-		if err := reviewableChange(reviewed); err != nil {
-			return err
+		reviewPlan, planErr := reviewed.AdmittedPlan()
+		if planErr != nil {
+			return admittedPlanFailure(planErr)
+		}
+		candidateReview := reviewPlan != nil && (reviewPlan.Review == "full-pipeline" || workspaceHasFullPipeline(reviewPlan)) &&
+			(reviewed.State == store.StateWorking || reviewed.State == store.StateStalled || reviewed.State == store.StateDone || reviewed.State == store.StateMerging)
+		if !candidateReview {
+			if err := reviewableChange(reviewed); err != nil {
+				return err
+			}
 		}
 		reviewTargets, err = changeCandidateTargets(ctx.Context, db, project, reviewed)
 		if err != nil {
@@ -268,6 +276,13 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		}
 		reviewsTaskID = reviewed.ID
 		baseRef = reviewed.Branch
+		if candidateReview && !project.IsWorkspace() {
+			candidate, err := db.LatestValidationCandidate(ctx.Context, reviewed.ID, "")
+			if err != nil {
+				return axi.Failure("candidate_missing", "private candidate disappeared before Review admission", false)
+			}
+			baseRef = candidate.RefName
+		}
 		reviewedTask = &reviewed
 		authorLaunchIdentities, err = db.TaskLaunchIdentities(ctx.Context, reviewed.ID)
 		if err != nil {

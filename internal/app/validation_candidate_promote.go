@@ -70,16 +70,40 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 	if !gitAncestor(ctx, task.WorktreePath, candidate.SubmittedSHA, candidate.CandidateSHA) {
 		return axi.Failure("candidate_not_fast_forward", "candidate is not a fast-forward of the submitted author head", false)
 	}
-
-	actualAuthor, authorBranch, err := authorBranchHead(ctx, task)
-	if err != nil {
-		return err
-	}
 	remoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
 	if err != nil {
 		return axi.Failure("candidate_remote_head_failed", "could not inspect the Task branch before promotion", true, err.Error())
 	}
 	alreadyPushed := candidate.State == store.ValidationCandidatePromoting && remoteHead == candidate.CandidateSHA
+	if !alreadyPushed && remoteHead != candidate.ExpectedRemoteSHA {
+		invalidator := remoteHead
+		if invalidator == "" {
+			invalidator = candidate.CandidateSHA
+		}
+		if err := db.MarkValidationCandidateStale(ctx, candidate.ID, invalidator); err != nil {
+			return err
+		}
+		return candidateSubmissionError(task, candidate, "candidate_remote_moved", "origin Task branch moved after candidate submission", false)
+	}
+	if alreadyPushed {
+		if err := requireFullPipelineCandidateResults(ctx, db, project, task, candidate); err != nil {
+			return err
+		}
+	} else if err := requireFullPipelineCandidateValidation(ctx, db, project, task, candidate); err != nil {
+		return err
+	}
+	candidateStatus, err := gitStatusOutput(ctx, candidate.WorktreePath, "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return err
+	}
+	if candidateStatus != "" {
+		return axi.Failure("candidate_dirty", "private candidate checkout changed after its validation results were recorded", false, "Commit the candidate changes and rerun review -> test -> docs -> lint")
+	}
+
+	actualAuthor, authorBranch, err := authorBranchHead(ctx, task)
+	if err != nil {
+		return err
+	}
 	authorOnExpectedHead := candidate.State == store.ValidationCandidateActive && actualAuthor == candidate.SubmittedSHA || candidate.State == store.ValidationCandidatePromoting && actualAuthor == candidate.CandidateSHA
 	authorAdvancedAfterPush := alreadyPushed && gitAncestor(ctx, task.WorktreePath, candidate.CandidateSHA, actualAuthor)
 	if authorBranch != "refs/heads/"+task.Branch || !authorOnExpectedHead && !authorAdvancedAfterPush {
@@ -93,10 +117,23 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		if err != nil {
 			return axi.Failure("candidate_target_head_failed", "could not recheck the frozen target before promotion", true, err.Error())
 		}
+		if targetHead == "" {
+			return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
+		}
 		if targetHead != candidate.TargetSHA {
+			if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
+				return err
+			}
 			return axi.Failure("candidate_target_moved", "the frozen target moved after candidate submission", false, "Refresh candidate freshness and rerun validation before promotion")
 		}
 		if remoteHead != candidate.ExpectedRemoteSHA {
+			invalidator := remoteHead
+			if invalidator == "" {
+				invalidator = candidate.CandidateSHA
+			}
+			if err := db.MarkValidationCandidateStale(ctx, candidate.ID, invalidator); err != nil {
+				return err
+			}
 			return axi.Failure("candidate_remote_moved", "origin Task branch moved after candidate submission", false, fmt.Sprintf("expected %s, found %s", shortSHA(candidate.ExpectedRemoteSHA), shortSHA(remoteHead)))
 		}
 	}
@@ -159,7 +196,13 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		if err != nil {
 			return axi.Failure("candidate_target_head_failed", "could not recheck the frozen target immediately before promotion", true, err.Error())
 		}
+		if targetHead == "" {
+			return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
+		}
 		if targetHead != candidate.TargetSHA {
+			if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
+				return err
+			}
 			return axi.Failure("candidate_target_moved", "the frozen target moved before promotion", false, "Refresh candidate freshness and rerun validation before promotion")
 		}
 		if err := db.RecordPublishPrePushHead(ctx, task.ID, repoName, candidate.ExpectedRemoteSHA); err != nil {

@@ -272,6 +272,9 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 					return prefixFailure(repo.Repo, err)
 				}
 			} else {
+				if isFullPipelineTask(task, repo.Repo) {
+					return axi.Failure("candidate_promotion_required", repo.Repo+": full-pipeline Members must publish through validated private candidate promotion", false, "Complete local validation and use `posse publish --repo "+repo.Repo+"` from the private candidate checkout")
+				}
 				// Tasks completed before member publishing was available still Merge.
 				branchRef := "refs/heads/" + task.Branch
 				if err := s.runIntentStep(ctx, db, intent, "push:"+repo.Repo, func() error {

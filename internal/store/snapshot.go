@@ -47,14 +47,15 @@ type TaskSnapshot struct {
 	ReviewReceipts []ReviewReceipt `toml:"review_receipts,omitempty"`
 	// Validation state is owned by a Change Task and includes its review rounds,
 	// finding ledger, carry proofs, dispositions, and fix-round budget.
-	ReviewRounds         []ReviewRound         `toml:"review_rounds,omitempty"`
-	ReviewPatterns       []ReviewPattern       `toml:"review_patterns,omitempty"`
-	ReviewFindings       []ReviewFinding       `toml:"review_findings,omitempty"`
-	ReviewFindingEvents  []ReviewFindingEvent  `toml:"review_finding_events,omitempty"`
-	ReviewCarries        []ReviewCarry         `toml:"review_carries,omitempty"`
-	ReviewDispositions   []ReviewDisposition   `toml:"review_dispositions,omitempty"`
-	ValidationFixRounds  []ValidationFixRound  `toml:"validation_fix_rounds,omitempty"`
-	ValidationCandidates []ValidationCandidate `toml:"validation_candidates,omitempty"`
+	ReviewRounds         []ReviewRound           `toml:"review_rounds,omitempty"`
+	ReviewPatterns       []ReviewPattern         `toml:"review_patterns,omitempty"`
+	ReviewFindings       []ReviewFinding         `toml:"review_findings,omitempty"`
+	ReviewFindingEvents  []ReviewFindingEvent    `toml:"review_finding_events,omitempty"`
+	ReviewCarries        []ReviewCarry           `toml:"review_carries,omitempty"`
+	ReviewDispositions   []ReviewDisposition     `toml:"review_dispositions,omitempty"`
+	ValidationFixRounds  []ValidationFixRound    `toml:"validation_fix_rounds,omitempty"`
+	ValidationCandidates []ValidationCandidate   `toml:"validation_candidates,omitempty"`
+	ValidationStages     []ValidationStageResult `toml:"validation_stages,omitempty"`
 }
 
 type projectSnapshot struct {
@@ -361,6 +362,9 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	}
 	if task.Type == "change" {
 		if snapshot.ValidationCandidates, err = db.ValidationCandidates(ctx, taskID); err != nil {
+			return err
+		}
+		if snapshot.ValidationStages, err = db.ValidationStages(ctx, taskID); err != nil {
 			return err
 		}
 		validationState, err := db.validationStateForTask(ctx, taskID)
@@ -870,7 +874,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_candidates", "validation_fix_rounds", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -1070,6 +1074,15 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_candidates(id,task_id,repo,generation,submitted_sha,candidate_sha,target_sha,expected_remote_sha,observed_author_sha,ref_name,worktree_path,state,promoted_sha,summary,verification,proof,risk,refresh,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				candidate.ID, task.ID, candidate.Repo, candidate.Generation, candidate.SubmittedSHA, candidate.CandidateSHA, candidate.TargetSHA, candidate.ExpectedRemoteSHA, candidate.ObservedAuthorSHA, candidate.RefName, candidate.WorktreePath, candidate.State, candidate.PromotedSHA, candidate.Summary, candidate.Verification, candidate.Proof, candidate.Risk, refresh, candidate.CreatedAt, candidate.UpdatedAt); err != nil {
 				return fmt.Errorf("rebuild t%d validation candidate: %w", task.Seq, err)
+			}
+		}
+		for _, stage := range snapshot.ValidationStages {
+			if stage.TaskID != 0 && stage.TaskID != task.ID || stage.ID < 1 || stage.CandidateID < 1 || !validValidationSHA(stage.CandidateSHA) || !validValidationSHA(stage.TargetSHA) || len(stage.ConfigSHA256) != 64 {
+				return fmt.Errorf("invalid validation stage result in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_stage_results(id,task_id,candidate_id,repo,stage,candidate_sha,target_sha,config_sha256,status,summary,evidence,coverage,invalidated_by_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				stage.ID, task.ID, stage.CandidateID, stage.Repo, stage.Stage, stage.CandidateSHA, stage.TargetSHA, stage.ConfigSHA256, stage.Status, stage.Summary, stage.Evidence, stage.Coverage, stage.InvalidatedSHA, stage.CreatedAt); err != nil {
+				return fmt.Errorf("rebuild t%d validation stage: %w", task.Seq, err)
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, "", task.State, "cli", "Rebuilt from atomic Task snapshot", task.UpdatedAt); err != nil {

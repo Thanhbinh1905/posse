@@ -166,25 +166,58 @@ func (db *DB) ActivateValidationCandidate(ctx context.Context, id int64, candida
 // AdvanceValidationCandidate records a candidate ref update only if it extends
 // the head previously stored by Posse.
 func (db *DB) AdvanceValidationCandidate(ctx context.Context, id int64, expectedSHA, candidateSHA string) error {
-	result, err := db.ExecContext(ctx, `UPDATE validation_candidates SET candidate_sha=?,updated_at=? WHERE id=? AND state IN ('preparing','active','stale','promoting') AND candidate_sha=?`, candidateSHA, time.Now().UnixMilli(), id, expectedSHA)
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	updatedAt := time.Now().UnixMilli()
+	result, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET candidate_sha=?,updated_at=? WHERE id=? AND state IN ('preparing','active','stale','promoting') AND candidate_sha=?`, candidateSHA, updatedAt, id, expectedSHA)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ErrStateRace
 	}
-	return db.persistCandidateTask(ctx, id)
+	if candidateSHA != expectedSHA {
+		if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status='passed'`, candidateSHA, id); err != nil {
+			return err
+		}
+	}
+	var taskID int64
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM validation_candidates WHERE id=?`, id).Scan(&taskID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
-func (db *DB) MarkValidationCandidateStale(ctx context.Context, id int64, observedAuthorSHA string) error {
-	result, err := db.ExecContext(ctx, `UPDATE validation_candidates SET state='stale',observed_author_sha=?,updated_at=? WHERE id=? AND state IN ('preparing','active','promoting')`, observedAuthorSHA, time.Now().UnixMilli(), id)
+func (db *DB) MarkValidationCandidateStale(ctx context.Context, id int64, observedSHA string) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET state='stale',observed_author_sha=?,updated_at=? WHERE id=? AND state IN ('preparing','active','promoting')`, observedSHA, time.Now().UnixMilli(), id)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ErrStateRace
 	}
-	return db.persistCandidateTask(ctx, id)
+	if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status='passed'`, observedSHA, id); err != nil {
+		return err
+	}
+	var taskID int64
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM validation_candidates WHERE id=?`, id).Scan(&taskID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) SupersedeValidationCandidate(ctx context.Context, id int64, expectedState, archiveRef, candidateSHA string) error {
