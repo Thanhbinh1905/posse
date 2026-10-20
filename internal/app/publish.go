@@ -75,8 +75,10 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		}
 		repoFilter = parsed.Flags["repo"]
 	}
-	if err := s.processPendingStackedTargetChanges(out.Context, db, project, cfg, repoFilter); err != nil {
-		return err
+	if !isFullPipelineTask(task, repoFilter) {
+		if err := s.processPendingStackedTargetChanges(out.Context, db, project, cfg, repoFilter); err != nil {
+			return err
+		}
 	}
 	task, err = db.TaskByID(out.Context, project.ID, task.ID)
 	if err != nil {
@@ -123,6 +125,11 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox", false)
 		}
 	}
+	if isFullPipelineTask(task, repoFilter) {
+		if err := s.refuseMovedCandidateAuthor(out.Context, db, task, true); err != nil {
+			return err
+		}
+	}
 	if err := validateChangeSignal(out.Context, task); err != nil {
 		return axi.Failure("publish_refused", err.Error(), false)
 	}
@@ -133,6 +140,16 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	sha, err := gitOutput(out.Context, task.WorktreePath, "rev-parse", "HEAD")
 	if err != nil {
 		return err
+	}
+	branchHead, err := gitOutput(out.Context, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+	if err != nil {
+		return err
+	}
+	if branchHead != sha {
+		return axi.Failure("publish_refused", "Task branch moved while publish was inspecting the Sandbox", true, "Retry `posse publish` after the branch settles")
+	}
+	if isFullPipelineTask(task, repoFilter) {
+		return s.submitPrivateCandidate(out, db, home, project, task, repoFilter, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
 	}
 	forge, err := forgeForRepository(out.Context, project.Root, cfg, parsed.Flags["repo"])
 	if err != nil {

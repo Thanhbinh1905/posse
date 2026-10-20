@@ -1321,6 +1321,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		data["plan_sha256"] = plan.SHA256()
 		rootContext = plan.Execution.RootContext
 	}
+	if task.Type == "change" {
+		if err := s.refuseMovedCandidateAuthor(ctx.Context, db, task, false); err != nil {
+			return err
+		}
+	}
 	inPlace := admittedPlan != nil && admittedPlan.Execution.Mode == "in-place"
 	if inPlace && (!project.IsDirectory() || task.Branch != "" || task.SandboxID != 0 || filepath.Clean(task.WorktreePath) != filepath.Clean(project.Root)) {
 		return axi.Failure("in_place_task_invalid", "Task no longer matches its admitted in-place Project custody", false)
