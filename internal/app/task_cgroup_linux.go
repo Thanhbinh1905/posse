@@ -276,7 +276,19 @@ func retireEmptyTaskCgroup(task store.Task) error {
 		return err
 	}
 	if len(pids) > 0 {
-		return fmt.Errorf("task cgroup still contains processes: %v", pids)
+		preserved, err := detachedSharedTaskProcessPIDs(task)
+		if err != nil {
+			return err
+		}
+		shared := taskProcessPIDSet(preserved)
+		for _, pid := range pids {
+			if !shared[pid] {
+				return fmt.Errorf("task cgroup still contains non-shared processes: %v", pids)
+			}
+		}
+		// A detached shared daemon remains in this Task cgroup until it exits.
+		// Keep the emptying/reap path available to `posse clean` afterward.
+		return nil
 	}
 	return removeEmptyTaskCgroup(task.ContainmentPath)
 }

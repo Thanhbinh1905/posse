@@ -122,7 +122,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		if err != nil || !strings.Contains(composed.Text, artifactProseInstruction("vi")) {
 			t.Fatalf("Lead instructions did not propagate configured prose language: %v\n%s", err, composed.Text)
 		}
-		contents := workerProtocol(project, task, brief, launchPath, filepath.Join(home, "scratch", project.Name, taskIDString(sequence)), "legacy", artifactProseLanguage(cfg)) + "\n\n" + brief.Body + "\n"
+		contents := workerProtocol(home, project, task, brief, launchPath, filepath.Join(home, "scratch", project.Name, taskIDString(sequence)), "legacy", artifactProseLanguage(cfg)) + "\n\n" + brief.Body + "\n"
 		if err := writeFile(launchPath, []byte(contents)); err != nil {
 			t.Fatal(err)
 		}

@@ -45,7 +45,17 @@ func ensureHeldSandboxLocks(ctx context.Context, db *store.DB, project store.Pro
 				if !os.IsNotExist(err) {
 					return err
 				}
-				found, err := db.HasNotice(ctx, project.ID, task.ID, "sandbox_missing")
+				intent, intentErr := db.IntentByTask(ctx, task.ID)
+				if intentErr != nil && !store.IsNotFound(intentErr) {
+					return intentErr
+				}
+				if task.State == store.StateSpawning && intentErr == nil && intent.Command == "start" {
+					// The start intent owns the gap between the durable Sandbox
+					// claim and Git materializing its worktree metadata. It will
+					// either finish the checkout or recover the interrupted start.
+					continue
+				}
+				found, err := hasOpenSandboxMissingNotice(ctx, db, project.ID, task.ID)
 				if err != nil {
 					return err
 				}
@@ -56,6 +66,9 @@ func ensureHeldSandboxLocks(ctx context.Context, db *store.DB, project store.Pro
 					return err
 				}
 				continue
+			}
+			if err := resolveRecoveredSandboxMissingNotice(ctx, db, project, task); err != nil {
+				return err
 			}
 			if err := lockSandbox(ctx, project.Root, sandbox.Path, task.Seq); err != nil {
 				return err
@@ -103,6 +116,38 @@ func lockAvailableSandbox(ctx context.Context, db *store.DB, project store.Proje
 		}
 	}
 	return lockSandbox(ctx, project.Root, sandbox.Path, task.Seq)
+}
+
+func hasOpenSandboxMissingNotice(ctx context.Context, db *store.DB, projectID, taskID int64) (bool, error) {
+	notices, err := db.Notices(ctx, projectID, true)
+	if err != nil {
+		return false, err
+	}
+	for _, notice := range notices {
+		if notice.TaskID == taskID && notice.Kind == "sandbox_missing" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// resolveRecoveredSandboxMissingNotice retires a missing-Sandbox Notice once
+// reconciliation verifies that the held checkout exists again. Without this,
+// a stale Notice from an interrupted creation can suppress a later real loss.
+func resolveRecoveredSandboxMissingNotice(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	notices, err := db.Notices(ctx, project.ID, true)
+	if err != nil {
+		return err
+	}
+	for _, notice := range notices {
+		if notice.TaskID != task.ID || notice.Kind != "sandbox_missing" {
+			continue
+		}
+		if _, err := db.AckNotices(ctx, project.ID, []string{strconv.FormatInt(notice.ID, 10)}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func posseLockTaskSeq(reason string) (int, bool) {

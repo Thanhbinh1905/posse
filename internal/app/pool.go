@@ -24,8 +24,11 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 	if args[0] == "reconcile-resource" {
 		return s.reconcileResourceLease(ctx, args[1:])
 	}
+	if args[0] == "repair" {
+		return s.repairPoolSandbox(ctx, args[1:])
+	}
 	if args[0] != "prune" {
-		return axi.Usage("pool accepts only the prune or reconcile-resource subcommand", "Run `posse pool` to list Sandboxes")
+		return axi.Usage("pool accepts the prune, repair, or reconcile-resource subcommand", "Run `posse pool` to list Sandboxes")
 	}
 	parsed, err := parseArgs("pool prune", args[1:], map[string]flagSpec{"yes": {boolean: true}})
 	if err != nil {
@@ -874,12 +877,13 @@ func releaseSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 	})
 }
 
-func requireNoSandboxProcesses(path string, approvedDiscard bool) error {
+func requireNoSandboxProcesses(path string, approvedDiscard bool, preservedCWD ...map[int]bool) error {
 	root, err := normalizeOwnedProcessRoot(path)
 	if err != nil {
 		return err
 	}
-	pids, err := processIDsInRoots([]ownedProcessRoot{{path: root}})
+	processRoot := ownedProcessRoot{path: root, includeOpenFiles: true, includeMappedFiles: true, excludedExact: mergeTaskProcessExclusions(preservedCWD...)}
+	pids, err := processIDsInRoots([]ownedProcessRoot{processRoot})
 	if err != nil {
 		return err
 	}
@@ -893,7 +897,17 @@ func requireNoSandboxProcesses(path string, approvedDiscard bool) error {
 	if approvedDiscard {
 		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Sandbox while processes remain", true, strings.Join(labels, ","), "No process was stopped or signalled. Inspect the Sandbox processes, then retry discard")
 	}
-	return axi.Failure("sandbox_process_identity_unavailable", "cannot release the Sandbox because live processes were not authorized during ownership proof: "+strings.Join(labels, ","), true, strings.Join(labels, ","), "Inspect the Sandbox processes and retry Teardown after they exit")
+	message := "cannot release the Sandbox because live processes were not authorized during ownership proof: " + strings.Join(labels, ",")
+	preservedPIDs := mergeTaskProcessExclusions(preservedCWD...)
+	if len(preservedPIDs) > 0 {
+		shared := make([]string, 0, len(preservedPIDs))
+		for pid := range preservedPIDs {
+			shared = append(shared, strconv.Itoa(pid))
+		}
+		sort.Strings(shared)
+		message = "preserving detached shared daemon PID(s) " + strings.Join(shared, ",") + "; " + message
+	}
+	return axi.Failure("sandbox_process_identity_unavailable", message, true, strings.Join(labels, ","), "Inspect the Sandbox processes and retry Teardown after they exit")
 }
 
 func finishReleasingSandbox(ctx context.Context, db *store.DB, project store.Project, sandbox store.Sandbox, task store.Task) error {
@@ -1061,6 +1075,7 @@ type ownedProcessRoot struct {
 	includeOpenFiles   bool
 	includeMappedFiles bool
 	excluded           map[int]bool
+	excludedExact      map[int]bool
 }
 
 type ownedProcess struct {
@@ -1514,6 +1529,9 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 }
 
 func ownedProcessRootExcludesPID(pid int, root ownedProcessRoot) (bool, error) {
+	if root.excludedExact[pid] {
+		return true, nil
+	}
 	if len(root.excluded) == 0 {
 		return false, nil
 	}

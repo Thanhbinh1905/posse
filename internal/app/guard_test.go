@@ -258,7 +258,11 @@ func TestGuardConservativeAcrossBranchesAndRuntimeFiles(t *testing.T) {
 }
 
 func TestGuardRecognizesSocketHardlinks(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp(os.TempDir(), "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	socket := filepath.Join(dir, "session.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {

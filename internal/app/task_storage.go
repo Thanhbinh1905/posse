@@ -4,15 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-const largeSharedGoCacheBytes int64 = 1 << 30
+const largeSharedGoCacheBytes = sharedGoBuildCacheLimitBytes
 
 func taskDiskLeakSummary(home string, project store.Project, tasks []store.Task) (string, string) {
 	var total int64
@@ -113,38 +111,41 @@ func projectDiskUsage(home string, project store.Project) (string, error) {
 	return fmt.Sprintf("%d bytes total (%s)", total, strings.Join(parts, ", ")), nil
 }
 
+func workerGoBuildCacheDiagnostic(home string) (status, detail, action string) {
+	cachePath := workerGoBuildCachePath(home)
+	info, err := os.Lstat(cachePath)
+	if os.IsNotExist(err) {
+		return "ok", fmt.Sprintf("Worker builds use a Posse-owned shared GOCACHE at %s; it has not been created yet", cachePath), ""
+	}
+	if err != nil {
+		return "warn", fmt.Sprintf("Posse Worker GOCACHE %s could not be inspected: %v", cachePath, err), "Check POSSE_HOME permissions"
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "warn", fmt.Sprintf("Posse Worker GOCACHE path is not a real directory: %s", cachePath), "Repair the cache path under POSSE_HOME before starting more Tasks"
+	}
+	bytes, err := pathBytes(cachePath)
+	if err != nil {
+		return "warn", fmt.Sprintf("Posse Worker GOCACHE %s could not be measured: %v", cachePath, err), "Check POSSE_HOME permissions"
+	}
+	detail = fmt.Sprintf("Posse Worker GOCACHE uses %d bytes at %s; old entries are trimmed after Teardown when usage reaches %d bytes", bytes, cachePath, sharedGoBuildCacheLimitBytes)
+	if bytes >= sharedGoBuildCacheLimitBytes {
+		return "warn", detail, "Wait for Go builds to stop; Posse trims entries older than six hours after Teardown"
+	}
+	return "ok", detail, ""
+}
+
 func sharedGoCacheDiagnostic(ctx context.Context) (status, detail, action string) {
-	cachePath := os.Getenv("GOCACHE")
-	if cachePath == "" {
-		if goBinary, err := exec.LookPath("go"); err == nil {
-			commandCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			defer cancel()
-			if output, err := exec.CommandContext(commandCtx, goBinary, "env", "GOCACHE").Output(); err == nil {
-				cachePath = strings.TrimSpace(string(output))
-			}
-		}
-	}
-	if cachePath == "" {
-		cacheDir, err := os.UserCacheDir()
-		if err != nil {
-			return "warn", "could not locate the shared Go build cache: " + err.Error(), "Check GOCACHE manually; Posse never deletes shared caches"
-		}
-		cachePath = filepath.Join(cacheDir, "go-build")
-	}
-	absolute, err := filepath.Abs(cachePath)
+	cachePath, err := locateSharedGoBuildCache(ctx)
 	if err != nil {
-		return "warn", "could not resolve GOCACHE: " + err.Error(), "Check GOCACHE manually; Posse never deletes shared caches"
+		return "warn", "could not locate the shared Go build cache: " + err.Error(), "Check GOCACHE manually"
 	}
-	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-		absolute = resolved
-	}
-	bytes, err := pathBytes(absolute)
+	bytes, err := pathBytes(cachePath)
 	if err != nil {
-		return "warn", fmt.Sprintf("GOCACHE %s could not be measured: %v", absolute, err), "Check the shared cache path and permissions"
+		return "warn", fmt.Sprintf("GOCACHE %s could not be measured: %v", cachePath, err), "Check the shared cache path and permissions"
 	}
-	detail = fmt.Sprintf("GOCACHE uses %d bytes at %s; Posse never removes shared caches", bytes, absolute)
+	detail = fmt.Sprintf("User GOCACHE uses %d bytes at %s; Worker builds use a separate Posse-owned cache", bytes, cachePath)
 	if bytes >= largeSharedGoCacheBytes {
-		return "warn", detail, "Review this shared cache; if safe, run `go clean -cache` manually"
+		return "warn", detail, "Posse does not alter the User cache; after Go builds finish, review it and run `go clean -cache` manually if desired"
 	}
 	return "ok", detail, ""
 }

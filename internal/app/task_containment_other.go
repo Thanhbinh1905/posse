@@ -43,6 +43,10 @@ func taskSharedProcessExclusions(store.Task) ([]taskProcessDetail, map[int]bool,
 	return nil, map[int]bool{}, nil
 }
 
+func detachedSharedDaemonCWDOnlyPIDs(string, map[int]bool) (map[int]bool, error) {
+	return map[int]bool{}, nil
+}
+
 func describeSharedTaskProcesses([]taskProcessDetail) string { return "" }
 
 func taskProcessHasExcludedAncestor(pid int, excluded map[int]bool) (bool, error) {

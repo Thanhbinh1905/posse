@@ -119,7 +119,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 
 // Restore files absent after a crash from the admitted inputs, never from
 // mutable Brief, preferences or Profile sources. Existing launch text is kept.
-func restoreAdmittedLaunchFiles(project store.Project, task store.Task, plan *taskplan.Plan) error {
+func restoreAdmittedLaunchFiles(home string, project store.Project, task store.Task, plan *taskplan.Plan) error {
 	roundFiles := make(map[string][]byte)
 	for _, input := range plan.Inputs {
 		if input.Role == "review-round-file" {
@@ -153,7 +153,7 @@ func restoreAdmittedLaunchFiles(project store.Project, task store.Task, plan *ta
 	for _, member := range plan.Execution.Members {
 		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, MergeMode: member.Delivery})
 	}
-	contents := workerProtocol(project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext, plan.ProseLanguage) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
+	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext, plan.ProseLanguage) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "worker", planPreferences(plan))
 	return writeFile(launchPath, []byte(contents))
 }

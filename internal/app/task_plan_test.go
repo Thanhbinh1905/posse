@@ -163,7 +163,7 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	if err := os.Remove(filepath.Join(plan.Paths.Output, "launch.md")); err != nil {
 		t.Fatal(err)
 	}
-	if err := restoreAdmittedLaunchFiles(f.project, task, plan); err != nil {
+	if err := restoreAdmittedLaunchFiles(f.home, f.project, task, plan); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := os.ReadFile(filepath.Join(plan.Paths.Output, "brief.md"))

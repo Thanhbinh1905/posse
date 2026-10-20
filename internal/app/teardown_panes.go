@@ -35,6 +35,7 @@ type teardownResult struct {
 	Panes            teardownPanes
 	BranchRemoved    bool
 	StoppedProcesses []string
+	CacheMaintenance string
 	AlreadyTornDown  bool
 }
 
@@ -235,7 +236,7 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 		if paneInsideSandbox && !taskPane && !foreignShellPane {
 			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("pane %s in the held Sandbox is not owned by Task %s", pane.PaneID, taskIDString(task.Seq)), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
 		}
-		if !paneInsideSandbox && agentName == "" && pane.Agent == "" {
+		if !paneInsideSandbox && !taskPane {
 			continue
 		}
 		first, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
@@ -266,6 +267,12 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 		}
 		if foreignShellPane && foreground != first.ShellPID {
 			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("pane %s in the held Sandbox has a foreground process that is not its shell", pane.PaneID), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
+		}
+		if foreground == first.ShellPID && !isShellProcessName(foregroundName) {
+			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("pane %s replaced its retained shell with foreground process %q; preserving it", pane.PaneID, foregroundName), false, "Stop or inspect the foreground command, preserve its work, then retry Teardown")
+		}
+		if taskPane && foreground != first.ShellPID && expectedAgentName == "" {
+			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("pane %s has a foreground process without a verified Task Worker identity", pane.PaneID), false, "Stop or inspect the foreground command, preserve its work, then retry Teardown")
 		}
 		if foreground != first.ShellPID && expectedAgentName != "" && (foregroundName == "" || !strings.EqualFold(foregroundName, expectedAgentName)) {
 			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("foreground process %d in Sandbox pane %s does not match Herdr's agent identity %q", foregroundPID, pane.PaneID, expectedAgentName), true)
@@ -394,10 +401,13 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 		if processInSandbox(first.ShellPID, heldSandbox.Path) && authorization.handle(first.ShellPID) != nil {
 			expectedPane, shellPID, taskOwnedPane := pane, first.ShellPID, taskPane
 			authorization.setSignalGuard(shellPID, func(signal syscall.Signal) error {
-				if signal != syscall.SIGKILL {
-					return nil
-				}
 				return s.verifySandboxShellSignalOwnership(ctx, project, task, heldSandbox.Path, expectedPane, shellPID, taskOwnedPane, foreignShellPane, authorization)
+			})
+		}
+		if taskPane && foreground != first.ShellPID && expectedAgentName != "" && authorization.handle(foregroundPID) != nil {
+			expectedPane, expectedPID, agentName := pane, foregroundPID, expectedAgentName
+			authorization.setSignalGuard(expectedPID, func(syscall.Signal) error {
+				return s.verifySandboxForegroundSignalOwnership(ctx, project, task, heldSandbox.Path, expectedPane, expectedPID, agentName, authorization)
 			})
 		}
 	}
@@ -427,6 +437,12 @@ func (s *Service) verifySandboxShellSignalOwnership(ctx context.Context, project
 	pane, found := snapshotPane(snapshot, paneID)
 	if !found || pane.WorkspaceID != expectedPane.WorkspaceID || pane.TabID != expectedPane.TabID || pane.Label != expectedPane.Label || !pathInside(pane.CWD, sandboxPath) {
 		return fmt.Errorf("pane %s no longer matches its proved identity or Sandbox; preserving its processes", paneID)
+	}
+	if info.ForegroundProcessGroup == shellPID {
+		name, _, found := foregroundProcess(info, shellPID)
+		if !found || !isShellProcessName(name) {
+			return fmt.Errorf("pane %s replaced its retained shell with foreground process %q; preserving it", paneID, name)
+		}
 	}
 	if foreignShellPane {
 		if !shellOnlyPaneInSandbox(snapshot, pane, sandboxPath) || info.ForegroundProcessGroup != shellPID {
@@ -476,6 +492,39 @@ func (s *Service) verifySandboxShellSignalOwnership(ctx context.Context, project
 	return nil
 }
 
+func (s *Service) verifySandboxForegroundSignalOwnership(ctx context.Context, project store.Project, task store.Task, sandboxPath string, expectedPane herdr.Pane, foregroundPID int, expectedAgentName string, authorization *sandboxProcessAuthorization) error {
+	alive, err := authorization.verifyIfAlive(foregroundPID)
+	if err != nil {
+		return err
+	}
+	if !alive {
+		return nil
+	}
+	info, err := s.sandboxPaneProcessInfo(ctx, expectedPane.PaneID)
+	if err != nil {
+		return fmt.Errorf("could not recheck foreground process in pane %s before signaling: %w", expectedPane.PaneID, err)
+	}
+	if info.ShellPID <= 1 || info.ForegroundProcessGroup != foregroundPID {
+		return fmt.Errorf("pane %s no longer has retained process %d in its foreground", expectedPane.PaneID, foregroundPID)
+	}
+	name, cwd, found := foregroundProcess(info, foregroundPID)
+	if !found || !strings.EqualFold(name, expectedAgentName) || !pathInside(cwd, sandboxPath) {
+		return fmt.Errorf("pane %s no longer exposes Task Worker %q as its foreground", expectedPane.PaneID, expectedAgentName)
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("could not recheck Task Worker ownership in pane %s: %w", expectedPane.PaneID, err)
+	}
+	pane, found := snapshotPane(snapshot, expectedPane.PaneID)
+	if !found {
+		return nil // The retained process identity remains authoritative after Herdr closes the verified pane.
+	}
+	if pane.WorkspaceID != expectedPane.WorkspaceID || pane.TabID != expectedPane.TabID || pane.Label != expectedPane.Label || pane.Agent != expectedPane.Agent || !pathInside(pane.CWD, sandboxPath) || !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
+		return fmt.Errorf("pane %s no longer has the verified Task Worker identity", expectedPane.PaneID)
+	}
+	return nil
+}
+
 func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project store.Project, task store.Task) (paneProcessInfo, error) {
 	if s.Herdr == nil {
 		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", "Herdr is required to verify an in-place Task pane before signaling", true)
@@ -500,6 +549,10 @@ func (s *Service) verifyInPlaceForegroundOwnership(ctx context.Context, project 
 		return paneProcessInfo{}, axi.Failure("task_process_identity_unavailable", fmt.Sprintf("Herdr reports no identifiable foreground process in in-place Task pane %s", pane.PaneID), true)
 	}
 	if foreground == info.ShellPID {
+		name, _, processFound := foregroundProcess(info, foreground)
+		if !processFound || !isShellProcessName(name) {
+			return paneProcessInfo{}, axi.Failure("task_process_not_owned", fmt.Sprintf("in-place Task pane %s replaced its retained shell with foreground process %q; preserving it", pane.PaneID, name), false, "Stop or inspect the foreground command, preserve its work, then retry Teardown")
+		}
 		return info, nil
 	}
 	if pane.Agent == "" || !taskAgentMatchesPane(snapshot, project, task, pane) {
@@ -580,6 +633,16 @@ func foregroundProcess(info paneProcessInfo, foreground int) (name, cwd string, 
 		}
 	}
 	return "", "", false
+}
+
+func isShellProcessName(name string) bool {
+	name = strings.TrimPrefix(filepath.Base(strings.ToLower(name)), "-")
+	switch name {
+	case "bash", "csh", "dash", "elvish", "fish", "ksh", "mksh", "nu", "powershell", "pwsh", "sh", "tcsh", "xonsh", "yash", "zsh":
+		return true
+	default:
+		return false
+	}
 }
 
 func snapshotPane(snapshot herdr.Snapshot, paneID string) (herdr.Pane, bool) {

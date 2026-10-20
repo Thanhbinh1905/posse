@@ -40,6 +40,21 @@ func sandboxProcessGroupID(pid int) (int, error) {
 	return group, nil
 }
 
+func sandboxProcessSessionID(pid int) (int, error) {
+	fields, err := sandboxProcessStatFields(pid)
+	if err != nil {
+		return 0, err
+	}
+	if len(fields) < 4 {
+		return 0, fmt.Errorf("process stat for PID %d has no session ID", pid)
+	}
+	session, err := strconv.Atoi(fields[3])
+	if err != nil || session <= 0 {
+		return 0, fmt.Errorf("invalid session ID for PID %d", pid)
+	}
+	return session, nil
+}
+
 func sandboxProcessParentID(pid int) (int, error) {
 	fields, err := sandboxProcessStatFields(pid)
 	if err != nil {

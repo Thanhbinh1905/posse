@@ -724,11 +724,11 @@ func (a *blockedLeadStartAdapter) Call(ctx context.Context, method string, param
 func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
 	brief := dispatch.Brief{Type: "change", DoneWhen: "tests pass"}
 	project := store.Project{Name: "shop"}
-	local := workerProtocol(project, store.Task{Seq: 1, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
-	pr := workerProtocol(project, store.Task{Seq: 2, Type: "change", MergeMode: "pr"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t2", "none", "English")
-	noMistakes := workerProtocol(project, store.Task{Seq: 3, Type: "change", MergeMode: "no-mistakes"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none", "English")
-	workspace := workerProtocol(store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "change"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t4", "none", "English")
-	if !strings.Contains(local, "Never git push or open a PR") || !strings.Contains(local, "Use the Posse-owned Task scratch directory `/home/user/.posse/scratch/shop/t1`") || !strings.Contains(local, "Files passed to `--findings` and `--report` may be in this Worker's worktree or this Task's scratch directory (`/home/user/.posse/scratch/shop/t1`)") || !strings.Contains(local, "Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches") {
+	local := workerProtocol("/home/user/.posse", project, store.Task{Seq: 1, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
+	pr := workerProtocol("/home/user/.posse", project, store.Task{Seq: 2, Type: "change", MergeMode: "pr"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t2", "none", "English")
+	noMistakes := workerProtocol("/home/user/.posse", project, store.Task{Seq: 3, Type: "change", MergeMode: "no-mistakes"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none", "English")
+	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "change"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t4", "none", "English")
+	if !strings.Contains(local, "Never git push or open a PR") || !strings.Contains(local, "Use the Posse-owned Task scratch directory `/home/user/.posse/scratch/shop/t1`") || !strings.Contains(local, "Files passed to `--findings` and `--report` may be in this Worker's worktree or this Task's scratch directory (`/home/user/.posse/scratch/shop/t1`)") || !strings.Contains(local, "Go builds use the shared Posse-owned `GOCACHE` at `/home/user/.posse/cache/worker-go-build`") || !strings.Contains(local, "`GOMODCACHE` remains the user's shared module cache") {
 		t.Fatalf("normal Worker protocol does not ban push: %s", local)
 	}
 	if !strings.Contains(pr, `posse publish "<summary>" [--verify "<command> -> <result>"] [--proof "<markdown>"] [--risk "<markdown>"]`) || !strings.Contains(pr, "screenshots/images") || !strings.Contains(pr, "test/log evidence") || !strings.Contains(pr, "risk plus rollback") || !strings.Contains(pr, "--pr <url>") || !strings.Contains(pr, "Never push directly") || !strings.Contains(pr, "or merge") {

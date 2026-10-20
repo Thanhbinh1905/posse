@@ -91,4 +91,7 @@ func TestExportTaskScratchSetsTemporaryVariablesInOwnedPane(t *testing.T) {
 	if !strings.Contains(command, "POSSE_TASK_ID='task-marker-123'") {
 		t.Errorf("environment command omitted the Task process marker: %s", command)
 	}
+	if !strings.Contains(command, "GOCACHE='"+workerGoBuildCachePath(service.Home)+"'") {
+		t.Errorf("environment command omitted the Posse-owned shared Worker GOCACHE: %s", command)
+	}
 }

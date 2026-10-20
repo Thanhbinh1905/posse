@@ -517,7 +517,7 @@ case "$PWD/" in
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     if [ -f "$POSSE_TEST_ROOT/check-task-env" ]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" > "$POSSE_TEST_ROOT/task-environment"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" "$GOCACHE" > "$POSSE_TEST_ROOT/task-environment"
     fi
     if [ -f "$POSSE_TEST_ROOT/launch-detached-server" ]; then
       setsid python3 "$POSSE_TEST_ROOT/detached-server.py" "$POSSE_TEST_ROOT" >/dev/null 2>&1 &

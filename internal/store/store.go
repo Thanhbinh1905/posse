@@ -372,6 +372,43 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 	return db.PersistTask(ctx, taskID)
 }
 
+// TransitionLostUnlessTeardownIntent gives an admitted Teardown ownership of
+// the Task's terminal transition. The intent check and state change share one
+// transaction so reconciliation cannot race an intent inserted concurrently.
+func (db *DB) TransitionLostUnlessTeardownIntent(ctx context.Context, taskID int64, expected State, source, note string) (bool, error) {
+	if !transitions[expected][StateLost] {
+		return false, fmt.Errorf("transition %q -> %q is not allowed", expected, StateLost)
+	}
+	if !oneOfSource(source) {
+		return false, fmt.Errorf("invalid transition source %q", source)
+	}
+	if err := validateTransitionSource(expected, StateLost, source); err != nil {
+		return false, err
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var hasTeardown int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM intents WHERE task_id=? AND command='teardown')`, taskID).Scan(&hasTeardown); err != nil {
+		return false, err
+	}
+	if hasTeardown != 0 {
+		return false, nil
+	}
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, expected, StateLost, source, note); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (db *DB) TransitionInPlacePreserved(ctx context.Context, task Task, expected State, note, quote string) error {
 	quote = strings.TrimSpace(quote)
 	if quote == "" {
@@ -981,6 +1018,40 @@ func (db *DB) UpdateTaskWorkspace(ctx context.Context, taskID int64, workspaceID
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
+}
+
+func (db *DB) RepairBrokenSandbox(ctx context.Context, sandboxID int64) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var projectID int64
+	if err := tx.QueryRowContext(ctx, `SELECT project_id FROM mounts WHERE id=? AND state='broken' AND task_id IS NULL`, sandboxID).Scan(&projectID); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrStateRace
+		}
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE mounts SET state='idle',task_id=NULL,released_at=? WHERE id=? AND state='broken' AND task_id IS NULL`, time.Now().UnixMilli(), sandboxID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrStateRace
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_leases WHERE mount_id=?`, sandboxID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) BreakSandbox(ctx context.Context, sandboxID, taskID int64) error {

@@ -6,11 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -25,8 +28,9 @@ import (
 
 type teardownCloseGuardAdapter struct {
 	*herdr.Client
-	closed    string
-	afterInfo func()
+	closed     string
+	afterInfo  func()
+	afterClose func()
 }
 
 func (adapter *teardownCloseGuardAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
@@ -36,6 +40,9 @@ func (adapter *teardownCloseGuardAdapter) Call(ctx context.Context, method strin
 	raw, err := adapter.Client.Call(ctx, method, params)
 	if err == nil && method == "pane.process_info" && adapter.afterInfo != nil {
 		adapter.afterInfo()
+	}
+	if err == nil && method == "pane.close" && adapter.afterClose != nil {
+		adapter.afterClose()
 	}
 	return raw, err
 }
@@ -135,6 +142,310 @@ func TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary(t *testing.T) {
 	_ = db.Close()
 	if code == 0 || !strings.Contains(output.String(), "teardown_incomplete") || !strings.Contains(output.String(), "Replacement foreground process") || !paneAlive || fileErr != nil || string(contents) != "preserve\n" || branchErr != nil || taskAfter.State != store.StateFailed || sandboxErr != nil || len(sandboxes) != 1 || sandboxes[0].State != "held" {
 		t.Fatalf("discard did not preserve the open pane and Sandbox: pane=%v file=%q fileErr=%v branch=%s Task=%s Sandboxes=%#v output=%s", paneAlive, contents, fileErr, branchOut, taskAfter.State, sandboxes, output.String())
+	}
+}
+
+func TestDiscardTeardownIntentWinsAgainstLostDetector(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Discard race", "discard-race")
+	// Reproduce a legacy Task pane in the Lead workspace, where absence is
+	// immediately actionable rather than protected by grouped-Worker grace.
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.ProjectByID(context.Background(), f.projectID)
+	if err == nil {
+		_, err = db.ExecContext(context.Background(), `UPDATE tasks SET herdr_workspace_id=? WHERE id=?`, project.HerdrWorkspaceID, task.ID)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	closeEntered := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var closeOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	adapter := &teardownCloseGuardAdapter{Client: f.client}
+	adapter.afterClose = func() {
+		closeOnce.Do(func() { close(closeEntered) })
+		<-releaseClose
+	}
+	for _, entry := range f.leadEnv {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			t.Setenv(key, value)
+		}
+	}
+	t.Chdir(f.repo)
+	cli := app.New(f.home, adapter).CLI()
+	var output bytes.Buffer
+	cli.Out, cli.ErrOut = &output, &output
+	type teardownResult struct {
+		code   int
+		output string
+	}
+	teardownDone := make(chan teardownResult, 1)
+	go func() {
+		code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved this discard"})
+		teardownDone <- teardownResult{code: code, output: output.String()}
+	}()
+	defer release()
+	select {
+	case <-closeEntered:
+	case result := <-teardownDone:
+		t.Fatalf("discard returned before the pane-close boundary: code=%d output=%s", result.code, result.output)
+	case <-time.After(10 * time.Second):
+		t.Fatal("discard did not reach the pane-close boundary")
+	}
+
+	// Reconcile from a second real CLI while the admitted Teardown has closed
+	// the pane but has not yet transitioned the Task to torn-down.
+	closedSnapshot, err := f.client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pane := range closedSnapshot.Panes {
+		if pane.PaneID == task.PaneID {
+			t.Fatalf("pane %s still exists at the Teardown boundary", task.PaneID)
+		}
+	}
+	command := exec.Command(f.binary, "list")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	listOutput, listErr := command.CombinedOutput()
+	if listErr != nil {
+		t.Fatalf("concurrent posse list: %v\n%s", listErr, listOutput)
+	}
+	if current := f.task(t, "t1"); current.State != store.StateWorking {
+		t.Fatalf("lost detector changed Task state during admitted discard: %s", current.State)
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(context.Background(), f.projectID, false)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	decisions, err := db.Decisions(context.Background(), f.projectID, true)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "task_lost" {
+			t.Fatalf("lost detector raised task_lost during admitted discard: %#v", notice)
+		}
+	}
+	for _, decision := range decisions {
+		if decision.TaskID == task.ID && decision.Kind == "recovery" {
+			t.Fatalf("lost detector raised a recovery Decision during admitted discard: %#v", decision)
+		}
+	}
+
+	release()
+	select {
+	case result := <-teardownDone:
+		if result.code != 0 || !strings.Contains(result.output, "torn-down") {
+			t.Fatalf("first discard did not complete after the close race: code=%d output=%s", result.code, result.output)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("discard did not finish after releasing the pane-close boundary")
+	}
+	if current := f.task(t, "t1"); current.State != store.StateTornDown {
+		t.Fatalf("Task state after discard = %s", current.State)
+	}
+}
+
+func TestTeardownPreservesForegroundCommandInTaskPane(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Preserve pane foreground", "preserve-pane-foreground")
+	markTaskReported(t, f, task)
+	f.exitWorker(t, "t1")
+
+	pidPath := filepath.Join(f.root, "foreground-command.pid")
+	scriptPath := filepath.Join(task.WorktreePath, "foreground-command.py")
+	script := "import os, signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nopen(" + fmt.Sprintf("%q", pidPath) + ", 'w').write(str(os.getpid()))\ntime.sleep(60)\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paneRunDone := make(chan struct{}, 1)
+	go func() {
+		_, _ = f.client.Run(context.Background(), "pane", "run", task.PaneID, "python3 "+shellQuote(scriptPath))
+		paneRunDone <- struct{}{}
+	}()
+	var commandPID int
+	if !waitForCondition(5*time.Second, func() bool {
+		contents, err := os.ReadFile(pidPath)
+		if err != nil {
+			return false
+		}
+		commandPID, err = strconv.Atoi(strings.TrimSpace(string(contents)))
+		return err == nil && commandPID > 1
+	}) {
+		t.Fatal("foreground test command did not start in the Task pane")
+	}
+	t.Cleanup(func() {
+		if commandPID > 1 {
+			_ = syscall.Kill(commandPID, syscall.SIGKILL)
+		}
+	})
+	environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", commandPID))
+	if err != nil || !strings.Contains(string(environ), "POSSE_TASK_ID="+task.ContainmentMarker) {
+		t.Fatalf("foreground command did not inherit the Task marker: %q %v", environ, err)
+	}
+	if observed := foregroundPID(t, f, task.PaneID); observed != commandPID {
+		t.Fatalf("foreground command PID %d is not Herdr's foreground process group: %d", commandPID, observed)
+	}
+	command := exec.Command(f.binary, "teardown", "t1")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	output, teardownErr := command.CombinedOutput()
+	if teardownErr == nil || !strings.Contains(string(output), "teardown_incomplete") {
+		t.Fatalf("Teardown should preserve the user foreground command: err=%v output=%s", teardownErr, output)
+	}
+	if _, _, err := store.ProcessIdentityForPID(commandPID); err != nil {
+		t.Fatalf("Teardown stopped the user foreground command: %v", err)
+	}
+	if current := f.task(t, "t1"); current.State != store.StateReported {
+		t.Fatalf("refused Teardown changed Task state to %s", current.State)
+	}
+	f.assertAlive(t, f.snapshot(t), task.PaneID)
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandboxes, err := db.Sandboxes(context.Background(), f.projectID)
+	_ = db.Close()
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "held" || sandboxes[0].TaskID != task.ID {
+		t.Fatalf("refused Teardown released the user's Sandbox: %#v %v", sandboxes, err)
+	}
+	_ = syscall.Kill(commandPID, syscall.SIGKILL)
+	select {
+	case <-paneRunDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("foreground pane command did not exit after teardown refusal")
+	}
+}
+
+func TestTeardownPreservesCommandThatReplacedTaskPaneShell(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Preserve replaced pane shell", "replaced-shell")
+	markTaskReported(t, f, task)
+	f.exitWorker(t, "t1")
+
+	pidPath := filepath.Join(f.root, "replacement-command.pid")
+	scriptPath := filepath.Join(task.WorktreePath, "replacement-command.py")
+	script := "import os, signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nopen(" + fmt.Sprintf("%q", pidPath) + ", 'w').write(str(os.getpid()))\ntime.sleep(60)\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paneRunDone := make(chan struct{}, 1)
+	go func() {
+		_, _ = f.client.Run(context.Background(), "pane", "run", task.PaneID, "exec python3 "+shellQuote(scriptPath))
+		paneRunDone <- struct{}{}
+	}()
+	var commandPID int
+	if !waitForCondition(5*time.Second, func() bool {
+		contents, err := os.ReadFile(pidPath)
+		if err != nil {
+			return false
+		}
+		commandPID, err = strconv.Atoi(strings.TrimSpace(string(contents)))
+		return err == nil && commandPID > 1
+	}) {
+		t.Fatal("replacement command did not start in the Task pane")
+	}
+	t.Cleanup(func() {
+		if commandPID > 1 {
+			_ = syscall.Kill(commandPID, syscall.SIGKILL)
+		}
+	})
+	if observed := foregroundPID(t, f, task.PaneID); observed != commandPID {
+		t.Fatalf("replacement command PID %d is not Herdr's foreground process group: %d", commandPID, observed)
+	}
+	raw, err := f.client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var info struct {
+		ProcessInfo struct {
+			ShellPID int `json:"shell_pid"`
+		} `json:"process_info"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil || info.ProcessInfo.ShellPID != commandPID {
+		t.Fatalf("test command did not replace the retained pane shell: %s %v", raw, err)
+	}
+
+	command := exec.Command(f.binary, "teardown", "t1")
+	command.Dir, command.Env = f.repo, f.leadEnv
+	output, teardownErr := command.CombinedOutput()
+	if teardownErr == nil || !strings.Contains(string(output), "teardown_incomplete") {
+		t.Fatalf("Teardown should preserve the command that replaced its shell: err=%v output=%s", teardownErr, output)
+	}
+	if _, _, err := store.ProcessIdentityForPID(commandPID); err != nil {
+		t.Fatalf("Teardown stopped the command that replaced the pane shell: %v", err)
+	}
+	if current := f.task(t, "t1"); current.State != store.StateReported {
+		t.Fatalf("refused Teardown changed Task state to %s", current.State)
+	}
+	_ = syscall.Kill(commandPID, syscall.SIGKILL)
+	select {
+	case <-paneRunDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement pane command did not exit after teardown refusal")
+	}
+}
+
+func TestTeardownReleasesSandboxWithDetachedSSHControlPersist(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Preserve SSH ControlPersist", "ssh-controlpersist")
+	markTaskReported(t, f, task)
+	f.exitWorker(t, "t1")
+
+	command := exec.Command("bash", "-c", `exec -a ssh bash -c "(cd /; exec sleep 120) & wait" -o ControlPersist=yes host`)
+	command.Dir = task.WorktreePath
+	command.Env = setEnv(f.env, "POSSE_TASK_ID", task.ContainmentMarker)
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if command.Process != nil {
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			_ = command.Wait()
+		}
+	}()
+	var cmdline []byte
+	var cmdlineErr error
+	if !waitForCondition(5*time.Second, func() bool {
+		cmdline, cmdlineErr = os.ReadFile(filepath.Join("/proc", strconv.Itoa(command.Process.Pid), "cmdline"))
+		return cmdlineErr == nil && strings.Contains(string(cmdline), "ControlPersist=yes")
+	}) {
+		t.Fatalf("fixture does not look like a ControlPersist daemon: %q %v", cmdline, cmdlineErr)
+	}
+	if _, _, err := store.ProcessIdentityForPID(command.Process.Pid); err != nil {
+		t.Fatalf("read detached SSH ControlPersist process identity: %v", err)
+	}
+
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1")
+	if !strings.Contains(output, "torn-down") {
+		t.Fatalf("Teardown did not release the Sandbox with a detached SSH daemon: %s", output)
+	}
+	if _, _, err := store.ProcessIdentityForPID(command.Process.Pid); err != nil {
+		t.Fatalf("Teardown stopped the shared SSH daemon: %v", err)
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandboxes, err := db.Sandboxes(context.Background(), f.projectID)
+	_ = db.Close()
+	if err != nil || len(sandboxes) != 1 || sandboxes[0].State != "idle" {
+		t.Fatalf("Sandbox state after preserved SSH daemon Teardown = %#v %v", sandboxes, err)
 	}
 }
 

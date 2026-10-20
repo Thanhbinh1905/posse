@@ -74,7 +74,10 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("POSSE_WORKER_HOME", f.home)
-	t.Chdir(f.task.WorktreePath)
+	if err := os.Chdir(f.task.WorktreePath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWD", f.task.WorktreePath)
 	if code := f.run("publish", "--repo", "worker", "Worker summary"); code != 0 || !strings.Contains(f.out.String(), "https://git.example.com/group/worker/-/merge_requests/17") {
 		t.Fatalf("publish MR: %d %s repos=%#v", code, f.out.String(), f.repos())
 	}
@@ -94,7 +97,10 @@ esac
 		t.Fatalf("done: %d %s", code, f.out.String())
 	}
 	t.Setenv("POSSE_WORKER_HOME", "")
-	t.Chdir(f.workspace)
+	if err := os.Chdir(f.workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWD", f.workspace)
 	f.service.Herdr = fake
 	if code := f.run("merge", "t1"); code != 0 {
 		t.Fatalf("open MR: %d %s", code, f.out.String())
@@ -124,6 +130,10 @@ esac
 	}
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-stack-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
+	if err := os.Chdir(f.project.Root); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWD", f.project.Root)
 	if err := f.service.autoTeardownMergedTasks(context.Background(), f.db, f.project, f.config()); err != nil {
 		t.Fatalf("teardown merged workspace Task: %v", err)
 	}

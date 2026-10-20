@@ -342,8 +342,12 @@ func findPane(panes []herdr.Pane, paneID, label string) (herdr.Pane, bool) {
 }
 
 func markLost(ctx context.Context, db *store.DB, task store.Task, reason string, now time.Time, notices *[]store.Notice) error {
-	if err := db.Transition(ctx, task.ID, task.State, store.StateLost, "cli", reason); err != nil {
+	transitioned, err := db.TransitionLostUnlessTeardownIntent(ctx, task.ID, task.State, "cli", reason)
+	if err != nil {
 		return err
+	}
+	if !transitioned {
+		return nil
 	}
 	notice, err := createNotice(ctx, db, task.ProjectID, task.ID, "task_lost", task.Title+" lost its Worker", now)
 	if err != nil {

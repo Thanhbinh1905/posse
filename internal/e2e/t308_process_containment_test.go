@@ -87,8 +87,9 @@ while True:
 	}
 	values := strings.Split(strings.TrimSpace(string(environment)), "\t")
 	expectedScratch := filepath.Join(f.home, "scratch", "shop", fmt.Sprintf("t%d", task.Seq))
-	if len(values) != 6 || values[0] != expectedScratch || values[1] != expectedScratch || values[2] != expectedScratch || values[3] != expectedScratch || values[4] != expectedScratch || values[5] != task.ContainmentMarker {
-		t.Fatalf("Worker Task environment = %#v, Task = %#v; want every temp variable set to %s and the recorded marker", values, task, expectedScratch)
+	expectedCache := filepath.Join(f.home, "cache", "worker-go-build")
+	if len(values) != 7 || values[0] != expectedScratch || values[1] != expectedScratch || values[2] != expectedScratch || values[3] != expectedScratch || values[4] != expectedScratch || values[5] != task.ContainmentMarker || values[6] != expectedCache {
+		t.Fatalf("Worker Task environment = %#v, Task = %#v; want every temp variable set to %s, the recorded marker, and shared Posse GOCACHE %s", values, task, expectedScratch, expectedCache)
 	}
 	if task.ContainmentMarker == "" {
 		t.Fatalf("Task process containment identity = %#v", task)
