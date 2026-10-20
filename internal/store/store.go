@@ -579,7 +579,7 @@ func oneOfState(value State, candidates ...State) bool {
 }
 
 func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64, error) {
-	planJSON, err := bindTaskPlan(task, task.Seq)
+	planJSON, err := bindTaskPlan(task, task.Seq, "")
 	if err != nil {
 		return 0, err
 	}
@@ -829,7 +829,20 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 			return 0, 0, ErrTaskBranchExists
 		}
 	}
-	planJSON, err := bindTaskPlan(task, seq)
+	workflowRunID := ""
+	if admitted, err := task.AdmittedPlan(); err != nil {
+		return 0, 0, err
+	} else if admitted != nil && admitted.Workflow != nil {
+		if admitted.Workflow.RunID == "new" {
+			workflowRunID, err = nextWorkflowRunIDTx(ctx, tx.Tx, projectID)
+			if err != nil {
+				return 0, 0, err
+			}
+		} else if err := validateWorkflowTaskAdmissionTx(ctx, tx.Tx, projectID, task.Type, admitted.Workflow); err != nil {
+			return 0, 0, err
+		}
+	}
+	planJSON, err := bindTaskPlan(task, seq, workflowRunID)
 	if err != nil {
 		return 0, 0, err
 	}

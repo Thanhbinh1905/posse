@@ -48,12 +48,8 @@ func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) 
 		ConfiguredModel: identity.ConfiguredModel, ModelKnown: identity.ModelKnown}, nil
 }
 
-func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice) (taskplan.Plan, error) {
+func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice, workflow *config.WorkflowSelection) (taskplan.Plan, error) {
 	brief, err := dispatch.ParseBriefText(string(briefData))
-	if err != nil {
-		return taskplan.Plan{}, err
-	}
-	workflow, err := resolveWorkflowSelection(cfg, brief.Workflow)
 	if err != nil {
 		return taskplan.Plan{}, err
 	}

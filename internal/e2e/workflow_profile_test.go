@@ -64,7 +64,7 @@ stages = [
 	projectConfigPath := filepath.Join(fixture.home, "projects", fixture.project.Name, "config.toml")
 	projectConfig := `[workflows.feature]
 stages = [
-  { name = "Project Plan", frame = "plan", gate = "user", task_type = "research", workers = 1 },
+  { name = "Project Plan", frame = "implement", gate = "user", task_type = "change", workers = 1 },
 ]
 `
 	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o700); err != nil {
@@ -104,7 +104,7 @@ stages = [
 		t.Fatal(err)
 	}
 	profiledPlan, err := profiled.AdmittedPlan()
-	if err != nil || profiledPlan == nil || profiledPlan.Workflow == nil || profiledPlan.Workflow.Name != shown.Name || profiledPlan.Workflow.Source != projectConfigPath || profiledPlan.Workflow.SHA256 != shown.SHA256 || !reflect.DeepEqual(profiledPlan.Workflow.Profile, shown.Profile) {
+	if err != nil || profiledPlan == nil || profiledPlan.Workflow == nil || profiledPlan.Workflow.Name != shown.Name || profiledPlan.Workflow.Source != projectConfigPath || profiledPlan.Workflow.SHA256 != shown.SHA256 || profiledPlan.Workflow.RunID != "w1" || profiledPlan.Workflow.StageName != "Project Plan" || profiledPlan.Workflow.StageIndex != 0 || !reflect.DeepEqual(profiledPlan.Workflow.Profile, shown.Profile) {
 		t.Fatalf("Task did not freeze the resolved profile: %#v %v", profiledPlan, err)
 	}
 
