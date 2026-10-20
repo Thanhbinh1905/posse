@@ -726,11 +726,15 @@ Create the nested file.
 			if err != nil || len(leases) != 1 {
 				t.Fatalf("recovery lost in-place lease: %#v, %v", leases, err)
 			}
+			turnToken, err := db.TaskTurnToken(ctx, task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			_ = db.Close()
 			output.Reset()
 			cli.Out, cli.ErrOut = &output, &output
 			t.Setenv("HERDR_PANE_ID", "w1:p2")
-			if code := cli.Run([]string{"signal", "done", "Created the file without a branch or commit"}); code != 0 {
+			if code := cli.Run([]string{"signal", "done", "Created the file without a branch or commit", "--turn", turnToken}); code != 0 {
 				t.Fatalf("signal done: %d\n%s", code, output.String())
 			}
 			db, err = store.Open(home)

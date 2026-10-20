@@ -558,6 +558,12 @@ type TaskTargetChange struct {
 	CompletedAt  int64
 }
 
+type TaskTurnToken struct {
+	TaskID    int64
+	Token     string
+	UpdatedAt int64
+}
+
 type Transition struct {
 	ID        int64
 	TaskID    int64

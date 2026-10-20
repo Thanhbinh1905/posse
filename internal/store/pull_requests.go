@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -729,18 +730,13 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 		}
 	}
 	allowChangedEffects := !unchanged || effect.TransitionTo == StateMerged && transitions[current.State][StateMerged]
-	for _, notice := range effect.Notices {
+	notices, err := filterMergeReadyNoticesTx(ctx, tx, observation.ProjectID, observation.TaskID, "", current.State, effect.Notices)
+	if err != nil {
+		return false, err
+	}
+	for _, notice := range notices {
 		if !allowChangedEffects && notice.Kind != "merge_ready" {
 			continue
-		}
-		if notice.Kind == "merge_ready" {
-			var exists bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='merge_ready' AND json_extract(data_json,'$.url')=? AND json_extract(data_json,'$.head_sha')=?)`, notice.ProjectID, notice.TaskID, observation.PRURL, observation.HeadSHA).Scan(&exists); err != nil {
-				return false, err
-			}
-			if exists {
-				continue
-			}
 		}
 		if err := insertNoticeTx(ctx, tx, notice); err != nil {
 			return false, err
@@ -827,6 +823,52 @@ func latestPRObservationTx(ctx context.Context, tx *writeTx, taskID int64) (PROb
 
 func samePRObservation(left, right PRObservation) bool {
 	return left.ProjectID == right.ProjectID && left.TaskID == right.TaskID && left.PRURL == right.PRURL && left.HeadSHA == right.HeadSHA && left.State == right.State && left.Checks == right.Checks && left.Review == right.Review && left.Mergeable == right.Mergeable && left.MergeCommit == right.MergeCommit
+}
+
+func filterMergeReadyNoticesTx(ctx context.Context, tx *writeTx, projectID, taskID int64, repo string, taskState State, notices []Notice) ([]Notice, error) {
+	if len(notices) == 0 {
+		return nil, nil
+	}
+	var transitionID, transitionAt int64
+	err := tx.QueryRowContext(ctx, `SELECT id,at FROM transitions WHERE task_id=? AND to_state='done' ORDER BY id DESC LIMIT 1`, taskID).Scan(&transitionID, &transitionAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	filtered := make([]Notice, 0, len(notices))
+	for _, notice := range notices {
+		if notice.Kind != "merge_ready" {
+			filtered = append(filtered, notice)
+			continue
+		}
+		if taskState != StateDone && taskState != StateMerging {
+			continue
+		}
+		data := map[string]any{}
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+			return nil, fmt.Errorf("decode merge_ready Notice: %w", err)
+		}
+		data["completion_transition"] = transitionID
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
+		notice.DataJSON = string(encoded)
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM notices
+			WHERE project_id=? AND task_id=? AND kind='merge_ready'
+			  AND COALESCE(json_extract(data_json,'$.repo'),'')=?
+			  AND json_extract(data_json,'$.head_sha')=?
+			  AND (json_extract(data_json,'$.completion_transition')=?
+			       OR (json_type(data_json,'$.completion_transition') IS NULL AND ?>0 AND created_at>=?))
+		)`, projectID, taskID, repo, data["head_sha"], transitionID, transitionID, transitionAt).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if !exists {
+			filtered = append(filtered, notice)
+		}
+	}
+	return filtered, nil
 }
 
 func insertNoticeTx(ctx context.Context, tx *writeTx, notice Notice) error {

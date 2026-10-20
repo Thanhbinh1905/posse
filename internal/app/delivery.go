@@ -204,14 +204,13 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 }
 
 func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config, token string) (bool, string, error) {
-	compacting := false
 	check := func(snapshot herdr.Snapshot) error {
 		pane, found := findAppPane(snapshot.Panes, paneID, task.PaneLabel)
 		if !found || pane.PaneID != paneID {
 			return axi.Failure("message_not_ready", "Worker is not ready for this message", true)
 		}
 		var err error
-		pane, compacting, err = s.piCompactingPane(ctx, pane)
+		pane, _, err = s.piCompactingPane(ctx, pane)
 		if err != nil {
 			return err
 		}
@@ -266,22 +265,6 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		submitting = true
 		return nil
 	}); err != nil {
-		if submitting && messagePromptRejected(err) {
-			var rollbackErr error
-			if message.Status == "interrupting" {
-				rollbackErr = db.RollbackInterruptMessage(ctx, message.ID, token)
-			} else {
-				rollbackErr = db.RollbackMessageSubmission(ctx, message.ID, token)
-			}
-			if rollbackErr != nil {
-				return false, "", errors.Join(err, rollbackErr)
-			}
-			reason := "agent_not_ready"
-			if compacting {
-				reason = "compacting"
-			}
-			return false, reason, nil
-		}
 		if submitting {
 			created, noticeErr := s.createMessageDeliveryUncertainNotice(ctx, db, task.ProjectID, task.Seq, message)
 			if noticeErr == nil && created {
@@ -320,9 +303,4 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		return true, "", err
 	}
 	return true, "", nil
-}
-
-func messagePromptRejected(err error) bool {
-	var failure *axi.Error
-	return errors.As(err, &failure) && failure.Code == "agent_not_ready"
 }

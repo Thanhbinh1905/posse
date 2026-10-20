@@ -14,13 +14,17 @@ import (
 // Origin and classification come from the caller's trusted delivery path,
 // never from the body. Text-only harnesses cannot authenticate a prompt typed
 // by the User; consumers must not classify arbitrary text by prefix alone.
-func deliveryEnvelope(from, to, task, purpose, ids, body string) string {
+func deliveryEnvelope(from, to, task, purpose, ids, body string, turnTokens ...string) string {
 	encoded, _ := json.Marshal(body)
-	return fmt.Sprintf("[posse | %s -> %s %s | %s #%s]\nbody: %s", from, to, task, purpose, ids, encoded)
+	header := fmt.Sprintf("[posse | %s -> %s %s | %s #%s", from, to, task, purpose, ids)
+	if len(turnTokens) > 0 && turnTokens[0] != "" {
+		header += " | turn " + turnTokens[0]
+	}
+	return header + fmt.Sprintf("]\nbody: %s", encoded)
 }
 
 func workerInstruction(task store.Task, message store.Message) string {
-	return deliveryEnvelope("Lead", "Worker", taskIDString(task.Seq), "instruction", fmt.Sprint(message.ID), message.Body)
+	return deliveryEnvelope("Lead", "Worker", taskIDString(task.Seq), "instruction", fmt.Sprint(message.ID), message.Body, fmt.Sprintf("message:%d", message.ID))
 }
 
 func noticeEnvelope(notices []store.Notice, tasks []string, body string) string {

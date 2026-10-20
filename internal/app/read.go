@@ -643,8 +643,13 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		hasQueuedMessages := false
 		hasUndeliverableMessages := false
 		hasHistoricalMessages := false
+		queuedAt := currentTime()
 		for _, message := range undeliveredMessages {
 			row := map[string]any{"id": message.ID, "status": message.Status, "instruction": message.Body}
+			if message.Status == "queued" {
+				age := time.Duration(max(int64(0), queuedAt-message.CreatedAt)) * time.Millisecond
+				row["queued_for"] = age.Round(time.Second).String()
+			}
 			switch message.Status {
 			case "queued":
 				hasQueuedMessages = true

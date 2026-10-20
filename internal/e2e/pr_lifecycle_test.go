@@ -1911,7 +1911,8 @@ case "$PWD/" in
       git commit -m "fix worker change $task_id" >/dev/null
       while [ ! -e "$POSSE_E2E_FIX_GATE/$task_id" ]; do sleep 0.02; done
       "$POSSE_E2E_POSSE_BIN" publish "Worker fixed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
-      "$POSSE_E2E_POSSE_BIN" signal done "Worker fixed $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+      turn_token=$(printf '%s\n' "$instruction" | sed -n 's/.*| turn \([^]]*\)].*/\1/p')
+      "$POSSE_E2E_POSSE_BIN" signal done "Worker fixed $task_id" --pr "$pr_url" --turn "$turn_token" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     done
     ;;

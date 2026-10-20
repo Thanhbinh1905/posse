@@ -14,7 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestClaudeStopPluginIsLeadOnlyAndBounded(t *testing.T) {
+func TestClaudeLeadUsesReceiptBackedBackgroundWatch(t *testing.T) {
 	home := t.TempDir()
 	project := store.Project{Name: "shop", Root: t.TempDir()}
 	service := testService(home, nil)
@@ -27,33 +27,25 @@ func TestClaudeStopPluginIsLeadOnlyAndBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Join(home, "projects", "shop", "lead-claude-watch")
-	if !strings.Contains(strings.Join(launch.Args, " "), "--plugin-dir "+root) {
-		t.Fatalf("Claude Lead missing Stop plugin: %#v", launch.Args)
+	if strings.Contains(strings.Join(launch.Args, " "), root) {
+		t.Fatalf("new Claude Lead still installs the Stop hook: %#v", launch.Args)
 	}
-	contents, err := os.ReadFile(filepath.Join(root, "hooks", "hooks.json"))
+	instructions, err := os.ReadFile(filepath.Join(home, "projects", "shop", "lead.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var plugin struct {
-		Hooks map[string][]struct {
-			Hooks []struct {
-				Command     string `json:"command"`
-				AsyncRewake bool   `json:"asyncRewake"`
-				Timeout     int    `json:"timeout"`
-			} `json:"hooks"`
-		} `json:"hooks"`
+	for _, expected := range []string{"--handoff", "CLAUDE_CODE_SESSION_ID", "without model turns", "`Read` on the output file", "exact Notice IDs", "receipt is accepted", "without a timeout"} {
+		if !strings.Contains(string(instructions), expected) {
+			t.Errorf("Claude Lead instructions omitted %q: %s", expected, instructions)
+		}
 	}
-	if err := json.Unmarshal(contents, &plugin); err != nil {
-		t.Fatal(err)
-	}
-	hook := plugin.Hooks["Stop"][0].Hooks[0]
-	if !hook.AsyncRewake || time.Duration(hook.Timeout)*time.Second <= claudeStopWait+5*time.Second || !strings.Contains(hook.Command, " _claude-stop") || !strings.Contains(hook.Command, shellQuote(home)) || !strings.Contains(hook.Command, shellQuote(project.Root)) {
-		t.Fatalf("unbounded or unowned Stop hook: %s", contents)
+	if strings.Contains(string(instructions), "Stop hook") {
+		t.Errorf("Claude Lead instructions still depend on a Stop hook: %s", instructions)
 	}
 	cfg.Kinds["claude"] = config.Kind{NoticeDelivery: config.NoticeDeliveryPrompt}
 	launch, err = service.prepareLeadLaunch(home, project, cfg, "claude")
 	if err != nil || strings.Contains(strings.Join(launch.Args, " "), root) {
-		t.Fatalf("non-Watch Claude got Stop hook: %#v %v", launch, err)
+		t.Fatalf("prompt-only Claude got the Stop plugin: %#v %v", launch, err)
 	}
 }
 
@@ -205,7 +197,7 @@ func TestClaudeStopLeavesDownProjectStopped(t *testing.T) {
 		t.Fatalf("down Project rearmed its Stop hook: %d %s", code, output.String())
 	}
 	rows := watchRows([]watchProcess{{PID: 1, Kind: "lead", StopHook: true}}, true)
-	if !strings.Contains(rows[0][len(rows[0])-1].Value.(string), "next Claude Stop hook") {
+	if !strings.Contains(rows[0][len(rows[0])-1].Value.(string), "legacy Claude Stop hook") {
 		t.Fatalf("update did not identify the hook restart owner: %#v", rows)
 	}
 }

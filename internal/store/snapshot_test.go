@@ -185,10 +185,16 @@ func TestTaskLaunchIdentitiesPersistAndRebuildWithoutLosingProfileChanges(t *tes
 	if !reflect.DeepEqual(snapshot.LaunchIdentities, want) {
 		t.Fatalf("snapshot launch identities = %#v, want %#v", snapshot.LaunchIdentities, want)
 	}
+	if snapshot.WorkerTurnToken != "launch:2" {
+		t.Fatalf("snapshot Worker turn token = %q, want launch:2", snapshot.WorkerTurnToken)
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET profile='damaged',launches=0 WHERE id=?`, taskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM task_launch_identities`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM task_turn_tokens`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
@@ -201,6 +207,10 @@ func TestTaskLaunchIdentitiesPersistAndRebuildWithoutLosingProfileChanges(t *tes
 	rebuiltIdentities, err := db.TaskLaunchIdentities(ctx, taskID)
 	if err != nil || !reflect.DeepEqual(rebuiltIdentities, want) {
 		t.Fatalf("rebuilt launch identities = %#v, %v; want %#v", rebuiltIdentities, err, want)
+	}
+	rebuiltTurn, err := db.TaskTurnToken(ctx, taskID)
+	if err != nil || rebuiltTurn != "launch:2" {
+		t.Fatalf("rebuilt Worker turn token = %q, %v; want launch:2", rebuiltTurn, err)
 	}
 }
 

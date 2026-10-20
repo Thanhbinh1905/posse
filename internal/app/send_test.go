@@ -109,13 +109,13 @@ func TestSendDeliveryPolicy(t *testing.T) {
 		{"pi working", "pi", "working", "delivered", "steered", false, false, false, false},
 		{"pi unknown without compaction signal", "pi", "unknown", "queued", "agent_not_ready", false, false, false, false},
 		{"unknown kind", "custom", "working", "queued", "kind_does_not_support_steering", false, false, false, false},
-		{"forced queue", "claude", "working", "queued", "waiting_for_idle (--queue)", true, false, false, false},
+		{"forced queue", "claude", "working", "queued", "waiting_for_idle", true, false, false, false},
 		{"focused", "claude", "working", "queued", "focused", false, true, false, false},
 		{"blocked", "claude", "blocked", "queued", "blocked", false, false, false, false},
 		{"blocked task", "claude", "blocked", "queued", "blocked", false, false, true, false},
 		{"idle modal", "claude", "idle", "queued", "agent_ui_unknown", false, false, false, true},
 		{"pi idle modal", "pi", "idle", "queued", "agent_ui_unknown", false, false, false, true},
-		{"idle with queue", "claude", "idle", "delivered", "agent_ready_and_unfocused", true, false, false, false},
+		{"idle with queue", "claude", "idle", "queued", "waiting_for_idle", true, false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -227,12 +227,12 @@ func TestSendDeliveryPolicy(t *testing.T) {
 	}
 }
 
-func TestSendInterruptDefinitePromptRejectionRestoresRedirectAheadOfQueue(t *testing.T) {
+func TestSendInterruptPromptErrorsRemainUncertainAndDoNotAdvanceQueue(t *testing.T) {
 	for _, tc := range []struct {
 		name, promptError, wantStatus string
 		wantCommandSuccess            bool
 	}{
-		{name: "definite not-ready rejection", promptError: "agent_not_ready", wantStatus: "queued", wantCommandSuccess: true},
+		{name: "not-ready response after submission remains held", promptError: "agent_not_ready", wantStatus: "submitting", wantCommandSuccess: false},
 		{name: "ambiguous timeout remains held", promptError: "agent_prompt_timeout", wantStatus: "submitting", wantCommandSuccess: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -760,16 +760,16 @@ func TestSendReturnsTypedErrorForSQLiteStorageFailure(t *testing.T) {
 
 func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 	for _, tc := range []struct {
-		name, wantState, wantReason   string
-		rejectPrompt, headWaitForIdle bool
-		focused                       bool
-		wantPromptCalls               int
-		wantBlocker                   bool
+		name, wantState, wantReason, wantHeadState                 string
+		rejectPrompt, headWaitForIdle, wantError, wantNoNewMessage bool
+		focused                                                    bool
+		wantPromptCalls                                            int
+		wantBlocker                                                bool
 	}{
-		{name: "accepted", wantState: "delivered", wantReason: "steered", headWaitForIdle: true, wantPromptCalls: 1},
-		{name: "rejected", wantState: "queued", wantReason: "compacting", rejectPrompt: true, headWaitForIdle: true, wantPromptCalls: 1},
-		{name: "earlier steerable message pending", wantState: "queued", wantReason: "earlier_message_pending", rejectPrompt: true, wantPromptCalls: 2},
-		{name: "earlier --queue message blocks focused Worker", wantState: "queued", wantReason: "earlier_message_pending", headWaitForIdle: true, focused: true, wantBlocker: true},
+		{name: "accepted", wantState: "delivered", wantReason: "steered", wantHeadState: "queued", headWaitForIdle: true, wantPromptCalls: 1},
+		{name: "post-submit not-ready response remains uncertain", wantState: "submitting", wantHeadState: "queued", rejectPrompt: true, headWaitForIdle: true, wantError: true, wantPromptCalls: 1},
+		{name: "earlier steerable message failure remains uncertain", wantHeadState: "submitting", rejectPrompt: true, wantError: true, wantNoNewMessage: true, wantPromptCalls: 1},
+		{name: "earlier --queue message blocks focused Worker", wantState: "queued", wantReason: "earlier_message_pending", wantHeadState: "queued", headWaitForIdle: true, focused: true, wantBlocker: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -818,11 +818,13 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 			var output bytes.Buffer
 			cli := service.CLI()
 			cli.Out = &output
-			if code := cli.Run([]string{"send", "t1", "Steer during compaction"}); code != 0 {
-				t.Fatalf("send exit=%d output=%s", code, output.String())
-			}
-			if !strings.Contains(output.String(), "state: "+tc.wantState) || !strings.Contains(output.String(), "reason: "+tc.wantReason) {
-				t.Fatalf("send result = %s, want state=%s reason=%s", output.String(), tc.wantState, tc.wantReason)
+			code := cli.Run([]string{"send", "t1", "Steer during compaction"})
+			if tc.wantError {
+				if code == 0 || !strings.Contains(output.String(), "message_delivery_uncertain") {
+					t.Fatalf("post-submit prompt error was not held as uncertain: exit=%d output=%s", code, output.String())
+				}
+			} else if code != 0 || !strings.Contains(output.String(), "state: "+tc.wantState) || !strings.Contains(output.String(), "reason: "+tc.wantReason) {
+				t.Fatalf("send exit=%d output=%s, want state=%s reason=%s", code, output.String(), tc.wantState, tc.wantReason)
 			}
 			if fake.CallCount("agent.prompt") != tc.wantPromptCalls {
 				t.Fatalf("agent.prompt calls = %d, want %d", fake.CallCount("agent.prompt"), tc.wantPromptCalls)
@@ -836,11 +838,16 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 			}
 			defer db.Close()
 			head, err := db.MessageByID(ctx, headID)
-			if err != nil || head.Status != "queued" {
-				t.Fatalf("wait-for-idle head changed: %#v %v", head, err)
+			if err != nil || head.Status != tc.wantHeadState {
+				t.Fatalf("queue head status=%#v err=%v, want %s", head, err, tc.wantHeadState)
 			}
 			var status string
-			if err := db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=? AND id<>?`, taskID, headID).Scan(&status); err != nil || status != tc.wantState {
+			err = db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=? AND id<>?`, taskID, headID).Scan(&status)
+			if tc.wantNoNewMessage {
+				if !store.IsNotFound(err) {
+					t.Fatalf("send queued a duplicate after an uncertain head submission: status=%q err=%v", status, err)
+				}
+			} else if err != nil || status != tc.wantState {
 				t.Fatalf("sent message state = %q, %v; want %s", status, err, tc.wantState)
 			}
 		})
@@ -900,7 +907,12 @@ func TestSendReopensDoneChangeTaskBeforeImmediateSignal(t *testing.T) {
 			t.Errorf("instruction became visible before Task was reopened: state=%s gated=%s error=%v", task.State, task.GatedSHA, err)
 			return
 		}
-		if state, err := observed.RecordWorkerSignal(ctx, task, "done", "Immediate fix complete", nil, "task_done"); err != nil || state != store.StateDone {
+		turnToken, err := observed.TaskTurnToken(ctx, task.ID)
+		if err != nil {
+			t.Errorf("current Worker turn token: %v", err)
+			return
+		}
+		if state, err := observed.RecordWorkerSignal(ctx, task, "done", "Immediate fix complete", map[string]any{"turn_token": turnToken}, "task_done"); err != nil || state != store.StateDone {
 			t.Errorf("immediate Signal = %s, %v", state, err)
 		}
 	}

@@ -96,7 +96,7 @@ func TestRealPiInterruptStopsBusyTurnE2E(t *testing.T) {
 	}
 
 	queued := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Wait for the current turn", "--queue")
-	if !strings.Contains(queued, "waiting_for_idle (--queue)") {
+	if !strings.Contains(queued, "state: queued") || !strings.Contains(queued, "reason: waiting_for_idle") {
 		t.Fatalf("real Pi queue head was not held: %s", queued)
 	}
 	redirect := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "--interrupt", "Stop and redirect this turn")

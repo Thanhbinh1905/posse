@@ -218,7 +218,7 @@ func watchRows(processes []watchProcess, includeRestart bool) []axi.Object {
 			if process.PollOnly {
 				restart = "The Project watch re-execs this process after installation, or the next posse command repairs it"
 			} else if process.StopHook {
-				restart = "The next Claude Stop hook owns the next bounded Notice wait"
+				restart = "The legacy Claude Stop hook owns the next bounded Notice wait"
 			} else if process.QuietRoutine {
 				restart = "The Lead extension restarts this process automatically"
 			}
