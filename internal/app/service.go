@@ -51,7 +51,7 @@ func New(home string, adapter herdr.Adapter) *Service {
 func (s *Service) CLI() *axi.App {
 	root := s.commands()
 	s.guardWorkers(root, nil)
-	addRemovedVocabularyCommands(root)
+	addRemovedVocabularyCommands(root, s.legacyPollerAdapter)
 	s.structureStoreErrors(root)
 	return &axi.App{Name: "posse", Root: root}
 }

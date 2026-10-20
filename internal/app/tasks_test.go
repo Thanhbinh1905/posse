@@ -134,7 +134,7 @@ func TestStartRejectsInvalidOptionalDisplayName(t *testing.T) {
 			output := &bytes.Buffer{}
 			cli := testService(home, nil).CLI()
 			cli.Out, cli.ErrOut = output, output
-			if code := cli.Run([]string{"start", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "safe lowercase kebab-case") {
+			if code := cli.Run([]string{"start", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "lowercase kebab-case") {
 				t.Fatalf("invalid Worker name exit=%d output=%s", code, output.String())
 			}
 		})
@@ -144,6 +144,16 @@ func TestStartRejectsInvalidOptionalDisplayName(t *testing.T) {
 	}
 	if got := defaultTaskName("東京"); got != "task" {
 		t.Fatalf("unsafe derived Task name = %q, want safe fallback", got)
+	}
+	output := &bytes.Buffer{}
+	cli := testService(home, nil).CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", brief, "--name", "research-generalizing-opus"}); code != 1 || !strings.Contains(output.String(), "--name research-generaliz-retry") {
+		t.Fatalf("invalid name did not suggest an accepted retry: code=%d output=%s", code, output)
+	}
+	retry := workerNameRetrySuggestion("research-generalizing-opus")
+	if retry != "research-generaliz-retry" || validateWorkerName(retry) != nil {
+		t.Fatalf("suggested retry is not an accepted Task Name: %q", retry)
 	}
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func SetFile(path, key, text string, projectFile bool) (any, error) {
 	if err != nil {
 		return nil, &InvalidError{File: path, Key: key, Reason: err.Error()}
 	}
-	_, original, err := ReadFile(path)
+	original, err := readFileForEdit(path, key)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +57,7 @@ func UnsetFile(path, key string, projectFile bool) error {
 	if _, ok := Lookup(key); !ok {
 		return &InvalidError{File: path, Key: key, Reason: unknownKeyReason(key)}
 	}
-	_, original, err := ReadFile(path)
+	original, err := readFileForEdit(path, key)
 	if err != nil {
 		return err
 	}
@@ -68,6 +69,26 @@ func UnsetFile(path, key string, projectFile bool) error {
 		return nil
 	}
 	return atomicfile.Write(path, []byte(updated), filePerm(path))
+}
+
+func readFileForEdit(path, key string) ([]byte, error) {
+	_, original, err := ReadFile(path)
+	if err == nil {
+		return original, nil
+	}
+	var invalid *InvalidError
+	if !errors.As(err, &invalid) || invalid.Key != key {
+		return nil, err
+	}
+	original, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return nil, readErr
+	}
+	var decoded map[string]any
+	if _, decodeErr := toml.Decode(string(original), &decoded); decodeErr != nil {
+		return nil, &InvalidError{File: path, Key: tomlErrorKey(decodeErr), Cause: decodeErr}
+	}
+	return original, nil
 }
 
 func parseSetting(key string, spec KeySpec, text string, projectFile bool) (any, string, error) {
@@ -245,6 +266,7 @@ func findAssignment(contents, wantedSection, wantedField string) (assignmentSpan
 }
 
 func parseTableHeader(line string) (string, bool) {
+	line = strings.TrimSpace(stripTOMLComment(line))
 	if !strings.HasPrefix(line, "[") {
 		return "", false
 	}
@@ -259,6 +281,33 @@ func parseTableHeader(line string) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+func stripTOMLComment(line string) string {
+	quote := byte(0)
+	escaped := false
+	for index := 0; index < len(line); index++ {
+		ch := line[index]
+		if quote != 0 {
+			if quote == '"' && ch == '\\' && !escaped {
+				escaped = true
+				continue
+			}
+			if ch == quote && !escaped {
+				quote = 0
+			}
+			escaped = false
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			continue
+		}
+		if ch == '#' {
+			return line[:index]
+		}
+	}
+	return line
 }
 
 func tomlExpressionEnd(contents string, start int) int {

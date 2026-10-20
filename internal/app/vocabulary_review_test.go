@@ -29,7 +29,7 @@ func TestGateFixInstructionPreservesHistoricalBriefIntent(t *testing.T) {
 func TestLegacyWatchRejectsNonAdapterInvocations(t *testing.T) {
 	service := testService(t.TempDir(), herdr.NewFake())
 	for _, args := range [][]string{
-		{}, {"--json"}, {"--json", "--ack", "all"}, {"--json", "--poll-only"}, {"--json", "--repair"},
+		{}, {"--json"}, {"--json", "--ack", "all"}, {"--poll-only"}, {"--json", "--poll-only"}, {"--json", "--repair"},
 		{"--handoff", "--destination", "pi:old"}, {"--json", "--handoff", "--destination", "claude:old"},
 		{"--json", "--handoff", "--destination", "pi:old", "--repair"},
 		{"--json", "--receipt", "old", "--receipt-outcome", "accepted", "--ack", "all"},

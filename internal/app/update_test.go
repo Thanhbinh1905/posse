@@ -43,6 +43,121 @@ func fakeRelease(t *testing.T, checksum string) (*httptest.Server, string) {
 	return server, url
 }
 
+func TestUpdate014PreflightsLegacyReviewAndAllowsConfigRepair(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", ".."))
+	target := filepath.Join(t.TempDir(), "posse-current")
+	build := exec.Command("go", "build", "-o", target, "./cmd/posse")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build current release binary: %v\n%s", err, output)
+	}
+	binary, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archiveBody bytes.Buffer
+	gz := gzip.NewWriter(&archiveBody)
+	tarball := tar.NewWriter(gz)
+	archiveName := fmt.Sprintf("posse_0.15.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	if err := tarball.WriteHeader(&tar.Header{Name: "posse", Mode: 0o755, Size: int64(len(binary)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarball.Write(binary); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarball.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive := archiveBody.Bytes()
+	digest := sha256.Sum256(archive)
+	var url string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "v0.15.0", "body": "### Migration note\nChoose a supported review policy before updating.", "assets": []any{map[string]string{"name": archiveName, "browser_download_url": url + "/archive"}, map[string]string{"name": "checksums.txt", "browser_download_url": url + "/checksums"}}})
+		case "/archive":
+			_, _ = w.Write(archive)
+		case "/checksums":
+			fmt.Fprintf(w, "%x  %s\n", digest, archiveName)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	url = server.URL
+
+	for _, action := range []string{"set", "unset"} {
+		t.Run(action, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "posse")
+			binaryPath := filepath.Join(root, "bin", "posse")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			oldBinary := []byte("installed 0.14.0 binary")
+			if err := os.WriteFile(binaryPath, oldBinary, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binaryPath, Version: "0.14.0"}); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(home, "config.toml")
+			original := `# 0.14 User config
+[defaults]
+review = "on_risk"
+landing_mode = "pr"
+`
+			if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			service := testService(home, nil)
+			service.Version = "0.14.0"
+			service.updateURL = url
+			code, output := runCLI(t, service, "update")
+			if code != 1 || !strings.Contains(output, "config_invalid") || !strings.Contains(output, "legacy review policy") || !strings.Contains(output, "on_risk") || !strings.Contains(output, "posse config set") {
+				t.Fatalf("update did not refuse the legacy config before installing: code=%d output=%s", code, output)
+			}
+			if data, err := os.ReadFile(binaryPath); err != nil || !bytes.Equal(data, oldBinary) {
+				t.Fatalf("preflight changed installed binary: %v %q", err, data)
+			}
+			if data, err := os.ReadFile(configPath); err != nil || string(data) != original {
+				t.Fatalf("preflight changed the legacy config: %q %v", data, err)
+			}
+			if _, err := os.Stat(configPath + ".v014"); !os.IsNotExist(err) {
+				t.Fatalf("preflight wrote a rollback config backup: %v", err)
+			}
+			args := []string{"config", action, "defaults.review"}
+			if action == "set" {
+				args = append(args, "none")
+			}
+			if code, output := runCLI(t, service, args...); code != 0 {
+				t.Fatalf("config %s could not repair the rejected key: %d %s", action, code, output)
+			}
+			if code, output := runCLI(t, service, "config", "show"); code != 0 {
+				t.Fatalf("repaired config did not load: %d %s", code, output)
+			}
+		})
+	}
+}
+
+func TestUpdateAlreadyCurrentPointsToSetup(t *testing.T) {
+	server, url := fakeRelease(t, "bad")
+	defer server.Close()
+	service := testService(t.TempDir(), nil)
+	service.Version = "0.2.0"
+	service.updateURL = url
+	code, output := runCLI(t, service, "update")
+	if code != 1 || !strings.Contains(output, "already_current") || !strings.Contains(output, "posse setup") {
+		t.Fatalf("already-current update omitted setup recovery: code=%d output=%s", code, output)
+	}
+}
+
 func TestUpdateCheckReportsRunningWatches(t *testing.T) {
 	home := t.TempDir()
 	db, err := store.Open(home)

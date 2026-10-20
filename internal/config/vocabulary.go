@@ -89,15 +89,11 @@ func migrateVocabularyFile(path string) error {
 	if !changed {
 		return atomicfile.Write(path+".vocabulary", []byte(vocabularyMarker), 0o600)
 	}
-	updated := append([]byte(vocabularyMarker), data...)
-	if changed {
-		var encoded bytes.Buffer
-		encoded.WriteString(vocabularyMarker)
-		if err := toml.NewEncoder(&encoded).Encode(values); err != nil {
-			return err
-		}
-		updated = encoded.Bytes()
+	updatedText, err := rewriteVocabularyText(string(data), values)
+	if err != nil {
+		return &InvalidError{File: path, Key: "config", Cause: err}
 	}
+	updated := append([]byte(vocabularyMarker), []byte(updatedText)...)
 	if err := atomicfile.Write(path+".v014", data, filePerm(path)); err != nil {
 		return err
 	}

@@ -174,13 +174,13 @@ func splitProcessArgs(raw string) []string {
 }
 
 func watchFromArgs(pid int, args []string, environment map[string]string, home string) (watchProcess, bool) {
-	// The former name is recognized only for ownership discovery and shutdown
-	// of pre-upgrade processes, never as executable CLI input.
+	// The former name is recognized for ownership discovery and the supervised
+	// poller's narrow re-entry adapter, never as general CLI input.
 	if len(args) < 2 || (args[1] != "watch" && args[1] != "lookout" && args[1] != "_claude-stop") || !sameWatchHome(processHome(environment), home) {
 		return watchProcess{}, false
 	}
 	// Pre-upgrade supervised processes retain their private binding names.
-	// Read them only for custody discovery, never to admit legacy CLI input.
+	// Their matching database identity is required before re-entry is allowed.
 	binding := func(current, historical string) (string, bool) {
 		value := environment[current]
 		if args[1] != "lookout" || environment[historical] == "" {

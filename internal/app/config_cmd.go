@@ -111,9 +111,6 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 		}
 	}
 	path := config.ConfigPath(home, projectName)
-	if _, _, err := config.ReadFile(path); err != nil {
-		return configError(err)
-	}
 	original, originalMode, originalExists, err := configSnapshot(path)
 	if err != nil {
 		return err
@@ -172,9 +169,6 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 		return err
 	}
 	path := config.ConfigPath(home, projectName)
-	if _, _, err := config.ReadFile(path); err != nil {
-		return configError(err)
-	}
 	original, originalMode, originalExists, err := configSnapshot(path)
 	if err != nil {
 		return err

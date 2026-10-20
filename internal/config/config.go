@@ -193,6 +193,55 @@ func DefaultHome() (string, error) {
 }
 
 func Load(home, projectName string) (Config, error) {
+	return loadConfig(home, projectName, true)
+}
+
+// ValidateAll checks every stored User and Project config without writing
+// vocabulary migrations or markers.
+func ValidateAll(home string) error {
+	if home == "" {
+		var err error
+		home, err = DefaultHome()
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := loadConfig(home, "", false); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(filepath.Join(home, "projects"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		projectDir := filepath.Join(home, "projects", entry.Name())
+		info, err := os.Stat(projectDir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			continue
+		}
+		path := filepath.Join(projectDir, "config.toml")
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if _, err := loadConfig(home, entry.Name(), false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	if home == "" {
 		var err error
 		home, err = DefaultHome()
@@ -201,7 +250,7 @@ func Load(home, projectName string) (Config, error) {
 		}
 	}
 	globalPath := filepath.Join(home, "config.toml")
-	global, err := readMap(globalPath)
+	global, err := readConfigMap(globalPath, migrate)
 	if err != nil {
 		return Config{}, err
 	}
@@ -217,7 +266,7 @@ func Load(home, projectName string) (Config, error) {
 	var project map[string]any
 	if projectName != "" {
 		projectPath = filepath.Join(home, "projects", projectName, "config.toml")
-		project, err = readMap(projectPath)
+		project, err = readConfigMap(projectPath, migrate)
 		if err != nil {
 			return Config{}, err
 		}
@@ -277,9 +326,11 @@ func hasLeadLanguage(values map[string]any) bool {
 	return found
 }
 
-func readMap(path string) (map[string]any, error) {
-	if err := migrateVocabularyFile(path); err != nil {
-		return nil, err
+func readConfigMap(path string, migrate bool) (map[string]any, error) {
+	if migrate {
+		if err := migrateVocabularyFile(path); err != nil {
+			return nil, err
+		}
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -294,6 +345,17 @@ func readMap(path string) (map[string]any, error) {
 	}
 	if decoded == nil {
 		decoded = map[string]any{}
+	}
+	if !migrate && !bytes.HasPrefix(data, []byte(vocabularyMarker)) {
+		marker, markerErr := os.ReadFile(path + ".vocabulary")
+		if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
+			return nil, markerErr
+		}
+		if string(marker) != vocabularyMarker {
+			if _, err := migrateVocabularyMap(decoded, ""); err != nil {
+				return nil, &InvalidError{File: path, Key: "config", Cause: err}
+			}
+		}
 	}
 	return decoded, nil
 }

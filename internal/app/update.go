@@ -22,6 +22,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -180,7 +181,7 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "watches", Value: watchRows(watches, false)}, {Key: "help", Value: help}})
 	}
 	if tag == "" && s.currentVersion() != "dev" && !newerVersion(s.currentVersion(), release.Tag) {
-		return axi.Failure("already_current", "no newer release is available", false, "Use `posse update --version vX.Y.Z` to select a release")
+		return axi.Failure("already_current", "no newer release is available", false, "Run `posse setup` to finish or repair integration setup", "Use `posse update --version vX.Y.Z` to select a release")
 	}
 	var installed updateInstallResult
 	var stopped []watchProcess
@@ -368,12 +369,21 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 		return err
 	}
 	// The downloaded binary knows which of its migrations require idle Tasks.
-	preflight := exec.CommandContext(ctx, temp.Name(), "_update-preflight")
+	preflight := exec.CommandContext(ctx, temp.Name(), "_update-preflight", "--json")
 	preflight.Env = append(os.Environ(), "POSSE_HOME="+home)
 	if force {
 		preflight.Env = append(preflight.Env, store.ForceMigrationEnv+"=1")
 	}
 	if output, err := preflight.CombinedOutput(); err != nil {
+		var failure struct {
+			Code      string   `json:"code"`
+			Message   string   `json:"message"`
+			Retryable bool     `json:"retryable"`
+			Help      []string `json:"help"`
+		}
+		if json.Unmarshal(output, &failure) == nil && failure.Code != "" {
+			return axi.Failure(failure.Code, failure.Message, failure.Retryable, failure.Help...)
+		}
 		return axi.Failure("migration_refused", strings.TrimSpace(string(output)), false, "Finish live Tasks or retry with `posse update --force`")
 	}
 	backup := ""
@@ -496,6 +506,9 @@ func (s *Service) updatePreflight(ctx *axi.Context, args []string) error {
 	}
 	if s.workerCaller(ctx.Context, home) {
 		return axi.Failure("worker_forbidden", "a Worker cannot update its home", false)
+	}
+	if err := config.ValidateAll(home); err != nil {
+		return configError(err)
 	}
 	db, err := store.OpenReadOnly(home)
 	if errors.Is(err, os.ErrNotExist) {
