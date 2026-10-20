@@ -194,7 +194,7 @@ func (a *promptAcceptedThenRejectedAdapter) Call(ctx context.Context, method str
 }
 
 func TestUnsendCannotWithdrawPromptAppliedBeforeHerdrError(t *testing.T) {
-	fixture := newPRLifecycleFixture(t)
+	fixture := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer fixture.db.Close()
 	ctx := context.Background()
 	const leadPane, workerPane, workspaceID = "w2:lead", "w2:p1", "w2"
@@ -647,7 +647,7 @@ func TestWorkspacePRReadinessDoesNotOutliveDoneState(t *testing.T) {
 }
 
 func TestDoneSignalRefusesHeadWithFailedRequiredChecks(t *testing.T) {
-	fixture := newPRLifecycleFixture(t)
+	fixture := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer fixture.db.Close()
 
 	ctx := context.Background()
