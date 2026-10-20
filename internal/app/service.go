@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -65,6 +66,7 @@ func (s *Service) structureStoreErrors(command *axi.Command) {
 		handler := command.Handler
 		name := command.Name
 		command.Handler = func(ctx *axi.Context, args []string) error {
+			ctx.Context = withObservationWarningWriter(ctx.Context, ctx.ErrOut)
 			err := normalizeCommandError(handler(ctx, args))
 			if err == nil {
 				s.superviseWatchRuntimes(ctx, name, args)
@@ -524,6 +526,19 @@ func (s *Service) prepareProjectWatchObservation(ctx context.Context, db *store.
 	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{deliverMessages: true, watchObservation: true})
 }
 
+type observationWarningWriterKey struct{}
+
+func withObservationWarningWriter(ctx context.Context, writer io.Writer) context.Context {
+	return context.WithValue(ctx, observationWarningWriterKey{}, writer)
+}
+
+func warnDeferredProjectObservation(ctx context.Context) {
+	writer, ok := ctx.Value(observationWarningWriterKey{}).(io.Writer)
+	if ok && writer != nil {
+		fmt.Fprintln(writer, "Project reconciliation was deferred due to database contention; the displayed state may be stale.")
+	}
+}
+
 func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, project store.Project, options projectPreparationOptions) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
@@ -569,10 +584,13 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 			}
 			if runErr != nil {
 				// A held Project keeps its recorded panes for `posse up`. Pure
-				// contention defers observations; Watch also records it so the
-				// next poll makes the retry visible in its diagnostics.
-				if store.IsOnlyBusy(runErr) && options.watchObservation {
-					return cfg, runErr
+				// contention defers observations; Watch records it for maintenance
+				// diagnostics, while foreground commands warn about stale output.
+				if store.IsOnlyBusy(runErr) {
+					if options.watchObservation {
+						return cfg, runErr
+					}
+					warnDeferredProjectObservation(ctx)
 				}
 				if !store.IsOnlyBusy(runErr) && !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) && !errors.Is(runErr, errRecoveryDeferred) {
 					return cfg, herdrError(runErr)

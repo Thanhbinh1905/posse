@@ -130,6 +130,74 @@ func lineCount(path string) int {
 	return strings.Count(string(contents), "started\n")
 }
 
+func TestHiddenWatchUsesNamedHerdrSession(t *testing.T) {
+	f := newPRLifecycleFixtureWithLead(t, true)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("hidden Project watch did not start: %v", watchPIDs(f.root))
+	}
+	stopLiveWatchRuntime(t, f.root)
+	socket := herdr.SocketPath(f.env)
+	f.env = setEnv(f.env, "HERDR_SESSION", "review-session")
+	f.env = setEnv(f.env, "HERDR_SOCKET_PATH", socket)
+	f.env = setEnv(f.env, "HERDR_BIN_PATH", "herdr")
+	f.env = setEnv(f.env, "HERDR_CONFIG_PATH", filepath.Join(f.root, "xdg", "herdr", "config.toml"))
+	f.env = setEnv(f.env, "GIT_SSH_COMMAND", "ssh -F /dev/null")
+	f.env = setEnv(f.env, "POSSE_TEST_HERDR_SOCKET_PATH", "")
+	f.leadEnv = setEnv(f.leadEnv, "HERDR_SESSION", "review-session")
+	f.leadEnv = setEnv(f.leadEnv, "HERDR_SOCKET_PATH", socket)
+	f.leadEnv = setEnv(f.leadEnv, "HERDR_BIN_PATH", "herdr")
+	f.leadEnv = setEnv(f.leadEnv, "HERDR_CONFIG_PATH", filepath.Join(f.root, "xdg", "herdr", "config.toml"))
+	f.leadEnv = setEnv(f.leadEnv, "GIT_SSH_COMMAND", "ssh -F /dev/null")
+	f.leadEnv = setEnv(f.leadEnv, "POSSE_TEST_HERDR_SOCKET_PATH", "")
+	command := exec.Command(f.binary, "doctor", "--json")
+	command.Dir, command.Env = f.repo, f.env
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("start hidden Watch in named Herdr session: %v\n%s", err, output)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("hidden Project watch did not start in named session: %v", watchPIDs(f.root))
+	}
+	state, err := f.db.WatchRuntime(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	environ, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(state.PID), "environ"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{
+		"HERDR_SESSION=review-session", "HERDR_SOCKET_PATH=" + socket, "HERDR_BIN_PATH=herdr",
+		"HERDR_CONFIG_PATH=" + filepath.Join(f.root, "xdg", "herdr", "config.toml"), "GIT_SSH_COMMAND=ssh -F /dev/null",
+	} {
+		if !strings.Contains(string(environ), value) {
+			t.Fatalf("hidden Watch did not preserve %s", strings.SplitN(value, "=", 2)[0])
+		}
+	}
+	if strings.Contains(string(environ), "POSSE_TEST_HERDR_SOCKET_PATH=") && !strings.Contains(string(environ), "POSSE_TEST_HERDR_SOCKET_PATH=\x00") {
+		t.Fatalf("hidden Watch inherited a non-empty test socket override: %q", environ)
+	}
+
+	client := herdr.NewWithEnv("herdr", f.env)
+	if _, err := client.Run(context.Background(), "pane", "report-agent", f.project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatalf("mark named-session Lead idle: %v", err)
+	}
+	other, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, "fixture:named-session-other")
+	if err != nil {
+		t.Fatalf("create unfocused named-session pane: %v", err)
+	}
+	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": other.RootPane.PaneID}); err != nil {
+		t.Fatalf("unfocus named-session Lead: %v", err)
+	}
+	noticeID, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "Named-session Worker finished"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return noticeDeliveredAt(t, f.db, f.project.ID, noticeID) != 0 }) {
+		t.Fatalf("hidden Watch could not deliver through named Herdr session; watch log: %s", readTestFile(t, filepath.Join(f.home, "projects", f.project.Name, "watch.log")))
+	}
+}
+
 func TestHiddenWatchRuntimeDeliversNoticesWhenLeadHasNoWait(t *testing.T) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
@@ -314,23 +382,25 @@ func TestWatchRuntimeReexecsAfterBinaryReplacement(t *testing.T) {
 func TestWatchHandoffRepairsDeadPoller(t *testing.T) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
-	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatalf("initial Project watch missing: %v", watchPIDs(f.root))
-	}
-	oldPID := watchPIDs(f.root)[0]
-	if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
-		t.Fatalf("killed watch remains: %v", watchPIDs(f.root))
-	}
+	for _, destination := range []string{"opencode:repair", "pi:repair"} {
+		if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+			t.Fatalf("initial Project watch missing before %s handoff: %v", destination, watchPIDs(f.root))
+		}
+		oldPID := watchPIDs(f.root)[0]
+		if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+			t.Fatalf("killed watch remains before %s handoff: %v", destination, watchPIDs(f.root))
+		}
 
-	runPosse(t, f.binary, f.repo, f.leadEnv, "watch", "--json", "--handoff", "--destination", "pi:repair", "--timeout", "1")
-	if !waitForCondition(10*time.Second, func() bool {
-		pids := watchPIDs(f.root)
-		return len(pids) == 1 && pids[0] != oldPID
-	}) {
-		t.Fatalf("a Pi extension handoff did not repair the hidden Watch: %v", watchPIDs(f.root))
+		runPosse(t, f.binary, f.repo, f.leadEnv, "watch", "--json", "--handoff", "--destination", destination, "--timeout", "1")
+		if !waitForCondition(10*time.Second, func() bool {
+			pids := watchPIDs(f.root)
+			return len(pids) == 1 && pids[0] != oldPID
+		}) {
+			t.Fatalf("%s handoff did not repair the hidden Watch: %v", destination, watchPIDs(f.root))
+		}
 	}
 }
 
@@ -376,6 +446,147 @@ func TestWatchPollerUsesItsSpawnedBinaryInsteadOfSetupManifest(t *testing.T) {
 	if strings.TrimSuffix(path, " (deleted)") != f.binary {
 		t.Fatalf("watch executable = %q, want spawned executable %q", path, f.binary)
 	}
+}
+
+func TestIngestRetriesWatchRepairWithinBudgetAfterLockContention(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
+	}
+	pid := watchPIDs(f.root)[0]
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatalf("killed Watch remains: %v", watchPIDs(f.root))
+	}
+	lock, err := os.OpenFile(filepath.Join(f.home, "projects", f.project.Name, "watch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	}()
+	event, err := json.Marshal(map[string]any{
+		"event": "pane.agent_status_changed",
+		"data":  map[string]string{"pane_id": f.project.LeadPaneID, "workspace_id": f.project.HerdrWorkspaceID, "agent_status": "working"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := setEnv(f.env, "HERDR_PANE_ID", f.project.LeadPaneID)
+	env = setEnv(env, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
+	env = setEnv(env, "HERDR_PLUGIN_EVENT_JSON", string(event))
+	command := exec.Command(f.binary, "_ingest")
+	command.Dir, command.Env = f.repo, env
+	output, err := command.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "ingested: true") {
+		t.Fatalf("_ingest failed during bounded Watch repair: %v\n%s", err, output)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Herdr event failed to repair the Watch after transient lock contention: %v", watchPIDs(f.root))
+	}
+}
+
+func TestWatchHeartbeatAdvancesBetweenSerialSlowPRFetches(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
+	}
+	stopLiveWatchRuntime(t, f.root)
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "bin", "git")); !os.IsNotExist(err) {
+		t.Fatalf("fixture unexpectedly has a git wrapper: %v", err)
+	}
+	fetchLog := filepath.Join(f.root, "slow-pr-fetches")
+	releaseFetch := filepath.Join(f.root, "release-slow-pr-fetch")
+	t.Cleanup(func() {
+		_ = os.WriteFile(releaseFetch, nil, 0o600)
+		stopLiveWatchRuntime(t, f.root)
+	})
+	gitWrapper := `#!/bin/sh
+set -eu
+case " $* " in
+  *"refs/remotes/origin/main"*)
+    printf 'started\n' >> "$POSSE_TEST_GIT_FETCH_LOG"
+    while [ ! -e "$POSSE_TEST_RELEASE_GIT_FETCH" ]; do sleep 0.05; done
+    ;;
+esac
+exec "$POSSE_TEST_REAL_GIT" "$@"
+`
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "git"), []byte(gitWrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.env = setEnv(f.env, "POSSE_TEST_REAL_GIT", realGit)
+	f.env = setEnv(f.env, "POSSE_TEST_GIT_FETCH_LOG", fetchLog)
+	f.env = setEnv(f.env, "POSSE_TEST_RELEASE_GIT_FETCH", releaseFetch)
+	f.env = setEnv(f.env, "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "20s")
+	f.leadEnv = setEnv(f.leadEnv, "POSSE_TEST_REAL_GIT", realGit)
+	f.leadEnv = setEnv(f.leadEnv, "POSSE_TEST_GIT_FETCH_LOG", fetchLog)
+	f.leadEnv = setEnv(f.leadEnv, "POSSE_TEST_RELEASE_GIT_FETCH", releaseFetch)
+	f.leadEnv = setEnv(f.leadEnv, "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "20s")
+
+	ctx := context.Background()
+	for sequence := 1; sequence <= 3; sequence++ {
+		_, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
+			Seq: sequence, Type: "change", Title: fmt.Sprintf("Slow PR %d", sequence),
+			MergeMode: "pr", Branch: "main", WorktreePath: f.repo,
+			PRURL: fmt.Sprintf("https://github.com/acme/shop/pull/%d", 16+sequence),
+		})
+		if err != nil {
+			t.Fatalf("create slow PR Task %d: %v", sequence, err)
+		}
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE project_watch_state SET checkout_checked_at=?,pr_polled_at=0 WHERE project_id=?`, time.Now().Add(time.Hour).UnixMilli(), f.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(f.binary, "doctor", "--json")
+	command.Dir, command.Env = f.repo, f.env
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("start Project Watch with slow PR fixtures: %v\n%s", err, output)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not restart: %v", watchPIDs(f.root))
+	}
+	pid := watchPIDs(f.root)[0]
+	if !waitForCondition(30*time.Second, func() bool { return lineCount(fetchLog) >= 2 }) {
+		t.Fatalf("PR poll did not enter two serial slow target fetches: %s", readTestFile(t, fetchLog))
+	}
+	time.Sleep(12 * time.Second)
+	command = exec.Command(f.binary, "doctor", "--json")
+	command.Dir, command.Env = f.repo, f.env
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("doctor while the PR poll was making progress: %v\n%s", err, output)
+	}
+	if pids := watchPIDs(f.root); len(pids) != 1 || pids[0] != pid {
+		t.Fatalf("supervision replaced a progressing Watch during serial PR fetches: %v\n%s", pids, output)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "Watch runtime") {
+			t.Fatalf("slow but progressing PR polling raised a false Watch failure: %#v", notice)
+		}
+	}
+	if err := os.WriteFile(releaseFetch, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stopLiveWatchRuntime(t, f.root)
 }
 
 func TestWatchHeartbeatStopsWhenProjectMaintenanceStalls(t *testing.T) {

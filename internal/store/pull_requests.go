@@ -40,6 +40,9 @@ type PRTaskWatchFailure struct {
 // PRPollClaimLease bounds how long an abandoned PR poll claim can suppress a later poll.
 const PRPollClaimLease = 5 * time.Minute
 
+// PRTaskWatchReminderInterval bounds how often an acknowledged PR failure can be reminded.
+const PRTaskWatchReminderInterval = 24 * time.Hour
+
 type ProjectWatchState struct {
 	PRPolledAt            int64
 	PRConsecutiveFailures int
@@ -196,6 +199,7 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 		return 0, err
 	}
 	noticeChanged := false
+	taskSnapshotChanged := previousPRURL != "" && previousPRURL != prURL
 	if previousPRURL != "" && previousPRURL != prURL {
 		result, err := tx.ExecContext(ctx, `UPDATE notices SET acked_at=COALESCE(acked_at,?) WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=? AND acked_at IS NULL`, at, projectID, taskID, previousPRURL, repo)
 		if err != nil {
@@ -217,40 +221,78 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 	if err := tx.QueryRowContext(ctx, `SELECT consecutive_failures FROM pr_task_watch_failures WHERE project_id=? AND task_id=? AND repo=?`, projectID, taskID, repo).Scan(&failures); err != nil {
 		return 0, err
 	}
+	if failures == 1 {
+		taskSnapshotChanged = true
+	}
 	if failures >= 3 {
 		fields := map[string]any{"pr_url": prURL, "consecutive_failures": failures, "error": failure}
 		if repo != "" {
 			fields["repo"] = repo
 		}
-		data, err := json.Marshal(fields)
-		if err != nil {
-			return 0, err
-		}
 		var noticeID int64
 		var existingSummary, existingData string
-		err = tx.QueryRowContext(ctx, `SELECT id,summary,data_json FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=? AND acked_at IS NULL AND id>COALESCE((SELECT MAX(id) FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_recovered' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=?),0) ORDER BY id DESC LIMIT 1`, projectID, taskID, prURL, repo, projectID, taskID, prURL, repo).Scan(&noticeID, &existingSummary, &existingData)
+		var ackedAt sql.NullInt64
+		err = tx.QueryRowContext(ctx, `SELECT id,summary,data_json,acked_at FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_failing' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=? AND id>COALESCE((SELECT MAX(id) FROM notices WHERE project_id=? AND task_id=? AND kind='pr_watch_recovered' AND json_extract(data_json,'$.pr_url')=? AND COALESCE(json_extract(data_json,'$.repo'),'')=?),0) ORDER BY id DESC LIMIT 1`, projectID, taskID, prURL, repo, projectID, taskID, prURL, repo).Scan(&noticeID, &existingSummary, &existingData, &ackedAt)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return 0, err
 		}
 		if errors.Is(err, sql.ErrNoRows) {
-			if failures%3 == 0 {
+			if failures == 3 {
+				data, err := json.Marshal(fields)
+				if err != nil {
+					return 0, err
+				}
 				if err := insertNoticeTx(ctx, tx, Notice{ProjectID: projectID, TaskID: taskID, Kind: "pr_watch_failing", Summary: summary, DataJSON: string(data), CreatedAt: at}); err != nil {
 					return 0, err
 				}
 				noticeChanged = true
+				taskSnapshotChanged = true
 			}
-		} else if existingSummary != summary || existingData != string(data) {
-			if _, err := tx.ExecContext(ctx, `UPDATE notices SET summary=?,data_json=? WHERE id=?`, summary, string(data), noticeID); err != nil {
+		} else if ackedAt.Valid {
+			var previous map[string]any
+			_ = json.Unmarshal([]byte(existingData), &previous)
+			reminderCount, _ := previous["reminder_count"].(float64)
+			if at-ackedAt.Int64 >= int64(prTaskWatchReminderDelay(int(reminderCount))/time.Millisecond) {
+				fields["reminder"] = true
+				fields["reminder_count"] = int(reminderCount) + 1
+				data, err := json.Marshal(fields)
+				if err != nil {
+					return 0, err
+				}
+				reminder := Notice{ProjectID: projectID, TaskID: taskID, Kind: "pr_watch_failing", Summary: "Persistent pull request polling failure reminder: " + failure, DataJSON: string(data), CreatedAt: at}
+				if err := insertNoticeTx(ctx, tx, reminder); err != nil {
+					return 0, err
+				}
+				noticeChanged = true
+				taskSnapshotChanged = true
+			}
+		} else {
+			var previous map[string]any
+			_ = json.Unmarshal([]byte(existingData), &previous)
+			if reminder, _ := previous["reminder"].(bool); reminder {
+				fields["reminder"] = true
+				fields["reminder_count"] = previous["reminder_count"]
+				summary = "Persistent pull request polling failure reminder: " + failure
+			}
+			data, err := json.Marshal(fields)
+			if err != nil {
 				return 0, err
 			}
-			noticeChanged = true
+			if existingSummary != summary || existingData != string(data) {
+				if _, err := tx.ExecContext(ctx, `UPDATE notices SET summary=?,data_json=? WHERE id=?`, summary, string(data), noticeID); err != nil {
+					return 0, err
+				}
+				noticeChanged = true
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	if err := db.persistTask(ctx, taskID, false); err != nil {
-		return 0, err
+	if taskSnapshotChanged {
+		if err := db.persistTask(ctx, taskID, false); err != nil {
+			return 0, err
+		}
 	}
 	if noticeChanged {
 		if err := db.PersistProject(ctx, projectID); err != nil {
@@ -258,6 +300,17 @@ func (db *DB) RecordPRTaskWatchFailure(ctx context.Context, projectID, taskID in
 		}
 	}
 	return failures, nil
+}
+
+func prTaskWatchReminderDelay(previousReminders int) time.Duration {
+	switch previousReminders {
+	case 0:
+		return PRTaskWatchReminderInterval
+	case 1:
+		return 2 * PRTaskWatchReminderInterval
+	default:
+		return 7 * 24 * time.Hour
+	}
 }
 
 func (db *DB) PRTaskWatchFailuresForTask(ctx context.Context, taskID int64) ([]PRTaskWatchFailure, error) {

@@ -317,7 +317,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		return s.repairWatch(ctx, db, home, project)
 	}
 	// Pi extension ticks also repair the independent Project poller; other adapter handoffs and receipt operations only deliver Notices.
-	if !parsed.Bool("poll-only") && (!parsed.Bool("handoff") || strings.HasPrefix(parsed.Flags["destination"], "pi:")) && parsed.Flags["receipt"] == "" {
+	if !parsed.Bool("poll-only") && parsed.Flags["receipt"] == "" {
 		if err := s.ensureWatchRuntime(ctx.Context, db, home, project); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Watch supervision for %s failed: %v\n", project.Name, err)
 		}

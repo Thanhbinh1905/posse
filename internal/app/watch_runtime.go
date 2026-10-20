@@ -31,6 +31,8 @@ var watchRuntimeHeartbeatInterval = 5 * time.Second
 var watchRuntimeStaleAfter = 30 * time.Second
 var watchRuntimeLogMaxBytes int64 = 1 << 20
 
+const watchRuntimeRepairBudget = 2 * time.Second
+
 func watchRuntimeLogPath(home string, project store.Project) string {
 	return filepath.Join(home, "projects", project.Name, "watch.log")
 }
@@ -529,7 +531,7 @@ func watchRuntimeEnvironment(parent []string, home string, project store.Project
 	values := make(map[string]string, len(parent)+5)
 	for _, entry := range parent {
 		key, value, found := strings.Cut(entry, "=")
-		if !found || key == "" || strings.HasPrefix(key, "GIT_") || strings.HasPrefix(key, "HERDR_") || strings.HasPrefix(key, "POSSE_") && !strings.HasPrefix(key, "POSSE_TEST_") {
+		if !found || key == "" || watchRuntimeDropsEnvironmentVariable(key) {
 			continue
 		}
 		values[key] = value
@@ -546,9 +548,21 @@ func watchRuntimeEnvironment(parent []string, home string, project store.Project
 	return env
 }
 
+func watchRuntimeDropsEnvironmentVariable(key string) bool {
+	switch key {
+	case "POSSE_HOME", "POSSE_TASK_ID", "POSSE_TASK_TEMP", "POSSE_WORKER_HOME",
+		watchRuntimeProjectEnv, watchRuntimeTokenEnv, watchRuntimeStartedEnv,
+		"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PLUGIN_EVENT", "HERDR_PLUGIN_EVENT_JSON",
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE":
+		return true
+	default:
+		return strings.HasPrefix(key, "POSSE_INTENT_")
+	}
+}
+
 func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args []string) {
-	// A Notice acknowledgement is delivery work, not a Project maintenance boundary.
-	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" || command == "watch" && (containsArgument(args, "--repair") || containsArgument(args, "--receipt") || containsArgument(args, "--receipt-outcome") || containsArgument(args, "--receipt-token") || containsArgument(args, "--handoff") && !watchHandoffRepairsPoller(args)) {
+	// Notice receipts are delivery work, not a Project maintenance boundary. Handoffs also repair the observer.
+	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" || command == "watch" && (containsArgument(args, "--repair") || containsArgument(args, "--receipt") || containsArgument(args, "--receipt-outcome") || containsArgument(args, "--receipt-token")) {
 		return
 	}
 	binary, err := os.Executable()
@@ -604,18 +618,6 @@ func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args 
 	}
 }
 
-func watchHandoffRepairsPoller(args []string) bool {
-	for index, arg := range args {
-		if arg == "--destination" && index+1 < len(args) {
-			return strings.HasPrefix(args[index+1], "pi:")
-		}
-		if strings.HasPrefix(arg, "--destination=") {
-			return strings.HasPrefix(strings.TrimPrefix(arg, "--destination="), "pi:")
-		}
-	}
-	return false
-}
-
 func containsArgument(args []string, value string) bool {
 	for _, arg := range args {
 		if arg == value || strings.HasPrefix(arg, value+"=") {
@@ -623,6 +625,35 @@ func containsArgument(args []string, value string) bool {
 		}
 	}
 	return false
+}
+
+type watchProgressContextKey struct{}
+
+type watchProgressReporter struct {
+	mu        sync.Mutex
+	last      time.Time
+	heartbeat func()
+}
+
+func (r *watchProgressReporter) Report() {
+	r.mu.Lock()
+	if time.Since(r.last) < watchRuntimeHeartbeatInterval {
+		r.mu.Unlock()
+		return
+	}
+	r.last = time.Now()
+	r.mu.Unlock()
+	r.heartbeat()
+}
+
+func withWatchProgress(ctx context.Context, progress func()) context.Context {
+	return context.WithValue(ctx, watchProgressContextKey{}, progress)
+}
+
+func reportWatchProgress(ctx context.Context) {
+	if progress, ok := ctx.Value(watchProgressContextKey{}).(func()); ok {
+		progress()
+	}
 }
 
 func (s *Service) watchMaintenanceInFlight() bool {
@@ -671,6 +702,17 @@ func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project
 }
 
 func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal, watch *store.WatchRuntime) error {
+	loopCtx := ctx.Context
+	if watch != nil {
+		progress := &watchProgressReporter{heartbeat: func() {
+			heartbeatCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if _, err := db.HeartbeatWatchRuntime(heartbeatCtx, project.ID, watch.PID, watch.Token, currentTime()); err != nil {
+				fmt.Fprintf(ctx.ErrOut, "Watch progress heartbeat failed for %s: %v\n", project.Name, err)
+			}
+		}}
+		loopCtx = withWatchProgress(loopCtx, progress.Report)
+	}
 	defer func() {
 		s.cancelWatchMaintenance()
 		if !s.waitForWatchMaintenance(4 * time.Second) {
@@ -684,7 +726,7 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 	lastFailure := ""
 	for {
 		if watch != nil {
-			ok, err := db.HeartbeatWatchRuntime(ctx.Context, project.ID, watch.PID, watch.Token, currentTime())
+			ok, err := db.HeartbeatWatchRuntime(loopCtx, project.ID, watch.PID, watch.Token, currentTime())
 			if err != nil {
 				fmt.Fprintf(ctx.ErrOut, "Watch heartbeat failed for %s: %v\n", project.Name, err)
 			} else if !ok {
@@ -702,17 +744,17 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			}
 		default:
 		}
-		fresh, err := db.ProjectByID(ctx.Context, project.ID)
+		fresh, err := db.ProjectByID(loopCtx, project.ID)
 		if err != nil {
 			return err
 		}
 		if fresh.IsDown() || fresh.Root != project.Root {
 			return nil
 		}
-		if _, err := s.prepareProjectWatchObservation(ctx.Context, db, fresh); err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) {
+		if _, err := s.prepareProjectWatchObservation(loopCtx, db, fresh); err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) {
 			recordWatchFailure(ctx, db, project.ID, &lastFailure, "reconcile", err)
 		}
-		if err := s.maintainProjectWatch(ctx.Context, db, fresh); err != nil {
+		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
 			recordWatchFailure(ctx, db, project.ID, &lastFailure, "watch", err)
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {

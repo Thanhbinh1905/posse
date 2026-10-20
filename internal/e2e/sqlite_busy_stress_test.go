@@ -91,7 +91,7 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 			}
 			contentionReleased = make(chan struct{})
 			go func() {
-				time.Sleep(3400 * time.Millisecond)
+				time.Sleep(750 * time.Millisecond)
 				_ = writer.Rollback()
 				close(contentionReleased)
 			}()

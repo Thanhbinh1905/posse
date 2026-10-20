@@ -176,15 +176,22 @@ func TestStopWatchesEscalatesToSIGKILL(t *testing.T) {
 func TestWatchRuntimeEnvironmentIsDetachedFromHerdrIdentity(t *testing.T) {
 	project := store.Project{ID: 42, Name: "shop", Root: "/workspace/shop"}
 	env := watchRuntimeEnvironment([]string{
-		"PATH=/usr/bin", "POSSE_HOME=/tmp/old", "POSSE_TASK_ID=t7", "POSSE_TASK_TEMP=/tmp/task", "POSSE_INTENT_CRASH_AT=merge", "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT=60s", "GIT_DIR=/repo/.git", "GIT_WORK_TREE=/repo", "HERDR_PANE_ID=w1:p4", "HERDR_WORKSPACE_ID=w1", "HERDR_TAB_ID=w1:t1", "HERDR_ENV=1", "HERDR_PLUGIN_EVENT=focus", "CUSTOM=value",
+		"PATH=/usr/bin", "POSSE_HOME=/tmp/old", "POSSE_TASK_ID=t7", "POSSE_TASK_TEMP=/tmp/task", "POSSE_INTENT_CRASH_AT=merge", "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT=60s", "GIT_DIR=/repo/.git", "GIT_WORK_TREE=/repo", "GIT_INDEX_FILE=/repo/.git/index", "GIT_SSH_COMMAND=ssh -i /home/user/key", "HERDR_PANE_ID=w1:p4", "HERDR_WORKSPACE_ID=w1", "HERDR_TAB_ID=w1:t1", "HERDR_ENV=1", "HERDR_SOCKET_PATH=/named/session/herdr.sock", "HERDR_SESSION=dev", "HERDR_BIN_PATH=/usr/local/bin/herdr", "HERDR_CONFIG_PATH=/home/user/herdr.toml", "HERDR_PLUGIN_EVENT=focus", "CUSTOM=value",
 	}, "/tmp/posse", project, "random-token", 1234)
 	got := parseProcessEnvironment(strings.Join(env, "\x00"))
 	if got["POSSE_HOME"] != "/tmp/posse" || got[watchRuntimeProjectEnv] != "42" || got[watchRuntimeTokenEnv] != "random-token" || got[watchRuntimeStartedEnv] != "1234" || got["PWD"] != project.Root {
 		t.Fatalf("watch identity environment = %#v", got)
 	}
-	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_ENV", "HERDR_PLUGIN_EVENT", "POSSE_TASK_ID", "POSSE_TASK_TEMP", "POSSE_INTENT_CRASH_AT", "GIT_DIR", "GIT_WORK_TREE"} {
+	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PLUGIN_EVENT", "POSSE_TASK_ID", "POSSE_TASK_TEMP", "POSSE_INTENT_CRASH_AT", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} {
 		if _, found := got[key]; found {
 			t.Errorf("detached watch inherited %s", key)
+		}
+	}
+	for key, want := range map[string]string{
+		"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/named/session/herdr.sock", "HERDR_SESSION": "dev", "HERDR_BIN_PATH": "/usr/local/bin/herdr", "HERDR_CONFIG_PATH": "/home/user/herdr.toml", "GIT_SSH_COMMAND": "ssh -i /home/user/key",
+	} {
+		if got[key] != want {
+			t.Errorf("watch lost environment setting %s: got %q, want %q", key, got[key], want)
 		}
 	}
 	if got["CUSTOM"] != "value" || got["POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT"] != "60s" {

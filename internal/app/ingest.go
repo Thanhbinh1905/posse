@@ -91,7 +91,7 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 		if stateErr != nil {
 			fmt.Fprintf(os.Stderr, "Watch supervision for %s failed: %v\n", project.Name, stateErr)
 		} else if !watchRuntimeProcessHealthy(home, project.ID, watchState) {
-			watchCtx, cancelWatch := context.WithTimeout(ctx, 100*time.Millisecond)
+			watchCtx, cancelWatch := context.WithTimeout(ctx, watchRuntimeRepairBudget)
 			if err := s.ensureWatchRuntime(watchCtx, db, home, project); err != nil {
 				fmt.Fprintf(os.Stderr, "Watch supervision for %s failed: %v\n", project.Name, err)
 			}

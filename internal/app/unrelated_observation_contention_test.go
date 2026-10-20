@@ -152,6 +152,15 @@ func TestShowDefersTaskStateRaceDuringObservation(t *testing.T) {
 	}
 }
 
+func TestForegroundReconcileContentionWarnsThatStateMayBeStale(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	fixture.service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = store.ErrBusy
+	code, output, errOut := fixture.run("list", "--json")
+	if code != 0 || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "reconciliation was deferred due to database contention") || !strings.Contains(errOut, "may be stale") {
+		t.Fatalf("foreground command omitted stale-state warning after reconciliation contention: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+}
+
 func TestListShowsDurableViewDuringObservationContention(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
