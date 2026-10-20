@@ -131,7 +131,7 @@ func installGateValidationPlan(t *testing.T, fixture *prMergeFixture, maxFixRoun
 		Brief:         taskplan.Select("brief", briefPath, briefData),
 		Execution:     taskplan.Execution{Mode: "sandbox", Scope: "repo", Base: "main", Target: "main"},
 		Launch:        taskplan.Launch{ProfileName: "claude", Profile: config.Profile{Kind: "claude"}},
-		Review:        "local",
+		Review:        "quick",
 		Delivery:      fixture.task.MergeMode,
 		Autonomy:      config.Autonomy{Review: "ask", Merge: "ask"},
 		ConfigSources: []string{"test"},

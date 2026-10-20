@@ -18,7 +18,7 @@ import (
 
 func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 	f := reviewIdentityFixture(t)
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "quick")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
 	brief := filepath.Join(f.root, "choice.md")
 	text := "---\ntype: change\ntitle: Scoped choice\ndone_when: checked\nmerge_mode: local\nreview: none\n---\nKeep the scope small.\n"
@@ -50,7 +50,7 @@ func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 
 func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 	f := reviewIdentityFixture(t)
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "quick")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
 	client := herdr.NewWithEnv("herdr", f.env)
 	before, err := client.Snapshot(context.Background())

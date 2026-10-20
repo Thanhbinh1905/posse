@@ -211,7 +211,7 @@ func TestReviewVerdictOnlyPassSatisfiesMergeAndMovementInvalidatesIt(t *testing.
 	}{{"pass", true}, {"changes_requested", false}, {"inconclusive", false}} {
 		t.Run(tc.verdict, func(t *testing.T) {
 			f := newReviewVerdictFixture(t)
-			if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\nreview = \"local\"\nauto_teardown = \"never\"\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\nreview = \"quick\"\nauto_teardown = \"never\"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if code, out, _ := f.run("merge", "t1"); code == 0 || !strings.Contains(out, "review_required") {

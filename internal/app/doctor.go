@@ -146,7 +146,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 						addCheck("deprecated no-mistakes "+project.Name, "warn", "could not inspect Project policies: "+usageErr.Error(), "Inspect the Project configuration and migrate away from no-mistakes")
 					} else if len(usages) > 0 {
 						detail := strings.Join(usages, "; ")
-						addCheck("deprecated no-mistakes "+project.Name, "warn", detail, "Migrate this Project to built-in validation and set its Merge Mode to pr or local and review policy to local or none")
+						addCheck("deprecated no-mistakes "+project.Name, "warn", detail, "Migrate this Project to built-in validation and set its Merge Mode to pr or local and review policy to quick or none")
 					}
 				}
 				if reason := staleProjectRootReason(project.Root, home); reason != "" {

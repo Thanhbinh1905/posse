@@ -130,6 +130,53 @@ func Test014ProjectShorthandConfigVocabularyUpgrade(t *testing.T) {
 	}
 }
 
+func Test015ReviewModeUpgradeMigratesLocalWithoutTouchingMergeMode(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	stopBackgroundWatch(t, f)
+	globalPath := filepath.Join(f.home, "config.toml")
+	projectPath := filepath.Join(f.home, "projects", f.project.Name, "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	globalOriginal := "# posse vocabulary: 1\n[defaults]\nreview = 'local' # global review\nmerge_mode = 'local' # delivery stays local\n"
+	projectOriginal := "# posse vocabulary: 1\nreview = 'local' # Project shorthand\n[repositories.api]\nreview = 'local' # member review\n"
+	if err := os.WriteFile(globalPath, []byte(globalOriginal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte(projectOriginal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "config", "show", "--project", f.project.Name, "--effective", "--json")
+	var result struct {
+		Effective config.Config `json:"effective"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Effective.Defaults.Review != "quick" || result.Effective.Defaults.MergeMode != "local" || result.Effective.Repositories["api"].Review != "quick" {
+		t.Fatalf("0.15 review migration changed effective policies: %s", output)
+	}
+	for path, want := range map[string]string{
+		globalPath:  "# posse vocabulary: 2\n[defaults]\nreview = 'quick' # global review\nmerge_mode = 'local' # delivery stays local\n",
+		projectPath: "# posse vocabulary: 2\nreview = 'quick' # Project shorthand\n[repositories.api]\nreview = 'quick' # member review\n",
+	} {
+		if got, err := os.ReadFile(path); err != nil || string(got) != want {
+			t.Errorf("migrated %s = %q, %v; want %q", path, got, err, want)
+		}
+	}
+	for path, want := range map[string]string{globalPath + ".v015": globalOriginal, projectPath + ".v015": projectOriginal} {
+		if got, err := os.ReadFile(path); err != nil || string(got) != want {
+			t.Errorf("backup %s = %q, %v; want original bytes %q", path, got, err, want)
+		}
+	}
+	code, output := runReleaseCLI(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
+	if code == 0 || !strings.Contains(output, "use quick") {
+		t.Fatalf("local remained a new-config alias: code=%d output=%s", code, output)
+	}
+}
+
 func Test014MalformedConfigRetainsFilenameAndErrorCode(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()

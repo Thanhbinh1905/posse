@@ -41,7 +41,7 @@ func signalReviewPolicyTask(t *testing.T, f *prLifecycleFixture, task store.Task
 func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	stopBackgroundWatch(t, f)
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "local")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "quick")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	if code, out := startReviewIdentityTask(t, f, "Selected policy", "author", ""); code != 0 {
 		t.Fatalf("start: %d %s", code, out)
@@ -95,6 +95,86 @@ func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "main")); got != strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "refs/heads/"+change.Branch)) {
 		t.Fatal("merge did not merge the reviewed candidate")
+	}
+}
+
+func TestFrozen015LocalReviewPlanKeepsItsEvidenceRequirement(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, f)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "quick")
+	if code, out := startReviewIdentityTask(t, f, "Legacy local review", "author", ""); code != 0 {
+		t.Fatalf("start: %d %s", code, out)
+	}
+	change := f.mustTask(t, "t1")
+	plan, err := change.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("read admitted plan: %#v %v", plan, err)
+	}
+	plan.Version, plan.Review = 3, "local"
+	for i := range plan.Preferences {
+		if plan.Preferences[i].Name == "review" {
+			plan.Preferences[i].Value = "local"
+		}
+	}
+	legacyJSON, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, legacyJSON, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=? AND revision=1`, legacyJSON, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
+	signalReviewPolicyTask(t, f, change)
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1"); code != 1 || !strings.Contains(out, "review_required") {
+		t.Fatalf("frozen local plan skipped its review: %d %s", code, out)
+	}
+	if code, out := startReviewIdentityTask(t, f, "Review legacy local plan", "reviewer", "t1"); code != 0 {
+		t.Fatalf("review: %d %s", code, out)
+	}
+	review := f.mustTask(t, "t2")
+	report := filepath.Join(f.home, "scratch", "shop", "t2", "report.md")
+	if err := os.WriteFile(report, []byte("Candidate passes.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, review, "--report", report, "--verdict", "pass")
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 {
+		t.Fatalf("frozen local plan rejected its qualifying pass: %d %s", code, out)
+	}
+}
+
+func TestFullPipelineCanBeFrozenButIsNotReady(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, f)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "full-pipeline")
+	if code, out := startReviewIdentityTask(t, f, "Frozen full pipeline", "author", ""); code != 0 {
+		t.Fatalf("start: %d %s", code, out)
+	}
+	change := f.mustTask(t, "t1")
+	plan, err := change.AdmittedPlan()
+	if err != nil || plan == nil || plan.Review != "full-pipeline" {
+		t.Fatalf("selected mode was not frozen: %#v %v", plan, err)
+	}
+	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	code, out := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", "Candidate summary")
+	if code != 0 || !strings.Contains(out, "candidate_head") || !strings.Contains(out, "validation required before publication") {
+		t.Fatalf("full-pipeline did not submit a private candidate without promoting it: %d %s", code, out)
+	}
+	stored := f.mustTask(t, "t1")
+	if stored.PRURL != "" {
+		t.Fatalf("unvalidated candidate opened a PR: %s", stored.PRURL)
+	}
+	command := exec.Command("git", "--git-dir", f.remote, "show-ref", "--verify", "--quiet", "refs/heads/"+change.Branch)
+	command.Env = f.env
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("private candidate submission pushed the Task branch: %s", output)
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		t.Fatalf("could not verify the remote Task branch remained absent: %v %s", err, output)
 	}
 }
 
@@ -178,14 +258,14 @@ func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
 func TestSelectedReviewPolicyConfigNeedsUserConsent(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	for _, key := range []string{"defaults.review", "repositories.api.review"} {
-		for _, args := range [][]string{{"config", "set", key, "local", "--project", "shop"}, {"config", "unset", key, "--project", "shop"}} {
+		for _, args := range [][]string{{"config", "set", key, "quick", "--project", "shop"}, {"config", "unset", key, "--project", "shop"}} {
 			code, out := runReviewIdentityCLI(t, f, args...)
 			if code != 1 || !strings.Contains(out, "user_only") {
 				t.Fatalf("unapproved policy write: %d %s", code, out)
 			}
 		}
 		const quote = "  Use local independent review.  "
-		code, out := runReviewIdentityCLI(t, f, "config", "set", key, "local", "--project", "shop", "--user-approved", quote)
+		code, out := runReviewIdentityCLI(t, f, "config", "set", key, "quick", "--project", "shop", "--user-approved", quote)
 		if code != 0 {
 			t.Fatalf("consented policy: %d %s", code, out)
 		}
@@ -240,7 +320,7 @@ func TestSelectedReviewPolicyWorkspaceAdmission(t *testing.T) {
 		t.Fatalf("member override not admitted: %#v %v", plan, err)
 	}
 	// A stricter live override does not rewrite the already admitted policy.
-	runPosse(t, f.binary, root, f.env, "config", "set", "repositories.api.review", "local", "--project", "policy-stack")
+	runPosse(t, f.binary, root, f.env, "config", "set", "repositories.api.review", "quick", "--project", "policy-stack")
 	writeBrief("review: none\n")
 	cmd := exec.Command(f.binary, "start", "--brief", brief, "--name", "lighter-member", "--profile", "author")
 	cmd.Dir, cmd.Env = root, leadEnv
@@ -268,7 +348,7 @@ func TestReviewPolicyLegacyConfigMigration(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	for _, value := range []string{"always", "on_risk", "never"} {
 		code, out := runReviewIdentityCLI(t, f, "config", "set", "defaults.review", value, "--user-approved", "Select review")
-		if code != 1 || !strings.Contains(out, "legacy review policy") || !strings.Contains(out, "none, quick, full-pipeline, local or no-mistakes") {
+		if code != 1 || !strings.Contains(out, "legacy review policy") || !strings.Contains(out, "none, quick, full-pipeline or no-mistakes") {
 			t.Errorf("migration %s: %d %s", value, code, out)
 		}
 	}

@@ -103,7 +103,7 @@ func TestExplicitLegacyReviewRefusesEveryConfigLayer(t *testing.T) {
 					}
 				}
 				_, err := Load(home, "shop")
-				if err == nil || !strings.Contains(err.Error(), "legacy review policy") || !strings.Contains(err.Error(), "none, quick, full-pipeline") || !strings.Contains(err.Error(), path) {
+				if err == nil || !strings.Contains(err.Error(), "legacy review policy") || !strings.Contains(err.Error(), "none, quick, full-pipeline or no-mistakes") || !strings.Contains(err.Error(), path) {
 					t.Fatalf("legacy loaded: %v", err)
 				}
 			})
