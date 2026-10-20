@@ -27,7 +27,8 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	f := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer f.db.Close()
 
-	legacyBinary := downloadOfficialReleaseBinary(t, f.root, "v0.14.0")
+	stableBinaryDir := newFixtureRootAt(t, "/var/tmp", fixturePrefix("official-update-installed-"))
+	legacyBinary := downloadOfficialReleaseBinary(t, stableBinaryDir, "v0.14.0")
 	home := filepath.Join(f.root, "legacy-release-home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
