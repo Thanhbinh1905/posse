@@ -431,7 +431,7 @@ func stopStoredWatchRuntimeWithEscalation(ctx context.Context, home string, proc
 	}
 	if watchPIDRunning(process.PID) {
 		if !escalate {
-			return fmt.Errorf("Watch PID %d did not stop gracefully; refusing to interrupt Project maintenance", process.PID)
+			return fmt.Errorf("watch PID %d did not stop gracefully; refusing to interrupt Project maintenance", process.PID)
 		}
 		owned, err := storedWatchProcessIsCurrent(home, process)
 		if err != nil {
