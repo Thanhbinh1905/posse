@@ -14,7 +14,11 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 3
+const Version = 4
+
+// planVersionCurrentBriefContract marks the first plan version written with
+// the current Brief vocabulary and semantics.
+const planVersionCurrentBriefContract = 3
 
 const (
 	RootContextNone     = "none"
@@ -138,27 +142,28 @@ func (loops ValidationLoops) MaxReviewRounds() int {
 type Plan struct {
 	// Original bytes retain the digest and provenance of admitted 0.14 plans.
 	legacyJSON      string
-	Version         int              `json:"version"`
-	Revision        int              `json:"revision"`
-	PreviousSHA256  string           `json:"previous_sha256,omitempty"`
-	Type            string           `json:"type"`
-	Outcome         string           `json:"outcome"`
-	Executor        string           `json:"executor"`
-	Execution       Execution        `json:"execution"`
-	Review          string           `json:"review"`
-	ReviewOf        int64            `json:"review_of,omitempty"`
-	Delivery        string           `json:"delivery"`
-	Grants          []Grant          `json:"grants"`
-	Preferences     []Preference     `json:"preferences,omitempty"`
-	UserChoice      *UserChoice      `json:"user_choice,omitempty"`
-	Inputs          []Input          `json:"inputs"`
-	Paths           Paths            `json:"paths"`
-	Launch          Launch           `json:"launch"`
-	Gate            []string         `json:"gate"`
-	ValidationLoops *ValidationLoops `json:"validation_loops,omitempty"`
-	MergeMethod     string           `json:"merge_method"`
-	ProseLanguage   string           `json:"prose_language,omitempty"`
-	Pool            config.Pool      `json:"pool"`
+	Version         int                       `json:"version"`
+	Revision        int                       `json:"revision"`
+	PreviousSHA256  string                    `json:"previous_sha256,omitempty"`
+	Type            string                    `json:"type"`
+	Outcome         string                    `json:"outcome"`
+	Executor        string                    `json:"executor"`
+	Execution       Execution                 `json:"execution"`
+	Review          string                    `json:"review"`
+	ReviewOf        int64                     `json:"review_of,omitempty"`
+	Delivery        string                    `json:"delivery"`
+	Grants          []Grant                   `json:"grants"`
+	Preferences     []Preference              `json:"preferences,omitempty"`
+	UserChoice      *UserChoice               `json:"user_choice,omitempty"`
+	Inputs          []Input                   `json:"inputs"`
+	Paths           Paths                     `json:"paths"`
+	Launch          Launch                    `json:"launch"`
+	Gate            []string                  `json:"gate"`
+	ValidationLoops *ValidationLoops          `json:"validation_loops,omitempty"`
+	Workflow        *config.WorkflowSelection `json:"workflow,omitempty"`
+	MergeMethod     string                    `json:"merge_method"`
+	ProseLanguage   string                    `json:"prose_language,omitempty"`
+	Pool            config.Pool               `json:"pool"`
 }
 
 type Request struct {
@@ -175,6 +180,7 @@ type Request struct {
 	Paths           Paths
 	Gate            []string
 	ValidationLoops *ValidationLoops
+	Workflow        *config.WorkflowSelection
 	MergeMethod     string
 	ProseLanguage   string
 	Pool            config.Pool
@@ -235,7 +241,7 @@ func Resolve(r Request) (Plan, error) {
 		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.merge", Value: autonomy.Merge, Source: mergeSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
-		Gate: r.Gate, ValidationLoops: validationLoops, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool}
+		Gate: r.Gate, ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool}
 	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
 	for i, explicit := range []bool{brief.MergeMode != "", brief.Review != ""} {
 		if explicit {
@@ -274,16 +280,17 @@ func Resolve(r Request) (Plan, error) {
 	// Snapshot interpreted configuration fields consumed by the contract, not
 	// entire TOML files, other Profiles or unrelated forge content.
 	settings, err := json.Marshal(struct {
-		Execution       Execution        `json:"execution"`
-		Review          string           `json:"review"`
-		Delivery        string           `json:"delivery"`
-		Grants          []Grant          `json:"grants"`
-		Gate            []string         `json:"gate"`
-		ValidationLoops *ValidationLoops `json:"validation_loops,omitempty"`
-		MergeMethod     string           `json:"merge_method"`
-		ProseLanguage   string           `json:"prose_language"`
-		Pool            config.Pool      `json:"pool"`
-	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.ValidationLoops, p.MergeMethod, p.ProseLanguage, p.Pool})
+		Execution       Execution                 `json:"execution"`
+		Review          string                    `json:"review"`
+		Delivery        string                    `json:"delivery"`
+		Grants          []Grant                   `json:"grants"`
+		Gate            []string                  `json:"gate"`
+		ValidationLoops *ValidationLoops          `json:"validation_loops,omitempty"`
+		Workflow        *config.WorkflowSelection `json:"workflow,omitempty"`
+		MergeMethod     string                    `json:"merge_method"`
+		ProseLanguage   string                    `json:"prose_language"`
+		Pool            config.Pool               `json:"pool"`
+	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool})
 	if err != nil {
 		return Plan{}, err
 	}
@@ -301,7 +308,7 @@ func Resolve(r Request) (Plan, error) {
 
 func (p Plan) Validate() error {
 	invalid := func(message string) error { return fmt.Errorf("invalid execution plan: %s", message) }
-	if p.Version != 1 && p.Version != 2 && p.Version != Version || p.Revision < 1 {
+	if p.Version < 1 || p.Version > Version || p.Revision < 1 {
 		return invalid("unsupported version or revision")
 	}
 	if p.Revision == 1 && p.PreviousSHA256 != "" || p.Revision > 1 && len(p.PreviousSHA256) != 64 {
@@ -431,7 +438,7 @@ func (p Plan) Validate() error {
 		return invalid("missing selected Brief")
 	}
 	parseBrief := dispatch.ParseBriefText
-	if p.Version < Version {
+	if p.Version < planVersionCurrentBriefContract {
 		parseBrief = dispatch.ParseHistoricalBriefText
 	}
 	brief, err := parseBrief(string(p.Inputs[0].Bytes))
@@ -440,6 +447,28 @@ func (p Plan) Validate() error {
 	}
 	if brief.Type != p.Type {
 		return invalid("selected Brief has another Task type")
+	}
+	if p.Workflow == nil {
+		if brief.Workflow != "" {
+			return invalid("selected Brief workflow is not frozen in the plan")
+		}
+	} else {
+		if brief.Workflow == "" || p.Workflow.Name != brief.Workflow || p.Workflow.Source == "" {
+			return invalid("frozen workflow does not match the selected Brief or has no source")
+		}
+		if len(p.Workflow.SHA256) != 64 {
+			return invalid("frozen workflow has an invalid digest")
+		}
+		if _, err := hex.DecodeString(p.Workflow.SHA256); err != nil {
+			return invalid("frozen workflow has an invalid digest")
+		}
+		digest, err := config.WorkflowDigest(p.Workflow.Profile)
+		if err != nil || digest != p.Workflow.SHA256 {
+			return invalid("frozen workflow content does not match its digest")
+		}
+		for _, issue := range config.ValidateWorkflowProfile(p.Workflow.Profile) {
+			return invalid("workflows." + p.Workflow.Name + "." + issue.Key + ": " + issue.Reason)
+		}
 	}
 	if p.ValidationLoops == nil {
 		if brief.ReviewRounds > 0 {
@@ -536,6 +565,8 @@ func Decode(data string) (Plan, error) {
 	}
 	if p.Version < Version {
 		p.legacyJSON = data
+	}
+	if p.Version < planVersionCurrentBriefContract {
 		switch p.Type {
 		case "ship":
 			p.Type = "change"
