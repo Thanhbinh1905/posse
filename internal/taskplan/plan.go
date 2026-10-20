@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -15,6 +16,8 @@ import (
 )
 
 const Version = 4
+
+var workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
 
 // planVersionCurrentBriefContract marks the first plan version written with
 // the current Brief vocabulary and semantics.
@@ -460,11 +463,11 @@ func (p Plan) Validate() error {
 		return invalid("selected Brief has another Task type")
 	}
 	if p.Workflow == nil {
-		if brief.Workflow != "" {
+		if brief.Workflow != "" || brief.WorkflowRun != "" || brief.Stage != "" {
 			return invalid("selected Brief workflow is not frozen in the plan")
 		}
 	} else {
-		if brief.Workflow == "" || p.Workflow.Name != brief.Workflow || p.Workflow.Source == "" {
+		if p.Workflow.Name == "" || p.Workflow.Source == "" || brief.Workflow != "" && p.Workflow.Name != brief.Workflow {
 			return invalid("frozen workflow does not match the selected Brief or has no source")
 		}
 		if len(p.Workflow.SHA256) != 64 {
@@ -479,6 +482,34 @@ func (p Plan) Validate() error {
 		}
 		for _, issue := range config.ValidateWorkflowProfile(p.Workflow.Profile) {
 			return invalid("workflows." + p.Workflow.Name + "." + issue.Key + ": " + issue.Reason)
+		}
+		runtimeBound := p.Workflow.RunID != "" || p.Workflow.StageName != "" || p.Workflow.StageIndex != 0
+		if !runtimeBound {
+			if brief.Workflow == "" || brief.WorkflowRun != "" || brief.Stage != "" {
+				return invalid("frozen workflow does not match the selected Brief or lacks run and stage identity")
+			}
+		} else {
+			if p.Workflow.RunID != "new" && !workflowRunIDPattern.MatchString(p.Workflow.RunID) {
+				return invalid("frozen workflow has an invalid run ID")
+			}
+			if p.Workflow.StageName == "" || p.Workflow.StageIndex < 0 || p.Workflow.StageIndex >= len(p.Workflow.Profile.Stages) {
+				return invalid("frozen workflow has an invalid stage identity")
+			}
+			stage := p.Workflow.Profile.Stages[p.Workflow.StageIndex]
+			if stage.Name != p.Workflow.StageName || stage.TaskType != p.Type {
+				return invalid("frozen workflow stage does not match the Task type")
+			}
+			if stage.TaskType == "none" {
+				return invalid("a none workflow stage cannot admit a Worker Task")
+			}
+			initialStage := p.Workflow.StageIndex == 0 && brief.Workflow != "" && brief.WorkflowRun == "" && brief.Stage == ""
+			if p.Workflow.RunID == "new" {
+				if !initialStage {
+					return invalid("new workflow run must start at its first stage")
+				}
+			} else if !initialStage && (brief.WorkflowRun != p.Workflow.RunID || brief.Stage != p.Workflow.StageName) {
+				return invalid("frozen workflow run or stage does not match the selected Brief")
+			}
 		}
 	}
 	if p.ValidationLoops == nil {

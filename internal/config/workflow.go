@@ -25,10 +25,13 @@ type WorkflowStage struct {
 }
 
 type WorkflowSelection struct {
-	Name    string          `json:"name"`
-	Profile WorkflowProfile `json:"profile"`
-	Source  string          `json:"source"`
-	SHA256  string          `json:"sha256"`
+	Name       string          `json:"name"`
+	Profile    WorkflowProfile `json:"profile"`
+	Source     string          `json:"source"`
+	SHA256     string          `json:"sha256"`
+	RunID      string          `json:"run_id,omitempty"`
+	StageName  string          `json:"stage_name,omitempty"`
+	StageIndex int             `json:"stage_index,omitempty"`
 }
 
 func (stage *WorkflowStage) UnmarshalJSON(data []byte) error {
