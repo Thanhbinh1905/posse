@@ -268,7 +268,7 @@ func TestReviewPolicyLegacyConfigMigration(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	for _, value := range []string{"always", "on_risk", "never"} {
 		code, out := runReviewIdentityCLI(t, f, "config", "set", "defaults.review", value, "--user-approved", "Select review")
-		if code != 1 || !strings.Contains(out, "legacy review policy") || !strings.Contains(out, "none, local or no-mistakes") {
+		if code != 1 || !strings.Contains(out, "legacy review policy") || !strings.Contains(out, "none, quick, full-pipeline, local or no-mistakes") {
 			t.Errorf("migration %s: %d %s", value, code, out)
 		}
 	}

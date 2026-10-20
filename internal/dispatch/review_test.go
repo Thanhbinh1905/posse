@@ -54,9 +54,10 @@ func TestReviewPolicyTighteningAndScopedChoice(t *testing.T) {
 		current, requested string
 		consent, allowed   bool
 	}{
-		{"none", "", false, true}, {"none", "local", false, true}, {"local", "no-mistakes", false, true},
-		{"local", "none", false, false}, {"no-mistakes", "local", false, false},
-		{"local", "none", true, true}, {"no-mistakes", "local", true, true},
+		{"none", "", false, true}, {"none", "local", false, true}, {"none", "quick", false, true},
+		{"quick", "full-pipeline", false, true}, {"full-pipeline", "quick", false, false},
+		{"local", "no-mistakes", false, true}, {"local", "none", false, false}, {"no-mistakes", "local", false, false},
+		{"local", "none", true, true}, {"no-mistakes", "local", true, true}, {"full-pipeline", "quick", true, true},
 		{"always", "none", true, false}, {"none", "invented", true, false},
 	} {
 		got, err := ResolveReview(tc.requested, tc.current, tc.consent)

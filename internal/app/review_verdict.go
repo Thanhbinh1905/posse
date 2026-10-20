@@ -189,8 +189,10 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 	for _, selected := range policies {
 		switch selected {
 		case "none":
-		case "local", "always":
+		case "local", "quick", "always":
 			local = true
+		case "full-pipeline":
+			return axi.Failure("full_pipeline_not_ready", "full-pipeline validation has not shipped; this Task cannot be promoted or merged", false, "Select `none` or `quick` for production Tasks until VP-C lands")
 		case "no-mistakes":
 			receipt = true
 		default:
