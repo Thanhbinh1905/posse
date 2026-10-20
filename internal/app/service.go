@@ -33,6 +33,7 @@ type Service struct {
 	confirm              confirmFunc
 	updateConfirm        confirmFunc
 	reexecUpdate         func(string, []string, []string) error
+	updateSetup          func(context.Context, string, string, bool) ([]byte, error)
 	maintenanceMu        sync.Mutex
 	maintenance          map[string]bool
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)

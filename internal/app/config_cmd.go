@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
@@ -116,11 +115,12 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	priorIssues := config.ValidationIssues(home, projectName)
 	value, err := config.SetFile(path, key, parsed.Positionals[1], projectName != "")
 	if err != nil {
 		return configError(err)
 	}
-	if err := s.validateConfigEdit(home, projectName, path, key); err != nil {
+	if err := s.validateConfigEdit(home, projectName, priorIssues); err != nil {
 		if rollbackErr := restoreConfigFile(path, original, originalExists, originalMode); rollbackErr != nil {
 			return errors.Join(configError(err), fmt.Errorf("restore previous config: %w", rollbackErr))
 		}
@@ -174,10 +174,11 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	priorIssues := config.ValidationIssues(home, projectName)
 	if err := config.UnsetFile(path, key, projectName != ""); err != nil {
 		return configError(err)
 	}
-	if err := s.validateConfigEdit(home, projectName, path, key); err != nil {
+	if err := s.validateConfigEdit(home, projectName, priorIssues); err != nil {
 		if rollbackErr := restoreConfigFile(path, original, originalExists, originalMode); rollbackErr != nil {
 			return errors.Join(configError(err), fmt.Errorf("restore previous config: %w", rollbackErr))
 		}
@@ -226,14 +227,15 @@ func (s *Service) validateConfigForEdit(home, projectName string) error {
 	return err
 }
 
-func (s *Service) validateConfigEdit(home, projectName, path, key string) error {
-	// A different invalid key was already present; keep this edit available to repair it next.
-	if err := s.validateConfigForEdit(home, projectName); err != nil {
-		var invalid *config.InvalidError
-		if errors.As(err, &invalid) && (filepath.Clean(invalid.File) != filepath.Clean(path) || invalid.Key != config.CanonicalProjectKey(key)) {
-			return nil
+func (s *Service) validateConfigEdit(home, projectName string, priorIssues []error) error {
+	previous := make(map[string]struct{}, len(priorIssues))
+	for _, issue := range priorIssues {
+		previous[issue.Error()] = struct{}{}
+	}
+	for _, issue := range config.ValidationIssues(home, projectName) {
+		if _, alreadyPresent := previous[issue.Error()]; !alreadyPresent {
+			return issue
 		}
-		return err
 	}
 	return nil
 }

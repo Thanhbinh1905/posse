@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -406,8 +407,14 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 		}
 	}
 	backup := ""
+	migrationState := store.MigrationState{}
 	db, dbErr := store.OpenReadOnly(home)
 	if dbErr == nil {
+		migrationState, err = db.MigrationState(ctx)
+		if err != nil {
+			db.Close()
+			return err
+		}
 		backup = filepath.Join(home, "backup", "posse-pre-"+release.Tag+".db")
 		if err := os.MkdirAll(filepath.Dir(backup), 0o700); err != nil {
 			db.Close()
@@ -466,12 +473,7 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 		repair := preflightResult.ConfigRepair
 		return axi.Failure("config_repair_required", fmt.Sprintf("installed %s; setup was skipped until configuration is repaired: %s", release.Tag, repair.Message), false, repair.Help...)
 	}
-	setup := exec.CommandContext(ctx, destination, "setup", "--binary", destination, "--json")
-	setup.Env = append(os.Environ(), "POSSE_HOME="+home)
-	if force {
-		setup.Env = append(setup.Env, store.ForceMigrationEnv+"=1")
-	}
-	output, err := setup.CombinedOutput()
+	output, err := s.runUpdateSetup(ctx, destination, home, force)
 	if err != nil {
 		var failure struct {
 			Code    string   `json:"code"`
@@ -487,10 +489,22 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 				return axi.Failure("config_repair_required", fmt.Sprintf("installed %s; setup could not complete until configuration is repaired: %s", release.Tag, failure.Message), false, help...)
 			}
 		}
+		afterMigrationState, stateErr := store.ReadMigrationState(ctx, home)
+		if stateErr != nil || !reflect.DeepEqual(migrationState, afterMigrationState) {
+			help := []string{"Resolve the setup failure and run `posse setup` to retry with the installed binary"}
+			if removeErr := os.Remove(binaryBackup); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				help = append(help, "Previous binary backup remains at "+binaryBackup+": "+removeErr.Error())
+			}
+			message := "setup failed; database migration state changed, so the new binary remains installed"
+			if stateErr != nil {
+				message = "setup failed; database migration state could not be verified, so the new binary remains installed: " + stateErr.Error()
+			}
+			return axi.Failure("setup_failed", fmt.Sprintf("%s: %s", message, strings.TrimSpace(string(output))), false, help...)
+		}
 		if rollbackErr := os.Rename(binaryBackup, destination); rollbackErr != nil {
 			return axi.Failure("setup_failed", fmt.Sprintf("setup failed and the previous binary could not be restored: %s", strings.TrimSpace(string(output))), false, "Restore the previous binary from "+binaryBackup, rollbackErr.Error())
 		}
-		return axi.Failure("setup_failed", fmt.Sprintf("setup failed; the previous binary was restored: %s", strings.TrimSpace(string(output))), false, "Resolve the setup failure and retry `posse update`")
+		return axi.Failure("setup_failed", fmt.Sprintf("setup failed before any database migrations were written; the previous binary was restored: %s", strings.TrimSpace(string(output))), false, "Resolve the setup failure and retry `posse update`")
 	}
 	if err := os.Remove(binaryBackup); err != nil && !errors.Is(err, os.ErrNotExist) {
 		installed.backupWarning = "could not remove previous binary backup " + binaryBackup + ": " + err.Error()
@@ -505,6 +519,18 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 	}
 	return nil
 }
+func (s *Service) runUpdateSetup(ctx context.Context, destination, home string, force bool) ([]byte, error) {
+	if s.updateSetup != nil {
+		return s.updateSetup(ctx, destination, home, force)
+	}
+	setup := exec.CommandContext(ctx, destination, "setup", "--binary", destination, "--json")
+	setup.Env = append(os.Environ(), "POSSE_HOME="+home)
+	if force {
+		setup.Env = append(setup.Env, store.ForceMigrationEnv+"=1")
+	}
+	return setup.CombinedOutput()
+}
+
 func (s *Service) downloadAsset(ctx context.Context, url string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

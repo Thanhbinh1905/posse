@@ -40,6 +40,81 @@ func TestConfigRollbackPreservesOriginalMode(t *testing.T) {
 	}
 }
 
+func TestConfigSetRejectsUnknownProfileOnValidHome(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	service := testService(home, herdr.NewFake())
+	t.Chdir(repo)
+	if code, output := runCLI(t, service, "config", "show"); code != 0 {
+		t.Fatalf("fresh config is invalid: code=%d output=%s", code, output)
+	}
+
+	code, output := runCLI(t, service, "config", "set", "dispatch", `[{ type = "change", use = "ghost" }]`)
+	if code != 1 || !strings.Contains(output, "references unknown Profile ghost") {
+		t.Fatalf("invalid Profile reference was accepted: code=%d output=%s", code, output)
+	}
+	if _, err := os.Stat(filepath.Join(home, "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("rejected edit left config behind: %v", err)
+	}
+	if code, output := runCLI(t, service, "config", "show"); code != 0 {
+		t.Fatalf("rejected edit made the valid home invalid: code=%d output=%s", code, output)
+	}
+}
+
+func TestConfigUnsetRejectsNewSemanticErrorAlongsideExistingError(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	path := filepath.Join(home, "config.toml")
+	original := []byte("[profiles.fast]\nkind = 'custom'\nmodel = 'model-1'\n[kinds.custom]\nmodel_args = ['--model', '{model}']\n[dispatch.default]\nuse = 'missing'\n")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, herdr.NewFake())
+	t.Chdir(repo)
+
+	code, output := runCLI(t, service, "config", "unset", "kinds.custom.model_args")
+	if code != 1 || !strings.Contains(output, "Worker kind has no model_args template") {
+		t.Fatalf("unset introduced a new semantic error: code=%d output=%s", code, output)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, original) {
+		t.Fatalf("rejected unset changed the original config: %q err=%v", data, err)
+	}
+}
+
+func TestConfigSetRejectsNewErrorAlongsideTwoExistingErrors(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	path := filepath.Join(home, "config.toml")
+	original := []byte("[defaults]\nreview = 'on_risk'\n[pool]\nkeep_idle = -1\n")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, herdr.NewFake())
+	t.Chdir(repo)
+
+	code, output := runCLI(t, service, "config", "set", "dispatch", `[{ type = "change", use = "ghost" }]`)
+	if code != 1 || !strings.Contains(output, "references unknown Profile ghost") {
+		t.Fatalf("edit introduced a third invalid setting: code=%d output=%s", code, output)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, original) {
+		t.Fatalf("rejected edit changed the original invalid config: %q err=%v", data, err)
+	}
+}
+
 func TestConfigEditsCanRepairMultipleInvalidSettings(t *testing.T) {
 	for _, edits := range [][][]string{
 		{{"config", "set", "defaults.review", "none"}, {"config", "set", "pool.keep_idle", "2"}},

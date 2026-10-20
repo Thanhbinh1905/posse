@@ -151,6 +151,85 @@ func TestUpdateRollsBackBinaryWhenSetupFails(t *testing.T) {
 	}
 }
 
+func TestUpdateKeepsNewBinaryWhenSetupFailsAfterWritingMigrations(t *testing.T) {
+	newBinary, archiveName, archive, digest := buildReleaseArchive(t, "v0.15.1")
+	var url string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "v0.15.1", "assets": []any{map[string]string{"name": archiveName, "browser_download_url": url + "/archive"}, map[string]string{"name": "checksums.txt", "browser_download_url": url + "/checksums"}}})
+		case "/archive":
+			_, _ = w.Write(archive)
+		case "/checksums":
+			fmt.Fprintf(w, "%s  %s\n", digest, archiveName)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	url = server.URL
+
+	root := t.TempDir()
+	home := filepath.Join(root, "posse")
+	binaryPath := filepath.Join(root, "bin", "posse")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldBinary := []byte("installed binary before migrated setup failure")
+	if err := os.WriteFile(binaryPath, oldBinary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binaryPath, Version: "0.15.0"}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM goose_db_version WHERE version_id = 12`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	service := testService(home, nil)
+	service.Version = "0.15.0"
+	service.updateURL = url
+	service.updateSetup = func(ctx context.Context, destination, setupHome string, force bool) ([]byte, error) {
+		if destination != binaryPath || setupHome != home || force {
+			t.Fatalf("setup arguments = destination %q home %q force %t", destination, setupHome, force)
+		}
+		db, err := store.Open(home)
+		if err != nil {
+			return []byte(err.Error()), err
+		}
+		if err := db.Close(); err != nil {
+			return []byte(err.Error()), err
+		}
+		return []byte(`{"code":"setup_failed","message":"simulated failure after migration"}`), fmt.Errorf("simulated setup failure")
+	}
+	code, output := runCLI(t, service, "update")
+	if code != 1 || !strings.Contains(output, "migration state changed") || !strings.Contains(output, "new binary remains installed") || !strings.Contains(output, "posse setup") {
+		t.Fatalf("migration failure did not retain the new binary with repair guidance: code=%d output=%s", code, output)
+	}
+	if data, err := os.ReadFile(binaryPath); err != nil || !bytes.Equal(data, newBinary) {
+		t.Fatalf("setup failure after migration restored the old binary: %v size=%d want=%d", err, len(data), len(newBinary))
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(binaryPath), ".posse-update-rollback-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("migration failure left old binary backups %v err=%v", leftovers, err)
+	}
+}
+
 func TestUpdateInstallsRepairBinaryForLegacyReviewAndAllowsConfigRepair(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	target := filepath.Join(t.TempDir(), "posse-current")

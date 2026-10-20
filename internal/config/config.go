@@ -241,6 +241,68 @@ func ValidateAll(home string) error {
 	return nil
 }
 
+// ValidationIssues reports every detectable issue in the global config and the
+// selected Project config without writing vocabulary migrations or markers.
+func ValidationIssues(home, projectName string) []error {
+	if home == "" {
+		var err error
+		home, err = DefaultHome()
+		if err != nil {
+			return []error{err}
+		}
+	}
+	globalPath := filepath.Join(home, "config.toml")
+	global, globalErr := readConfigMap(globalPath, false)
+	issues := []error{}
+	if globalErr != nil {
+		issues = append(issues, globalErr)
+		global = map[string]any{}
+	}
+	if _, found := global["autonomy"]; found {
+		issues = append(issues, &InvalidError{File: globalPath, Key: "autonomy", Reason: "autonomy is valid only in a Project config"})
+	}
+	issues = append(issues, SchemaValidationErrors(globalPath, global, false)...)
+
+	projectPath := ""
+	var project map[string]any
+	var projectErr error
+	if projectName != "" {
+		projectPath = filepath.Join(home, "projects", projectName, "config.toml")
+		project, projectErr = readConfigMap(projectPath, false)
+		if projectErr != nil {
+			issues = append(issues, projectErr)
+			project = map[string]any{}
+		}
+		issues = append(issues, SchemaValidationErrors(projectPath, project, true)...)
+	}
+	if globalErr == nil && projectErr == nil {
+		cfg, err := configFromMaps(globalPath, global, projectPath, project, projectName)
+		if err != nil {
+			issues = append(issues, err)
+		} else {
+			issues = append(issues, cfg.ValidationIssues(projectName != "")...)
+		}
+	}
+	return uniqueValidationErrors(issues)
+}
+
+func uniqueValidationErrors(issues []error) []error {
+	seen := make(map[string]struct{}, len(issues))
+	unique := make([]error, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		key := issue.Error()
+		if _, found := seen[key]; found {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, issue)
+	}
+	return unique
+}
+
 func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	if home == "" {
 		var err error
@@ -260,8 +322,6 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	if err := ValidateSchemaMap(globalPath, global, false); err != nil {
 		return Config{}, err
 	}
-	globalRules, globalDefault := extractDispatch(global)
-	merged := mergeMaps(defaultMap(), global)
 	projectPath := ""
 	var project map[string]any
 	if projectName != "" {
@@ -273,6 +333,21 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 		if err := ValidateSchemaMap(projectPath, project, true); err != nil {
 			return Config{}, err
 		}
+	}
+	cfg, err := configFromMaps(globalPath, global, projectPath, project, projectName)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := cfg.Validate(projectName != ""); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func configFromMaps(globalPath string, global map[string]any, projectPath string, project map[string]any, projectName string) (Config, error) {
+	globalRules, globalDefault := extractDispatch(global)
+	merged := mergeMaps(defaultMap(), global)
+	if projectName != "" {
 		projectRules, projectDefault := extractDispatch(project)
 		project = applyProjectScalars(project)
 		merged = mergeMaps(merged, project)
@@ -312,9 +387,6 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	if cfg.Autonomy.Yolo {
 		cfg.Autonomy.Review = "lead"
 		cfg.Autonomy.Merge = "auto"
-	}
-	if err := cfg.Validate(projectName != ""); err != nil {
-		return Config{}, err
 	}
 	return cfg, nil
 }
@@ -511,61 +583,73 @@ func (c *Config) normalizeBuiltins() {
 }
 
 func (c Config) Validate(projectFile bool) error {
+	issues := c.ValidationIssues(projectFile)
+	if len(issues) == 0 {
+		return nil
+	}
+	return issues[0]
+}
+
+// ValidationIssues returns all independent semantic config errors in stable
+// order. Validate retains the first error for normal load and setup paths.
+func (c Config) ValidationIssues(projectFile bool) []error {
 	file := "config.toml"
 	if len(c.Files) > 0 {
 		file = c.Files[len(c.Files)-1]
 	}
+	var issues []error
+	add := func(key, reason string) {
+		issues = append(issues, &InvalidError{File: file, Key: key, Reason: reason})
+	}
 	if c.Defaults.MaxWorkers < 1 {
-		return &InvalidError{File: file, Key: "defaults.max_workers", Reason: "must be positive"}
+		add("defaults.max_workers", "must be positive")
 	}
 	if !oneOf(c.Defaults.DispatchInheritance, "kind", "lead_profile") {
-		return &InvalidError{File: file, Key: "defaults.dispatch_inheritance", Reason: "must be kind or lead_profile"}
+		add("defaults.dispatch_inheritance", "must be kind or lead_profile")
 	}
 	if c.Defaults.RecoveryAttempts < 1 {
-		return &InvalidError{File: file, Key: "defaults.recovery_attempts", Reason: "must be positive"}
+		add("defaults.recovery_attempts", "must be positive")
 	}
 	if backoff, err := time.ParseDuration(c.Defaults.RecoveryBackoff); err != nil || backoff <= 0 {
-		return &InvalidError{File: file, Key: "defaults.recovery_backoff", Reason: "must be a positive duration"}
+		add("defaults.recovery_backoff", "must be a positive duration")
 	}
-	stall, err := time.ParseDuration(c.Defaults.StallAfter)
-	if err != nil || stall <= 0 {
-		return &InvalidError{File: file, Key: "defaults.stall_after", Reason: "must be a positive duration"}
+	if stall, err := time.ParseDuration(c.Defaults.StallAfter); err != nil || stall <= 0 {
+		add("defaults.stall_after", "must be a positive duration")
 	}
-	idle, err := time.ParseDuration(c.Defaults.IdleAfter)
-	if err != nil || idle <= 0 {
-		return &InvalidError{File: file, Key: "defaults.idle_after", Reason: "must be a positive duration"}
+	if idle, err := time.ParseDuration(c.Defaults.IdleAfter); err != nil || idle <= 0 {
+		add("defaults.idle_after", "must be a positive duration")
 	}
-	prPoll, err := time.ParseDuration(c.Defaults.PRPoll)
-	if err != nil || prPoll <= 0 {
-		return &InvalidError{File: file, Key: "defaults.pr_poll", Reason: "must be a positive duration"}
+	if prPoll, err := time.ParseDuration(c.Defaults.PRPoll); err != nil || prPoll <= 0 {
+		add("defaults.pr_poll", "must be a positive duration")
 	}
 	if !oneOf(c.Defaults.AutoTeardown, "finished", "merged", "never") {
-		return &InvalidError{File: file, Key: "defaults.auto_teardown", Reason: "must be one of finished, merged, never"}
+		add("defaults.auto_teardown", "must be one of finished, merged, never")
 	}
 	if !oneOf(c.Defaults.MergeMode, "local", "pr", "no-mistakes") {
-		return &InvalidError{File: file, Key: "defaults.merge_mode", Reason: "must be local, pr or no-mistakes"}
+		add("defaults.merge_mode", "must be local, pr or no-mistakes")
 	}
 	if !oneOf(c.Defaults.Forge, "", "auto", "github", "gitlab") {
-		return &InvalidError{File: file, Key: "defaults.forge", Reason: "must be auto, github or gitlab"}
+		add("defaults.forge", "must be auto, github or gitlab")
 	}
-	for name, repo := range c.Repositories {
+	for _, name := range sortedMapKeys(c.Repositories) {
+		repo := c.Repositories[name]
 		if repo.Review != "" {
 			if err := ValidateReview(repo.Review); err != nil {
-				return &InvalidError{File: file, Key: "repositories." + name + ".review", Reason: err.Error()}
+				add("repositories."+name+".review", err.Error())
 			}
 		}
 		if !oneOf(repo.Forge, "", "auto", "github", "gitlab") {
-			return &InvalidError{File: file, Key: "repositories." + name + ".forge", Reason: "must be auto, github or gitlab"}
+			add("repositories."+name+".forge", "must be auto, github or gitlab")
 		}
 	}
 	if !oneOf(c.Defaults.MergeMethod, "squash", "merge", "rebase") {
-		return &InvalidError{File: file, Key: "defaults.merge_method", Reason: "must be squash, merge or rebase"}
+		add("defaults.merge_method", "must be squash, merge or rebase")
 	}
 	if err := ValidateReview(c.Defaults.Review); err != nil {
-		return &InvalidError{File: file, Key: "defaults.review", Reason: err.Error()}
+		add("defaults.review", err.Error())
 	}
 	if !oneOf(c.Pool.Clean, "warm", "pristine") {
-		return &InvalidError{File: file, Key: "pool.clean", Reason: "must be warm or pristine"}
+		add("pool.clean", "must be warm or pristine")
 	}
 	if projectFile {
 		if c.Autonomy.Yolo {
@@ -573,67 +657,72 @@ func (c Config) Validate(projectFile bool) error {
 			c.Autonomy.Merge = "auto"
 		}
 		if c.Autonomy.Review != "" && !oneOf(c.Autonomy.Review, "ask", "lead") {
-			return &InvalidError{File: file, Key: "autonomy.review", Reason: "must be ask or lead"}
+			add("autonomy.review", "must be ask or lead")
 		}
 		if c.Autonomy.Merge != "" && !oneOf(c.Autonomy.Merge, "ask", "auto") {
-			return &InvalidError{File: file, Key: "autonomy.merge", Reason: "must be ask or auto"}
+			add("autonomy.merge", "must be ask or auto")
 		}
 	} else if !reflect.DeepEqual(c.Autonomy, Autonomy{}) {
-		return &InvalidError{File: file, Key: "autonomy", Reason: "autonomy is valid only in a Project config"}
+		add("autonomy", "autonomy is valid only in a Project config")
 	}
 	if c.DispatchDefault.Use != "" {
 		if _, ok := c.Profiles[c.DispatchDefault.Use]; !ok {
-			return &InvalidError{File: file, Key: "dispatch.default.use", Reason: "references unknown Profile " + c.DispatchDefault.Use}
+			add("dispatch.default.use", "references unknown Profile "+c.DispatchDefault.Use)
 		}
 	}
 	for i, rule := range c.Dispatch {
 		if rule.Type != "" && !oneOf(rule.Type, "change", "research", "review") {
-			return &InvalidError{File: file, Key: fmt.Sprintf("dispatch[%d].type", i), Reason: "must be change, research or review"}
+			add(fmt.Sprintf("dispatch[%d].type", i), "must be change, research or review")
 		}
 		if rule.Use == "" {
-			return &InvalidError{File: file, Key: fmt.Sprintf("dispatch[%d].use", i), Reason: "must name a Profile"}
-		}
-		if _, ok := c.Profiles[rule.Use]; !ok {
-			return &InvalidError{File: file, Key: fmt.Sprintf("dispatch[%d].use", i), Reason: "references unknown Profile " + rule.Use}
+			add(fmt.Sprintf("dispatch[%d].use", i), "must name a Profile")
+		} else if _, ok := c.Profiles[rule.Use]; !ok {
+			add(fmt.Sprintf("dispatch[%d].use", i), "references unknown Profile "+rule.Use)
 		}
 	}
-	for name, profile := range c.Profiles {
+	for _, name := range sortedMapKeys(c.Profiles) {
+		profile := c.Profiles[name]
 		if profile.Kind == "" {
-			return &InvalidError{File: file, Key: "profiles." + name + ".kind", Reason: "must name a Worker kind"}
+			add("profiles."+name+".kind", "must name a Worker kind")
+			continue
 		}
 		kind := c.Kinds[profile.Kind]
 		profileFile := c.profileFile(name, file)
 		if profile.Model != "" && len(kind.ModelArgs) == 0 {
-			return &InvalidError{File: profileFile, Key: "profiles." + name + ".model", Reason: "Worker kind has no model_args template"}
+			issues = append(issues, &InvalidError{File: profileFile, Key: "profiles." + name + ".model", Reason: "Worker kind has no model_args template"})
 		}
 		if profile.Effort != "" && len(kind.EffortArgs) == 0 {
-			return &InvalidError{File: profileFile, Key: "profiles." + name + ".effort", Reason: "Worker kind has no effort_args template"}
+			issues = append(issues, &InvalidError{File: profileFile, Key: "profiles." + name + ".effort", Reason: "Worker kind has no effort_args template"})
 		}
 	}
-	for kind, profileName := range c.Lead.Profiles {
+	for _, kind := range sortedMapKeys(c.Lead.Profiles) {
+		profileName := c.Lead.Profiles[kind]
 		if profileName == "" {
-			return &InvalidError{File: file, Key: "lead.profiles." + kind, Reason: "must name a Profile"}
+			add("lead.profiles."+kind, "must name a Profile")
+			continue
 		}
 		profile, ok := c.Profiles[profileName]
 		if !ok {
-			return &InvalidError{File: file, Key: "lead.profiles." + kind, Reason: "references unknown Profile " + profileName}
+			add("lead.profiles."+kind, "references unknown Profile "+profileName)
+			continue
 		}
 		if profile.Kind != kind {
-			return &InvalidError{File: file, Key: "lead.profiles." + kind, Reason: "Profile kind must be " + kind}
+			add("lead.profiles."+kind, "Profile kind must be "+kind)
 		}
 	}
-	for name, kind := range c.Kinds {
+	for _, name := range sortedMapKeys(c.Kinds) {
+		kind := c.Kinds[name]
 		if kind.NoticeDelivery != "" && !oneOf(kind.NoticeDelivery, NoticeDeliveries...) {
-			return &InvalidError{File: file, Key: "kinds." + name + ".notice_delivery", Reason: "must be one of " + strings.Join(NoticeDeliveries, ", ")}
+			add("kinds."+name+".notice_delivery", "must be one of "+strings.Join(NoticeDeliveries, ", "))
 		}
 		if name != "claude" && kind.NoticeDelivery == NoticeDeliveryWatch && !kind.BackgroundCommands {
-			return &InvalidError{File: file, Key: "kinds." + name + ".notice_delivery", Reason: "watch requires background_commands = true"}
+			add("kinds."+name+".notice_delivery", "watch requires background_commands = true")
 		}
 	}
-	if !oneOf(c.Pool.Clean, "warm", "pristine") || c.Pool.KeepIdle < 0 {
-		return &InvalidError{File: file, Key: "pool", Reason: "clean must be warm or pristine and keep_idle cannot be negative"}
+	if c.Pool.KeepIdle < 0 {
+		add("pool.keep_idle", "cannot be negative")
 	}
-	return nil
+	return uniqueValidationErrors(issues)
 }
 
 func (c Config) profileFile(name, fallback string) string {
