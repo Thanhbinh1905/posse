@@ -111,18 +111,16 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 		}
 	}
 	path := config.ConfigPath(home, projectName)
-	if _, _, err := config.ReadFile(path); err != nil {
-		return configError(err)
-	}
 	original, originalMode, originalExists, err := configSnapshot(path)
 	if err != nil {
 		return err
 	}
+	priorIssues := config.ValidationIssues(home, projectName)
 	value, err := config.SetFile(path, key, parsed.Positionals[1], projectName != "")
 	if err != nil {
 		return configError(err)
 	}
-	if err := s.validateConfigForEdit(home, projectName); err != nil {
+	if err := s.validateConfigEdit(home, projectName, priorIssues); err != nil {
 		if rollbackErr := restoreConfigFile(path, original, originalExists, originalMode); rollbackErr != nil {
 			return errors.Join(configError(err), fmt.Errorf("restore previous config: %w", rollbackErr))
 		}
@@ -172,17 +170,15 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 		return err
 	}
 	path := config.ConfigPath(home, projectName)
-	if _, _, err := config.ReadFile(path); err != nil {
-		return configError(err)
-	}
 	original, originalMode, originalExists, err := configSnapshot(path)
 	if err != nil {
 		return err
 	}
+	priorIssues := config.ValidationIssues(home, projectName)
 	if err := config.UnsetFile(path, key, projectName != ""); err != nil {
 		return configError(err)
 	}
-	if err := s.validateConfigForEdit(home, projectName); err != nil {
+	if err := s.validateConfigEdit(home, projectName, priorIssues); err != nil {
 		if rollbackErr := restoreConfigFile(path, original, originalExists, originalMode); rollbackErr != nil {
 			return errors.Join(configError(err), fmt.Errorf("restore previous config: %w", rollbackErr))
 		}
@@ -205,7 +201,7 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 // configApprovalProject returns zero when no approval record is needed. Global
 // changes are attributed to the calling Lead's Project.
 func (s *Service) configApprovalProject(ctx context.Context, db *store.DB, key, projectName, quote string) (int64, error) {
-	if !config.IsUserOnly(key) {
+	if !config.IsUserOnlyFor(key, projectName != "") {
 		return 0, nil
 	}
 	actor := s.configCaller(ctx, db)
@@ -229,6 +225,19 @@ func (s *Service) configApprovalProject(ctx context.Context, db *store.DB, key, 
 func (s *Service) validateConfigForEdit(home, projectName string) error {
 	_, err := config.Load(home, projectName)
 	return err
+}
+
+func (s *Service) validateConfigEdit(home, projectName string, priorIssues []error) error {
+	previous := make(map[string]struct{}, len(priorIssues))
+	for _, issue := range priorIssues {
+		previous[issue.Error()] = struct{}{}
+	}
+	for _, issue := range config.ValidationIssues(home, projectName) {
+		if _, alreadyPresent := previous[issue.Error()]; !alreadyPresent {
+			return issue
+		}
+	}
+	return nil
 }
 
 func (s *Service) requireConfigCaller(ctx context.Context, db *store.DB) error {

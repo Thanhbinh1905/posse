@@ -123,6 +123,9 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	if parsed.Bool("uninstall") {
 		return s.uninstallSetup(ctx, home, manifestPath, manifest, found)
 	}
+	if err := config.ValidateAll(home); err != nil {
+		return configError(err)
+	}
 	skillMode := ""
 	if parsed.Bool("global-skills") {
 		skillMode = "install"
@@ -136,7 +139,7 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 			return axi.Reported(err)
 		}
 	} else if err != nil {
-		return err
+		return configError(err)
 	}
 	plan := renderSetupPlan(run.plan)
 	if !run.applied {

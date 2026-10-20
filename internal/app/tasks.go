@@ -64,7 +64,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		name = defaultTaskName(brief.Title)
 	}
 	if err := validateWorkerName(name); err != nil {
-		return axi.Failure("name_invalid", err.Error(), false, "Use a safe lowercase kebab-case name or omit --name for an automatic name")
+		return invalidWorkerNameFailure(name, err)
 	}
 	resolution, err := s.resolveDispatch(ctx.Context, project, cfg, brief.Type, parsed.Flags["profile"])
 	if err != nil {
@@ -154,7 +154,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		name = defaultTaskName(brief.Title)
 	}
 	if err := validateWorkerName(name); err != nil {
-		return axi.Failure("name_invalid", err.Error(), false, "Use a safe lowercase kebab-case name or omit --name for an automatic name")
+		return invalidWorkerNameFailure(name, err)
 	}
 	if project.IsDirectory() {
 		if brief.Execution != "in-place" {
@@ -760,6 +760,9 @@ func (s *Service) refreshWorkerDisplay(ctx context.Context, db *store.DB, projec
 	return err
 }
 
+const maxWorkerNameLength = 24
+const workerRetryNameSuffix = "-retry"
+
 var workerNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var conventionalCommitPrefix = regexp.MustCompile(`^[a-z]+(?:\([^)]*\))?!?:\s*`)
 var titleWordPattern = regexp.MustCompile(`[a-z0-9]+(?:-[a-z0-9]+)*`)
@@ -783,7 +786,7 @@ func taskTitleSlug(title string) string {
 			continue
 		}
 		candidate := strings.Join(append(words, word), "-")
-		if len(candidate) > 24 {
+		if len(candidate) > maxWorkerNameLength {
 			break
 		}
 		words = append(words, word)
@@ -832,10 +835,27 @@ var titleStopWords = map[string]bool{"a": true, "an": true, "and": true, "enable
 var taskIDNamePattern = regexp.MustCompile(`^t[0-9]+$`)
 
 func validateWorkerName(name string) error {
-	if len([]rune(name)) > 24 || !workerNamePattern.MatchString(name) || taskIDNamePattern.MatchString(name) {
+	if len([]rune(name)) > maxWorkerNameLength || !workerNamePattern.MatchString(name) || taskIDNamePattern.MatchString(name) {
 		return fmt.Errorf("invalid Task Name: must be lowercase kebab-case, at most 24 characters, and not a Task ID")
 	}
 	return nil
+}
+
+func invalidWorkerNameFailure(name string, cause error) error {
+	retryName := workerNameRetrySuggestion(name)
+	return axi.Failure("name_invalid", cause.Error(), false, "Retry with `--name "+retryName+"` (lowercase kebab-case, at most 24 characters), or omit `--name` for an automatic name")
+}
+
+func workerNameRetrySuggestion(name string) string {
+	slug := strings.Join(titleWordPattern.FindAllString(strings.ToLower(name), -1), "-")
+	limit := maxWorkerNameLength - len(workerRetryNameSuffix)
+	if len(slug) > limit {
+		slug = strings.TrimRight(slug[:limit], "-")
+	}
+	if slug == "" {
+		slug = "task"
+	}
+	return slug + workerRetryNameSuffix
 }
 
 func createTaskWithSequence(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task) (int64, int, error) {

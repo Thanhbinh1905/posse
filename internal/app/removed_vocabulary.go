@@ -8,7 +8,7 @@ import (
 
 // User input is rejected. The recorded 0.14 Lead adapter protocol is the only
 // executable exception, and uses the canonical Watch's caller guards.
-func addRemovedVocabularyCommands(root *axi.Command) {
+func addRemovedVocabularyCommands(root *axi.Command, legacyPoller func(*axi.Context, []string) (bool, error)) {
 	var watchHandler func(*axi.Context, []string) error
 	for _, command := range root.Subcommands {
 		if command.Name == "watch" {
@@ -23,18 +23,23 @@ func addRemovedVocabularyCommands(root *axi.Command) {
 		old, replacement := entry[0], entry[1]
 		command := &axi.Command{Name: old, Hidden: true, ReplacedBy: replacement}
 		if old == "lookout" && watchHandler != nil {
-			command.Handler = legacyAdapterWatch(watchHandler)
+			command.Handler = legacyAdapterWatch(watchHandler, legacyPoller)
 		}
 		root.Subcommands = append(root.Subcommands, command)
 	}
 }
 
-func legacyAdapterWatch(watch func(*axi.Context, []string) error) func(*axi.Context, []string) error {
+func legacyAdapterWatch(watch func(*axi.Context, []string) error, legacyPoller func(*axi.Context, []string) (bool, error)) func(*axi.Context, []string) error {
 	return func(ctx *axi.Context, args []string) error {
 		parsed, err := parseArgs("watch", args, map[string]flagSpec{
-			"quiet-routine": {boolean: true}, "handoff": {boolean: true}, "destination": {},
+			"quiet-routine": {boolean: true}, "poll-only": {boolean: true}, "handoff": {boolean: true}, "destination": {},
 			"receipt": {}, "receipt-outcome": {}, "receipt-token": {},
 		})
+		if err == nil && len(args) == 1 && args[0] == "--poll-only" && legacyPoller != nil {
+			if handled, watchErr := legacyPoller(ctx, args); handled {
+				return watchErr
+			}
+		}
 		if err == nil && ctx.JSON && len(parsed.Positionals) == 0 {
 			destination := parsed.Flags["destination"]
 			adapter, session, _ := strings.Cut(destination, ":")

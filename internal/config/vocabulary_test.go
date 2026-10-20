@@ -44,6 +44,82 @@ func TestStoredVocabularyMigratesOnceAndRejectsReintroducedKeys(t *testing.T) {
 	}
 }
 
+func TestRepairingLegacyReviewPreservesOriginalVocabularyBackup(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	original := "[defaults]\nreview = 'on_risk'\nlanding_mode = 'pr'\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetFile(path, "defaults.review", "none", false); err != nil {
+		t.Fatalf("repair review: %v", err)
+	}
+	if _, err := Load(home, ""); err != nil {
+		t.Fatalf("load repaired config: %v", err)
+	}
+	backup, err := os.ReadFile(path + ".v014")
+	if err != nil || string(backup) != original {
+		t.Fatalf("migration backup = %q err=%v; want original %q", backup, err, original)
+	}
+}
+
+func TestVocabularyMigrationPreservesCommentsAndLayout(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	original := "# User comment\n[remuda] # Pool settings\nkeep_idle   = 7 # Keep four extra Sandboxes\n\n[defaults]\nlanding_mode = 'pr' # Selected merge mode\nauto_unsaddle = 'landed'\n"
+	want := "# posse vocabulary: 1\n# User comment\n[pool] # Pool settings\nkeep_idle   = 7 # Keep four extra Sandboxes\n\n[defaults]\nmerge_mode = 'pr' # Selected merge mode\nauto_teardown = 'merged'\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(home, ""); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != want {
+		t.Fatalf("migrated config = %q, err %v; want %q", data, err, want)
+	}
+}
+
+func TestValidateAllChecksProjectConfigWithoutWriting(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "projects", "shop", "config.toml")
+	original := "[defaults]\nreview = 'on_risk'\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAll(home); err == nil || !strings.Contains(err.Error(), "defaults.review") || !strings.Contains(err.Error(), "on_risk") {
+		t.Fatalf("ValidateAll did not reject the legacy Project policy: %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != original {
+		t.Fatalf("read-only validation changed config: %q err=%v", data, err)
+	}
+	for _, suffix := range []string{".v014", ".vocabulary", ".vocabulary-lock"} {
+		if _, err := os.Stat(path + suffix); !os.IsNotExist(err) {
+			t.Fatalf("read-only validation created %s: %v", suffix, err)
+		}
+	}
+}
+
+func TestVocabularyMigrationPreservesInlineDispatchComments(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	original := "# Keep ship in this comment\ndispatch = [\n  { type = 'ship', use = 'builder' }, # legacy rule\n]\n"
+	want := "# posse vocabulary: 1\n# Keep ship in this comment\ndispatch = [\n  { type = 'change', use = 'builder' }, # legacy rule\n]\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(home, ""); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != want {
+		t.Fatalf("migrated config = %q, err %v; want %q", data, err, want)
+	}
+}
+
 func TestVocabularyUpgradeRejectsConflictingKeysWithoutWriting(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "config.toml")

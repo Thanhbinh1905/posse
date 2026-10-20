@@ -434,6 +434,70 @@ func containsArgument(args []string, value string) bool {
 	return false
 }
 
+func (s *Service) legacyPollerAdapter(ctx *axi.Context, args []string) (bool, error) {
+	if len(args) != 1 || args[0] != "--poll-only" || len(os.Args) != 3 || os.Args[1] != "lookout" || os.Args[2] != "--poll-only" {
+		return false, nil
+	}
+	home, err := s.homePath()
+	if err != nil {
+		return false, nil
+	}
+	environment := parseProcessEnvironment(strings.Join(os.Environ(), "\x00"))
+	if environment["POSSE_LOOKOUT_PROJECT_ID"] == "" || environment["POSSE_LOOKOUT_TOKEN"] == "" || environment["POSSE_LOOKOUT_STARTED_AT"] == "" {
+		return false, nil
+	}
+	process, ok := watchFromArgs(os.Getpid(), os.Args, environment, home)
+	if !ok || !process.PollOnly || process.WatchProjectID < 1 || process.WatchToken == "" || process.WatchStartedAt < 1 {
+		return false, nil
+	}
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		return false, nil
+	}
+	project, err := db.ProjectByID(ctx.Context, process.WatchProjectID)
+	if err != nil {
+		_ = db.Close()
+		return false, nil
+	}
+	runtime, err := db.WatchRuntime(ctx.Context, project.ID)
+	if err != nil {
+		_ = db.Close()
+		return false, nil
+	}
+	workingDir, err := currentDir()
+	if err != nil {
+		_ = db.Close()
+		return false, nil
+	}
+	registered, found, err := registeredProjectFor(ctx.Context, db, workingDir)
+	_ = db.Close()
+	if err != nil || !found || registered.ID != project.ID || runtime.PID != os.Getpid() || runtime.Token != process.WatchToken || runtime.StartedAt != process.WatchStartedAt {
+		return false, nil
+	}
+	running, ok := inspectWatchExecutable(os.Getpid())
+	if !ok || !watchExecutableVerifier(running.Path) || runtime.ExecutableDevice != running.Device || runtime.ExecutableInode != running.Inode {
+		return false, nil
+	}
+	for _, binding := range []struct{ key, value string }{
+		{watchRuntimeProjectEnv, strconv.FormatInt(project.ID, 10)},
+		{watchRuntimeTokenEnv, runtime.Token},
+		{watchRuntimeStartedEnv, strconv.FormatInt(runtime.StartedAt, 10)},
+	} {
+		if err := os.Setenv(binding.key, binding.value); err != nil {
+			return true, err
+		}
+	}
+	for _, key := range []string{"POSSE_LOOKOUT_PROJECT_ID", "POSSE_LOOKOUT_TOKEN", "POSSE_LOOKOUT_STARTED_AT"} {
+		if err := os.Unsetenv(key); err != nil {
+			return true, err
+		}
+	}
+	if len(os.Args) > 1 && os.Args[1] == "lookout" {
+		os.Args[1] = "watch"
+	}
+	return true, s.wait(ctx, args)
+}
+
 func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal) error {
 	token := os.Getenv(watchRuntimeTokenEnv)
 	if token == "" {

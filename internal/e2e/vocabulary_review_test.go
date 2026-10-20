@@ -102,10 +102,12 @@ func Test014ProjectShorthandConfigVocabularyUpgrade(t *testing.T) {
 			// v0.14.0 docs/spec.md Project example, plus its supported
 			// auto_unsaddle shorthand and terminal value.
 			original := "# Project configuration\nlanding_mode = '" + mode + "'\nauto_unsaddle = 'landed'\ngate = ['just test']\n[defaults]\nforge = 'gitlab'\n[repositories.worker]\nlanding_mode = 'local'\ntarget_branch = 'staging'\ngate = ['make test']\nforge = 'github'\n[autonomy]\nyolo = false\nreview = 'ask'\nland = 'ask'\n"
-			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
-				t.Fatal(err)
+			for _, suffix := range []string{".vocabulary", ".v014"} {
+				if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
 			}
-			if err := os.Remove(path + ".vocabulary"); err != nil && !os.IsNotExist(err) {
+			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			output := runPosse(t, f.binary, f.repo, f.leadEnv, "config", "show", "--project", f.project.Name, "--effective", "--json")
