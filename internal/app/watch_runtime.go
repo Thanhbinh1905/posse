@@ -662,6 +662,31 @@ func (s *Service) watchMaintenanceInFlight() bool {
 	return len(s.maintenance) > 0
 }
 
+func legacyPollerInstalledExecutable(home string) (watchExecutableIdentity, bool) {
+	manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName))
+	if err != nil || !found || manifest.Binary == "" {
+		return watchExecutableIdentity{}, false
+	}
+	return watchExecutableAt(manifest.Binary)
+}
+
+func (s *Service) reexecLegacyWatch(target watchExecutableIdentity) error {
+	args := watchReexecArguments(os.Args)
+	if len(args) == 0 {
+		args = []string{target.Path}
+	} else {
+		args[0] = target.Path
+	}
+	execProcess := syscall.Exec
+	if s.reexecUpdate != nil {
+		execProcess = s.reexecUpdate
+	}
+	if err := execProcess(target.Path, args, os.Environ()); err != nil {
+		return fmt.Errorf("re-exec legacy poller into the installed Watch: %w", err)
+	}
+	return errors.New("legacy Watch re-exec returned unexpectedly")
+}
+
 func (s *Service) legacyPollerAdapter(ctx *axi.Context, args []string) (bool, error) {
 	if len(args) != 1 || args[0] != "--poll-only" || len(os.Args) != 3 || os.Args[1] != "lookout" || os.Args[2] != "--poll-only" {
 		return false, nil
@@ -722,6 +747,11 @@ func (s *Service) legacyPollerAdapter(ctx *axi.Context, args []string) (bool, er
 	}
 	if len(os.Args) > 1 && os.Args[1] == "lookout" {
 		os.Args[1] = "watch"
+	}
+	// The legacy protocol is the one-time exception to the spawned-binary baseline:
+	// move an old lookout into the installed Watch before it enters the poll loop.
+	if target, found := legacyPollerInstalledExecutable(home); found && !sameWatchExecutableIdentity(target, running) {
+		return true, s.reexecLegacyWatch(target)
 	}
 	return true, s.wait(ctx, args)
 }

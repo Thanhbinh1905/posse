@@ -70,6 +70,7 @@ func (s *Service) structureStoreErrors(command *axi.Command) {
 			ctx.Context = withObservationWarningWriter(ctx.Context, ctx.ErrOut)
 			err := normalizeCommandError(handler(ctx, args))
 			if err == nil {
+				flushDeferredProjectObservation(ctx.Context)
 				s.superviseWatchRuntimes(ctx, name, args)
 			}
 			return err
@@ -529,14 +530,40 @@ func (s *Service) prepareProjectWatchObservation(ctx context.Context, db *store.
 
 type observationWarningWriterKey struct{}
 
+type observationWarningState struct {
+	mu       sync.Mutex
+	writer   io.Writer
+	deferred bool
+}
+
+const deferredProjectObservationWarning = "Project reconciliation was deferred due to database contention; the displayed state may be stale."
+
 func withObservationWarningWriter(ctx context.Context, writer io.Writer) context.Context {
-	return context.WithValue(ctx, observationWarningWriterKey{}, writer)
+	state := &observationWarningState{writer: writer}
+	return context.WithValue(ctx, observationWarningWriterKey{}, state)
 }
 
 func warnDeferredProjectObservation(ctx context.Context) {
-	writer, ok := ctx.Value(observationWarningWriterKey{}).(io.Writer)
-	if ok && writer != nil {
-		fmt.Fprintln(writer, "Project reconciliation was deferred due to database contention; the displayed state may be stale.")
+	state, ok := ctx.Value(observationWarningWriterKey{}).(*observationWarningState)
+	if !ok || state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.deferred = true
+	state.mu.Unlock()
+}
+
+func flushDeferredProjectObservation(ctx context.Context) {
+	state, ok := ctx.Value(observationWarningWriterKey{}).(*observationWarningState)
+	if !ok || state == nil {
+		return
+	}
+	state.mu.Lock()
+	deferred, writer := state.deferred, state.writer
+	state.deferred = false
+	state.mu.Unlock()
+	if deferred && writer != nil {
+		fmt.Fprintln(writer, deferredProjectObservationWarning)
 	}
 }
 

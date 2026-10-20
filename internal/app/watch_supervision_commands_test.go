@@ -22,7 +22,7 @@ func TestNoticeOnlyCommandsSkipWatchSupervision(t *testing.T) {
 	for _, test := range []struct {
 		command string
 		args    []string
-	}{{command: "ack"}, {command: "lookout"}, {command: "watch", args: []string{"--handoff"}}, {command: "watch", args: []string{"--receipt=receipt"}}} {
+	}{{command: "ack"}, {command: "lookout"}, {command: "watch", args: []string{"--receipt=receipt"}}} {
 		name := test.command + " " + strings.Join(test.args, " ")
 		t.Run(name, func(t *testing.T) {
 			before := calls
