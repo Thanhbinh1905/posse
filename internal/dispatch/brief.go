@@ -598,7 +598,7 @@ func ResolveReview(requested, current string, userChoice bool) (string, error) {
 	if err := config.ValidateReview(requested); err != nil {
 		return "", &BriefError{Field: "review", Reason: err.Error()}
 	}
-	rank := map[string]int{"none": 0, "local": 1, "no-mistakes": 2}
+	rank := map[string]int{"none": 0, "quick": 1, "full-pipeline": 2, "no-mistakes": 2}
 	if !userChoice && rank[requested] < rank[current] {
 		return "", &BriefError{Field: "review", Reason: "cannot loosen the Project review policy without a scoped User choice"}
 	}

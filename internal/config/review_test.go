@@ -14,7 +14,7 @@ func TestReviewDefaultsOverridesAndUserControl(t *testing.T) {
 		t.Fatalf("defaults: %#v %v", cfg.Defaults, err)
 	}
 	path := ConfigPath(home, "shop")
-	if _, err := SetFile(path, "defaults.review", "local", true); err != nil {
+	if _, err := SetFile(path, "defaults.review", "quick", true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := SetFile(path, "repositories.api.review", "none", true); err != nil {
@@ -24,7 +24,7 @@ func TestReviewDefaultsOverridesAndUserControl(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err = Load(home, "shop")
-	if err != nil || cfg.MemberReview("api") != "none" || cfg.MemberReview("worker") != "no-mistakes" || cfg.MemberReview("tool") != "local" {
+	if err != nil || cfg.MemberReview("api") != "none" || cfg.MemberReview("worker") != "no-mistakes" || cfg.MemberReview("tool") != "quick" {
 		t.Fatalf("overrides: %#v %v", cfg, err)
 	}
 	for _, key := range []string{"defaults.review", "repositories.api.review"} {
@@ -88,7 +88,7 @@ func TestExplicitLegacyReviewRefusesEveryConfigLayer(t *testing.T) {
 					}
 				}
 				_, err := Load(home, "shop")
-				if err == nil || !strings.Contains(err.Error(), "legacy review policy") || !strings.Contains(err.Error(), "none, local or no-mistakes") || !strings.Contains(err.Error(), path) {
+				if err == nil || !strings.Contains(err.Error(), "legacy review policy") || !strings.Contains(err.Error(), "none, quick, full-pipeline or no-mistakes") || !strings.Contains(err.Error(), path) {
 					t.Fatalf("legacy loaded: %v", err)
 				}
 			})

@@ -6,19 +6,26 @@ import (
 )
 
 func TestReviewPolicyBriefSelectionAndMigration(t *testing.T) {
-	for _, policy := range []string{"none", "local", "no-mistakes", "always", "on_risk", "never"} {
+	for _, policy := range []string{"none", "quick", "full-pipeline", "no-mistakes", "local", "always", "on_risk", "never"} {
 		text := "---\ntype: change\ntitle: Policy\ndone_when: checked\nreview: " + policy + "\n---\n"
 		brief, err := ParseBriefText(text)
 		legacy := policy == "always" || policy == "on_risk" || policy == "never"
-		if legacy {
+		switch {
+		case policy == "local":
+			if err == nil || !strings.Contains(err.Error(), "use quick") {
+				t.Fatalf("local alias admitted: %v", err)
+			}
+		case legacy:
 			if err == nil || !strings.Contains(err.Error(), "legacy review policy") {
 				t.Fatalf("legacy admitted: %s %v", policy, err)
 			}
 			if historical, err := ParseHistoricalBriefText(text); err != nil || historical.Review != policy {
 				t.Fatalf("historical Brief changed: %#v %v", historical, err)
 			}
-		} else if err != nil || brief.Review != policy {
-			t.Fatalf("policy refused: %#v %v", brief, err)
+		default:
+			if err != nil || brief.Review != policy {
+				t.Fatalf("policy refused: %#v %v", brief, err)
+			}
 		}
 	}
 }
@@ -54,10 +61,10 @@ func TestReviewPolicyTighteningAndScopedChoice(t *testing.T) {
 		current, requested string
 		consent, allowed   bool
 	}{
-		{"none", "", false, true}, {"none", "local", false, true}, {"local", "no-mistakes", false, true},
-		{"local", "none", false, false}, {"no-mistakes", "local", false, false},
-		{"local", "none", true, true}, {"no-mistakes", "local", true, true},
-		{"always", "none", true, false}, {"none", "invented", true, false},
+		{"none", "", false, true}, {"none", "quick", false, true}, {"quick", "full-pipeline", false, true},
+		{"quick", "none", false, false}, {"full-pipeline", "quick", false, false}, {"no-mistakes", "quick", false, false},
+		{"quick", "none", true, true}, {"no-mistakes", "quick", true, true},
+		{"always", "none", true, false}, {"none", "invented", true, false}, {"local", "quick", true, false},
 	} {
 		got, err := ResolveReview(tc.requested, tc.current, tc.consent)
 		if (err == nil) != tc.allowed {

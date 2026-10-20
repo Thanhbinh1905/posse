@@ -14,7 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 3
+const Version = 4
 
 const (
 	RootContextNone     = "none"
@@ -301,7 +301,7 @@ func Resolve(r Request) (Plan, error) {
 
 func (p Plan) Validate() error {
 	invalid := func(message string) error { return fmt.Errorf("invalid execution plan: %s", message) }
-	if p.Version != 1 && p.Version != 2 && p.Version != Version || p.Revision < 1 {
+	if p.Version != 1 && p.Version != 2 && p.Version != 3 && p.Version != Version || p.Revision < 1 {
 		return invalid("unsupported version or revision")
 	}
 	if p.Revision == 1 && p.PreviousSHA256 != "" || p.Revision > 1 && len(p.PreviousSHA256) != 64 {
@@ -330,6 +330,10 @@ func (p Plan) Validate() error {
 		if !config.LegacyReview(p.Review) {
 			return invalid("unsupported legacy review policy")
 		}
+	} else if p.Version < Version {
+		if err := config.ValidateHistoricalReview(p.Review); err != nil {
+			return invalid(err.Error())
+		}
 	} else if err := config.ValidateReview(p.Review); err != nil {
 		return invalid(err.Error())
 	}
@@ -338,6 +342,9 @@ func (p Plan) Validate() error {
 	}
 	if p.Execution.Scope == "workspace" && p.Delivery == "no-mistakes" {
 		return invalid("no-mistakes delivery is unsupported for Workspaces")
+	}
+	if p.Version == Version && p.Review == "full-pipeline" && p.Delivery == "no-mistakes" {
+		return invalid("full-pipeline cannot use no-mistakes delivery")
 	}
 	if p.Execution.Mode == "in-place" {
 		if p.Execution.Scope != "directory" || len(p.Execution.Paths) == 0 || p.Delivery != "local" {
@@ -406,7 +413,11 @@ func (p Plan) Validate() error {
 			return invalid("invalid pinned Member base commit")
 		}
 		if p.Version >= 2 {
-			if err := config.ValidateReview(member.Review); err != nil {
+			validateReview := config.ValidateReview
+			if p.Version < Version {
+				validateReview = config.ValidateHistoricalReview
+			}
+			if err := validateReview(member.Review); err != nil {
 				return invalid("Member " + member.Name + ": " + err.Error())
 			}
 			if member.ReviewSource == "" {

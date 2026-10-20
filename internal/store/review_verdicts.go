@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Review verdicts. Only ReviewPass satisfies local review.
+// Review verdicts. Only ReviewPass satisfies quick review.
 const (
 	ReviewPass             = "pass"
 	ReviewChangesRequested = "changes_requested"

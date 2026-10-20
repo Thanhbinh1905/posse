@@ -107,7 +107,7 @@ func noMistakesQueryFailure(commit string, err error) error {
 	detail := truncate(strings.TrimSpace(err.Error()), 1200)
 	lower := strings.ToLower(detail)
 	if strings.Contains(lower, "unknown flag") || strings.Contains(lower, "unknown command") || strings.Contains(lower, "unknown shorthand flag") {
-		return axi.Failure("review_receipt_unsupported", "the installed no-mistakes cannot report a review receipt (`no-mistakes axi receipt --head <sha>`)", false, detail, "Upgrade to a no-mistakes release that implements the "+noMistakesReceiptSchema+" receipt, or have the User select a different review policy; CI, forge approval or a local Review cannot substitute")
+		return axi.Failure("review_receipt_unsupported", "the installed no-mistakes cannot report a review receipt (`no-mistakes axi receipt --head <sha>`)", false, detail, "Upgrade to a no-mistakes release that implements the "+noMistakesReceiptSchema+" receipt, or have the User select a different review policy; CI, forge approval or a quick Review cannot substitute")
 	}
 	retryable := errors.Is(err, context.DeadlineExceeded)
 	return axi.Failure("review_receipt_unavailable", "no-mistakes returned no review receipt for "+shortSHA(commit), retryable, detail, "Run the no-mistakes pipeline for this exact commit, then retry")

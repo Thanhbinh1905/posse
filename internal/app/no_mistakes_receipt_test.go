@@ -162,9 +162,9 @@ func TestNoMistakesReceiptQualifiesExactHeadAndIsRecordedOnce(t *testing.T) {
 	requireFailureCode(t, requireSelectedReviewAt(ctx, f.db, f.project, config.Config{}, f.task, f.headSHA), "review_receipt_unsupported")
 }
 
-func TestLocalReviewBindsToExplicitPullRequestHead(t *testing.T) {
+func TestQuickReviewBindsToExplicitPullRequestHead(t *testing.T) {
 	f := newReviewVerdictFixture(t)
-	freezeReviewPolicy(t, f, "local", taskplan.Version)
+	freezeReviewPolicy(t, f, "quick", taskplan.Version)
 	if code, out := f.signal(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
 		t.Fatalf("verdict: %d %s", code, out)
 	}
@@ -178,7 +178,7 @@ func TestLocalReviewBindsToExplicitPullRequestHead(t *testing.T) {
 
 func TestMergedPullRequestWithoutEvidenceIsPolicyViolation(t *testing.T) {
 	f := newReviewVerdictFixture(t)
-	freezeReviewPolicy(t, f, "local", taskplan.Version)
+	freezeReviewPolicy(t, f, "quick", taskplan.Version)
 	merged := store.PRObservation{PRURL: f.task.PRURL, HeadSHA: f.headSHA, State: "MERGED", MergeCommit: strings.Repeat("e", 40), ObservedAt: 7}
 	notice, violated := reviewPolicyViolation(context.Background(), f.db, f.project, config.Config{}, f.task, merged)
 	if !violated || notice.Kind != "review_policy_violation" || !strings.Contains(notice.DataJSON, `"evidence_error":"review_required"`) || !strings.Contains(notice.Summary, "without the selected review evidence") {

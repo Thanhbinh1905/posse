@@ -67,7 +67,7 @@ func TestVocabularyMigrationPreservesCommentsAndLayout(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "config.toml")
 	original := "# User comment\n[remuda] # Pool settings\nkeep_idle   = 7 # Keep four extra Sandboxes\n\n[defaults]\nlanding_mode = 'pr' # Selected merge mode\nauto_unsaddle = 'landed'\n"
-	want := "# posse vocabulary: 1\n# User comment\n[pool] # Pool settings\nkeep_idle   = 7 # Keep four extra Sandboxes\n\n[defaults]\nmerge_mode = 'pr' # Selected merge mode\nauto_teardown = 'merged'\n"
+	want := "# posse vocabulary: 2\n# User comment\n[pool] # Pool settings\nkeep_idle   = 7 # Keep four extra Sandboxes\n\n[defaults]\nmerge_mode = 'pr' # Selected merge mode\nauto_teardown = 'merged'\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestVocabularyMigrationPreservesInlineDispatchComments(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "config.toml")
 	original := "# Keep ship in this comment\ndispatch = [\n  { type = 'ship', use = 'builder' }, # legacy rule\n]\n"
-	want := "# posse vocabulary: 1\n# Keep ship in this comment\ndispatch = [\n  { type = 'change', use = 'builder' }, # legacy rule\n]\n"
+	want := "# posse vocabulary: 2\n# Keep ship in this comment\ndispatch = [\n  { type = 'change', use = 'builder' }, # legacy rule\n]\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}

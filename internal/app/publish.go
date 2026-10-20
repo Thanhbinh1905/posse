@@ -68,6 +68,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if err := ensureSelectedReviewModeReady(out.Context, db, project, cfg, task); err != nil {
+		return err
+	}
 	repoFilter := ""
 	if project.IsWorkspace() {
 		if parsed.Flags["repo"] == "" {

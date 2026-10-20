@@ -12,7 +12,35 @@ import (
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 )
 
-const vocabularyMarker = "# posse vocabulary: 1\n"
+const (
+	vocabularyMarkerV1 = "# posse vocabulary: 1\n"
+	vocabularyMarker   = "# posse vocabulary: 2\n"
+)
+
+func vocabularyMarkerVersion(data []byte) int {
+	switch {
+	case bytes.HasPrefix(data, []byte(vocabularyMarker)):
+		return 2
+	case bytes.HasPrefix(data, []byte(vocabularyMarkerV1)):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func vocabularyVersion(data []byte, path string) (int, error) {
+	if version := vocabularyMarkerVersion(data); version > 0 {
+		return version, nil
+	}
+	marker, err := os.ReadFile(path + ".vocabulary")
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return vocabularyMarkerVersion(marker), nil
+}
 
 // ReplacementKey is shared by validation and the one-time stored-config upgrade.
 func ReplacementKey(key string) string {
@@ -47,13 +75,12 @@ func unknownKeyReason(key string) string {
 }
 
 func preserveVocabularyBackup(path string, original []byte) error {
-	if bytes.HasPrefix(original, []byte(vocabularyMarker)) {
-		return nil
-	}
-	if marker, err := os.ReadFile(path + ".vocabulary"); err == nil && string(marker) == vocabularyMarker {
-		return nil
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	version, err := vocabularyVersion(original, path)
+	if err != nil {
 		return err
+	}
+	if version > 0 {
+		return nil
 	}
 	var values map[string]any
 	if _, err := toml.Decode(string(original), &values); err != nil {
@@ -127,19 +154,20 @@ func writeFileIfMissing(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-// migrateVocabularyFile upgrades stored 0.14 config exactly once, before it is
-// validated. Subsequent legacy input is an error, not a working alias. Preserve
-// the original bytes next to the file for rollback, including comments.
+// migrateVocabularyFile upgrades stored config once per vocabulary version,
+// before it is validated. The v2 migration renames review local to quick; later
+// explicit local values are rejected rather than treated as an alias.
 func migrateVocabularyFile(path string) error {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil || bytes.HasPrefix(data, []byte(vocabularyMarker)) {
+	if err != nil {
 		return err
 	}
-	if marker, err := os.ReadFile(path + ".vocabulary"); err == nil && string(marker) == vocabularyMarker {
-		return nil
+	version, err := vocabularyVersion(data, path)
+	if err != nil || version >= 2 {
+		return err
 	}
 	lock, err := os.OpenFile(path+".vocabulary-lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -151,14 +179,24 @@ func migrateVocabularyFile(path string) error {
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	data, err = os.ReadFile(path)
-	if err != nil || bytes.HasPrefix(data, []byte(vocabularyMarker)) {
+	if err != nil {
+		return err
+	}
+	version, err = vocabularyVersion(data, path)
+	if err != nil || version >= 2 {
 		return err
 	}
 	values := map[string]any{}
 	if _, err := toml.Decode(string(data), &values); err != nil {
 		return &InvalidError{File: path, Key: tomlErrorKey(err), Cause: err}
 	}
-	changed, err := migrateVocabularyMap(values, "")
+	originalValues := clone(values).(map[string]any)
+	var changed bool
+	if version == 1 {
+		changed = migrateReviewPolicies(values, "")
+	} else {
+		changed, err = migrateVocabularyMap(values, "")
+	}
 	if err != nil {
 		return &InvalidError{File: path, Key: "config", Cause: err}
 	}
@@ -167,18 +205,73 @@ func migrateVocabularyFile(path string) error {
 	if err := ValidateSchemaMap(path, values, true); err != nil {
 		return err
 	}
+	inlineVersion := vocabularyMarkerVersion(data)
 	if !changed {
+		if inlineVersion == 1 {
+			updated := append([]byte(vocabularyMarker), data[len(vocabularyMarkerV1):]...)
+			return atomicfile.Write(path, updated, filePerm(path))
+		}
 		return atomicfile.Write(path+".vocabulary", []byte(vocabularyMarker), 0o600)
 	}
 	updatedText, err := rewriteVocabularyText(string(data), values)
 	if err != nil {
 		return &InvalidError{File: path, Key: "config", Cause: err}
 	}
+	if inlineVersion == 1 {
+		updatedText = strings.TrimPrefix(updatedText, vocabularyMarkerV1)
+	}
 	updated := append([]byte(vocabularyMarker), []byte(updatedText)...)
-	if err := writeFileIfMissing(path+".v014", data, filePerm(path)); err != nil {
-		return err
+	if containsReviewLocal(originalValues, "") {
+		if err := writeFileIfMissing(path+".v015", data, filePerm(path)); err != nil {
+			return err
+		}
+	}
+	if version == 0 && containsLegacyVocabulary(originalValues, "") {
+		if err := writeFileIfMissing(path+".v014", data, filePerm(path)); err != nil {
+			return err
+		}
 	}
 	return atomicfile.Write(path, updated, filePerm(path))
+}
+
+func containsReviewLocal(values map[string]any, prefix string) bool {
+	for key, value := range values {
+		full := key
+		if prefix != "" {
+			full = prefix + "." + key
+		}
+		if text, ok := value.(string); ok && isReviewPolicyPath(full) && text == "local" {
+			return true
+		}
+		if table, ok := value.(map[string]any); ok && containsReviewLocal(table, full) {
+			return true
+		}
+	}
+	return false
+}
+
+func isReviewPolicyPath(path string) bool {
+	if path == "review" || path == "defaults.review" {
+		return true
+	}
+	return strings.HasPrefix(path, "repositories.") && strings.HasSuffix(path, ".review") && strings.Count(path, ".") == 2
+}
+
+func migrateReviewPolicies(values map[string]any, prefix string) bool {
+	changed := false
+	for key, value := range values {
+		full := key
+		if prefix != "" {
+			full = prefix + "." + key
+		}
+		if text, ok := value.(string); ok && isReviewPolicyPath(full) && text == "local" {
+			values[key], value, changed = "quick", "quick", true
+		}
+		if table, ok := value.(map[string]any); ok && migrateReviewPolicies(table, full) {
+			changed = true
+		}
+	}
+	return changed
 }
 
 func migrateVocabularyMap(values map[string]any, prefix string) (bool, error) {
@@ -198,6 +291,9 @@ func migrateVocabularyMap(values map[string]any, prefix string) (bool, error) {
 				delete(values, key)
 				values[newKey], key, full, changed = value, newKey, target, true
 			}
+		}
+		if text, ok := value.(string); ok && isReviewPolicyPath(full) && text == "local" {
+			values[key], value, changed = "quick", "quick", true
 		}
 		if table, ok := value.(map[string]any); ok {
 			childChanged, err := migrateVocabularyMap(table, full)

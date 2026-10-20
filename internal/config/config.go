@@ -418,13 +418,15 @@ func readConfigMap(path string, migrate bool) (map[string]any, error) {
 	if decoded == nil {
 		decoded = map[string]any{}
 	}
-	if !migrate && !bytes.HasPrefix(data, []byte(vocabularyMarker)) {
-		marker, markerErr := os.ReadFile(path + ".vocabulary")
-		if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
-			return nil, markerErr
+	if !migrate {
+		version, err := vocabularyVersion(data, path)
+		if err != nil {
+			return nil, err
 		}
-		if string(marker) != vocabularyMarker {
-			if _, err := migrateVocabularyMap(decoded, ""); err != nil {
+		if version < 2 {
+			if version == 1 {
+				migrateReviewPolicies(decoded, "")
+			} else if _, err := migrateVocabularyMap(decoded, ""); err != nil {
 				return nil, &InvalidError{File: path, Key: "config", Cause: err}
 			}
 		}

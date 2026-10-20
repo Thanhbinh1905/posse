@@ -114,6 +114,38 @@ func TestLegacyPlansWithoutValidationLoopsKeepTheirOldContract(t *testing.T) {
 	}
 }
 
+func TestFullPipelineSelectionIsFrozenAndLegacyLocalPlansRemainReadable(t *testing.T) {
+	r := request("change")
+	r.Review = "full-pipeline"
+	plan, err := taskplan.Resolve(r)
+	if err != nil || plan.Review != "full-pipeline" {
+		t.Fatalf("full-pipeline was not frozen: %#v %v", plan, err)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := taskplan.Decode(encoded)
+	if err != nil || restored.Review != "full-pipeline" {
+		t.Fatalf("full-pipeline did not survive plan round-trip: %#v %v", restored, err)
+	}
+
+	legacy := request("change")
+	legacyPlan, err := taskplan.Resolve(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPlan.Version, legacyPlan.Review, legacyPlan.Preferences[1].Value = 3, "local", "local"
+	legacyBytes, err := legacyPlan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRestored, err := taskplan.Decode(legacyBytes)
+	if err != nil || legacyRestored.Version != 3 || legacyRestored.Review != "local" {
+		t.Fatalf("frozen legacy local plan changed: %#v %v", legacyRestored, err)
+	}
+}
+
 func TestWorkspaceRootContextIsFrozenAndDefaultsToNone(t *testing.T) {
 	r := request("research")
 	r.Brief = taskplan.Select("brief", "brief.md", []byte("---\ntype: research\ntitle: Inspect workspace\ndone_when: report is saved\nroot_context: read-only\n---\n"))
@@ -184,6 +216,7 @@ func TestUnsupportedExecutionCombinationsAreRejected(t *testing.T) {
 		{"executor mode", func(r *taskplan.Request) { r.Execution.Mode = "in-place" }},
 		{"scope", func(r *taskplan.Request) { r.Execution.Scope = "remote" }},
 		{"workspace no-mistakes", func(r *taskplan.Request) { r.Execution.Scope = "workspace"; r.Delivery = "no-mistakes" }},
+		{"full-pipeline no-mistakes delivery", func(r *taskplan.Request) { r.Review = "full-pipeline"; r.Delivery = "no-mistakes" }},
 		{"workspace missing members", func(r *taskplan.Request) { r.Execution.Scope = "workspace" }},
 		{"repo members", func(r *taskplan.Request) {
 			r.Execution.Members = []taskplan.Member{{Name: "api", Path: "api", Delivery: "local"}}
@@ -229,7 +262,8 @@ func TestInPlaceExecutionRequiresConsentLocalDeliveryAndNonOverlappingScopes(t *
 		{"missing consent", func(r *taskplan.Request) { r.UserChoice = nil }},
 		{"pull request", func(r *taskplan.Request) { r.Delivery = "pr" }},
 		{"no mistakes", func(r *taskplan.Request) { r.Delivery = "no-mistakes" }},
-		{"Review policy", func(r *taskplan.Request) { r.Review = "local" }},
+		{"Review policy alias", func(r *taskplan.Request) { r.Review = "local" }},
+
 		{"requested Review", func(r *taskplan.Request) {
 			r.Brief = taskplan.Select("brief", "review-policy.md", []byte(`---
 type: change
@@ -290,7 +324,7 @@ paths: [src]
 
 func TestScopedUserChoiceChangesPreferencesNeverGrants(t *testing.T) {
 	r := request("change")
-	r.Delivery, r.Review = "pr", "local"
+	r.Delivery, r.Review = "pr", "quick"
 	r.Brief = taskplan.Select("brief", "choice.md", []byte("---\ntype: change\ntitle: Choice\ndone_when: checked\nmerge_mode: local\nreview: none\n---\n"))
 	if _, err := taskplan.Resolve(r); err == nil {
 		t.Fatal("unapproved lighter preferences admitted")
@@ -364,20 +398,20 @@ func TestLegacyReviewPlansKeepFrozenValues(t *testing.T) {
 func TestMemberReviewSelectionAndScopedConsent(t *testing.T) {
 	r := request("change")
 	r.Review = "no-mistakes"
-	r.Brief = taskplan.Select("brief", "members.md", []byte("---\ntype: change\ntitle: Member\ndone_when: checked\nrepos: [api]\nreview: local\n---\n"))
+	r.Brief = taskplan.Select("brief", "members.md", []byte("---\ntype: change\ntitle: Member\ndone_when: checked\nrepos: [api]\nreview: quick\n---\n"))
 	r.Execution.Scope = "workspace"
 	r.Execution.Members = []taskplan.Member{{Name: "api", Path: "api", Delivery: "local", Review: "none", ReviewSource: "repositories.api.review"}}
 	plan, err := taskplan.Resolve(r)
-	if err != nil || plan.Execution.Members[0].Review != "local" || plan.Execution.Members[0].ReviewSource != "brief: members.md" {
+	if err != nil || plan.Execution.Members[0].Review != "quick" || plan.Execution.Members[0].ReviewSource != "brief: members.md" {
 		t.Fatalf("member tightening: %#v %v", plan, err)
 	}
 	r.Execution.Members[0].Review = "no-mistakes"
 	if _, err := taskplan.Resolve(r); err == nil {
 		t.Fatal("member policy loosened without consent")
 	}
-	r.UserChoice = &taskplan.UserChoice{Quote: "Use local review for this Task", Actor: "lead", Source: "start --user-approved"}
+	r.UserChoice = &taskplan.UserChoice{Quote: "Use quick review for this Task", Actor: "lead", Source: "start --user-approved"}
 	plan, err = taskplan.Resolve(r)
-	if err != nil || plan.Execution.Members[0].Review != "local" || plan.Execution.Members[0].ReviewSource != "User choice: start --user-approved" || plan.Grants[1].Value != "ask" {
+	if err != nil || plan.Execution.Members[0].Review != "quick" || plan.Execution.Members[0].ReviewSource != "User choice: start --user-approved" || plan.Grants[1].Value != "ask" {
 		t.Fatalf("member consent: %#v %v", plan, err)
 	}
 }

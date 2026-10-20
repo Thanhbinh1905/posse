@@ -51,7 +51,7 @@ So for a Task whose target is `staging`, a Worker that follows the protocol toda
 
 Posse gets built-in validation for `pr` and `local` delivery, separate from the optional workflow profiles in [ADR 0027](0027-thin-core-and-user-owned-workflow-profiles.md). The target review policy is exactly `defaults.review = "none" | "quick" | "full-pipeline"`, with per-Member overrides and admission freezing. `quick` is today's `local` review. `none` keeps the direct path; `quick` keeps exact-head independent review at Merge; `full-pipeline` adds required local validation before every push. A profile or Autonomy cannot bypass the selected mode. Configurable loops are mechanisms, not switches that disable required evidence.
 
-The `local` -> `quick` config rename is automatic on update, with no alias kept; local Git delivery is not renamed. no-mistakes delivery/review remain deprecated, and V15 removal (#305) is on hold until parity and migration proof. This ADR records target behavior; [spec section 25](../spec.md#25-built-in-validation) distinguishes implemented loop foundations from the pending rename, private candidate lane, publication barrier and remaining V09-V14 integration.
+The `local` -> `quick` config rename is automatic on update, with no alias kept; local Git delivery is not renamed. The selector is implemented, but `full-pipeline` remains blocked until private candidate validation and the publication barrier ship. no-mistakes delivery/review remain deprecated, and V15 removal (#305) is on hold until parity and migration proof. [Spec section 25](../spec.md#25-built-in-validation) distinguishes implemented loop foundations from the pending private candidate lane, publication barrier and remaining V09-V14 integration.
 
 ### Capability map
 
