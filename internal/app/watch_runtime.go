@@ -769,7 +769,7 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 	loopCtx := ctx.Context
 	if watch != nil {
 		progress := &watchProgressReporter{heartbeat: func() {
-			heartbeatCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			heartbeatCtx, cancel := context.WithTimeout(loopCtx, time.Second)
 			defer cancel()
 			if _, err := db.HeartbeatWatchRuntime(heartbeatCtx, project.ID, watch.PID, watch.Token, currentTime()); err != nil {
 				fmt.Fprintf(ctx.ErrOut, "Watch progress heartbeat failed for %s: %v\n", project.Name, err)
