@@ -772,7 +772,7 @@ func TestDoneSignalRefusesHeadWithFailedRequiredChecks(t *testing.T) {
 }
 
 func TestDoneSignalRefusesTurnFromBeforeDeliveredInstruction(t *testing.T) {
-	fixture := newPRLifecycleFixture(t)
+	fixture := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer fixture.db.Close()
 	ctx := context.Background()
 	worktree := filepath.Join(fixture.root, "posse", "pool", "stale-instruction-turn")
@@ -821,7 +821,7 @@ func TestDoneSignalRefusesTurnFromBeforeDeliveredInstruction(t *testing.T) {
 }
 
 func TestDoneSignalRefusesStaleWorkerInstanceAfterRelaunch(t *testing.T) {
-	fixture := newPRLifecycleFixture(t)
+	fixture := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer fixture.db.Close()
 	ctx := context.Background()
 	worktree := filepath.Join(fixture.root, "posse", "pool", "stale-instance")
