@@ -1,5 +1,7 @@
 # #111: Claude owns bounded Notice waits
 
+> Historical proof of the former Stop-hook implementation. New Claude Leads use the receipt-backed background Watch documented in [#360](360-claude-background-watch.md); this remains as evidence for legacy hook processes.
+
 ## Reproduction
 
 `TestRealClaudeLookoutBackgroundLimit` runs Claude Code 2.1.300 against a local Anthropic response stream in an isolated Herdr/Posse fixture. The model requests the actual CLI as `exec <posse> watch --timeout 5000`, with Bash `run_in_background=true` and `timeout=1000`. Claude starts the background command, then reports:

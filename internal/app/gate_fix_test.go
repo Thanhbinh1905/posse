@@ -191,7 +191,12 @@ func completeGateFixRound(t *testing.T, fixture *prMergeFixture, round int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.recordWorkerSignalWithContinuity(ctx, fixture.db, fixture.project, current, "done", fmt.Sprintf("Completed Gate fix round %d", round), nil, "task_done", nil, false); err != nil {
+	turnToken, err := fixture.db.TaskTurnToken(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := map[string]any{"turn_token": turnToken}
+	if _, err := fixture.service.recordWorkerSignalWithContinuity(ctx, fixture.db, fixture.project, current, "done", fmt.Sprintf("Completed Gate fix round %d", round), data, "task_done", nil, false); err != nil {
 		t.Fatalf("record Gate fix round %d completion: %v", round, err)
 	}
 }

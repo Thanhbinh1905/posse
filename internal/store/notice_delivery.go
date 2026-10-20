@@ -440,6 +440,9 @@ func (db *DB) ResolveNoticeDelivery(ctx context.Context, projectID int64, delive
 		FROM notice_delivery_receipts WHERE delivery_id=? AND project_id=?`, deliveryID, projectID).Scan(&delivery.DeliveryID, &delivery.BatchID, &delivery.ProjectID, &rawIDs, &delivery.Destination, &delivery.Generation, &delivery.State, &delivery.OwnerToken, &delivery.ClaimedAt, &delivery.LeaseUntil, &delivery.AcceptedAt, &delivery.CreatedAt, &delivery.UpdatedAt); err != nil {
 		return err
 	}
+	if delivery.State == "accepted" && outcome == "accepted" {
+		return nil
+	}
 	if delivery.OwnerToken != token || delivery.LeaseUntil <= at || delivery.State != "printed" && delivery.State != "claimed" {
 		return ErrStateRace
 	}
@@ -497,6 +500,78 @@ func (db *DB) ResolveNoticeDelivery(ctx context.Context, projectID int64, delive
 		return err
 	}
 	return db.PersistNoticeDeliverySnapshot(ctx, delivery.ProjectID)
+}
+
+func acceptAcknowledgedNoticeDeliveriesTx(ctx context.Context, tx *writeTx, projectID int64, at int64) error {
+	rows, err := tx.QueryContext(ctx, `SELECT r.delivery_id,r.owner_token,r.notice_ids_json
+		FROM notice_delivery_receipts r
+		WHERE r.project_id=? AND r.state='printed'
+		AND NOT EXISTS (
+			SELECT 1 FROM json_each(r.notice_ids_json) ids
+			LEFT JOIN notices n ON n.project_id=r.project_id AND n.id=CAST(ids.value AS INTEGER)
+			WHERE n.id IS NULL OR n.acked_at IS NULL
+		)`, projectID)
+	if err != nil {
+		return err
+	}
+	type acceptedBatch struct {
+		id, owner string
+		noticeIDs []int64
+	}
+	var batches []acceptedBatch
+	for rows.Next() {
+		var batch acceptedBatch
+		var encodedIDs string
+		if err := rows.Scan(&batch.id, &batch.owner, &encodedIDs); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := json.Unmarshal([]byte(encodedIDs), &batch.noticeIDs); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("decode Notice delivery IDs: %w", err)
+		}
+		batches = append(batches, batch)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, batch := range batches {
+		query := `UPDATE notices SET delivered_at=COALESCE(delivered_at,?),claim_token='',claimed_at=0
+			WHERE project_id=? AND claim_token=? AND acked_at IS NOT NULL AND id IN (` + sqlPlaceholders(len(batch.noticeIDs)) + `)`
+		args := []any{at, projectID, batch.owner}
+		for _, id := range batch.noticeIDs {
+			args = append(args, id)
+		}
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != int64(len(batch.noticeIDs)) {
+			return ErrStateRace
+		}
+		result, err = tx.ExecContext(ctx, `UPDATE notice_delivery_receipts
+			SET state='accepted',owner_token='',lease_until=0,accepted_at=?,updated_at=?
+			WHERE delivery_id=? AND state='printed' AND owner_token=?`, at, at, batch.id, batch.owner)
+		if err != nil {
+			return err
+		}
+		changed, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return ErrStateRace
+		}
+	}
+	return nil
 }
 
 func (db *DB) ResolveUncertainNoticeDelivery(ctx context.Context, projectID int64, deliveryID, outcome string, at int64) error {

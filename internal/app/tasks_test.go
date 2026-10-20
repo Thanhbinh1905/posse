@@ -664,7 +664,11 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	sandboxPath := filepath.Join(root, "sandbox")
 	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
 	home := filepath.Join(root, "posse")
-	if err := os.MkdirAll(filepath.Join(home, "projects", "shop", "tasks", "t1"), 0o700); err != nil {
+	taskHome := filepath.Join(home, "projects", "shop", "tasks", "t1")
+	if err := os.MkdirAll(taskHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskHome, "launch.md"), []byte("# Worker protocol\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	configText := "[kinds.claude]\n\n[profiles.deep]\nkind = \"claude\"\nmodel = \"sonnet\"\n\n"

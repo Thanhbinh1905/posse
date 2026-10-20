@@ -130,13 +130,17 @@ kill -KILL $$
 		t.Fatalf("crashed receiver batch = %+v", batch)
 	}
 	notices, err := f.db.NoticesByIDs(context.Background(), f.project.ID, []int64{f.noticeID})
-	if err != nil || notices[0].DeliveredAt != 0 || notices[0].AckedAt == 0 {
-		t.Fatalf("handled ack before crash = %+v err=%v", notices, err)
+	if err != nil || notices[0].DeliveredAt == 0 || notices[0].AckedAt == 0 {
+		t.Fatalf("acknowledged Notice was not accepted before receiver crash: %+v err=%v", notices, err)
+	}
+	delivery, err := f.db.NoticeDelivery(context.Background(), batch.Delivery.DeliveryID)
+	if err != nil || delivery.State != "accepted" || delivery.AcceptedAt == 0 {
+		t.Fatalf("acknowledged receipt was not accepted before receiver crash: %+v err=%v", delivery, err)
 	}
 	return batch
 }
 
-func TestAcknowledgedPrintedNoticeRecoversAfterCrashAndRebuild(t *testing.T) {
+func TestAcknowledgedNoticeReceiptSurvivesCrashAndRebuild(t *testing.T) {
 	for _, rebuild := range []bool{false, true} {
 		name := "crash"
 		if rebuild {
@@ -153,50 +157,32 @@ func TestAcknowledgedPrintedNoticeRecoversAfterCrashAndRebuild(t *testing.T) {
 					t.Fatalf("rebuild after handled ack: %v", err)
 				}
 				var restoredOwner, restoredClaim string
-				var ackedAt int64
-				if err := f.db.QueryRowContext(context.Background(), `SELECT d.owner_token,n.claim_token,n.acked_at FROM notice_delivery_receipts d JOIN notices n ON n.id=? WHERE d.delivery_id=?`, f.noticeID, first.Delivery.DeliveryID).Scan(&restoredOwner, &restoredClaim, &ackedAt); err != nil {
+				var ackedAt, deliveredAt int64
+				if err := f.db.QueryRowContext(context.Background(), `SELECT d.owner_token,n.claim_token,n.acked_at,n.delivered_at FROM notice_delivery_receipts d JOIN notices n ON n.id=? WHERE d.delivery_id=?`, f.noticeID, first.Delivery.DeliveryID).Scan(&restoredOwner, &restoredClaim, &ackedAt, &deliveredAt); err != nil {
 					t.Fatal(err)
 				}
-				if restoredOwner != first.Delivery.OwnerToken || restoredClaim != restoredOwner || ackedAt == 0 {
-					t.Fatalf("rebuild lost printed receipt ownership: owner=%q claim=%q acked_at=%d", restoredOwner, restoredClaim, ackedAt)
+				if restoredOwner != "" || restoredClaim != "" || ackedAt == 0 || deliveredAt == 0 {
+					t.Fatalf("rebuild lost accepted receipt state: owner=%q claim=%q acked_at=%d delivered_at=%d", restoredOwner, restoredClaim, ackedAt, deliveredAt)
+				}
+				delivery, err := f.db.NoticeDelivery(context.Background(), first.Delivery.DeliveryID)
+				if err != nil || delivery.State != "accepted" || delivery.AcceptedAt == 0 {
+					t.Fatalf("rebuild lost accepted receipt: %+v err=%v", delivery, err)
 				}
 			}
 			newerID, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, Kind: "needs_decision", Summary: "Later Notice must still reach the adapter"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := f.db.ExecContext(context.Background(), `UPDATE notice_delivery_receipts SET lease_until=0 WHERE delivery_id=?`, first.Delivery.DeliveryID); err != nil {
-				t.Fatal(err)
-			}
 			code, output := f.cli(t, "watch", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
 			if code != 0 {
-				t.Fatalf("same-session receipt recovery after ack: %s", output)
-			}
-			var retry noticeHandoffPayload
-			if err := json.Unmarshal(output, &retry); err != nil {
-				t.Fatalf("decode recovered receipt: %s: %v", output, err)
-			}
-			if retry.Delivery.DeliveryID != first.Delivery.DeliveryID || retry.Delivery.BatchID != first.Delivery.BatchID || retry.Delivery.OwnerToken == first.Delivery.OwnerToken || len(retry.Notices) != 1 || retry.Notices[0].ID != f.noticeID {
-				t.Fatalf("recovery changed or merged the acknowledged batch: first=%+v retry=%+v", first, retry)
-			}
-			code, output = f.cli(t, "watch", "--json", "--receipt", retry.Delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", retry.Delivery.OwnerToken)
-			if code != 0 {
-				t.Fatalf("accept recovered receipt: %s", output)
-			}
-			notices, err := f.db.NoticesByIDs(context.Background(), f.project.ID, []int64{f.noticeID})
-			if err != nil || notices[0].DeliveredAt == 0 || notices[0].AckedAt == 0 {
-				t.Fatalf("receipt recovery lost handled acknowledgment: %+v err=%v", notices, err)
-			}
-			nextCode, nextOutput := f.cli(t, "watch", "--json", "--handoff", "--destination", f.destination, "--timeout", "2000")
-			if nextCode != 0 {
-				t.Fatalf("later Notice did not reach receiver: %s", nextOutput)
+				t.Fatalf("deliver later Notice after acknowledged receipt: %s", output)
 			}
 			var next noticeHandoffPayload
-			if err := json.Unmarshal(nextOutput, &next); err != nil {
-				t.Fatalf("decode later batch: %s: %v", nextOutput, err)
+			if err := json.Unmarshal(output, &next); err != nil {
+				t.Fatalf("decode later batch: %s: %v", output, err)
 			}
 			if len(next.Notices) != 1 || next.Notices[0].ID != newerID || next.Delivery.BatchID == first.Delivery.BatchID {
-				t.Fatalf("later Notice was lost or merged into the old batch: %+v", next)
+				t.Fatalf("acknowledged Notice was replayed or later Notice was lost: first=%+v next=%+v", first, next)
 			}
 		})
 	}
@@ -466,8 +452,13 @@ func TestOpenCodeAcknowledgedReceiptRecoversAfterLeaseExpiry(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode adapter probe: %s: %v", output, err)
 	}
-	if result.PromptCalls != 2 || len(result.SettlementCodes) < 3 || len(result.WatchFailures) != 0 {
-		t.Fatalf("expired handled receipt was replayed or stopped later delivery: %+v", result)
+	if result.PromptCalls != 2 || len(result.SettlementCodes) != 2 || len(result.WatchFailures) != 0 {
+		t.Fatalf("acknowledged receipt was replayed or stopped later delivery: %+v", result)
+	}
+	for _, code := range result.SettlementCodes {
+		if code != 0 {
+			t.Fatalf("idempotent receipt settlement failed: %+v", result)
+		}
 	}
 	first, err := f.db.NoticesByIDs(context.Background(), f.project.ID, []int64{f.noticeID})
 	if err != nil || first[0].DeliveredAt == 0 || first[0].AckedAt == 0 {

@@ -654,7 +654,11 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
 	home := filepath.Join(root, "posse")
-	if err := os.MkdirAll(home, 0o700); err != nil {
+	taskHome := filepath.Join(home, "projects", "shop", "tasks", "t1")
+	if err := os.MkdirAll(taskHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskHome, "launch.md"), []byte("# Worker protocol\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	configText := "[lead]\nkind = \"claude\"\n\n[profiles.deep]\nkind = \"claude\"\n"

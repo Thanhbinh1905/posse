@@ -495,18 +495,36 @@ func TestPosseSpawnNoticeMergeTeardownAndRecovery(t *testing.T) {
 	    git add "e2e-worker-$task_id.txt" || { echo 'git add failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
 	    # A relaunched Worker finds its change already committed and keeps running like a real agent.
 	    git diff --cached --quiet || git commit -m "worker change $task_id" >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'git commit failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
+	    turn_token=
 	    while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id" ]; do sleep 0.05; done
-	    posse signal done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'posse signal failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
+	    if [ "$task_id" = t1 ]; then
+	      while [ -z "$turn_token" ]; do
+	        IFS= read -r line || break
+	        printf '%s\n' "$line" >> "$POSSE_E2E_WORKER_LOG"
+	        case "$line" in *'| turn '*) turn_token=$(printf '%s\n' "$line" | sed -n 's/.*| turn \([^]]*\)].*/\1/p') ;; esac
+	      done
+	    fi
+	    if [ -n "$turn_token" ]; then
+	      posse signal done 'E2E worker committed the change' --turn "$turn_token" >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'posse signal failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
+	    else
+	      posse signal done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1 || { echo 'posse signal failed' >> "$POSSE_E2E_WORKER_LOG"; exit 0; }
+	    fi
 	    if [ "$task_id" = t1 ]; then
 	      while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id-idle" ]; do sleep 0.05; done
 	    fi
 	    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1 &
+	    turn_token=
 	    while IFS= read -r line; do
 	      printf '%s\n' "$line" >> "$POSSE_E2E_WORKER_LOG"
+	      case "$line" in *'| turn '*) turn_token=$(printf '%s\n' "$line" | sed -n 's/.*| turn \([^]]*\)].*/\1/p') ;; esac
 	      case "$line" in
 	        *'Queue after the current turn'*)
 	          while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id-queued" ]; do sleep 0.05; done
-	          posse signal done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1
+	          if [ -n "$turn_token" ]; then
+	            posse signal done 'E2E worker committed the change' --turn "$turn_token" >> "$POSSE_E2E_WORKER_LOG" 2>&1
+	          else
+	            posse signal done 'E2E worker committed the change' >> "$POSSE_E2E_WORKER_LOG" 2>&1
+	          fi
 	          ;;
 	      esac
 	    done
@@ -1772,8 +1790,17 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("recovery digest Notice count = %d, want one: %#v; recovery=%s", recoveryNotices, notices, recoveryOutput)
 	}
 	recoveredLaunchSnapshot, err := os.ReadFile(thirdLaunchPath)
-	if err != nil || !bytes.Equal(recoveredLaunchSnapshot, thirdLaunchSnapshot) || strings.Contains(string(recoveredLaunchSnapshot), "Updated User worker instructions") || strings.Contains(string(recoveredLaunchSnapshot), "Updated Project worker instructions") {
-		t.Fatalf("Worker preferences snapshot changed during relaunch: before=%q after=%q err=%v", thirdLaunchSnapshot, recoveredLaunchSnapshot, err)
+	normalizeTurnToken := func(contents []byte) []byte {
+		lines := strings.Split(string(contents), "\n")
+		for index := range lines {
+			if strings.HasPrefix(lines[index], "Current Worker turn token: ") {
+				lines[index] = "Current Worker turn token: <current>"
+			}
+		}
+		return []byte(strings.Join(lines, "\n"))
+	}
+	if err != nil || !bytes.Equal(normalizeTurnToken(recoveredLaunchSnapshot), normalizeTurnToken(thirdLaunchSnapshot)) || strings.Contains(string(recoveredLaunchSnapshot), "Updated User worker instructions") || strings.Contains(string(recoveredLaunchSnapshot), "Updated Project worker instructions") {
+		t.Fatalf("Worker preferences snapshot changed during relaunch beyond its turn token: before=%q after=%q err=%v", thirdLaunchSnapshot, recoveredLaunchSnapshot, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
