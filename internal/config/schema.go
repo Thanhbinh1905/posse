@@ -1,9 +1,9 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -119,6 +119,20 @@ func IsUserOnly(key string) bool {
 	return found && spec.UserOnly
 }
 
+func CanonicalProjectKey(key string) string {
+	if isProjectScalarAlias(key) {
+		return canonicalSchemaKey(key)
+	}
+	return key
+}
+
+func IsUserOnlyFor(key string, projectFile bool) bool {
+	if projectFile {
+		key = CanonicalProjectKey(key)
+	}
+	return IsUserOnly(key)
+}
+
 func ValidateSetting(key string, value any, projectFile bool) error {
 	spec, found := Lookup(key)
 	if !found {
@@ -206,82 +220,97 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 }
 
 func ValidateSchemaMap(file string, values map[string]any, projectFile bool) error {
-	var walk func(string, any) error
-	walk = func(prefix string, value any) error {
+	issues := SchemaValidationErrors(file, values, projectFile)
+	if len(issues) == 0 {
+		return nil
+	}
+	return issues[0]
+}
+
+// SchemaValidationErrors reports every independently invalid setting in a
+// config map so an edit can distinguish pre-existing errors from new ones.
+func SchemaValidationErrors(file string, values map[string]any, projectFile bool) []error {
+	var issues []error
+	var walk func(string, any)
+	walk = func(prefix string, value any) {
 		if replacement := ReplacementKey(prefix); replacement != "" {
-			return &InvalidError{File: file, Key: prefix, Reason: "was removed; use " + replacement}
+			issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "was removed; use " + replacement})
+			return
 		}
 		switch current := value.(type) {
 		case map[string]any:
 			if prefix == "dispatch" {
-				for key, item := range current {
+				for _, key := range sortedMapKeys(current) {
+					item := current[key]
 					if key != "default" {
-						return &InvalidError{File: file, Key: "dispatch." + key, Reason: "unknown configuration key"}
+						issues = append(issues, &InvalidError{File: file, Key: "dispatch." + key, Reason: "unknown configuration key"})
+						continue
 					}
-					if err := walk("dispatch.default", item); err != nil {
-						return err
-					}
+					walk("dispatch.default", item)
 				}
-				return nil
+				return
 			}
 			if !knownContainer(prefix) && prefix != "" {
-				return &InvalidError{File: file, Key: prefix, Reason: "unknown configuration table"}
+				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "unknown configuration table"})
+				return
 			}
-			for key, item := range current {
+			for _, key := range sortedMapKeys(current) {
 				path := key
 				if prefix != "" {
 					path = prefix + "." + key
 				}
-				if err := walk(path, item); err != nil {
-					return err
-				}
+				walk(path, current[key])
 			}
 		case []map[string]any:
 			if prefix != "dispatch" {
-				return fmt.Errorf("%s: %s must be an array of tables", file, prefix)
+				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: prefix + " must be an array of tables"})
+				return
 			}
 			for index, entry := range current {
-				for key, item := range entry {
+				for _, key := range sortedMapKeys(entry) {
 					path := "dispatch." + key
 					if path == "dispatch.default" {
 						continue
 					}
-					if err := validateDispatchValue(file, path, item, index); err != nil {
-						return err
+					if err := validateDispatchValue(file, path, entry[key], index); err != nil {
+						issues = append(issues, err)
 					}
 				}
 			}
 		default:
 			if prefix == "" {
-				return nil
+				return
 			}
 			key := canonicalSchemaKey(prefix)
 			if _, found := Lookup(key); !found {
-				return &InvalidError{File: file, Key: prefix, Reason: "unknown configuration key"}
+				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "unknown configuration key"})
+				return
 			}
 			if err := ValidateSetting(key, value, projectFile); err != nil {
-				return &InvalidError{File: file, Key: key, Reason: strings.TrimPrefix(err.Error(), key+" ")}
+				issues = append(issues, &InvalidError{File: file, Key: key, Reason: strings.TrimPrefix(err.Error(), key+" ")})
 			}
 		}
-		return nil
 	}
 	if values == nil {
 		return nil
 	}
-	for key, value := range values {
+	for _, key := range sortedMapKeys(values) {
 		if !projectFile && isProjectScalarAlias(key) {
-			return &InvalidError{File: file, Key: key, Reason: "is valid only in a Project config"}
+			issues = append(issues, &InvalidError{File: file, Key: key, Reason: "is valid only in a Project config"})
+			continue
 		}
-		path := key
-		if err := walk(path, value); err != nil {
-			var invalid *InvalidError
-			if errors.As(err, &invalid) {
-				return err
-			}
-			return &InvalidError{File: file, Key: path, Reason: strings.TrimPrefix(err.Error(), file+": ")}
-		}
+		walk(key, values[key])
 	}
-	return nil
+	return uniqueValidationErrors(issues)
+}
+
+func sortedMapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func validateDispatchValue(file, key string, value any, index int) error {

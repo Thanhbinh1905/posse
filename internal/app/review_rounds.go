@@ -119,7 +119,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		name = fmt.Sprintf("review-round-%d", generated.Admission.Round)
 	}
 	if err := validateWorkerName(name); err != nil {
-		return axi.Failure("name_invalid", err.Error(), false, "Use a safe lowercase kebab-case name or omit --name for an automatic name")
+		return invalidWorkerNameFailure(name, err)
 	}
 	args := []string{"--name", name}
 	if profile != "" {

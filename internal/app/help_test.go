@@ -27,7 +27,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 	for _, want := range []string{
 		"Restart the Worker in the same execution root, optionally with another Profile.",
 		"Start a Worker from a Brief with an optional display name.",
-		"List a Project's Pool or prune safe, Posse-owned orphans.",
+		"List a Project's Pool or prune safe, Posse-owned orphan panes.",
 		"Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).",
 		"Send a message, optionally queueing it or interrupting and redirecting a busy Worker.",
 		"Withdraw a queued Worker message before delivery begins.",

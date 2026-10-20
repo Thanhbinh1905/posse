@@ -34,7 +34,16 @@ The installer downloads a release to `~/.local/bin` by default and offers to set
 3. `posse update` runs the new `posse setup` for integrations; run it manually after another installation method. If you installed optional global skills, also run `posse setup --global-skills` so agents do not learn removed commands from stale copies.
 4. Restart every running Lead: from a User shell in each Project, run `posse up --replace`. Running Pi/OpenCode Leads retain their old adapters in memory. Their exact machine handoff/receipt calls remain supported during the transition, but restarting loads the new adapter and instructions.
 
-Stored Tasks, config and paths upgrade automatically; existing worktrees are not moved. Removed User commands and flags fail with their replacement names.
+Stored Tasks, config and paths upgrade automatically; existing worktrees are not moved. Removed User commands and flags fail with their replacement names. If config contains `review = "on_risk"`, the new binary remains installed but setup cannot finish until you repair the policy. Run `posse config set defaults.review none` or `posse config unset defaults.review`, then `posse setup`; add `--project <name>` for Project config.
+
+### 0.15 release notes
+
+Custom scripts and Herdr layouts that consume Posse output must use the renamed fields and tokens:
+
+- `ack.auto_unsaddled` is now `ack.auto_torn_down`.
+- Update fields `lookouts`, `stopped_lookouts` and `reexec_lookouts` are now `watches`, `stopped_watches` and `reexec_watches`.
+- Pool `mount` and `mounts` are now `sandbox` and `sandboxes`.
+- The Herdr token `posse_mount` is now `posse_sandbox`.
 
 ## Get started
 
