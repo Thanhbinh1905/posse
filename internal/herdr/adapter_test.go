@@ -180,6 +180,36 @@ func TestIsolatedTestEnvironmentRedirectsAllWritableState(t *testing.T) {
 	}
 }
 
+func TestValidateIsolatedEnvironmentRejectsArbitraryTMPDIR(t *testing.T) {
+	tmpRoot, err := os.MkdirTemp(os.TempDir(), "arbitrary-herdr-tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpRoot)
+	root, err := os.MkdirTemp(tmpRoot, TestRootName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	if _, err := WriteIsolatedConfig(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmpRoot)
+	t.Setenv("POSSE_E2E_TMP_ROOT", "")
+	env := IsolatedTestEnvironment(root)
+	untrusted := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != "TMPDIR" && key != "POSSE_E2E_TMP_ROOT" {
+			untrusted = append(untrusted, entry)
+		}
+	}
+	untrusted = append(untrusted, "TMPDIR="+tmpRoot)
+	if _, err := ValidateIsolatedEnvironment(untrusted); err == nil {
+		t.Fatal("accepted an isolated Herdr fixture under an untrusted temporary root")
+	}
+}
+
 func TestIsolatedTestEnvironmentDisablesHerdrNetworkUpdates(t *testing.T) {
 	root, err := os.MkdirTemp(os.TempDir(), TestRootName())
 	if err != nil {

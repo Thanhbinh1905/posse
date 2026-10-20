@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,6 +37,8 @@ type Service struct {
 	updateSetup          func(context.Context, string, string, bool) ([]byte, error)
 	maintenanceMu        sync.Mutex
 	maintenance          map[string]bool
+	maintenanceCancels   map[string]context.CancelFunc
+	maintenanceWG        sync.WaitGroup
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
 }
 
@@ -64,8 +67,10 @@ func (s *Service) structureStoreErrors(command *axi.Command) {
 		handler := command.Handler
 		name := command.Name
 		command.Handler = func(ctx *axi.Context, args []string) error {
+			ctx.Context = withObservationWarningWriter(ctx.Context, ctx.ErrOut)
 			err := normalizeCommandError(handler(ctx, args))
 			if err == nil {
+				flushDeferredProjectObservation(ctx.Context)
 				s.superviseWatchRuntimes(ctx, name, args)
 			}
 			return err
@@ -193,13 +198,63 @@ func (s *Service) beginMaintenance(key string) bool {
 		return false
 	}
 	s.maintenance[key] = true
+	s.maintenanceWG.Add(1)
 	return true
+}
+
+func (s *Service) beginMaintenanceContext(key string, parent context.Context) (context.Context, bool) {
+	ctx, cancel := context.WithCancel(parent)
+	if !s.beginMaintenance(key) {
+		cancel()
+		return nil, false
+	}
+	s.maintenanceMu.Lock()
+	if s.maintenanceCancels == nil {
+		s.maintenanceCancels = make(map[string]context.CancelFunc)
+	}
+	s.maintenanceCancels[key] = cancel
+	s.maintenanceMu.Unlock()
+	return ctx, true
 }
 
 func (s *Service) endMaintenance(key string) {
 	s.maintenanceMu.Lock()
 	delete(s.maintenance, key)
+	cancel := s.maintenanceCancels[key]
+	delete(s.maintenanceCancels, key)
 	s.maintenanceMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.maintenanceWG.Done()
+}
+
+func (s *Service) cancelWatchMaintenance() {
+	s.maintenanceMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.maintenanceCancels))
+	for _, cancel := range s.maintenanceCancels {
+		cancels = append(cancels, cancel)
+	}
+	s.maintenanceMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (s *Service) waitForWatchMaintenance(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		s.maintenanceWG.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 func (s *Service) homePath() (string, error) {
@@ -473,6 +528,45 @@ func (s *Service) prepareProjectWatchObservation(ctx context.Context, db *store.
 	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{deliverMessages: true, watchObservation: true})
 }
 
+type observationWarningWriterKey struct{}
+
+type observationWarningState struct {
+	mu       sync.Mutex
+	writer   io.Writer
+	deferred bool
+}
+
+const deferredProjectObservationWarning = "Project reconciliation was deferred due to database contention; the displayed state may be stale."
+
+func withObservationWarningWriter(ctx context.Context, writer io.Writer) context.Context {
+	state := &observationWarningState{writer: writer}
+	return context.WithValue(ctx, observationWarningWriterKey{}, state)
+}
+
+func warnDeferredProjectObservation(ctx context.Context) {
+	state, ok := ctx.Value(observationWarningWriterKey{}).(*observationWarningState)
+	if !ok || state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.deferred = true
+	state.mu.Unlock()
+}
+
+func flushDeferredProjectObservation(ctx context.Context) {
+	state, ok := ctx.Value(observationWarningWriterKey{}).(*observationWarningState)
+	if !ok || state == nil {
+		return
+	}
+	state.mu.Lock()
+	deferred, writer := state.deferred, state.writer
+	state.deferred = false
+	state.mu.Unlock()
+	if deferred && writer != nil {
+		fmt.Fprintln(writer, deferredProjectObservationWarning)
+	}
+}
+
 func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, project store.Project, options projectPreparationOptions) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
@@ -517,8 +611,16 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				}
 			}
 			if runErr != nil {
-				// A held Project keeps its recorded panes for `posse up`.
-				if !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) && !errors.Is(runErr, errRecoveryDeferred) {
+				// A held Project keeps its recorded panes for `posse up`. Pure
+				// contention defers observations; Watch records it for maintenance
+				// diagnostics, while foreground commands warn about stale output.
+				if store.IsOnlyBusy(runErr) {
+					if options.watchObservation {
+						return cfg, runErr
+					}
+					warnDeferredProjectObservation(ctx)
+				}
+				if !store.IsOnlyBusy(runErr) && !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) && !errors.Is(runErr, errRecoveryDeferred) {
 					return cfg, herdrError(runErr)
 				}
 			} else {

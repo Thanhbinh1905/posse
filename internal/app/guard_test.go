@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -258,11 +259,16 @@ func TestGuardConservativeAcrossBranchesAndRuntimeFiles(t *testing.T) {
 }
 
 func TestGuardRecognizesSocketHardlinks(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "s")
+	dir := t.TempDir()
+	handle, err := os.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = handle.Close() })
+	shortDir := fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), handle.Fd())
+	if _, err := os.Stat(shortDir); err == nil {
+		dir = shortDir
+	}
 	socket := filepath.Join(dir, "session.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {

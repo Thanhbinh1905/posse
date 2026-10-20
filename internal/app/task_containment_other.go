@@ -39,7 +39,9 @@ func retireEmptyTaskCgroupWithPreserved(store.Task, map[int]bool) error {
 
 func taskContainmentProcessDetails(store.Task) []taskProcessDetail { return nil }
 
-func retainTaskContainmentProcesses(*sandboxProcessAuthorization, store.Task, []ownedProcessRoot) error { return nil }
+func retainTaskContainmentProcesses(*sandboxProcessAuthorization, store.Task, []ownedProcessRoot) error {
+	return nil
+}
 
 func processHasTaskMarker(int, string) bool { return false }
 

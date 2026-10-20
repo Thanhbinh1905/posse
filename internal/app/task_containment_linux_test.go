@@ -147,16 +147,6 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 	if err != nil || pid <= 1 {
 		t.Fatalf("ControlMaster PID = %q: %v", pidBytes, err)
 	}
-	handle, err := openSandboxProcessHandle(pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if alive, _ := handle.Alive(); alive {
-			_ = handle.Signal(syscall.SIGKILL)
-		}
-		_ = handle.Close()
-	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		processes := processDetails([]int{pid})
@@ -168,6 +158,16 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	handle, err := openSandboxProcessHandle(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if alive, _ := handle.Alive(); alive {
+			_ = handle.Signal(syscall.SIGKILL)
+		}
+		_ = handle.Close()
+	}()
 	if !processHasTaskMarker(pid, marker) {
 		t.Fatalf("detached ControlMaster PID %d lost its inherited Task marker", pid)
 	}

@@ -1781,6 +1781,7 @@ type prLifecycleFixture struct {
 	home        string
 	binary      string
 	env         []string
+	callerEnv   []string
 	leadEnv     []string
 	fixGate     string
 	ghLog       string
@@ -2089,7 +2090,7 @@ esac
 	}
 	return &prLifecycleFixture{
 		root: root, repo: repo, remote: remote, home: home, binary: binary,
-		env: env, leadEnv: leadEnv, fixGate: fixGate, ghLog: filepath.Join(root, "gh.log"),
+		env: env, callerEnv: callerEnv, leadEnv: leadEnv, fixGate: fixGate, ghLog: filepath.Join(root, "gh.log"),
 		ghState: filepath.Join(root, "gh-state.json"), ghOpenPRs: filepath.Join(root, "gh-open-prs.json"),
 		ghMerge: filepath.Join(root, "gh-merge-called"), ghBody: filepath.Join(root, "gh-body.md"),
 		ghTitle: filepath.Join(root, "gh-title.txt"), ghPRClosed: filepath.Join(root, "gh-pr-closed"),

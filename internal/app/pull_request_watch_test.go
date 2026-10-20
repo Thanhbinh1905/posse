@@ -1167,6 +1167,79 @@ func TestPRWatchAttributesPartialGraphQLErrorsAndKeepsGlobalFailures(t *testing.
 	}
 }
 
+func TestForgeDetectionFailureRaisesOneProjectNoticeForMultipleTasks(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open first PR exit=%d output=%s error=%s", code, output, errOutput)
+	}
+	ctx := context.Background()
+	secondID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
+		Seq: 2, Type: "change", Title: "second PR", State: store.StateSpawning,
+		MergeMode: "pr", Branch: "posse/t2", BaseRef: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{
+		{store.StateSpawning, store.StateWorking, "cli"},
+		{store.StateWorking, store.StateDone, "worker"},
+		{store.StateDone, store.StateMerging, "cli"},
+	} {
+		if transition.to == store.StateDone {
+			if _, err := fixture.db.AddSignal(ctx, secondID, "done", "Worker completed second PR", nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := fixture.db.Transition(ctx, secondID, transition.from, transition.to, transition.source, "second PR"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secondURL := "https://github.com/acme/shop/pull/18"
+	if err := fixture.db.UpdateTaskMerge(ctx, secondID, secondURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "config", "remote.origin.url", "https://git.example.com/acme/shop.git")
+	gitTest(t, fixture.repo, "config", "url.file://"+fixture.remote+".insteadOf", "https://git.example.com/acme/shop.git")
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := fixture.db.ProjectWatchState(ctx, fixture.project.ID)
+	if err != nil || state.PRConsecutiveFailures != 3 {
+		t.Fatalf("host-level forge failure streak = %#v, %v", state, err)
+	}
+	notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectFailures, taskFailures int
+	for _, notice := range notices {
+		if notice.Kind != "pr_watch_failing" {
+			continue
+		}
+		if notice.TaskID == 0 {
+			projectFailures++
+		} else {
+			taskFailures++
+		}
+	}
+	var taskRows int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pr_task_watch_failures`).Scan(&taskRows); err != nil {
+		t.Fatal(err)
+	}
+	if projectFailures != 1 || taskFailures != 0 || taskRows != 0 {
+		t.Fatalf("shared forge detection failure was duplicated per Task: project notices=%d task notices=%d failure rows=%d notices=%#v", projectFailures, taskFailures, taskRows, notices)
+	}
+}
+
 func TestPRWatchFailureNoticeRequiresThreeConsecutiveFailures(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {

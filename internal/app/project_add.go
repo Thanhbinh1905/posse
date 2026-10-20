@@ -184,6 +184,20 @@ func (s *Service) projectRepoRows(ctx context.Context, db *store.DB, project sto
 	if err != nil {
 		return nil, err
 	}
+	memberErrors, err := db.MemberWatchErrors(ctx, project.ID)
+	if err != nil {
+		return nil, err
+	}
+	errorsByRepo := make(map[string][]any)
+	for _, failure := range memberErrors {
+		updatedAt := ""
+		if failure.UpdatedAt > 0 {
+			updatedAt = time.UnixMilli(failure.UpdatedAt).UTC().Format(time.RFC3339)
+		}
+		errorsByRepo[failure.Repo] = append(errorsByRepo[failure.Repo], axi.Object{
+			{Key: "phase", Value: failure.Phase}, {Key: "error", Value: failure.Error}, {Key: "updated_at", Value: updatedAt},
+		})
+	}
 	rows := make([]any, 0, len(repos))
 	for _, repo := range repos {
 		remote := repo.OriginHost
@@ -211,6 +225,7 @@ func (s *Service) projectRepoRows(ctx context.Context, db *store.DB, project sto
 			{Key: "remote", Value: shown}, {Key: "merge_mode", Value: savedMemberMergeMode(cfg, repo.Name, remote)},
 			{Key: "status", Value: repo.Status}, {Key: "checkout_status", Value: checkoutStatus},
 			{Key: "checkout_checked_at", Value: checkedAt}, {Key: "checkout_reason", Value: watch.CheckoutReason},
+			{Key: "maintenance_errors", Value: errorsByRepo[repo.Name]},
 		})
 	}
 	return rows, nil

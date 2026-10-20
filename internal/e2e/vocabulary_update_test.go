@@ -15,12 +15,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
+	if testProcessHasHerdrAncestor(os.Getpid()) {
+		t.Skip("release update fixture requires a process tree outside an active Herdr session")
+	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("official v0.14.0 release fixture is Linux amd64")
 	}
@@ -48,7 +52,7 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	}
 	officialRelease := downloadOfficialReleaseAsset(t, "v0.15.0")
 	officialProxyURL, officialCertPath := startUpdateReleaseProxy(t, officialRelease)
-	officialUpdateEnv := setEnv(env, "HTTPS_PROXY", officialProxyURL)
+	officialUpdateEnv := setEnv(f.callerEnv, "HTTPS_PROXY", officialProxyURL)
 	officialUpdateEnv = setEnv(officialUpdateEnv, "https_proxy", officialProxyURL)
 	officialUpdateEnv = setEnv(officialUpdateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
 	officialUpdateEnv = setEnv(officialUpdateEnv, "no_proxy", "localhost,127.0.0.1,::1")
@@ -79,7 +83,7 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	}
 	currentRelease := makeUpdateTestRelease(t, f.binary, "v0.15.1")
 	proxyURL, certPath := startUpdateReleaseProxy(t, currentRelease)
-	updateEnv := setEnv(env, "HTTPS_PROXY", proxyURL)
+	updateEnv := setEnv(f.callerEnv, "HTTPS_PROXY", proxyURL)
 	updateEnv = setEnv(updateEnv, "https_proxy", proxyURL)
 	updateEnv = setEnv(updateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
 	updateEnv = setEnv(updateEnv, "no_proxy", "localhost,127.0.0.1,::1")
@@ -120,6 +124,39 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	if code, output := runReleaseCLI(t, legacyBinary, f.repo, setupEnv, "setup", "--binary", legacyBinary); code != 0 || !strings.Contains(output, "manifest:") {
 		t.Fatalf("setup did not complete after command-line repair: code=%d output=%s", code, output)
 	}
+}
+
+func testProcessHasHerdrAncestor(pid int) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	for pid > 1 {
+		environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+		if err == nil {
+			for _, entry := range bytes.Split(environ, []byte{0}) {
+				key, _, _ := strings.Cut(string(entry), "=")
+				if strings.HasPrefix(key, "HERDR_") {
+					return true
+				}
+			}
+		}
+		status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+		if err != nil {
+			return false
+		}
+		parent := 0
+		for _, line := range strings.Split(string(status), "\n") {
+			if value, found := strings.CutPrefix(line, "PPid:"); found {
+				parent, _ = strconv.Atoi(strings.TrimSpace(value))
+				break
+			}
+		}
+		if parent <= 0 || parent == pid {
+			return false
+		}
+		pid = parent
+	}
+	return false
 }
 
 func runReleaseCLI(t *testing.T, binary, cwd string, env []string, args ...string) (int, string) {

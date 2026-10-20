@@ -268,7 +268,36 @@ func TestWatchKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) {
 		return err == nil
 	}) {
 		calls, _ := os.ReadFile(ghLog)
-		t.Fatalf("offline Member forge query did not enter its deliberate stall: gh calls=%s", calls)
+		watchLog, _ := os.ReadFile(filepath.Join(home, "projects", project.Name, "watch.log"))
+		state, _ := db.WatchRuntime(context.Background(), project.ID)
+		_, procErr := os.Stat(fmt.Sprintf("/proc/%d", state.PID))
+		t.Fatalf("offline Member forge query did not enter its deliberate stall: gh calls=%s Watch log=%s Watch=%#v procErr=%v pids=%v", calls, watchLog, state, procErr, watchPIDs(root))
+	}
+	watchBeforeUpdate, err := db.WatchRuntime(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryBytes, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := binary + ".replacement"
+	if err := os.WriteFile(replacement, binaryBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, binary); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(7 * time.Second)
+	watchDuringStall, err := db.WatchRuntime(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watchDuringStall.PID != watchBeforeUpdate.PID || watchDuringStall.ExecutableInode != watchBeforeUpdate.ExecutableInode {
+		t.Fatalf("Watch re-executed before its in-flight Member poll ended: before=%#v during=%#v", watchBeforeUpdate, watchDuringStall)
+	}
+	if _, err := os.Stat(releaseStall); err == nil {
+		t.Fatal("offline forge stall ended before the update-boundary assertion")
 	}
 	gitTest(t, env, offlineRoot, "config", "--unset-all", "url.file://"+filepath.Join(root, "offline.git")+".insteadOf")
 	gitTest(t, env, offlineRoot, "config", "url.http://"+blackhole.Addr().String()+"/.insteadOf", "https://vpn-t181.invalid/")
@@ -289,6 +318,14 @@ func TestWatchKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) {
 	if task, err := db.TaskByID(context.Background(), project.ID, good.ID); err != nil || task.State != store.StateMerging {
 		t.Fatalf("healthy Task changed state before its PR merged: %#v, %v", task, err)
 	}
+	writer, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin isolated SQLite writer contention: %v", err)
+	}
+	if _, err := writer.ExecContext(context.Background(), `UPDATE projects SET name=name WHERE id=?`, project.ID); err != nil {
+		_ = writer.Rollback()
+		t.Fatalf("hold isolated SQLite writer contention: %v", err)
+	}
 	view, err = json.Marshal(map[string]any{
 		"url": goodURL, "state": "MERGED", "headRefOid": goodHead, "baseRefName": "main", "mergeable": "MERGEABLE",
 		"reviewDecision": "APPROVED", "mergeCommit": map[string]string{"oid": goodHead}, "statusCheckRollup": []any{},
@@ -297,6 +334,11 @@ func TestWatchKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(viewPath, view, 0o600); err != nil {
+		_ = writer.Rollback()
+		t.Fatal(err)
+	}
+	time.Sleep(450 * time.Millisecond)
+	if err := writer.Rollback(); err != nil {
 		t.Fatal(err)
 	}
 	if !waitForCondition(30*time.Second, func() bool {
@@ -360,7 +402,6 @@ func TestWatchKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) {
 		logData, _ := os.ReadFile(filepath.Join(home, "projects", project.Name, "watch.log"))
 		t.Fatalf("released forge failure and blackholed checkout failure were not recorded against the offline Member: notices=%#v watch=%#v watchErr=%v runtime=%#v runtimeErr=%v pids=%v log=%s", notices, watch, watchErr, runtime, runtimeErr, watchPIDs(root), logData)
 	}
-	stopLiveWatchRuntime(t, root)
 	notices, err := db.Notices(context.Background(), project.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -370,5 +411,55 @@ func TestWatchKeepsHealthyMemberWorkWhenOtherForgeAndFetchStall(t *testing.T) {
 			t.Fatalf("offline Member fetch failure produced a false root_behind Notice: %#v", notice)
 		}
 	}
-	t.Logf("while offline PR query and git fetch remained stalled, the healthy Member observation and merged-Task Teardown completed; checkout fetch failure remained distinct from root_behind")
+	if !waitForCondition(10*time.Second, func() bool {
+		updated, err := db.WatchRuntime(context.Background(), project.ID)
+		return err == nil && updated.ExecutableInode != watchBeforeUpdate.ExecutableInode
+	}) {
+		updated, _ := db.WatchRuntime(context.Background(), project.ID)
+		t.Fatalf("Watch did not re-exec after its in-flight maintenance ended: before=%#v after=%#v", watchBeforeUpdate, updated)
+	}
+	memberErrors, err := db.MemberWatchErrors(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedPhases := map[string]map[string]bool{}
+	for _, failure := range memberErrors {
+		if failedPhases[failure.Repo] == nil {
+			failedPhases[failure.Repo] = map[string]bool{}
+		}
+		failedPhases[failure.Repo][failure.Phase] = true
+	}
+	if !failedPhases["offline"]["pr_poll"] || !failedPhases["offline"]["checkout_sync"] {
+		t.Fatalf("offline Member maintenance errors were not retained by phase: %#v", memberErrors)
+	}
+	show := runPosse(t, binary, workspace, env, "project", "show", "stack")
+	for _, expected := range []string{"offline", "maintenance_errors", "pr_poll", "checkout_sync"} {
+		if !strings.Contains(show, expected) {
+			t.Fatalf("Project show omitted Member maintenance error %q: %s", expected, show)
+		}
+	}
+	stopLiveWatchRuntime(t, root)
+	var activeClaims int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM member_pr_poll_state WHERE project_id=? AND (claim_until>0 OR claim_token<>'')`, project.ID).Scan(&activeClaims); err != nil {
+		t.Fatal(err)
+	}
+	if activeClaims != 0 {
+		rows, queryErr := db.QueryContext(context.Background(), `SELECT repo,claim_until,claim_token,pr_polled_at FROM member_pr_poll_state WHERE project_id=? AND (claim_until>0 OR claim_token<>'')`, project.ID)
+		if queryErr != nil {
+			t.Fatalf("stopped Watch left %d Member poll claims active; read claim rows: %v", activeClaims, queryErr)
+		}
+		defer rows.Close()
+		var active []string
+		for rows.Next() {
+			var repo, token string
+			var claimUntil, polledAt int64
+			if err := rows.Scan(&repo, &claimUntil, &token, &polledAt); err != nil {
+				t.Fatal(err)
+			}
+			active = append(active, fmt.Sprintf("%s until=%d token=%s polled_at=%d", repo, claimUntil, token, polledAt))
+		}
+		logData, _ := os.ReadFile(filepath.Join(home, "projects", project.Name, "watch.log"))
+		t.Fatalf("stopped Watch left %d Member poll claims active: %v; Watch log=%s", activeClaims, active, logData)
+	}
+	t.Logf("while offline PR query and git fetch remained stalled and SQLite writes were contended, the healthy Member observation and merged-Task Teardown completed; offline failure phases remained visible and claims were released")
 }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -80,9 +81,19 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		return axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
 	}
 	// Mark the Project down before closing anything, so the pane and
-	// workspace close events this command causes do not recover it.
+	// workspace close events this command causes do not recover it. If the
+	// Watch is wedged while holding SQLite's writer lock, stop that exact
+	// Project process and retry the state change once its connection closes.
 	if err := db.MarkProjectDown(ctx.Context, project.ID); err != nil {
-		return err
+		if !store.IsBusy(err) {
+			return err
+		}
+		if stopErr := stopProjectPollerAfterContention(ctx.Context, home, project); stopErr != nil {
+			return errors.Join(err, stopErr)
+		}
+		if retryErr := db.MarkProjectDown(ctx.Context, project.ID); retryErr != nil {
+			return retryErr
+		}
 	}
 	snapshot, err := s.snapshot(ctx.Context)
 	if err != nil {
@@ -141,7 +152,7 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		return axi.Failure("watch_stop_failed", "a Watch of Project "+project.Name+" is still running", true, "Retry `posse down`")
 	}
 	for _, watch := range watches {
-		if err := stopStoredWatchRuntime(ctx.Context, home, watch); err != nil {
+		if err := stopStoredWatchRuntimeForDown(ctx.Context, home, watch); err != nil {
 			return axi.Failure("watch_stop_failed", "the Project watch is still completing maintenance", true, "Retry `posse down` after it stops")
 		}
 	}

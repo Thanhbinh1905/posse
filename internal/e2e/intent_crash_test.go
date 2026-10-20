@@ -183,6 +183,7 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 			var sandbox store.Sandbox
 			var mergedCount, tornDownCount, approvalCount, intentCount, incompleteCount int
 			var intents []store.Intent
+			var notices []store.Notice
 			if err := fixture.openDB(t, func(db *store.DB) error {
 				var err error
 				task, err = db.Task(context.Background(), fixture.project.ID, taskID)
@@ -209,6 +210,10 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 					return err
 				}
 				intents, err = db.Intents(context.Background(), fixture.project.ID)
+				if err != nil {
+					return err
+				}
+				notices, err = db.Notices(context.Background(), fixture.project.ID, false)
 				return err
 			}); err != nil {
 				t.Fatal(err)
@@ -218,7 +223,7 @@ func TestLocalMergeReportsConcurrentTeardownOutcomeExactlyOnce(t *testing.T) {
 				wantState, wantSandbox, wantTornDown, wantIncomplete = store.StateMerged, "broken", 0, 1
 			}
 			if task.State != wantState || sandbox.State != wantSandbox || mergedCount != 1 || tornDownCount != wantTornDown || approvalCount != 1 || intentCount != 0 || incompleteCount != wantIncomplete {
-				t.Fatalf("unexpected exactly-once outcome: state=%s sandbox=%s merged=%d torn-down=%d approvals=%d intents=%d incomplete=%d rows=%#v watch PIDs=%v merge output=%s", task.State, sandbox.State, mergedCount, tornDownCount, approvalCount, intentCount, incompleteCount, intents, watchPIDs(fixture.root), mergeOutput.String())
+				t.Fatalf("unexpected exactly-once outcome: state=%s sandbox=%s merged=%d torn-down=%d approvals=%d intents=%d incomplete=%d rows=%#v notices=%#v watch PIDs=%v merge output=%s", task.State, sandbox.State, mergedCount, tornDownCount, approvalCount, intentCount, incompleteCount, intents, notices, watchPIDs(fixture.root), mergeOutput.String())
 			}
 		})
 	}

@@ -472,7 +472,13 @@ func (s *Service) verifySandboxShellSignalOwnership(ctx context.Context, project
 		return fmt.Errorf("could not recheck pane %s ownership before signaling its retained shell: %w", paneID, err)
 	}
 	pane, found := snapshotPane(snapshot, paneID)
-	if !found || pane.WorkspaceID != expectedPane.WorkspaceID || pane.TabID != expectedPane.TabID || pane.Label != expectedPane.Label || !taskOwnedPane && !pathInside(pane.CWD, sandboxPath) {
+	if !found {
+		if !taskOwnedPane || foreignShellPane {
+			return fmt.Errorf("pane %s no longer matches its proved identity or Sandbox; preserving its processes", paneID)
+		}
+		return verifyClosedTaskPaneShellOwnership(task, sandboxPath, paneID, shellPID, authorization)
+	}
+	if pane.WorkspaceID != expectedPane.WorkspaceID || pane.TabID != expectedPane.TabID || pane.Label != expectedPane.Label || !taskOwnedPane && !pathInside(pane.CWD, sandboxPath) {
 		return fmt.Errorf("pane %s no longer matches its proved identity or Sandbox; preserving its processes", paneID)
 	}
 	if foreignShellPane {
@@ -518,7 +524,58 @@ func (s *Service) verifySandboxShellSignalOwnership(ctx context.Context, project
 		return err
 	}
 	if !foregroundAlive {
-		return fmt.Errorf("pane %s foreground process %d exited during ownership recheck", paneID, foregroundPID)
+		// A competing Teardown may stop the agent between this pane snapshot and
+		// the pidfd check. Re-read the pane before authorizing its retained shell.
+		return s.verifyTaskPaneShellAfterForegroundExit(ctx, project, task, sandboxPath, expectedPane, shellPID, foregroundPID, authorization)
+	}
+	return nil
+}
+
+func (s *Service) verifyTaskPaneShellAfterForegroundExit(ctx context.Context, project store.Project, task store.Task, sandboxPath string, expectedPane herdr.Pane, shellPID, foregroundPID int, authorization *sandboxProcessAuthorization) error {
+	info, err := s.sandboxPaneProcessInfo(ctx, expectedPane.PaneID)
+	if err != nil {
+		return fmt.Errorf("could not recheck pane %s after foreground process %d exited: %w", expectedPane.PaneID, foregroundPID, err)
+	}
+	if info.ShellPID != shellPID || info.ForegroundProcessGroup != shellPID {
+		return fmt.Errorf("pane %s foreground changed after Task process %d exited; preserving its processes", expectedPane.PaneID, foregroundPID)
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("could not confirm pane %s ownership after foreground process %d exited: %w", expectedPane.PaneID, foregroundPID, err)
+	}
+	pane, found := snapshotPane(snapshot, expectedPane.PaneID)
+	if !found {
+		return verifyClosedTaskPaneShellOwnership(task, sandboxPath, expectedPane.PaneID, shellPID, authorization)
+	}
+	if pane.WorkspaceID != expectedPane.WorkspaceID || pane.TabID != expectedPane.TabID || pane.Label != expectedPane.Label || !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
+		return fmt.Errorf("pane %s no longer matches Task %s after foreground process %d exited; preserving its processes", expectedPane.PaneID, taskIDString(task.Seq), foregroundPID)
+	}
+	if pane.Agent != "" || snapshotAgentName(snapshot, expectedPane.PaneID) != "" {
+		return fmt.Errorf("pane %s still exposes a foreground agent after Task process %d exited; preserving its processes", expectedPane.PaneID, foregroundPID)
+	}
+	shellAlive, err := authorization.verifyIfAlive(shellPID)
+	if err != nil {
+		return err
+	}
+	if !shellAlive {
+		return nil
+	}
+	return verifyTaskPaneShellImageAuthorized(task, shellPID, authorization, true)
+}
+
+func verifyClosedTaskPaneShellOwnership(task store.Task, sandboxPath, paneID string, shellPID int, authorization *sandboxProcessAuthorization) error {
+	alive, err := authorization.verifyIfAlive(shellPID)
+	if err != nil {
+		return err
+	}
+	if !alive {
+		return nil
+	}
+	if !processInSandbox(shellPID, sandboxPath) {
+		return fmt.Errorf("closed Task pane %s shell PID %d no longer references its Sandbox; preserving it", paneID, shellPID)
+	}
+	if err := verifyTaskPaneShellImageAuthorized(task, shellPID, authorization, true); err != nil {
+		return fmt.Errorf("closed Task pane %s shell PID %d no longer matches its verified image: %w", paneID, shellPID, err)
 	}
 	return nil
 }
