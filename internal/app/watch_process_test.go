@@ -71,6 +71,19 @@ func TestWatchProjectDiscoveryMatchesNestedWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestSupervisedWatchDiscoveryExcludesForegroundPollOnlyRuns(t *testing.T) {
+	project := store.Project{ID: 42, Root: "/workspace/shop"}
+	processes := []watchProcess{
+		{PID: 11, PollOnly: true, WorkingDir: project.Root},
+		{PID: 12, PollOnly: true, WatchProjectID: project.ID, WatchStartedAt: 100},
+		{PID: 13, PollOnly: true, WatchProjectID: project.ID, WatchToken: "managed-token", WatchStartedAt: 100},
+	}
+	got := supervisedWatchProcessesForProject(processes, project)
+	if len(got) != 1 || got[0].PID != 13 {
+		t.Fatalf("supervised Project Watches = %#v, want only the process with a complete private identity", got)
+	}
+}
+
 func TestLiveLeadWatchExcludesPollOnlyAndOtherProjects(t *testing.T) {
 	project := store.Project{Root: "/workspace/shop", HerdrWorkspaceID: "w1", LeadPaneID: "w1:p1"}
 	pid := os.Getpid()

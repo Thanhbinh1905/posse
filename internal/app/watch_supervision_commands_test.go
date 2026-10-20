@@ -34,6 +34,22 @@ func TestNoticeOnlyCommandsSkipWatchSupervision(t *testing.T) {
 	}
 }
 
+func TestForegroundPollOnlyWatchSkipsWatchSupervision(t *testing.T) {
+	previous := watchExecutableVerifier
+	t.Cleanup(func() { watchExecutableVerifier = previous })
+	calls := 0
+	watchExecutableVerifier = func(string) bool {
+		calls++
+		return false
+	}
+	service := New(t.TempDir(), nil)
+	ctx := &axi.Context{Context: context.Background(), Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}}
+	service.superviseWatchRuntimes(ctx, "watch", []string{"--poll-only", "--timeout", "2500"})
+	if calls != 0 {
+		t.Fatal("foreground --poll-only Watch was supervised after its wait loop")
+	}
+}
+
 func TestWatchRepairSkipsDuplicateWatchSupervision(t *testing.T) {
 	previous := watchExecutableVerifier
 	t.Cleanup(func() { watchExecutableVerifier = previous })

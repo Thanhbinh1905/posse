@@ -244,12 +244,10 @@ func (s *Service) ensureWatchRuntime(ctx context.Context, db *store.DB, home str
 	if err != nil {
 		return err
 	}
-	var projectProcesses []watchProcess
-	for _, process := range processes {
-		if process.PollOnly && (process.WatchProjectID == project.ID || process.WatchProjectID == 0 && processWorkingInProject(process, project)) {
-			projectProcesses = append(projectProcesses, process)
-		}
-	}
+	// Only a complete private binding identifies a supervised Watch. A
+	// foreground `watch --poll-only` has no binding and must not be stopped as
+	// an orphan or legacy process, even when it runs from the Project folder.
+	projectProcesses := supervisedWatchProcessesForProject(processes, project)
 
 	var stored *watchProcess
 	if state.PID > 0 {
@@ -562,7 +560,7 @@ func watchRuntimeDropsEnvironmentVariable(key string) bool {
 
 func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args []string) {
 	// Notice receipts are delivery work, not a Project maintenance boundary. Handoffs also repair the observer.
-	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" || command == "watch" && (containsArgument(args, "--repair") || containsArgument(args, "--receipt") || containsArgument(args, "--receipt-outcome") || containsArgument(args, "--receipt-token")) {
+	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" || command == "watch" && (containsArgument(args, "--poll-only") || containsArgument(args, "--repair") || containsArgument(args, "--receipt") || containsArgument(args, "--receipt-outcome") || containsArgument(args, "--receipt-token")) {
 		return
 	}
 	binary, err := os.Executable()

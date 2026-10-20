@@ -345,6 +345,16 @@ func processBelongsToProject(process watchProcess, project store.Project) bool {
 	return processWorkingInProject(process, project)
 }
 
+func supervisedWatchProcessesForProject(processes []watchProcess, project store.Project) []watchProcess {
+	var supervised []watchProcess
+	for _, process := range processes {
+		if process.PollOnly && process.WatchProjectID == project.ID && process.WatchToken != "" && process.WatchStartedAt > 0 {
+			supervised = append(supervised, process)
+		}
+	}
+	return supervised
+}
+
 func processWorkingInProject(process watchProcess, project store.Project) bool {
 	if process.WorkingDir == "" || project.Root == "" {
 		return false
