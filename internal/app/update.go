@@ -45,6 +45,12 @@ type updateCache struct {
 	Release githubRelease `json:"release"`
 }
 
+type updateConfigRepair struct {
+	Key     string   `json:"key"`
+	Message string   `json:"message"`
+	Help    []string `json:"help"`
+}
+
 func (s *Service) releaseClient() *http.Client {
 	if s.updateClient != nil {
 		return s.updateClient
@@ -192,6 +198,9 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 	if installed.reexecWarning != "" {
 		result = append(result, axi.Field{Key: "watch_reexec_warning", Value: installed.reexecWarning})
 	}
+	if installed.backupWarning != "" {
+		result = append(result, axi.Field{Key: "binary_backup_warning", Value: installed.backupWarning})
+	}
 	return ctx.Print(result)
 }
 
@@ -279,6 +288,7 @@ type updateInstallResult struct {
 	binary, backup string
 	reexecWatches  []watchProcess
 	reexecWarning  string
+	backupWarning  string
 }
 
 func (s *Service) installRelease(ctx context.Context, release githubRelease, force, stopWatches bool, installed *updateInstallResult, stopped *[]watchProcess) error {
@@ -374,17 +384,26 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 	if force {
 		preflight.Env = append(preflight.Env, store.ForceMigrationEnv+"=1")
 	}
-	if output, err := preflight.CombinedOutput(); err != nil {
+	preflightOutput, err := preflight.CombinedOutput()
+	if err != nil {
 		var failure struct {
 			Code      string   `json:"code"`
 			Message   string   `json:"message"`
 			Retryable bool     `json:"retryable"`
 			Help      []string `json:"help"`
 		}
-		if json.Unmarshal(output, &failure) == nil && failure.Code != "" {
+		if json.Unmarshal(preflightOutput, &failure) == nil && failure.Code != "" {
 			return axi.Failure(failure.Code, failure.Message, failure.Retryable, failure.Help...)
 		}
-		return axi.Failure("migration_refused", strings.TrimSpace(string(output)), false, "Finish live Tasks or retry with `posse update --force`")
+		return axi.Failure("migration_refused", strings.TrimSpace(string(preflightOutput)), false, "Finish live Tasks or retry with `posse update --force`")
+	}
+	var preflightResult struct {
+		ConfigRepair *updateConfigRepair `json:"config_repair"`
+	}
+	if len(bytes.TrimSpace(preflightOutput)) > 0 {
+		if err := json.Unmarshal(preflightOutput, &preflightResult); err != nil {
+			return axi.Failure("update_preflight_invalid", "target binary returned an invalid preflight result", false, strings.TrimSpace(string(preflightOutput)))
+		}
 	}
 	backup := ""
 	db, dbErr := store.OpenReadOnly(home)
@@ -416,28 +435,65 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 	} else if !errors.Is(dbErr, os.ErrNotExist) {
 		return dbErr
 	}
+	binaryBackup := ""
+	if preflightResult.ConfigRepair == nil {
+		binaryBackup, err = backupExecutable(destination)
+		if err != nil {
+			return fmt.Errorf("backup installed binary: %w", err)
+		}
+	}
 	if stopWatches {
 		current, err := s.runningWatches(ctx, home)
 		if err != nil {
+			_ = os.Remove(binaryBackup)
 			return axi.Failure("watch_discovery_failed", err.Error(), false, "Check process-table access and retry the update")
 		}
 		stoppedProcesses, err := stopWatchProcesses(ctx, home, current)
 		if err != nil {
+			_ = os.Remove(binaryBackup)
 			return axi.Failure("watch_stop_failed", err.Error(), false, "Inspect the listed process IDs before retrying")
 		}
 		*stopped = stoppedProcesses
 	}
 	if err := os.Rename(temp.Name(), destination); err != nil {
+		if binaryBackup != "" {
+			_ = os.Remove(binaryBackup)
+		}
 		return fmt.Errorf("install binary: %w", err)
 	}
-	setup := exec.CommandContext(ctx, destination, "setup", "--binary", destination)
+	if preflightResult.ConfigRepair != nil {
+		installed.binary, installed.backup = destination, backup
+		repair := preflightResult.ConfigRepair
+		return axi.Failure("config_repair_required", fmt.Sprintf("installed %s; setup was skipped until configuration is repaired: %s", release.Tag, repair.Message), false, repair.Help...)
+	}
+	setup := exec.CommandContext(ctx, destination, "setup", "--binary", destination, "--json")
 	setup.Env = append(os.Environ(), "POSSE_HOME="+home)
 	if force {
 		setup.Env = append(setup.Env, store.ForceMigrationEnv+"=1")
 	}
 	output, err := setup.CombinedOutput()
 	if err != nil {
-		return axi.Failure("setup_failed", fmt.Sprintf("installed %s but setup failed: %s", release.Tag, strings.TrimSpace(string(output))), false, "Run `posse setup` after resolving the reported problem")
+		var failure struct {
+			Code    string   `json:"code"`
+			Message string   `json:"message"`
+			Help    []string `json:"help"`
+		}
+		if json.Unmarshal(output, &failure) == nil && failure.Code == "config_invalid" {
+			if _, repairable := configRepairForError(config.ValidateAll(home)); repairable {
+				help := append([]string(nil), failure.Help...)
+				if err := os.Remove(binaryBackup); err != nil && !errors.Is(err, os.ErrNotExist) {
+					help = append(help, "Previous binary backup remains at "+binaryBackup+": "+err.Error())
+				}
+				return axi.Failure("config_repair_required", fmt.Sprintf("installed %s; setup could not complete until configuration is repaired: %s", release.Tag, failure.Message), false, help...)
+			}
+		}
+		if rollbackErr := os.Rename(binaryBackup, destination); rollbackErr != nil {
+			return axi.Failure("setup_failed", fmt.Sprintf("setup failed and the previous binary could not be restored: %s", strings.TrimSpace(string(output))), false, "Restore the previous binary from "+binaryBackup, rollbackErr.Error())
+		}
+		return axi.Failure("setup_failed", fmt.Sprintf("setup failed; the previous binary was restored: %s", strings.TrimSpace(string(output))), false, "Resolve the setup failure and retry `posse update`")
+	}
+	if err := os.Remove(binaryBackup); err != nil && !errors.Is(err, os.ErrNotExist) {
+		installed.backupWarning = "could not remove previous binary backup " + binaryBackup + ": " + err.Error()
 	}
 	installed.binary, installed.backup = destination, backup
 	if !stopWatches && len(watches) > 0 {
@@ -496,6 +552,55 @@ func extractPosse(data []byte) ([]byte, error) {
 	}
 	return nil, fmt.Errorf("archive does not contain posse")
 }
+func configRepairForError(err error) (*updateConfigRepair, bool) {
+	var invalid *config.InvalidError
+	if !errors.As(err, &invalid) {
+		return nil, false
+	}
+	if _, ok := config.Lookup(invalid.Key); !ok {
+		return nil, false
+	}
+	return &updateConfigRepair{Key: invalid.Key, Message: invalid.Error(), Help: configRepairHelp(invalid)}, true
+}
+
+func backupExecutable(path string) (string, error) {
+	source, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer source.Close()
+	info, err := source.Stat()
+	if err != nil {
+		return "", err
+	}
+	backup, err := os.CreateTemp(filepath.Dir(path), ".posse-update-rollback-*")
+	if err != nil {
+		return "", err
+	}
+	backupPath := backup.Name()
+	complete := false
+	defer func() {
+		if !complete {
+			_ = backup.Close()
+			_ = os.Remove(backupPath)
+		}
+	}()
+	if err := backup.Chmod(info.Mode().Perm()); err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(backup, source); err != nil {
+		return "", err
+	}
+	if err := backup.Sync(); err != nil {
+		return "", err
+	}
+	if err := backup.Close(); err != nil {
+		return "", err
+	}
+	complete = true
+	return backupPath, nil
+}
+
 func (s *Service) updatePreflight(ctx *axi.Context, args []string) error {
 	if len(args) > 0 {
 		return axi.Usage("_update-preflight takes no arguments")
@@ -507,12 +612,17 @@ func (s *Service) updatePreflight(ctx *axi.Context, args []string) error {
 	if s.workerCaller(ctx.Context, home) {
 		return axi.Failure("worker_forbidden", "a Worker cannot update its home", false)
 	}
+	var repair *updateConfigRepair
 	if err := config.ValidateAll(home); err != nil {
-		return configError(err)
+		var ok bool
+		repair, ok = configRepairForError(err)
+		if !ok {
+			return configError(err)
+		}
 	}
 	db, err := store.OpenReadOnly(home)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return printUpdateConfigRepair(ctx, repair)
 	}
 	if err != nil {
 		return err
@@ -522,5 +632,15 @@ func (s *Service) updatePreflight(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return schemaFailure(db.RefuseLiveMigration(ctx.Context, pending, os.Getenv(store.ForceMigrationEnv) == "1"))
+	if err := schemaFailure(db.RefuseLiveMigration(ctx.Context, pending, os.Getenv(store.ForceMigrationEnv) == "1")); err != nil {
+		return err
+	}
+	return printUpdateConfigRepair(ctx, repair)
+}
+
+func printUpdateConfigRepair(ctx *axi.Context, repair *updateConfigRepair) error {
+	if repair == nil {
+		return nil
+	}
+	return ctx.Print(axi.Object{{Key: "config_repair", Value: repair}, {Key: "help", Value: repair.Help}})
 }

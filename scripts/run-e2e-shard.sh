@@ -5,7 +5,7 @@ set -eu
 # Keep this list complete so newly added tests cannot silently go unsharded.
 assignments='
 1 Test014ProjectVocabularyUpgradePreservesTasksSandboxesAndOpenPR
-1 Test014LegacyReviewBlocksUpdatePreflightUntilRepaired
+1 TestOfficial014HomeCanBeRepairedAfter015Update
 1 Test014TaskSnapshotRebuildPreservesMergeAuthorityAndSandbox
 1 Test014MalformedConfigRetainsFilenameAndErrorCode
 1 Test014ProjectShorthandConfigVocabularyUpgrade

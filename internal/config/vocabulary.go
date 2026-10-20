@@ -46,6 +46,87 @@ func unknownKeyReason(key string) string {
 	return "unknown configuration key"
 }
 
+func preserveVocabularyBackup(path string, original []byte) error {
+	if bytes.HasPrefix(original, []byte(vocabularyMarker)) {
+		return nil
+	}
+	if marker, err := os.ReadFile(path + ".vocabulary"); err == nil && string(marker) == vocabularyMarker {
+		return nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var values map[string]any
+	if _, err := toml.Decode(string(original), &values); err != nil {
+		return err
+	}
+	if !containsLegacyVocabulary(values, "") {
+		return nil
+	}
+	return writeFileIfMissing(path+".v014", original, filePerm(path))
+}
+
+func containsLegacyVocabulary(values map[string]any, prefix string) bool {
+	for key, value := range values {
+		full := key
+		if prefix != "" {
+			full = prefix + "." + key
+		}
+		if ReplacementKey(full) != "" {
+			return true
+		}
+		if key == "auto_teardown" && value == "landed" {
+			return true
+		}
+		if text, ok := value.(string); ok && migrateVocabularyString(full, text) != text {
+			return true
+		}
+		if table, ok := value.(map[string]any); ok && containsLegacyVocabulary(table, full) {
+			return true
+		}
+		if full == "dispatch" {
+			if rules, ok := tableEntries(value); ok {
+				for _, rule := range rules {
+					if legacyTaskType(rule["type"]) != "" {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func writeFileIfMissing(path string, data []byte, mode os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm())
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = file.Close()
+			_ = os.Remove(path)
+		}
+	}()
+	if err := file.Chmod(mode.Perm()); err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	complete = true
+	return nil
+}
+
 // migrateVocabularyFile upgrades stored 0.14 config exactly once, before it is
 // validated. Subsequent legacy input is an error, not a working alias. Preserve
 // the original bytes next to the file for rollback, including comments.
@@ -94,7 +175,7 @@ func migrateVocabularyFile(path string) error {
 		return &InvalidError{File: path, Key: "config", Cause: err}
 	}
 	updated := append([]byte(vocabularyMarker), []byte(updatedText)...)
-	if err := atomicfile.Write(path+".v014", data, filePerm(path)); err != nil {
+	if err := writeFileIfMissing(path+".v014", data, filePerm(path)); err != nil {
 		return err
 	}
 	return atomicfile.Write(path, updated, filePerm(path))

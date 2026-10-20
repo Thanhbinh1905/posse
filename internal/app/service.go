@@ -156,7 +156,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "teardown", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Sandbox work with User approval and verified Worker shutdown.", Handler: s.teardown},
 		{Name: "watch", Usage: "$ watch [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the Project watch.", Handler: s.wait},
-		{Name: "pool", Summary: "List a Project's Pool or prune safe, Posse-owned orphans.", Handler: s.pool},
+		{Name: "pool", Summary: "List a Project's Pool or prune safe, Posse-owned orphan panes.", Handler: s.pool},
 		{Name: "clean", Usage: "$ clean [--dry-run|--yes]", Summary: "Review or reclaim finished Tasks, their processes, scratch and held Sandboxes.", Handler: s.clean},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
 		{Name: "project", Summary: "Inspect or change a Project's settings.", Subcommands: []*axi.Command{
@@ -732,9 +732,29 @@ func defaultBranch(ctx context.Context, root string) (string, error) {
 func configError(err error) error {
 	var invalid *config.InvalidError
 	if errors.As(err, &invalid) {
-		return axi.Failure("config_invalid", invalid.Error(), false, "Edit the named config file and retry")
+		return axi.Failure("config_invalid", invalid.Error(), false, configRepairHelp(invalid)...)
 	}
 	return err
+}
+
+func configRepairHelp(invalid *config.InvalidError) []string {
+	if _, ok := config.Lookup(invalid.Key); !ok {
+		return []string{"Edit the named config file and retry"}
+	}
+	scope := ""
+	projectDir := filepath.Dir(invalid.File)
+	if filepath.Base(filepath.Dir(projectDir)) == "projects" {
+		scope = " --project " + filepath.Base(projectDir)
+	}
+	key := invalid.Key
+	value := "<valid-value>"
+	if strings.Contains(invalid.Error(), "legacy review policy") {
+		value = "none"
+	}
+	return []string{
+		"Run `posse config set " + key + " " + value + scope + "` or `posse config unset " + key + scope + "`",
+		"Run `posse setup` after the config is valid",
+	}
 }
 
 func herdrError(err error) error {

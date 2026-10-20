@@ -119,6 +119,20 @@ func IsUserOnly(key string) bool {
 	return found && spec.UserOnly
 }
 
+func CanonicalProjectKey(key string) string {
+	if isProjectScalarAlias(key) {
+		return canonicalSchemaKey(key)
+	}
+	return key
+}
+
+func IsUserOnlyFor(key string, projectFile bool) bool {
+	if projectFile {
+		key = CanonicalProjectKey(key)
+	}
+	return IsUserOnly(key)
+}
+
 func ValidateSetting(key string, value any, projectFile bool) error {
 	spec, found := Lookup(key)
 	if !found {

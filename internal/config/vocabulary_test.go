@@ -44,6 +44,25 @@ func TestStoredVocabularyMigratesOnceAndRejectsReintroducedKeys(t *testing.T) {
 	}
 }
 
+func TestRepairingLegacyReviewPreservesOriginalVocabularyBackup(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	original := "[defaults]\nreview = 'on_risk'\nlanding_mode = 'pr'\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetFile(path, "defaults.review", "none", false); err != nil {
+		t.Fatalf("repair review: %v", err)
+	}
+	if _, err := Load(home, ""); err != nil {
+		t.Fatalf("load repaired config: %v", err)
+	}
+	backup, err := os.ReadFile(path + ".v014")
+	if err != nil || string(backup) != original {
+		t.Fatalf("migration backup = %q err=%v; want original %q", backup, err, original)
+	}
+}
+
 func TestVocabularyMigrationPreservesCommentsAndLayout(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "config.toml")

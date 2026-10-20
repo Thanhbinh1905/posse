@@ -31,19 +31,24 @@ func ReadFile(path string) (map[string]any, []byte, error) {
 }
 
 func SetFile(path, key, text string, projectFile bool) (any, error) {
-	spec, ok := Lookup(key)
+	schemaKey := key
+	if projectFile {
+		schemaKey = CanonicalProjectKey(schemaKey)
+	}
+	spec, ok := Lookup(schemaKey)
 	if !ok {
 		return nil, &InvalidError{File: path, Key: key, Reason: unknownKeyReason(key)}
 	}
-	value, literal, err := parseSetting(key, spec, text, projectFile)
+	value, literal, err := parseSetting(schemaKey, spec, text, projectFile)
 	if err != nil {
 		return nil, &InvalidError{File: path, Key: key, Reason: err.Error()}
 	}
-	original, err := readFileForEdit(path, key)
+	original, err := readFileForEdit(path)
 	if err != nil {
 		return nil, err
 	}
-	updated, err := replaceTOMLValue(string(original), key, literal)
+	fileKey := projectEditKey(string(original), key, projectFile)
+	updated, err := replaceTOMLValue(string(original), fileKey, literal)
 	if err != nil {
 		return nil, err
 	}
@@ -54,14 +59,19 @@ func SetFile(path, key, text string, projectFile bool) (any, error) {
 }
 
 func UnsetFile(path, key string, projectFile bool) error {
-	if _, ok := Lookup(key); !ok {
+	schemaKey := key
+	if projectFile {
+		schemaKey = CanonicalProjectKey(schemaKey)
+	}
+	if _, ok := Lookup(schemaKey); !ok {
 		return &InvalidError{File: path, Key: key, Reason: unknownKeyReason(key)}
 	}
-	original, err := readFileForEdit(path, key)
+	original, err := readFileForEdit(path)
 	if err != nil {
 		return err
 	}
-	updated, found, err := removeTOMLValue(string(original), key)
+	fileKey := projectEditKey(string(original), key, projectFile)
+	updated, found, err := removeTOMLValue(string(original), fileKey)
 	if err != nil {
 		return err
 	}
@@ -71,13 +81,13 @@ func UnsetFile(path, key string, projectFile bool) error {
 	return atomicfile.Write(path, []byte(updated), filePerm(path))
 }
 
-func readFileForEdit(path, key string) ([]byte, error) {
+func readFileForEdit(path string) ([]byte, error) {
 	_, original, err := ReadFile(path)
 	if err == nil {
 		return original, nil
 	}
 	var invalid *InvalidError
-	if !errors.As(err, &invalid) || invalid.Key != key {
+	if !errors.As(err, &invalid) {
 		return nil, err
 	}
 	original, readErr := os.ReadFile(path)
@@ -88,7 +98,27 @@ func readFileForEdit(path, key string) ([]byte, error) {
 	if _, decodeErr := toml.Decode(string(original), &decoded); decodeErr != nil {
 		return nil, &InvalidError{File: path, Key: tomlErrorKey(decodeErr), Cause: decodeErr}
 	}
+	if err := preserveVocabularyBackup(path, original); err != nil {
+		return nil, err
+	}
 	return original, nil
+}
+
+func projectEditKey(contents, key string, projectFile bool) string {
+	if !projectFile {
+		return key
+	}
+	field := key
+	if strings.HasPrefix(field, "defaults.") {
+		field = strings.TrimPrefix(field, "defaults.")
+	}
+	if !isProjectScalarAlias(field) {
+		return key
+	}
+	if _, found := findAssignment(contents, "", field); found {
+		return field
+	}
+	return key
 }
 
 func parseSetting(key string, spec KeySpec, text string, projectFile bool) (any, string, error) {
@@ -201,11 +231,13 @@ func tableEntries(value any) ([]map[string]any, bool) {
 }
 
 func replaceTOMLValue(contents, key, literal string) (string, error) {
-	parts := strings.Split(key, ".")
 	if key == "dispatch" {
 		return replaceDispatch(contents, literal)
 	}
-	section, field := strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]
+	section, field := "", key
+	if parts := strings.Split(key, "."); len(parts) > 1 {
+		section, field = strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]
+	}
 	if match, ok := findAssignment(contents, section, field); ok {
 		return contents[:match.valueStart] + literal + contents[match.valueEnd:], nil
 	}
@@ -217,8 +249,10 @@ func removeTOMLValue(contents, key string) (string, bool, error) {
 		updated, found := removeDispatch(contents)
 		return updated, found, nil
 	}
-	parts := strings.Split(key, ".")
-	section, field := strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]
+	section, field := "", key
+	if parts := strings.Split(key, "."); len(parts) > 1 {
+		section, field = strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]
+	}
 	match, ok := findAssignment(contents, section, field)
 	if !ok {
 		return contents, false, nil

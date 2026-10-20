@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
@@ -119,7 +120,7 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return configError(err)
 	}
-	if err := s.validateConfigForEdit(home, projectName); err != nil {
+	if err := s.validateConfigEdit(home, projectName, path, key); err != nil {
 		if rollbackErr := restoreConfigFile(path, original, originalExists, originalMode); rollbackErr != nil {
 			return errors.Join(configError(err), fmt.Errorf("restore previous config: %w", rollbackErr))
 		}
@@ -176,7 +177,7 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 	if err := config.UnsetFile(path, key, projectName != ""); err != nil {
 		return configError(err)
 	}
-	if err := s.validateConfigForEdit(home, projectName); err != nil {
+	if err := s.validateConfigEdit(home, projectName, path, key); err != nil {
 		if rollbackErr := restoreConfigFile(path, original, originalExists, originalMode); rollbackErr != nil {
 			return errors.Join(configError(err), fmt.Errorf("restore previous config: %w", rollbackErr))
 		}
@@ -199,7 +200,7 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 // configApprovalProject returns zero when no approval record is needed. Global
 // changes are attributed to the calling Lead's Project.
 func (s *Service) configApprovalProject(ctx context.Context, db *store.DB, key, projectName, quote string) (int64, error) {
-	if !config.IsUserOnly(key) {
+	if !config.IsUserOnlyFor(key, projectName != "") {
 		return 0, nil
 	}
 	actor := s.configCaller(ctx, db)
@@ -223,6 +224,18 @@ func (s *Service) configApprovalProject(ctx context.Context, db *store.DB, key, 
 func (s *Service) validateConfigForEdit(home, projectName string) error {
 	_, err := config.Load(home, projectName)
 	return err
+}
+
+func (s *Service) validateConfigEdit(home, projectName, path, key string) error {
+	// A different invalid key was already present; keep this edit available to repair it next.
+	if err := s.validateConfigForEdit(home, projectName); err != nil {
+		var invalid *config.InvalidError
+		if errors.As(err, &invalid) && (filepath.Clean(invalid.File) != filepath.Clean(path) || invalid.Key != config.CanonicalProjectKey(key)) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Service) requireConfigCaller(ctx context.Context, db *store.DB) error {
