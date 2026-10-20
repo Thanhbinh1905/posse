@@ -35,6 +35,7 @@ var ErrNotFound = sql.ErrNoRows
 var ErrStateRace = errors.New("Task state changed concurrently")
 var ErrMessageDeliveryInProgress = errors.New("a message delivery is already in progress")
 var ErrQueuedInstructionsPending = errors.New("queued instructions remain undelivered")
+var ErrStaleWorkerTurn = errors.New("done Signal belongs to a stale Worker turn")
 var ErrTaskMergeInProgress = errors.New("Task merge has started or is in progress")
 var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition is only valid for User-approved discard")
 var ErrBusy = errors.New("database contention; retry the operation")
@@ -1219,6 +1220,9 @@ func (db *DB) NextTaskLaunchWithIdentity(ctx context.Context, taskID int64, prof
 	if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision) SELECT id,?,?,?,?,CASE WHEN plan_json='' THEN 0 ELSE json_extract(plan_json,'$.revision') END FROM tasks WHERE id=?`, launches, profile, configuredModel, modelKnown, taskID); err != nil {
 		return 0, err
 	}
+	if err := setTaskTurnTokenTx(ctx, tx, taskID, fmt.Sprintf("launch:%d", launches), now); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -1228,6 +1232,21 @@ func (db *DB) NextTaskLaunchWithIdentity(ctx context.Context, taskID int64, prof
 // TaskLaunchIdentities returns the configured Profile and model values recorded
 // for each launch. Missing rows remain visible through the caller's comparison
 // of these rows with Task.Launches; they are not reconstructed from current config.
+func setTaskTurnTokenTx(ctx context.Context, tx *writeTx, taskID int64, token string, at int64) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO task_turn_tokens(task_id,token,updated_at) VALUES(?,?,?)
+		ON CONFLICT(task_id) DO UPDATE SET token=excluded.token,updated_at=excluded.updated_at`, taskID, token, at)
+	return err
+}
+
+func (db *DB) TaskTurnToken(ctx context.Context, taskID int64) (string, error) {
+	var token string
+	err := db.QueryRowContext(ctx, `SELECT token FROM task_turn_tokens WHERE task_id=?`, taskID).Scan(&token)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return token, err
+}
+
 func (db *DB) TaskLaunchIdentities(ctx context.Context, taskID int64) ([]TaskLaunchIdentity, error) {
 	rows, err := db.QueryContext(ctx, `SELECT task_id,launch_number,profile_name,configured_model,model_known,plan_revision FROM task_launch_identities WHERE task_id=? ORDER BY launch_number`, taskID)
 	if err != nil {
@@ -1480,6 +1499,18 @@ func (db *DB) RecordWorkerSignalWithValidation(ctx context.Context, task Task, v
 	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, nil, &validation)
 }
 
+func workerTurnTokenFromData(data any) string {
+	switch value := data.(type) {
+	case map[string]any:
+		token, _ := value["turn_token"].(string)
+		return token
+	case map[string]string:
+		return value["turn_token"]
+	default:
+		return ""
+	}
+}
+
 func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput, validationHeads *ValidationContinuitySnapshot) (State, error) {
 	inPlace := false
 	if verb == "done" {
@@ -1507,6 +1538,21 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 		return "", err
 	}
 	current := State(state)
+	if verb == "done" {
+		var currentTurn string
+		err := tx.QueryRowContext(ctx, `SELECT token FROM task_turn_tokens WHERE task_id=?`, task.ID).Scan(&currentTurn)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		if currentTurn != "" {
+			submittedTurn := workerTurnTokenFromData(data)
+			if currentTurn != "launch:1" || submittedTurn != "" {
+				if submittedTurn != currentTurn {
+					return "", ErrStaleWorkerTurn
+				}
+			}
+		}
+	}
 	if verb == "done" && taskType == "change" && validationHeads != nil {
 		currentHeads, err := validationContinuitySnapshotTx(ctx, tx, task.ID)
 		if err != nil {
@@ -1616,6 +1662,15 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	signal, err := queries.InsertSignal(ctx, dbgen.InsertSignalParams{TaskID: task.ID, Verb: verb, Note: note, DataJson: string(encoded), At: signalAt})
 	if err != nil {
 		return "", err
+	}
+	if verb == "working" {
+		signalID, err := signal.LastInsertId()
+		if err != nil {
+			return "", err
+		}
+		if err := setTaskTurnTokenTx(ctx, tx, task.ID, fmt.Sprintf("signal:%d", signalID), signalAt); err != nil {
+			return "", err
+		}
 	}
 	if verdict != nil {
 		signalID, err := signal.LastInsertId()
@@ -2198,6 +2253,9 @@ func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token 
 	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='submitting' WHERE id=? AND status IN ('claimed','interrupting') AND claim_token=?`, messageID, token); err != nil {
 		return err
 	}
+	if err := setTaskTurnTokenTx(ctx, tx, taskID, fmt.Sprintf("message:%d", messageID), time.Now().UnixMilli()); err != nil {
+		return err
+	}
 	// Commit the authorized Task transition before Herdr can expose the
 	// instruction. An immediate Worker Signal must see the reopened Task.
 	current := State(state)
@@ -2448,9 +2506,15 @@ func (db *DB) RequeueNotices(ctx context.Context, projectID int64, ids []int64) 
 
 func (db *DB) AckNotices(ctx context.Context, projectID int64, identifiers []string) (int, error) {
 	at := time.Now().UnixMilli()
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	queries := db.queries.WithTx(tx.Tx)
 	count := 0
 	if len(identifiers) == 1 && identifiers[0] == "all" {
-		result, err := db.queries.AckAllNotices(ctx, dbgen.AckAllNoticesParams{AckedAt: sql.NullInt64{Int64: at, Valid: true}, ProjectID: projectID})
+		result, err := queries.AckAllNotices(ctx, dbgen.AckAllNoticesParams{AckedAt: sql.NullInt64{Int64: at, Valid: true}, ProjectID: projectID})
 		if err != nil {
 			return 0, err
 		}
@@ -2462,13 +2526,19 @@ func (db *DB) AckNotices(ctx context.Context, projectID int64, identifiers []str
 			if err != nil || id < 1 {
 				return count, fmt.Errorf("invalid Notice id %q", value)
 			}
-			result, err := db.queries.AckNotice(ctx, dbgen.AckNoticeParams{AckedAt: sql.NullInt64{Int64: at, Valid: true}, ID: id, ProjectID: projectID})
+			result, err := queries.AckNotice(ctx, dbgen.AckNoticeParams{AckedAt: sql.NullInt64{Int64: at, Valid: true}, ID: id, ProjectID: projectID})
 			if err != nil {
 				return count, err
 			}
 			changed, _ := result.RowsAffected()
 			count += int(changed)
 		}
+	}
+	if err := acceptAcknowledgedNoticeDeliveriesTx(ctx, tx, projectID, at); err != nil {
+		return count, err
+	}
+	if err := tx.Commit(); err != nil {
+		return count, err
 	}
 	if err := db.PersistNoticeDeliverySnapshotIfPresent(ctx, projectID); err != nil {
 		return count, err

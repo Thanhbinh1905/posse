@@ -134,7 +134,7 @@ func TestStartRejectsInvalidOptionalDisplayName(t *testing.T) {
 			output := &bytes.Buffer{}
 			cli := testService(home, nil).CLI()
 			cli.Out, cli.ErrOut = output, output
-			if code := cli.Run([]string{"start", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "safe lowercase kebab-case") {
+			if code := cli.Run([]string{"start", "--brief", brief, "--name", name}); code != 1 || !strings.Contains(output.String(), "name_invalid") || !strings.Contains(output.String(), "lowercase kebab-case") {
 				t.Fatalf("invalid Worker name exit=%d output=%s", code, output.String())
 			}
 		})
@@ -144,6 +144,16 @@ func TestStartRejectsInvalidOptionalDisplayName(t *testing.T) {
 	}
 	if got := defaultTaskName("東京"); got != "task" {
 		t.Fatalf("unsafe derived Task name = %q, want safe fallback", got)
+	}
+	output := &bytes.Buffer{}
+	cli := testService(home, nil).CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", brief, "--name", "research-generalizing-opus"}); code != 1 || !strings.Contains(output.String(), "--name research-generaliz-retry") {
+		t.Fatalf("invalid name did not suggest an accepted retry: code=%d output=%s", code, output)
+	}
+	retry := workerNameRetrySuggestion("research-generalizing-opus")
+	if retry != "research-generaliz-retry" || validateWorkerName(retry) != nil {
+		t.Fatalf("suggested retry is not an accepted Task Name: %q", retry)
 	}
 }
 
@@ -664,7 +674,11 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	sandboxPath := filepath.Join(root, "sandbox")
 	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandboxPath, "main")
 	home := filepath.Join(root, "posse")
-	if err := os.MkdirAll(filepath.Join(home, "projects", "shop", "tasks", "t1"), 0o700); err != nil {
+	taskHome := filepath.Join(home, "projects", "shop", "tasks", "t1")
+	if err := os.MkdirAll(taskHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskHome, "launch.md"), []byte("# Worker protocol\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	configText := "[kinds.claude]\n\n[profiles.deep]\nkind = \"claude\"\nmodel = \"sonnet\"\n\n"

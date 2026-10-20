@@ -131,16 +131,16 @@ func TestPrintedNoticeCanBeAcknowledgedBeforeReceiptAcceptance(t *testing.T) {
 	if err != nil || acked != 1 {
 		t.Fatalf("Lead ack while OpenCode turn owns printed receipt: acknowledged=%d err=%v", acked, err)
 	}
-	before, err := db.NoticesByIDs(ctx, project.ID, []int64{noticeID})
-	if err != nil || before[0].AckedAt == 0 || before[0].DeliveredAt != 0 {
-		t.Fatalf("acknowledgment before receipt acceptance = %#v, %v", before, err)
-	}
-	if err := db.ResolveNoticeDelivery(ctx, project.ID, delivery.DeliveryID, "owner-a", "accepted", 1020); err != nil {
-		t.Fatalf("accept receipt after in-turn acknowledgment: %v", err)
-	}
 	after, err := db.NoticesByIDs(ctx, project.ID, []int64{noticeID})
-	if err != nil || after[0].DeliveredAt != 1020 || after[0].AckedAt != before[0].AckedAt {
-		t.Fatalf("accepted receipt did not preserve earlier acknowledgment: %#v, %v", after, err)
+	if err != nil || after[0].AckedAt == 0 || after[0].DeliveredAt == 0 {
+		t.Fatalf("acknowledged printed Notice did not accept its receipt: %#v, %v", after, err)
+	}
+	accepted, err := db.NoticeDelivery(ctx, delivery.DeliveryID)
+	if err != nil || accepted.State != "accepted" || accepted.AcceptedAt == 0 {
+		t.Fatalf("acknowledged printed receipt = %#v, %v", accepted, err)
+	}
+	if err := db.ResolveNoticeDelivery(ctx, project.ID, delivery.DeliveryID, "owner-a", "accepted", accepted.AcceptedAt+1); err != nil {
+		t.Fatalf("repeated accepted settlement was not idempotent: %v", err)
 	}
 
 	allNoticeID, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "task_done", Summary: "ack all while OpenCode turn owns receipt"})
@@ -158,16 +158,17 @@ func TestPrintedNoticeCanBeAcknowledgedBeforeReceiptAcceptance(t *testing.T) {
 	if err != nil || acked != 1 {
 		t.Fatalf("Lead ack all while OpenCode turn owns printed receipt: acknowledged=%d err=%v", acked, err)
 	}
-	if err := db.ResolveNoticeDelivery(ctx, project.ID, allDelivery.DeliveryID, "owner-b", "accepted", 1120); err != nil {
-		t.Fatalf("accept receipt after ack all: %v", err)
+	allDelivery, err = db.NoticeDelivery(ctx, allDelivery.DeliveryID)
+	if err != nil || allDelivery.State != "accepted" || allDelivery.AcceptedAt == 0 {
+		t.Fatalf("ack-all did not accept printed receipt: %#v, %v", allDelivery, err)
 	}
 	allAfter, err := db.NoticesByIDs(ctx, project.ID, []int64{allNoticeID})
-	if err != nil || allAfter[0].DeliveredAt != 1120 || allAfter[0].AckedAt == 0 {
+	if err != nil || allAfter[0].DeliveredAt == 0 || allAfter[0].AckedAt == 0 {
 		t.Fatalf("accepted ack-all receipt did not preserve acknowledgment: %#v, %v", allAfter, err)
 	}
 }
 
-func TestAckedPrintedReceiptCanBeTakenOverAfterLeaseExpiry(t *testing.T) {
+func TestAckedPrintedReceiptIsAcceptedBeforeLeaseExpiry(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
 	if err != nil {
@@ -193,17 +194,18 @@ func TestAckedPrintedReceiptCanBeTakenOverAfterLeaseExpiry(t *testing.T) {
 	if acked, err := db.AckNotices(ctx, project.ID, []string{fmt.Sprint(noticeID)}); err != nil || acked != 1 {
 		t.Fatalf("ack printed Notice = %d, %v", acked, err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE notice_delivery_receipts SET lease_until=0 WHERE delivery_id=?`, first.DeliveryID); err != nil {
-		t.Fatal(err)
+	accepted, err := db.NoticeDelivery(ctx, first.DeliveryID)
+	if err != nil || accepted.State != "accepted" {
+		t.Fatalf("acknowledged receipt = %#v, %v", accepted, err)
 	}
 	retry, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{noticeID}, "opencode:session-1", "herdr:g2", "owner-b", time.Now().UnixMilli(), 1000)
-	if err != nil || !claimed || retry.DeliveryID != first.DeliveryID || retry.BatchID != first.BatchID || retry.State != "printed" || retry.OwnerToken != "owner-b" {
-		t.Fatalf("expired acknowledged receipt takeover = %#v claimed=%v err=%v", retry, claimed, err)
+	if err != nil || claimed || retry.DeliveryID != first.DeliveryID || retry.State != "accepted" {
+		t.Fatalf("accepted receipt was claimed again = %#v claimed=%v err=%v", retry, claimed, err)
 	}
 	var token string
 	var ackedAt int64
-	if err := db.QueryRowContext(ctx, `SELECT claim_token,acked_at FROM notices WHERE id=?`, noticeID).Scan(&token, &ackedAt); err != nil || token != "owner-b" || ackedAt == 0 {
-		t.Fatalf("takeover lost ownership or acknowledgment: claim_token=%q acked_at=%d err=%v", token, ackedAt, err)
+	if err := db.QueryRowContext(ctx, `SELECT claim_token,acked_at FROM notices WHERE id=?`, noticeID).Scan(&token, &ackedAt); err != nil || token != "" || ackedAt == 0 {
+		t.Fatalf("accepted receipt retained ownership or lost acknowledgment: claim_token=%q acked_at=%d err=%v", token, ackedAt, err)
 	}
 }
 
@@ -232,16 +234,16 @@ func TestRejectedPrintedReceiptReopensAcknowledgedNotice(t *testing.T) {
 	if acked, err := db.AckNotices(ctx, project.ID, []string{fmt.Sprint(noticeID)}); err != nil || acked != 1 {
 		t.Fatalf("ack before known rejection = %d, %v", acked, err)
 	}
-	if err := db.ResolveNoticeDelivery(ctx, project.ID, delivery.DeliveryID, "owner-a", "rejected", 1020); err != nil {
-		t.Fatal(err)
+	if err := db.ResolveNoticeDelivery(ctx, project.ID, delivery.DeliveryID, "owner-a", "rejected", 1020); !errors.Is(err, ErrStateRace) {
+		t.Fatalf("rejected an already accepted receipt: %v", err)
 	}
-	notices, err := db.Notices(ctx, project.ID, true)
-	if err != nil || len(notices) != 1 || notices[0].ID != noticeID || notices[0].AckedAt != 0 {
-		t.Fatalf("known rejection did not reopen acknowledged Notice: %#v, %v", notices, err)
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].ID != noticeID || notices[0].AckedAt == 0 || notices[0].DeliveredAt == 0 {
+		t.Fatalf("acknowledged Notice was not kept accepted: %#v, %v", notices, err)
 	}
 }
 
-func TestAckedUncertainReceiptOwnershipSurvivesRebuild(t *testing.T) {
+func TestUncertainReceiptOwnershipSurvivesRebuild(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -265,9 +267,6 @@ func TestAckedUncertainReceiptOwnershipSurvivesRebuild(t *testing.T) {
 	if err := db.MarkNoticeDeliveryPrinted(ctx, delivery.DeliveryID, "owner-a", now+1); err != nil {
 		t.Fatal(err)
 	}
-	if acked, err := db.AckNotices(ctx, project.ID, []string{fmt.Sprint(noticeID)}); err != nil || acked != 1 {
-		t.Fatalf("ack printed Notice = %d, %v", acked, err)
-	}
 	if err := db.ResolveNoticeDelivery(ctx, project.ID, delivery.DeliveryID, "owner-a", "uncertain", now+2); err != nil {
 		t.Fatal(err)
 	}
@@ -282,8 +281,8 @@ func TestAckedUncertainReceiptOwnershipSurvivesRebuild(t *testing.T) {
 		t.Fatalf("resolve rebuilt uncertain receipt: %v", err)
 	}
 	notices, err := db.NoticesByIDs(ctx, project.ID, []int64{noticeID})
-	if err != nil || notices[0].DeliveredAt != now+3 || notices[0].AckedAt == 0 {
-		t.Fatalf("resolution lost accepted delivery or acknowledgment: %+v err=%v", notices, err)
+	if err != nil || notices[0].DeliveredAt != now+3 || notices[0].AckedAt != 0 {
+		t.Fatalf("uncertain receipt resolution changed delivery or acknowledgment unexpectedly: %+v err=%v", notices, err)
 	}
 }
 

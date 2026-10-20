@@ -223,6 +223,21 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 	if heldSandbox.Path == "" || task.WorktreePath == "" || !pathInside(task.WorktreePath, heldSandbox.Path) {
 		return axi.Failure("sandbox_process_identity_unavailable", "could not match the Task worktree to its held Sandbox before releasing it", true)
 	}
+	home, err := s.homePath()
+	if err != nil {
+		return axi.Failure("sandbox_process_identity_unavailable", "could not locate Posse home while retaining Task process identities", true, err.Error())
+	}
+	roots, err := taskOwnedProcessRoots(ctx, db, home, project, task)
+	if err != nil {
+		return axi.Failure("sandbox_process_identity_unavailable", "could not verify Task-owned process paths", true, err.Error())
+	}
+	for index := range roots {
+		roots[index].includeOpenFiles = true
+		roots[index].includeMappedFiles = true
+	}
+	if err := retainTaskContainmentProcesses(authorization, task, roots); err != nil {
+		return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not retain Task-contained process identities before releasing the Sandbox: %v", err), true)
+	}
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return axi.Failure("sandbox_process_identity_unavailable", "could not verify foreground process ownership before releasing the Sandbox", true, err.Error())
@@ -741,7 +756,7 @@ func verifyTaskPaneShellImageAuthorized(task store.Task, pid int, authorization 
 
 func verifyTaskPaneShellImageIdentity(taskSeq, pid int, expected string) error {
 	if expected == "" {
-		return fmt.Errorf("Task t%d has no verified pane-shell image identity", taskSeq)
+		return fmt.Errorf("task t%d has no verified pane-shell image identity", taskSeq)
 	}
 	identity, err := sandboxProcessExecutableIdentity(pid)
 	if err != nil {

@@ -208,16 +208,6 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 	return processLabels(allPIDs), fmt.Errorf("sandbox processes survived teardown: %v", survivors)
 }
 
-func excludeExactProcessIDs(pids []int, excluded map[int]bool) []int {
-	filtered := make([]int, 0, len(pids))
-	for _, pid := range pids {
-		if !excluded[pid] {
-			filtered = append(filtered, pid)
-		}
-	}
-	return filtered
-}
-
 func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxProcessHandle, authorization *sandboxProcessAuthorization, waitForTransients bool, excluded map[int]bool) error {
 	pids, err := sandboxProcessIDs(root)
 	if err != nil {

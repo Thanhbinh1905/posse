@@ -34,6 +34,33 @@ func TestReviewDefaultsOverridesAndUserControl(t *testing.T) {
 	}
 }
 
+func TestProjectReviewShorthandCanBeRepaired(t *testing.T) {
+	for _, action := range []string{"set", "unset"} {
+		t.Run(action, func(t *testing.T) {
+			home := t.TempDir()
+			path := ConfigPath(home, "shop")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("review = 'on_risk'\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if action == "set" {
+				_, err = SetFile(path, "defaults.review", "none", true)
+			} else {
+				err = UnsetFile(path, "defaults.review", true)
+			}
+			if err != nil {
+				t.Fatalf("repair Project review with %s: %v", action, err)
+			}
+			if _, err := Load(home, "shop"); err != nil {
+				t.Fatalf("Project review still invalid after %s: %v", action, err)
+			}
+		})
+	}
+}
+
 func TestExplicitLegacyReviewRefusesEveryConfigLayer(t *testing.T) {
 	for _, value := range []string{"always", "on_risk", "never"} {
 		for _, scope := range []string{"global", "project", "alias", "member"} {

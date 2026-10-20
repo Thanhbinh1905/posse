@@ -486,6 +486,11 @@ func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
 		db.Close()
 		t.Fatalf("delivered instruction remained pending: %v %v", pending, err)
 	}
+	turnToken, err := db.TaskTurnToken(ctx, task.ID)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +502,7 @@ func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
 	service := testService(fixture.home, fake)
-	if code, output := runCLI(t, service, "signal", "done", "Applied the delivered instruction"); code != 0 || !strings.Contains(output, "state: done") {
+	if code, output := runCLI(t, service, "signal", "done", "Applied the delivered instruction", "--turn", turnToken); code != 0 || !strings.Contains(output, "state: done") {
 		t.Fatalf("done Signal after delivered instruction was rejected: code=%d output=%s", code, output)
 	}
 }

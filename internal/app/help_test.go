@@ -27,12 +27,12 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 	for _, want := range []string{
 		"Restart the Worker in the same execution root, optionally with another Profile.",
 		"Start a Worker from a Brief with an optional display name.",
-		"List a Project's Pool or prune safe, Posse-owned orphans.",
+		"List a Project's Pool or prune safe, Posse-owned orphan panes.",
 		"Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).",
 		"Send a message, optionally queueing it or interrupting and redirecting a busy Worker.",
 		"Withdraw a queued Worker message before delivery begins.",
 		"Interrupt a working Worker and verify it stopped; report when no working turn can be interrupted.",
-		"Record a Worker's Signal; done is refused while queued instructions remain undelivered.",
+		"Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("posse --help omitted summary %q: %s", want, help)

@@ -43,6 +43,312 @@ func fakeRelease(t *testing.T, checksum string) (*httptest.Server, string) {
 	return server, url
 }
 
+func buildReleaseArchive(t *testing.T, tag string) ([]byte, string, []byte, string) {
+	t.Helper()
+	root := filepath.Clean(filepath.Join("..", ".."))
+	binaryPath := filepath.Join(t.TempDir(), "posse-current")
+	build := exec.Command("go", "build", "-o", binaryPath, "./cmd/posse")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build current release binary: %v\n%s", err, output)
+	}
+	binary, err := os.ReadFile(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archiveBody bytes.Buffer
+	gz := gzip.NewWriter(&archiveBody)
+	tarball := tar.NewWriter(gz)
+	archiveName := fmt.Sprintf("posse_%s_%s_%s.tar.gz", strings.TrimPrefix(tag, "v"), runtime.GOOS, runtime.GOARCH)
+	if err := tarball.WriteHeader(&tar.Header{Name: "posse", Mode: 0o755, Size: int64(len(binary)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarball.Write(binary); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarball.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive := archiveBody.Bytes()
+	digest := sha256.Sum256(archive)
+	return binary, archiveName, archive, fmt.Sprintf("%x", digest)
+}
+
+func TestUpdatePreflightAllowsKnownConfigRepair(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(path, []byte("[defaults]\nreview = 'on_risk'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	code, output := runCLI(t, service, "_update-preflight")
+	if code != 0 {
+		t.Fatalf("update preflight blocked the release that can repair config: %d %s", code, output)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "[defaults]\nreview = 'on_risk'\n" {
+		t.Fatalf("read-only preflight changed config: %q %v", data, err)
+	}
+}
+
+func TestUpdateRollsBackBinaryWhenSetupFails(t *testing.T) {
+	_, archiveName, archive, digest := buildReleaseArchive(t, "v0.15.1")
+	var url string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "v0.15.1", "assets": []any{map[string]string{"name": archiveName, "browser_download_url": url + "/archive"}, map[string]string{"name": "checksums.txt", "browser_download_url": url + "/checksums"}}})
+		case "/archive":
+			_, _ = w.Write(archive)
+		case "/checksums":
+			fmt.Fprintf(w, "%s  %s\n", digest, archiveName)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	url = server.URL
+
+	root := t.TempDir()
+	home := filepath.Join(root, "posse")
+	binaryPath := filepath.Join(root, "bin", "posse")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldBinary := []byte("installed binary before setup failure")
+	if err := os.WriteFile(binaryPath, oldBinary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binaryPath, Version: "0.15.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[defaults]\nreview = 'none'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, nil)
+	service.Version = "0.15.0"
+	service.updateURL = url
+	path := filepath.Join(root, "empty-path")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", path)
+	code, output := runCLI(t, service, "update")
+	if code != 1 || !strings.Contains(output, "setup_failed") || !strings.Contains(output, "previous binary was restored") {
+		t.Fatalf("failed setup did not report rollback: code=%d output=%s", code, output)
+	}
+	if data, err := os.ReadFile(binaryPath); err != nil || !bytes.Equal(data, oldBinary) {
+		t.Fatalf("setup failure did not restore the installed binary: %q %v", data, err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(binaryPath), ".posse-update-rollback-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("setup rollback left binary backups %v err=%v", leftovers, err)
+	}
+}
+
+func TestUpdateKeepsNewBinaryWhenSetupFailsAfterWritingMigrations(t *testing.T) {
+	newBinary, archiveName, archive, digest := buildReleaseArchive(t, "v0.15.1")
+	var url string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "v0.15.1", "assets": []any{map[string]string{"name": archiveName, "browser_download_url": url + "/archive"}, map[string]string{"name": "checksums.txt", "browser_download_url": url + "/checksums"}}})
+		case "/archive":
+			_, _ = w.Write(archive)
+		case "/checksums":
+			fmt.Fprintf(w, "%s  %s\n", digest, archiveName)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	url = server.URL
+
+	root := t.TempDir()
+	home := filepath.Join(root, "posse")
+	binaryPath := filepath.Join(root, "bin", "posse")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldBinary := []byte("installed binary before migrated setup failure")
+	if err := os.WriteFile(binaryPath, oldBinary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binaryPath, Version: "0.15.0"}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `ALTER TABLE messages DROP COLUMN wait_for_idle`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM goose_db_version WHERE version_id = 12`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	service := testService(home, nil)
+	service.Version = "0.15.0"
+	service.updateURL = url
+	service.updateSetup = func(ctx context.Context, destination, setupHome string, force bool) ([]byte, error) {
+		if destination != binaryPath || setupHome != home || force {
+			t.Fatalf("setup arguments = destination %q home %q force %t", destination, setupHome, force)
+		}
+		db, err := store.Open(home)
+		if err != nil {
+			return []byte(err.Error()), err
+		}
+		if err := db.Close(); err != nil {
+			return []byte(err.Error()), err
+		}
+		return []byte(`{"code":"setup_failed","message":"simulated failure after migration"}`), fmt.Errorf("simulated setup failure")
+	}
+	code, output := runCLI(t, service, "update")
+	if code != 1 || !strings.Contains(output, "migration state changed") || !strings.Contains(output, "new binary remains installed") || !strings.Contains(output, "posse setup") {
+		t.Fatalf("migration failure did not retain the new binary with repair guidance: code=%d output=%s", code, output)
+	}
+	if data, err := os.ReadFile(binaryPath); err != nil || !bytes.Equal(data, newBinary) {
+		t.Fatalf("setup failure after migration restored the old binary: %v size=%d want=%d", err, len(data), len(newBinary))
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(binaryPath), ".posse-update-rollback-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("migration failure left old binary backups %v err=%v", leftovers, err)
+	}
+}
+
+func TestUpdateInstallsRepairBinaryForLegacyReviewAndAllowsConfigRepair(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", ".."))
+	target := filepath.Join(t.TempDir(), "posse-current")
+	build := exec.Command("go", "build", "-o", target, "./cmd/posse")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build current release binary: %v\n%s", err, output)
+	}
+	binary, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archiveBody bytes.Buffer
+	gz := gzip.NewWriter(&archiveBody)
+	tarball := tar.NewWriter(gz)
+	archiveName := fmt.Sprintf("posse_0.15.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	if err := tarball.WriteHeader(&tar.Header{Name: "posse", Mode: 0o755, Size: int64(len(binary)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarball.Write(binary); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarball.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive := archiveBody.Bytes()
+	digest := sha256.Sum256(archive)
+	var url string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "v0.15.0", "body": "### Migration note\nChoose a supported review policy before updating.", "assets": []any{map[string]string{"name": archiveName, "browser_download_url": url + "/archive"}, map[string]string{"name": "checksums.txt", "browser_download_url": url + "/checksums"}}})
+		case "/archive":
+			_, _ = w.Write(archive)
+		case "/checksums":
+			fmt.Fprintf(w, "%x  %s\n", digest, archiveName)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	url = server.URL
+
+	for _, action := range []string{"set", "unset"} {
+		t.Run(action, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "posse")
+			binaryPath := filepath.Join(root, "bin", "posse")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			oldBinary := []byte("installed 0.14.0 binary")
+			if err := os.WriteFile(binaryPath, oldBinary, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: binaryPath, Version: "0.14.0"}); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(home, "config.toml")
+			original := `# 0.14 User config
+[defaults]
+review = "on_risk"
+landing_mode = "pr"
+`
+			if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			service := testService(home, nil)
+			service.Version = "0.14.0"
+			service.updateURL = url
+			code, output := runCLI(t, service, "update")
+			if code != 1 || !strings.Contains(output, "config_repair_required") || !strings.Contains(output, "setup was skipped") || !strings.Contains(output, "legacy review policy") || !strings.Contains(output, "posse config set defaults.review none") {
+				t.Fatalf("update did not install the repair-capable binary and defer setup: code=%d output=%s", code, output)
+			}
+			if data, err := os.ReadFile(binaryPath); err != nil || !bytes.Equal(data, binary) {
+				t.Fatalf("repair-capable binary was not installed: %v size=%d want=%d", err, len(data), len(binary))
+			}
+			if data, err := os.ReadFile(configPath); err != nil || string(data) != original {
+				t.Fatalf("preflight changed the legacy config: %q %v", data, err)
+			}
+			if _, err := os.Stat(configPath + ".v014"); !os.IsNotExist(err) {
+				t.Fatalf("preflight wrote a rollback config backup: %v", err)
+			}
+			args := []string{"config", action, "defaults.review"}
+			if action == "set" {
+				args = append(args, "none")
+			}
+			if code, output := runCLI(t, service, args...); code != 0 {
+				t.Fatalf("config %s could not repair the rejected key: %d %s", action, code, output)
+			}
+			if code, output := runCLI(t, service, "config", "show"); code != 0 {
+				t.Fatalf("repaired config did not load: %d %s", code, output)
+			}
+			backup, err := os.ReadFile(configPath + ".v014")
+			if err != nil || string(backup) != original {
+				t.Fatalf("migration backup did not preserve the original bytes: %q %v; want %q", backup, err, original)
+			}
+		})
+	}
+}
+
+func TestUpdateAlreadyCurrentPointsToSetup(t *testing.T) {
+	server, url := fakeRelease(t, "bad")
+	defer server.Close()
+	service := testService(t.TempDir(), nil)
+	service.Version = "0.2.0"
+	service.updateURL = url
+	code, output := runCLI(t, service, "update")
+	if code != 1 || !strings.Contains(output, "already_current") || !strings.Contains(output, "posse setup") {
+		t.Fatalf("already-current update omitted setup recovery: code=%d output=%s", code, output)
+	}
+}
+
 func TestUpdateCheckReportsRunningWatches(t *testing.T) {
 	home := t.TempDir()
 	db, err := store.Open(home)

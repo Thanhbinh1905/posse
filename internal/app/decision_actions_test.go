@@ -66,6 +66,23 @@ func TestTeardownStopsSandboxWriterBeforeSnapshot(t *testing.T) {
 	if _, err := f.db.RecordPRObservation(ctx, store.PRObservation{TaskID: task.ID, ProjectID: f.project.ID, PRURL: task.PRURL, State: "MERGED", HeadSHA: f.headSHA, MergeCommit: f.headSHA}, store.PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
+	shell := exec.Command("sleep", "300")
+	shell.Dir = f.worktree
+	shell.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := shell.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = shell.Process.Kill()
+		_ = shell.Wait()
+	}()
+	task.PaneShellIdentity, err = sandboxProcessExecutableIdentity(shell.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateTaskPaneShellIdentity(ctx, task.ID, task.PaneShellIdentity); err != nil {
+		t.Fatal(err)
+	}
 	writer := exec.Command("bash", "-c", "trap 'printf late\\n > late.txt; exit 0' TERM; while true; do read -t 0.1 || :; done")
 	writer.Dir = f.worktree
 	writer.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -99,7 +116,7 @@ func TestTeardownStopsSandboxWriterBeforeSnapshot(t *testing.T) {
 	task.AgentName = "posse-shop-t1-1"
 	fake.SnapshotValue.Panes[0].Agent = ""
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: task.AgentName, PaneID: "w2:p1"}}
-	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":2147483647,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"claude","cwd":%q}]}}`, writer.Process.Pid, writer.Process.Pid, f.worktree))
+	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":%d,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"claude","cwd":%q}]}}`, shell.Process.Pid, writer.Process.Pid, writer.Process.Pid, f.worktree))
 	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue, autoCloseWhenFile: filepath.Join(f.worktree, "late.txt"), autoClosePaneID: task.PaneID}
 	f.service.Herdr = adapter
 	cfg, err := config.Load(f.home, f.project.Name)

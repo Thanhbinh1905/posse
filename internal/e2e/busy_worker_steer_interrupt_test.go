@@ -66,7 +66,7 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		t.Fatalf("simulate Pi's unclassified auto-compaction busy state: %v", err)
 	}
 	queued := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Wait until the current turn ends", "--queue")
-	if !strings.Contains(queued, "waiting_for_idle (--queue)") {
+	if !strings.Contains(queued, "state: queued") || !strings.Contains(queued, "reason: waiting_for_idle") {
 		t.Fatalf("explicitly queued message was not held: %s", queued)
 	}
 	pending, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)

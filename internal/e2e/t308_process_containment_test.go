@@ -268,8 +268,8 @@ exec -a "ssh -M -S $2" bash -c 'sleep 300 & echo $! > "$1"; wait' e2e-control-ch
 	teardown.Dir, teardown.Env = f.repo, f.leadEnv
 	outputBytes, teardownErr := teardown.CombinedOutput()
 	output := string(outputBytes)
-	if teardownErr == nil || !strings.Contains(output, "preserving detached shared daemon") || !strings.Contains(output, strconv.Itoa(pid)) {
-		t.Fatalf("Teardown did not report the preserved ControlMaster: err=%v output=%s", teardownErr, output)
+	if teardownErr == nil || !strings.Contains(output, "cannot release the Sandbox while live processes still reference it") || !strings.Contains(output, strconv.Itoa(pid)) {
+		t.Fatalf("Teardown did not block release for ControlMaster PID %d (child %d, ordinary process %d): err=%v output=%s", pid, childPID, ordinaryPID, teardownErr, output)
 	}
 	if !teardownFixtureProcessRunning(master) {
 		t.Fatalf("Teardown signalled detached ControlMaster PID %d", pid)

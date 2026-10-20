@@ -311,6 +311,10 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		}
 		return false, err
 	}
+	var currentTaskState State
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=? AND project_id=?`, observation.TaskID, observation.ProjectID).Scan(&currentTaskState); err != nil {
+		return false, err
+	}
 	if currentPRURL != observation.PRURL || currentRepoState == TaskRepoMerged {
 		return false, nil
 	}
@@ -319,13 +323,26 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		return false, err
 	}
 	var previous PRObservation
-	err = tx.QueryRowContext(ctx, `SELECT pr_url, head_sha, state, checks, review, mergeable, merge_commit FROM pr_observations WHERE task_id=? AND repo=? ORDER BY id DESC LIMIT 1`, observation.TaskID, repo).
-		Scan(&previous.PRURL, &previous.HeadSHA, &previous.State, &previous.Checks, &previous.Review, &previous.Mergeable, &previous.MergeCommit)
+	err = tx.QueryRowContext(ctx, `SELECT project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit FROM pr_observations WHERE task_id=? AND repo=? ORDER BY id DESC LIMIT 1`, observation.TaskID, repo).
+		Scan(&previous.ProjectID, &previous.TaskID, &previous.PRURL, &previous.HeadSHA, &previous.State, &previous.Checks, &previous.Review, &previous.Mergeable, &previous.MergeCommit)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	unchanged := err == nil && samePRObservation(previous, observation)
-	if unchanged && effect.RepoState == "" {
+	noticesToRecord := effect.Notices
+	if unchanged {
+		noticesToRecord = make([]Notice, 0, len(effect.Notices))
+		for _, notice := range effect.Notices {
+			if notice.Kind == "merge_ready" {
+				noticesToRecord = append(noticesToRecord, notice)
+			}
+		}
+	}
+	notices, err := filterMergeReadyNoticesTx(ctx, tx, observation.ProjectID, observation.TaskID, repo, currentTaskState, noticesToRecord)
+	if err != nil {
+		return false, err
+	}
+	if unchanged && effect.RepoState == "" && len(notices) == 0 {
 		if err := tx.Commit(); err != nil {
 			return false, err
 		}
@@ -338,10 +355,10 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, repo, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
 			return false, err
 		}
-		for _, notice := range effect.Notices {
-			if err := insertNoticeTx(ctx, tx, notice); err != nil {
-				return false, err
-			}
+	}
+	for _, notice := range notices {
+		if err := insertNoticeTx(ctx, tx, notice); err != nil {
+			return false, err
 		}
 	}
 	if effect.RepoState != "" {

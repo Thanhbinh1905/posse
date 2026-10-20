@@ -86,6 +86,99 @@ func taskContainmentProcessDetails(task store.Task) []taskProcessDetail {
 	return processDetails(pids)
 }
 
+func retainTaskContainmentProcesses(authorization *sandboxProcessAuthorization, task store.Task, roots []ownedProcessRoot) error {
+	if authorization == nil {
+		return fmt.Errorf("task process authorization is unavailable")
+	}
+	pids := map[int]bool{}
+	if task.ContainmentMode == "cgroup" && task.ContainmentPath != "" {
+		if err := validateTaskCgroupPath(task.ContainmentPath, task); err != nil {
+			return fmt.Errorf("verify Task cgroup before retaining its processes: %w", err)
+		}
+		cgroupPIDs, err := cgroupProcesses(task.ContainmentPath)
+		if err != nil {
+			return fmt.Errorf("enumerate Task cgroup processes: %w", err)
+		}
+		for _, pid := range cgroupPIDs {
+			pids[pid] = true
+		}
+	}
+	if task.ContainmentMarker != "" {
+		markedPIDs, err := markedTaskPIDs(task.ContainmentMarker)
+		if err != nil {
+			return fmt.Errorf("enumerate Task-marked processes: %w", err)
+		}
+		for _, pid := range markedPIDs {
+			pids[pid] = true
+		}
+	}
+	ordered := make([]int, 0, len(pids))
+	for pid := range pids {
+		if pid > 1 {
+			ordered = append(ordered, pid)
+		}
+	}
+	sort.Ints(ordered)
+	for _, pid := range ordered {
+		if !taskContainsProcess(pid, task, roots) {
+			continue
+		}
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if processGone(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect Task-contained process %d: %w", pid, err)
+		}
+		if !taskContainsProcess(pid, task, roots) {
+			return fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
+		}
+		alreadyRetained := authorization.handle(pid) != nil
+		handle, err := authorization.bind(pid)
+		if processGone(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("retain Task-contained process %d: %w", pid, err)
+		}
+		if handle.Identity() != bootID+"/"+startTime {
+			return fmt.Errorf("task process %d changed identity during ownership proof", pid)
+		}
+		alive, err := authorization.verifyIfAlive(pid)
+		if err != nil {
+			return fmt.Errorf("recheck Task-contained process %d: %w", pid, err)
+		}
+		if alive && !taskContainsProcess(pid, task, roots) {
+			return fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
+		}
+		if !alreadyRetained {
+			processPID := pid
+			authorization.setSignalGuard(processPID, func(syscall.Signal) error {
+				stillAlive, err := authorization.verifyIfAlive(processPID)
+				if err != nil {
+					return err
+				}
+				if stillAlive && !taskContainsProcess(processPID, task, roots) {
+					return fmt.Errorf("task process %d no longer matches its recorded containment identity", processPID)
+				}
+				return nil
+			})
+		}
+	}
+	return nil
+}
+
+func taskContainsProcess(pid int, task store.Task, roots []ownedProcessRoot) bool {
+	if task.ContainmentMode == "cgroup" && task.ContainmentPath != "" && processInCgroup(pid, task.ContainmentPath) {
+		return true
+	}
+	if task.ContainmentMarker == "" || !processHasTaskMarker(pid, task.ContainmentMarker) {
+		return false
+	}
+	references, _ := processRootReferences(pid, roots)
+	return references
+}
+
 func excludeTaskProcessTree(pids []int, excluded map[int]bool) ([]int, error) {
 	if len(excluded) == 0 || len(pids) == 0 {
 		return pids, nil

@@ -695,6 +695,23 @@ func TestPRMergePreservesWorkWrittenDuringPaneShutdown(t *testing.T) {
 	}
 	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", f.headSHA, f.headSHA)
 	fake := f.service.Herdr.(*herdr.Fake)
+	shell := exec.Command("sleep", "300")
+	shell.Dir = f.worktree
+	shell.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := shell.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = shell.Process.Kill()
+		_ = shell.Wait()
+	}()
+	shellIdentity, err := sandboxProcessExecutableIdentity(shell.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateTaskPaneShellIdentity(ctx, f.task.ID, shellIdentity); err != nil {
+		t.Fatal(err)
+	}
 	worker := exec.Command("bash", "-c", "trap 'printf \"%s\\n\" \"preserve me\" > late-worker-work.txt; exit 0' TERM; while true; do read -t 0.1 || :; done")
 	worker.Dir = f.worktree
 	worker.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -724,7 +741,7 @@ func TestPRMergePreservesWorkWrittenDuringPaneShutdown(t *testing.T) {
 	}
 	fake.SnapshotValue.Panes[0].Agent = ""
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
-	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":2147483647,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"claude","cwd":%q}]}}`, worker.Process.Pid, worker.Process.Pid, f.worktree))
+	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":%d,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"claude","cwd":%q}]}}`, shell.Process.Pid, worker.Process.Pid, worker.Process.Pid, f.worktree))
 	work := filepath.Join(f.worktree, "late-worker-work.txt")
 	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue, autoCloseWhenFile: work, autoClosePaneID: f.task.PaneID}
 	f.service.Herdr = adapter

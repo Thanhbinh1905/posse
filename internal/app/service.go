@@ -33,6 +33,7 @@ type Service struct {
 	confirm              confirmFunc
 	updateConfirm        confirmFunc
 	reexecUpdate         func(string, []string, []string) error
+	updateSetup          func(context.Context, string, string, bool) ([]byte, error)
 	maintenanceMu        sync.Mutex
 	maintenance          map[string]bool
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
@@ -51,7 +52,7 @@ func New(home string, adapter herdr.Adapter) *Service {
 func (s *Service) CLI() *axi.App {
 	root := s.commands()
 	s.guardWorkers(root, nil)
-	addRemovedVocabularyCommands(root)
+	addRemovedVocabularyCommands(root, s.legacyPollerAdapter)
 	s.structureStoreErrors(root)
 	return &axi.App{Name: "posse", Root: root}
 }
@@ -138,7 +139,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Orphan or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
 		{Name: "start", Usage: "$ start --brief <file> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>]", Summary: "Start a Worker from a Brief with an optional display name.", Handler: s.spawn},
-		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--findings <file>] [--report <file>]", Summary: "Record a Worker's Signal; done is refused while queued instructions remain undelivered.", Handler: s.signal},
+		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--turn <token>] [--findings <file>] [--report <file>]", Summary: "Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Push this PR-mode Change Task's branch and open or refresh its pull request. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Worker's next publish will use.", Handler: s.retitle},
 		{Name: "brief", Summary: "Reprint this Worker's launch Brief.", Handler: s.brief},
@@ -156,7 +157,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "teardown", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Sandbox work with User approval and verified Worker shutdown.", Handler: s.teardown},
 		{Name: "watch", Usage: "$ watch [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the Project watch.", Handler: s.wait},
-		{Name: "pool", Summary: "List a Project's Pool or prune safe, Posse-owned orphans.", Handler: s.pool},
+		{Name: "pool", Summary: "List a Project's Pool or prune safe, Posse-owned orphan panes.", Handler: s.pool},
 		{Name: "clean", Usage: "$ clean [--dry-run|--yes]", Summary: "Review or reclaim finished Tasks, their processes, scratch and held Sandboxes.", Handler: s.clean},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
 		{Name: "project", Summary: "Inspect or change a Project's settings.", Subcommands: []*axi.Command{
@@ -732,9 +733,29 @@ func defaultBranch(ctx context.Context, root string) (string, error) {
 func configError(err error) error {
 	var invalid *config.InvalidError
 	if errors.As(err, &invalid) {
-		return axi.Failure("config_invalid", invalid.Error(), false, "Edit the named config file and retry")
+		return axi.Failure("config_invalid", invalid.Error(), false, configRepairHelp(invalid)...)
 	}
 	return err
+}
+
+func configRepairHelp(invalid *config.InvalidError) []string {
+	if _, ok := config.Lookup(invalid.Key); !ok {
+		return []string{"Edit the named config file and retry"}
+	}
+	scope := ""
+	projectDir := filepath.Dir(invalid.File)
+	if filepath.Base(filepath.Dir(projectDir)) == "projects" {
+		scope = " --project " + filepath.Base(projectDir)
+	}
+	key := invalid.Key
+	value := "<valid-value>"
+	if strings.Contains(invalid.Error(), "legacy review policy") {
+		value = "none"
+	}
+	return []string{
+		"Run `posse config set " + key + " " + value + scope + "` or `posse config unset " + key + scope + "`",
+		"Run `posse setup` after the config is valid",
+	}
 }
 
 func herdrError(err error) error {

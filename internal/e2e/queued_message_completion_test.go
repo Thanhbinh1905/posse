@@ -36,14 +36,16 @@ case "$PWD/" in
     if [ -e "$POSSE_HOME/projects/shop/tasks/t1/report.md" ]; then : > "$POSSE_TEST_ROOT/first-report-copied"; fi
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     instruction=
+    turn_token=
     while IFS= read -r line; do
       printf '%s\n' "$line" >> "$POSSE_TEST_ROOT/research.log"
+      case "$line" in *'| turn '*) turn_token=$(printf '%s\n' "$line" | sed -n 's/.*| turn \([^]]*\)].*/\1/p') ;; esac
       case "$line" in *'Please include the missing caveat before reporting done.'*) instruction=$line; break ;; esac
     done
     [ -n "$instruction" ] || exit 0
     printf 'Isolated Research report. Applied instruction: %s\n' "$instruction" > report.md
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-    "$POSSE_E2E_POSSE_BIN" signal done 'Isolated Research report ready' --report report.md >> "$POSSE_TEST_ROOT/research.log" 2>&1
+    "$POSSE_E2E_POSSE_BIN" signal done 'Isolated Research report ready' --report report.md --turn "$turn_token" >> "$POSSE_TEST_ROOT/research.log" 2>&1
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     ;;
   *)

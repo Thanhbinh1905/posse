@@ -133,19 +133,6 @@ func knownSharedTaskDaemon(pid int) (bool, error) {
 	return isSharedTaskDaemonCommand(strings.TrimSpace(string(comm)), args), nil
 }
 
-func knownSharedSSHMasterDaemon(pid int) (bool, error) {
-	commandLine, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(pid), "cmdline"))
-	if err != nil {
-		return false, err
-	}
-	comm, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(pid), "comm"))
-	if err != nil {
-		return false, err
-	}
-	args := strings.Fields(strings.Join(strings.Split(strings.TrimRight(string(commandLine), "\x00"), "\x00"), " "))
-	return knownSharedSSHMasterDaemonCommand(strings.TrimSpace(string(comm)), args), nil
-}
-
 func knownSharedSSHMasterDaemonCommand(comm string, args []string) bool {
 	return isSharedTaskDaemonCommand(comm, args)
 }
