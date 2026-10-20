@@ -5,7 +5,7 @@
 The User asked for a built-in Posse process modelled on no-mistakes but fitted to Posse:
 
 > "tôi muốn tìm hiểu cơ chế của no mistake để có thể tạo ra riêng 1 thứ phù hợp với posse builtin"
-
+>
 > "trong 1 bài research gần đây của claude. Các nhà phát triển đã cho 1 vài lời khuyên trong việc review và tôi muốn áp dụng nó vào app build in này luôn thứ nhất nó chỉ được sử dụng tối đa 3 lần review. thứ 2 mỗi lần review sẽ chỉ review những thay đổi mới mà không phải quét lại cả PR . thứ Ba gom các bước lại thành các pattern việc đó sẽ giúp gom các lỗi lại và sửa chung trong 1 lần sửa và cuối cùng không bao giờ báo lại các bước cũ hãy sử dụng 1 agent opus nghiên cứu kỹ để biến nó thành 1 builtin process hoàn chỉnh trong posse"
 
 The four rules: (1) at most 3 review rounds per change; (2) each later round reviews only the new changes; (3) findings are grouped into patterns so related defects are fixed together; (4) findings from earlier rounds are never reported again.
@@ -49,7 +49,9 @@ So for a Task whose target is `staging`, a Worker that follows the protocol toda
 
 ## Decision
 
-Posse gets a built-in **validation loop** that covers every capability Posse still takes from no-mistakes. Its parts are the Review Loop, Gate Fix Rounds, the CI loop, head continuity and Posse-owned PR evidence. It runs in the `pr` and `local` Merge Modes. The `no-mistakes` Merge Mode and review policy are deprecated now and removed after migration. Every part is configured per Project by the User, and each can be turned off. Review evidence stays a separate User policy (`defaults.review`), so nothing here makes review mandatory.
+Posse gets built-in validation for `pr` and `local` delivery, separate from the optional workflow profiles in [ADR 0027](0027-thin-core-and-user-owned-workflow-profiles.md). The target review policy is exactly `defaults.review = "none" | "quick" | "full-pipeline"`, with per-Member overrides and admission freezing. `quick` is today's `local` review. `none` keeps the direct path; `quick` keeps exact-head independent review at Merge; `full-pipeline` adds required local validation before every push. A profile or Autonomy cannot bypass the selected mode. Configurable loops are mechanisms, not switches that disable required evidence.
+
+The `local` -> `quick` config rename is automatic on update, with no alias kept; local Git delivery is not renamed. no-mistakes delivery/review remain deprecated, and V15 removal (#305) is on hold until parity and migration proof. This ADR records target behavior; [spec section 25](../spec.md#25-built-in-validation) distinguishes implemented loop foundations from the pending rename, private candidate lane, publication barrier and remaining V09-V14 integration.
 
 ### Capability map
 
@@ -63,22 +65,31 @@ Posse gets a built-in **validation loop** that covers every capability Posse sti
 | push (force-with-lease to a gate remote) | `posse publish` pushes only the Task branch, without force (existing) |
 | pr step with attestation (`prsummary.go:25,101`) | `posse publish` template (existing) plus a Posse-owned Validation block in the tokenized body: head SHA, Gate result, review rounds and verdict, ledger counts and CI state. It is rendering only; the evidence stays in SQLite |
 | ci step: poll, fix from failed logs, dedupe by failing-check set, rerun cancelled checks (`steps/ci.go:122-551`, `ci_transient.go`) | PR watch (existing) plus the CI loop: on failed required checks for the current head, Posse queues one fix instruction with check names, log URLs and failed-log tails, deduplicated by failing-check set per head, up to `ci_loop.max_fix_rounds` (default 3). Checks that failed only as provider-cancelled are rerun on the same head up to `ci_loop.rerun_cancelled` (default 1), and only while the forge head equals `gated_sha` |
-| head continuity at each step and before push (`push.go:80,140-165`) | every automatic instruction records its expected base head. The next done Signal must descend from it (`head_discontinuity` otherwise). Gate, round, CI observation and merge must all name one head (existing D03 pins plus the new round bindings) |
-| intent step | the Brief carries explicit intent. Its quoted User words are included verbatim in every round and Fix Round instruction |
-| document step | optional: `review_loop.docs = true` adds documentation gaps to the review rubric as `docs-*` patterns that default to P2, and a docs command can be one more Gate entry |
+| head continuity at each step and before push (`push.go:80,140-165`) | automatic instructions retain their expected base head; `full-pipeline` additionally binds every required local stage to one exact final head, target and config before publication. Ancestry is not fresh evidence |
+| intent and test evidence | the Brief carries explicit intent, quoted verbatim in every round/fix instruction; `full-pipeline` requires intent/E2E proof as well as deterministic Gates, with inconclusive evidence never counted as passed |
+| document step | required Docs stage in `full-pipeline`: affected owner docs, no-comments check and complete PR description (intent, changes, verification/results, proof, risk, rollback); an explicit no-owner-doc-change disposition does not skip the other checks. `review_loop.docs` remains only the optional extra reviewer rubric in lighter modes |
 | review receipt (D03) | not needed: the evidence is native (exact-head pass, carry or User acceptance) |
 
 #### Validation flow
 
-For a Change Task with the loop enabled, after its done Signal:
+| Mode | Evidence and flow | Skips |
+|---|---|---|
+| `none` | Direct publication; review is not required, not passed. Existing Gates, target freshness, forge checks and merge authority remain | Independent review and full-pipeline stages |
+| `quick` | Today's `local`: publication may precede review; Merge needs exact-head independent review (or the specified carry/User disposition), plus ordinary delivery checks | Private lane and mandatory intent-test/docs/lint bundle |
+| `full-pipeline` | Private local candidate -> review -> test (intent proof) -> docs -> lint -> exact-head barrier -> publish/PR -> forge CI -> pinned Merge | No required stage is silently disabled |
 
-1. Freshness: if the head lacks the frozen target tip, Posse queues the existing merge instruction (ADR 0019).
-2. Gate: `posse merge` runs the Gates at the head. A failure queues a Gate Fix Round while budget remains, otherwise raises `gate_failed` for the Lead.
-3. Review: with `review_loop.auto_start = true`, Posse admits the next round once the Gate passes and an eligible reviewer Profile resolves. If none resolves, auto-start records one readiness Notice and does not fail Merge solely for that reason; other selected-review checks still apply. Explicit `posse review start` reports the Profile or identity error. With auto-start disabled, the Lead runs `posse review start`.
-4. CI: the PR watch runs on the published head in parallel with review. Failures queue CI Fix Rounds or cancelled-check reruns.
-5. Merge: requires the selected evidence, a green observation and the current target at one head (existing D03), and no blocking finding.
+For `none`/`quick`, the existing loop-enabled post-done path remains freshness -> Gates -> selected review -> Merge, with PR-watch CI allowed in parallel with review. Missing reviewer resolution raises readiness but never satisfies `quick`. For `full-pipeline`:
 
-Fix instructions for the same head are coalesced: Gate, CI and review work still queued for that head are delivered as one instruction, so related work is fixed in one pass. Every fix produces a new head and restarts the flow at step 1. Review of that head is a delta round, or a carry when it is a clean target merge.
+1. Submit author head `S` without pushing or requiring a PR/done Signal. Give a Posse-owned private local candidate `H` exclusive validation custody in a checkout isolated from concurrent author edits. Fetch frozen target `T` and merge it before validation if needed. Preserve ADR 0019's merge-only policy for published branches.
+2. Validate **review -> test (intent proof) -> docs -> lint**. Docs includes the no-comments check (remove unnecessary comments, retain necessary rationale) and a complete PR description. Run the repository's workflow jobs locally where possible; record unsupported jobs and runner/secret/event differences, not a fictional remote-CI pass.
+3. Bind all required local results to one exact final `H`, target `T` and frozen config digest. Any later edit/commit invalidates earlier results and re-enters the ordered sequence, ending with a no-edit verification pass. A review carry carries only review, never test/docs/lint/CI. Missing reviewer, failed/inconclusive proof or unmet required stages blocks publication; stage exceptions and User acceptance are visible, not clean passes.
+4. Before every push, compare submitted author/candidate/expected remote heads and current target. Refuse moved author/candidate or stale evidence; target advancement returns to freshness and validation. Publish only validated `H` by fast-forward push, then create/update the PR/MR. No hidden remote candidate branch or draft PR substitutes for private local validation. Retry PR metadata idempotently if it fails after code publication.
+5. Forge CI is the final confirmation after publication, bound to exact `H`. A CI code fix creates a private candidate and repeats freshness and local validation before any republish. Same-head cancelled-check reruns use their own budget. CI/Gate repairs do not reset the review cap. Unknown, pending or absent checks are not green proof without explicit trusted no-CI policy.
+6. Merge requires the selected evidence, current target and applicable forge confirmation on one head, no blocking finding, and existing merge authority. `local-validated` and `forge-ready` are separate states; neither is merged. Local delivery records remote CI/PR as not applicable rather than passed.
+
+Queued undelivered Gate/CI/review fix instructions for one head are still coalesced. The User decides entry to each configured stage (ADR 0027); automatic round/fix scheduling operates only inside the approved stage. Stage approval, `autonomy.review` and `autonomy.merge` do not grant automatic progression or publication bypasses.
+
+The t335 study confirms no-mistakes v1.50.0 uses a private local lane then publishes the real branch before observing forge CI. Its later fix commits can pass ancestry checks without exact-final-head revalidation, and CI repair pushes directly. Posse adopts the local-lane idea, not those evidence gaps; it does not claim remote CI ran before publication.
 
 ### Review Loop
 
@@ -121,7 +132,8 @@ Successive Review Tasks of one Change Task become numbered **Review Rounds** ove
 - Admission binds each round to its scope base, head, contained target commit, baseline tree and delta digest; the Reviewer cannot choose them.
 - A `pass` binds only its head. A clean target merge after a pass is carried forward without a round when Posse proves that `H`'s tree equals the conflict-free `merge-tree` of the passed head and `T`. The carry is a separate insert-only record. It does not rebind the verdict, so ADR 0020's rule that no operation rebinds a verdict is unchanged. Any other new commit, including a hand-resolved conflict or a CI fix, needs a new round or a cap Decision. This matches the guidance that an approval covers one commit.
 - ADR 0019 is unchanged: rounds may review a behind head, and Merge still requires the current target. Carry-forward means the target merges ADR 0019 demands do not consume rounds.
-- With `defaults.review = "local"`, the evidence for a head is a loop `pass`, a carry, or an `accept-head` Decision bound to that exact head. Recorded blocking findings refuse Merge with `review_findings_open` under every policy until fixed or accepted by the User, because the loop's own record would otherwise be ignored. `review_loop.enabled = false` restores today's independent full-review Review Tasks.
+- With `defaults.review = "quick"` (today's `local`), the evidence for a head is a loop `pass`, a carry, or an `accept-head` Decision bound to that exact head. Full-pipeline needs this review component plus exact-final-head test/docs/lint and applicable forge CI. An `accept-head` is visible review-risk acceptance, not a pass for other stages. Recorded blocking findings refuse Merge under every policy and publication in `full-pipeline` until fixed or accepted by the User. Disabling the Review Loop restores independent full-review Tasks, not permission to skip selected review.
+- Fixes are applied in the private candidate lane under `full-pipeline`; `quick` retains the author-branch path. Custody, head/config bindings and Member evidence must survive restart. The PR body reports native evidence, never authorizes delivery.
 
 ### Target branch
 
@@ -130,22 +142,23 @@ Every part of the validation loop uses the Task's frozen target (Brief `target:`
 ### Deprecation, interim and removal of no-mistakes
 
 - **Interim (now):** Change admission refuses `no_mistakes_target_unsupported` when the Merge Mode is `no-mistakes` and the frozen target is not the repository default branch, in every no-mistakes version. Setting `no-mistakes` as a Merge Mode or review policy warns that it is deprecated. `posse doctor` reports each Project that still uses it. This is cheaper and safer than threading `--base-branch` through Worker prose, which v1.84 would still scope incorrectly.
-- **Migration:** `posse doctor` and `posse up` print the replacement config for each Project still on no-mistakes: `merge_mode = "pr"`, `review = "local"` (or the Project's current choice), `[review_loop]`, `[gate_loop]`, `[ci_loop]`, and Gate commands suggested from the no-mistakes trusted `commands.test` and `commands.lint`. Posse does not write config; the User applies it. Admitted Tasks keep their frozen Merge Mode and finish under no-mistakes.
-- **Removal:** a later release rejects `no-mistakes` as a Merge Mode or review policy with an explicit migration error naming the key, as D02 does for legacy review values. `posse update` refuses the upgrade while a live Task still has a frozen `no-mistakes` plan. Stored `review_receipts` stay readable for history.
+- **Review-name migration:** update automatically rewrites review `local` to `quick` in global/Project and Member config, including supported Project scalar forms, preserving comments and unrelated settings. No alias remains in new config/Briefs. Failed migration leaves the prior config usable with a file/key error. `merge_mode = "local"`, immutable plans and historical evidence remain unchanged; historical `local` review is interpreted with its old semantics, never upgraded to `full-pipeline`.
+- **Pipeline migration:** `posse doctor` and `posse up` suggest `merge_mode = "pr"`, `review = "full-pipeline"`, loop settings and trusted test/lint commands for no-mistakes replacement; `none`/`quick` are explicitly lighter alternatives. Unlike the automatic name migration, this policy change needs the User's choice. Frozen Tasks finish under their original plans and targets. Local job equivalence is not complete forge-CI parity. The studied v1.50.0 does not implement Posse's expected `axi receipt` producer, and a PR lifecycle attestation comment cannot substitute for it.
+- **Removal (V15 #305 on hold):** after parity and migration proof, a later release rejects `no-mistakes` as a Merge Mode or review policy with an explicit migration error naming the key, as D02 does for legacy review values. `posse update` refuses the upgrade while a live Task still has a frozen `no-mistakes` plan. Stored `review_receipts` stay readable for history.
 
 ### Dropped no-mistakes features
 
 | Feature | Why it is dropped |
 |---|---|
 | daemon, JSON-RPC socket and separate SQLite state | Posse is a CLI over Herdr without a daemon (ADR 0001) and has its own store |
-| bare gate repository, pre-receive and post-receive hooks, `no-mistakes` remote | `posse publish` pushes the Task branch to origin; the Worker guard blocks direct pushes |
+| bare gate repository, pre-receive and post-receive hooks, `no-mistakes` remote | reuse Posse Task/store concepts for private candidate custody and exact-head promotion; no second bare-gate system is required |
 | rebase, force-push and the force-push guard | pushed branches are never rebased (ADR 0019); there is nothing to force |
-| `branch_sync` custody return | the Worker owns its Sandbox; nothing rewrites the User's branch |
+| `branch_sync` custody return | candidate/author movement is checked before promotion; never rewrite the User's branch or silently overwrite concurrent author work |
 | intent inference from transcripts | the Brief states intent explicitly |
-| agent-drafted PR prose | publish renders the Worker's summary, verification, proof and risk |
-| agent-run test step with untested-scenario classification | Gate commands give deterministic results; the Worker supplies `--verify` and `--proof`; missing tests are a review pattern |
+| separate agent-drafted PR service | full-pipeline Docs prepares the complete description before publication; publish renders summary, verification, proof, risk and native evidence |
+| inference that deterministic Gates alone prove intent | not adopted: full-pipeline requires explicit intent/E2E proof as well as commands; none/quick retain their lighter contracts |
 | automatic staging and `protected_paths` | Posse never stages; the Worker commits its own changes |
-| push-option step skipping and `--yes` gate resolution | per-Project config and Autonomy |
+| push-option step skipping and `--yes` gate resolution | required stages are frozen at admission; Autonomy and profile settings cannot skip the selected mode |
 | review receipts | evidence is native |
 | risk assessment fields | D02 has no risk classifier |
 | fork-remote publishing, Pi run-profile pins, telemetry, stats, wizard, eval | not used by Posse Projects (inference) or covered by Profiles and frozen launches |
@@ -153,7 +166,8 @@ Every part of the validation loop uses the Task's frozen target (Brief `target:`
 
 ## Consequences
 
-- One built-in path covers what Posse needed from no-mistakes, and it follows the frozen target everywhere.
+- Three selectable review modes keep the direct path light while reserving validate-before-push for `full-pipeline`; each follows the frozen target everywhere. This is target behavior, not a claim that full-pipeline ships today.
+- Private candidate custody, all publication entry points and exact-head evidence invalidation are required work, not covered by the later merge Gate. Local workflow jobs reduce forge failures but cannot reproduce every hosted runner, secret or PR event.
 - A Change Task receives at most three reviews; a long fix-and-review exchange becomes a User Decision instead of an unbounded loop.
 - Later rounds cost only the delta, at the price of not finding older defects. Those surface as pre-existing follow-ups; the cited measurement found about 59% of repeat flags were such code.
 - Reviewers must emit structured, anchored findings; free-text-only Review Reports no longer qualify under the loop.
@@ -169,7 +183,7 @@ Every part of the validation loop uses the Task's frozen target (Brief `target:`
 - **Keep no-mistakes and add `--base-branch`.** Rejected: the User's goal is to stop needing no-mistakes, v1.84 still scopes review and tests against the default branch, and trusted config always comes from the default branch.
 - **Full rereview each round (no-mistakes).** Rejected by rule 2, and by the cited measurement that most repeat flags concerned code present since the first pass.
 - **Diff the commit range `R..H`.** Rejected because merges of `origin/<target>`, which ADR 0019 requires, would put target code into scope.
-- **Hard-code a mandatory pipeline.** Rejected; Posse is a foundation, so each part is configurable and review evidence stays a User policy.
+- **Hard-code a mandatory pipeline.** Rejected: the User selects `none`, `quick` or `full-pipeline`; only the latter requires the whole local sequence. Once selected, its requirements cannot be disabled by a profile or loop switch.
 - **Line-number or positional finding IDs.** Rejected because they change with every edit.
 - **Let the Reviewer decide what is a repeat.** Kept only as an extra claim; Posse enforces the fingerprint and scope rules mechanically.
 - **Allow a configurable cap above 3.** Rejected by rule 1; `rethink` is the escape, and it is a new Change Task.

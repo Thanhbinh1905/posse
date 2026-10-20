@@ -51,7 +51,7 @@ A Research Task that examines a Change Task's change adversarially before it Mer
 _Avoid_: Code review, audit
 
 **Review Verdict**:
-The typed outcome (`pass`, `changes_requested` or `inconclusive`) of a Review Task, bound by Posse to the exact Change revision it examined. Only a current `pass` satisfies local review.
+The typed outcome (`pass`, `changes_requested` or `inconclusive`) of a Review Task, bound by Posse to the exact Change revision it examined. Only a current `pass` is a passing Review Verdict; selected review evidence may also include an explicit carry or User acceptance.
 _Avoid_: Approval, review result
 
 **Review Loop**:
@@ -133,8 +133,8 @@ A standing grant the User gives a Project that lets the Lead decide review findi
 _Avoid_: Permission, auto mode
 
 **Gate**:
-A configured check Posse runs before a Change Task Merges or an in-place Task reports completion.
-_Avoid_: Validation, CI, pipeline
+A configured executable check Posse runs before publication or Merge as required by the selected review mode, or before an in-place Task reports completion; not a User's stage-transition decision.
+_Avoid_: Stage approval, Validation, CI, pipeline
 
 **Watch**:
 The mechanism that observes a Project and delivers Notices to its Lead. Formerly: Lookout.
@@ -171,6 +171,18 @@ _Avoid_: Subproject, submodule, child repo
 **Profile**:
 A named Worker configuration, or an implicit resolution to the Lead's agent kind; a named Profile can also provide model, effort and arguments.
 _Avoid_: Preset, agent config
+
+**Workflow profile**:
+An optional User-defined ordered recipe of stages over the three core frames and Git delivery; the User decides each transition. It is distinct from a Worker Profile.
+_Avoid_: Mandatory lifecycle, Worker Profile, bundle
+
+**Frame**:
+One of Posse's three work boundaries: Plan -> tickets, Implement, or Review. Ship is Git delivery after these frames, not a fourth frame.
+_Avoid_: Stage, phase, Task type
+
+**Stage**:
+One step in a workflow profile, mapped to a frame or to Ship, with a User decision before advancing; several stages may share a frame.
+_Avoid_: Frame, Task state, Gate
 
 **Launch Identity Record**:
 A Task's launch number, Profile name and configured model value or unknown status, derived from that launch's arguments and persisted with its Task id.
