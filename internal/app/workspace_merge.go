@@ -546,9 +546,50 @@ func (s *Service) pollWorkspacePullRequestsAndNotify(ctx context.Context, db *st
 
 func finishMemberPRPollOrRelease(ctx context.Context, db *store.DB, projectID int64, repo, token string, polledAt int64) error {
 	if err := db.FinishMemberPRPoll(ctx, projectID, repo, token, polledAt); err != nil {
-		return errors.Join(err, db.ReleaseMemberPRPoll(ctx, projectID, repo, token))
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), store.PRPollClaimLease)
+		releaseErr := db.ReleaseMemberPRPoll(cleanupCtx, projectID, repo, token)
+		cancel()
+		if store.IsBusy(releaseErr) {
+			go retryMemberPRPollRelease(db, projectID, repo, token)
+		}
+		return errors.Join(err, releaseErr)
 	}
 	return nil
+}
+
+func releaseProjectPRPollWithRetry(db *store.DB, projectID int64, token string) {
+	ctx, cancel := context.WithTimeout(context.Background(), store.PRPollClaimLease)
+	err := db.ReleasePRPoll(ctx, projectID, token)
+	cancel()
+	if store.IsBusy(err) {
+		go retryProjectPRPollRelease(db, projectID, token)
+	}
+}
+
+func retryProjectPRPollRelease(db *store.DB, projectID int64, token string) {
+	deadline := time.Now().Add(store.PRPollClaimLease)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), store.PRPollClaimLease)
+		err := db.ReleasePRPoll(ctx, projectID, token)
+		cancel()
+		if err == nil || !store.IsBusy(err) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func retryMemberPRPollRelease(db *store.DB, projectID int64, repo, token string) {
+	deadline := time.Now().Add(store.PRPollClaimLease)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), store.PRPollClaimLease)
+		err := db.ReleaseMemberPRPoll(ctx, projectID, repo, token)
+		cancel()
+		if err == nil || !store.IsBusy(err) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, onMerged func(), repoFilter string, claimProject, syncRoot bool, memberClaim string) error {
@@ -563,7 +604,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		if claim == "" {
 			return nil
 		}
-		defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
+		defer releaseProjectPRPollWithRetry(db, project.ID, claim)
 	}
 	if memberClaim != "" {
 		defer func() {
@@ -724,6 +765,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 	mergedAny := false
 	mergedTargets := []pollTarget{}
 	hasMemberFailure := false
+	failedMemberPolls := map[string]bool{}
 	var processingErr error
 	for result := range results {
 		if processingErr != nil {
@@ -732,6 +774,11 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		task, member := result.target.task, result.target.member
 		if result.err != nil {
 			hasMemberFailure = true
+			failedMemberPolls[member.repo.Repo] = true
+			if errors.Is(result.err, context.Canceled) {
+				continue
+			}
+			_ = db.RecordMemberWatchError(context.Background(), project.ID, member.repo.Repo, memberPRPollPhase, truncate(normalizeCommandError(result.err).Error(), 240), now.UnixMilli())
 			if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, member.task, member.repo.Repo, member.repo.PRURL, result.err, now); err != nil {
 				processingErr = err
 				cancelPoll()
@@ -757,6 +804,8 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
 			if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
 				hasMemberFailure = true
+				failedMemberPolls[member.repo.Repo] = true
+				_ = db.RecordMemberWatchError(context.Background(), project.ID, member.repo.Repo, memberPRPollPhase, "merged head is not on the Member's Task branch", now.UnixMilli())
 				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
 					processingErr = err
 					cancelPoll()
@@ -765,6 +814,8 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			}
 			if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
 				hasMemberFailure = true
+				failedMemberPolls[member.repo.Repo] = true
+				_ = db.RecordMemberWatchError(context.Background(), project.ID, member.repo.Repo, memberPRPollPhase, "merged head is not on the Member's Task branch", now.UnixMilli())
 				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
 					processingErr = err
 					cancelPoll()
@@ -811,6 +862,11 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 	}
 	if processingErr != nil {
 		return processingErr
+	}
+	for _, group := range groups {
+		if !failedMemberPolls[group.repo] {
+			_ = db.ClearMemberWatchError(context.Background(), project.ID, group.repo, memberPRPollPhase)
+		}
 	}
 	for _, merged := range mergedTargets {
 		if err := s.enqueueStackedTargetChanges(ctx, db, project, merged.member.task, merged.member.repo.Repo, taskTargetBranch(merged.member.project, merged.member.task)); err != nil {

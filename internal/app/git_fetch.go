@@ -14,6 +14,7 @@ import (
 const gitFetchAttempts = 4
 
 func gitFetch(ctx context.Context, root string, args ...string) (string, error) {
+	reportWatchProgress(ctx)
 	lock, err := acquireRepositoryFetchLock(ctx, root)
 	if err != nil {
 		return "", err
@@ -23,6 +24,7 @@ func gitFetch(ctx context.Context, root string, args ...string) (string, error) 
 
 	commandArgs := append([]string{"fetch"}, args...)
 	for attempt := 0; ; attempt++ {
+		reportWatchProgress(ctx)
 		output, err := gitOutput(ctx, root, commandArgs...)
 		if err == nil || attempt+1 == gitFetchAttempts || !isTransientGitFetchLock(err) {
 			return output, err

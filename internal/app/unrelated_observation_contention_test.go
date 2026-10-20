@@ -108,17 +108,17 @@ func TestWatchLogsAndRetriesMaintenanceContention(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer writer.Rollback()
-	if _, err := writer.ExecContext(context.Background(), `UPDATE projects SET lead_absent_since=lead_absent_since WHERE id=?`, fixture.project.ID); err != nil {
+	if _, err := writer.ExecContext(context.Background(), `UPDATE projects SET lead_absent_since=COALESCE(lead_absent_since,0)+1 WHERE id=?`, fixture.project.ID); err != nil {
 		t.Fatal(err)
 	}
 	released := make(chan error, 1)
 	go func() {
-		time.Sleep(1500 * time.Millisecond)
+		time.Sleep(6 * time.Second)
 		released <- writer.Commit()
 	}()
 
 	started := time.Now()
-	code, out, errOut := fixture.run("watch", "--timeout", "3000")
+	code, out, errOut := fixture.run("watch", "--timeout", "8000")
 	if err := <-released; err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,9 @@ func TestWatchLogsAndRetriesMaintenanceContention(t *testing.T) {
 		t.Fatalf("Watch did not finish after writer release: exit=%d output=%s stderr=%s", code, out, errOut)
 	}
 	if !store.IsBusy(errors.New(errOut)) {
-		t.Fatalf("Watch did not expose its deferred contention: %s", errOut)
+		notices, _ := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+		updated, _ := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+		t.Fatalf("Watch did not expose its deferred contention: stderr=%s notices=%#v snapshots=%d updated_at=%d", errOut, notices, fake.CallCount("session.snapshot"), updated.UpdatedAt)
 	}
 	if fake.CallCount("session.snapshot") < 2 {
 		t.Fatalf("Watch did not retry reconciliation after contention: snapshots=%d", fake.CallCount("session.snapshot"))
@@ -147,6 +149,15 @@ func TestShowDefersTaskStateRaceDuringObservation(t *testing.T) {
 	code, output, errOut := fixture.run("show", "t1")
 	if code != 0 || !strings.Contains(output, "t1") || !strings.Contains(errOut, "Project observations were deferred") {
 		t.Fatalf("show did not return its durable Task view after a concurrent state change: exit=%d output=%s stderr=%s", code, output, errOut)
+	}
+}
+
+func TestForegroundReconcileContentionWarnsThatStateMayBeStale(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	fixture.service.Herdr.(*herdr.Fake).Errors["session.snapshot"] = store.ErrBusy
+	code, output, errOut := fixture.run("list", "--json")
+	if code != 0 || !strings.Contains(output, "tasks") || !strings.Contains(errOut, "reconciliation was deferred due to database contention") || !strings.Contains(errOut, "may be stale") {
+		t.Fatalf("foreground command omitted stale-state warning after reconciliation contention: exit=%d output=%s stderr=%s", code, output, errOut)
 	}
 }
 

@@ -92,6 +92,14 @@ type MemberPrPollState struct {
 	ClaimToken string
 }
 
+type MemberWatchError struct {
+	ProjectID int64
+	Repo      string
+	Phase     string
+	Error     string
+	UpdatedAt int64
+}
+
 type Message struct {
 	ID          int64
 	TaskID      int64

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -183,6 +185,46 @@ func TestPRTaskWatchFailuresRaiseAfterThree(t *testing.T) {
 	}
 }
 
+func TestPRTaskWatchFailurePollingDoesNotRewriteTaskSnapshotEveryTime(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/acme/shop/pull/1"
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "First PR", MergeMode: "pr", PRURL: prURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, int64(attempt), "timeout", "PR watch failed three times: timeout"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := db.TaskSnapshotPath(project.Name, 1)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 4; attempt <= 9; attempt++ {
+		if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, int64(attempt), "connection refused", "PR watch failed three times: connection refused"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("PR failure polls rewrote the Task snapshot without a Notice transition:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
 func TestPRTaskWatchFailureNoticeUpdatesInPlaceAndRecoversOnce(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
@@ -218,8 +260,65 @@ func TestPRTaskWatchFailureNoticeUpdatesInPlaceAndRecoversOnce(t *testing.T) {
 		}
 	}
 	notices, err = db.Notices(ctx, project.ID, false)
-	if err != nil || countKind(notices, "pr_watch_failing") != 1 || notices[0].ID != failureID || !strings.Contains(notices[0].DataJSON, "connection refused") {
-		t.Fatalf("persistent failure did not update its Notice in place: %#v, %v", notices, err)
+	if err != nil || countKind(notices, "pr_watch_failing") != 1 {
+		t.Fatalf("continued outage re-raised an acknowledged Notice within three polls: %#v, %v", notices, err)
+	}
+	reminderAt := int64(4) + PRTaskWatchReminderInterval.Milliseconds()
+	if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, reminderAt, "connection refused", "PR watch reminder: connection refused"); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 2 {
+		t.Fatalf("long-running acknowledged outage did not raise one reminder: %#v, %v", notices, err)
+	}
+	reminderID := int64(0)
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && notice.ID != failureID {
+			reminderID = notice.ID
+			if !strings.Contains(notice.Summary, "reminder") {
+				t.Errorf("persistent outage Notice is not identified as a reminder: %#v", notice)
+			}
+		}
+	}
+	if reminderID == 0 {
+		t.Fatal("persistent outage reminder missing")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE notices SET acked_at=? WHERE id=?`, reminderAt+1, reminderID); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 8; attempt <= 30; attempt++ {
+		if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, reminderAt+1+int64(attempt), "connection refused", "PR watch reminder: connection refused"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 2 {
+		t.Fatalf("one outage produced more than one delayed reminder: %#v, %v", notices, err)
+	}
+	secondReminderAt := reminderAt + 1 + 2*PRTaskWatchReminderInterval.Milliseconds()
+	if _, err := db.RecordPRTaskWatchFailure(ctx, project.ID, taskID, "", prURL, secondReminderAt, "connection refused", "PR watch failed three times: connection refused"); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || countKind(notices, "pr_watch_failing") != 3 {
+		t.Fatalf("second reminder did not honor the longer backoff: %#v, %v", notices, err)
+	}
+	var reminderCount int
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && notice.ID != failureID && strings.Contains(notice.Summary, "reminder") {
+			var data struct {
+				ReminderCount int `json:"reminder_count"`
+			}
+			if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+				t.Fatal(err)
+			}
+			if data.ReminderCount > reminderCount {
+				reminderCount = data.ReminderCount
+			}
+		}
+	}
+	if reminderCount != 2 {
+		t.Fatalf("second reminder count = %d, want 2", reminderCount)
 	}
 
 	task, err := db.TaskByID(ctx, project.ID, taskID)
@@ -235,7 +334,7 @@ func TestPRTaskWatchFailureNoticeUpdatesInPlaceAndRecoversOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	notices, err = db.Notices(ctx, project.ID, false)
-	if err != nil || countKind(notices, "pr_watch_recovered") != 1 || countKind(notices, "pr_watch_failing") != 1 {
+	if err != nil || countKind(notices, "pr_watch_recovered") != 1 || countKind(notices, "pr_watch_failing") != 3 {
 		t.Fatalf("successful poll did not create exactly one recovery Notice: %#v, %v", notices, err)
 	}
 	for _, notice := range notices {
@@ -249,7 +348,7 @@ func TestPRTaskWatchFailureNoticeUpdatesInPlaceAndRecoversOnce(t *testing.T) {
 		}
 	}
 	notices, err = db.Notices(ctx, project.ID, false)
-	if err != nil || countKind(notices, "pr_watch_failing") != 2 || countKind(notices, "pr_watch_recovered") != 1 {
+	if err != nil || countKind(notices, "pr_watch_failing") != 4 || countKind(notices, "pr_watch_recovered") != 1 {
 		t.Fatalf("new outage did not start a distinct failure episode: %#v, %v", notices, err)
 	}
 }

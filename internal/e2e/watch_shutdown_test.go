@@ -32,7 +32,10 @@ func TestStoppingBackgroundWatchReleasesActiveForgePoll(t *testing.T) {
 		_, err := os.Stat(probeLog)
 		return err == nil
 	}) {
-		t.Fatal("background Watch did not start the controlled forge probe")
+		watchLog, _ := os.ReadFile(filepath.Join(f.home, "projects", f.project.Name, "watch.log"))
+		watch, _ := f.db.WatchRuntime(context.Background(), f.project.ID)
+		notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+		t.Fatalf("background Watch did not start the controlled forge probe: watch=%#v pids=%v log=%s notices=%#v", watch, watchPIDs(f.root), watchLog, notices)
 	}
 	stopLiveWatchRuntime(t, f.root)
 	var claimUntil int64

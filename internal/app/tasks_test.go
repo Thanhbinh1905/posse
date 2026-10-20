@@ -1121,12 +1121,18 @@ func TestWorkspaceStartChecksOnlySelectedMembers(t *testing.T) {
 		wantError bool
 	}{
 		{name: "unrequested collision", brief: dispatch.Brief{Type: "change", Repos: []string{"worker"}}},
+		{name: "unrequested unreachable origin", brief: dispatch.Brief{Type: "change", Repos: []string{"worker"}}},
 		{name: "research without editable members", brief: dispatch.Brief{Type: "research"}},
 		{name: "selected collision", brief: dispatch.Brief{Type: "change", Repos: []string{"backend"}}, wantError: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			f := newWorkspaceMergeFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
-			gitTest(t, filepath.Join(f.workspace, "backend"), "branch", store.TaskBranchName(2))
+			backendRoot := filepath.Join(f.workspace, "backend")
+			if testCase.name == "unrequested unreachable origin" {
+				gitTest(t, backendRoot, "remote", "set-url", "origin", "https://127.0.0.1:1/acme/backend.git")
+			} else {
+				gitTest(t, backendRoot, "branch", store.TaskBranchName(2))
+			}
 			members, _, err := f.service.planTaskMembers(context.Background(), f.db, f.project, f.config(), testCase.brief, nil)
 			if err != nil {
 				t.Fatal(err)

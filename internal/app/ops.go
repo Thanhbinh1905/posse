@@ -34,50 +34,73 @@ func (s *Service) recordWatchMaintenanceFailure(ctx context.Context, db *store.D
 	return s.regenerateProjects(ctx, db)
 }
 
+const (
+	memberPRPollPhase       = "pr_poll"
+	memberCheckoutSyncPhase = "checkout_sync"
+)
+
+func (s *Service) recordMemberWatchFailure(ctx context.Context, db *store.DB, project store.Project, repo, phase string, cause error) error {
+	failure := truncate(normalizeCommandError(cause).Error(), 240)
+	writeErr := db.RecordMemberWatchError(ctx, project.ID, repo, phase, failure, time.Now().UnixMilli())
+	if store.IsOnlyBusy(cause) {
+		return writeErr
+	}
+	noticeErr := s.recordWatchMaintenanceFailure(ctx, db, project, fmt.Errorf("member %s %s: %w", repo, phase, cause))
+	return errors.Join(writeErr, noticeErr)
+}
+
 func (s *Service) startWorkspacePRPolls(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
 	now := time.Now()
 	projectClaim, err := db.ClaimPRPoll(ctx, project.ID, now, parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute), false)
 	if err != nil || projectClaim == "" {
 		return err
 	}
-	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, projectClaim) }()
+	defer releaseProjectPRPollWithRetry(db, project.ID, projectClaim)
 	targets, err := s.projectTargets(ctx, db, project)
 	if err != nil {
 		return err
 	}
 	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
+	var failures []error
 	for _, target := range targets {
 		repo := target.Name
 		key := fmt.Sprintf("pr:%d:%s", project.ID, repo)
-		if !s.beginMaintenance(key) {
+		memberCtx, started := s.beginMaintenanceContext(key, ctx)
+		if !started {
 			continue
 		}
-		token, err := db.ClaimMemberPRPoll(ctx, project.ID, repo, now, interval, false)
+		token, err := db.ClaimMemberPRPoll(memberCtx, project.ID, repo, now, interval, false)
 		if err != nil {
 			s.endMaintenance(key)
-			return err
+			if errors.Is(err, context.Canceled) {
+				continue
+			}
+			memberErr := fmt.Errorf("member %s PR polling claim: %w", repo, err)
+			_ = db.RecordMemberWatchError(context.Background(), project.ID, repo, memberPRPollPhase, truncate(normalizeCommandError(memberErr).Error(), 240), now.UnixMilli())
+			failures = append(failures, memberErr)
+			continue
 		}
 		if token == "" {
 			s.endMaintenance(key)
 			continue
 		}
-		go func(repo, key, token string) {
+		go func(repo, key, token string, memberCtx context.Context) {
 			defer s.endMaintenance(key)
 			mergedMember := false
 			onMerged := func() {
 				mergedMember = true
 				s.startMergedMemberSync(ctx, db, project, repo)
 			}
-			pollErr := s.pollWorkspacePullRequestsForRepo(ctx, db, project, cfg, false, onMerged, repo, false, false, token)
+			pollErr := s.pollWorkspacePullRequestsForRepo(memberCtx, db, project, cfg, false, onMerged, repo, false, false, token)
 			if mergedMember {
 				s.startMergedTaskTeardown(ctx, db, project, cfg)
 			}
-			if pollErr != nil && !store.IsBusy(pollErr) {
-				_ = s.recordWatchMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s PR polling: %w", repo, pollErr))
+			if pollErr != nil && !errors.Is(pollErr, context.Canceled) {
+				_ = s.recordMemberWatchFailure(context.Background(), db, project, repo, "PR polling", pollErr)
 			}
-		}(repo, key, token)
+		}(repo, key, token, memberCtx)
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (s *Service) startWorkspaceCheckoutSync(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
@@ -87,54 +110,78 @@ func (s *Service) startWorkspaceCheckoutSync(ctx context.Context, db *store.DB, 
 	}
 	now := time.Now()
 	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
+	var failures []error
 	for _, target := range targets {
 		state, err := db.ProjectRepoWatchState(ctx, project.ID, target.Name)
 		if err != nil {
-			return err
+			memberErr := fmt.Errorf("member %s checkout sync state: %w", target.Name, err)
+			_ = db.RecordMemberWatchError(context.Background(), project.ID, target.Name, memberCheckoutSyncPhase, truncate(normalizeCommandError(memberErr).Error(), 240), now.UnixMilli())
+			failures = append(failures, memberErr)
+			continue
 		}
 		if !store.ProjectWatchInterval(state.CheckoutCheckedAt, interval, now) {
 			continue
 		}
 		target := target
+		key := workspaceCheckoutMaintenanceKey(project.ID, target.Name)
+		memberCtx, started := s.beginMaintenanceContext(key, ctx)
+		if !started {
+			continue
+		}
 		go func() {
-			result, syncErr := s.syncRepository(ctx, db, project, target, now)
+			defer s.endMaintenance(key)
+			result, syncErr := s.syncRepository(memberCtx, db, project, target, now)
 			if syncErr == nil && result.Status != "skipped" {
 				reason := result.Reason
 				if reason == "" && result.Err != nil {
 					reason = truncate(strings.TrimSpace(result.Err.Error()), 240)
 				}
-				syncErr = db.RecordRepoCheckout(ctx, project.ID, target.Name, now.UnixMilli(), result.Status, reason)
+				syncErr = db.RecordRepoCheckout(memberCtx, project.ID, target.Name, now.UnixMilli(), result.Status, reason)
 			}
 			if syncErr == nil && result.Status != "skipped" {
-				syncErr = db.RecordCheckoutAttempt(ctx, project.ID, now.UnixMilli())
+				syncErr = db.RecordCheckoutAttempt(memberCtx, project.ID, now.UnixMilli())
 			}
-			if syncErr != nil && !store.IsBusy(syncErr) {
-				_ = s.recordWatchMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s checkout sync: %w", target.Name, syncErr))
+			if syncErr != nil && !errors.Is(syncErr, context.Canceled) {
+				_ = s.recordMemberWatchFailure(context.Background(), db, project, target.Name, "checkout sync", syncErr)
+			} else if syncErr == nil && result.Err != nil && (result.Status == "fetch_failed" || result.Status == "no_origin") {
+				_ = db.RecordMemberWatchError(context.Background(), project.ID, target.Name, memberCheckoutSyncPhase, truncate(normalizeCommandError(result.Err).Error(), 240), now.UnixMilli())
+			} else if syncErr == nil && result.Status != "skipped" {
+				_ = db.ClearMemberWatchError(context.Background(), project.ID, target.Name, memberCheckoutSyncPhase)
 			}
 		}()
 	}
-	return nil
+	return errors.Join(failures...)
+}
+
+func workspaceCheckoutMaintenanceKey(projectID int64, repo string) string {
+	return fmt.Sprintf("checkout:%d:%s", projectID, repo)
 }
 
 func (s *Service) startMergedMemberSync(ctx context.Context, db *store.DB, project store.Project, repo string) {
+	key := workspaceCheckoutMaintenanceKey(project.ID, repo)
+	memberCtx, started := s.beginMaintenanceContext(key, ctx)
+	if !started {
+		return
+	}
 	go func() {
+		defer s.endMaintenance(key)
 		var result projectSyncResult
-		target, err := s.projectTarget(ctx, db, project, repo)
+		target, err := s.projectTarget(memberCtx, db, project, repo)
 		if err == nil {
 			now := time.Now()
-			result, err = s.syncRepository(ctx, db, project, target, now)
+			result, err = s.syncRepository(memberCtx, db, project, target, now)
 			if err == nil && result.Status != "skipped" {
 				reason := result.Reason
 				if reason == "" && result.Err != nil {
 					reason = truncate(strings.TrimSpace(result.Err.Error()), 240)
 				}
-				err = db.RecordRepoCheckout(ctx, project.ID, repo, now.UnixMilli(), result.Status, reason)
+				err = db.RecordRepoCheckout(memberCtx, project.ID, repo, now.UnixMilli(), result.Status, reason)
 			}
 		}
 		if err == nil && result.Status != "skipped" {
-			err = db.RecordCheckoutAttempt(ctx, project.ID, time.Now().UnixMilli())
+			err = db.RecordCheckoutAttempt(memberCtx, project.ID, time.Now().UnixMilli())
 		}
-		if err != nil && !store.IsBusy(err) {
+		if err != nil && !store.IsBusy(err) && !errors.Is(err, context.Canceled) {
 			_ = s.recordWatchMaintenanceFailure(context.Background(), db, project, fmt.Errorf("member %s merged checkout sync: %w", repo, err))
 		}
 	}()
@@ -142,12 +189,13 @@ func (s *Service) startMergedMemberSync(ctx context.Context, db *store.DB, proje
 
 func (s *Service) startMergedTaskTeardown(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) {
 	key := fmt.Sprintf("teardown:%d", project.ID)
-	if !s.beginMaintenance(key) {
+	maintenanceCtx, started := s.beginMaintenanceContext(key, ctx)
+	if !started {
 		return
 	}
 	go func() {
 		defer s.endMaintenance(key)
-		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil && !store.IsBusy(err) {
+		if err := s.autoTeardownMergedTasks(maintenanceCtx, db, project, cfg); err != nil && !store.IsBusy(err) && !errors.Is(err, context.Canceled) {
 			_ = s.recordWatchMaintenanceFailure(context.Background(), db, project, fmt.Errorf("merged Task Teardown: %w", err))
 		}
 	}()
@@ -163,17 +211,18 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		return configError(err)
 	}
 	if project.IsWorkspace() {
+		var failures []error
 		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("merged Task Teardown: %w", err))
 		}
 		if err := s.startWorkspacePRPolls(ctx, db, project, cfg); err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("PR polling: %w", err))
 		}
 		if err := s.startWorkspaceCheckoutSync(ctx, db, project, cfg); err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("checkout sync: %w", err))
 		}
 		_, _ = s.availableUpdate(ctx, db, &project)
-		return nil
+		return errors.Join(failures...)
 	}
 	var failures []error
 	mergedTasks := make(chan struct{}, 1)
@@ -267,8 +316,8 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Bool("repair") {
 		return s.repairWatch(ctx, db, home, project)
 	}
-	// Adapter handoffs and receipt decisions own Notice delivery, not maintenance.
-	if !parsed.Bool("poll-only") && !parsed.Bool("handoff") && parsed.Flags["receipt"] == "" {
+	// Every adapter handoff repairs the independent Project poller; receipt operations only deliver Notices.
+	if !parsed.Bool("poll-only") && parsed.Flags["receipt"] == "" {
 		if err := s.ensureWatchRuntime(ctx.Context, db, home, project); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Watch supervision for %s failed: %v\n", project.Name, err)
 		}
@@ -348,6 +397,10 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	for {
 		select {
 		case <-stopSignals:
+			s.cancelWatchMaintenance()
+			if !s.waitForWatchMaintenance(4 * time.Second) {
+				fmt.Fprintln(ctx.ErrOut, "Watch maintenance shutdown timed out; unfinished poll claims will expire")
+			}
 			return s.reportWatchStopped(ctx, project, false)
 		default:
 		}

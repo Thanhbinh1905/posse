@@ -16,11 +16,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 )
 
-const (
-	forgeProbeTimeout = 2 * time.Second
-	forgeProbeCache   = "forge-auth-cache.json"
-)
+const forgeProbeCache = "forge-auth-cache.json"
 
+var forgeProbeTimeout = 2 * time.Second
 var forgeProbeCacheTTL = 5 * time.Second
 
 type forgeProbeOutcome struct {
@@ -105,11 +103,12 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 		return forgeProbeOutcome{}, err
 	}
 	memoryKey := home + "\x00" + key
+	cacheTimeoutResults := os.Getenv(watchRuntimeTokenEnv) == ""
 
 	for {
 		var entry forgeProbeCacheEntry
 		forgeProbeState.Lock()
-		if cached := forgeProbeState.memory[memoryKey]; forgeProbeCacheFresh(cached, time.Now()) {
+		if cached := forgeProbeState.memory[memoryKey]; forgeProbeCacheFresh(cached, time.Now()) && (cacheTimeoutResults || !cached.Outcome.anyTimedOut()) {
 			entry = cached
 		}
 		if !entry.CheckedAt.IsZero() && entry.Outcome.covers(mode) {
@@ -131,7 +130,7 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 				if flight.err != nil {
 					return forgeProbeOutcome{}, flight.err
 				}
-				if flight.outcome.covers(mode) {
+				if flight.outcome.covers(mode) && (cacheTimeoutResults || !flight.outcome.anyTimedOut()) {
 					return flight.outcome, nil
 				}
 				continue
@@ -140,6 +139,9 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 
 		if entry.CheckedAt.IsZero() {
 			entry, _ = readForgeProbeCache(home, key)
+		}
+		if !cacheTimeoutResults && entry.Outcome.anyTimedOut() {
+			entry = forgeProbeCacheEntry{}
 		}
 		if !forgeProbeCacheFresh(entry, time.Now()) {
 			entry = forgeProbeCacheEntry{}
@@ -163,7 +165,7 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 					remaining, probeErr = runForgeProbe(ctx, root, host, needed)
 					outcome = mergeForgeProbeOutcomes(outcome, remaining)
 				}
-				if probeErr == nil && !outcome.anyTimedOut() {
+				if probeErr == nil && (!outcome.anyTimedOut() || cacheTimeoutResults) {
 					entry = forgeProbeCacheEntry{CheckedAt: time.Now(), Outcome: outcome}
 					writeForgeProbeCache(home, key, entry)
 				}
@@ -171,7 +173,7 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 		}
 
 		forgeProbeState.Lock()
-		if probeErr == nil && !outcome.anyTimedOut() {
+		if probeErr == nil && (!outcome.anyTimedOut() || cacheTimeoutResults) {
 			forgeProbeState.memory[memoryKey] = entry
 			pruneForgeProbeMemory(time.Now())
 		} else if probeErr == nil {
@@ -338,7 +340,7 @@ func forgeProbeCacheKey(host string, cfg config.Config) (string, string, error) 
 
 func forgeProbeCacheFresh(entry forgeProbeCacheEntry, now time.Time) bool {
 	age := now.Sub(entry.CheckedAt)
-	return !entry.CheckedAt.IsZero() && !entry.Outcome.anyTimedOut() && age >= 0 && age < forgeProbeCacheTTL
+	return !entry.CheckedAt.IsZero() && age >= 0 && age < forgeProbeCacheTTL
 }
 
 // readForgeProbeCache returns only fresh outcomes so a partial refresh cannot
