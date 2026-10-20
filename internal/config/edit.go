@@ -108,10 +108,7 @@ func projectEditKey(contents, key string, projectFile bool) string {
 	if !projectFile {
 		return key
 	}
-	field := key
-	if strings.HasPrefix(field, "defaults.") {
-		field = strings.TrimPrefix(field, "defaults.")
-	}
+	field := strings.TrimPrefix(key, "defaults.")
 	if !isProjectScalarAlias(field) {
 		return key
 	}
