@@ -21,13 +21,19 @@ func (t Task) AdmittedPlan() (*taskplan.Plan, error) {
 	return &plan, nil
 }
 
-func bindTaskPlan(task Task, sequence int) (string, error) {
+func bindTaskPlan(task Task, sequence int, workflowRunID string) (string, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil || plan == nil {
 		return "", err
 	}
 	if plan.Revision != 1 || plan.PreviousSHA256 != "" {
 		return "", fmt.Errorf("new Task requires execution plan revision 1")
+	}
+	if plan.Workflow != nil && plan.Workflow.RunID == "new" {
+		if workflowRunID == "" {
+			return "", fmt.Errorf("new workflow run identity must be assigned during Task admission")
+		}
+		plan.Workflow.RunID = workflowRunID
 	}
 	return plan.Bind(fmt.Sprintf("t%d", sequence)).Encode()
 }

@@ -54,7 +54,7 @@ func (s *Service) workflowShow(ctx *axi.Context, args []string) error {
 		{Key: "source", Value: workflow.Source},
 		{Key: "sha256", Value: workflow.SHA256},
 		{Key: "profile", Value: workflow.Profile},
-		{Key: "help", Value: []any{"Select this profile with `workflow: " + workflow.Name + "` in a Task Brief", "Stage transitions remain User-decided"}},
+		{Key: "help", Value: []any{"Start a run with `workflow: " + workflow.Name + "` in a Task Brief", "Continue it with `workflow_run: <run>` and `stage: <name>`", "Stage transitions require `posse workflow advance` and an exact User quote"}},
 	})
 }
 

@@ -19,6 +19,8 @@ type Brief struct {
 	Paths          []string
 	Review         string
 	Workflow       string
+	WorkflowRun    string
+	Stage          string
 	ReviewRounds   int
 	Base           string
 	BaseByRepo     map[string]string
@@ -37,6 +39,8 @@ type Brief struct {
 	Refs   []IssueRef
 	Body   string
 }
+
+var workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
 
 type IssueRef struct {
 	Repository string
@@ -136,7 +140,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		if key == "autonomy" && allowHistoricalMultiIssue {
 			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "review_rounds", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -152,6 +156,8 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		Execution:   unquote(values["execution"]),
 		Review:      unquote(values["review"]),
 		Workflow:    unquote(values["workflow"]),
+		WorkflowRun: unquote(values["workflow_run"]),
+		Stage:       unquote(values["stage"]),
 		ReviewOf:    unquote(values["review_of"]),
 		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
@@ -197,6 +203,15 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	}
 	if _, found := values["workflow"]; found && strings.TrimSpace(brief.Workflow) == "" {
 		return Brief{}, &BriefError{Field: "workflow", Reason: "must name a configured workflow profile"}
+	}
+	if (brief.WorkflowRun == "") != (brief.Stage == "") {
+		return Brief{}, &BriefError{Field: "workflow_run", Reason: "workflow_run and stage must be supplied together"}
+	}
+	if brief.WorkflowRun != "" && !workflowRunIDPattern.MatchString(brief.WorkflowRun) {
+		return Brief{}, &BriefError{Field: "workflow_run", Reason: "must be a workflow run ID such as w1"}
+	}
+	if brief.Stage != "" && strings.TrimSpace(brief.Stage) == "" {
+		return Brief{}, &BriefError{Field: "stage", Reason: "must name a workflow stage"}
 	}
 	if brief.RootContext != "" && brief.RootContext != "read-only" {
 		return Brief{}, &BriefError{Field: "root_context", Reason: "must be read-only when selected"}
