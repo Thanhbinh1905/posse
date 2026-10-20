@@ -353,7 +353,7 @@ func TestBackupDailyReclaimsStaleLock(t *testing.T) {
 	}
 }
 
-func TestRebuildClearsSandboxIntentAndRuntimeForeignKeys(t *testing.T) {
+func TestRebuildRestoresPRWatchFailureStreakAndClearsIntentRuntimeForeignKeys(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -387,8 +387,9 @@ func TestRebuildClearsSandboxIntentAndRuntimeForeignKeys(t *testing.T) {
 	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
 		t.Fatalf("rebuild failed with dependent rows present: %v", err)
 	}
-	var failureRows int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pr_task_watch_failures`).Scan(&failureRows); err != nil || failureRows != 0 {
-		t.Fatalf("rebuild retained stale PR watch failures: rows=%d err=%v", failureRows, err)
+	var failureRows, failureCount int
+	var failureURL, failureMessage string
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(consecutive_failures),0),COALESCE(MAX(pr_url),''),COALESCE(MAX(last_error),'') FROM pr_task_watch_failures`).Scan(&failureRows, &failureCount, &failureURL, &failureMessage); err != nil || failureRows != 1 || failureCount != 1 || failureURL != prURL || failureMessage != "offline" {
+		t.Fatalf("rebuild did not restore the PR watch failure streak: rows=%d count=%d url=%q error=%q err=%v", failureRows, failureCount, failureURL, failureMessage, err)
 	}
 }

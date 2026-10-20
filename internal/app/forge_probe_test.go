@@ -153,6 +153,58 @@ func TestExplicitForgeConfigSkipsAutoDetectionAndDeduplicatesReadiness(t *testin
 	}
 }
 
+func TestForgeProbeTimeoutIsCachedForForegroundButRetriedByWatch(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "probe.log")
+	t.Setenv("POSSE_HOME", filepath.Join(root, "posse"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("POSSE_PROBE_LOG", logPath)
+	t.Setenv("POSSE_WATCH_TOKEN", "")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(`#!/bin/sh
+printf 'gh\n' >> "$POSSE_PROBE_LOG"
+/bin/sleep 1
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousTimeout, previousTTL := forgeProbeTimeout, forgeProbeCacheTTL
+	forgeProbeTimeout, forgeProbeCacheTTL = 50*time.Millisecond, time.Minute
+	t.Cleanup(func() {
+		forgeProbeTimeout, forgeProbeCacheTTL = previousTimeout, previousTTL
+	})
+	cfg := config.Config{}
+	probe := func() forgeProbeOutcome {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		outcome, err := cachedForgeProbe(ctx, root, "git.example", cfg, "github")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !outcome.GitHubTimedOut {
+			t.Fatalf("forge probe outcome = %#v, want a timeout", outcome)
+		}
+		return outcome
+	}
+	probe()
+	probe()
+	calls, err := os.ReadFile(logPath)
+	if err != nil || strings.Count(string(calls), "gh\n") != 1 {
+		t.Fatalf("foreground timeout was not negatively cached: calls=%q err=%v", calls, err)
+	}
+	t.Setenv("POSSE_WATCH_TOKEN", "watch-token")
+	probe()
+	probe()
+	calls, err = os.ReadFile(logPath)
+	if err != nil || strings.Count(string(calls), "gh\n") != 3 {
+		t.Fatalf("Watch reused a timed-out foreground probe instead of retrying: calls=%q err=%v", calls, err)
+	}
+}
+
 func TestForgeProbeCacheHasShortTTLAndInvalidatesOnConfigChange(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")

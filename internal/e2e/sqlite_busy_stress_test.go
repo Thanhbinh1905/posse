@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -24,44 +25,51 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 	}
 
 	client := herdr.NewWithEnv("herdr", f.env)
-	worker, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, "posse:shop:t1")
-	if err != nil {
-		t.Fatalf("create isolated Worker pane: %v", err)
-	}
-	const workerLabel = "posse:shop:t1"
-	if _, err := client.Call(context.Background(), "pane.rename", map[string]any{"pane_id": worker.RootPane.PaneID, "label": workerLabel}); err != nil {
-		t.Fatalf("label isolated Worker pane: %v", err)
-	}
-	if _, err := client.Run(context.Background(), "pane", "report-agent", worker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
-		t.Fatalf("mark isolated Worker working: %v", err)
-	}
-
 	ctx := context.Background()
-	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
-		Seq: 1, Type: "change", Title: "Concurrent store stress", ShortName: "concurrent-store-stress",
-		Profile: "deep", MergeMode: "local", Branch: "posse/concurrent-store-stress", BaseRef: "main",
-		HerdrWorkspaceID: f.project.HerdrWorkspaceID, PaneID: worker.RootPane.PaneID,
-		PaneLabel: workerLabel, AgentName: "claude", AutonomyReview: "ask", AutonomyMerge: "ask",
-	})
-	if err != nil {
-		t.Fatalf("create isolated Worker Task: %v", err)
+	const workerCount = 6
+	const iterations = 8
+	type stressWorker struct {
+		taskID int64
+		cwd    string
+		env    []string
 	}
-	sandbox, err := f.db.AcquireSandbox(ctx, f.project.ID, taskID, filepath.Join(f.root, "posse", "pool"))
-	if err != nil {
-		t.Fatalf("acquire isolated Worker Sandbox: %v", err)
+	workers := make([]stressWorker, 0, workerCount)
+	for seq := 1; seq <= workerCount; seq++ {
+		label := fmt.Sprintf("posse:shop:t%d", seq)
+		worker, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, label)
+		if err != nil {
+			t.Fatalf("create isolated Worker %d pane: %v", seq, err)
+		}
+		if _, err := client.Call(ctx, "pane.rename", map[string]any{"pane_id": worker.RootPane.PaneID, "label": label}); err != nil {
+			t.Fatalf("label isolated Worker %d pane: %v", seq, err)
+		}
+		if _, err := client.Run(ctx, "pane", "report-agent", worker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+			t.Fatalf("mark isolated Worker %d working: %v", seq, err)
+		}
+		branch := fmt.Sprintf("posse/concurrent-store-stress-%d", seq)
+		taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
+			Seq: seq, Type: "change", Title: fmt.Sprintf("Concurrent store stress %d", seq), ShortName: fmt.Sprintf("concurrent-store-stress-%d", seq),
+			Profile: "deep", MergeMode: "local", Branch: branch, BaseRef: "main",
+			HerdrWorkspaceID: f.project.HerdrWorkspaceID, PaneID: worker.RootPane.PaneID,
+			PaneLabel: label, AgentName: "claude", AutonomyReview: "ask", AutonomyMerge: "ask",
+		})
+		if err != nil {
+			t.Fatalf("create isolated Worker %d Task: %v", seq, err)
+		}
+		sandbox, err := f.db.AcquireSandbox(ctx, f.project.ID, taskID, filepath.Join(f.root, "posse", "pool"))
+		if err != nil {
+			t.Fatalf("acquire isolated Worker %d Sandbox: %v", seq, err)
+		}
+		gitTest(t, f.env, f.repo, "worktree", "add", "-b", branch, sandbox.Path, "main")
+		if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker ready"); err != nil {
+			t.Fatalf("start isolated Worker %d Task: %v", seq, err)
+		}
+		workerEnv := setEnv(f.env, "HERDR_ENV", "1")
+		workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", worker.RootPane.PaneID)
+		workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
+		workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", worker.RootPane.TabID)
+		workers = append(workers, stressWorker{taskID: taskID, cwd: sandbox.Path, env: workerEnv})
 	}
-	gitTest(t, f.env, f.repo, "worktree", "add", "-b", "posse/concurrent-store-stress", sandbox.Path, "main")
-	if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker ready"); err != nil {
-		t.Fatalf("start isolated Worker Task: %v", err)
-	}
-
-	workerEnv := setEnv(f.env, "HERDR_ENV", "1")
-	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", worker.RootPane.PaneID)
-	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
-	workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", worker.RootPane.TabID)
-
-	const iterations = 12
-	const commandsPerRole = 8
 	if _, err := f.db.RecordPRPoll(ctx, f.project.ID, 0, ""); err != nil {
 		t.Fatalf("reset isolated Watch poll timestamp: %v", err)
 	}
@@ -71,17 +79,35 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 	}
 
 	for iteration := 0; iteration < iterations; iteration++ {
-		results := make(chan stressCommandResult, commandsPerRole*2)
+		var contentionReleased chan struct{}
+		if iteration == 0 {
+			writer, err := f.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin isolated SQLite contention: %v", err)
+			}
+			if _, err := writer.ExecContext(ctx, `UPDATE projects SET name=name WHERE id=?`, f.project.ID); err != nil {
+				_ = writer.Rollback()
+				t.Fatalf("hold isolated SQLite writer: %v", err)
+			}
+			contentionReleased = make(chan struct{})
+			go func() {
+				time.Sleep(3400 * time.Millisecond)
+				_ = writer.Rollback()
+				close(contentionReleased)
+			}()
+		}
+		results := make(chan stressCommandResult, workerCount*2)
 		var group sync.WaitGroup
-		for command := 0; command < commandsPerRole; command++ {
+		for _, worker := range workers {
 			note := "concurrent store stress " + time.Now().Format(time.RFC3339Nano)
 			args := []string{"signal", "working", note}
 			group.Add(1)
-			go func(args []string) {
+			go func(worker stressWorker, args []string) {
 				defer group.Done()
-				results <- runStressCommand(f.binary, sandbox.Path, workerEnv, args)
-			}(args)
-
+				results <- runStressCommand(f.binary, worker.cwd, worker.env, args)
+			}(worker, args)
+		}
+		for command := 0; command < workerCount; command++ {
 			leadArgs := []string{"list"}
 			if command%2 == 1 {
 				leadArgs = nil
@@ -93,6 +119,9 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 			}(leadArgs)
 		}
 		group.Wait()
+		if contentionReleased != nil {
+			<-contentionReleased
+		}
 		close(results)
 		for result := range results {
 			if result.err != nil || busyText(result.output) {
@@ -101,16 +130,18 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 		}
 	}
 
-	signals, err := f.db.TaskSignals(ctx, taskID, iterations*commandsPerRole+1)
-	if err != nil {
-		t.Fatalf("read stress-run Signals: %v", err)
-	}
-	if len(signals) != iterations*commandsPerRole {
-		t.Fatalf("recorded %d Signals under load, want %d", len(signals), iterations*commandsPerRole)
-	}
-	for _, signal := range signals {
-		if signal.Verb != "working" {
-			t.Fatalf("stress-run recorded unexpected Signal: %#v", signal)
+	for _, worker := range workers {
+		signals, err := f.db.TaskSignals(ctx, worker.taskID, iterations+1)
+		if err != nil {
+			t.Fatalf("read stress-run Signals for Task %d: %v", worker.taskID, err)
+		}
+		if len(signals) != iterations {
+			t.Fatalf("Task %d recorded %d Signals under load, want %d", worker.taskID, len(signals), iterations)
+		}
+		for _, signal := range signals {
+			if signal.Verb != "working" {
+				t.Fatalf("Task %d recorded unexpected Signal: %#v", worker.taskID, signal)
+			}
 		}
 	}
 	if got := len(watchPIDs(f.root)); got == 0 {

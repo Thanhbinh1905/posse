@@ -23,8 +23,12 @@ const fixtureLockName = ".posse-e2e-fixture.lock"
 var fixtureRootPathHandles sync.Map
 
 func isTaskScratchRoot(path string) bool {
-	path = filepath.Clean(path)
-	return filepath.IsAbs(path) && strings.HasPrefix(path, "/tmp/posse-") && strings.HasSuffix(path, "-scratch")
+	return herdr.IsTaskScratchRootPath(path)
+}
+
+func pathWithinRoot(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func fixturePrefix(suffix string) string {
@@ -93,6 +97,13 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 			t.Fatalf("unsafe POSSE_E2E_TMP_ROOT: %q", configuredRoot)
 		}
 		parent = configuredRoot
+		if tmpDir := os.Getenv("TMPDIR"); tmpDir != "" {
+			if absolute, err := filepath.Abs(tmpDir); err == nil {
+				if resolved, err := filepath.EvalSymlinks(absolute); err == nil && pathWithinRoot(configuredRoot, resolved) {
+					parent = resolved
+				}
+			}
+		}
 	} else if isTaskScratchRoot(parent) {
 		if !validTaskScratchRoot(parent) {
 			t.Fatalf("unsafe Task scratch TMPDIR: %q", parent)
@@ -115,16 +126,8 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		t.Fatalf("resolve E2E fixture parent: %v", err)
 	}
 	parent = filepath.Clean(parent)
-	customRoot := configuredRoot != "." && parent == configuredRoot && validTaskScratchRoot(configuredRoot)
-	tmpDir := os.Getenv("TMPDIR")
-	if tmpDir == "" {
-		tmpDir = os.TempDir()
-	}
-	tmpDir, err = filepath.Abs(tmpDir)
-	if err != nil {
-		t.Fatalf("resolve E2E TMPDIR: %v", err)
-	}
-	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || parent == filepath.Clean(tmpDir)
+	customRoot := configuredRoot != "." && validTaskScratchRoot(configuredRoot) && pathWithinRoot(configuredRoot, parent)
+	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || customRoot
 	if (!parentIsTemp && !customRoot) || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
@@ -140,7 +143,7 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 			break
 		}
 	}
-	if (!insideTemp && parent != filepath.Clean(tmpDir)) || !strings.HasPrefix(prefix, "posse-e2e-") {
+	if !insideTemp && !customRoot || !strings.HasPrefix(prefix, "posse-e2e-") {
 		t.Fatalf("unsafe E2E fixture parent/prefix: %q, %q", parent, prefix)
 	}
 	if err := reclaimAbandonedFixtures(parent); err != nil {
@@ -216,7 +219,7 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 }
 
 func validTaskScratchRootPath(root string) bool {
-	return filepath.Clean(root) == root && filepath.Dir(root) == "/tmp" && strings.HasPrefix(filepath.Base(root), "posse-") && strings.HasSuffix(filepath.Base(root), "-scratch")
+	return filepath.Clean(root) == root && herdr.IsTaskScratchRootPath(root)
 }
 
 func validTaskScratchRoot(root string) bool {
@@ -224,7 +227,7 @@ func validTaskScratchRoot(root string) bool {
 		return false
 	}
 	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 		return false
 	}
 	resolved, err := filepath.EvalSymlinks(root)
@@ -235,7 +238,18 @@ func TestIsolatedHerdrAcceptsDefaultTaskScratchTMPDIR(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("requires Linux procfs to keep the non-/tmp fixture physically inside Task scratch")
 	}
-	taskScratch := newFixtureRoot(t, "posse-e2e-task-scratch-")
+	taskScratch := os.Getenv("TMPDIR")
+	if !validTaskScratchRoot(taskScratch) {
+		var err error
+		taskScratch, err = os.MkdirTemp("/tmp", "posse-e2e-task-scratch-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(taskScratch) })
+		if err := os.Chmod(taskScratch, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	tmpDir := filepath.Join(taskScratch, "posse", "scratch", "shop", "t1")
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -250,7 +264,7 @@ func TestIsolatedHerdrAcceptsDefaultTaskScratchTMPDIR(t *testing.T) {
 		t.Fatalf("Task TMPDIR alias is unavailable: %v", err)
 	}
 	t.Setenv("TMPDIR", configuredTMPDIR)
-	t.Setenv("POSSE_E2E_TMP_ROOT", "")
+	t.Setenv("POSSE_E2E_TMP_ROOT", taskScratch)
 
 	root := newFixtureRoot(t, herdr.TestRootName())
 	resolvedTMPDir, err := filepath.EvalSymlinks(configuredTMPDIR)

@@ -218,8 +218,17 @@ func TestPRTaskWatchFailureNoticeUpdatesInPlaceAndRecoversOnce(t *testing.T) {
 		}
 	}
 	notices, err = db.Notices(ctx, project.ID, false)
-	if err != nil || countKind(notices, "pr_watch_failing") != 1 || notices[0].ID != failureID || !strings.Contains(notices[0].DataJSON, "connection refused") {
-		t.Fatalf("persistent failure did not update its Notice in place: %#v, %v", notices, err)
+	if err != nil || countKind(notices, "pr_watch_failing") != 2 {
+		t.Fatalf("continued failure after acknowledgement did not raise a reminder: %#v, %v", notices, err)
+	}
+	var reminder *Notice
+	for index := range notices {
+		if notices[index].Kind == "pr_watch_failing" && notices[index].ID != failureID {
+			reminder = &notices[index]
+		}
+	}
+	if reminder == nil || reminder.AckedAt != 0 || !strings.Contains(reminder.DataJSON, `"consecutive_failures":6`) || !strings.Contains(reminder.DataJSON, "connection refused") {
+		t.Fatalf("persistent failure reminder = %#v", reminder)
 	}
 
 	task, err := db.TaskByID(ctx, project.ID, taskID)
@@ -235,7 +244,7 @@ func TestPRTaskWatchFailureNoticeUpdatesInPlaceAndRecoversOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	notices, err = db.Notices(ctx, project.ID, false)
-	if err != nil || countKind(notices, "pr_watch_recovered") != 1 || countKind(notices, "pr_watch_failing") != 1 {
+	if err != nil || countKind(notices, "pr_watch_recovered") != 1 || countKind(notices, "pr_watch_failing") != 2 {
 		t.Fatalf("successful poll did not create exactly one recovery Notice: %#v, %v", notices, err)
 	}
 	for _, notice := range notices {
@@ -249,7 +258,7 @@ func TestPRTaskWatchFailureNoticeUpdatesInPlaceAndRecoversOnce(t *testing.T) {
 		}
 	}
 	notices, err = db.Notices(ctx, project.ID, false)
-	if err != nil || countKind(notices, "pr_watch_failing") != 2 || countKind(notices, "pr_watch_recovered") != 1 {
+	if err != nil || countKind(notices, "pr_watch_failing") != 3 || countKind(notices, "pr_watch_recovered") != 1 {
 		t.Fatalf("new outage did not start a distinct failure episode: %#v, %v", notices, err)
 	}
 }

@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,9 +29,123 @@ const (
 var watchStartupGracePeriod = 5 * time.Second
 var watchRuntimeHeartbeatInterval = 5 * time.Second
 var watchRuntimeStaleAfter = 30 * time.Second
+var watchRuntimeLogMaxBytes int64 = 1 << 20
 
 func watchRuntimeLogPath(home string, project store.Project) string {
 	return filepath.Join(home, "projects", project.Name, "watch.log")
+}
+
+func rotateWatchRuntimeLog(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("watch log is not a regular file")
+	}
+	if info.Size() < watchRuntimeLogMaxBytes {
+		return nil
+	}
+	backup := path + ".1"
+	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Rename(path, backup)
+}
+
+type watchRuntimeLogWriter struct {
+	mu     sync.Mutex
+	path   string
+	file   *os.File
+	size   int64
+	closed bool
+}
+
+func openWatchRuntimeLog(path string) (*watchRuntimeLogWriter, error) {
+	if err := rotateWatchRuntimeLog(path); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	return &watchRuntimeLogWriter{path: path, file: file, size: info.Size()}, nil
+}
+
+func (writer *watchRuntimeLogWriter) rotateLocked() error {
+	if err := writer.file.Close(); err != nil {
+		return err
+	}
+	if err := rotateWatchRuntimeLog(writer.path); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(writer.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	writer.file, writer.size = file, 0
+	return nil
+}
+
+func (writer *watchRuntimeLogWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.closed {
+		return 0, os.ErrClosed
+	}
+	limit := watchRuntimeLogMaxBytes
+	if limit < 1 {
+		limit = 1
+	}
+	written := 0
+	for len(data) > 0 {
+		if writer.size >= limit {
+			if err := writer.rotateLocked(); err != nil {
+				return written, err
+			}
+		}
+		count := int64(len(data))
+		if room := limit - writer.size; count > room {
+			count = room
+		}
+		n, err := writer.file.Write(data[:int(count)])
+		written += n
+		writer.size += int64(n)
+		data = data[n:]
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
+}
+
+func (writer *watchRuntimeLogWriter) Close() error {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.closed {
+		return nil
+	}
+	writer.closed = true
+	return writer.file.Close()
+}
+
+func startWatchProcess(command *exec.Cmd) error {
+	if err := command.Start(); err != nil {
+		return err
+	}
+	go func() { _ = command.Wait() }()
+	return nil
 }
 
 func watchRuntimeLockPath(home string, project store.Project) string {
@@ -62,12 +178,7 @@ func watchExecutableAt(path string) (watchExecutableIdentity, bool) {
 	return watchExecutableIdentity{Path: resolved, Device: uint64(stat.Dev), Inode: stat.Ino}, true
 }
 
-func currentWatchExecutable(home string) (watchExecutableIdentity, bool) {
-	if manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName)); err == nil && found && manifest.Binary != "" {
-		if identity, ok := watchExecutableAt(manifest.Binary); ok {
-			return identity, true
-		}
-	}
+func currentWatchExecutable(_ string) (watchExecutableIdentity, bool) {
 	path, err := os.Executable()
 	if err != nil {
 		return watchExecutableIdentity{}, false
@@ -77,6 +188,17 @@ func currentWatchExecutable(home string) (watchExecutableIdentity, bool) {
 
 func watchProcessMatchesWatch(process watchProcess, projectID int64, watch store.WatchRuntime) bool {
 	return process.PID == watch.PID && process.WatchProjectID == projectID && process.WatchToken == watch.Token && process.WatchStartedAt == watch.StartedAt
+}
+
+func watchRuntimeProcessHealthy(home string, projectID int64, state store.WatchRuntime) bool {
+	if state.PID < 1 || state.Token == "" || state.StartedAt < 1 || state.HeartbeatAt < 1 || time.Since(time.UnixMilli(state.HeartbeatAt)) > watchRuntimeStaleAfter {
+		return false
+	}
+	process, ok := inspectWatchProcess(home, state.PID)
+	if !ok || !process.PollOnly || !watchPIDRunning(state.PID) || !watchProcessMatchesWatch(process, projectID, state) {
+		return false
+	}
+	return process.Executable.Device == state.ExecutableDevice && process.Executable.Inode == state.ExecutableInode
 }
 
 func (s *Service) ensureWatchRuntime(ctx context.Context, db *store.DB, home string, project store.Project) error {
@@ -258,7 +380,31 @@ func stopDuplicateWatchRuntimes(ctx context.Context, home string, processes []wa
 	return nil
 }
 
+func stopProjectPollerAfterContention(ctx context.Context, home string, project store.Project) error {
+	processes, err := systemWatchProcesses(home)
+	if err != nil {
+		return err
+	}
+	for _, process := range processes {
+		if !process.PollOnly || process.WatchProjectID != project.ID {
+			continue
+		}
+		if err := stopStoredWatchRuntimeForDown(ctx, home, process); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func stopStoredWatchRuntime(ctx context.Context, home string, process watchProcess) error {
+	return stopStoredWatchRuntimeWithEscalation(ctx, home, process, false)
+}
+
+func stopStoredWatchRuntimeForDown(ctx context.Context, home string, process watchProcess) error {
+	return stopStoredWatchRuntimeWithEscalation(ctx, home, process, true)
+}
+
+func stopStoredWatchRuntimeWithEscalation(ctx context.Context, home string, process watchProcess, escalate bool) error {
 	if !watchPIDRunning(process.PID) {
 		return nil
 	}
@@ -272,7 +418,7 @@ func stopStoredWatchRuntime(ctx context.Context, home string, process watchProce
 	if !owned {
 		return fmt.Errorf("refusing to signal Watch PID %d after its process identity changed", process.PID)
 	}
-	if err := syscall.Kill(process.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := signalWatchProcessGroup(process.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
 	deadline := time.Now().Add(watchStopGracePeriod)
@@ -284,9 +430,39 @@ func stopStoredWatchRuntime(ctx context.Context, home string, process watchProce
 		}
 	}
 	if watchPIDRunning(process.PID) {
-		return fmt.Errorf("watch PID %d did not stop gracefully; refusing to interrupt Project maintenance", process.PID)
+		if !escalate {
+			return fmt.Errorf("Watch PID %d did not stop gracefully; refusing to interrupt Project maintenance", process.PID)
+		}
+		owned, err := storedWatchProcessIsCurrent(home, process)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return fmt.Errorf("refusing to SIGKILL Watch PID %d after its process identity changed", process.PID)
+		}
+		if err := signalWatchProcessGroup(process.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("send SIGKILL to wedged Watch PID %d: %w", process.PID, err)
+		}
+		killDeadline := time.Now().Add(time.Second)
+		for time.Now().Before(killDeadline) && watchPIDRunning(process.PID) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
+		if watchPIDRunning(process.PID) {
+			return fmt.Errorf("watch PID %d remains after SIGKILL", process.PID)
+		}
 	}
 	return nil
+}
+
+func signalWatchProcessGroup(pid int, signal syscall.Signal) error {
+	if group, err := syscall.Getpgid(pid); err == nil && group == pid {
+		return syscall.Kill(-pid, signal)
+	}
+	return syscall.Kill(pid, signal)
 }
 
 func storedWatchProcessIsCurrent(home string, expected watchProcess) (bool, error) {
@@ -317,31 +493,34 @@ func (s *Service) startWatchRuntime(ctx context.Context, db *store.DB, home stri
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return fmt.Errorf("create Project Watch log directory: %w", err)
 	}
-	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	log, err := openWatchRuntimeLog(logPath)
+	if err != nil {
+		return fmt.Errorf("open Project Watch log: %w", err)
+	}
+	if err := log.Close(); err != nil {
+		return fmt.Errorf("close Project Watch log: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open Project Watch log: %w", err)
 	}
 	command := exec.Command(binary, "watch", "--poll-only")
 	command.Dir = project.Root
 	command.Env = watchRuntimeEnvironment(os.Environ(), home, project, token, startedAt)
-	command.Stdout, command.Stderr = log, log
+	command.Stdout, command.Stderr = logFile, logFile
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := command.Start(); err != nil {
-		log.Close()
+	if err := startWatchProcess(command); err != nil {
+		_ = logFile.Close()
 		return fmt.Errorf("start hidden Project Watch: %w", err)
 	}
-	_ = log.Close()
+	_ = logFile.Close()
 	watch := store.WatchRuntime{
 		PID: command.Process.Pid, Token: token, StartedAt: startedAt, HeartbeatAt: startedAt,
 		ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode,
 	}
 	if err := db.SetWatchRuntime(ctx, project.ID, watch); err != nil {
 		_ = command.Process.Kill()
-		_ = command.Process.Release()
 		return fmt.Errorf("record hidden Project Watch: %w", err)
-	}
-	if err := command.Process.Release(); err != nil {
-		return fmt.Errorf("release hidden Project Watch process: %w", err)
 	}
 	return nil
 }
@@ -350,7 +529,7 @@ func watchRuntimeEnvironment(parent []string, home string, project store.Project
 	values := make(map[string]string, len(parent)+5)
 	for _, entry := range parent {
 		key, value, found := strings.Cut(entry, "=")
-		if !found || key == "" || key == watchRuntimeProjectEnv || key == watchRuntimeTokenEnv || key == watchRuntimeStartedEnv || key == "POSSE_HOME" || key == "HERDR_PANE_ID" || key == "HERDR_WORKSPACE_ID" || key == "HERDR_TAB_ID" || key == "HERDR_ENV" || key == "HERDR_PLUGIN_EVENT" || key == "HERDR_PLUGIN_EVENT_JSON" {
+		if !found || key == "" || strings.HasPrefix(key, "GIT_") || strings.HasPrefix(key, "HERDR_") || strings.HasPrefix(key, "POSSE_") && !strings.HasPrefix(key, "POSSE_TEST_") {
 			continue
 		}
 		values[key] = value
@@ -369,7 +548,7 @@ func watchRuntimeEnvironment(parent []string, home string, project store.Project
 
 func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args []string) {
 	// A Notice acknowledgement is delivery work, not a Project maintenance boundary.
-	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "watch" || command == "lookout" || command == "remove" || command == "_update-preflight" {
+	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" || command == "watch" && (containsArgument(args, "--repair") || containsArgument(args, "--receipt") || containsArgument(args, "--receipt-outcome") || containsArgument(args, "--receipt-token") || containsArgument(args, "--handoff") && !watchHandoffRepairsPoller(args)) {
 		return
 	}
 	binary, err := os.Executable()
@@ -425,13 +604,31 @@ func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args 
 	}
 }
 
+func watchHandoffRepairsPoller(args []string) bool {
+	for index, arg := range args {
+		if arg == "--destination" && index+1 < len(args) {
+			return strings.HasPrefix(args[index+1], "pi:")
+		}
+		if strings.HasPrefix(arg, "--destination=") {
+			return strings.HasPrefix(strings.TrimPrefix(arg, "--destination="), "pi:")
+		}
+	}
+	return false
+}
+
 func containsArgument(args []string, value string) bool {
 	for _, arg := range args {
-		if arg == value {
+		if arg == value || strings.HasPrefix(arg, value+"=") {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *Service) watchMaintenanceInFlight() bool {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	return len(s.maintenance) > 0
 }
 
 func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal) error {
@@ -455,6 +652,16 @@ func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project
 	if !ok {
 		return fmt.Errorf("cannot identify hidden Watch executable %q", binary)
 	}
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	log, err := openWatchRuntimeLog(watchRuntimeLogPath(home, project))
+	if err != nil {
+		return fmt.Errorf("open Project Watch log: %w", err)
+	}
+	defer log.Close()
+	ctx.Out, ctx.ErrOut = log, log
 	watch := store.WatchRuntime{PID: os.Getpid(), Token: token, StartedAt: startedAt, HeartbeatAt: currentTime(), ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode}
 	if err := db.SetWatchRuntime(ctx.Context, project.ID, watch); err != nil {
 		return err
@@ -464,55 +671,34 @@ func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project
 }
 
 func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal, watch *store.WatchRuntime) error {
+	defer func() {
+		s.cancelWatchMaintenance()
+		if !s.waitForWatchMaintenance(4 * time.Second) {
+			fmt.Fprintln(ctx.ErrOut, "Watch maintenance shutdown timed out; unfinished poll claims will expire")
+		}
+	}()
 	deadline := time.Time{}
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
 	}
 	lastFailure := ""
-	watchStopped := make(chan struct{}, 1)
-	if watch != nil {
-		heartbeatStop := make(chan struct{})
-		go func() {
-			ticker := time.NewTicker(watchRuntimeHeartbeatInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-heartbeatStop:
-					return
-				case <-ticker.C:
-					ok, err := db.HeartbeatWatchRuntime(ctx.Context, project.ID, watch.PID, watch.Token, currentTime())
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Watch heartbeat failed for %s: %v\n", project.Name, err)
-						continue
-					}
-					if !ok {
-						select {
-						case watchStopped <- struct{}{}:
-						default:
-						}
-						return
-					}
-					if err := s.reexecWatchIfUpdated(project.ID, watch); err != nil {
-						fmt.Fprintf(os.Stderr, "Watch re-exec check failed for %s: %v\n", project.Name, err)
-					}
+	for {
+		if watch != nil {
+			ok, err := db.HeartbeatWatchRuntime(ctx.Context, project.ID, watch.PID, watch.Token, currentTime())
+			if err != nil {
+				fmt.Fprintf(ctx.ErrOut, "Watch heartbeat failed for %s: %v\n", project.Name, err)
+			} else if !ok {
+				return nil
+			} else if !s.watchMaintenanceInFlight() {
+				if err := s.reexecWatchIfUpdated(project.ID, watch); err != nil {
+					fmt.Fprintf(ctx.ErrOut, "Watch re-exec check failed for %s: %v\n", project.Name, err)
 				}
 			}
-		}()
-		defer close(heartbeatStop)
-	}
-	for {
-		select {
-		case <-watchStopped:
-			return nil
-		default:
 		}
 		select {
 		case sig := <-stopSignals:
 			if sig == syscall.SIGTERM {
 				return s.reportWatchStopped(ctx, project, true)
-			}
-			if err := s.reexecWatchIfUpdated(project.ID, watch); err != nil {
-				return err
 			}
 		default:
 		}
@@ -537,13 +723,8 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			if sig == syscall.SIGTERM {
 				return s.reportWatchStopped(ctx, project, true)
 			}
-			if err := s.reexecWatchIfUpdated(project.ID, watch); err != nil {
-				return err
-			}
 		case <-ctx.Context.Done():
 			return ctx.Context.Err()
-		case <-watchStopped:
-			return nil
 		case <-time.After(2 * time.Second):
 			if watch == nil {
 				if err := s.handleLeadWatchUpdate(ctx, project); err != nil {
@@ -666,6 +847,11 @@ func sameWatchExecutableIdentity(left, right watchExecutableIdentity) bool {
 }
 
 func requestWatchReexec(home string, processes []watchProcess) error {
+	installed, installedOK := currentWatchExecutable(home)
+	return requestWatchReexecForIdentity(home, processes, installed, installedOK)
+}
+
+func requestWatchReexecForIdentity(home string, processes []watchProcess, installed watchExecutableIdentity, installedOK bool) error {
 	if len(processes) == 0 {
 		return nil
 	}
@@ -673,7 +859,6 @@ func requestWatchReexec(home string, processes []watchProcess) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
-	installed, installedOK := currentWatchExecutable(home)
 	var failures []error
 	for _, process := range processes {
 		if !watchPIDRunning(process.PID) {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -307,6 +308,213 @@ func TestWatchRuntimeReexecsAfterBinaryReplacement(t *testing.T) {
 	}) {
 		state, _ := f.db.WatchRuntime(context.Background(), f.project.ID)
 		t.Fatalf("watch did not re-exec into the replacement binary: before=%#v after=%#v pids=%v", before, state, watchPIDs(f.root))
+	}
+}
+
+func TestWatchHandoffRepairsDeadPoller(t *testing.T) {
+	f := newPRLifecycleFixtureWithLead(t, true)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("initial Project watch missing: %v", watchPIDs(f.root))
+	}
+	oldPID := watchPIDs(f.root)[0]
+	if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatalf("killed watch remains: %v", watchPIDs(f.root))
+	}
+
+	runPosse(t, f.binary, f.repo, f.leadEnv, "watch", "--json", "--handoff", "--destination", "pi:repair", "--timeout", "1")
+	if !waitForCondition(10*time.Second, func() bool {
+		pids := watchPIDs(f.root)
+		return len(pids) == 1 && pids[0] != oldPID
+	}) {
+		t.Fatalf("a Pi extension handoff did not repair the hidden Watch: %v", watchPIDs(f.root))
+	}
+}
+
+func TestWatchPollerUsesItsSpawnedBinaryInsteadOfSetupManifest(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("initial Project watch missing: %v", watchPIDs(f.root))
+	}
+	oldPID := watchPIDs(f.root)[0]
+	if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatalf("killed watch remains: %v", watchPIDs(f.root))
+	}
+
+	binary, err := os.ReadFile(f.binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBinary := filepath.Join(f.root, "manifest-posse")
+	if err := os.WriteFile(manifestBinary, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(map[string]string{"binary": manifestBinary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "posse", "setup.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, f.binary, f.repo, f.env, "doctor", "--json")
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not restart: %v", watchPIDs(f.root))
+	}
+	pid := watchPIDs(f.root)[0]
+	time.Sleep(7 * time.Second)
+	path, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSuffix(path, " (deleted)") != f.binary {
+		t.Fatalf("watch executable = %q, want spawned executable %q", path, f.binary)
+	}
+}
+
+func TestWatchHeartbeatStopsWhenProjectMaintenanceStalls(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseFetch := make(chan struct{})
+	fetchStarted := make(chan struct{}, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		fetchStarted <- struct{}{}
+		<-releaseFetch
+		_ = connection.Close()
+	}()
+	t.Cleanup(func() {
+		close(releaseFetch)
+		_ = listener.Close()
+		stopLiveWatchRuntime(t, f.root)
+	})
+	gitTest(t, f.env, f.repo, "config", "--unset-all", "url.file://"+f.remote+".insteadOf")
+	gitTest(t, f.env, f.repo, "config", "url.http://"+listener.Addr().String()+"/.insteadOf", "https://github.com/acme/shop.git")
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE project_watch_state SET checkout_checked_at=0 WHERE project_id=?`, f.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fetchStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Project Watch did not enter the deliberately stalled Git fetch")
+	}
+	before, err := f.db.WatchRuntime(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(7 * time.Second)
+	during, err := f.db.WatchRuntime(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if during.HeartbeatAt != before.HeartbeatAt {
+		t.Fatalf("Watch heartbeat advanced while Project maintenance was stalled: before=%d during=%d", before.HeartbeatAt, during.HeartbeatAt)
+	}
+}
+
+func TestIngestDoesNotWaitForHealthyWatchRuntimeLock(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
+	}
+	lock, err := os.OpenFile(filepath.Join(f.home, "projects", f.project.Name, "watch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	event, err := json.Marshal(map[string]any{
+		"event": "pane.agent_status_changed",
+		"data":  map[string]string{"pane_id": f.project.LeadPaneID, "agent_status": "working"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(f.binary, "_ingest")
+	command.Dir, command.Env = f.repo, setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", string(event))
+	started := time.Now()
+	output, err := command.CombinedOutput()
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("_ingest failed while Watch lock was held: %v\n%s", err, output)
+	}
+	t.Logf("_ingest completed in %s while the Watch lock was held", elapsed)
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("_ingest waited %s for a healthy Watch lock; want under 500 ms", elapsed)
+	}
+}
+
+func TestDownStopsAWedgedProjectWatch(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
+	}
+	pid := watchPIDs(f.root)[0]
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGCONT)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	})
+
+	command := exec.Command(f.binary, "down")
+	command.Dir, command.Env = f.repo, f.env
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("posse down could not stop wedged Watch: %v\n%s", err, output)
+	}
+	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+		t.Fatalf("posse down returned while Watch PID %d remained running", pid)
+	}
+}
+
+func TestPassiveWatchLeavesCommandBoundaryIntentsForNormalRecovery(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
+	}
+	ctx := context.Background()
+	for sequence, command := range []string{"merge --execute", "teardown"} {
+		taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
+			Seq: sequence + 1, Type: "change", Title: command, MergeMode: "local",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.db.StartIntent(ctx, f.project.ID, taskID, command, "started", `{}`, 2147483000+sequence); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(3 * time.Second)
+	intents, err := f.db.Intents(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 2 {
+		t.Fatalf("passive Watch recovered command-boundary intents: %#v", intents)
 	}
 }
 

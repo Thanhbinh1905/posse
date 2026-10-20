@@ -33,6 +33,7 @@ type TaskSnapshot struct {
 	ReportReviews    []ReportReview       `toml:"report_reviews,omitempty"`
 	ReportAcceptance *ReportAcceptance    `toml:"report_acceptance,omitempty"`
 	PRBodyMarkers    []PRBodyMarker       `toml:"pr_body_markers,omitempty"`
+	PRWatchFailures  []PRTaskWatchFailure `toml:"pr_watch_failures,omitempty"`
 	// Members and TaskRepos are set for a workspace Project only.
 	Members       []ProjectRepo      `toml:"members,omitempty"`
 	TaskRepos     []TaskRepo         `toml:"task_repos,omitempty"`
@@ -298,6 +299,10 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if err != nil {
 		return err
 	}
+	watchFailures, err := db.PRTaskWatchFailuresForTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	targetChanges, err := db.TaskTargetChanges(ctx, taskID)
 	if err != nil {
 		return err
@@ -334,7 +339,7 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		}
 		plans = plans[:admitted.Revision]
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, TargetChanges: targetChanges, PlanRevisions: plans}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, LaunchIdentities: identities, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, TargetChanges: targetChanges, PlanRevisions: plans}
 	if task.Type == "review" {
 		if snapshot.ReviewTargets, err = db.ReviewTargets(ctx, taskID); err != nil {
 			return err
@@ -1069,6 +1074,27 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		for _, repo := range snapshot.TaskRepos {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id,repo,worktree_path,base_ref,target_branch,landing_mode,state,gated_sha,pr_url,landed_ref,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, task.ID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.MergeMode, repo.State, repo.GatedSHA, repo.PRURL, repo.MergedRef, task.UpdatedAt); err != nil {
 				return err
+			}
+		}
+		for _, failure := range snapshot.PRWatchFailures {
+			if failure.ProjectID != 0 && failure.ProjectID != task.ProjectID || failure.TaskID != 0 && failure.TaskID != task.ID || failure.PRURL == "" || failure.ConsecutiveFailures < 0 {
+				return fmt.Errorf("invalid PR watch failure in snapshot for t%d", task.Seq)
+			}
+			currentPRURL := task.PRURL
+			if failure.Repo != "" {
+				currentPRURL = ""
+				for _, repo := range snapshot.TaskRepos {
+					if repo.Repo == failure.Repo {
+						currentPRURL = repo.PRURL
+						break
+					}
+				}
+			}
+			if currentPRURL != failure.PRURL {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO pr_task_watch_failures(project_id,task_id,repo,pr_url,consecutive_failures,last_error,updated_at) VALUES(?,?,?,?,?,?,?)`, task.ProjectID, task.ID, failure.Repo, failure.PRURL, failure.ConsecutiveFailures, failure.LastError, failure.UpdatedAt); err != nil {
+				return fmt.Errorf("rebuild t%d PR watch failure: %w", task.Seq, err)
 			}
 		}
 	}

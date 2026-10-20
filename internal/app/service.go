@@ -35,6 +35,8 @@ type Service struct {
 	reexecUpdate         func(string, []string, []string) error
 	maintenanceMu        sync.Mutex
 	maintenance          map[string]bool
+	maintenanceCancels   map[string]context.CancelFunc
+	maintenanceWG        sync.WaitGroup
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
 }
 
@@ -192,13 +194,63 @@ func (s *Service) beginMaintenance(key string) bool {
 		return false
 	}
 	s.maintenance[key] = true
+	s.maintenanceWG.Add(1)
 	return true
+}
+
+func (s *Service) beginMaintenanceContext(key string, parent context.Context) (context.Context, bool) {
+	ctx, cancel := context.WithCancel(parent)
+	if !s.beginMaintenance(key) {
+		cancel()
+		return nil, false
+	}
+	s.maintenanceMu.Lock()
+	if s.maintenanceCancels == nil {
+		s.maintenanceCancels = make(map[string]context.CancelFunc)
+	}
+	s.maintenanceCancels[key] = cancel
+	s.maintenanceMu.Unlock()
+	return ctx, true
 }
 
 func (s *Service) endMaintenance(key string) {
 	s.maintenanceMu.Lock()
 	delete(s.maintenance, key)
+	cancel := s.maintenanceCancels[key]
+	delete(s.maintenanceCancels, key)
 	s.maintenanceMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.maintenanceWG.Done()
+}
+
+func (s *Service) cancelWatchMaintenance() {
+	s.maintenanceMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.maintenanceCancels))
+	for _, cancel := range s.maintenanceCancels {
+		cancels = append(cancels, cancel)
+	}
+	s.maintenanceMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (s *Service) waitForWatchMaintenance(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		s.maintenanceWG.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 func (s *Service) homePath() (string, error) {
@@ -516,8 +568,13 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				}
 			}
 			if runErr != nil {
-				// A held Project keeps its recorded panes for `posse up`.
-				if !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) && !errors.Is(runErr, errRecoveryDeferred) {
+				// A held Project keeps its recorded panes for `posse up`. Pure
+				// contention defers observations; Watch also records it so the
+				// next poll makes the retry visible in its diagnostics.
+				if store.IsOnlyBusy(runErr) && options.watchObservation {
+					return cfg, runErr
+				}
+				if !store.IsOnlyBusy(runErr) && !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) && !errors.Is(runErr, errRecoveryDeferred) {
 					return cfg, herdrError(runErr)
 				}
 			} else {

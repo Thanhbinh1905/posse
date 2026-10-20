@@ -17,13 +17,20 @@ import (
 // IsolatedTestEnvironment strips every inherited HERDR_* value and redirects all
 // persisted state to a short disposable test root.
 func IsolatedTestEnvironment(root string) []string {
+	scratchRoot := os.Getenv("POSSE_E2E_TMP_ROOT")
+	if !safeTaskScratchRoot(scratchRoot) || !inside(scratchRoot, root) {
+		scratchRoot = taskScratchRootContaining(root)
+	}
+	if !safeTaskScratchRoot(scratchRoot) || !inside(scratchRoot, root) {
+		scratchRoot = ""
+	}
 	values := make([]string, 0, len(os.Environ())+8)
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
 		if found && (strings.HasPrefix(key, "HERDR_") || key == "CLAUDECODE" || key == "CLAUDE_AGENT_ID" || key == "CODEX_CI" || key == "CODEX_THREAD_ID" || key == "PI_CODING_AGENT" || key == "PI_SESSION_ID" || key == "OPENCODE_SESSION_ID") {
 			continue
 		}
-		if found && (key == "HOME" || key == "POSSE_HOME" || key == "CLAUDE_CONFIG_DIR" || key == "CODEX_HOME" || key == "PI_CODING_AGENT_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_TEST_HERDR" || key == "POSSE_TEST_HERDR_SOCKET_PATH" || key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_NOSYSTEM" || key == "LANG" || key == "LC_ALL" || key == "TERM" || key == "SHELL") {
+		if found && (key == "HOME" || key == "POSSE_HOME" || key == "CLAUDE_CONFIG_DIR" || key == "CODEX_HOME" || key == "PI_CODING_AGENT_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_TEST_HERDR" || key == "POSSE_TEST_HERDR_SOCKET_PATH" || key == "POSSE_E2E_TMP_ROOT" || key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_NOSYSTEM" || key == "LANG" || key == "LC_ALL" || key == "TERM" || key == "SHELL") {
 			continue
 		}
 		values = append(values, entry)
@@ -45,6 +52,9 @@ func IsolatedTestEnvironment(root string) []string {
 		// (or no SHELL), its pseudo-terminal captures no sidebar frames.
 		"SHELL=/bin/bash",
 	)
+	if scratchRoot != "" {
+		env = append(env, "POSSE_E2E_TMP_ROOT="+scratchRoot)
+	}
 	defaultSocketPath := filepath.Join(root, "xdg", "herdr", "herdr.sock")
 	if absolute, err := filepath.Abs(defaultSocketPath); err == nil {
 		defaultSocketPath = absolute
@@ -94,6 +104,22 @@ func IsolatedTestSocketDir(root string) string {
 	return filepath.Dir(IsolatedTestSocketPath(root))
 }
 
+func IsTaskScratchRootPath(root string) bool {
+	root = filepath.Clean(root)
+	if !filepath.IsAbs(root) {
+		return false
+	}
+	base := filepath.Base(root)
+	if filepath.Dir(root) == "/tmp" && strings.HasPrefix(base, "posse-") && strings.Contains(base, "-scratch-") {
+		return true
+	}
+	if filepath.Base(filepath.Dir(root)) != "posse" || filepath.Base(filepath.Dir(filepath.Dir(root))) != "scratch" || filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(root)))) != ".posse" {
+		return false
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(base, "t"))
+	return strings.HasPrefix(base, "t") && err == nil && id > 0
+}
+
 func ValidateIsolatedEnvironment(values []string) (string, error) {
 	env := environmentMap(values)
 	root := env["POSSE_TEST_ROOT"]
@@ -111,18 +137,13 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 	}
 	tmpDirAbs, tmpDirErr := filepath.Abs(tmpDir)
 	if tmpDirErr == nil {
-		tmpDirAbs, tmpDirErr = filepath.EvalSymlinks(tmpDirAbs)
+		_, tmpDirErr = filepath.EvalSymlinks(tmpDirAbs)
 	}
 	scratchRoot := filepath.Clean(env["POSSE_E2E_TMP_ROOT"])
 	insideScratch := safeTaskScratchRoot(scratchRoot) && inside(scratchRoot, rootAbs)
 	resolvedRoot, resolveErr := filepath.EvalSymlinks(rootAbs)
 	parent := filepath.Dir(resolvedRoot)
-	configuredTemp := filepath.IsAbs(tmpDir) && tmpDirErr == nil && filepath.Clean(tmpDirAbs) != string(filepath.Separator) && parent == filepath.Clean(tmpDirAbs)
-	// A fixture may override its child TMPDIR with a subdirectory after being
-	// created directly under this test process's Task scratch directory.
-	processTemp, processTempErr := filepath.EvalSymlinks(os.TempDir())
-	configuredTemp = configuredTemp || processTempErr == nil && filepath.IsAbs(processTemp) && processTemp != string(filepath.Separator) && parent == filepath.Clean(processTemp)
-	parentIsTemp := parent == "/tmp" || parent == "/var/tmp" || parent == filepath.Clean(os.TempDir()) || configuredTemp
+	parentIsTemp := parent == "/tmp" || parent == "/var/tmp"
 	insideTemp := false
 	for _, tempRoot := range []string{"/tmp", "/var/tmp"} {
 		relative, err := filepath.Rel(tempRoot, resolvedRoot)
@@ -131,8 +152,8 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 			break
 		}
 	}
-	if env["POSSE_TEST_HERDR"] != "1" || rootErr != nil || tmpDirErr != nil || resolveErr != nil || !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(rootAbs), "posse-e2e-") || !parentIsTemp && !insideScratch || !insideTemp && !insideScratch && !configuredTemp {
-		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* root, a fixture under the configured E2E scratch root, or a fixture directly under TMPDIR"}
+	if env["POSSE_TEST_HERDR"] != "1" || rootErr != nil || tmpDirErr != nil || resolveErr != nil || !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(rootAbs), "posse-e2e-") || !parentIsTemp && !insideScratch || !insideTemp && !insideScratch {
+		return "", &Error{Code: "unsafe_test_environment", Message: "isolated Herdr mutation requires a /tmp/posse-e2e-* root or a fixture under the configured E2E scratch root"}
 	}
 	root = rootAbs
 	for key := range env {
@@ -191,12 +212,21 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 	return root, nil
 }
 
+func taskScratchRootContaining(path string) string {
+	for current := filepath.Clean(path); current != "." && current != filepath.Dir(current); current = filepath.Dir(current) {
+		if IsTaskScratchRootPath(current) {
+			return current
+		}
+	}
+	return ""
+}
+
 func safeTaskScratchRoot(root string) bool {
-	if filepath.Clean(root) != root || filepath.Dir(root) != "/tmp" || !strings.HasPrefix(filepath.Base(root), "posse-") || !strings.HasSuffix(filepath.Base(root), "-scratch") {
+	if filepath.Clean(root) != root || !IsTaskScratchRootPath(root) {
 		return false
 	}
 	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 		return false
 	}
 	resolved, err := filepath.EvalSymlinks(root)

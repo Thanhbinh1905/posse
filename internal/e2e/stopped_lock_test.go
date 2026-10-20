@@ -88,9 +88,16 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			wakeArgs := []string{"--json"}
-			if kind == "fetch" {
+			if kind == "sandbox" {
+				brief := filepath.Join(f.root, "contended-start.md")
+				contents := "---\ntype: change\ntitle: contended Sandbox start\ndone_when: the change is ready\n---\nCreate a Task after the Sandbox-state lock is available.\n"
+				if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				wakeArgs = append(wakeArgs, "start", "--brief", brief, "--name", "contended-start")
+			} else {
 				// Force a user-invoked Project sync through the fetch lock, while
-				// background watch polling is deferred by the fresh timestamp.
+				// background Watch polling is deferred by the fresh timestamp.
 				wakeArgs = append(wakeArgs, "sync")
 			}
 			wake := exec.CommandContext(ctx, f.binary, wakeArgs...)

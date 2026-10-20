@@ -95,6 +95,15 @@ func (db *DB) EnsureSandboxResourceLease(ctx context.Context, request ResourceLe
 		return ResourceLease{}, err
 	}
 	token := fmt.Sprintf("sandbox:%d", request.SandboxID)
+	if existing, err := db.queries.ResourceLeaseBySource(ctx, token); err == nil {
+		lease := resourceLeaseFromSource(existing)
+		if lease.ResourceType != request.ResourceType || lease.ScopeRoot != request.ScopeRoot || lease.ScopePath != request.ScopePath || lease.OwnerProjectID != request.OwnerProjectID || lease.SandboxID != request.SandboxID {
+			return ResourceLease{}, &ResourceLeaseConflict{Lease: lease}
+		}
+		return lease, nil
+	} else if !IsNotFound(err) {
+		return ResourceLease{}, err
+	}
 	return db.claimResourceLease(ctx, request, token, true)
 }
 

@@ -84,7 +84,7 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	gitScript := "#!/bin/sh\nset -eu\nprintf '%s\\t%s\\n' \"${HERDR_PANE_ID:-}\" \"$PWD $*\" >> \"$POSSE_TEST_GIT_COMMAND_LOG\"\nevent=\nfor arg in \"$@\"; do\n  case \"$arg\" in fetch|ls-remote) event=$arg; break ;; esac\ndone\nif [ -n \"$event\" ]; then\n  printf '%s\\t%s\\t%s\\n' \"${HERDR_PANE_ID:-}\" \"$event\" \"$PWD $*\" >> \"$POSSE_TEST_GIT_LOG\"\n  case \"$event:$*\" in\n    fetch:*offline*) exit 1 ;;\n    ls-remote:*offline*) exit 0 ;;\n  esac\nfi\nexec \"$POSSE_REAL_GIT\" \"$@\"\n"
+	gitScript := "#!/bin/sh\nset -eu\nprintf '%s\\t%s\\n' \"${HERDR_PANE_ID:-}\" \"$PWD $*\" >> \"$POSSE_TEST_GIT_COMMAND_LOG\"\nevent=\nfor arg in \"$@\"; do\n  case \"$arg\" in fetch|ls-remote) event=$arg; break ;; esac\ndone\nif [ -n \"$event\" ]; then\n  printf '%s\\t%s\\t%s\\n' \"${HERDR_PANE_ID:-}\" \"$event\" \"$PWD $*\" >> \"$POSSE_TEST_GIT_LOG\"\n  case \"$event:$*\" in\n    fetch:*offline*) exit 1 ;;\n    ls-remote:*offline*) exit 0 ;;\n  esac\nfi\nexec \"$POSSE_TEST_REAL_GIT\" \"$@\"\n"
 	for name, script := range map[string]string{
 		"git":    gitScript,
 		"gh":     "#!/bin/sh\nprintf '%s\\tgh %s\\n' \"${HERDR_PANE_ID:-}\" \"$*\" >> \"$POSSE_TEST_FORGE_LOG\"\nexit 1\n",
@@ -102,7 +102,7 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 		"POSSE_TEST_GIT_COMMAND_LOG": gitCommandLog,
 		"POSSE_TEST_FORGE_LOG":       forgeLog,
 		"POSSE_TEST_LEAD_STARTED":    leadStarted,
-		"POSSE_REAL_GIT":             realGit,
+		"POSSE_TEST_REAL_GIT":        realGit,
 		"GIT_AUTHOR_NAME":            "Posse E2E",
 		"GIT_AUTHOR_EMAIL":           "posse-e2e@example.test",
 		"GIT_COMMITTER_NAME":         "Posse E2E",
@@ -163,6 +163,7 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 
 	client := herdr.NewWithEnv("herdr", env)
 	startServer(t, client)
+	t.Cleanup(func() { stopFixtureWatchRuntimes(root) })
 	if _, err := client.Run(context.Background(), "integration", "install", "claude"); err != nil {
 		t.Fatal(err)
 	}
@@ -269,8 +270,13 @@ func TestUpStartsRegisteredWorkspaceWithoutRepositoryOrForgeCalls(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, line := range appendedLogLines(calls, before) {
-		if pane, event, found := strings.Cut(line, "\t"); found && pane == workspace.RootPane.PaneID && event == "fetch" && strings.Contains(line, "offline") {
-			t.Fatalf("Change Task touched the unrequested offline Member: %s", line)
+		pane, event, found := strings.Cut(line, "\t")
+		if !found || pane != workspace.RootPane.PaneID {
+			continue
+		}
+		kind, command, found := strings.Cut(event, "\t")
+		if found && (kind == "fetch" || kind == "ls-remote") && strings.Contains(command, offlineRepo) {
+			t.Fatalf("Change Task ran %s against the unrequested offline Member: %s", kind, line)
 		}
 	}
 	t.Log("Change Task fetched and resolved only the requested reachable Member")

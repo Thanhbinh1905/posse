@@ -989,7 +989,7 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 	if claim == "" {
 		return nil
 	}
-	defer func() { _ = db.ReleasePRPoll(context.Background(), project.ID, claim) }()
+	defer releaseProjectPRPollWithRetry(db, project.ID, claim)
 	if err := s.processPendingStackedTargetChanges(ctx, db, project, cfg, ""); err != nil {
 		return err
 	}
@@ -1047,15 +1047,16 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		}
 	}
 	forge, forgeErr := forgeForRepository(ctx, project.Root, cfg, "")
-	// Forge probe failures are attributed to each watched Task below, rather than
-	// also incrementing the Project-wide failure streak.
 	globalFailure := ""
+	if forgeErr != nil {
+		globalFailure = truncate(forgeErr.Error(), 300)
+	}
 	gitlabTargets := make([]store.Task, 0)
 	for _, task := range watched {
-		refErr := forgeErr
-		if refErr == nil {
-			_, refErr = forgeReference(task.PRURL, forge)
+		if forgeErr != nil {
+			continue
 		}
+		_, refErr := forgeReference(task.PRURL, forge)
 		if refErr != nil {
 			failedTasks[task.ID] = refErr
 			continue

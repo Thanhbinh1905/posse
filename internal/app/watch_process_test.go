@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,20 +176,83 @@ func TestStopWatchesEscalatesToSIGKILL(t *testing.T) {
 func TestWatchRuntimeEnvironmentIsDetachedFromHerdrIdentity(t *testing.T) {
 	project := store.Project{ID: 42, Name: "shop", Root: "/workspace/shop"}
 	env := watchRuntimeEnvironment([]string{
-		"PATH=/usr/bin", "POSSE_HOME=/tmp/old", "HERDR_PANE_ID=w1:p4", "HERDR_WORKSPACE_ID=w1", "HERDR_TAB_ID=w1:t1", "HERDR_ENV=1", "HERDR_PLUGIN_EVENT=focus", "CUSTOM=value",
+		"PATH=/usr/bin", "POSSE_HOME=/tmp/old", "POSSE_TASK_ID=t7", "POSSE_TASK_TEMP=/tmp/task", "POSSE_INTENT_CRASH_AT=merge", "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT=60s", "GIT_DIR=/repo/.git", "GIT_WORK_TREE=/repo", "HERDR_PANE_ID=w1:p4", "HERDR_WORKSPACE_ID=w1", "HERDR_TAB_ID=w1:t1", "HERDR_ENV=1", "HERDR_PLUGIN_EVENT=focus", "CUSTOM=value",
 	}, "/tmp/posse", project, "random-token", 1234)
 	got := parseProcessEnvironment(strings.Join(env, "\x00"))
 	if got["POSSE_HOME"] != "/tmp/posse" || got[watchRuntimeProjectEnv] != "42" || got[watchRuntimeTokenEnv] != "random-token" || got[watchRuntimeStartedEnv] != "1234" || got["PWD"] != project.Root {
 		t.Fatalf("watch identity environment = %#v", got)
 	}
-	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_ENV", "HERDR_PLUGIN_EVENT"} {
+	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_ENV", "HERDR_PLUGIN_EVENT", "POSSE_TASK_ID", "POSSE_TASK_TEMP", "POSSE_INTENT_CRASH_AT", "GIT_DIR", "GIT_WORK_TREE"} {
 		if _, found := got[key]; found {
 			t.Errorf("detached watch inherited %s", key)
 		}
 	}
-	if got["CUSTOM"] != "value" {
-		t.Fatalf("watch lost unrelated environment: %#v", got)
+	if got["CUSTOM"] != "value" || got["POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT"] != "60s" {
+		t.Fatalf("watch lost unrelated or test-harness environment: %#v", got)
 	}
+}
+
+func TestWatchRuntimeRotatesLargeLogBeforeStarting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "watch.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousLimit := watchRuntimeLogMaxBytes
+	watchRuntimeLogMaxBytes = 10
+	t.Cleanup(func() { watchRuntimeLogMaxBytes = previousLimit })
+	if err := rotateWatchRuntimeLog(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("rotated Watch log still exists at its active path: %v", err)
+	}
+	backup, err := os.ReadFile(path + ".1")
+	if err != nil || string(backup) != strings.Repeat("x", 20) {
+		t.Fatalf("rotated Watch log = %q, %v", backup, err)
+	}
+}
+
+func TestWatchRuntimeLogRotatesWhileThePollerIsRunning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "watch.log")
+	previousLimit := watchRuntimeLogMaxBytes
+	watchRuntimeLogMaxBytes = 10
+	t.Cleanup(func() { watchRuntimeLogMaxBytes = previousLimit })
+	writer, err := openWatchRuntimeLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("abcdefghijklmnop")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(active) != "klmnop" || string(backup) != "abcdefghij" {
+		t.Fatalf("active and rotated Watch logs = %q and %q", active, backup)
+	}
+}
+
+func TestStartedWatchProcessIsReapedByItsParent(t *testing.T) {
+	command := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := startWatchProcess(command); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(watchProcRoot, strconv.Itoa(command.Process.Pid))); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("exited child PID %d remained in the process table; Wait did not reap it", command.Process.Pid)
 }
 
 func TestWatchProcessListingExtractsWatchIdentity(t *testing.T) {

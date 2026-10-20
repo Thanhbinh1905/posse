@@ -171,9 +171,10 @@ func TestWatchReportsPersistentForgeProbeFailureAfterThreePolls(t *testing.T) {
 			}
 		}
 		if !waitForCondition(4*time.Second, func() bool {
-			return prTaskWatchFailureCount(t, f.db, taskID) >= failure
+			state, err := f.db.ProjectWatchState(context.Background(), f.project.ID)
+			return err == nil && state.PRConsecutiveFailures >= failure
 		}) {
-			t.Fatalf("Task failure streak did not reach %d", failure)
+			t.Fatalf("Project forge failure streak did not reach %d", failure)
 		}
 		if failure < 3 {
 			notices, err := f.db.Notices(context.Background(), f.project.ID, false)
@@ -211,12 +212,12 @@ func TestWatchReportsPersistentForgeProbeFailureAfterThreePolls(t *testing.T) {
 	if !strings.Contains(string(contents), "pr_watch_failing") || !strings.Contains(string(contents), "acknowledgement committed: 1") {
 		t.Fatalf("persistent failure or acknowledgement outcome missing from Watch output: %s", contents)
 	}
-	if failures := prTaskWatchFailureCount(t, f.db, taskID); failures != 3 {
-		t.Fatalf("persistent Task failure count = %d; want three", failures)
+	if failures := prTaskWatchFailureCount(t, f.db, taskID); failures != 0 {
+		t.Fatalf("host-level forge failure incremented a Task streak: %d", failures)
 	}
 	state, err := f.db.ProjectWatchState(context.Background(), f.project.ID)
-	if err != nil || state.PRConsecutiveFailures != 0 {
-		t.Fatalf("Task-scoped forge failures leaked into the Project streak: %#v, %v", state, err)
+	if err != nil || state.PRConsecutiveFailures != 3 {
+		t.Fatalf("Project forge failure streak = %#v, %v; want three", state, err)
 	}
 }
 

@@ -250,6 +250,8 @@ func TestRealClaudeWatchBackgroundLimit(t *testing.T) {
 			if strings.Contains(line, "was stopped after reaching its background time limit") {
 				t.Log("real Claude: 5s Watch stopped by the configured 1000ms background deadline; no harness clock or code replacement")
 				t.Log(line)
+				time.Sleep(250 * time.Millisecond)
+				stopLiveWatchRuntime(t, f.root)
 				return
 			}
 		case <-ctx.Done():

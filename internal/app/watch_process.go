@@ -45,6 +45,40 @@ var watchExecutableVerifier = isPosseExecutable
 
 var watchProcRoot = "/proc"
 
+func inspectWatchProcess(home string, pid int) (watchProcess, bool) {
+	if runtime.GOOS == "linux" {
+		root := filepath.Join(watchProcRoot, strconv.Itoa(pid))
+		environment, err := os.ReadFile(filepath.Join(root, "environ"))
+		if err != nil {
+			return watchProcess{}, false
+		}
+		command, err := os.ReadFile(filepath.Join(root, "cmdline"))
+		if err != nil {
+			return watchProcess{}, false
+		}
+		process, found := watchFromArgs(pid, splitProcessArgs(string(command)), parseProcessEnvironment(string(environment)), home)
+		if !found {
+			return watchProcess{}, false
+		}
+		executable, verified := inspectWatchExecutable(pid)
+		if !verified || !watchExecutableVerifier(executable.Path) {
+			return watchProcess{}, false
+		}
+		process.Executable = executable
+		return process, true
+	}
+	processes, err := systemWatchProcesses(home)
+	if err != nil {
+		return watchProcess{}, false
+	}
+	for _, process := range processes {
+		if process.PID == pid {
+			return process, true
+		}
+	}
+	return watchProcess{}, false
+}
+
 func systemWatchProcesses(home string) ([]watchProcess, error) {
 	if runtime.GOOS == "darwin" {
 		output, err := exec.Command("ps", "-axEww", "-o", "pid=,command=").Output()

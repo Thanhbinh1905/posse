@@ -249,7 +249,11 @@ func TestRequestWatchReexecSkipsUpdatedProcessesAndMarksRemainingOnes(t *testing
 	if len(processes) != 2 {
 		t.Fatalf("expected old and updated helper processes, found %#v", processes)
 	}
-	if err := requestWatchReexec(home, processes); err != nil {
+	installedIdentity, installedOK := watchExecutableAt(installed)
+	if !installedOK {
+		t.Fatalf("inspect installed Watch executable %s", installed)
+	}
+	if err := requestWatchReexecForIdentity(home, processes, installedIdentity, true); err != nil {
 		t.Fatalf("an already updated Watch caused a warning: %v", err)
 	}
 	if _, err := os.Stat(watchReexecMarker(home, current.Process.Pid)); !os.IsNotExist(err) {
