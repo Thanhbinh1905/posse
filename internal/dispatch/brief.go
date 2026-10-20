@@ -18,6 +18,7 @@ type Brief struct {
 	Execution      string
 	Paths          []string
 	Review         string
+	Workflow       string
 	ReviewRounds   int
 	Base           string
 	BaseByRepo     map[string]string
@@ -135,7 +136,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		if key == "autonomy" && allowHistoricalMultiIssue {
 			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "review_rounds", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "review_rounds", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -150,6 +151,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		MergeMode:   unquote(values["merge_mode"]),
 		Execution:   unquote(values["execution"]),
 		Review:      unquote(values["review"]),
+		Workflow:    unquote(values["workflow"]),
 		ReviewOf:    unquote(values["review_of"]),
 		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
@@ -192,6 +194,9 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 			return Brief{}, err
 		}
 		brief.Repos = repos
+	}
+	if _, found := values["workflow"]; found && strings.TrimSpace(brief.Workflow) == "" {
+		return Brief{}, &BriefError{Field: "workflow", Reason: "must name a configured workflow profile"}
 	}
 	if brief.RootContext != "" && brief.RootContext != "read-only" {
 		return Brief{}, &BriefError{Field: "root_context", Reason: "must be read-only when selected"}

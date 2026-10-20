@@ -52,6 +52,10 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return briefError(err)
 	}
+	workflow, err := resolveWorkflowSelection(cfg, brief.Workflow)
+	if err != nil {
+		return err
+	}
 	targets, err := s.projectTargets(ctx.Context, db, project)
 	if err != nil {
 		return err
@@ -92,6 +96,9 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + startCommand + "` to start this Worker"}},
+	}
+	if workflow != nil {
+		result = append(result, axi.Field{Key: "workflow", Value: workflow})
 	}
 	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
 	if brief.ReportKind != "" {
@@ -148,6 +155,9 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	brief, err := dispatch.ParseBriefText(string(briefData))
 	if err != nil {
 		return briefError(err)
+	}
+	if _, err := resolveWorkflowSelection(cfg, brief.Workflow); err != nil {
+		return err
 	}
 	name := parsed.Flags["name"]
 	if name == "" {
