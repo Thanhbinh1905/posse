@@ -34,6 +34,21 @@ func TestReviewDefaultsOverridesAndUserControl(t *testing.T) {
 	}
 }
 
+func TestFullPipelineReviewCanBeSelectedWithoutImplicitDefault(t *testing.T) {
+	home := t.TempDir()
+	if _, err := SetFile(ConfigPath(home, "shop"), "defaults.review", "full-pipeline", true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(home, "shop")
+	if err != nil || cfg.Defaults.Review != "full-pipeline" {
+		t.Fatalf("full-pipeline selection = %q, err=%v", cfg.Defaults.Review, err)
+	}
+	global, err := Load(t.TempDir(), "")
+	if err != nil || global.Defaults.Review != "none" {
+		t.Fatalf("full-pipeline changed the default: %q, err=%v", global.Defaults.Review, err)
+	}
+}
+
 func TestProjectReviewShorthandCanBeRepaired(t *testing.T) {
 	for _, action := range []string{"set", "unset"} {
 		t.Run(action, func(t *testing.T) {

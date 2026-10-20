@@ -162,8 +162,19 @@ func TestFullPipelineCanBeFrozenButIsNotReady(t *testing.T) {
 	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
 	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
 	code, out := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", "Candidate summary")
-	if code != 1 || !strings.Contains(out, "review_mode_not_ready") || !strings.Contains(out, "private candidate validation") {
-		t.Fatalf("unimplemented full-pipeline mode did not block publication: %d %s", code, out)
+	if code != 0 || !strings.Contains(out, "candidate_head") || !strings.Contains(out, "validation required before publication") {
+		t.Fatalf("full-pipeline did not submit a private candidate without promoting it: %d %s", code, out)
+	}
+	stored := f.mustTask(t, "t1")
+	if stored.PRURL != "" {
+		t.Fatalf("unvalidated candidate opened a PR: %s", stored.PRURL)
+	}
+	command := exec.Command("git", "--git-dir", f.remote, "show-ref", "--verify", "--quiet", "refs/heads/"+change.Branch)
+	command.Env = f.env
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("private candidate submission pushed the Task branch: %s", output)
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		t.Fatalf("could not verify the remote Task branch remained absent: %v %s", err, output)
 	}
 }
 

@@ -51,7 +51,7 @@ var keySpecs = []KeySpec{
 	{Key: "repositories.<repository>.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override the forge for a member repository."},
 	{Key: "defaults.merge_method", Type: TypeString, Allowed: []string{"squash", "merge", "rebase"}, Default: "squash", Meaning: "Merge method used for pull requests."},
 	{Key: "defaults.pr_poll", Type: TypeDuration, Default: "2m", Meaning: "Minimum interval between pull request and Project checkout polls."},
-	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Default: "none", Meaning: "Review evidence required to Merge a Change Task. full-pipeline is selectable and frozen but unavailable until private candidate validation ships; no-mistakes is deprecated.", UserOnly: true},
+	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Default: "none", Meaning: "Review evidence required to Merge a Change Task. full-pipeline is selectable and frozen but unavailable until VP-C validation ships; no-mistakes is deprecated.", UserOnly: true},
 	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
 	{Key: "defaults.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in the Sandbox before a Change Task may Merge.", UserOnly: true},
 	{Key: "review_loop.enabled", Type: TypeBoolean, Default: true, Meaning: "Enable built-in Review Rounds for Change Tasks.", UserOnly: true},

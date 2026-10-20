@@ -76,7 +76,7 @@ func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 			}
 			if tc.policy == "full-pipeline" {
 				var refusal *axi.Error
-				if !errors.As(err, &refusal) || refusal.Code != "review_mode_not_ready" {
+				if !errors.As(err, &refusal) || refusal.Code != "full_pipeline_not_ready" {
 					t.Fatalf("full-pipeline did not fail closed: %v", err)
 				}
 			}

@@ -213,21 +213,8 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 	return nil
 }
 
-func ensureSelectedReviewModeReady(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) error {
-	policies, err := selectedReviewPolicies(ctx, db, project, cfg, task)
-	if err != nil {
-		return err
-	}
-	for _, policy := range policies {
-		if policy == "full-pipeline" {
-			return fullPipelineNotReady(task)
-		}
-	}
-	return nil
-}
-
 func fullPipelineNotReady(task store.Task) error {
-	return axi.Failure("review_mode_not_ready", "Task "+taskIDString(task.Seq)+" selects full-pipeline, which is not ready until private candidate validation ships", false, "Select none or quick until full-pipeline validation is available")
+	return axi.Failure("full_pipeline_not_ready", "full-pipeline validation has not shipped; this Task cannot be promoted or merged", false, "Select `none` or `quick` for production Tasks until VP-C lands")
 }
 
 // selectedReviewPolicies lists the admitted policy of the Task, or of each

@@ -26,6 +26,25 @@ func request(taskType string) taskplan.Request {
 	return r
 }
 
+func TestFullPipelineReviewModeCanBeFrozenBeforeVPCRuntime(t *testing.T) {
+	r := request("change")
+	r.Review = "full-pipeline"
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatalf("resolve selectable full-pipeline mode: %v", err)
+	}
+	if plan.Review != "full-pipeline" {
+		t.Fatalf("frozen review mode = %q", plan.Review)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := taskplan.Decode(encoded); err != nil || restored.Review != "full-pipeline" {
+		t.Fatalf("round-trip full-pipeline plan = %#v, err=%v", restored, err)
+	}
+}
+
 func TestLegacyBriefsResolveWithoutChangingInputsOrLaunchSettings(t *testing.T) {
 	for _, taskType := range []string{"change", "research", "review"} {
 		t.Run(taskType, func(t *testing.T) {
