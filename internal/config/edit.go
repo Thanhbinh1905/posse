@@ -139,14 +139,14 @@ func parseSetting(key string, spec KeySpec, text string, projectFile bool) (any,
 	if err := ValidateSetting(key, value, projectFile); err != nil {
 		return nil, "", err
 	}
-	encoded, err := encodeSettingValue(spec.Type, value)
+	encoded, err := encodeSettingValue(key, spec.Type, value)
 	if err != nil {
 		return nil, "", err
 	}
 	return value, encoded, nil
 }
 
-func encodeSettingValue(kind ValueType, value any) (string, error) {
+func encodeSettingValue(key string, kind ValueType, value any) (string, error) {
 	switch kind {
 	case TypeString, TypeDuration:
 		text, ok := value.(string)
@@ -195,16 +195,72 @@ func encodeSettingValue(kind ValueType, value any) (string, error) {
 		encoded := make([]string, 0, len(entries))
 		for _, entry := range entries {
 			fields := []string{}
-			for _, key := range []string{"type", "when", "use"} {
-				if text, found := entry[key].(string); found {
-					fields = append(fields, key+" = "+strconv.Quote(text))
+			keys := []string{"type", "when", "use"}
+			if isWorkflowStagesKey(key) {
+				keys = sortedMapKeys(entry)
+			}
+			for _, field := range keys {
+				item, found := entry[field]
+				if !found {
+					continue
 				}
+				literal, err := encodeTOMLValue(item)
+				if err != nil {
+					return "", err
+				}
+				fields = append(fields, field+" = "+literal)
 			}
 			encoded = append(encoded, "{"+strings.Join(fields, ", ")+"}")
 		}
 		return "[" + strings.Join(encoded, ", ") + "]", nil
 	default:
 		return "", fmt.Errorf("unsupported configuration type %s", kind)
+	}
+}
+
+func encodeTOMLValue(value any) (string, error) {
+	switch typed := value.(type) {
+	case string:
+		return strconv.Quote(typed), nil
+	case bool:
+		return strconv.FormatBool(typed), nil
+	case int:
+		return strconv.Itoa(typed), nil
+	case int32:
+		return strconv.FormatInt(int64(typed), 10), nil
+	case int64:
+		return strconv.FormatInt(typed, 10), nil
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64), nil
+	case []string:
+		values := make([]string, len(typed))
+		for index, item := range typed {
+			values[index] = strconv.Quote(item)
+		}
+		return "[" + strings.Join(values, ", ") + "]", nil
+	case []any:
+		values := make([]string, len(typed))
+		for index, item := range typed {
+			encoded, err := encodeTOMLValue(item)
+			if err != nil {
+				return "", err
+			}
+			values[index] = encoded
+		}
+		return "[" + strings.Join(values, ", ") + "]", nil
+	case map[string]any:
+		keys := sortedMapKeys(typed)
+		values := make([]string, 0, len(keys))
+		for _, key := range keys {
+			encoded, err := encodeTOMLValue(typed[key])
+			if err != nil {
+				return "", err
+			}
+			values = append(values, key+" = "+encoded)
+		}
+		return "{" + strings.Join(values, ", ") + "}", nil
+	default:
+		return "", fmt.Errorf("unsupported TOML value %T", value)
 	}
 }
 
@@ -254,7 +310,17 @@ func removeTOMLValue(contents, key string) (string, bool, error) {
 	if !ok {
 		return contents, false, nil
 	}
-	return contents[:match.lineStart] + contents[match.lineEnd:], true, nil
+	lineEnd := match.lineEnd
+	if match.valueEnd > lineEnd {
+		lineEnd = match.valueEnd
+		for lineEnd < len(contents) && contents[lineEnd] != '\n' {
+			lineEnd++
+		}
+		if lineEnd < len(contents) {
+			lineEnd++
+		}
+	}
+	return contents[:match.lineStart] + contents[lineEnd:], true, nil
 }
 
 type assignmentSpan struct {

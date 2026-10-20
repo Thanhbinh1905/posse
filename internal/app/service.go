@@ -143,6 +143,9 @@ func (s *Service) commands() *axi.Command {
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Orphan or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
+		{Name: "workflow", Summary: "Preview optional User-owned workflow profiles.", Subcommands: []*axi.Command{
+			{Name: "show", Usage: "$ workflow show <name> [--project <name>]", Summary: "Show a resolved workflow profile, its source and digest.", Handler: s.workflowShow},
+		}},
 		{Name: "start", Usage: "$ start --brief <file> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>]", Summary: "Start a Worker from a Brief with an optional display name.", Handler: s.spawn},
 		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--turn <token>] [--findings <file>] [--report <file>]", Summary: "Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Publish or submit this PR-mode Change Task according to its frozen review mode. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
