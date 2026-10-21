@@ -16,7 +16,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-var errSandboxProcessChangedWhileBinding = errors.New("Sandbox process identity changed while opening its handle")
+var errSandboxProcessChangedWhileBinding = errors.New("sandbox process identity changed while opening its handle")
 
 type sandboxProcessHandle struct {
 	pid                int

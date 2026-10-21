@@ -302,7 +302,7 @@ func retainTaskProcessHandle(pid int, observedIdentity string, task store.Task, 
 		}
 		return alive, nil
 	}
-	return false, fmt.Errorf("Task process %d kept changing identity while retaining its handle", pid)
+	return false, fmt.Errorf("task process %d kept changing identity while retaining its handle", pid)
 }
 
 func taskProcessHasOwnershipProof(pid int, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {
