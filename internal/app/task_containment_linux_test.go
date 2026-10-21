@@ -80,8 +80,8 @@ func TestTaskContainmentRetainsNewProcessOnlyWithIndependentOwnershipProof(t *te
 	if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(foreign.Process.Pid, marker) }) {
 		t.Fatal("foreign Task-marked process did not start")
 	}
-	if err := authorization.guardSignal(foreign.Process.Pid, syscall.SIGTERM); err == nil || !strings.Contains(err.Error(), "recorded containment identity") {
-		t.Fatalf("marker-only process without a Task-path reference was authorized: %v", err)
+	if _, err := stopMarkedTaskProcesses(marker, authorization.guardSignal, nil, 0); err != nil {
+		t.Fatalf("marker-only process without a Task-path reference blocked Task teardown: %v", err)
 	}
 	if err := foreign.Process.Signal(syscall.Signal(0)); err != nil {
 		t.Fatalf("marker-only process was signaled despite lacking Task-path proof: %v", err)

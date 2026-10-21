@@ -11,7 +11,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// mountProcessAuthorization retains process handles established while Herdr
+var errTaskProcessOutsideOwnedPaths = errors.New("task-marked process no longer references task-owned paths")
+
+// sandboxProcessAuthorization retains process handles established while Herdr
 // ownership is proved. CWD discovery during cleanup may verify these handles,
 // but must not authorize a new process.
 type sandboxProcessAuthorization struct {
@@ -205,6 +207,16 @@ func verifySandboxProcessHandleIfAlive(pid int, handle *sandboxProcessHandle) (b
 	}
 	if handle.Identity() != bootID+"/"+startTime {
 		return false, fmt.Errorf("sandbox PID %d changed process instance; preserving its work", pid)
+	}
+	zombie, err := sandboxProcessIsZombie(pid)
+	if processGone(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("cannot verify Sandbox process %d state: %w", pid, err)
+	}
+	if zombie {
+		return false, nil
 	}
 	alive, err := handle.Alive()
 	if err != nil {

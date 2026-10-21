@@ -7,7 +7,47 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
+
+func TestSandboxAuthorizationTreatsZombieAsNotSignallable(t *testing.T) {
+	child := exec.Command("sh", "-c", "sleep 1")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	defer func() {
+		if !waited {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+		}
+	}()
+	handle, err := openSandboxProcessHandle(child.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handle.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		zombie, err := sandboxProcessIsZombie(child.Process.Pid)
+		if err == nil && zombie {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	zombie, err := sandboxProcessIsZombie(child.Process.Pid)
+	if err != nil || !zombie {
+		t.Fatalf("child state = zombie:%t err:%v, want an unreaped zombie", zombie, err)
+	}
+	alive, err := verifySandboxProcessHandleIfAlive(child.Process.Pid, handle)
+	if err != nil || alive {
+		t.Fatalf("unreaped zombie = alive:%t err:%v, want not signallable", alive, err)
+	}
+	if err := child.Wait(); err != nil {
+		t.Fatalf("wait for exited child: %v", err)
+	}
+	waited = true
+}
 
 func TestSandboxAuthorizationRechecksUnretainedExitedProcess(t *testing.T) {
 	// A child can exit after CWD enumeration but before its handle is retained.

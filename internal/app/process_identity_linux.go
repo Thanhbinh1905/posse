@@ -54,6 +54,17 @@ func sandboxProcessGroupID(pid int) (int, error) {
 	return group, nil
 }
 
+func sandboxProcessIsZombie(pid int) (bool, error) {
+	fields, err := sandboxProcessStatFields(pid)
+	if err != nil {
+		return false, err
+	}
+	if len(fields) == 0 || fields[0] == "" {
+		return false, fmt.Errorf("process stat for PID %d has no state", pid)
+	}
+	return fields[0] == "Z" || fields[0] == "X" || fields[0] == "x", nil
+}
+
 func sandboxProcessParentID(pid int) (int, error) {
 	fields, err := sandboxProcessStatFields(pid)
 	if err != nil {

@@ -103,7 +103,7 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	}
 	officialRelease := downloadOfficialReleaseAsset(t, "v0.15.0")
 	officialProxyURL, officialCertPath := startUpdateReleaseProxy(t, officialRelease)
-	officialUpdateEnv := setEnv(f.callerEnv, "HTTPS_PROXY", officialProxyURL)
+	officialUpdateEnv := setEnv(env, "HTTPS_PROXY", officialProxyURL)
 	officialUpdateEnv = setEnv(officialUpdateEnv, "https_proxy", officialProxyURL)
 	officialUpdateEnv = setEnv(officialUpdateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
 	officialUpdateEnv = setEnv(officialUpdateEnv, "no_proxy", "localhost,127.0.0.1,::1")
@@ -134,7 +134,7 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	}
 	currentRelease := makeUpdateTestRelease(t, f.binary, "v0.15.1")
 	proxyURL, certPath := startUpdateReleaseProxy(t, currentRelease)
-	updateEnv := setEnv(f.callerEnv, "HTTPS_PROXY", proxyURL)
+	updateEnv := setEnv(env, "HTTPS_PROXY", proxyURL)
 	updateEnv = setEnv(updateEnv, "https_proxy", proxyURL)
 	updateEnv = setEnv(updateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
 	updateEnv = setEnv(updateEnv, "no_proxy", "localhost,127.0.0.1,::1")

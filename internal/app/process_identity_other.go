@@ -20,6 +20,8 @@ func sandboxProcessGroupID(pid int) (int, error) {
 	return 0, fmt.Errorf("process group is unsupported on this platform for PID %d", pid)
 }
 
+func sandboxProcessIsZombie(int) (bool, error) { return false, nil }
+
 func sandboxProcessParentID(pid int) (int, error) {
 	return 0, fmt.Errorf("process ancestry is unsupported on this platform for PID %d", pid)
 }
