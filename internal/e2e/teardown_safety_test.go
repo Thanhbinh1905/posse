@@ -602,7 +602,12 @@ func TestTeardownKeepsSandboxHeldUntilDetachedSSHControlPersistExits(t *testing.
 	}
 	blocked := false
 	for _, notice := range notices {
-		blocked = blocked || notice.TaskID == task.ID && notice.Kind == "teardown_blocked" && strings.Contains(notice.Summary, strconv.Itoa(masterPID)) && strings.Contains(strings.ToLower(notice.Summary), "controlpersist")
+		lowerSummary := strings.ToLower(notice.Summary)
+		blocked = blocked || (notice.TaskID == task.ID && notice.Kind == "teardown_blocked" &&
+			strings.Contains(notice.Summary, strconv.Itoa(masterPID)) &&
+			strings.Contains(lowerSummary, "controlpersist") &&
+			strings.Contains(lowerSummary, "stop the listed processes") &&
+			strings.Contains(lowerSummary, "retry teardown"))
 	}
 	if noticeErr != nil || !blocked {
 		t.Fatalf("missing actionable Notice for the preserved SSH daemon: %#v %v", notices, noticeErr)

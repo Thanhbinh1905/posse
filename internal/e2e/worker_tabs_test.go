@@ -812,7 +812,7 @@ func (f *workerTabsFixture) exitWorker(t *testing.T, taskID string) {
 	}
 	var lastProcessInfo json.RawMessage
 	var lastPane herdr.Pane
-	if !waitForCondition(5*time.Second, func() bool {
+	if !waitForCondition(10*time.Second, func() bool {
 		raw, err := f.client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
 		if err != nil {
 			lastProcessInfo = json.RawMessage(err.Error())

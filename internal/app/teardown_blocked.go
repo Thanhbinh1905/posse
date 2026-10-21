@@ -28,7 +28,8 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 	if len(processes) == 0 {
 		return nil
 	}
-	summary := fmt.Sprintf("%s teardown blocked by residual processes: %s", taskDisplayName(task), describeTaskProcesses(processes))
+	remedy := "Stop the listed processes or move their cwd and open files outside the Sandbox, then retry Teardown."
+	summary := fmt.Sprintf("%s teardown blocked by residual processes: %s. Remedy: %s", taskDisplayName(task), describeTaskProcesses(processes), remedy)
 	notices, err := db.Notices(ctx, project.ID, false)
 	if err != nil {
 		return err
@@ -38,7 +39,7 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 			return nil
 		}
 	}
-	data, err := json.Marshal(map[string]any{"processes": processes, "error": cause.Error()})
+	data, err := json.Marshal(map[string]any{"processes": processes, "error": cause.Error(), "remedy": remedy})
 	if err != nil {
 		return err
 	}

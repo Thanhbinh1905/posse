@@ -205,6 +205,19 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 // handles for Task panes and shell-only panes in the held Sandbox. CWD discovery
 // may detect a process but cannot authorize cleanup. Herdr 0.9.1 has no atomic
 // pane-close precondition, so teardown never closes panes by target ID alone.
+func (s *Service) verifyNoForeignTaskMarkedForeground(ctx context.Context, task store.Task, pane herdr.Pane) error {
+	info, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
+	if err != nil {
+		return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not verify processes in Task-marked pane %s", pane.PaneID), true, err.Error())
+	}
+	for _, process := range info.ForegroundProcesses {
+		if process.PID > 1 && processHasTaskMarker(process.PID, task.ContainmentMarker) {
+			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("Task-marked foreground PID %d is running in unowned pane %s", process.PID, pane.PaneID), false, "Stop or inspect the foreground, preserve its work, then retry Teardown")
+		}
+	}
+	return nil
+}
+
 func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.Context, db *store.DB, project store.Project, task store.Task, authorization *sandboxProcessAuthorization) error {
 	sandboxes, err := db.Sandboxes(ctx, project.ID)
 	if err != nil {
@@ -247,6 +260,11 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 		paneInsideSandbox := pathInside(pane.CWD, heldSandbox.Path)
 		agentName := snapshotAgentName(snapshot, pane.PaneID)
 		taskPane := ownsTaskPane(snapshot, project, task, tabs, pane)
+		if !taskPane && task.ContainmentMarker != "" && pane.WorkspaceID == task.HerdrWorkspaceID {
+			if err := s.verifyNoForeignTaskMarkedForeground(ctx, task, pane); err != nil {
+				return err
+			}
+		}
 		foreignShellPane := paneInsideSandbox && !taskPane && shellOnlyPaneInSandbox(snapshot, pane, heldSandbox.Path)
 		if paneInsideSandbox && !taskPane && !foreignShellPane {
 			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("pane %s in the held Sandbox is not owned by Task %s", pane.PaneID, taskIDString(task.Seq)), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
