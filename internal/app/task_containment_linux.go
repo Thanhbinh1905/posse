@@ -133,43 +133,30 @@ func retainTaskContainmentProcesses(authorization *sandboxProcessAuthorization, 
 		if !taskContainsProcess(pid, task, roots) {
 			return fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
 		}
-		alreadyRetained := authorization.handle(pid) != nil
-		handle, err := authorization.bind(pid)
-		if processGone(err) {
-			continue
-		}
+		retained, err := retainTaskProcessHandle(pid, bootID+"/"+startTime, task, roots, authorization)
 		if err != nil {
 			return fmt.Errorf("retain Task-contained process %d: %w", pid, err)
 		}
-		if handle.Identity() != bootID+"/"+startTime {
-			return fmt.Errorf("task process %d changed identity during ownership proof", pid)
+		if !retained {
+			continue
 		}
-		alive, err := authorization.verifyIfAlive(pid)
-		if err != nil {
-			return fmt.Errorf("recheck Task-contained process %d: %w", pid, err)
-		}
-		if alive && !taskContainsProcess(pid, task, roots) {
-			return fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
-		}
-		if !alreadyRetained {
-			processPID := pid
-			authorization.setSignalGuard(processPID, func(syscall.Signal) error {
-				stillAlive, err := authorization.verifyIfAlive(processPID)
+		processPID := pid
+		authorization.setSignalGuard(processPID, func(syscall.Signal) error {
+			stillAlive, err := authorization.verifyIfAlive(processPID)
+			if err != nil {
+				return err
+			}
+			if stillAlive {
+				owned, err := taskProcessHasOwnershipProof(processPID, task, roots, authorization)
 				if err != nil {
 					return err
 				}
-				if stillAlive {
-					owned, err := taskProcessHasOwnershipProof(processPID, task, roots, authorization)
-					if err != nil {
-						return err
-					}
-					if !owned {
-						return fmt.Errorf("%w: PID %d", errTaskProcessOutsideOwnedPaths, processPID)
-					}
+				if !owned {
+					return fmt.Errorf("%w: PID %d", errTaskProcessOutsideOwnedPaths, processPID)
 				}
-				return nil
-			})
-		}
+			}
+			return nil
+		})
 	}
 	authorization.authorizeTaskProcess = func(pid int) error {
 		zombie, err := sandboxProcessIsZombie(pid)
@@ -246,6 +233,72 @@ func retainTaskContainmentProcesses(authorization *sandboxProcessAuthorization, 
 		return nil
 	}
 	return nil
+}
+
+func retainTaskProcessHandle(pid int, observedIdentity string, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {
+	if authorization == nil {
+		return false, fmt.Errorf("task process authorization is unavailable")
+	}
+	handle, err := authorization.bind(pid)
+	if processGone(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if handle.Identity() != observedIdentity {
+		alive, err := handle.Alive()
+		if err != nil {
+			return false, fmt.Errorf("verify Task process %d handle after identity changed: %w", pid, err)
+		}
+		if !alive {
+			if authorization.handles[pid] == handle {
+				delete(authorization.handles, pid)
+			}
+			_ = handle.Close()
+			owned, err := taskProcessHasOwnershipProof(pid, task, roots, authorization)
+			if err != nil || !owned {
+				return false, err
+			}
+			handle, err = authorization.bind(pid)
+			if processGone(err) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+		}
+		owned, err := taskProcessHasOwnershipProof(pid, task, roots, authorization)
+		if err != nil {
+			return false, err
+		}
+		if !owned {
+			if authorization.handles[pid] == handle {
+				delete(authorization.handles, pid)
+			}
+			_ = handle.Close()
+			return false, nil
+		}
+		alive, err = verifySandboxProcessHandleIfAlive(pid, handle)
+		if err != nil {
+			return false, fmt.Errorf("recheck Task process %d after identity changed: %w", pid, err)
+		}
+		if !alive {
+			if authorization.handles[pid] == handle {
+				delete(authorization.handles, pid)
+			}
+			_ = handle.Close()
+			return false, nil
+		}
+	}
+	alive, err := authorization.verifyIfAlive(pid)
+	if err != nil {
+		return false, err
+	}
+	if alive && !taskContainsProcess(pid, task, roots) {
+		return false, fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
+	}
+	return alive, nil
 }
 
 func taskProcessHasOwnershipProof(pid int, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {

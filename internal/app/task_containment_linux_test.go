@@ -21,6 +21,88 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestSandboxProcessHandleTreatsExitedPIDFDAsGoneBeforePIDReuseCheck(t *testing.T) {
+	command := exec.Command("sleep", "300")
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := openSandboxProcessHandle(command.Process.Pid)
+	if err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatal(err)
+	}
+	defer handle.Close()
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("process exited without a signal")
+	}
+
+	// Pair the exited process's pidfd with a different live PID to model the
+	// old PID slot having been reused before Teardown rechecks its handle.
+	reusedPID := *handle
+	reusedPID.pid = os.Getpid()
+	alive, err := verifySandboxProcessHandleIfAlive(reusedPID.pid, &reusedPID)
+	if err != nil || alive {
+		t.Fatalf("exited process handle was confused with its reused PID: alive=%t err=%v", alive, err)
+	}
+}
+
+func TestRetainTaskProcessHandleReprovesChangedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cwd  string
+		want bool
+	}{
+		{name: "Task path reference", cwd: "task", want: true},
+		{name: "marker without Task path reference", cwd: "/", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+			command := exec.Command("sleep", "300")
+			command.Dir = tc.cwd
+			if tc.cwd == "task" {
+				command.Dir = root
+			}
+			command.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "ready"), 0)
+			command.Stdout, command.Stderr = io.Discard, io.Discard
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			})
+			if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(command.Process.Pid, marker) }) {
+				t.Fatal("Task-marked process did not start")
+			}
+
+			authorization := newSandboxProcessAuthorization()
+			defer authorization.Close()
+			task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+			retained, err := retainTaskProcessHandle(command.Process.Pid, "stale-process-identity", task, []ownedProcessRoot{{path: root}}, authorization)
+			if err != nil || retained != tc.want {
+				t.Fatalf("retained=%t err=%v, want retained=%t", retained, err, tc.want)
+			}
+			if tc.want && authorization.handle(command.Process.Pid) == nil {
+				t.Fatal("Task-owned replacement process did not retain its exact handle")
+			}
+			if !tc.want {
+				if authorization.handle(command.Process.Pid) != nil {
+					t.Fatal("marker-only process was retained without Task ownership proof")
+				}
+				if err := command.Process.Signal(syscall.Signal(0)); err != nil {
+					t.Fatalf("marker-only process was signalled: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestTaskContainmentRetainsNewProcessOnlyWithIndependentOwnershipProof(t *testing.T) {
 	root := t.TempDir()
 	marker := fmt.Sprintf("containment-test-%d", os.Getpid())

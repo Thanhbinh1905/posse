@@ -198,6 +198,13 @@ func (authorization *sandboxProcessAuthorization) verifyIfAlive(pid int) (bool, 
 }
 
 func verifySandboxProcessHandleIfAlive(pid int, handle *sandboxProcessHandle) (bool, error) {
+	alive, err := handle.Alive()
+	if err != nil {
+		return false, fmt.Errorf("cannot verify Sandbox process %d liveness: %w", pid, err)
+	}
+	if !alive {
+		return false, nil
+	}
 	bootID, startTime, err := store.ProcessIdentityForPID(pid)
 	if err != nil {
 		if processGone(err) {
@@ -206,6 +213,13 @@ func verifySandboxProcessHandleIfAlive(pid int, handle *sandboxProcessHandle) (b
 		return false, fmt.Errorf("cannot verify Sandbox process %d identity: %w", pid, err)
 	}
 	if handle.Identity() != bootID+"/"+startTime {
+		alive, err := handle.Alive()
+		if err != nil {
+			return false, fmt.Errorf("cannot recheck Sandbox process %d liveness: %w", pid, err)
+		}
+		if !alive {
+			return false, nil
+		}
 		return false, fmt.Errorf("sandbox PID %d changed process instance; preserving its work", pid)
 	}
 	zombie, err := sandboxProcessIsZombie(pid)
@@ -218,11 +232,7 @@ func verifySandboxProcessHandleIfAlive(pid int, handle *sandboxProcessHandle) (b
 	if zombie {
 		return false, nil
 	}
-	alive, err := handle.Alive()
-	if err != nil {
-		return false, fmt.Errorf("cannot verify Sandbox process %d liveness: %w", pid, err)
-	}
-	return alive, nil
+	return handle.Alive()
 }
 
 func unretainedSandboxProcessAlive(pid int) (bool, error) {
