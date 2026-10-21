@@ -12,8 +12,8 @@ var (
 	ErrReviewRoundUnchanged      = errors.New("change head is unchanged since its last review")
 	ErrReviewRoundCap            = errors.New("review round cap reached")
 	ErrReviewRoundNumber         = errors.New("review round number changed concurrently")
-	ErrReviewResolutionsRequired = errors.New("Review fix resolutions are required")
-	ErrReviewResolutionsInvalid  = errors.New("Review fix resolutions are invalid")
+	ErrReviewResolutionsRequired = errors.New("review fix resolutions are required")
+	ErrReviewResolutionsInvalid  = errors.New("review fix resolutions are invalid")
 )
 
 // ReviewRoundAdmission binds a new Review Task to one numbered round. All

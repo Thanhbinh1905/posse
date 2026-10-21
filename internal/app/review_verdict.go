@@ -175,7 +175,7 @@ func reviewPassFor(ctx context.Context, db *store.DB, change store.Task, candida
 // requireReviewPass requires a D01 pass of the exact candidate: commit when
 // given, otherwise the current Task branch tips.
 func requireReviewPass(ctx context.Context, db *store.DB, project store.Project, change store.Task, commit string) error {
-	targets := []store.ReviewTarget{}
+	var targets []store.ReviewTarget
 	var err error
 	if commit == "" {
 		targets, err = changeCandidateTargets(ctx, db, project, change)

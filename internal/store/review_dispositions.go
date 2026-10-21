@@ -21,7 +21,7 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 		return fmt.Errorf("reclassify requires a severity P0, P1, P2 or P3")
 	}
 	if len(findingSeqs)+len(patternSeqs) == 0 {
-		return fmt.Errorf("Review disposition requires findings or patterns")
+		return fmt.Errorf("review disposition requires findings or patterns")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -76,7 +76,7 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 		}
 	}
 	if len(selected) == 0 {
-		return fmt.Errorf("Review disposition did not select any findings")
+		return fmt.Errorf("review disposition did not select any findings")
 	}
 	threshold := map[string]int{"P0": 0, "P1": 1, "P2": 2}[blockAt]
 	ids := make([]int64, 0, len(selected))
