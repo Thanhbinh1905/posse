@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -15,9 +16,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
 func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
@@ -26,6 +30,7 @@ func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
 	}
 	f := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer f.db.Close()
+	userEnv := newPRLifecycleUserShellEnv(t, f)
 	// Update runs setup against the running binary, which refuses binaries
 	// under /tmp. Keep the release fixture in the Task scratch root when set;
 	// CI's /tmp default falls back to /var/tmp like the 0.14 upgrade test.
@@ -39,7 +44,7 @@ func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	env := setEnv(f.env, "POSSE_HOME", home)
+	env := setEnv(userEnv, "POSSE_HOME", home)
 	configPath := filepath.Join(home, "config.toml")
 	original := []byte("# posse vocabulary: 1\n# Keep this User comment.\n[defaults]\nreview = 'local' # Existing review behavior\nmerge_mode = 'local' # Local delivery is unchanged\n")
 	if err := os.WriteFile(configPath, original, 0o600); err != nil {
@@ -51,12 +56,13 @@ func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
 
 	release := makeUpdateTestRelease(t, f.binary, "v0.15.1")
 	proxyURL, certPath := startUpdateReleaseProxy(t, release)
-	updateEnv := setEnv(env, "HTTPS_PROXY", proxyURL)
+	updateEnv := setEnv(env, "PATH", updateFixturePath(t, f))
+	updateEnv = setEnv(updateEnv, "HTTPS_PROXY", proxyURL)
 	updateEnv = setEnv(updateEnv, "https_proxy", proxyURL)
 	updateEnv = setEnv(updateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
 	updateEnv = setEnv(updateEnv, "no_proxy", "localhost,127.0.0.1,::1")
 	updateEnv = setEnv(updateEnv, "SSL_CERT_FILE", certPath)
-	if code, output := runReleaseCLI(t, legacyBinary, f.repo, updateEnv, "update", "--version", release.tag); code != 0 {
+	if code, output := runReleaseCLIInUserPane(t, f, legacyBinary, f.repo, updateEnv, "update", "--version", release.tag); code != 0 {
 		t.Fatalf("v0.15.0 update failed: code=%d output=%s", code, output)
 	}
 	want := "# posse vocabulary: 2\n# Keep this User comment.\n[defaults]\nreview = 'quick' # Existing review behavior\nmerge_mode = 'local' # Local delivery is unchanged\n"
@@ -74,6 +80,7 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	}
 	f := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer f.db.Close()
+	userEnv := newPRLifecycleUserShellEnv(t, f)
 
 	stableBinaryDir := newFixtureRootAt(t, "/var/tmp", fixturePrefix("official-update-installed-"))
 	legacyBinary := downloadOfficialReleaseBinary(t, stableBinaryDir, "v0.14.0")
@@ -96,12 +103,14 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	}
 	officialRelease := downloadOfficialReleaseAsset(t, "v0.15.0")
 	officialProxyURL, officialCertPath := startUpdateReleaseProxy(t, officialRelease)
-	officialUpdateEnv := setEnv(env, "HTTPS_PROXY", officialProxyURL)
+	officialUpdateEnv := setEnv(userEnv, "POSSE_HOME", home)
+	officialUpdateEnv = setEnv(officialUpdateEnv, "PATH", updateFixturePath(t, f))
+	officialUpdateEnv = setEnv(officialUpdateEnv, "HTTPS_PROXY", officialProxyURL)
 	officialUpdateEnv = setEnv(officialUpdateEnv, "https_proxy", officialProxyURL)
 	officialUpdateEnv = setEnv(officialUpdateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
 	officialUpdateEnv = setEnv(officialUpdateEnv, "no_proxy", "localhost,127.0.0.1,::1")
 	officialUpdateEnv = setEnv(officialUpdateEnv, "SSL_CERT_FILE", officialCertPath)
-	updateCode, updateOutput := runReleaseCLI(t, legacyBinary, f.repo, officialUpdateEnv, "update", "--version", "v0.15.0")
+	updateCode, updateOutput := runReleaseCLIInUserPane(t, f, legacyBinary, f.repo, officialUpdateEnv, "update", "--version", "v0.15.0")
 	if updateCode != 1 || !strings.Contains(updateOutput, "setup_failed") || !strings.Contains(updateOutput, "installed v0.15.0") || !strings.Contains(updateOutput, "legacy review policy") {
 		t.Fatalf("official v0.14.0 update did not reproduce the 0.15.0 setup failure: code=%d output=%s", updateCode, updateOutput)
 	}
@@ -127,12 +136,14 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	}
 	currentRelease := makeUpdateTestRelease(t, f.binary, "v0.15.1")
 	proxyURL, certPath := startUpdateReleaseProxy(t, currentRelease)
-	updateEnv := setEnv(env, "HTTPS_PROXY", proxyURL)
+	updateEnv := setEnv(userEnv, "POSSE_HOME", home)
+	updateEnv = setEnv(updateEnv, "PATH", updateFixturePath(t, f))
+	updateEnv = setEnv(updateEnv, "HTTPS_PROXY", proxyURL)
 	updateEnv = setEnv(updateEnv, "https_proxy", proxyURL)
 	updateEnv = setEnv(updateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
 	updateEnv = setEnv(updateEnv, "no_proxy", "localhost,127.0.0.1,::1")
 	updateEnv = setEnv(updateEnv, "SSL_CERT_FILE", certPath)
-	updateCode, updateOutput = runReleaseCLI(t, legacyBinary, f.repo, updateEnv, "update", "--version", currentRelease.tag)
+	updateCode, updateOutput = runReleaseCLIInUserPane(t, f, legacyBinary, f.repo, updateEnv, "update", "--version", currentRelease.tag)
 	if updateCode != 1 || !strings.Contains(updateOutput, "setup_failed") || !strings.Contains(updateOutput, "installed "+currentRelease.tag) || !strings.Contains(updateOutput, "posse config set defaults.review none") {
 		t.Fatalf("official v0.15.0 update did not install the repair-capable binary: code=%d output=%s", updateCode, updateOutput)
 	}
@@ -168,6 +179,99 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	if code, output := runReleaseCLI(t, legacyBinary, f.repo, setupEnv, "setup", "--binary", legacyBinary); code != 0 || !strings.Contains(output, "manifest:") {
 		t.Fatalf("setup did not complete after command-line repair: code=%d output=%s", code, output)
 	}
+}
+
+func runReleaseCLIInUserPane(t *testing.T, fixture *prLifecycleFixture, binary, cwd string, env []string, args ...string) (int, string) {
+	t.Helper()
+	paneID := testEnvValue(env, "HERDR_PANE_ID")
+	if paneID == "" {
+		t.Fatal("User shell environment has no HERDR_PANE_ID")
+	}
+	outputPath := filepath.Join(fixture.root, "release-cli-output")
+	statusPath := filepath.Join(fixture.root, "release-cli-status")
+	scriptPath := filepath.Join(fixture.root, "run-release-cli.sh")
+	var script strings.Builder
+	script.WriteString("#!/bin/sh\ncd " + shellQuote(cwd) + " || exit 125\nunset POSSE_TEST_HERDR\n")
+	for _, key := range []string{"PATH", "POSSE_HOME", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE"} {
+		if value := testEnvValue(env, key); value != "" {
+			script.WriteString("export " + key + "=" + shellQuote(value) + "\n")
+		}
+	}
+	script.WriteString("\"$@\" >" + shellQuote(outputPath) + " 2>&1\ncode=$?\nprintf '%s\n' \"$code\" >" + shellQuote(statusPath) + "\nexit 0\n")
+	if err := os.WriteFile(scriptPath, []byte(script.String()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(outputPath)
+	_ = os.Remove(statusPath)
+	command := shellQuote(scriptPath)
+	for _, arg := range append([]string{binary}, args...) {
+		command += " " + shellQuote(arg)
+	}
+	client := herdr.NewWithEnv("herdr", env)
+	if _, err := client.Run(context.Background(), "pane", "run", paneID, command); err != nil {
+		t.Fatalf("run release CLI in User shell: %v", err)
+	}
+	if !waitForCondition(30*time.Second, func() bool {
+		_, err := os.Stat(statusPath)
+		return err == nil
+	}) {
+		t.Fatal("release CLI did not finish in the User shell")
+	}
+	status, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(status)))
+	if err != nil {
+		t.Fatalf("invalid release CLI exit code %q: %v", status, err)
+	}
+	return code, string(output)
+}
+
+func newPRLifecycleUserShellEnv(t *testing.T, fixture *prLifecycleFixture) []string {
+	t.Helper()
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	workspace, err := createWorkspace(client, fixture.repo)
+	if err != nil {
+		t.Fatalf("create isolated User shell workspace: %v", err)
+	}
+	env := setEnv(fixture.env, "HERDR_ENV", "1")
+	env = setEnv(env, "HERDR_PANE_ID", workspace.RootPane.PaneID)
+	env = setEnv(env, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
+	env = setEnv(env, "HERDR_TAB_ID", workspace.RootPane.TabID)
+	env = setEnv(env, "HERDR_SOCKET_PATH", herdr.SocketPath(fixture.env))
+	return env
+}
+
+func updateFixturePath(t *testing.T, fixture *prLifecycleFixture) string {
+	t.Helper()
+	binDir := filepath.Join(fixture.root, "update-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	herdrBinary, err := exec.LookPath("herdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	herdrLink := filepath.Join(binDir, "herdr")
+	if err := os.Symlink(herdrBinary, herdrLink); err != nil && !os.IsExist(err) {
+		t.Fatal(err)
+	}
+	return binDir + string(os.PathListSeparator) + "/usr/bin:/bin"
+}
+
+func testEnvValue(env []string, key string) string {
+	for _, entry := range env {
+		name, value, found := strings.Cut(entry, "=")
+		if found && name == key {
+			return value
+		}
+	}
+	return ""
 }
 
 func runReleaseCLI(t *testing.T, binary, cwd string, env []string, args ...string) (int, string) {
