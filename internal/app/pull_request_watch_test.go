@@ -446,6 +446,48 @@ func TestGitLabPRWatchRetriesCancelledJobAndQueuesOneCIFixRound(t *testing.T) {
 	}
 }
 
+func TestPRWatchCIFixBudgetIgnoresHistoricalRepairsOutsideFullPipeline(t *testing.T) {
+	for _, review := range []string{"none", "quick"} {
+		t.Run(review, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+				t.Fatal(err)
+			}
+			freezeCILoopWithReview(t, fixture, 1, 0, review)
+			seedHistoricalValidationFixRounds(t, fixture, 3)
+			fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			poll := func() {
+				t.Helper()
+				if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
+			t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+			poll()
+
+			var rounds, queued, exhausted int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.task.ID).Scan(&rounds); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, fixture.task.ID).Scan(&queued); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_exhausted'`, fixture.task.ID).Scan(&exhausted); err != nil {
+				t.Fatal(err)
+			}
+			if rounds != 1 || queued != 1 || exhausted != 0 {
+				t.Fatalf("historical repairs reduced %s CI budget: rounds=%d queued=%d exhausted=%d", review, rounds, queued, exhausted)
+			}
+		})
+	}
+}
+
 func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()

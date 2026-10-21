@@ -79,8 +79,9 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	if err != nil {
 		return reviewFixQueued{}, err
 	}
-	if !capAuthorized && usage.Total() >= maxRounds {
-		return reviewFixQueued{}, s.reviewCapFailure(ctx, db, project, change, usage.Total(), maxRounds)
+	used := reviewCapUsed(change, usage)
+	if !capAuthorized && used >= maxRounds {
+		return reviewFixQueued{}, s.reviewCapFailure(ctx, db, project, change, used, maxRounds)
 	}
 	findings, err := db.ReviewFindingsForTask(ctx, change.ID)
 	if err != nil {
@@ -174,8 +175,10 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	var result store.QueueValidationFixResult
 	if capAuthorized {
 		result, err = db.QueueValidationFixInstruction(ctx, change.ID, "review", head, dedupe, strings.TrimSpace(body.String()))
-	} else {
+	} else if taskUsesSharedReviewRepairCap(change) {
 		result, err = db.QueueValidationFixInstructionWithSharedBudget(ctx, change.ID, "review", head, dedupe, strings.TrimSpace(body.String()), maxRounds, maxRounds)
+	} else {
+		result, err = db.QueueValidationFixInstructionWithinBudget(ctx, change.ID, "review", head, dedupe, strings.TrimSpace(body.String()), maxRounds)
 	}
 	if err != nil {
 		return reviewFixQueued{}, err
@@ -185,10 +188,14 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 		if err != nil {
 			return reviewFixQueued{}, err
 		}
-		if usage.Total() < maxRounds {
+		used := reviewCapUsed(change, usage)
+		if used < maxRounds {
 			return reviewFixQueued{}, axi.Failure("review_round_reserving_capacity", "an admitted Review Round temporarily reserves the remaining shared repair capacity", true, "Wait for the active Review Round to record a verdict, then retry")
 		}
-		return reviewFixQueued{}, s.reviewCapFailure(ctx, db, project, change, usage.Total(), maxRounds)
+		return reviewFixQueued{}, s.reviewCapFailure(ctx, db, project, change, used, maxRounds)
+	}
+	if result.Exhausted {
+		return reviewFixQueued{}, axi.Failure("review_fix_budget_exhausted", "the frozen Review fix-round budget is exhausted", false)
 	}
 	if !result.Queued && !capAuthorized {
 		return reviewFixQueued{}, axi.Failure("review_fix_duplicate", "the same whole-pattern fix instruction already exists for this head", false)

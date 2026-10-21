@@ -62,7 +62,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		t.Fatalf("publish help omitted repeatable metadata flags: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"signal", "--help"}); code != 0 || !strings.Contains(output.String(), "[--findings <file>] [--report <file>]") {
+	if code := cli.Run([]string{"signal", "--help"}); code != 0 || !strings.Contains(output.String(), "[--findings <file>] [--resolutions <file>] [--report <file>]") {
 		t.Fatalf("signal help omitted Signal file flags: code=%d output=%s", code, output.String())
 	}
 

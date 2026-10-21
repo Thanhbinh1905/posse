@@ -139,7 +139,8 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	remaining := max - usage.Total() - pendingRounds
+	capUsed := reviewCapUsed(change, usage)
+	remaining := max - capUsed - pendingRounds
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -177,7 +178,7 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 		{Key: "review_rounds_used", Value: usage.ReviewRounds},
 		{Key: "repair_rounds_used", Value: usage.RepairRounds},
 		{Key: "pending_review_rounds", Value: pendingRounds},
-		{Key: "total_used", Value: usage.Total()},
+		{Key: "total_used", Value: capUsed},
 		{Key: "max_rounds", Value: max},
 		{Key: "remaining", Value: remaining},
 		{Key: "rounds", Value: roundRows},

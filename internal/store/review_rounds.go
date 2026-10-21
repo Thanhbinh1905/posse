@@ -19,10 +19,11 @@ var (
 // ReviewRoundAdmission binds a new Review Task to one numbered round. All
 // repository bindings are inserted with the Task in the same transaction.
 type ReviewRoundAdmission struct {
-	ChangeTaskID int64
-	Round        int
-	MaxRounds    int
-	Bindings     []ReviewRound
+	ChangeTaskID       int64
+	Round              int
+	MaxRounds          int
+	SharedRepairBudget bool
+	Bindings           []ReviewRound
 }
 
 type ReviewLedgerEntry struct {
@@ -104,8 +105,10 @@ WHERE rr.ship_task_id=? AND rr.status='admitted'
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status='verdict'`, admission.ChangeTaskID).Scan(&used); err != nil {
 		return err
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','gate','ci')`, admission.ChangeTaskID).Scan(&repairs); err != nil {
-		return err
+	if admission.SharedRepairBudget {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','gate','ci')`, admission.ChangeTaskID).Scan(&repairs); err != nil {
+			return err
+		}
 	}
 	if admission.Round != used+1 {
 		return ErrReviewRoundNumber

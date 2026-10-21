@@ -185,9 +185,6 @@ func requireReviewPass(ctx context.Context, db *store.DB, project store.Project,
 	if err != nil {
 		return err
 	}
-	if err := ensureReviewCarry(ctx, db, project, change, targets); err != nil {
-		return err
-	}
 	qualifies, err := reviewVerdictQualifies(ctx, db, change)
 	if err != nil {
 		return err
@@ -195,6 +192,15 @@ func requireReviewPass(ctx context.Context, db *store.DB, project store.Project,
 	evidence, err := db.ReviewEvidenceFor(ctx, change.ID, targets, qualifies)
 	if err != nil {
 		return err
+	}
+	if !evidence.Complete {
+		if err := ensureReviewCarry(ctx, db, project, change, targets); err != nil {
+			return err
+		}
+		evidence, err = db.ReviewEvidenceFor(ctx, change.ID, targets, qualifies)
+		if err != nil {
+			return err
+		}
 	}
 	if evidence.Complete {
 		plan, planErr := change.AdmittedPlan()

@@ -147,6 +147,40 @@ func TestReviewRoundAdmissionGuardsAndVoids(t *testing.T) {
 	}
 }
 
+func TestReviewRoundAdmissionSharesRepairBudgetOnlyWhenEnabled(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		name := "separate"
+		if shared {
+			name = "shared"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+			if _, err := f.db.QueueValidationFixInstruction(f.ctx, f.change, "gate", reviewShaA, "prior-gate-fix", "Prior Gate fix"); err != nil {
+				t.Fatal(err)
+			}
+			admission := ReviewRoundAdmission{
+				ChangeTaskID: f.change, Round: 1, MaxRounds: 1, SharedRepairBudget: shared,
+				Bindings: []ReviewRound{{
+					ChangeTaskID: f.change, Round: 1, Repository: "shop", ScopeKind: "full", ScopeBaseSHA: reviewShaA,
+					HeadSHA: reviewShaB, TargetCommitSHA: reviewShaA, BaselineTree: reviewShaA, DeltaSHA256: reportHash,
+					ConflictedPaths: "[]", Status: "admitted",
+				}},
+			}
+			change := f.task(t, f.change)
+			_, _, err := f.db.CreateReviewRoundTaskWithSequenceAndIntent(f.ctx, change.ProjectID, "shop", Task{
+				Type: "review", ReviewsTaskID: f.change, Title: "round one", ShortName: "round-one", MergeMode: "local", Branch: "posse/t3",
+				ReviewTargets: []ReviewTarget{{Repository: "shop", Commit: reviewShaB}},
+			}, "start", 1, admission, func(int) (bool, error) { return false, nil })
+			if shared && !errors.Is(err, ErrReviewRoundCap) {
+				t.Fatalf("shared budget admission error = %v, want cap", err)
+			}
+			if !shared && err != nil {
+				t.Fatalf("separate review-round budget was reduced by a Gate fix: %v", err)
+			}
+		})
+	}
+}
+
 func TestReviewRoundAdmissionAllowsPartialWorkspaceDelta(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}, {Repository: "api", Commit: reviewShaB}})
 	for _, row := range []struct {

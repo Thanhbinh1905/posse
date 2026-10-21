@@ -11,6 +11,22 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
+func planUsesSharedReviewRepairCap(plan *taskplan.Plan) bool {
+	return plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan))
+}
+
+func taskUsesSharedReviewRepairCap(task store.Task) bool {
+	plan, err := task.AdmittedPlan()
+	return err == nil && planUsesSharedReviewRepairCap(plan)
+}
+
+func reviewCapUsed(task store.Task, usage store.ReviewCapUsage) int {
+	if taskUsesSharedReviewRepairCap(task) {
+		return usage.Total()
+	}
+	return usage.ReviewRounds
+}
+
 func reviewCapHead(ctx context.Context, db *store.DB, project store.Project, task store.Task) (string, error) {
 	targets, err := changeCandidateTargets(ctx, db, project, task)
 	if err != nil {
@@ -120,14 +136,15 @@ func (s *Service) checkReviewCapAfterReviewDone(ctx context.Context, db *store.D
 		return err
 	}
 	max := plan.ValidationLoops.MaxReviewRounds()
-	if usage.Total() < max {
+	used := reviewCapUsed(change, usage)
+	if used < max {
 		return nil
 	}
 	head, err := reviewCapHead(ctx, db, project, change)
 	if err != nil {
 		return err
 	}
-	return createReviewCapNotice(ctx, db, project, change, head, usage.Total(), max)
+	return createReviewCapNotice(ctx, db, project, change, head, used, max)
 }
 
 func (s *Service) checkReviewCapAfterDone(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
@@ -164,7 +181,8 @@ func (s *Service) checkReviewCapAfterDone(ctx context.Context, db *store.DB, hom
 	if err != nil {
 		return err
 	}
-	if usage.Total() < max {
+	used := reviewCapUsed(task, usage)
+	if used < max {
 		return nil
 	}
 	qualifies, err := reviewVerdictQualifies(ctx, db, task)
@@ -181,7 +199,7 @@ func (s *Service) checkReviewCapAfterDone(ctx context.Context, db *store.DB, hom
 	if len(targets) != 1 {
 		return axi.Failure("review_cap_unsupported", "Review cap Decisions currently require one repository candidate", false)
 	}
-	return createReviewCapNotice(ctx, db, project, task, targets[0].Commit, usage.Total(), max)
+	return createReviewCapNotice(ctx, db, project, task, targets[0].Commit, used, max)
 }
 
 func requireFrozenReviewLoop(plan *taskplan.Plan) error {

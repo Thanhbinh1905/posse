@@ -40,7 +40,7 @@ func ensureReviewCarry(ctx context.Context, db *store.DB, project store.Project,
 		var err error
 		targetSHA, err = remoteBranchHead(ctx, root, "refs/heads/"+taskTargetBranch(project, task))
 		if err != nil || targetSHA == "" {
-			return err
+			return nil
 		}
 		if _, err := gitFetch(ctx, root, "origin", taskTargetBranch(project, task)+":refs/remotes/origin/"+taskTargetBranch(project, task)); err != nil {
 			return nil

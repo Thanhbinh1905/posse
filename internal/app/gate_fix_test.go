@@ -69,6 +69,31 @@ func TestPRMergeQueuesThreeGateFixRoundsThenExhaustsBudget(t *testing.T) {
 	}
 }
 
+func TestGateFixBudgetIgnoresHistoricalRepairsOutsideFullPipeline(t *testing.T) {
+	for _, review := range []string{"none", "quick"} {
+		t.Run(review, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			installGateValidationPlanForReview(t, fixture, 1, review)
+			seedHistoricalValidationFixRounds(t, fixture, 3)
+			writeFailingGate(t, fixture, "printf 'gate output tail'; exit 7")
+
+			code, output, errOutput := fixture.run("merge", "t1")
+			notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gateRounds int
+			if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='gate'`, fixture.task.ID).Scan(&gateRounds); err != nil {
+				t.Fatal(err)
+			}
+			if code != 1 || !strings.Contains(output, "gate_failed") || errOutput != "" || gateRounds != 1 ||
+				countNoticeKind(notices, "gate_fix_queued") != 1 || countNoticeKind(notices, "gate_fix_exhausted") != 0 || countNoticeKind(notices, "review_cap_reached") != 0 {
+				t.Fatalf("historical repairs reduced %s Gate budget: exit=%d output=%s stderr=%s rounds=%d notices=%#v", review, code, output, errOutput, gateRounds, notices)
+			}
+		})
+	}
+}
+
 func TestLocalMergeQueuesGateFixInstruction(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateDone)
 	installGateValidationPlan(t, fixture, 1)
@@ -112,6 +137,10 @@ func TestPRMergeZeroGateFixRoundsKeepsManualFailurePath(t *testing.T) {
 }
 
 func installGateValidationPlan(t *testing.T, fixture *prMergeFixture, maxFixRounds int) {
+	installGateValidationPlanForReview(t, fixture, maxFixRounds, "quick")
+}
+
+func installGateValidationPlanForReview(t *testing.T, fixture *prMergeFixture, maxFixRounds int, review string) {
 	t.Helper()
 	ctx := context.Background()
 	briefPath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md")
@@ -131,7 +160,7 @@ func installGateValidationPlan(t *testing.T, fixture *prMergeFixture, maxFixRoun
 		Brief:         taskplan.Select("brief", briefPath, briefData),
 		Execution:     taskplan.Execution{Mode: "sandbox", Scope: "repo", Base: "main", Target: "main"},
 		Launch:        taskplan.Launch{ProfileName: "claude", Profile: config.Profile{Kind: "claude"}},
-		Review:        "quick",
+		Review:        review,
 		Delivery:      fixture.task.MergeMode,
 		Autonomy:      config.Autonomy{Review: "ask", Merge: "ask"},
 		ConfigSources: []string{"test"},
@@ -159,6 +188,20 @@ func installGateValidationPlan(t *testing.T, fixture *prMergeFixture, maxFixRoun
 	}
 	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, fixture.task.ID, encoded); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func seedHistoricalValidationFixRounds(t *testing.T, fixture *prMergeFixture, count int) {
+	t.Helper()
+	ctx := context.Background()
+	for i := 0; i < count; i++ {
+		head := fmt.Sprintf("%040x", i+1)
+		if _, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "review", head, fmt.Sprintf("historical-review-%d", i+1), "Historical Review repair"); err != nil {
+			t.Fatalf("seed historical repair %d: %v", i+1, err)
+		}
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE messages SET status='delivered' WHERE task_id=?`, fixture.task.ID); err != nil {
+		t.Fatalf("mark historical repair messages delivered: %v", err)
 	}
 }
 

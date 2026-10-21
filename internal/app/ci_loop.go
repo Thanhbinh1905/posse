@@ -227,7 +227,13 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	checkSetKey := hex.EncodeToString(digest[:])
 	dedupeKey := "ci:" + observation.HeadSHA + ":" + checkSetKey
 	instruction := renderCIFixInstruction(task, plan, observation, prURL, member, checks, tails)
-	result, err := db.QueueCIFixInstructionWithSharedBudget(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds, plan.ValidationLoops.MaxReviewRounds())
+	var result store.QueueValidationFixResult
+	var err error
+	if fullPipelineSelected(task, member) {
+		result, err = db.QueueCIFixInstructionWithSharedBudget(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds, plan.ValidationLoops.MaxReviewRounds())
+	} else {
+		result, err = db.QueueCIFixInstruction(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds)
+	}
 	if errors.Is(err, store.ErrStaleValidationHead) || errors.Is(err, store.ErrStateRace) {
 		return nil
 	}
