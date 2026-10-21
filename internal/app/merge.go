@@ -64,6 +64,19 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("merge_approval_required", mergeKind+" needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
 		}
 	}
+	var prMergeIntent *store.Intent
+	if parsed.Bool("execute") && !project.IsWorkspace() && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
+		intent, intentErr := s.startTaskIntentAtStep(ctx.Context, db, project.ID, task.ID, "merge --execute", "in_progress:pr.merge")
+		if intentErr != nil {
+			return axi.Failure("intent_active", "Task already has an unfinished command", true, intentErr.Error())
+		}
+		prMergeIntent = &intent
+		defer func() {
+			if finishErr := db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID); returnErr == nil && finishErr != nil {
+				returnErr = finishErr
+			}
+		}()
+	}
 	cfg, err := s.prepareProject(ctx.Context, db, project)
 	if err != nil {
 		return err
@@ -77,7 +90,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	if !project.IsWorkspace() && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
 		// Pull request evidence binds to the gated forge head, not the Sandbox tip.
-		return s.preparePullRequestMerge(ctx, db, project, cfg, task, parsed.Bool("execute"), strings.TrimSpace(parsed.Flags["user-approved"]))
+		return s.preparePullRequestMerge(ctx, db, project, cfg, task, parsed.Bool("execute"), strings.TrimSpace(parsed.Flags["user-approved"]), prMergeIntent)
 	}
 	if task.State != store.StateDone || !autoStartReviewLoop(plan) {
 		if err := requireSelectedReview(ctx.Context, db, project, cfg, task); err != nil {

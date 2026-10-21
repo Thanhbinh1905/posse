@@ -104,7 +104,7 @@ func createPROpenedNotice(ctx context.Context, db *store.DB, project store.Proje
 	return err
 }
 
-func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merge bool, userQuote string) (returnErr error) {
+func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merge bool, userQuote string, mergeIntent *store.Intent) (returnErr error) {
 	ctx := out.Context
 	if task.PRURL != "" {
 		previous, err := db.LatestPRObservation(ctx, task.ID)
@@ -316,7 +316,10 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 		}
 		return ctxPrintMerge(out, task, "Run `posse watch` to watch this pull request")
 	}
-	return s.mergePullRequest(out, db, project, cfg, task, userQuote)
+	if mergeIntent == nil {
+		return axi.Failure("intent_active", "pull request merge intent was not reserved", true)
+	}
+	return s.mergePullRequest(out, db, project, cfg, task, userQuote, *mergeIntent)
 }
 
 func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
@@ -624,7 +627,7 @@ func (s *Service) enterNoMistakesMerge(ctx context.Context, db *store.DB, projec
 	return createPROpenedNotice(ctx, db, project, task, task.PRURL, gatedSHA, task.Title+": no-mistakes pull request is ready for review")
 }
 
-func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, userQuote string) (returnErr error) {
+func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, userQuote string, intent store.Intent) error {
 	ctx := out.Context
 	if task.GatedSHA == "" || task.PRURL == "" {
 		task, _ = db.TaskByID(ctx, project.ID, task.ID)
@@ -696,15 +699,6 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 			return err
 		}
 	}
-	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "merge --execute")
-	if err != nil {
-		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
-	}
-	defer func() {
-		if finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID); returnErr == nil && finishErr != nil {
-			returnErr = finishErr
-		}
-	}()
 	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, task.GatedSHA); err != nil {
 		return err
 	}

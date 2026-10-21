@@ -396,6 +396,24 @@ func stopProjectPollerAfterContention(ctx context.Context, home string, project 
 	return nil
 }
 
+func stopProjectPollerAtDirectoryAfterContention(ctx context.Context, home, dir string) (bool, error) {
+	processes, err := systemWatchProcesses(home)
+	if err != nil {
+		return false, err
+	}
+	stopped := false
+	for _, process := range processes {
+		if !process.PollOnly || !pathInside(dir, process.WorkingDir) {
+			continue
+		}
+		if err := stopStoredWatchRuntimeForDown(ctx, home, process); err != nil {
+			return stopped, err
+		}
+		stopped = true
+	}
+	return stopped, nil
+}
+
 func stopStoredWatchRuntime(ctx context.Context, home string, process watchProcess) error {
 	return stopStoredWatchRuntimeWithEscalation(ctx, home, process, false)
 }

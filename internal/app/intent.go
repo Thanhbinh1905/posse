@@ -17,16 +17,24 @@ func (s *Service) startTaskIntent(ctx context.Context, db *store.DB, projectID, 
 }
 
 func (s *Service) startTaskIntentWithPayload(ctx context.Context, db *store.DB, projectID, taskID int64, command, payload string) (store.Intent, error) {
+	return s.startTaskIntentWithInitialStep(ctx, db, projectID, taskID, command, payload, "started")
+}
+
+func (s *Service) startTaskIntentAtStep(ctx context.Context, db *store.DB, projectID, taskID int64, command, step string) (store.Intent, error) {
+	return s.startTaskIntentWithInitialStep(ctx, db, projectID, taskID, command, `{}`, step)
+}
+
+func (s *Service) startTaskIntentWithInitialStep(ctx context.Context, db *store.DB, projectID, taskID int64, command, payload, step string) (store.Intent, error) {
 	var intent store.Intent
 	err := withSandboxStateLock(ctx, db, func() error {
 		var err error
-		intent, err = s.startTaskIntentWithPayloadLocked(ctx, db, projectID, taskID, command, payload)
+		intent, err = s.startTaskIntentWithPayloadLockedAtStep(ctx, db, projectID, taskID, command, payload, step)
 		return err
 	})
 	return intent, err
 }
 
-func (s *Service) startTaskIntentWithPayloadLocked(ctx context.Context, db *store.DB, projectID, taskID int64, command, payload string) (store.Intent, error) {
+func (s *Service) startTaskIntentWithPayloadLockedAtStep(ctx context.Context, db *store.DB, projectID, taskID int64, command, payload, initialStep string) (store.Intent, error) {
 	processID := os.Getpid()
 	intent, err := db.IntentByTask(ctx, taskID)
 	if err == nil {
@@ -49,7 +57,7 @@ func (s *Service) startTaskIntentWithPayloadLocked(ctx context.Context, db *stor
 	if !store.IsNotFound(err) {
 		return store.Intent{}, err
 	}
-	if err := db.StartIntent(ctx, projectID, taskID, command, "started", payload, processID); err != nil {
+	if err := db.StartIntent(ctx, projectID, taskID, command, initialStep, payload, processID); err != nil {
 		return store.Intent{}, err
 	}
 	return db.IntentByTask(ctx, taskID)
