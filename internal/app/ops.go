@@ -885,35 +885,7 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 		}
 		fmt.Fprintf(&out, "- Last activity: %s\n\n", time.UnixMilli(project.LastActivityAt).Local().Format(time.RFC3339))
 	}
-	return writeAtomic(filepath.Join(home, "projects.md"), []byte(out.String()), 0o600)
-}
-
-func writeAtomic(path string, contents []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".posse-*.tmp")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	defer os.Remove(temporary)
-	if err := file.Chmod(mode); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(contents); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporary, path)
+	return writeFile(filepath.Join(home, "projects.md"), []byte(out.String()))
 }
 
 func jsonRaw(data []byte) any {

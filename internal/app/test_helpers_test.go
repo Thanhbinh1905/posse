@@ -25,6 +25,8 @@ func TestMain(m *testing.M) {
 			_ = os.Unsetenv(key)
 		}
 	}
+	// Hundreds of tests create a store; migrate one and copy it for the rest.
+	store.SeedNewStoresFromTemplate()
 	_ = os.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	_ = os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	// A Service without an explicit Home must never reach the real posse home,

@@ -207,11 +207,14 @@ func TestRepositorySyncSkipsAnInterprocessOverlap(t *testing.T) {
 	defer owner.Close()
 	defer unix.Flock(int(owner.Fd()), unix.LOCK_UN)
 	target := repoTarget{Root: fixture.repo, DefaultBranch: fixture.project.DefaultBranch}
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
-	defer cancel()
-	result, err := fixture.service.syncRepository(ctx, fixture.db, fixture.project, target, time.Now())
+	// The holder is already syncing; a foreground command must not wait for it.
+	started := time.Now()
+	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now())
 	if err != nil || result.Status != "skipped" {
 		t.Fatalf("interprocess repository overlap = %+v, %v; want skipped", result, err)
+	}
+	if elapsed := time.Since(started); elapsed >= fileLockWaitBudget/2 {
+		t.Fatalf("interprocess repository overlap waited %s for the sync lock, want an immediate skip", elapsed)
 	}
 }
 

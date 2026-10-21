@@ -26,7 +26,12 @@ func (e *fileLockWaitError) Unwrap() error { return store.ErrBusy }
 // A live but stopped holder cannot release its flock. Bound acquisition even
 // when the command has no deadline; never unlink or steal an owned lock file.
 func acquireFileLock(ctx context.Context, path string) (*os.File, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, fileLockWaitBudget)
+	return acquireFileLockWithin(ctx, path, fileLockWaitBudget)
+}
+
+// acquireFileLockWithin waits at most budget; a zero budget tries once.
+func acquireFileLockWithin(ctx context.Context, path string, budget time.Duration) (*os.File, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

@@ -150,7 +150,7 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		result.Reason = "origin remote unavailable: " + truncate(strings.TrimSpace(err.Error()), 240)
 		return result, nil
 	}
-	lock, err := acquireRepositorySyncLock(ctx, target.Root)
+	lock, err := tryRepositorySyncLock(ctx, target.Root)
 	if err != nil {
 		if store.IsBusy(err) {
 			return projectSyncResult{Status: "skipped", Reason: "repository sync already running"}, nil

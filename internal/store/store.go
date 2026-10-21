@@ -176,8 +176,11 @@ func openAt(path string, timeout time.Duration) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
+	captureTemplate := seedNewStore(path)
 	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
-	dsn := fileURL + "?_pragma=busy_timeout(" + strconv.Itoa(sqliteBusyTimeoutMillis) + ")&_pragma=foreign_keys(1)&_txlock=immediate"
+	// WAL with synchronous=NORMAL stays consistent after a crash and syncs only
+	// at checkpoints, so commits do not wait on fsync behind other writers.
+	dsn := fileURL + "?_pragma=busy_timeout(" + strconv.Itoa(sqliteBusyTimeoutMillis) + ")&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -192,11 +195,21 @@ func openAt(path string, timeout time.Duration) (*DB, error) {
 		_ = database.Close()
 		return nil, err
 	}
+	if captureTemplate {
+		result.captureNewStoreTemplate(ctx)
+	}
 	return result, nil
 }
 
 func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	defer func() { migrationErr = retryableContention(migrationErr) }()
+	sources, err := embeddedMigrations()
+	if err != nil {
+		return err
+	}
+	if db.schemaCurrent(ctx, sources) {
+		return nil
+	}
 	lockCtx, cancelLock := context.WithTimeout(ctx, migrationLockWaitBudget)
 	lock, err := acquireMigrationLock(lockCtx, db.Path)
 	cancelLock()
@@ -229,10 +242,6 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 		return err
 	}
 	if err := db.normalizeLegacyTaskPaneShellIdentityMigration(ctx); err != nil {
-		return err
-	}
-	sources, err := embeddedMigrations()
-	if err != nil {
 		return err
 	}
 	if err := db.checkSchema(ctx, sources); err != nil {

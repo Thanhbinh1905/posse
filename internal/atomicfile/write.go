@@ -1,13 +1,19 @@
 package atomicfile
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 )
 
+// Write replaces path durably. An existing file that already holds contents
+// with mode is left alone, so routine snapshots do not pay for fsyncs.
 func Write(path string, contents []byte, mode os.FileMode) error {
 	if err := refuseSymlink(path); err != nil {
 		return err
+	}
+	if unchanged(path, contents, mode) {
+		return nil
 	}
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -46,6 +52,15 @@ func Write(path string, contents []byte, mode os.FileMode) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
+}
+
+func unchanged(path string, contents []byte, mode os.FileMode) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != mode.Perm() || info.Size() != int64(len(contents)) {
+		return false
+	}
+	existing, err := os.ReadFile(path)
+	return err == nil && bytes.Equal(existing, contents)
 }
 
 func refuseSymlink(path string) error {
