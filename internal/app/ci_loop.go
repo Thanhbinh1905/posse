@@ -264,7 +264,11 @@ func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation st
 	if member != "" {
 		memberContext = " for workspace member " + member
 	}
-	fmt.Fprintf(&body, "Required CI checks failed for PR head %s%s, which matches the gated head. Fix each failure, commit the changes, publish the updated head, and signal done again.\n\n", observation.HeadSHA, memberContext)
+	if isFullPipelineTask(task, member) {
+		fmt.Fprintf(&body, "Required CI checks failed for PR head %s%s, which matches the gated head. Fix each failure on the author Task branch, commit, signal done, then submit a private candidate and complete Review -> test -> docs -> lint before promotion. Do not push the fix directly.\n\n", observation.HeadSHA, memberContext)
+	} else {
+		fmt.Fprintf(&body, "Required CI checks failed for PR head %s%s, which matches the gated head. Fix each failure, commit the changes, publish the updated head, and signal done again.\n\n", observation.HeadSHA, memberContext)
+	}
 	for _, check := range checks {
 		name := strings.TrimSpace(check.Name)
 		if name == "" {
@@ -275,7 +279,13 @@ func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation st
 	if intent := briefIntent(plan); intent != "" {
 		fmt.Fprintf(&body, "\nUser intent (verbatim):\n%s\n", intent)
 	}
-	if member != "" {
+	if isFullPipelineTask(task, member) {
+		if member != "" {
+			fmt.Fprintf(&body, "\nThis PR is %s for workspace member %s. Submit the committed author head with `posse publish --repo %s \"<summary>\"` from the Task Sandbox. Then review and validate the private candidate, and run `posse publish --repo %s` from that candidate checkout to promote it. Preserve the member's frozen target branch.", prURL, member, member, member)
+		} else {
+			fmt.Fprintf(&body, "\nThis PR is %s. Submit the committed author head with `posse publish \"<summary>\"` from the Task Sandbox. Then review and validate the private candidate, and run `posse publish` from that candidate checkout to promote it. Preserve the Task's frozen target branch.", prURL)
+		}
+	} else if member != "" {
 		fmt.Fprintf(&body, "\nThis PR is %s for workspace member %s. Publish the updated head with `posse publish --repo %s \"<summary>\"` and report done without `--pr`. Preserve the member's frozen target branch.", prURL, member, member)
 	} else {
 		fmt.Fprintf(&body, "\nThis PR is %s. Publish the updated head with `posse publish \"<summary>\"` and report done with the PR URL. Preserve the Task's frozen target branch.", prURL)

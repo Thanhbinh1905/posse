@@ -165,6 +165,43 @@ func retainTaskContainmentProcesses(authorization *sandboxProcessAuthorization, 
 			})
 		}
 	}
+	authorization.authorizeTaskProcess = func(pid int) error {
+		if !taskContainsProcess(pid, task, roots) {
+			return fmt.Errorf("task process %d no longer matches its recorded containment identity", pid)
+		}
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if processGone(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect newly observed Task process %d: %w", pid, err)
+		}
+		handle, err := authorization.bind(pid)
+		if processGone(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("retain newly observed Task process %d: %w", pid, err)
+		}
+		if handle.Identity() != bootID+"/"+startTime || !taskContainsProcess(pid, task, roots) {
+			if authorization.handles[pid] == handle {
+				delete(authorization.handles, pid)
+			}
+			_ = handle.Close()
+			return fmt.Errorf("newly observed Task process %d changed containment identity while retaining its handle", pid)
+		}
+		authorization.setSignalGuard(pid, func(syscall.Signal) error {
+			alive, err := verifySandboxProcessHandleIfAlive(pid, handle)
+			if err != nil {
+				return err
+			}
+			if alive && !taskContainsProcess(pid, task, roots) {
+				return fmt.Errorf("task process %d no longer matches its recorded containment identity", pid)
+			}
+			return nil
+		})
+		return nil
+	}
 	return nil
 }
 

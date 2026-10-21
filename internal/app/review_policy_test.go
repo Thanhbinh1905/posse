@@ -76,8 +76,8 @@ func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 			}
 			if tc.policy == "full-pipeline" {
 				var refusal *axi.Error
-				if !errors.As(err, &refusal) || refusal.Code != "full_pipeline_not_ready" {
-					t.Fatalf("full-pipeline did not fail closed: %v", err)
+				if !errors.As(err, &refusal) || refusal.Code != "candidate_missing" {
+					t.Fatalf("full-pipeline did not require a private candidate: %v", err)
 				}
 			}
 		})

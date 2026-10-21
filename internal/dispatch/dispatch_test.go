@@ -8,6 +8,25 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 )
 
+func TestWorkflowRunBriefFields(t *testing.T) {
+	valid := "---\ntype: research\ntitle: Continue workflow\ndone_when: Report complete\nworkflow_run: w12\nstage: Plan\n---\n"
+	brief, err := ParseBriefText(valid)
+	if err != nil || brief.WorkflowRun != "w12" || brief.Stage != "Plan" {
+		t.Fatalf("parse workflow continuation = %#v, %v", brief, err)
+	}
+	for _, frontmatter := range []string{
+		"workflow_run: w1\n",
+		"stage: Build\n",
+		"workflow_run: workflow-1\nstage: Build\n",
+		"workflow_run: w1\nstage:   \n",
+	} {
+		contents := "---\ntype: change\ntitle: Invalid workflow\ndone_when: checked\n" + frontmatter + "---\n"
+		if _, err := ParseBriefText(contents); err == nil {
+			t.Errorf("invalid workflow Brief accepted: %q", frontmatter)
+		}
+	}
+}
+
 func TestResolveUsesSingleTypeRule(t *testing.T) {
 	cfg := config.Config{
 		Profiles: map[string]config.Profile{"review": {Kind: "codex"}},

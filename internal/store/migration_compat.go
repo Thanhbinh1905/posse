@@ -26,7 +26,7 @@ const (
 	taskContainmentMigrationChecksum             = "80f7ce98b714a0d7c2852e843fd6008312fd84c5047cd0999ef7ad845a19a955"
 	legacyTaskPaneShellIdentityMigrationVersion  = 56
 	taskTurnTokensMigrationVersion               = 56
-	taskPaneShellIdentityMigrationVersion        = 59
+	taskPaneShellIdentityMigrationVersion        = 60
 	legacyTaskPaneShellIdentityMigrationChecksum = "e342aa13224885dd18cf0d364701b35677fe1175aa2a294a23ce05d585cc19fa"
 	legacyReportBundleMigrationChecksum          = "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
 )
@@ -488,7 +488,8 @@ func (db *DB) normalizeLegacyTaskContainmentMigration(ctx context.Context) error
 
 // normalizeLegacyTaskPaneShellIdentityMigration preserves databases from the
 // Task branch's version 56 shell-identity migration after main claimed version
-// 56 for turn tokens, 57 for workspace Watch errors, and 58 for validation candidates.
+// 56 for turn tokens, 57 for workspace Watch errors, 58 for validation candidates,
+// and 59 for validation stage results.
 func (db *DB) normalizeLegacyTaskPaneShellIdentityMigration(ctx context.Context) error {
 	var hasGoose int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='goose_db_version')`).Scan(&hasGoose); err != nil {

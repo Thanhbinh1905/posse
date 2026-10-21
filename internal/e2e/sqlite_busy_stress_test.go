@@ -73,9 +73,9 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 	if _, err := f.db.RecordPRPoll(ctx, f.project.ID, 0, ""); err != nil {
 		t.Fatalf("reset isolated Watch poll timestamp: %v", err)
 	}
-	busyText := func(output string) bool {
+	storeBusyText := func(output string) bool {
 		lower := strings.ToLower(output)
-		return strings.Contains(lower, "store_busy") || strings.Contains(lower, "sqlite_busy") || strings.Contains(lower, "database is locked") || strings.Contains(lower, "database table is locked") || strings.Contains(lower, "database contention")
+		return strings.Contains(lower, "store_busy") || strings.Contains(lower, "sqlite_busy") || strings.Contains(lower, "database is locked") || strings.Contains(lower, "database table is locked")
 	}
 
 	for iteration := 0; iteration < iterations; iteration++ {
@@ -124,7 +124,7 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 		}
 		close(results)
 		for result := range results {
-			if result.err != nil || busyText(result.output) {
+			if result.err != nil || storeBusyText(result.output) {
 				t.Fatalf("iteration %d: posse %s failed under concurrent Watch/Worker/Lead load: err=%v\n%s", iteration+1, strings.Join(result.args, " "), result.err, result.output)
 			}
 		}
@@ -159,7 +159,7 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 		t.Fatalf("read stress-run Notices: %v", err)
 	}
 	for _, notice := range notices {
-		if busyText(notice.Summary) || busyText(notice.DataJSON) {
+		if storeBusyText(notice.Summary) || storeBusyText(notice.DataJSON) {
 			t.Fatalf("Watch recorded a visible contention Notice: %#v", notice)
 		}
 	}

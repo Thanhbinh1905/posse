@@ -21,6 +21,73 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestTaskContainmentRetainsNewProcessOnlyWithIndependentOwnershipProof(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d", os.Getpid())
+	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	if err := retainTaskContainmentProcesses(authorization, task, []ownedProcessRoot{{path: root}}); err != nil {
+		t.Fatal(err)
+	}
+
+	owned := exec.Command("sleep", "300")
+	owned.Dir = root
+	owned.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "owned-ready"), 0)
+	owned.Stdout, owned.Stderr = io.Discard, io.Discard
+	if err := owned.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ownedWaited := false
+	defer func() {
+		if !ownedWaited {
+			_ = owned.Process.Kill()
+			_ = owned.Wait()
+		}
+	}()
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(owned.Process.Pid, marker) }) {
+		t.Fatal("new Task-owned process did not expose its marker")
+	}
+	if err := authorization.guardSignal(owned.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("retain and signal a new process with marker and Task-path proof: %v", err)
+	}
+	handle := authorization.handle(owned.Process.Pid)
+	if handle == nil {
+		t.Fatal("newly authorized Task process did not retain its exact process handle")
+	}
+	if err := handle.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal newly authorized Task process: %v", err)
+	}
+	if err := owned.Wait(); err == nil {
+		t.Fatal("new Task-owned process exited without a signal")
+	}
+	ownedWaited = true
+
+	foreign := exec.Command("sleep", "300")
+	foreign.Dir = "/"
+	foreign.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "foreign-ready"), 0)
+	foreign.Stdout, foreign.Stderr = io.Discard, io.Discard
+	if err := foreign.Start(); err != nil {
+		t.Fatal(err)
+	}
+	foreignWaited := false
+	defer func() {
+		if !foreignWaited {
+			_ = foreign.Process.Kill()
+			_ = foreign.Wait()
+		}
+	}()
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(foreign.Process.Pid, marker) }) {
+		t.Fatal("foreign Task-marked process did not start")
+	}
+	if err := authorization.guardSignal(foreign.Process.Pid, syscall.SIGTERM); err == nil || !strings.Contains(err.Error(), "recorded containment identity") {
+		t.Fatalf("marker-only process without a Task-path reference was authorized: %v", err)
+	}
+	if err := foreign.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("marker-only process was signaled despite lacking Task-path proof: %v", err)
+	}
+}
+
 func TestStopMarkedTaskProcessesStopsDetachedServer(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -514,6 +581,17 @@ func TestCgroupModeStopsMarkedProcessOutsideCgroup(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cgroup mode did not stop its marked out-of-cgroup process")
 	}
+}
+
+func waitForTaskContainmentCondition(timeout time.Duration, condition func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return condition()
 }
 
 func waitForTaskContainmentFile(timeout time.Duration, path string) bool {

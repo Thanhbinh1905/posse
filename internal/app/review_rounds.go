@@ -97,10 +97,22 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	if change.Type != "change" {
 		return axi.Failure("review_round_target_invalid", "Review Rounds require a Change Task", false)
 	}
-	if err := reviewableChange(change); err != nil {
+	plan, err := change.AdmittedPlan()
+	if err != nil {
+		return admittedPlanFailure(err)
+	}
+	candidateReview := plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan))
+	if candidateReview {
+		if change.State != store.StateWorking && change.State != store.StateStalled && change.State != store.StateDone && change.State != store.StateMerging {
+			return axi.Failure("review_target_incomplete", "Change Task must be active before its private candidate can be reviewed", false)
+		}
+		if err := s.prepareReviewCandidateCheckouts(ctx.Context, db, home, project, change, plan); err != nil {
+			return err
+		}
+	} else if err := reviewableChange(change); err != nil {
 		return err
 	}
-	plan, err := change.AdmittedPlan()
+	plan, err = change.AdmittedPlan()
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
@@ -126,6 +138,92 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		args = append(args, "--profile", profile)
 	}
 	return s.spawnTask(ctx, args, generated)
+}
+
+func workspaceHasFullPipeline(plan *taskplan.Plan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, member := range plan.Execution.Members {
+		if member.Review == "full-pipeline" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) prepareReviewCandidateCheckouts(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, plan *taskplan.Plan) error {
+	if plan == nil {
+		return nil
+	}
+	if plan.Execution.Scope != "workspace" {
+		candidate, err := db.LatestValidationCandidate(ctx, change.ID, "")
+		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+			return axi.Failure("candidate_missing", "full-pipeline review requires a submitted private candidate", false)
+		}
+		if candidate.State == store.ValidationCandidateActive {
+			if err := s.ensureCandidateCheckout(ctx, db, home, change, candidate); err != nil {
+				return err
+			}
+		}
+		targetHead, err := remoteBranchHead(ctx, candidate.WorktreePath, "refs/heads/"+taskTargetBranch(project, change))
+		if err != nil {
+			return err
+		}
+		if targetHead == "" || targetHead != candidate.TargetSHA {
+			if candidate.State == store.ValidationCandidateActive && targetHead != "" {
+				if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
+					return err
+				}
+			} else if targetHead != "" {
+				if err := db.InvalidateValidationStages(ctx, candidate.ID, targetHead); err != nil {
+					return err
+				}
+			}
+			return axi.Failure("candidate_target_moved", "frozen target changed before Review admission", false, "Submit a fresh candidate and rerun validation")
+		}
+		return nil
+	}
+	repos, err := db.TaskRepos(ctx, change.ID)
+	if err != nil {
+		return err
+	}
+	for _, repo := range repos {
+		if repo.State == store.TaskRepoUnchanged || !isFullPipelineTask(change, repo.Repo) {
+			continue
+		}
+		candidate, err := db.LatestValidationCandidate(ctx, change.ID, repo.Repo)
+		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+			return axi.Failure("candidate_missing", "full-pipeline review requires a submitted private candidate for Member "+repo.Repo, false)
+		}
+		if candidate.State == store.ValidationCandidateActive {
+			memberTask := change
+			memberTask.WorktreePath = repo.WorktreePath
+			if err := s.ensureCandidateCheckout(ctx, db, home, memberTask, candidate); err != nil {
+				return err
+			}
+		}
+		if repo.TargetBranch == "" {
+			return axi.Failure("candidate_target_missing", "Member "+repo.Repo+" has no frozen target branch", false)
+		}
+		targetHead, err := remoteBranchHead(ctx, candidate.WorktreePath, "refs/heads/"+repo.TargetBranch)
+		if err != nil {
+			return err
+		}
+		if targetHead == "" || targetHead != candidate.TargetSHA {
+			if candidate.State == store.ValidationCandidateActive && targetHead != "" {
+				if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
+					return err
+				}
+			} else if targetHead != "" {
+				if err := db.InvalidateValidationStages(ctx, candidate.ID, targetHead); err != nil {
+					return err
+				}
+			}
+			return axi.Failure("candidate_target_moved", "frozen target changed before Review admission for Member "+repo.Repo, false, "Submit a fresh candidate and rerun validation")
+		}
+	}
+	return nil
 }
 
 func buildReviewRound(ctx context.Context, db *store.DB, project store.Project, change store.Task, plan taskplan.Plan, maxRounds int, home string) (*generatedReviewRound, error) {
@@ -174,7 +272,15 @@ func reviewRoundRepositories(ctx context.Context, db *store.DB, project store.Pr
 		if len(targets) != 1 || targets[0].Repository != project.Name {
 			return nil, axi.Failure("review_target_unresolved", "Change candidate does not match its Project repository", false)
 		}
-		return []reviewRoundRepository{{name: project.Name, root: project.Root, worktree: change.WorktreePath, targetBranch: taskTargetBranch(project, change), head: targets[0].Commit}}, nil
+		worktree := change.WorktreePath
+		if isFullPipelineTask(change, "") {
+			candidate, err := db.LatestValidationCandidate(ctx, change.ID, "")
+			if err != nil || candidate.CandidateSHA != targets[0].Commit || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+				return nil, axi.Failure("candidate_missing", "private candidate changed before Review admission", false)
+			}
+			worktree = candidate.WorktreePath
+		}
+		return []reviewRoundRepository{{name: project.Name, root: project.Root, worktree: worktree, targetBranch: taskTargetBranch(project, change), head: targets[0].Commit}}, nil
 	}
 	projectRepos, err := db.ProjectRepos(ctx, project.ID)
 	if err != nil {
@@ -206,7 +312,15 @@ func reviewRoundRepositories(ctx context.Context, db *store.DB, project store.Pr
 		if targetBranch == "" {
 			targetBranch = repo.DefaultBranch
 		}
-		repositories = append(repositories, reviewRoundRepository{name: taskRepo.Repo, root: filepath.Join(project.Root, repo.Path), worktree: taskRepo.WorktreePath, targetBranch: targetBranch, head: head, workspace: true})
+		worktree := taskRepo.WorktreePath
+		if isFullPipelineTask(change, taskRepo.Repo) {
+			candidate, err := db.LatestValidationCandidate(ctx, change.ID, taskRepo.Repo)
+			if err != nil || candidate.CandidateSHA != head || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+				return nil, axi.Failure("candidate_missing", "private candidate changed before Review admission for Member "+taskRepo.Repo, false)
+			}
+			worktree = candidate.WorktreePath
+		}
+		repositories = append(repositories, reviewRoundRepository{name: taskRepo.Repo, root: filepath.Join(project.Root, repo.Path), worktree: worktree, targetBranch: targetBranch, head: head, workspace: true})
 	}
 	sort.Slice(repositories, func(i, j int) bool { return repositories[i].name < repositories[j].name })
 	return repositories, nil

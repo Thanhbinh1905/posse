@@ -48,12 +48,8 @@ func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) 
 		ConfiguredModel: identity.ConfiguredModel, ModelKnown: identity.ModelKnown}, nil
 }
 
-func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice) (taskplan.Plan, error) {
+func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice, workflow *config.WorkflowSelection) (taskplan.Plan, error) {
 	brief, err := dispatch.ParseBriefText(string(briefData))
-	if err != nil {
-		return taskplan.Plan{}, err
-	}
-	workflow, err := resolveWorkflowSelection(cfg, brief.Workflow)
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
@@ -171,7 +167,7 @@ func restoreAdmittedLaunchFiles(home string, project store.Project, task store.T
 	for _, member := range plan.Execution.Members {
 		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, MergeMode: member.Delivery})
 	}
-	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext, plan.ProseLanguage) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
+	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext, plan.ProseLanguage) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "worker", planPreferences(plan))
 	return writeFile(launchPath, []byte(contents))
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -22,8 +23,26 @@ func TestValidationCandidateCustodySurvivesSnapshotRebuild(t *testing.T) {
 	if err := f.db.ActivateValidationCandidate(f.ctx, candidate.ID, reviewShaA); err != nil {
 		t.Fatalf("activate candidate: %v", err)
 	}
+	configSHA := strings.Repeat("f", 64)
+	for _, stage := range []string{"test", "docs", "lint"} {
+		if _, err := f.db.RecordValidationStage(f.ctx, ValidationStageResult{
+			TaskID: f.change, CandidateID: candidate.ID, Stage: stage, CandidateSHA: reviewShaA, TargetSHA: reviewShaB,
+			ConfigSHA256: configSHA, Summary: stage + " passed", Evidence: "recorded evidence",
+		}); err != nil {
+			t.Fatalf("record %s stage: %v", stage, err)
+		}
+	}
 	if err := f.db.AdvanceValidationCandidate(f.ctx, candidate.ID, reviewShaA, reviewShaB); err != nil {
 		t.Fatalf("advance candidate: %v", err)
+	}
+	stageHistory, err := f.db.ValidationStages(f.ctx, f.change)
+	if err != nil || len(stageHistory) != 3 {
+		t.Fatalf("stage history after candidate movement = %+v, %v", stageHistory, err)
+	}
+	for _, stage := range stageHistory {
+		if stage.Status != "invalidated" || stage.InvalidatedSHA != reviewShaB {
+			t.Fatalf("candidate movement did not persist stage invalidation: %+v", stage)
+		}
 	}
 	if err := f.db.MarkValidationCandidateStale(f.ctx, candidate.ID, reviewShaC); err != nil {
 		t.Fatalf("mark candidate stale: %v", err)
@@ -54,6 +73,10 @@ func TestValidationCandidateCustodySurvivesSnapshotRebuild(t *testing.T) {
 	if len(before) != 2 || before[0].State != ValidationCandidateSuperseded || before[1].State != ValidationCandidateActive {
 		t.Fatalf("candidate history before rebuild = %+v", before)
 	}
+	stagesBefore, err := f.db.ValidationStages(f.ctx, f.change)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if count, err := f.db.RebuildFromSnapshots(f.ctx, f.home); err != nil || count != 2 {
 		t.Fatalf("rebuild count=%d err=%v", count, err)
 	}
@@ -63,6 +86,10 @@ func TestValidationCandidateCustodySurvivesSnapshotRebuild(t *testing.T) {
 	}
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("candidate history after rebuild = %+v, want %+v", after, before)
+	}
+	stagesAfter, err := f.db.ValidationStages(f.ctx, f.change)
+	if err != nil || !reflect.DeepEqual(stagesAfter, stagesBefore) {
+		t.Fatalf("stage history after rebuild = %+v, want %+v, err=%v", stagesAfter, stagesBefore, err)
 	}
 }
 

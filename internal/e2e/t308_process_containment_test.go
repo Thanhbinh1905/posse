@@ -46,6 +46,7 @@ func TestTeardownStopsDetachedTaskServer(t *testing.T) {
 	}
 	serverScript := fmt.Sprintf(`import os, socket, sys, time
 root = sys.argv[1]
+reference = open(sys.argv[2], "rb")
 os.chdir("/")
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

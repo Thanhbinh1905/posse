@@ -52,7 +52,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return briefError(err)
 	}
-	workflow, err := resolveWorkflowSelection(cfg, brief.Workflow)
+	workflow, err := resolveWorkflowForBrief(ctx.Context, db, project, cfg, brief)
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,8 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return briefError(err)
 	}
-	if _, err := resolveWorkflowSelection(cfg, brief.Workflow); err != nil {
+	workflow, err := resolveWorkflowForBrief(ctx.Context, db, project, cfg, brief)
+	if err != nil {
 		return err
 	}
 	name := parsed.Flags["name"]
@@ -255,8 +256,16 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if reviewed.Branch == "" {
 			return axi.Failure("brief_invalid", "the reviewed Task has no branch to inspect", false)
 		}
-		if err := reviewableChange(reviewed); err != nil {
-			return err
+		reviewPlan, planErr := reviewed.AdmittedPlan()
+		if planErr != nil {
+			return admittedPlanFailure(planErr)
+		}
+		candidateReview := reviewPlan != nil && (reviewPlan.Review == "full-pipeline" || workspaceHasFullPipeline(reviewPlan)) &&
+			(reviewed.State == store.StateWorking || reviewed.State == store.StateStalled || reviewed.State == store.StateDone || reviewed.State == store.StateMerging)
+		if !candidateReview {
+			if err := reviewableChange(reviewed); err != nil {
+				return err
+			}
 		}
 		reviewTargets, err = changeCandidateTargets(ctx.Context, db, project, reviewed)
 		if err != nil {
@@ -267,6 +276,13 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		}
 		reviewsTaskID = reviewed.ID
 		baseRef = reviewed.Branch
+		if candidateReview && !project.IsWorkspace() {
+			candidate, err := db.LatestValidationCandidate(ctx.Context, reviewed.ID, "")
+			if err != nil {
+				return axi.Failure("candidate_missing", "private candidate disappeared before Review admission", false)
+			}
+			baseRef = candidate.RefName
+		}
 		reviewedTask = &reviewed
 		authorLaunchIdentities, err = db.TaskLaunchIdentities(ctx.Context, reviewed.ID)
 		if err != nil {
@@ -426,7 +442,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyMerge: defaultValue(autonomy.Merge, "ask"),
 		Branch: branch, BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets,
 	}
-	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, sourceBriefPath, briefData, members, choice)
+	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, sourceBriefPath, briefData, members, choice, workflow)
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
@@ -469,13 +485,18 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		return axi.Failure("task_branch_changed", "Task sequence changed while its branch was being admitted", true, "Retry `posse start`; Posse will check the new Task-bound branch before creating the Task")
 	}
 	if err != nil {
-		return err
+		return workflowAdmissionFailure(err)
 	}
 	defer func() { _ = db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID) }()
 	crashIntentAt("start", "after", "task.create")
 	task, err = db.TaskByID(ctx.Context, project.ID, taskID)
 	if err != nil {
 		return err
+	}
+	if admitted, planErr := task.AdmittedPlan(); planErr != nil {
+		return admittedPlanFailure(planErr)
+	} else if admitted != nil {
+		plan = *admitted
 	}
 	var scratchPath string
 	if err := s.runIntentStep(ctx.Context, db, intent, "scratch.create", func() error {
@@ -627,7 +648,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			return err
 		}
 	}
-	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, plan.ProseLanguage, fmt.Sprintf("launch:%d", launch)) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, plan.ProseLanguage, fmt.Sprintf("launch:%d", launch)) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -719,6 +740,9 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	if mode == "no-mistakes" {
 		result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning("merge_mode")}})
+	}
+	if workflow := plan.Workflow; workflow != nil {
+		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
 	}
 	return ctx.Print(result)
 }
@@ -1489,8 +1513,16 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if inPlace && !signalFileInTaskScratch(home, project, task, parsed.Flags["report"]) {
 			return axi.Failure("signal_invalid", "in-place Reports must come from this Task's scratch directory", false)
 		}
-		if _, err := copySignalFile(home, project, task, parsed.Flags["report"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")); err != nil {
+		reportPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")
+		if _, err := copySignalFile(home, project, task, parsed.Flags["report"], reportPath); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
+		}
+		if admittedPlan != nil && admittedPlan.Workflow != nil {
+			digest, err := fileSHA256(reportPath)
+			if err != nil {
+				return err
+			}
+			data["workflow_report_sha256"] = digest
 		}
 		if reviewFindings != nil {
 			if err := writeReviewFindingsArtifact(project, task, home, findingsContents); err != nil {

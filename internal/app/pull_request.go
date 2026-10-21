@@ -198,6 +198,9 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 				return err
 			}
 			workerPR := task.PRURL != ""
+			if isFullPipelineTask(task, "") && !workerPR {
+				return axi.Failure("candidate_promotion_required", "full-pipeline Tasks must publish through the validated private candidate promotion path", false, "Complete local validation and run `posse publish` from the private candidate checkout")
+			}
 			if workerPR {
 				forge, err := forgeForRepository(ctx, project.Root, cfg, "")
 				if err != nil {

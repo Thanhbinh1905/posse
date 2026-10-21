@@ -145,7 +145,7 @@ func TestFrozen015LocalReviewPlanKeepsItsEvidenceRequirement(t *testing.T) {
 	}
 }
 
-func TestFullPipelineCanBeFrozenButIsNotReady(t *testing.T) {
+func TestFullPipelineCanBeFrozenAndSubmitsPrivateCandidateWithoutPublishing(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	stopBackgroundWatch(t, f)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
@@ -175,6 +175,97 @@ func TestFullPipelineCanBeFrozenButIsNotReady(t *testing.T) {
 		t.Fatalf("private candidate submission pushed the Task branch: %s", output)
 	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
 		t.Fatalf("could not verify the remote Task branch remained absent: %v %s", err, output)
+	}
+}
+
+func TestFullPipelineValidatesPrivateCandidateBeforeBareOriginPublication(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, f)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "full-pipeline")
+	if code, output := startReviewIdentityTask(t, f, "Validate before publish", "author", ""); code != 0 {
+		t.Fatalf("start Change Task: code=%d %s", code, output)
+	}
+	change := f.mustTask(t, "t1")
+	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate head")
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv,
+		"publish", "Candidate summary", "--verify", "go test ./... -> passed",
+		"--proof", "Intent behavior verified", "--risk", "Risk: low\nRollback: revert")
+	if code != 0 || !strings.Contains(output, "validation required before publication") {
+		t.Fatalf("submit private candidate: code=%d %s", code, output)
+	}
+	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+	if code, output := runReviewIdentityCLI(t, f, "review", "start", "t1", "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start candidate Review Round: code=%d %s", code, output)
+	}
+	review := f.mustTask(t, "t2")
+	waitForReviewIdentityAgent(t, f, review.PaneID)
+	reviewHead := strings.TrimSpace(gitTest(t, f.env, review.WorktreePath, "rev-parse", "HEAD"))
+	if reviewHead != candidate.CandidateSHA {
+		t.Fatalf("Reviewer checkout head=%s, want private candidate %s", reviewHead, candidate.CandidateSHA)
+	}
+	report := filepath.Join(f.home, "scratch", "shop", "t2", "report.md")
+	findings := filepath.Join(f.home, "scratch", "shop", "t2", "findings.json")
+	if err := os.WriteFile(report, []byte("The private candidate passed review.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(findings, []byte(`{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "pass")
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+	for _, args := range [][]string{
+		{"validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent/E2E behavior verified"},
+		{"validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"},
+		{"validate", "lint", "--proof", "Configured Gates passed", "--coverage", "No local workflow jobs are configured"},
+	} {
+		code, output = runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, args...)
+		if code != 0 {
+			t.Fatalf("candidate stage %v failed: %d %s", args, code, output)
+		}
+		assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+	}
+	stages, err := f.db.ValidationStages(context.Background(), change.ID)
+	if err != nil || len(stages) != 3 {
+		t.Fatalf("persisted local stages=%+v err=%v", stages, err)
+	}
+	for _, stage := range stages {
+		if stage.Status != "passed" || stage.CandidateSHA != candidate.CandidateSHA {
+			t.Fatalf("stage is not bound to final private head: %+v", stage)
+		}
+	}
+	code, output = runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "Candidate summary")
+	if code != 0 || !strings.Contains(output, "promoted: candidate") {
+		t.Fatalf("promote validated candidate: %d %s", code, output)
+	}
+	publishedCommand := exec.Command("git", "--git-dir", f.remote, "rev-parse", "refs/heads/"+change.Branch)
+	publishedCommand.Env = f.env
+	publishedOutput, err := publishedCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read published bare-origin head: %v %s", err, publishedOutput)
+	}
+	published := strings.TrimSpace(string(publishedOutput))
+	if published != candidate.CandidateSHA {
+		t.Fatalf("bare origin published %s, want validated candidate %s", published, candidate.CandidateSHA)
+	}
+}
+
+func assertTaskBranchAbsentOnBareOrigin(t *testing.T, f *prLifecycleFixture, branch string) {
+	t.Helper()
+	command := exec.Command("git", "--git-dir", f.remote, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	command.Env = f.env
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("Task branch was published before local validation: %s", output)
+	}
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		t.Fatalf("could not audit bare origin branch refs: %v %s", err, output)
 	}
 }
 

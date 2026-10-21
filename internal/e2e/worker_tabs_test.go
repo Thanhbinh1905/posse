@@ -520,7 +520,8 @@ case "$PWD/" in
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" "$GOCACHE" > "$POSSE_TEST_ROOT/task-environment"
     fi
     if [ -f "$POSSE_TEST_ROOT/launch-detached-server" ]; then
-      setsid python3 "$POSSE_TEST_ROOT/detached-server.py" "$POSSE_TEST_ROOT" >/dev/null 2>&1 &
+      printf 'Task-owned server reference\n' > "$TMPDIR/detached-server-reference"
+      setsid python3 "$POSSE_TEST_ROOT/detached-server.py" "$POSSE_TEST_ROOT" "$TMPDIR/detached-server-reference" >/dev/null 2>&1 &
       echo $! > "$POSSE_TEST_ROOT/detached-server.pid"
     fi
     while [ ! -f "$PWD/.posse-e2e-agent-exit" ]; do sleep 0.05; done

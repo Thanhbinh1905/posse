@@ -144,6 +144,48 @@ func candidateAuthorMovedFailure(task store.Task, candidate store.ValidationCand
 
 // allowResubmission is true only for publish, which archives a stale candidate
 // before creating a fresh one. A Signal must keep refusing until publish.
+func (s *Service) requireCandidateSubmissionFreshness(ctx context.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate) error {
+	if candidate.State != store.ValidationCandidateActive {
+		return nil
+	}
+	if err := s.refuseMovedCandidateAuthor(ctx, db, task, false); err != nil {
+		return err
+	}
+	candidateTask := task
+	if candidate.Repo != "" {
+		repos, err := db.TaskRepos(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, repo := range repos {
+			if repo.Repo == candidate.Repo {
+				candidateTask.WorktreePath = repo.WorktreePath
+				found = true
+				break
+			}
+		}
+		if !found {
+			return axi.Failure("candidate_author_moved", "candidate Member is no longer part of this Task", false)
+		}
+	}
+	remoteHead, err := remoteBranchHead(ctx, candidateTask.WorktreePath, "refs/heads/"+task.Branch)
+	if err != nil {
+		return axi.Failure("candidate_remote_head_failed", "could not inspect the Task branch on origin", true, err.Error())
+	}
+	if remoteHead != candidate.ExpectedRemoteSHA {
+		invalidator := remoteHead
+		if invalidator == "" {
+			invalidator = candidate.CandidateSHA
+		}
+		if err := db.MarkValidationCandidateStale(ctx, candidate.ID, invalidator); err != nil {
+			return err
+		}
+		return candidateSubmissionError(task, candidate, "candidate_remote_moved", "origin Task branch moved after candidate submission", false)
+	}
+	return nil
+}
+
 func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, task store.Task, allowResubmission bool) error {
 	candidates, err := db.LiveValidationCandidates(ctx, task.ID)
 	if err != nil {
@@ -235,18 +277,60 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 				}
 				return candidateAuthorMovedFailure(task, candidate, submittedSHA, branch)
 			}
-			if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
-				return err
+			currentTarget, targetErr := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+taskTargetBranch(project, task))
+			if targetErr != nil {
+				return axi.Failure("candidate_target_head_failed", "could not refresh the frozen target before validation", true, targetErr.Error())
 			}
-			candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
-			if err != nil {
-				return err
+			if currentTarget == "" {
+				return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
 			}
-			return printCandidateSubmission(out, task, candidate, true)
+			if currentTarget != candidate.TargetSHA {
+				if markErr := db.MarkValidationCandidateStale(ctx, candidate.ID, currentTarget); markErr != nil && markErr != store.ErrStateRace {
+					return markErr
+				}
+				candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
+				if err != nil {
+					return err
+				}
+				if err := s.archiveCandidate(ctx, db, task, candidate); err != nil {
+					return err
+				}
+			} else {
+				if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
+					return err
+				}
+				candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
+				if err != nil {
+					return err
+				}
+				if err := mergeCandidateTarget(ctx, task, candidate, taskTargetBranch(project, task)); err != nil {
+					return err
+				}
+				if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
+					return err
+				}
+				candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
+				if err != nil {
+					return err
+				}
+				return printCandidateSubmission(out, task, candidate, true)
+			}
 		case store.ValidationCandidatePromoting:
 			return axi.Failure("candidate_promotion_in_progress", fmt.Sprintf("candidate for t%d is being promoted", task.Seq), true, "Resume its internal promotion before submitting another candidate")
 		case store.ValidationCandidatePromoted:
-			if submittedSHA == candidate.PromotedSHA {
+			currentTarget, targetErr := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+taskTargetBranch(project, task))
+			if targetErr != nil {
+				return axi.Failure("candidate_target_head_failed", "could not refresh the frozen target before candidate resubmission", true, targetErr.Error())
+			}
+			if currentTarget == "" {
+				return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
+			}
+			if currentTarget != candidate.TargetSHA {
+				if err := db.InvalidateValidationStages(ctx, candidate.ID, currentTarget); err != nil {
+					return err
+				}
+			}
+			if submittedSHA == candidate.PromotedSHA && currentTarget == candidate.TargetSHA {
 				return printPromotedCandidate(out, db, task, candidate, repoName)
 			}
 			if err := s.archiveCandidate(ctx, db, task, candidate); err != nil {
@@ -297,7 +381,39 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 	if err != nil {
 		return err
 	}
+	if err := mergeCandidateTarget(ctx, task, candidate, targetBranch); err != nil {
+		return err
+	}
+	if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
+		return err
+	}
+	candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
+	if err != nil {
+		return err
+	}
 	return printCandidateSubmission(out, task, candidate, false)
+}
+
+func mergeCandidateTarget(ctx context.Context, task store.Task, candidate store.ValidationCandidate, targetBranch string) error {
+	targetRef := "refs/remotes/origin/" + targetBranch
+	if _, err := gitFetch(ctx, candidate.WorktreePath, "origin", targetBranch+":"+targetRef); err != nil {
+		return axi.Failure("candidate_target_fetch_failed", "could not fetch the frozen target into the private candidate", true, err.Error())
+	}
+	targetSHA, err := gitOutput(ctx, candidate.WorktreePath, "rev-parse", "--verify", targetRef+"^{commit}")
+	if err != nil {
+		return err
+	}
+	if targetSHA != candidate.TargetSHA {
+		return axi.Failure("candidate_target_moved", "frozen target changed while refreshing the private candidate", false, "Submit a fresh candidate and rerun validation")
+	}
+	if gitAncestor(ctx, candidate.WorktreePath, targetSHA, candidate.CandidateSHA) {
+		return nil
+	}
+	if _, err := gitOutput(ctx, candidate.WorktreePath, "merge", "--no-edit", targetSHA); err != nil {
+		_, _ = gitOutput(ctx, candidate.WorktreePath, "merge", "--abort")
+		return axi.Failure("candidate_target_conflict", "could not merge the frozen target into the private candidate", false, err.Error())
+	}
+	return nil
 }
 
 func printCandidateSubmission(out *axi.Context, task store.Task, candidate store.ValidationCandidate, resumed bool) error {

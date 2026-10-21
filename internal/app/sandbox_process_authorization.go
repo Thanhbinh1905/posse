@@ -15,8 +15,9 @@ import (
 // ownership is proved. CWD discovery during cleanup may verify these handles,
 // but must not authorize a new process.
 type sandboxProcessAuthorization struct {
-	handles       map[int]*sandboxProcessHandle
-	processGroups map[int][]*sandboxProcessHandle
+	handles              map[int]*sandboxProcessHandle
+	processGroups        map[int][]*sandboxProcessHandle
+	authorizeTaskProcess func(int) error
 }
 
 func newSandboxProcessAuthorization() *sandboxProcessAuthorization {
@@ -137,7 +138,20 @@ func (authorization *sandboxProcessAuthorization) setSignalGuard(pid int, guard 
 
 func (authorization *sandboxProcessAuthorization) guardSignal(pid int, signal syscall.Signal) error {
 	handle := authorization.handle(pid)
+	if handle == nil && authorization != nil && authorization.authorizeTaskProcess != nil {
+		if err := authorization.authorizeTaskProcess(pid); err != nil {
+			return err
+		}
+		handle = authorization.handle(pid)
+	}
 	if handle == nil {
+		alive, err := unretainedSandboxProcessAlive(pid)
+		if err != nil {
+			return fmt.Errorf("cannot verify unretained Task process %d: %w", pid, err)
+		}
+		if !alive {
+			return nil
+		}
 		return fmt.Errorf("PID %d was not retained during Task ownership proof; preserving it", pid)
 	}
 	alive, err := verifySandboxProcessHandleIfAlive(pid, handle)
