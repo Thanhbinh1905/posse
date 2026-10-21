@@ -48,11 +48,47 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='pane_shell_identity')`).Scan(&shellIdentity); err != nil || shellIdentity != 1 {
 		t.Fatalf("pane shell identity column after migration renumbering exists=%d, err=%v", shellIdentity, err)
 	}
+	assertAppliedMigrationChecksums(t, db, 56, 57, 58, 59, 60, 61)
+}
+
+func TestOpenRenumbersAppliedVersion60TaskPaneShellIdentityMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DELETE FROM goose_db_version WHERE version_id=61`,
+		`DELETE FROM posse_migration_checksums WHERE version=61`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("prepare database from the legacy version 60 pane shell migration: %s: %v", statement, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE posse_migration_checksums SET sha256=? WHERE version=60`, legacyTaskPaneShellIdentityMigrationChecksum); err != nil {
+		t.Fatalf("prepare legacy version 60 checksum: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatalf("open database after version 60 pane shell migration renumbering: %v", err)
+	}
+	defer db.Close()
+	assertAppliedMigrationChecksums(t, db, 60, 61)
+}
+
+func assertAppliedMigrationChecksums(t *testing.T, db *DB, versions ...int64) {
+	t.Helper()
+	ctx := context.Background()
 	sources, err := embeddedMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []int64{56, 57, 58, 59, 60} {
+	for _, version := range versions {
 		var applied int
 		var expected, recorded string
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM goose_db_version WHERE version_id=? AND is_applied=1`, version).Scan(&applied); err != nil || applied != 1 {

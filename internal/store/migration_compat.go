@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // legacyProjectUUIDMigrationChecksum identifies the project UUID migration
@@ -26,7 +27,7 @@ const (
 	taskContainmentMigrationChecksum             = "80f7ce98b714a0d7c2852e843fd6008312fd84c5047cd0999ef7ad845a19a955"
 	legacyTaskPaneShellIdentityMigrationVersion  = 56
 	taskTurnTokensMigrationVersion               = 56
-	taskPaneShellIdentityMigrationVersion        = 60
+	taskPaneShellIdentityMigrationVersion        = 61
 	legacyTaskPaneShellIdentityMigrationChecksum = "e342aa13224885dd18cf0d364701b35677fe1175aa2a294a23ce05d585cc19fa"
 	legacyReportBundleMigrationChecksum          = "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
 )
@@ -486,10 +487,87 @@ func (db *DB) normalizeLegacyTaskContainmentMigration(ctx context.Context) error
 	return tx.Commit()
 }
 
+func (db *DB) normalizeLegacyTaskPaneShellIdentityVersion60(ctx context.Context) error {
+	var hasChecksums int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='posse_migration_checksums')`).Scan(&hasChecksums); err != nil {
+		return err
+	}
+	var recorded sql.NullString
+	if hasChecksums != 0 {
+		err := db.QueryRowContext(ctx, `SELECT sha256 FROM posse_migration_checksums WHERE version=60`).Scan(&recorded)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if recorded.Valid && recorded.String != legacyTaskPaneShellIdentityMigrationChecksum {
+		return nil
+	}
+	if !recorded.Valid {
+		var tableSQL sql.NullString
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='validation_stage_results'`).Scan(&tableSQL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if !tableSQL.Valid {
+			return &SchemaError{Code: "schema_diverged", Message: fmt.Sprintf("%s cannot identify the applied migration 60", db.Path)}
+		}
+		if strings.Contains(tableSQL.String, "'failed'") {
+			return nil
+		}
+	}
+	sources, err := embeddedMigrations()
+	if err != nil {
+		return err
+	}
+	var shellIdentityChecksum string
+	for _, source := range sources {
+		if source.version == taskPaneShellIdentityMigrationVersion {
+			shellIdentityChecksum = source.checksum
+			break
+		}
+	}
+	if shellIdentityChecksum == "" {
+		return fmt.Errorf("task pane shell identity migration source %d is missing", taskPaneShellIdentityMigrationVersion)
+	}
+	var alreadyApplied int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, taskPaneShellIdentityMigrationVersion).Scan(&alreadyApplied); err != nil {
+		return err
+	}
+	if alreadyApplied != 0 {
+		return &SchemaError{Code: "schema_diverged", Message: fmt.Sprintf("%s records both legacy and current Task pane shell identity migrations", db.Path)}
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS posse_migration_checksums (version INTEGER PRIMARY KEY, sha256 TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE goose_db_version SET version_id=? WHERE version_id=60 AND is_applied=1`, taskPaneShellIdentityMigrationVersion)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("normalize legacy task pane shell identity migration 60: moved %d Goose receipts, want 1", changed)
+	}
+	if recorded.Valid {
+		if _, err := tx.ExecContext(ctx, `UPDATE posse_migration_checksums SET version=?,sha256=? WHERE version=60`, taskPaneShellIdentityMigrationVersion, shellIdentityChecksum); err != nil {
+			return err
+		}
+	} else if _, err := tx.ExecContext(ctx, `INSERT INTO posse_migration_checksums(version,sha256) VALUES(?,?)`, taskPaneShellIdentityMigrationVersion, shellIdentityChecksum); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // normalizeLegacyTaskPaneShellIdentityMigration preserves databases from the
-// Task branch's version 56 shell-identity migration after main claimed version
-// 56 for turn tokens, 57 for workspace Watch errors, 58 for validation candidates,
-// and 59 for validation stage results.
+// Task branch's version 56 or 60 shell-identity migrations after main claimed
+// version 56 for turn tokens, 57 for workspace Watch errors, 58 for validation
+// candidates, 59 for validation stage results, and 60 for validation-stage failures.
 func (db *DB) normalizeLegacyTaskPaneShellIdentityMigration(ctx context.Context) error {
 	var hasGoose int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='goose_db_version')`).Scan(&hasGoose); err != nil {
@@ -498,8 +576,11 @@ func (db *DB) normalizeLegacyTaskPaneShellIdentityMigration(ctx context.Context)
 	if hasGoose == 0 {
 		return nil
 	}
-	var legacyApplied, hasShellIdentity, hasTurnTokens, hasMemberWatchErrors int
+	var legacyApplied, version60Applied, hasShellIdentity, hasTurnTokens, hasMemberWatchErrors int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, legacyTaskPaneShellIdentityMigrationVersion).Scan(&legacyApplied); err != nil {
+		return err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=60 AND is_applied=1)`).Scan(&version60Applied); err != nil {
 		return err
 	}
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='pane_shell_identity')`).Scan(&hasShellIdentity); err != nil {
@@ -511,7 +592,15 @@ func (db *DB) normalizeLegacyTaskPaneShellIdentityMigration(ctx context.Context)
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='member_watch_errors')`).Scan(&hasMemberWatchErrors); err != nil {
 		return err
 	}
-	if legacyApplied == 0 || hasShellIdentity == 0 {
+	if hasShellIdentity == 0 {
+		return nil
+	}
+	if version60Applied != 0 {
+		if err := db.normalizeLegacyTaskPaneShellIdentityVersion60(ctx); err != nil {
+			return err
+		}
+	}
+	if legacyApplied == 0 {
 		return nil
 	}
 	var hasChecksums int
