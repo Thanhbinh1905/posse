@@ -27,7 +27,7 @@ const (
 	taskContainmentMigrationChecksum             = "80f7ce98b714a0d7c2852e843fd6008312fd84c5047cd0999ef7ad845a19a955"
 	legacyTaskPaneShellIdentityMigrationVersion  = 56
 	taskTurnTokensMigrationVersion               = 56
-	taskPaneShellIdentityMigrationVersion        = 61
+	taskPaneShellIdentityMigrationVersion        = 62
 	legacyTaskPaneShellIdentityMigrationChecksum = "e342aa13224885dd18cf0d364701b35677fe1175aa2a294a23ce05d585cc19fa"
 	legacyReportBundleMigrationChecksum          = "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
 )
@@ -564,10 +564,112 @@ func (db *DB) normalizeLegacyTaskPaneShellIdentityVersion60(ctx context.Context)
 	return tx.Commit()
 }
 
+// normalizeLegacyTaskPaneShellIdentityVersion61 moves an already-shipped Task
+// migration out of version 61, which main now uses for Lead-start ownership.
+// The schema and migration checksum distinguish it from main's version 61.
+func (db *DB) normalizeLegacyTaskPaneShellIdentityVersion61(ctx context.Context) error {
+	var hasApplied int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=61 AND is_applied=1)`).Scan(&hasApplied); err != nil {
+		return err
+	}
+	if hasApplied == 0 {
+		return nil
+	}
+	var hasChecksums int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='posse_migration_checksums')`).Scan(&hasChecksums); err != nil {
+		return err
+	}
+	var recorded sql.NullString
+	if hasChecksums != 0 {
+		err := db.QueryRowContext(ctx, `SELECT sha256 FROM posse_migration_checksums WHERE version=61`).Scan(&recorded)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if recorded.Valid && recorded.String != legacyTaskPaneShellIdentityMigrationChecksum {
+		return nil
+	}
+	if !recorded.Valid {
+		var hasClaims, hasHolder, hasPID int
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='lead_start_claims')`).Scan(&hasClaims); err != nil {
+			return err
+		}
+		if hasClaims == 0 {
+			return &SchemaError{Code: "schema_diverged", Message: fmt.Sprintf("%s cannot identify the applied migration 61", db.Path)}
+		}
+		for _, check := range []struct {
+			query string
+			value *int
+		}{
+			{`SELECT EXISTS(SELECT 1 FROM pragma_table_info('lead_start_claims') WHERE name='holder')`, &hasHolder},
+			{`SELECT EXISTS(SELECT 1 FROM pragma_table_info('lead_start_claims') WHERE name='pid')`, &hasPID},
+		} {
+			if err := db.QueryRowContext(ctx, check.query).Scan(check.value); err != nil {
+				return err
+			}
+		}
+		if hasHolder != 0 && hasPID != 0 {
+			return nil
+		}
+		if hasHolder != 0 || hasPID != 0 {
+			return &SchemaError{Code: "schema_diverged", Message: fmt.Sprintf("%s has an incomplete Lead-start ownership migration at version 61", db.Path)}
+		}
+	}
+	sources, err := embeddedMigrations()
+	if err != nil {
+		return err
+	}
+	var shellIdentityChecksum string
+	for _, source := range sources {
+		if source.version == taskPaneShellIdentityMigrationVersion {
+			shellIdentityChecksum = source.checksum
+			break
+		}
+	}
+	if shellIdentityChecksum == "" {
+		return fmt.Errorf("task pane shell identity migration source %d is missing", taskPaneShellIdentityMigrationVersion)
+	}
+	var alreadyApplied int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM goose_db_version WHERE version_id=? AND is_applied=1)`, taskPaneShellIdentityMigrationVersion).Scan(&alreadyApplied); err != nil {
+		return err
+	}
+	if alreadyApplied != 0 {
+		return &SchemaError{Code: "schema_diverged", Message: fmt.Sprintf("%s records both legacy and current Task pane shell identity migrations", db.Path)}
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS posse_migration_checksums (version INTEGER PRIMARY KEY, sha256 TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE goose_db_version SET version_id=? WHERE version_id=61 AND is_applied=1`, taskPaneShellIdentityMigrationVersion)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("normalize legacy task pane shell identity migration 61: moved %d Goose receipts, want 1", changed)
+	}
+	if recorded.Valid {
+		if _, err := tx.ExecContext(ctx, `UPDATE posse_migration_checksums SET version=?,sha256=? WHERE version=61`, taskPaneShellIdentityMigrationVersion, shellIdentityChecksum); err != nil {
+			return err
+		}
+	} else if _, err := tx.ExecContext(ctx, `INSERT INTO posse_migration_checksums(version,sha256) VALUES(?,?)`, taskPaneShellIdentityMigrationVersion, shellIdentityChecksum); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // normalizeLegacyTaskPaneShellIdentityMigration preserves databases from the
-// Task branch's version 56 or 60 shell-identity migrations after main claimed
-// version 56 for turn tokens, 57 for workspace Watch errors, 58 for validation
-// candidates, 59 for validation stage results, and 60 for validation-stage failures.
+// Task branch's version 56, 60 or 61 shell-identity migrations after main
+// claimed version 56 for turn tokens, 57 for workspace Watch errors, 58 for
+// validation candidates, 59 for validation stage results, 60 for validation-
+// stage failures, and 61 for Lead-start ownership.
 func (db *DB) normalizeLegacyTaskPaneShellIdentityMigration(ctx context.Context) error {
 	var hasGoose int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='goose_db_version')`).Scan(&hasGoose); err != nil {
@@ -599,6 +701,9 @@ func (db *DB) normalizeLegacyTaskPaneShellIdentityMigration(ctx context.Context)
 		if err := db.normalizeLegacyTaskPaneShellIdentityVersion60(ctx); err != nil {
 			return err
 		}
+	}
+	if err := db.normalizeLegacyTaskPaneShellIdentityVersion61(ctx); err != nil {
+		return err
 	}
 	if legacyApplied == 0 {
 		return nil

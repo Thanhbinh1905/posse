@@ -127,14 +127,18 @@ UPDATE projects SET down_at = ? WHERE id = ?;
 UPDATE projects SET lead_pane_id = '', lead_label = '', lead_absent_since = 0 WHERE id = ? AND down_at != 0;
 
 -- name: InsertLeadStartClaim :execresult
-INSERT INTO lead_start_claims(project_id, claimed_at) VALUES (?, ?)
+INSERT INTO lead_start_claims(project_id, claimed_at, holder, pid) VALUES (?, ?, ?, ?)
 ON CONFLICT(project_id) DO NOTHING;
 
--- name: RefreshLeadStartClaim :execresult
-UPDATE lead_start_claims SET claimed_at = ? WHERE project_id = ? AND claimed_at <= ?;
+-- name: ReclaimLeadStartClaim :execresult
+UPDATE lead_start_claims SET claimed_at = ?, holder = ?, pid = ?
+WHERE project_id = ? AND claimed_at = ? AND holder = ? AND pid = ?;
+
+-- name: LeadStartClaim :one
+SELECT claimed_at, holder, pid FROM lead_start_claims WHERE project_id = ?;
 
 -- name: ReleaseLeadStart :exec
-DELETE FROM lead_start_claims WHERE project_id = ?;
+DELETE FROM lead_start_claims WHERE project_id = ? AND holder = ? AND pid = ?;
 
 -- name: MoveProject :exec
 UPDATE projects SET root = ?, default_branch = ?, status = 'active', last_activity_at = ? WHERE id = ?;

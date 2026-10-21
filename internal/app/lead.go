@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -178,7 +179,7 @@ func (s *Service) availableLeadKinds(ctx context.Context, cfg config.Config) []s
 	return available
 }
 
-func (s *Service) upCore(ctx *axi.Context, args []string) error {
+func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	parsed, err := parseUpArgs(args)
 	if err != nil {
 		return err
@@ -297,14 +298,31 @@ func (s *Service) upCore(ctx *axi.Context, args []string) error {
 			return err
 		}
 	}
-	claimed, err := db.ClaimLeadStart(ctx.Context, project.ID, time.Now().UnixMilli(), time.Now().Add(-2*time.Minute).UnixMilli())
+	now := time.Now()
+	claimed, err := db.ClaimLeadStart(ctx.Context, project.ID, now.UnixMilli(), now.Add(-2*time.Minute).UnixMilli(), "up", os.Getpid())
 	if err != nil {
 		return err
 	}
 	if !claimed {
-		return axi.Failure("lead_starting", "a Lead is already starting or being checked for Project "+project.Name, true, "Wait a moment, then run `posse up` again")
+		claim, claimErr := db.LeadStartClaim(ctx.Context, project.ID)
+		if claimErr != nil {
+			return claimErr
+		}
+		expiresAt := time.UnixMilli(claim.ClaimedAt).Add(2 * time.Minute)
+		remaining := time.Until(expiresAt).Round(time.Second)
+		if remaining < 0 {
+			remaining = 0
+		}
+		message := fmt.Sprintf("Project %s Lead start is held by %s (pid %d), claimed at %s; claim expires at %s (in %s)", project.Name, claim.Holder, claim.PID, time.UnixMilli(claim.ClaimedAt).Format(time.RFC3339), expiresAt.Format(time.RFC3339), remaining)
+		return axi.Failure("lead_starting", message, true, "Wait for the current Lead start to finish, then run `posse up` again")
 	}
-	defer db.ReleaseLeadStart(context.Background(), project.ID)
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if releaseErr := db.ReleaseLeadStart(releaseCtx, project.ID, "up", os.Getpid()); releaseErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("release Lead start claim: %w", releaseErr))
+		}
+	}()
 	var snapshot herdr.Snapshot
 	if registered {
 		// With no Lead workspace left (`posse down`, a closed group or a

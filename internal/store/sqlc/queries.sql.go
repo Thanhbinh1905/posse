@@ -460,17 +460,24 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 }
 
 const insertLeadStartClaim = `-- name: InsertLeadStartClaim :execresult
-INSERT INTO lead_start_claims(project_id, claimed_at) VALUES (?, ?)
+INSERT INTO lead_start_claims(project_id, claimed_at, holder, pid) VALUES (?, ?, ?, ?)
 ON CONFLICT(project_id) DO NOTHING
 `
 
 type InsertLeadStartClaimParams struct {
 	ProjectID int64
 	ClaimedAt int64
+	Holder    string
+	Pid       int64
 }
 
 func (q *Queries) InsertLeadStartClaim(ctx context.Context, arg InsertLeadStartClaimParams) (sql.Result, error) {
-	return q.db.ExecContext(ctx, insertLeadStartClaim, arg.ProjectID, arg.ClaimedAt)
+	return q.db.ExecContext(ctx, insertLeadStartClaim,
+		arg.ProjectID,
+		arg.ClaimedAt,
+		arg.Holder,
+		arg.Pid,
+	)
 }
 
 const insertNotice = `-- name: InsertNotice :execresult
@@ -756,6 +763,23 @@ func (q *Queries) LastNoticeNotification(ctx context.Context, projectID int64) (
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const leadStartClaim = `-- name: LeadStartClaim :one
+SELECT claimed_at, holder, pid FROM lead_start_claims WHERE project_id = ?
+`
+
+type LeadStartClaimRow struct {
+	ClaimedAt int64
+	Holder    string
+	Pid       int64
+}
+
+func (q *Queries) LeadStartClaim(ctx context.Context, projectID int64) (LeadStartClaimRow, error) {
+	row := q.db.QueryRowContext(ctx, leadStartClaim, projectID)
+	var i LeadStartClaimRow
+	err := row.Scan(&i.ClaimedAt, &i.Holder, &i.Pid)
+	return i, err
 }
 
 const liveTasks = `-- name: LiveTasks :many
@@ -1291,6 +1315,33 @@ func (q *Queries) QueueMessage(ctx context.Context, arg QueueMessageParams) (sql
 	return q.db.ExecContext(ctx, queueMessage, arg.TaskID, arg.Body, arg.CreatedAt)
 }
 
+const reclaimLeadStartClaim = `-- name: ReclaimLeadStartClaim :execresult
+UPDATE lead_start_claims SET claimed_at = ?, holder = ?, pid = ?
+WHERE project_id = ? AND claimed_at = ? AND holder = ? AND pid = ?
+`
+
+type ReclaimLeadStartClaimParams struct {
+	ClaimedAt   int64
+	Holder      string
+	Pid         int64
+	ProjectID   int64
+	ClaimedAt_2 int64
+	Holder_2    string
+	Pid_2       int64
+}
+
+func (q *Queries) ReclaimLeadStartClaim(ctx context.Context, arg ReclaimLeadStartClaimParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, reclaimLeadStartClaim,
+		arg.ClaimedAt,
+		arg.Holder,
+		arg.Pid,
+		arg.ProjectID,
+		arg.ClaimedAt_2,
+		arg.Holder_2,
+		arg.Pid_2,
+	)
+}
+
 const recordNoticeNotification = `-- name: RecordNoticeNotification :exec
 INSERT INTO notice_notifications(project_id, notified_at) VALUES (?, ?)
 ON CONFLICT(project_id) DO UPDATE SET notified_at = excluded.notified_at
@@ -1306,26 +1357,18 @@ func (q *Queries) RecordNoticeNotification(ctx context.Context, arg RecordNotice
 	return err
 }
 
-const refreshLeadStartClaim = `-- name: RefreshLeadStartClaim :execresult
-UPDATE lead_start_claims SET claimed_at = ? WHERE project_id = ? AND claimed_at <= ?
-`
-
-type RefreshLeadStartClaimParams struct {
-	ClaimedAt   int64
-	ProjectID   int64
-	ClaimedAt_2 int64
-}
-
-func (q *Queries) RefreshLeadStartClaim(ctx context.Context, arg RefreshLeadStartClaimParams) (sql.Result, error) {
-	return q.db.ExecContext(ctx, refreshLeadStartClaim, arg.ClaimedAt, arg.ProjectID, arg.ClaimedAt_2)
-}
-
 const releaseLeadStart = `-- name: ReleaseLeadStart :exec
-DELETE FROM lead_start_claims WHERE project_id = ?
+DELETE FROM lead_start_claims WHERE project_id = ? AND holder = ? AND pid = ?
 `
 
-func (q *Queries) ReleaseLeadStart(ctx context.Context, projectID int64) error {
-	_, err := q.db.ExecContext(ctx, releaseLeadStart, projectID)
+type ReleaseLeadStartParams struct {
+	ProjectID int64
+	Holder    string
+	Pid       int64
+}
+
+func (q *Queries) ReleaseLeadStart(ctx context.Context, arg ReleaseLeadStartParams) error {
+	_, err := q.db.ExecContext(ctx, releaseLeadStart, arg.ProjectID, arg.Holder, arg.Pid)
 	return err
 }
 

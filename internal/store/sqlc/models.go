@@ -82,6 +82,8 @@ type Intent struct {
 type LeadStartClaim struct {
 	ProjectID int64
 	ClaimedAt int64
+	Holder    string
+	Pid       int64
 }
 
 type MemberPrPollState struct {
