@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,14 +16,16 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
-func installFullPipelinePlan(t *testing.T, fixture *prMergeFixture) {
+func installFullPipelinePlan(t *testing.T, fixture *prMergeFixture, workflowOptIn ...bool) {
 	t.Helper()
+	runWorkflows := len(workflowOptIn) > 0 && workflowOptIn[0]
 	plan, err := taskplan.Resolve(taskplan.Request{
 		Brief:     taskplan.Select("brief", "change.md", []byte("---\ntype: change\ntitle: Candidate\ndone_when: candidate is promoted\n---\nImplement the requested change.\n")),
 		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
 		Launch:    taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
 		Review:    "full-pipeline", Delivery: "pr", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
-		Paths: taskplan.Paths{Scratch: filepath.Join(fixture.home, "scratch", "shop", "t1"), Output: filepath.Join(fixture.home, "projects", "shop", "tasks", "t1")},
+		Paths:        taskplan.Paths{Scratch: filepath.Join(fixture.home, "scratch", "shop", "t1"), Output: filepath.Join(fixture.home, "projects", "shop", "tasks", "t1")},
+		WorkflowJobs: runWorkflows,
 	})
 	if err != nil {
 		t.Fatalf("resolve full-pipeline plan: %v", err)
@@ -307,6 +310,108 @@ func TestFullPipelineRepairsReturnThroughPrivateCandidateValidation(t *testing.T
 		if !strings.Contains(gate, required) {
 			t.Errorf("full-pipeline Gate instruction omitted %q: %s", required, gate)
 		}
+	}
+}
+
+func TestFullPipelineWorkflowJobsRequireFrozenUserOptInAndBlockPromotion(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	writeWorkflow(t, fixture.worktree, "ci.yml", `name: candidate workflow
+on: pull_request
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: test -f change.txt
+`)
+	gitTest(t, fixture.worktree, "add", ".github/workflows/ci.yml")
+	gitTest(t, fixture.worktree, "commit", "-m", "add local workflow")
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "fixture test -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("test stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"); code != 0 {
+		t.Fatalf("docs stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, _ := runCandidateCLI(t, fixture, candidate, "validate", "lint", "--proof", "Configured Gates passed", "--coverage", "Local workflow execution was not enabled"); code != 1 || !strings.Contains(output, "workflow_jobs_blocked") {
+		t.Fatalf("unapproved workflow execution did not block lint: exit=%d output=%s", code, output)
+	}
+	stages, err := fixture.db.ValidationStages(context.Background(), fixture.task.ID)
+	if err != nil || len(stages) != 3 {
+		t.Fatalf("stage history=%+v err=%v", stages, err)
+	}
+	var lint *store.ValidationStageResult
+	for index := range stages {
+		if stages[index].Stage == "lint" {
+			lint = &stages[index]
+		}
+	}
+	if lint == nil || lint.Status != "failed" || lint.CandidateSHA != candidate.CandidateSHA {
+		t.Fatalf("failed lint result was not bound to candidate: %+v", lint)
+	}
+	var coverage localWorkflowCoverage
+	if err := json.Unmarshal([]byte(lint.Coverage), &coverage); err != nil || coverage.Enabled || len(coverage.Workflows) != 1 || len(coverage.Workflows[0].Jobs) != 1 || coverage.Workflows[0].Jobs[0].Status != "not_applicable" {
+		t.Fatalf("disabled job was not durably reported as not applicable: %+v err=%v raw=%s", coverage, err, lint.Coverage)
+	}
+	if err := runCandidatePromotionForTest(t, fixture); err == nil || !strings.Contains(err.Error(), "no current passing lint result") {
+		t.Fatalf("promotion accepted the failed workflow gate: %v", err)
+	}
+	if remote, err := remoteBranchHead(context.Background(), fixture.worktree, "refs/heads/posse/t1"); err != nil || remote != "" {
+		t.Fatalf("unapproved workflow job moved origin: head=%q err=%v", remote, err)
+	}
+}
+
+func TestSupportedWorkflowFailureIsRecordedAndBlocksPromotion(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture, true)
+	writeWorkflow(t, fixture.worktree, "ci.yml", `name: candidate failure
+on: pull_request
+jobs:
+  failing-check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo workflow-failure-output; exit 7
+`)
+	gitTest(t, fixture.worktree, "add", ".github/workflows/ci.yml")
+	gitTest(t, fixture.worktree, "commit", "-m", "add failing local workflow")
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "fixture test -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("test stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"); code != 0 {
+		t.Fatalf("docs stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, _ := runCandidateCLI(t, fixture, candidate, "validate", "lint", "--proof", "Gates passed", "--coverage", "Execute pull-request workflow jobs"); code != 1 || !strings.Contains(output, "gate_failed") {
+		t.Fatalf("supported workflow failure did not fail lint: exit=%d output=%s", code, output)
+	}
+	stages, err := fixture.db.ValidationStages(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lint *store.ValidationStageResult
+	for index := range stages {
+		if stages[index].Stage == "lint" {
+			lint = &stages[index]
+		}
+	}
+	if lint == nil || lint.Status != "failed" || lint.CandidateSHA != candidate.CandidateSHA || !strings.Contains(lint.Coverage, "workflow-failure-output") {
+		t.Fatalf("failed workflow outcome was not candidate-bound and retained: %+v", lint)
+	}
+	if err := runCandidatePromotionForTest(t, fixture); err == nil || !strings.Contains(err.Error(), "no current passing lint result") {
+		t.Fatalf("promotion accepted a failing workflow: %v", err)
+	}
+	if remote, err := remoteBranchHead(context.Background(), fixture.worktree, "refs/heads/posse/t1"); err != nil || remote != "" {
+		t.Fatalf("failing workflow moved origin: head=%q err=%v", remote, err)
 	}
 }
 

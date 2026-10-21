@@ -127,8 +127,9 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		Review: review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
 		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
-		Gate:  cfg.Defaults.Gate, ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, Gate: cfg.GateLoop, CI: cfg.CILoop},
-		MergeMethod: cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup}})
+		Gate:  cfg.Defaults.Gate, WorkflowJobs: cfg.FullPipeline.RunWorkflows,
+		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, Gate: cfg.GateLoop, CI: cfg.CILoop},
+		MergeMethod:     cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup}})
 }
 
 // Restore files absent after a crash from the admitted inputs, never from

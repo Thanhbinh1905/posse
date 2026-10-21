@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -183,13 +184,50 @@ func TestFullPipelineValidatesPrivateCandidateBeforeBareOriginPublication(t *tes
 	stopBackgroundWatch(t, f)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "full-pipeline")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "full_pipeline.run_workflows", "true", "--project", "shop")
 	if code, output := startReviewIdentityTask(t, f, "Validate before publish", "author", ""); code != 0 {
 		t.Fatalf("start Change Task: code=%d %s", code, output)
 	}
 	change := f.mustTask(t, "t1")
-	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate head")
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "change.txt"), []byte("candidate content\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, change.WorktreePath, "add", "change.txt")
+	gitTest(t, f.env, change.WorktreePath, "commit", "-m", "add candidate content")
+	workflowDir := filepath.Join(change.WorktreePath, ".github", "workflows")
+	if err := os.MkdirAll(workflowDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	workflow := `name: Candidate CI
+on: pull_request
+jobs:
+  local-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify candidate and sanitized environment
+        run: |
+          test -f change.txt
+          test -z "${GH_TOKEN:-}"
+          printf 'ran\n' > "$POSSE_TASK_TEMP/workflow-ran"
+  windows:
+    runs-on: windows-latest
+    steps:
+      - run: exit 99
+  secret-dependent:
+    runs-on: ubuntu-latest
+    env:
+      ACTION_TOKEN: ${{ secrets.ACTION_TOKEN }}
+    steps:
+      - run: exit 99
+`
+	if err := os.WriteFile(filepath.Join(workflowDir, "ci.yml"), []byte(workflow), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, change.WorktreePath, "add", ".github/workflows/ci.yml")
+	gitTest(t, f.env, change.WorktreePath, "commit", "-m", "add candidate workflow fixture")
 	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
 	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	workerEnv = setEnv(workerEnv, "GH_TOKEN", "fixture-secret-must-not-reach-workflow")
 	code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv,
 		"publish", "Candidate summary", "--verify", "go test ./... -> passed",
 		"--proof", "Intent behavior verified", "--risk", "Risk: low\nRollback: revert")
@@ -223,7 +261,7 @@ func TestFullPipelineValidatesPrivateCandidateBeforeBareOriginPublication(t *tes
 	for _, args := range [][]string{
 		{"validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent/E2E behavior verified"},
 		{"validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"},
-		{"validate", "lint", "--proof", "Configured Gates passed", "--coverage", "No local workflow jobs are configured"},
+		{"validate", "lint", "--proof", "Configured Gates passed", "--coverage", "Run candidate CI shell steps; report Windows and secret-dependent jobs as not applicable"},
 	} {
 		code, output = runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, args...)
 		if code != 0 {
@@ -235,10 +273,37 @@ func TestFullPipelineValidatesPrivateCandidateBeforeBareOriginPublication(t *tes
 	if err != nil || len(stages) != 3 {
 		t.Fatalf("persisted local stages=%+v err=%v", stages, err)
 	}
+	var lintCoverage string
 	for _, stage := range stages {
 		if stage.Status != "passed" || stage.CandidateSHA != candidate.CandidateSHA {
 			t.Fatalf("stage is not bound to final private head: %+v", stage)
 		}
+		if stage.Stage == "lint" {
+			lintCoverage = stage.Coverage
+		}
+	}
+	var coverage struct {
+		Schema    string `json:"schema"`
+		Enabled   bool   `json:"enabled"`
+		Workflows []struct {
+			Jobs []struct {
+				Name   string `json:"name"`
+				Status string `json:"status"`
+			} `json:"jobs"`
+		} `json:"workflows"`
+	}
+	if err := json.Unmarshal([]byte(lintCoverage), &coverage); err != nil || coverage.Schema != "posse.local-workflow-coverage.v1" || !coverage.Enabled || len(coverage.Workflows) != 1 || len(coverage.Workflows[0].Jobs) != 3 {
+		t.Fatalf("candidate-bound workflow coverage is incomplete: %+v err=%v raw=%s", coverage, err, lintCoverage)
+	}
+	jobs := map[string]string{}
+	for _, job := range coverage.Workflows[0].Jobs {
+		jobs[job.Name] = job.Status
+	}
+	if jobs["local-shell"] != "passed" || jobs["windows"] != "not_applicable" || jobs["secret-dependent"] != "not_applicable" {
+		t.Fatalf("workflow job outcomes are not explicit: %#v", jobs)
+	}
+	if data, err := os.ReadFile(filepath.Join(f.home, "scratch", "shop", "t1", "workflow-ran")); err != nil || string(data) != "ran\n" {
+		t.Fatalf("supported workflow job did not execute in Task scratch: %q err=%v", data, err)
 	}
 	code, output = runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "Candidate summary")
 	if code != 0 || !strings.Contains(output, "promoted: candidate") {
