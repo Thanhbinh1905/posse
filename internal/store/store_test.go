@@ -504,6 +504,8 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 		`DROP TABLE review_findings`,
 		`DROP TABLE review_patterns`,
 		`DROP TABLE review_rounds`,
+		`ALTER TABLE lead_start_claims DROP COLUMN pid`,
+		`ALTER TABLE lead_start_claims DROP COLUMN holder`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`ALTER TABLE projects ADD COLUMN project_uuid TEXT NOT NULL DEFAULT ''`,
@@ -622,6 +624,8 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		`DROP TABLE review_patterns`,
 		`DROP TABLE review_rounds`,
 		`DROP TABLE task_turn_tokens`,
+		`ALTER TABLE lead_start_claims DROP COLUMN pid`,
+		`ALTER TABLE lead_start_claims DROP COLUMN holder`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`,
@@ -812,6 +816,8 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`DROP TABLE review_patterns`,
 		`DROP TABLE review_rounds`,
 		`DROP TABLE task_turn_tokens`,
+		`ALTER TABLE lead_start_claims DROP COLUMN pid`,
+		`ALTER TABLE lead_start_claims DROP COLUMN holder`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -1404,7 +1410,7 @@ func TestLeadStartClaimAllowsOnlyOneConcurrentLead(t *testing.T) {
 		go func(db *DB) {
 			defer group.Done()
 			<-start
-			claimed, err := db.ClaimLeadStart(ctx, project.ID, now, now-2*time.Minute.Milliseconds())
+			claimed, err := db.ClaimLeadStart(ctx, project.ID, now, now-2*time.Minute.Milliseconds(), "up", os.Getpid())
 			results <- claimed
 			errors <- err
 		}(db)
@@ -1427,13 +1433,102 @@ func TestLeadStartClaimAllowsOnlyOneConcurrentLead(t *testing.T) {
 	if claims != 1 {
 		t.Fatalf("concurrent Lead claims = %d, want 1", claims)
 	}
-	claimed, err := second.ClaimLeadStart(ctx, project.ID, now+3*time.Minute.Milliseconds(), now+time.Minute.Milliseconds())
+	claimed, err := second.ClaimLeadStart(ctx, project.ID, now+3*time.Minute.Milliseconds(), now+time.Minute.Milliseconds(), "watch-recovery", os.Getpid())
 	if err != nil || !claimed {
 		t.Fatalf("stale Lead start claim was not recovered = %t, %v", claimed, err)
 	}
-	claimed, err = first.ClaimLeadStart(ctx, project.ID, now+3*time.Minute.Milliseconds()+1, now+time.Minute.Milliseconds())
+	claimed, err = first.ClaimLeadStart(ctx, project.ID, now+3*time.Minute.Milliseconds()+1, now+time.Minute.Milliseconds(), "up", os.Getpid())
 	if err != nil || claimed {
 		t.Fatalf("fresh Lead start claim allowed a second owner = %t, %v", claimed, err)
+	}
+}
+
+func TestReleaseLeadStartRetriesTransientContention(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	locker, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close()
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if claimed, err := db.ClaimLeadStart(ctx, project.ID, now, now-2*time.Minute.Milliseconds(), "up", os.Getpid()); err != nil || !claimed {
+		t.Fatalf("seed Lead start claim = %t, %v", claimed, err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA busy_timeout=25`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := locker.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE projects SET name=name WHERE id=?`, project.ID); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() { released <- db.ReleaseLeadStart(ctx, project.ID, "up", os.Getpid()) }()
+	time.Sleep(70 * time.Millisecond)
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-released; err != nil {
+		t.Fatalf("release did not retry after transient contention: %v", err)
+	}
+	if _, err := db.LeadStartClaim(ctx, project.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("claim after successful retry = %v, want no row", err)
+	}
+}
+
+func TestReleaseLeadStartReturnsPersistentFailure(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReleaseLeadStart(context.Background(), 1, "up", os.Getpid()); err == nil {
+		t.Fatal("ReleaseLeadStart discarded a persistent database failure")
+	}
+}
+
+func TestLeadStartClaimReclaimsDeadProcessImmediately(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("immediate dead-process reclamation requires procfs")
+	}
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	claimed, err := db.ClaimLeadStart(ctx, project.ID, now, now-2*time.Minute.Milliseconds(), "watch-recovery", 2147483647)
+	if err != nil || !claimed {
+		t.Fatalf("seed dead-process claim = %t, %v", claimed, err)
+	}
+	claimed, err = db.ClaimLeadStart(ctx, project.ID, now+1, now+1-2*time.Minute.Milliseconds(), "up", os.Getpid())
+	if err != nil || !claimed {
+		t.Fatalf("live caller could not immediately reclaim dead-process claim = %t, %v", claimed, err)
+	}
+	claim, err := db.LeadStartClaim(ctx, project.ID)
+	if err != nil || claim.Holder != "up" || claim.PID != int64(os.Getpid()) {
+		t.Fatalf("reclaimed claim = %+v, %v", claim, err)
 	}
 }
 

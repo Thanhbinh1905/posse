@@ -510,6 +510,10 @@ rows = [["state_icon", "machine", { token = "workspace", rules = [{ starts_with 
 	// The fake Worker stays working until torn down. Keep the fake Lead alive
 	// so its detached startup finalizer can observe the agent.
 	agent := `#!/bin/sh
+case "$PWD/" in
+  "$POSSE_E2E_WORKTREES/"*) ;;
+  *) while [ -f "$POSSE_TEST_ROOT/hold-lead-start" ]; do sleep 0.05; done ;;
+esac
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
 case "$PWD/" in
   "$POSSE_E2E_WORKTREES/"*)

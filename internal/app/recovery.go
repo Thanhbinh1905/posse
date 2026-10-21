@@ -655,16 +655,22 @@ func (s *Service) ensureRecoveryWorkspace(ctx context.Context, db *store.DB, pro
 	return db.ProjectByID(ctx, project.ID)
 }
 
-func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, snapshot herdr.Snapshot) error {
+func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, snapshot herdr.Snapshot) (returnErr error) {
 	now := time.Now()
-	claimed, err := db.ClaimLeadStart(ctx, project.ID, now.UnixMilli(), now.Add(-2*time.Minute).UnixMilli())
+	claimed, err := db.ClaimLeadStart(ctx, project.ID, now.UnixMilli(), now.Add(-2*time.Minute).UnixMilli(), "watch-recovery", os.Getpid())
 	if err != nil {
 		return err
 	}
 	if !claimed {
 		return nil
 	}
-	defer db.ReleaseLeadStart(context.Background(), project.ID)
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if releaseErr := db.ReleaseLeadStart(releaseCtx, project.ID, "watch-recovery", os.Getpid()); releaseErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("release Lead start claim: %w", releaseErr))
+		}
+	}()
 	var current *herdr.Pane
 	leadLabel := project.LeadLabel
 	if leadLabel == "" {
