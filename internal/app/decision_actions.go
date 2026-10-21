@@ -123,6 +123,43 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		}
+	case "review_cap":
+		taskRef, expectedHead, ok := parseReviewCapOrigin(decision.Origin)
+		if !ok || taskRef != taskIDString(task.Seq) || task.Type != "change" {
+			return axi.Failure("decision_refused", "Review cap Decision binding is invalid", false)
+		}
+		actualHead, err := currentReviewCapHead(out.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		if actualHead != expectedHead {
+			return axi.Failure("decision_refused", "the reviewed candidate head changed after this Review cap Decision; refresh the cap Notice before applying it", false)
+		}
+		switch decision.Answer {
+		case "accept-head":
+			if err := db.RecordReviewDisposition(out.Context, task.ID, decision.ID, expectedHead, decision.UserQuote, userDispositionBlockAt(task)); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "head", Value: expectedHead}})
+		case "final-fix":
+			queued, err := s.queueReviewFix(out.Context, db, project, task, nil, true)
+			if err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "final-fix-queued"}, {Key: "message", Value: queued.MessageID}, {Key: "patterns", Value: queued.Selected}})
+		case "rethink":
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "rethink"}, {Key: "help", Value: []any{"Create a new Change Brief with `supersedes: " + taskIDString(task.Seq) + "`, then run `posse start --brief <file>`; inherited findings stay visible without being reported again.", "The capped Task remains unchanged; use the normal discard or Orphan path when appropriate."}}})
+		case "discard":
+			if task.State == store.StateTornDown {
+				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+			}
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		default:
+			return axi.Failure("decision_refused", "unknown Review cap Decision answer", false)
+		}
 	case "review":
 		if decision.Answer == "ignore" {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "ignored"}})

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,8 +29,31 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return err
 	}
+	capNotices, err := db.ReviewCapNotices(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	byID := make(map[int64]store.Notice, len(notices)+len(capNotices))
 	for _, notice := range notices {
-		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited") {
+		byID[notice.ID] = notice
+	}
+	latestCapNotice := map[int64]int64{}
+	for _, notice := range capNotices {
+		byID[notice.ID] = notice
+		if notice.ID > latestCapNotice[notice.TaskID] {
+			latestCapNotice[notice.TaskID] = notice.ID
+		}
+	}
+	notices = notices[:0]
+	for _, notice := range byID {
+		notices = append(notices, notice)
+	}
+	sort.Slice(notices, func(i, j int) bool { return notices[i].ID < notices[j].ID })
+	for _, notice := range notices {
+		if notice.Kind == "review_cap_reached" && latestCapNotice[notice.TaskID] != notice.ID {
+			continue
+		}
+		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited", "review_cap_reached") {
 			continue
 		}
 		task, err := db.TaskByID(ctx, project.ID, notice.TaskID)
@@ -44,6 +68,18 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		}
 		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
 		switch {
+		case notice.Kind == "review_cap_reached" && task.Type == "change":
+			head, used, max, err := reviewCapNoticeData(notice)
+			if err != nil {
+				return err
+			}
+			if err := db.ObsoleteStaleReviewCapDecisions(ctx, task.ID, reviewCapOrigin(task, head)); err != nil {
+				return err
+			}
+			request.Kind = "review_cap"
+			request.Origin = reviewCapOrigin(task, head)
+			request.Question = fmt.Sprintf("Review and repair cap reached for %s at %s (%d of %d Review/repair rounds used). Choose how to proceed.", taskIDString(task.Seq), shortSHA(head), used, max)
+			request.Options = []string{"accept-head", "final-fix", "rethink", "discard"}
 		case notice.Kind == "merge_ready" && task.AutonomyMerge != "auto" && (task.State == store.StateDone || task.State == store.StateMerging):
 			request.Kind = "merge_ready"
 			request.Question = "Merge " + task.Title + "? " + notice.Summary

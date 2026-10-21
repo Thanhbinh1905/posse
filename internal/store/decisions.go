@@ -43,7 +43,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least two options")
 	}
 	switch request.Kind {
-	case "merge_ready", "recovery", "worker_exited", "review", "worker_question", "orphan", "pr_closed":
+	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed":
 	default:
 		return Decision{}, fmt.Errorf("invalid Decision kind %q", request.Kind)
 	}
@@ -108,6 +108,25 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 		return Decision{}, err
 	}
 	return decision, nil
+}
+
+// ObsoleteStaleReviewCapDecisions retires unanswered cap choices for an older
+// exact head, preserving answered history.
+func (db *DB) ObsoleteStaleReviewCapDecisions(ctx context.Context, taskID int64, currentOrigin string) error {
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID); err != nil {
+		return err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Review candidate head changed'
+WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0 AND origin<>?`, time.Now().UnixMilli(), taskID, currentOrigin)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 // ObsoletePendingPRDecision retires a stale observation without changing a
@@ -259,6 +278,25 @@ func (db *DB) Decision(ctx context.Context, projectID, id int64) (Decision, erro
 	return decisionRow(db.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND id=?`, projectID, id))
 }
 
+// ReviewCapNotices returns cap Notices regardless of the general decision cursor,
+// so a newer exact-head cap cannot be skipped by older reconciliation state.
+func (db *DB) ReviewCapNotices(ctx context.Context, projectID int64) ([]Notice, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id,project_id,COALESCE(task_id,0),kind,summary,data_json,created_at,COALESCE(delivered_at,0),COALESCE(acked_at,0) FROM notices WHERE project_id=? AND kind='review_cap_reached' ORDER BY id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var notices []Notice
+	for rows.Next() {
+		var notice Notice
+		if err := rows.Scan(&notice.ID, &notice.ProjectID, &notice.TaskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &notice.DeliveredAt, &notice.AckedAt); err != nil {
+			return nil, err
+		}
+		notices = append(notices, notice)
+	}
+	return notices, rows.Err()
+}
+
 // DecisionSourceNotices returns unevaluated Notices and merge_ready Notices
 // without a Decision, even if the cursor advanced before reconciliation completed.
 func (db *DB) DecisionSourceNotices(ctx context.Context, projectID int64) ([]Notice, error) {
@@ -346,7 +384,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
-	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" {
+	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" {
 		return "", nil
 	}
 	var state State

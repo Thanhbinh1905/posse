@@ -69,8 +69,12 @@ func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 	if code, out := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 {
 		t.Fatalf("current pass refused: %d %s", code, out)
 	}
-	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "unreviewed follow-up")
-	code, out := runReviewIdentityCLI(t, f, "merge", "t1", "--execute")
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "unreviewed-follow-up.txt"), []byte("new review scope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, change.WorktreePath, "add", "unreviewed-follow-up.txt")
+	gitTest(t, f.env, change.WorktreePath, "commit", "-m", "unreviewed follow-up")
+	code, out := runReviewIdentityCLI(t, f, "merge", "t1")
 	if code != 1 || !strings.Contains(out, "review_required") {
 		t.Fatalf("stale pass admitted: %d %s", code, out)
 	}
@@ -96,6 +100,32 @@ func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "main")); got != strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "refs/heads/"+change.Branch)) {
 		t.Fatal("merge did not merge the reviewed candidate")
+	}
+}
+
+func TestQuickLocalMergeUsesExactHeadPassWithoutOrigin(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, f)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "quick")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
+	if code, output := startReviewIdentityTask(t, f, "Local without origin", "author", ""); code != 0 {
+		t.Fatalf("start Change: %d %s", code, output)
+	}
+	change := f.mustTask(t, "t1")
+	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
+	signalReviewPolicyTask(t, f, change)
+	if code, output := startReviewIdentityTask(t, f, "Pass local candidate", "reviewer", "t1"); code != 0 {
+		t.Fatalf("start Review: %d %s", code, output)
+	}
+	review := f.mustTask(t, "t2")
+	report := filepath.Join(f.home, "scratch", "shop", "t2", "report.md")
+	if err := os.WriteFile(report, []byte("Exact candidate passes.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, review, "--report", report, "--verdict", "pass")
+	gitTest(t, f.env, change.WorktreePath, "remote", "remove", "origin")
+	if code, output := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 {
+		t.Fatalf("exact-head quick pass did not permit local merge without origin: %d %s", code, output)
 	}
 }
 

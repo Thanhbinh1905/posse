@@ -149,7 +149,7 @@ func (s *Service) commands() *axi.Command {
 			{Name: "advance", Usage: "$ workflow advance <run> --to <next-stage> --user-approved <quote> [--abandon <task>]...", Summary: "Record User approval to advance a run to its next profile stage.", Handler: s.workflowAdvance},
 		}},
 		{Name: "start", Usage: "$ start --brief <file> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>]", Summary: "Start a Worker from a Brief with an optional display name.", Handler: s.spawn},
-		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--turn <token>] [--findings <file>] [--report <file>]", Summary: "Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.", Handler: s.signal},
+		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--turn <token>] [--findings <file>] [--resolutions <file>] [--report <file>]", Summary: "Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Publish or submit this PR-mode Change Task according to its frozen review mode. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "validate", Usage: "$ validate <status|test|docs|lint> [--repo <member>] [stage evidence flags]", Summary: "Record ordered, exact-head full-pipeline evidence from the private candidate checkout.", Handler: s.validateCandidate},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Worker's next publish will use.", Handler: s.retitle},
@@ -162,8 +162,12 @@ func (s *Service) commands() *axi.Command {
 		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Interrupt a working Worker and verify it stopped; report when no working turn can be interrupted.", Handler: s.interrupt},
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Worker in the same execution root, optionally with another Profile.", Handler: s.relaunch},
 		{Name: "merge", Usage: "$ merge <task> [--execute] [--user-approved <quote>]", Summary: "Merge a completed Change Task; PR merges require the gated head to include the target branch.", Handler: s.merge},
-		{Name: "review", Summary: "Inspect and admit built-in Review Rounds.", Subcommands: []*axi.Command{
+		{Name: "review", Usage: "$ review <change> [--full]", Summary: "Inspect Review Rounds, findings, carries and remaining budget.", Handler: s.reviewStatus, Subcommands: []*axi.Command{
 			{Name: "start", Usage: "$ review start <change> [--profile <name>] [--name <short>]", Summary: "Admit the next numbered Review Round with its frozen delta scope.", Handler: s.reviewStart},
+			{Name: "fix", Usage: "$ review fix <change> [--pattern P-n]...", Summary: "Queue one whole-pattern fix instruction for the Change Worker.", Handler: s.reviewFix},
+			{Name: "carry", Usage: "$ review carry <change> <passed-head> <candidate-head>", Summary: "Record a Review-only carry for a tree-identical private candidate merge.", Handler: s.reviewCarry},
+			{Name: "dispose", Usage: "$ review dispose <change> <F-n|P-n>... <fix|accept|defer|withdraw|reclassify> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]", Summary: "Record a finding disposition or queue a whole-pattern fix.", Handler: s.reviewDispose},
+			{Name: "merge", Usage: "$ review merge <change> <P-n> <P-n>...", Summary: "Merge duplicate Finding Patterns into the first pattern.", Handler: s.reviewMergePatterns},
 		}},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "teardown", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Sandbox work with User approval and verified Worker shutdown.", Handler: s.teardown},

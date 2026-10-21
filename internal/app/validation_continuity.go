@@ -19,9 +19,33 @@ func (s *Service) recordWorkerSignalWithContinuity(
 	noticeKind string,
 	verdict *store.ReviewVerdictInput,
 	inPlace bool,
+	resolutions ...*store.ReviewFixResolutionsInput,
 ) (store.State, error) {
-	if verb != "done" || task.Type != "change" || inPlace || project.IsWorkspace() {
+	var reviewResolutions *store.ReviewFixResolutionsInput
+	if len(resolutions) > 0 {
+		reviewResolutions = resolutions[0]
+	}
+	record := func(validation *store.ValidationContinuitySnapshot) (store.State, error) {
+		if validation != nil {
+			if reviewResolutions != nil {
+				return db.RecordWorkerSignalWithValidationAndResolutions(ctx, task, verb, note, data, noticeKind, *validation, reviewResolutions)
+			}
+			return db.RecordWorkerSignalWithValidation(ctx, task, verb, note, data, noticeKind, *validation)
+		}
+		if reviewResolutions != nil {
+			return db.RecordWorkerSignalWithResolutions(ctx, task, verb, note, data, noticeKind, verdict, reviewResolutions)
+		}
 		return db.RecordWorkerSignalWithVerdict(ctx, task, verb, note, data, noticeKind, verdict)
+	}
+	if verb != "done" || task.Type != "change" || inPlace || project.IsWorkspace() {
+		return record(nil)
+	}
+	plan, planErr := task.AdmittedPlan()
+	if planErr != nil {
+		return "", admittedPlanFailure(planErr)
+	}
+	if plan != nil && plan.Review == "full-pipeline" {
+		return record(nil)
 	}
 
 	for attempt := 0; attempt < 3; attempt++ {
@@ -29,7 +53,7 @@ func (s *Service) recordWorkerSignalWithContinuity(
 		if err != nil {
 			return "", err
 		}
-		state, err := db.RecordWorkerSignalWithValidation(ctx, task, verb, note, data, noticeKind, validation)
+		state, err := record(&validation)
 		if !errors.Is(err, store.ErrValidationHeadsChanged) {
 			return state, err
 		}

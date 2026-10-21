@@ -8,19 +8,22 @@ import (
 )
 
 var (
-	ErrReviewRoundActive    = errors.New("review round is already active")
-	ErrReviewRoundUnchanged = errors.New("change head is unchanged since its last review")
-	ErrReviewRoundCap       = errors.New("review round cap reached")
-	ErrReviewRoundNumber    = errors.New("review round number changed concurrently")
+	ErrReviewRoundActive         = errors.New("review round is already active")
+	ErrReviewRoundUnchanged      = errors.New("change head is unchanged since its last review")
+	ErrReviewRoundCap            = errors.New("review round cap reached")
+	ErrReviewRoundNumber         = errors.New("review round number changed concurrently")
+	ErrReviewResolutionsRequired = errors.New("review fix resolutions are required")
+	ErrReviewResolutionsInvalid  = errors.New("review fix resolutions are invalid")
 )
 
 // ReviewRoundAdmission binds a new Review Task to one numbered round. All
 // repository bindings are inserted with the Task in the same transaction.
 type ReviewRoundAdmission struct {
-	ChangeTaskID int64
-	Round        int
-	MaxRounds    int
-	Bindings     []ReviewRound
+	ChangeTaskID       int64
+	Round              int
+	MaxRounds          int
+	SharedRepairBudget bool
+	Bindings           []ReviewRound
 }
 
 type ReviewLedgerEntry struct {
@@ -33,7 +36,7 @@ type ReviewLedgerEntry struct {
 
 // ReviewLedgerFor returns the Change Task's current finding ledger in stable ID order.
 func (db *DB) ReviewLedgerFor(ctx context.Context, changeTaskID int64) ([]ReviewLedgerEntry, error) {
-	rows, err := db.QueryContext(ctx, `SELECT f.seq,p.seq,p.key,f.state,f.fingerprint FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id WHERE f.ship_task_id=? ORDER BY f.seq`, changeTaskID)
+	rows, err := db.QueryContext(ctx, `SELECT f.seq,COALESCE(parent.seq,p.seq),COALESCE(parent.key,p.key),CASE WHEN f.inherited_from IS NOT NULL THEN 'inherited' ELSE f.state END,f.fingerprint FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id LEFT JOIN review_patterns parent ON parent.id=p.merged_into WHERE f.ship_task_id=? ORDER BY f.seq`, changeTaskID)
 	if err != nil {
 		return nil, err
 	}
@@ -98,9 +101,14 @@ WHERE rr.ship_task_id=? AND rr.status='admitted'
 	if active {
 		return ErrReviewRoundActive
 	}
-	var used int
+	var used, repairs int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status='verdict'`, admission.ChangeTaskID).Scan(&used); err != nil {
 		return err
+	}
+	if admission.SharedRepairBudget {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','gate','ci')`, admission.ChangeTaskID).Scan(&repairs); err != nil {
+			return err
+		}
 	}
 	if admission.Round != used+1 {
 		return ErrReviewRoundNumber
@@ -128,7 +136,7 @@ SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
 	if !anyNewHead {
 		return ErrReviewRoundUnchanged
 	}
-	if used >= admission.MaxRounds {
+	if used+repairs >= admission.MaxRounds {
 		return ErrReviewRoundCap
 	}
 	return nil
