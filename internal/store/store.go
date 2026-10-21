@@ -1277,25 +1277,78 @@ func (db *DB) SetProjectWorkspace(ctx context.Context, projectID int64, workspac
 	return db.PersistProject(ctx, projectID)
 }
 
-func (db *DB) ClaimLeadStart(ctx context.Context, projectID int64, now, staleBefore int64) (bool, error) {
-	result, err := db.queries.InsertLeadStartClaim(ctx, dbgen.InsertLeadStartClaimParams{ProjectID: projectID, ClaimedAt: now})
+type LeadStartClaim struct {
+	ClaimedAt int64
+	Holder    string
+	PID       int64
+}
+
+func (db *DB) ClaimLeadStart(ctx context.Context, projectID int64, now, staleBefore int64, holder string, pid int) (bool, error) {
+	result, err := db.queries.InsertLeadStartClaim(ctx, dbgen.InsertLeadStartClaimParams{ProjectID: projectID, ClaimedAt: now, Holder: holder, Pid: int64(pid)})
 	if err != nil {
-		return false, err
+		return false, retryableContention(err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil || rows == 1 {
 		return rows == 1, err
 	}
-	result, err = db.queries.RefreshLeadStartClaim(ctx, dbgen.RefreshLeadStartClaimParams{ClaimedAt: now, ProjectID: projectID, ClaimedAt_2: staleBefore})
+	claim, err := db.queries.LeadStartClaim(ctx, projectID)
 	if err != nil {
-		return false, err
+		return false, retryableContention(err)
+	}
+	if claim.ClaimedAt > staleBefore && processAlive(int(claim.Pid)) {
+		return false, nil
+	}
+	result, err = db.queries.ReclaimLeadStartClaim(ctx, dbgen.ReclaimLeadStartClaimParams{
+		ClaimedAt: now, Holder: holder, Pid: int64(pid), ProjectID: projectID,
+		ClaimedAt_2: claim.ClaimedAt, Holder_2: claim.Holder, Pid_2: claim.Pid,
+	})
+	if err != nil {
+		return false, retryableContention(err)
 	}
 	rows, err = result.RowsAffected()
 	return rows == 1, err
 }
 
-func (db *DB) ReleaseLeadStart(ctx context.Context, projectID int64) error {
-	return db.queries.ReleaseLeadStart(ctx, projectID)
+func (db *DB) LeadStartClaim(ctx context.Context, projectID int64) (LeadStartClaim, error) {
+	claim, err := db.queries.LeadStartClaim(ctx, projectID)
+	return LeadStartClaim{ClaimedAt: claim.ClaimedAt, Holder: claim.Holder, PID: claim.Pid}, err
+}
+
+func (db *DB) ReleaseLeadStart(ctx context.Context, projectID int64, holder string, pid int) error {
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		err = retryableContention(db.queries.ReleaseLeadStart(ctx, dbgen.ReleaseLeadStartParams{ProjectID: projectID, Holder: holder, Pid: int64(pid)}))
+		if !errors.Is(err, ErrBusy) {
+			return err
+		}
+		if attempt == 3 {
+			break
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(err, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return fmt.Errorf("release Lead start claim after retries: %w", err)
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil || !os.IsNotExist(err) {
+		return true
+	}
+	// On systems without procfs, retain the time-based lease rather than
+	// risking reclaiming a live process's claim.
+	if _, err := os.Stat("/proc"); os.IsNotExist(err) {
+		return true
+	}
+	return false
 }
 
 func (db *DB) MoveProject(ctx context.Context, projectID int64, newRoot, defaultBranch string) error {
