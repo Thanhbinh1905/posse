@@ -102,6 +102,62 @@ func (fixture *prMergeFixture) advanceTarget(t *testing.T, conflicting, push boo
 	return tip
 }
 
+type prMergeTestProgress struct{}
+
+func (prMergeTestProgress) ReadPane(context.Context, herdr.Adapter, string, int) (string, error) {
+	return "", nil
+}
+
+func (prMergeTestProgress) WorktreeFingerprint(context.Context, string, bool) (string, error) {
+	return "", nil
+}
+
+func TestPRMergeIntentProtectsTaskBeforeProjectReconciliation(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.service.Progress = prMergeTestProgress{}
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+
+	completed, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, status := range []string{"working", "idle"} {
+		if _, err := fixture.db.ObserveCompletedWorker(context.Background(), completed, fixture.task.PaneID, "generation", status, now); err != nil {
+			t.Fatalf("record completed Worker %s status: %v", status, err)
+		}
+		now = now.Add(time.Second)
+	}
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	snapshot := fake.SnapshotValue
+	snapshot.ServerStartedAt = "generation"
+	for index := range snapshot.Panes {
+		if snapshot.Panes[index].PaneID == fixture.task.PaneID {
+			snapshot.Panes[index].AgentStatus = "working"
+		}
+	}
+	fake.SnapshotValue = snapshot
+
+	if code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "User approved the PR merge"); code != 0 || !strings.Contains(output, "state: merging") {
+		t.Fatalf("merge lost to a completed Worker observation: exit=%d output=%s error=%s", code, output, stderr)
+	}
+	current, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || current.State != store.StateMerging {
+		t.Fatalf("merge changed state to %s after Worker observation: %v", current.State, err)
+	}
+}
+
 func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranches(t *testing.T) {
 	for _, scenario := range []struct {
 		name        string

@@ -691,11 +691,31 @@ func TestDownStopsAWedgedProjectWatch(t *testing.T) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	})
 
+	migrationLock, err := os.OpenFile(filepath.Join(f.home, "posse.db.migrate.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrationLock.Close()
+	if err := syscall.Flock(int(migrationLock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	lockRelease := time.AfterFunc(5100*time.Millisecond, func() {
+		_ = syscall.Flock(int(migrationLock.Fd()), syscall.LOCK_UN)
+	})
+	defer func() {
+		lockRelease.Stop()
+		_ = syscall.Flock(int(migrationLock.Fd()), syscall.LOCK_UN)
+	}()
+
 	command := exec.Command(f.binary, "down")
 	command.Dir, command.Env = f.repo, f.env
+	started := time.Now()
 	output, err := command.CombinedOutput()
+	if elapsed := time.Since(started); elapsed < 5*time.Second {
+		t.Fatalf("posse down did not exercise migration-lock contention: elapsed=%s", elapsed)
+	}
 	if err != nil {
-		t.Fatalf("posse down could not stop wedged Watch: %v\n%s", err, output)
+		t.Fatalf("posse down could not stop wedged Watch after transient migration-lock contention: %v\n%s", err, output)
 	}
 	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
 		t.Fatalf("posse down returned while Watch PID %d remained running", pid)
