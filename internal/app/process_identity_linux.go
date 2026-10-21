@@ -16,6 +16,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+var errSandboxProcessChangedWhileBinding = errors.New("Sandbox process identity changed while opening its handle")
+
 type sandboxProcessHandle struct {
 	pid                int
 	fd                 int
@@ -115,7 +117,7 @@ func openSandboxProcessHandle(pid int) (*sandboxProcessHandle, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("PID %d changed process identity while opening pidfd", pid)
+		return nil, fmt.Errorf("%w: PID %d changed process identity while opening pidfd", errSandboxProcessChangedWhileBinding, pid)
 	}
 	currentExecutableIdentity, err := sandboxProcessExecutableIdentity(pid)
 	if err != nil || currentExecutableIdentity != executableIdentity {
@@ -123,7 +125,7 @@ func openSandboxProcessHandle(pid int) (*sandboxProcessHandle, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("PID %d changed executable image while opening pidfd", pid)
+		return nil, fmt.Errorf("%w: PID %d changed executable image while opening pidfd", errSandboxProcessChangedWhileBinding, pid)
 	}
 	return handle, nil
 }
