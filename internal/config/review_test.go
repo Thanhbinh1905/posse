@@ -49,6 +49,24 @@ func TestFullPipelineReviewCanBeSelectedWithoutImplicitDefault(t *testing.T) {
 	}
 }
 
+func TestLocalWorkflowExecutionNeedsExplicitUserConfig(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := Load(home, "shop")
+	if err != nil || cfg.FullPipeline.RunWorkflows {
+		t.Fatalf("workflow execution must default off: %#v err=%v", cfg.FullPipeline, err)
+	}
+	if !IsUserOnly("full_pipeline.run_workflows") {
+		t.Fatal("local workflow execution permission is not User-only")
+	}
+	if _, err := SetFile(ConfigPath(home, "shop"), "full_pipeline.run_workflows", "true", true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(home, "shop")
+	if err != nil || !cfg.FullPipeline.RunWorkflows {
+		t.Fatalf("Project User config did not enable workflow execution: %#v err=%v", cfg.FullPipeline, err)
+	}
+}
+
 func TestProjectReviewShorthandCanBeRepaired(t *testing.T) {
 	for _, action := range []string{"set", "unset"} {
 		t.Run(action, func(t *testing.T) {
