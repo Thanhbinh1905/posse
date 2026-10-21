@@ -63,6 +63,7 @@ var keySpecs = []KeySpec{
 	{Key: "gate_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic Gate fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Change Task.", UserOnly: true},
+	{Key: "full_pipeline.run_workflows", Type: TypeBoolean, Default: false, Meaning: "Explicitly allow locally executing repository CI workflow shell steps in the private full-pipeline candidate; unsupported jobs remain visible and cannot be inferred from repository files.", UserOnly: true},
 	{Key: "repositories.<repo>.merge_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Meaning: "How this member repository of a workspace Project Merges; defaults to local without an origin, else the Project merge_mode. no-mistakes is deprecated and unavailable for workspace Tasks."},
 	{Key: "repositories.<repo>.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for this workspace Member; overrides defaults.target_branch and the Member's default branch."},
 	{Key: "repositories.<repo>.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in this member's worktree before it may Merge; replaces defaults.gate for the member.", UserOnly: true},

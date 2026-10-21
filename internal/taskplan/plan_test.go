@@ -45,6 +45,38 @@ func TestFullPipelineReviewModeCanBeFrozenBeforeVPCRuntime(t *testing.T) {
 	}
 }
 
+func TestWorkflowExecutionPermissionIsFrozenAndDigestBound(t *testing.T) {
+	nonPipeline := request("change")
+	nonPipeline.WorkflowJobs = true
+	withoutWorkflows, err := taskplan.Resolve(nonPipeline)
+	if err != nil || withoutWorkflows.WorkflowJobs {
+		t.Fatalf("workflow execution leaked into a non-full-pipeline plan: %#v err=%v", withoutWorkflows, err)
+	}
+	base := request("change")
+	base.Review = "full-pipeline"
+	disabled, err := taskplan.Resolve(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabledRequest := base
+	enabledRequest.WorkflowJobs = true
+	enabled, err := taskplan.Resolve(enabledRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.WorkflowJobs || !enabled.WorkflowJobs || disabled.SHA256() == enabled.SHA256() {
+		t.Fatalf("workflow execution permission was not frozen into the plan: disabled=%#v enabled=%#v", disabled.WorkflowJobs, enabled.WorkflowJobs)
+	}
+	encoded, err := enabled.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := taskplan.Decode(encoded)
+	if err != nil || !restored.WorkflowJobs || restored.SHA256() != enabled.SHA256() {
+		t.Fatalf("workflow execution permission did not survive plan round-trip: %#v err=%v", restored, err)
+	}
+}
+
 func TestLegacyBriefsResolveWithoutChangingInputsOrLaunchSettings(t *testing.T) {
 	for _, taskType := range []string{"change", "research", "review"} {
 		t.Run(taskType, func(t *testing.T) {
