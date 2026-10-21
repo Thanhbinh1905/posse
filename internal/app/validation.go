@@ -151,6 +151,8 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 	if err != nil || plan == nil {
 		return admittedPlanFailure(fmt.Errorf("full-pipeline Task has no valid admitted plan"))
 	}
+	var workflowFailure error
+	var workflowCoverage string
 	if stage == "test" {
 		if err := requireCandidateReviewPass(out.Context, db, project, task, candidate); err != nil {
 			return err
@@ -197,6 +199,16 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 			}
 			return axi.Failure("gate_failed", gateErr.Error(), false, "Fix the Gate failure in the private candidate, then rerun review -> test -> docs -> lint")
 		}
+		scratch, err := ensureTaskScratchForTask(out.Context, db, home, project, task)
+		if err != nil {
+			return err
+		}
+		coverage, runErr := runLocalWorkflowJobs(out.Context, candidate.WorktreePath, scratch, plan.WorkflowJobs, parsed.Flags["coverage"])
+		workflowCoverage, err = workflowCoverageJSON(coverage)
+		if err != nil {
+			return err
+		}
+		workflowFailure = runErr
 	}
 	if stage == "docs" {
 		if _, err := db.ValidationStage(out.Context, candidate.ID, "test", candidate.CandidateSHA, candidate.TargetSHA, plan.SHA256()); err != nil {
@@ -213,13 +225,31 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 			evidence += "\n\nNo owner documentation changes: " + reason
 		}
 	}
+	stageStatus, summary := "passed", stage+" passed"
+	coverageText := strings.TrimSpace(parsed.Flags["coverage"])
+	if stage == "lint" {
+		coverageText = workflowCoverage
+	}
+	if workflowFailure != nil {
+		stageStatus, summary = "failed", "lint blocked by local workflow coverage"
+	}
 	result, err := db.RecordValidationStage(out.Context, store.ValidationStageResult{
-		TaskID: task.ID, CandidateID: candidate.ID, Repo: candidate.Repo, Stage: stage,
+		TaskID: task.ID, CandidateID: candidate.ID, Repo: candidate.Repo, Stage: stage, Status: stageStatus,
 		CandidateSHA: candidate.CandidateSHA, TargetSHA: candidate.TargetSHA, ConfigSHA256: plan.SHA256(),
-		Summary: stage + " passed", Evidence: evidence, Coverage: strings.TrimSpace(parsed.Flags["coverage"]),
+		Summary: summary, Evidence: evidence, Coverage: coverageText,
 	})
 	if err != nil {
 		return err
+	}
+	if workflowFailure != nil {
+		if failedWorkflowJob(coverageText) {
+			gateErr := newGateCommandFailure("local workflow job", workflowCoverageFailureOutput(coverageText), workflowFailure)
+			if recordErr := recordGateFailure(out.Context, db, project, task, candidate.CandidateSHA, candidate.Repo, gateErr); recordErr != nil {
+				return recordErr
+			}
+			return axi.Failure("gate_failed", gateErr.Error(), false, "Fix the local workflow failure in the private candidate, then rerun review -> test -> docs -> lint")
+		}
+		return axi.Failure("workflow_jobs_blocked", workflowFailure.Error(), false, "Enable full_pipeline.run_workflows in User Project config before admitting a full-pipeline Task, or resolve the workflow parsing/coverage blocker")
 	}
 	return out.Print(axi.Object{
 		{Key: "task", Value: taskIDString(task.Seq)}, {Key: "stage", Value: result.Stage},
@@ -414,7 +444,7 @@ func (s *Service) printCandidateValidationStatus(out *axi.Context, db *store.DB,
 	}
 	current := map[string]any{}
 	for _, stage := range results {
-		if stage.CandidateID == candidate.ID && stage.CandidateSHA == candidate.CandidateSHA && stage.TargetSHA == candidate.TargetSHA && stage.ConfigSHA256 == plan.SHA256() && stage.Status == "passed" {
+		if stage.CandidateID == candidate.ID && stage.CandidateSHA == candidate.CandidateSHA && stage.TargetSHA == candidate.TargetSHA && stage.ConfigSHA256 == plan.SHA256() {
 			current[stage.Stage] = map[string]any{"status": stage.Status, "evidence": stage.Evidence, "coverage": stage.Coverage}
 		}
 	}
