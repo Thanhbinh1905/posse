@@ -11,7 +11,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestWorkspaceSendUsesLastMergedMemberObservation(t *testing.T) {
+func TestWorkspaceSendRefusesRefreshedMergedMemberPR(t *testing.T) {
 	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n[repositories.worker]\nforge = \"github\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
 	bin := filepath.Join(f.root, "bin")
 	_ = os.MkdirAll(bin, 0o700)
@@ -37,14 +37,10 @@ func TestWorkspaceSendUsesLastMergedMemberObservation(t *testing.T) {
 	if err := os.WriteFile(viewPath, view, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code := f.run("send", "t1", "Add another fix"); code != 0 || !strings.Contains(f.out.String(), "state: queued") {
-		t.Fatalf("send did not use the last persisted PR observation: code=%d output=%s", code, f.out.String())
+	if code := f.run("send", "t1", "Add another fix"); code == 0 || !strings.Contains(f.out.String(), "pr_merged") {
+		t.Fatalf("send did not refuse a refreshed merged Member PR: code=%d output=%s", code, f.out.String())
 	}
-	if state := f.state(); state != store.StateDone {
-		t.Fatalf("send changed the Task state based on an unrefreshed PR: %s", state)
-	}
-	var messageCount int
-	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=?`, f.task.ID).Scan(&messageCount); err != nil || messageCount != 1 {
-		t.Fatalf("send did not queue against the last persisted PR observation: messages=%d err=%v", messageCount, err)
+	if state := f.state(); state != store.StateMerged && state != store.StateTornDown {
+		t.Fatalf("merged Member was not Merged: %s", state)
 	}
 }

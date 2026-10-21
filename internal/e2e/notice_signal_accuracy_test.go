@@ -509,7 +509,7 @@ esac
 	}
 }
 
-func TestSendDoesNotWaitForBlockedForge(t *testing.T) {
+func TestSendContinuesAfterBlockedForgeTimeout(t *testing.T) {
 	fixture := newWorkspacePRReadinessFixture(t)
 	fixture.writeView(t, fixture.head, "APPROVED")
 	if err := os.WriteFile(fixture.blockPath, []byte("block\n"), 0o600); err != nil {
@@ -537,15 +537,15 @@ func TestSendDoesNotWaitForBlockedForge(t *testing.T) {
 			t.Fatalf("ordinary send did not queue without waiting for Forge: err=%v output=%s", result.err, result.output)
 		}
 		if elapsed > 5*time.Second {
-			t.Fatalf("ordinary send preflight took %s, want at most 5s", elapsed)
+			t.Fatalf("ordinary send took %s after the blocked Forge exceeded its refresh budget", elapsed)
 		}
 	case <-time.After(5 * time.Second):
 		_ = os.WriteFile(fixture.releasePath, []byte("release\n"), 0o600)
 		result := <-outputCh
 		t.Fatalf("ordinary send waited for the blocked Forge response: err=%v output=%s", result.err, result.output)
 	}
-	if _, err := os.Stat(fixture.startedPath); !os.IsNotExist(err) {
-		t.Fatalf("ordinary send started a Forge refresh: stat err=%v", err)
+	if _, err := os.Stat(fixture.startedPath); err != nil {
+		t.Fatalf("ordinary send did not attempt the bounded Forge refresh: stat err=%v", err)
 	}
 	var messages int
 	if err := fixture.base.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=?`, fixture.taskID).Scan(&messages); err != nil || messages != 1 {
