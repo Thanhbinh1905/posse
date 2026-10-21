@@ -234,17 +234,37 @@ func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store
 	if err != nil {
 		return err
 	}
-	_, ok, err := reviewPassFor(ctx, db, task, targets)
+	if err := ensureReviewCarry(ctx, db, project, task, targets); err != nil {
+		return err
+	}
+	qualifies, err := reviewVerdictQualifies(ctx, db, task)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets, qualifies)
+	if err != nil {
+		return err
+	}
+	plan, planErr := task.AdmittedPlan()
+	if planErr != nil {
+		return admittedPlanFailure(planErr)
+	}
+	findings, err := db.ReviewFindingsForTask(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	for _, finding := range findings {
+		if reviewFindingBlocks(finding, plan) {
+			return axi.Failure("review_findings_open", "candidate has a blocking Review finding that is not fixed or accepted by the User", false, "Fix it, record a qualifying User disposition, or complete a passing Review")
+		}
+	}
+	if !evidence.Complete {
 		help := "Run `posse review start " + taskIDString(task.Seq) + "` and wait for a pass on this exact candidate"
 		plan, planErr := task.AdmittedPlan()
 		if planErr == nil && (plan == nil || plan.ValidationLoops == nil || !plan.ValidationLoops.Review.Enabled) {
 			help = "Dispatch an independent Review Task with `review_of: " + taskIDString(task.Seq) + "` and wait for a pass on this exact candidate"
 		}
-		return axi.Failure("validation_review_required", "the current private candidate "+shortSHA(candidate.CandidateSHA)+" has no independent passing Review", false, help)
+		return axi.Failure("validation_review_required", "the current private candidate "+shortSHA(candidate.CandidateSHA)+" has no passing Review, proved Review carry, or exact-head User disposition", false, help)
 	}
 	return nil
 }

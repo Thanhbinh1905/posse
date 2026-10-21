@@ -137,7 +137,23 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	if profile != "" {
 		args = append(args, "--profile", profile)
 	}
-	return s.spawnTask(ctx, args, generated)
+	err = s.spawnTask(ctx, args, generated)
+	var failure *axi.Error
+	if errors.As(err, &failure) && failure.Code == "review_round_cap" {
+		usage, usageErr := db.ReviewCapUsage(ctx.Context, change.ID)
+		if usageErr != nil {
+			return usageErr
+		}
+		head, headErr := reviewCapHead(ctx.Context, db, project, change)
+		if headErr != nil {
+			return headErr
+		}
+		if noticeErr := s.raiseReviewCapNotice(ctx.Context, db, project, change, head, usage.Total(), maxRounds); noticeErr != nil {
+			return noticeErr
+		}
+		return axi.Failure("review_round_cap", fmt.Sprintf("frozen Review and repair cap reached at %s (%d of %d rounds used)", shortSHA(head), usage.Total(), maxRounds), false, "Wait for the User's `review_cap` Decision")
+	}
+	return err
 }
 
 func workspaceHasFullPipeline(plan *taskplan.Plan) bool {

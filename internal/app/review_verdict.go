@@ -175,25 +175,49 @@ func reviewPassFor(ctx context.Context, db *store.DB, change store.Task, candida
 // requireReviewPass requires a D01 pass of the exact candidate: commit when
 // given, otherwise the current Task branch tips.
 func requireReviewPass(ctx context.Context, db *store.DB, project store.Project, change store.Task, commit string) error {
-	var ok bool
+	targets := []store.ReviewTarget{}
 	var err error
 	if commit == "" {
-		_, ok, err = currentReviewPass(ctx, db, project, change)
+		targets, err = changeCandidateTargets(ctx, db, project, change)
 	} else {
-		_, ok, err = reviewPassFor(ctx, db, change, []store.ReviewTarget{{Repository: project.Name, Commit: commit}})
+		targets = []store.ReviewTarget{{Repository: project.Name, Commit: commit}}
 	}
 	if err != nil {
 		return err
 	}
-	if !ok {
-		id := taskIDString(change.Seq)
-		revision := "its current revision"
-		if commit != "" {
-			revision = "candidate " + shortSHA(commit)
-		}
-		return axi.Failure("review_required", "Task "+id+" has no passing Review of "+revision, false, "Dispatch a Review Task for "+id+" with `review_of: "+id+"` and wait for a `pass` verdict; only an explicit User choice may select lighter review")
+	if err := ensureReviewCarry(ctx, db, project, change, targets); err != nil {
+		return err
 	}
-	return nil
+	qualifies, err := reviewVerdictQualifies(ctx, db, change)
+	if err != nil {
+		return err
+	}
+	evidence, err := db.ReviewEvidenceFor(ctx, change.ID, targets, qualifies)
+	if err != nil {
+		return err
+	}
+	if evidence.Complete {
+		plan, planErr := change.AdmittedPlan()
+		if planErr != nil {
+			return admittedPlanFailure(planErr)
+		}
+		findings, err := db.ReviewFindingsForTask(ctx, change.ID)
+		if err != nil {
+			return err
+		}
+		for _, finding := range findings {
+			if reviewFindingBlocks(finding, plan) {
+				return axi.Failure("review_findings_open", "Task has a blocking Review finding that is not fixed or accepted by the User", false)
+			}
+		}
+		return nil
+	}
+	id := taskIDString(change.Seq)
+	revision := "its current revision"
+	if commit != "" {
+		revision = "candidate " + shortSHA(commit)
+	}
+	return axi.Failure("review_required", "Task "+id+" has no passing Review, proved carry, or exact-head User disposition for "+revision, false, "Dispatch a Review Task for "+id+" with `review_of: "+id+"` and wait for a `pass` verdict; only an explicit User choice may select lighter review")
 }
 
 // requireSelectedReview keeps evidence separate from disposition and merge

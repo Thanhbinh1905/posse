@@ -82,11 +82,21 @@ func recordGateFailure(ctx context.Context, db *store.DB, project store.Project,
 	if err != nil {
 		return err
 	}
-	result, err := db.QueueValidationFixInstructionWithinBudget(
-		ctx, task.ID, "gate", headSHA, dedupeKey, instruction, plan.ValidationLoops.Gate.MaxFixRounds,
+	result, err := db.QueueValidationFixInstructionWithSharedBudget(
+		ctx, task.ID, "gate", headSHA, dedupeKey, instruction, plan.ValidationLoops.Gate.MaxFixRounds, plan.ValidationLoops.MaxReviewRounds(),
 	)
 	if err != nil {
 		return err
+	}
+	if result.SharedExhausted {
+		usage, err := db.ReviewCapUsage(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if usage.Total() < plan.ValidationLoops.MaxReviewRounds() {
+			return nil
+		}
+		return createReviewCapNotice(ctx, db, project, task, headSHA, usage.Total(), plan.ValidationLoops.MaxReviewRounds())
 	}
 	if result.Queued {
 		details["round"], details["max_fix_rounds"] = result.Seq, plan.ValidationLoops.Gate.MaxFixRounds

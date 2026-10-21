@@ -156,6 +156,24 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return briefError(err)
 	}
+	var supersededTask *store.Task
+	if brief.Supersedes != "" {
+		source, err := s.currentTask(ctx.Context, db, project, brief.Supersedes)
+		if err != nil {
+			return err
+		}
+		if source.Type != "change" || source.ID == 0 {
+			return axi.Failure("brief_invalid", "supersedes must identify a prior Change Task", false)
+		}
+		var authorized bool
+		if err := db.QueryRowContext(ctx.Context, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND kind='review_cap' AND answer='rethink' AND user_quote<>'')`, source.ID).Scan(&authorized); err != nil {
+			return err
+		}
+		if !authorized {
+			return axi.Failure("brief_invalid", "supersedes requires a User-approved rethink Decision for the prior Change Task", false)
+		}
+		supersededTask = &source
+	}
 	workflow, err := resolveWorkflowForBrief(ctx.Context, db, project, cfg, brief)
 	if err != nil {
 		return err
@@ -492,6 +510,12 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	task, err = db.TaskByID(ctx.Context, project.ID, taskID)
 	if err != nil {
 		return err
+	}
+	if supersededTask != nil {
+		if err := db.InheritReviewLedger(ctx.Context, supersededTask.ID, task.ID); err != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+			return err
+		}
 	}
 	if admitted, planErr := task.AdmittedPlan(); planErr != nil {
 		return admittedPlanFailure(planErr)
@@ -1265,7 +1289,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			filtered = append(filtered, args[i])
 		}
 	}
-	parsed, err := parseArgs("signal", filtered, map[string]flagSpec{"report": {}, "findings": {}, "pr": {}, "verdict": {}, "turn": {}})
+	parsed, err := parseArgs("signal", filtered, map[string]flagSpec{"report": {}, "findings": {}, "resolutions": {}, "pr": {}, "verdict": {}, "turn": {}})
 	if err != nil {
 		return err
 	}
@@ -1399,22 +1423,56 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				return err
 			}
 		} else if task.Type == "change" && !inPlace {
-			if err := validateChangeSignal(ctx.Context, task); err != nil {
-				return axi.Failure("signal_invalid", err.Error(), false, "Commit the change and leave the worktree clean before signalling done")
+			privateCandidate := false
+			if !project.IsWorkspace() && fullPipelineSelected(task, "") {
+				candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
+				if candidateErr == nil && candidate.State == store.ValidationCandidateActive {
+					if err := s.ensureCandidateCheckout(ctx.Context, db, home, task, candidate); err != nil {
+						return err
+					}
+					candidate, err = db.LatestValidationCandidate(ctx.Context, task.ID, "")
+					if err != nil {
+						return err
+					}
+					cwd, cwdErr := currentDir()
+					if cwdErr != nil || !pathWithin(candidate.WorktreePath, cwd) {
+						return axi.Failure("candidate_checkout_required", "full-pipeline done Signals must come from the private candidate checkout", false, candidate.WorktreePath)
+					}
+					candidateStatus, statusErr := gitStatusOutput(ctx.Context, candidate.WorktreePath, "--porcelain", "--untracked-files=all")
+					if statusErr != nil {
+						return statusErr
+					}
+					if candidateStatus != "" {
+						return axi.Failure("candidate_dirty", "commit candidate changes before signalling done", false)
+					}
+					privateCandidate = true
+				} else if candidateErr != nil {
+					if store.IsNotFound(candidateErr) {
+						return axi.Failure("candidate_missing", "full-pipeline done Signals require a submitted private candidate", false)
+					}
+					return candidateErr
+				} else if candidate.State != store.ValidationCandidatePromoted {
+					return axi.Failure("candidate_not_active", "full-pipeline done Signals require an active private candidate or a promoted PR head", false)
+				}
 			}
-			if !project.IsWorkspace() {
+			if !privateCandidate {
+				if err := validateChangeSignal(ctx.Context, task); err != nil {
+					return axi.Failure("signal_invalid", err.Error(), false, "Commit the change and leave the worktree clean before signalling done")
+				}
+			}
+			if !project.IsWorkspace() && !fullPipelineSelected(task, "") {
 				if _, err := s.checkedValidationContinuity(ctx.Context, db, project, task); err != nil {
 					return err
 				}
 			}
-			if (task.MergeMode == "no-mistakes" || task.MergeMode == "pr") && parsed.Flags["pr"] == "" {
+			if (task.MergeMode == "no-mistakes" || task.MergeMode == "pr") && parsed.Flags["pr"] == "" && !privateCandidate {
 				return axi.Failure("signal_invalid", "a PR-mode Change Task requires --pr <url>", false)
 			}
 			if task.MergeMode == "no-mistakes" {
 				if err := validatePullRequestOrigin(ctx.Context, project.Root, parsed.Flags["pr"]); err != nil {
 					return err
 				}
-			} else if task.MergeMode == "pr" {
+			} else if task.MergeMode == "pr" && !privateCandidate {
 				cfg, err := config.Load(home, project.Name)
 				if err != nil {
 					return configError(err)
@@ -1477,6 +1535,74 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	var reviewFindings *store.ReviewFindingsInput
 	var findingsContents []byte
+	var reviewResolutions *store.ReviewFixResolutionsInput
+	if verb == "done" && task.Type == "change" {
+		round, pending, err := db.ReviewFixRoundForTask(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if pending && parsed.Flags["resolutions"] == "" {
+			return axi.Failure("review_resolution_missing", "a Review fix instruction requires --resolutions <file> on the done Signal", false)
+		}
+		if parsed.Flags["resolutions"] != "" && !pending {
+			return axi.Failure("review_resolutions_invalid", "--resolutions requires a delivered, unanswered Review fix instruction", false)
+		}
+		if pending {
+			contents, err := readSignalFile(home, project, task, parsed.Flags["resolutions"])
+			if err != nil {
+				return axi.Failure("signal_invalid", err.Error(), false)
+			}
+			parsedResolutions, err := decodeReviewResolutions(contents)
+			if err != nil {
+				return axi.Failure("review_resolutions_invalid", err.Error(), false)
+			}
+			actualHead := ""
+			candidateID := int64(0)
+			if fullPipelineSelected(task, "") {
+				candidate, err := db.LatestValidationCandidate(ctx.Context, task.ID, "")
+				if err != nil || candidate.State != store.ValidationCandidateActive {
+					return axi.Failure("candidate_missing", "full-pipeline Review fixes require the active private candidate", false)
+				}
+				if err := s.ensureCandidateCheckout(ctx.Context, db, home, task, candidate); err != nil {
+					return err
+				}
+				candidate, err = db.LatestValidationCandidate(ctx.Context, task.ID, "")
+				if err != nil {
+					return err
+				}
+				cwd, cwdErr := currentDir()
+				if cwdErr != nil || !pathWithin(candidate.WorktreePath, cwd) {
+					return axi.Failure("review_fix_candidate_required", "full-pipeline Review fixes must be completed in the private candidate checkout", false, candidate.WorktreePath)
+				}
+				actualHead, err = gitOutput(ctx.Context, candidate.WorktreePath, "rev-parse", "HEAD")
+				if err != nil {
+					return err
+				}
+				candidateID = candidate.ID
+			} else {
+				actualHead, err = gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
+				if err != nil {
+					return err
+				}
+			}
+			if _, err := gitOutput(ctx.Context, task.WorktreePath, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
+				root := task.WorktreePath
+				if candidateID > 0 {
+					candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
+					if candidateErr != nil {
+						return candidateErr
+					}
+					root = candidate.WorktreePath
+				}
+				if _, err := gitOutput(ctx.Context, root, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
+					return recordHeadDiscontinuity(ctx.Context, db, project, task, round.ExpectedBaseHead, actualHead)
+				}
+			}
+			reviewResolutions = convertReviewResolutions(parsedResolutions, round.ExpectedBaseHead, actualHead, candidateID)
+		}
+	} else if parsed.Flags["resolutions"] != "" {
+		return axi.Failure("signal_invalid", "--resolutions is only valid on a Change done Signal with a Review fix instruction", false)
+	}
 	if verb == "done" {
 		if task.Type == "review" {
 			reviewFindings, findingsContents, err = reviewRoundForSignal(ctx.Context, db, home, project, task, parsed.Flags["findings"])
@@ -1586,7 +1712,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		verdict = &store.ReviewVerdictInput{Verdict: verdictFlag, ReportSHA256: digest, Findings: reviewFindings}
 	}
-	state, err := s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, inPlace)
+	state, err := s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, inPlace, reviewResolutions)
 	if err != nil {
 		if errors.Is(err, store.ErrTaskMergeInProgress) {
 			return axi.Failure("merge_in_progress", "cannot reopen the Task because its merge has started or is in progress", false, "Wait for the Lead to resolve the merge outcome before retrying the Signal")
@@ -1608,6 +1734,12 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		if errors.Is(err, store.ErrReviewFindingsInvalid) {
 			return axi.Failure("review_findings_invalid", err.Error(), false)
+		}
+		if errors.Is(err, store.ErrReviewResolutionsRequired) {
+			return axi.Failure("review_resolution_missing", err.Error(), false)
+		}
+		if errors.Is(err, store.ErrReviewResolutionsInvalid) {
+			return axi.Failure("review_resolutions_invalid", err.Error(), false)
 		}
 		if errors.Is(err, store.ErrQueuedInstructionsPending) {
 			return queuedInstructionsPendingFailure(task)
@@ -1632,6 +1764,16 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
 	defer cancelMaintenance()
+	if verb == "done" && task.Type == "change" {
+		if err := s.checkReviewCapAfterDone(maintenanceCtx, db, home, project, task); err != nil {
+			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Review cap reconciliation deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
+		}
+	}
+	if verb == "done" && task.Type == "review" && verdict != nil {
+		if err := s.checkReviewCapAfterReviewDone(maintenanceCtx, db, project, task); err != nil {
+			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Review cap reconciliation deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
+		}
+	}
 	if _, err := s.prepareProject(maintenanceCtx, db, project); err != nil {
 		if store.IsOnlyBusy(err) {
 			// Watch retries deferred maintenance and logs its own contention.
