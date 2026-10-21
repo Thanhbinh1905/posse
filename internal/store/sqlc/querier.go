@@ -44,6 +44,7 @@ type Querier interface {
 	InsertTransition(ctx context.Context, arg InsertTransitionParams) error
 	LastNoticeDelivery(ctx context.Context, projectID int64) (int64, error)
 	LastNoticeNotification(ctx context.Context, projectID int64) (int64, error)
+	LeadStartClaim(ctx context.Context, projectID int64) (LeadStartClaimRow, error)
 	LiveTasks(ctx context.Context, projectID int64) ([]Task, error)
 	MarkMessageDelivered(ctx context.Context, arg MarkMessageDeliveredParams) error
 	MarkNoticeDelivered(ctx context.Context, arg MarkNoticeDeliveredParams) error
@@ -64,9 +65,9 @@ type Querier interface {
 	Projects(ctx context.Context) ([]Project, error)
 	PruneEvents(ctx context.Context, receivedAt int64) error
 	QueueMessage(ctx context.Context, arg QueueMessageParams) (sql.Result, error)
+	ReclaimLeadStartClaim(ctx context.Context, arg ReclaimLeadStartClaimParams) (sql.Result, error)
 	RecordNoticeNotification(ctx context.Context, arg RecordNoticeNotificationParams) error
-	RefreshLeadStartClaim(ctx context.Context, arg RefreshLeadStartClaimParams) (sql.Result, error)
-	ReleaseLeadStart(ctx context.Context, projectID int64) error
+	ReleaseLeadStart(ctx context.Context, arg ReleaseLeadStartParams) error
 	ReleaseSandbox(ctx context.Context, arg ReleaseSandboxParams) error
 	ResetProgress(ctx context.Context, arg ResetProgressParams) error
 	ResetTaskProgress(ctx context.Context, arg ResetTaskProgressParams) error
