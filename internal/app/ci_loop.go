@@ -227,7 +227,13 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	checkSetKey := hex.EncodeToString(digest[:])
 	dedupeKey := "ci:" + observation.HeadSHA + ":" + checkSetKey
 	instruction := renderCIFixInstruction(task, plan, observation, prURL, member, checks, tails)
-	result, err := db.QueueCIFixInstruction(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds)
+	var result store.QueueValidationFixResult
+	var err error
+	if fullPipelineSelected(task, member) {
+		result, err = db.QueueCIFixInstructionWithSharedBudget(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds, plan.ValidationLoops.MaxReviewRounds())
+	} else {
+		result, err = db.QueueCIFixInstruction(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds)
+	}
 	if errors.Is(err, store.ErrStaleValidationHead) || errors.Is(err, store.ErrStateRace) {
 		return nil
 	}
@@ -246,6 +252,16 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	}
 	if err != nil {
 		return err
+	}
+	if result.SharedExhausted {
+		usage, err := db.ReviewCapUsage(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if usage.Total() < plan.ValidationLoops.MaxReviewRounds() {
+			return nil
+		}
+		return createReviewCapNotice(ctx, db, project, task, observation.HeadSHA, usage.Total(), plan.ValidationLoops.MaxReviewRounds())
 	}
 	if result.Queued {
 		data := marshalJSON(map[string]any{"url": prURL, "head_sha": observation.HeadSHA, "check_set": checkSetKey, "checks": names, "repository": member})

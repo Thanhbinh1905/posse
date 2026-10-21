@@ -1104,13 +1104,17 @@ type prMergeFixture struct {
 }
 
 func freezeCILoop(t *testing.T, fixture *prMergeFixture, maxFixRounds, rerunCancelled int) {
+	freezeCILoopWithReview(t, fixture, maxFixRounds, rerunCancelled, "none")
+}
+
+func freezeCILoopWithReview(t *testing.T, fixture *prMergeFixture, maxFixRounds, rerunCancelled int, review string) {
 	t.Helper()
 	brief := []byte("---\ntype: change\ntitle: CI loop test\ndone_when: checks are resolved\n---\nUser intent (verbatim): Retain this exact request.\n")
 	plan, err := taskplan.Resolve(taskplan.Request{
 		Brief:     taskplan.Select("brief", "change.md", brief),
 		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
 		Launch:    taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
-		Review:    "none", Delivery: "pr", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
+		Review:    review, Delivery: "pr", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
 		Paths: taskplan.Paths{Scratch: filepath.Join(fixture.home, "scratch", "shop", "t1"), Output: filepath.Join(fixture.home, "projects", "shop", "tasks", "t1")},
 		ValidationLoops: &taskplan.ValidationLoops{
 			Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"},

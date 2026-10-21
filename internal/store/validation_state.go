@@ -110,14 +110,61 @@ type ValidationFixRound struct {
 	CreatedAt        int64  `toml:"created_at"`
 }
 
+type ReviewFindingDetail struct {
+	FindingSeq    int
+	PatternSeq    int
+	PatternKey    string
+	Title         string
+	Rule          string
+	RootCause     string
+	FixGuidance   string
+	Repository    string
+	Path          string
+	Symbol        string
+	Excerpt       string
+	Severity      string
+	Origin        string
+	InScope       bool
+	State         string
+	InheritedFrom int64
+}
+
+type ReviewFixResolution struct {
+	Pattern string
+	Status  string
+	Note    string
+}
+
+type ReviewFixResolutionsInput struct {
+	ExpectedBaseHead string
+	ActualHead       string
+	CandidateID      int64
+	Patterns         []ReviewFixResolution
+}
+
+type ReviewEvidence struct {
+	Complete    bool
+	Pass        bool
+	Carry       bool
+	Disposition bool
+}
+
+type ReviewCapUsage struct {
+	ReviewRounds int
+	RepairRounds int
+}
+
+func (usage ReviewCapUsage) Total() int { return usage.ReviewRounds + usage.RepairRounds }
+
 // QueueValidationFixResult describes whether an automatic instruction was added.
 type QueueValidationFixResult struct {
-	MessageID  int64
-	Seq        int
-	RoundsUsed int
-	Queued     bool
-	Coalesced  bool
-	Exhausted  bool
+	MessageID       int64
+	Seq             int
+	RoundsUsed      int
+	Queued          bool
+	Coalesced       bool
+	Exhausted       bool
+	SharedExhausted bool
 }
 
 // ValidationContinuitySnapshot binds a done Signal to the current fix rounds.
@@ -132,7 +179,7 @@ var ErrValidationHeadsChanged = errors.New("validation fix instructions changed 
 // QueueValidationFixInstruction records a fix round and queues or extends the
 // unsent validation message for the same head in one transaction.
 func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string) (QueueValidationFixResult, error) {
-	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, nil)
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, nil, nil)
 }
 
 // QueueValidationFixInstructionWithinBudget records a fix round only while its
@@ -141,10 +188,19 @@ func (db *DB) QueueValidationFixInstructionWithinBudget(ctx context.Context, tas
 	if maxRounds < 0 {
 		return QueueValidationFixResult{}, fmt.Errorf("validation fix round budget cannot be negative")
 	}
-	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, &maxRounds)
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, &maxRounds, nil)
 }
 
-func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string, maxRounds *int) (QueueValidationFixResult, error) {
+// QueueValidationFixInstructionWithSharedBudget enforces the frozen per-kind
+// limit and shared Review/Gate/CI cap in the same admission transaction.
+func (db *DB) QueueValidationFixInstructionWithSharedBudget(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string, maxRounds, sharedMax int) (QueueValidationFixResult, error) {
+	if maxRounds < 0 || sharedMax < 1 {
+		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix budget")
+	}
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, &maxRounds, &sharedMax)
+}
+
+func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string, maxRounds, sharedMax *int) (QueueValidationFixResult, error) {
 	if taskID < 1 || (kind != "gate" && kind != "ci" && kind != "review" && kind != "freshness") {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix task or kind")
 	}
@@ -195,6 +251,18 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 	}
 	if maxRounds != nil && roundsUsed >= *maxRounds {
 		return QueueValidationFixResult{RoundsUsed: roundsUsed, Exhausted: true}, nil
+	}
+	if sharedMax != nil {
+		var reviews, repairs int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status IN ('admitted','verdict')`, taskID).Scan(&reviews); err != nil {
+			return QueueValidationFixResult{}, err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','gate','ci')`, taskID).Scan(&repairs); err != nil {
+			return QueueValidationFixResult{}, err
+		}
+		if reviews+repairs >= *sharedMax {
+			return QueueValidationFixResult{RoundsUsed: reviews + repairs, SharedExhausted: true}, nil
+		}
 	}
 	seq := lastSeq + 1
 	var messageID int64

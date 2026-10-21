@@ -137,7 +137,24 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	if profile != "" {
 		args = append(args, "--profile", profile)
 	}
-	return s.spawnTask(ctx, args, generated)
+	err = s.spawnTask(ctx, args, generated)
+	var failure *axi.Error
+	if errors.As(err, &failure) && failure.Code == "review_round_cap" {
+		usage, usageErr := db.ReviewCapUsage(ctx.Context, change.ID)
+		if usageErr != nil {
+			return usageErr
+		}
+		used := reviewCapUsed(change, usage)
+		head, headErr := reviewCapHead(ctx.Context, db, project, change)
+		if headErr != nil {
+			return headErr
+		}
+		if noticeErr := s.raiseReviewCapNotice(ctx.Context, db, project, change, head, used, maxRounds); noticeErr != nil {
+			return noticeErr
+		}
+		return axi.Failure("review_round_cap", fmt.Sprintf("frozen Review and repair cap reached at %s (%d of %d rounds used)", shortSHA(head), used, maxRounds), false, "Wait for the User's `review_cap` Decision")
+	}
+	return err
 }
 
 func workspaceHasFullPipeline(plan *taskplan.Plan) bool {
@@ -529,7 +546,10 @@ func renderReviewRound(ctx context.Context, db *store.DB, change store.Task, pla
 	files["review/ledger.md"] = []byte(ledger)
 	briefData := generatedReviewBrief(change, plan, round, scopes, workspace)
 	briefPath := filepath.Join(projectTasksPath, "review-rounds", fmt.Sprintf("t%d-round-%d.md", change.Seq, round))
-	bindings := store.ReviewRoundAdmission{ChangeTaskID: change.ID, Round: round, MaxRounds: maxRounds}
+	bindings := store.ReviewRoundAdmission{
+		ChangeTaskID: change.ID, Round: round, MaxRounds: maxRounds,
+		SharedRepairBudget: planUsesSharedReviewRepairCap(&plan),
+	}
 	for _, scope := range scopes {
 		bindings.Bindings = append(bindings.Bindings, scope.Binding)
 	}

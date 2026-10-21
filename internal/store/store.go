@@ -1559,13 +1559,25 @@ func (db *DB) RecordWorkerSignal(ctx context.Context, task Task, verb, note stri
 // RecordWorkerSignalWithVerdict records a Signal and, for a Review Task's done
 // Signal, its verdict in one transaction.
 func (db *DB) RecordWorkerSignalWithVerdict(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput) (State, error) {
-	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, verdict, nil)
+	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, verdict, nil, nil)
+}
+
+// RecordWorkerSignalWithResolutions records the Worker's pattern-level Review
+// fix answers with the done Signal in the same transaction.
+func (db *DB) RecordWorkerSignalWithResolutions(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput, resolutions *ReviewFixResolutionsInput) (State, error) {
+	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, verdict, nil, resolutions)
 }
 
 // RecordWorkerSignalWithValidation records a Change done Signal only if the
 // automatic validation instructions checked by the caller have not changed.
 func (db *DB) RecordWorkerSignalWithValidation(ctx context.Context, task Task, verb, note string, data any, noticeKind string, validation ValidationContinuitySnapshot) (State, error) {
-	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, nil, &validation)
+	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, nil, &validation, nil)
+}
+
+// RecordWorkerSignalWithValidationAndResolutions atomically checks instruction
+// continuity and records Review fix answers with the Worker's done Signal.
+func (db *DB) RecordWorkerSignalWithValidationAndResolutions(ctx context.Context, task Task, verb, note string, data any, noticeKind string, validation ValidationContinuitySnapshot, resolutions *ReviewFixResolutionsInput) (State, error) {
+	return db.recordWorkerSignal(ctx, task, verb, note, data, noticeKind, nil, &validation, resolutions)
 }
 
 func workerTurnTokenFromData(data any) string {
@@ -1580,7 +1592,7 @@ func workerTurnTokenFromData(data any) string {
 	}
 }
 
-func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput, validationHeads *ValidationContinuitySnapshot) (State, error) {
+func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note string, data any, noticeKind string, verdict *ReviewVerdictInput, validationHeads *ValidationContinuitySnapshot, resolutions *ReviewFixResolutionsInput) (State, error) {
 	inPlace := false
 	if verb == "done" {
 		plan, err := task.AdmittedPlan()
@@ -1591,6 +1603,9 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	}
 	if verdict != nil && verb != "done" {
 		return "", fmt.Errorf("a review verdict is valid only on a done Signal")
+	}
+	if resolutions != nil && (verb != "done" || task.Type != "change") {
+		return "", fmt.Errorf("review fix resolutions are valid only on a Change done Signal")
 	}
 	encoded, err := json.Marshal(data)
 	if err != nil {
@@ -1716,6 +1731,11 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 		}
 		if pending {
 			return "", ErrQueuedInstructionsPending
+		}
+	}
+	if verb == "done" && taskType == "change" {
+		if err := applyReviewFixResolutionsTx(ctx, tx, task.ID, resolutions); err != nil {
+			return "", err
 		}
 	}
 	signalAt := time.Now().UnixMilli()
@@ -1861,6 +1881,11 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	if verdict != nil && verdict.Findings != nil && task.ReviewsTaskID > 0 {
 		if err := db.PersistTask(ctx, task.ReviewsTaskID); err != nil {
 			log.Printf("posse: Review findings committed for Change Task %d, but recovery snapshot refresh failed: %v", task.ReviewsTaskID, err)
+		}
+	}
+	if resolutions != nil {
+		if err := db.PersistTask(ctx, task.ID); err != nil {
+			log.Printf("posse: Review fix resolutions committed for Task %d, but recovery snapshot refresh failed: %v", task.ID, err)
 		}
 	}
 	return current, nil
