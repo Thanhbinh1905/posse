@@ -509,7 +509,7 @@ esac
 	}
 }
 
-func TestSendPreflightIsBoundedAgainstBlockedForge(t *testing.T) {
+func TestSendDoesNotWaitForBlockedForge(t *testing.T) {
 	fixture := newWorkspacePRReadinessFixture(t)
 	fixture.writeView(t, fixture.head, "APPROVED")
 	if err := os.WriteFile(fixture.blockPath, []byte("block\n"), 0o600); err != nil {
@@ -528,21 +528,13 @@ func TestSendPreflightIsBoundedAgainstBlockedForge(t *testing.T) {
 			err    error
 		}{output: output, err: err}
 	}()
-	if !waitForCondition(3*time.Second, func() bool {
-		_, err := os.Stat(fixture.startedPath)
-		return err == nil
-	}) {
-		_ = os.WriteFile(fixture.releasePath, []byte("release\n"), 0o600)
-		result := <-outputCh
-		t.Fatalf("ordinary send did not reach the blocked Forge query: err=%v output=%s", result.err, result.output)
-	}
 	started := time.Now()
 	select {
 	case result := <-outputCh:
 		elapsed := time.Since(started)
 		_ = os.WriteFile(fixture.releasePath, []byte("release\n"), 0o600)
-		if result.err == nil || !strings.Contains(string(result.output), "send_preparation_timeout") {
-			t.Fatalf("ordinary send did not return its bounded preflight error: err=%v output=%s", result.err, result.output)
+		if result.err != nil || !strings.Contains(string(result.output), "state: queued") {
+			t.Fatalf("ordinary send did not queue without waiting for Forge: err=%v output=%s", result.err, result.output)
 		}
 		if elapsed > 5*time.Second {
 			t.Fatalf("ordinary send preflight took %s, want at most 5s", elapsed)
@@ -552,9 +544,12 @@ func TestSendPreflightIsBoundedAgainstBlockedForge(t *testing.T) {
 		result := <-outputCh
 		t.Fatalf("ordinary send waited for the blocked Forge response: err=%v output=%s", result.err, result.output)
 	}
+	if _, err := os.Stat(fixture.startedPath); !os.IsNotExist(err) {
+		t.Fatalf("ordinary send started a Forge refresh: stat err=%v", err)
+	}
 	var messages int
-	if err := fixture.base.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=?`, fixture.taskID).Scan(&messages); err != nil || messages != 0 {
-		t.Fatalf("timed-out send queued a message: count=%d err=%v", messages, err)
+	if err := fixture.base.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=?`, fixture.taskID).Scan(&messages); err != nil || messages != 1 {
+		t.Fatalf("send did not queue its message: count=%d err=%v", messages, err)
 	}
 }
 

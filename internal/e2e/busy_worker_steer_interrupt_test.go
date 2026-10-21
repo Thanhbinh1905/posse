@@ -44,7 +44,23 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "busy-pi-worker")
 	task := fixture.mustTask(t, "t1")
+	prURL := "https://github.com/acme/shop/pull/17"
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=?,landing_mode='pr' WHERE id=?`, prURL, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	blockedForge := filepath.Join(fixture.root, "blocked-pr-view")
+	releaseForge := filepath.Join(fixture.root, "release-pr-view")
+	ghPath := filepath.Join(fixture.root, "bin", "gh")
+	ghRealPath := filepath.Join(fixture.root, "bin", "gh-real")
+	if err := os.Rename(ghPath, ghRealPath); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "#!/bin/sh\nif [ \"$1 $2\" = 'pr view' ]; then : > " + shellQuote(blockedForge) + "; while [ ! -e " + shellQuote(releaseForge) + " ]; do sleep 0.02; done; fi\nexec " + shellQuote(ghRealPath) + " \"$@\"\n"
+	if err := os.WriteFile(ghPath, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
+		_ = os.WriteFile(releaseForge, []byte("release\n"), 0o600)
 		_, _ = client.Call(context.Background(), "agent.send_keys", map[string]any{"target": task.PaneID, "keys": []string{"esc"}})
 	})
 	if !waitForCondition(15*time.Second, func() bool {
@@ -104,6 +120,9 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	steering := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Send-time steering")
 	if !strings.Contains(steering, "state: delivered") || !strings.Contains(steering, "reason: steered") {
 		t.Fatalf("send-time steering did not report the sent message: %s", steering)
+	}
+	if _, err := os.Stat(blockedForge); !os.IsNotExist(err) {
+		t.Fatalf("posse send waited for or started the blocked PR refresh: stat err=%v", err)
 	}
 	inputLog := filepath.Join(fixture.root, "fake-agent-input.log")
 	if !waitForCondition(5*time.Second, func() bool {
@@ -183,6 +202,9 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	interrupt := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "--interrupt", "Stop and redirect this turn")
 	if !strings.Contains(interrupt, "state: delivered") || !strings.Contains(interrupt, "reason: delivered_after_interrupt") {
 		t.Fatalf("send --interrupt did not verify and deliver the redirect: %s", interrupt)
+	}
+	if _, err := os.Stat(blockedForge); !os.IsNotExist(err) {
+		t.Fatalf("posse send --interrupt waited for or started the blocked PR refresh: stat err=%v", err)
 	}
 	remaining, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)
 	if err != nil || remaining.ID != claimed.ID || remaining.Body != "Keep this queued" {

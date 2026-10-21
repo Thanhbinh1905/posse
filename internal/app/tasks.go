@@ -1892,37 +1892,8 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	refreshPR := task.PRURL != "" && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes")
-	if project.IsWorkspace() {
-		repos, err := db.TaskRepos(ctx.Context, task.ID)
-		if err != nil {
-			return err
-		}
-		for _, repo := range repos {
-			refreshPR = refreshPR || repo.PRURL != "" && repo.MergeMode == "pr"
-		}
-	}
-	if refreshPR && !parsed.Bool("queue") {
-		pollCtx, cancelPoll := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
-		pollErr := s.pollProjectPullRequests(pollCtx, db, project, cfg, true)
-		timedOut := errors.Is(pollCtx.Err(), context.DeadlineExceeded)
-		cancelPoll()
-		if timedOut {
-			return axi.Failure("send_preparation_timeout", "PR refresh exceeded the send time budget; the message was not queued", true, "Retry `posse send` after Project maintenance is available, or use `--queue` to enqueue without a PR refresh")
-		}
-		if pollErr != nil {
-			return pollErr
-		}
-		if err := s.autoTeardownMergedTasks(ctx.Context, db, project, cfg); err != nil {
-			return err
-		}
-		if task, err = db.TaskByID(ctx.Context, project.ID, task.ID); err != nil {
-			return err
-		}
-		if task.State == store.StateMerged || task.State == store.StateTornDown {
-			return axi.Failure("pr_merged", "pull request merged; Task Merged before the message could be sent", false)
-		}
-	}
+	// Use the last persisted PR observation. Network-backed refresh must not
+	// block delivery or interruption of a busy Worker.
 	if task.State == store.StateDone && task.Type != "change" {
 		return axi.Failure("message_refused", "Task is not accepting Worker instructions in state done because it is not a Change Task", false, "Create a new Change Task with `posse start --brief <file> [--name <short>]` to continue the work")
 	}
