@@ -61,6 +61,36 @@ func TestWorkerExitedNoticePastCursorStillRaisesDecision(t *testing.T) {
 	}
 }
 
+func TestMergeReadyNoticeRaisesDecisionWhileTaskIsDone(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	fixture.task.PRURL = "https://github.com/acme/shop/pull/17"
+	fixture.task.GatedSHA = fixture.headSHA
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET pr_url=?,gated_sha=? WHERE id=?`, fixture.task.PRURL, fixture.headSHA, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.RecordPRObservation(ctx, store.PRObservation{
+		ProjectID: fixture.project.ID, TaskID: fixture.task.ID, PRURL: fixture.task.PRURL,
+		HeadSHA: fixture.headSHA, State: "OPEN", Checks: `{"state":"SUCCESS"}`,
+		Review: "APPROVED", Mergeable: "MERGEABLE",
+	}, store.PRObservationEffect{}, fixture.task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, TaskID: fixture.task.ID, Kind: "merge_ready", Summary: "PR checks are ready"}); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(fixture.home, herdr.NewFake())
+	for range 2 {
+		if err := service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decisions, err := fixture.db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "merge_ready" {
+		t.Fatalf("merge_ready Decision = %#v, %v", decisions, err)
+	}
+}
+
 func TestLegacyWorkerExitedNoticeDoesNotAttachToLaterLaunch(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")

@@ -341,12 +341,28 @@ func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 	// failure manual so this test isolates review and merge authority.
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "gate_loop.max_fix_rounds", "0", "--user-approved", "Keep this test on the manual Gate failure path")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["exit 1"]`)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.enabled", "true")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.max_rounds", "1")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.auto_start", "true")
 	if code, out := startReviewIdentityTask(t, f, "No independent review", "author", ""); code != 0 {
 		t.Fatalf("start: %d %s", code, out)
 	}
 	change := f.mustTask(t, "t1")
 	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
 	signalReviewPolicyTask(t, f, change)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=? WHERE id=?`, "https://github.com/acme/shop/pull/17", change.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "show", "t1", "--json"); code != 0 || !strings.Contains(out, `"review":"none"`) {
+		t.Fatalf("show did not reflect the admitted review:none policy: %d %s", code, out)
+	}
 	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
 	code, out := runReviewIdentityCLI(t, f, "merge", "t1", "--execute")
 	if code != 1 || !strings.Contains(out, "merge_approval_required") {
@@ -362,6 +378,15 @@ func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["true"]`)
 	if code, out = runReviewIdentityCLIWithResourceConflictRetry(t, f, "merge", "t1", "--execute", "--user-approved", "Merge this checked Task"); code != 0 {
 		t.Fatalf("none refused: %d %s", code, out)
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rounds, err := db.ReviewRoundsFor(context.Background(), change.ID)
+	if err != nil || len(rounds) != 0 {
+		t.Fatalf("review policy none unexpectedly admitted auto-start Review Rounds: %#v, %v", rounds, err)
 	}
 }
 

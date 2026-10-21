@@ -14,7 +14,9 @@ import (
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func TestReviewStartAdmitsFrozenRoundAndGeneratedFiles(t *testing.T) {
@@ -178,6 +180,15 @@ guidance = ["docs/review.md"]
 	gitTest(t, change.WorktreePath, "commit", "-m", "later change")
 	if code, output := start(); code != 1 || !strings.Contains(output, "review_round_cap") {
 		t.Fatalf("round cap refusal code=%d: %s", code, output)
+	}
+}
+
+func TestAutoStartReviewLoopRespectsSelectedReviewPolicy(t *testing.T) {
+	if autoStartReviewLoop(&taskplan.Plan{Review: "none", ValidationLoops: &taskplan.ValidationLoops{Review: config.ReviewLoop{Enabled: true, AutoStart: true}}}) {
+		t.Fatal("auto-start enabled for a Task whose admitted review policy is none")
+	}
+	if !autoStartReviewLoop(&taskplan.Plan{Review: "quick", ValidationLoops: &taskplan.ValidationLoops{Review: config.ReviewLoop{Enabled: true, AutoStart: true}}}) {
+		t.Fatal("auto-start disabled for a reviewed Task")
 	}
 }
 

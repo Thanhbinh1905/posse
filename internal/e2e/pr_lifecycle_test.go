@@ -1003,6 +1003,22 @@ func TestWatchCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
 	}
 }
 
+func TestMergeReadyNoticeWhileTaskIsDoneRaisesDecision(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE id=?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", task.GatedSHA)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	fixture.requireNotice(t, "t1", "merge_ready")
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "merge_ready" {
+		t.Fatalf("merge_ready Decision was not raised while the Task remained done: %#v, %v", decisions, err)
+	}
+}
+
 func TestMergeReadyDecisionCanDiscardUnmergedPR(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()

@@ -633,7 +633,7 @@ func mapReviewRoundAdmissionError(err error) error {
 }
 
 func autoStartReviewLoop(plan *taskplan.Plan) bool {
-	return plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled && plan.ValidationLoops.Review.AutoStart
+	return plan != nil && plan.Review != "none" && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled && plan.ValidationLoops.Review.AutoStart
 }
 
 func autoStartReviewerUnavailable(err error) (*axi.Error, bool) {

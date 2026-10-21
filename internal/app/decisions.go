@@ -44,7 +44,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		}
 		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
 		switch {
-		case notice.Kind == "merge_ready" && task.AutonomyMerge != "auto" && task.State == store.StateMerging:
+		case notice.Kind == "merge_ready" && task.AutonomyMerge != "auto" && (task.State == store.StateDone || task.State == store.StateMerging):
 			request.Kind = "merge_ready"
 			request.Question = "Merge " + task.Title + "? " + notice.Summary
 			request.Options = []string{"merge", "wait", "discard"}
