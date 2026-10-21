@@ -80,7 +80,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			request.Origin = reviewCapOrigin(task, head)
 			request.Question = fmt.Sprintf("Review and repair cap reached for %s at %s (%d of %d Review/repair rounds used). Choose how to proceed.", taskIDString(task.Seq), shortSHA(head), used, max)
 			request.Options = []string{"accept-head", "final-fix", "rethink", "discard"}
-		case notice.Kind == "merge_ready" && task.AutonomyMerge != "auto" && task.State == store.StateMerging:
+		case notice.Kind == "merge_ready" && task.AutonomyMerge != "auto" && (task.State == store.StateDone || task.State == store.StateMerging):
 			request.Kind = "merge_ready"
 			request.Question = "Merge " + task.Title + "? " + notice.Summary
 			request.Options = []string{"merge", "wait", "discard"}

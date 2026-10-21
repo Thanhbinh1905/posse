@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -761,7 +762,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.ghState, encoded, 0o600); err != nil {
+	if err := atomicfile.Write(fixture.ghState, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.root, "gh-exit-nonzero"), nil, 0o600); err != nil {
@@ -1000,6 +1001,64 @@ func TestWatchCloseObservationDuringDiscardTeardownIsObsoleted(t *testing.T) {
 		if decision.TaskID == task.ID {
 			t.Fatalf("closed-PR Decision remained pending after discard Teardown: %#v", decision)
 		}
+	}
+}
+
+func TestMergeReadyNoticeWhileTaskIsDoneRaisesDecision(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET state='done' WHERE id=?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", task.GatedSHA)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	fixture.requireNotice(t, "t1", "merge_ready")
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "merge_ready" {
+		t.Fatalf("merge_ready Decision was not raised while the Task remained done: %#v, %v", decisions, err)
+	}
+}
+
+func TestMergeReadyDecisionBackfillsAfterDeferredReconciliation(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", task.GatedSHA)
+	writer, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(context.Background(), `UPDATE projects SET name=name WHERE id=?`, fixture.project.ID); err != nil {
+		_ = writer.Rollback()
+		t.Fatal(err)
+	}
+	command := exec.Command(fixture.binary, "show", "t1")
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	output, commandErr := command.CombinedOutput()
+	if err := writer.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if commandErr != nil || !strings.Contains(string(output), "Project observations were deferred") {
+		t.Fatalf("store contention did not defer reconciliation: err=%v output=%s", commandErr, output)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	var noticeID int64
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT id FROM notices WHERE task_id=? AND kind='merge_ready' ORDER BY id DESC LIMIT 1`, task.ID).Scan(&noticeID); err != nil {
+		t.Fatalf("PR watch did not persist merge_ready while Task was merging: %v", err)
+	}
+	// Recreate the durable state of a deferred reconciliation that advanced the cursor
+	// before saving its Decision, after the PR watcher persisted the real Notice.
+	if _, err := fixture.db.ExecContext(context.Background(), `DELETE FROM decisions WHERE project_id=? AND origin=?`, fixture.project.ID, fmt.Sprintf("notice:%d", noticeID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.AdvanceDecisionNoticeCursor(context.Background(), fixture.project.ID, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	output = []byte(runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decisions"))
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "merge_ready" {
+		t.Fatalf("merge_ready Decision was not recovered after deferred reconciliation: decisions=%#v err=%v output=%s", decisions, err, output)
 	}
 }
 
@@ -2361,7 +2420,7 @@ func (fixture *prLifecycleFixture) writeGraphQL(t *testing.T, alias, state, chec
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.ghState, encoded, 0o600); err != nil {
+	if err := atomicfile.Write(fixture.ghState, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
