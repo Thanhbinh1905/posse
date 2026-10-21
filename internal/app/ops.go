@@ -92,6 +92,9 @@ func (s *Service) startWorkspacePRPolls(ctx context.Context, db *store.DB, proje
 				s.startMergedMemberSync(ctx, db, project, repo)
 			}
 			pollErr := s.pollWorkspacePullRequestsForRepo(memberCtx, db, project, cfg, false, onMerged, repo, false, false, token)
+			if decisionErr := s.raiseNoticeDecisions(memberCtx, db, project); decisionErr != nil {
+				pollErr = errors.Join(pollErr, fmt.Errorf("PR watch Decisions: %w", decisionErr))
+			}
 			if mergedMember {
 				s.startMergedTaskTeardown(ctx, db, project, cfg)
 			}
@@ -277,6 +280,9 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
 			failures = append(failures, fmt.Errorf("active Task Teardown: %w", err))
 		}
+	}
+	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
+		failures = append(failures, fmt.Errorf("PR watch Decisions: %w", err))
 	}
 	_, _ = s.availableUpdate(ctx, db, &project)
 	return errors.Join(failures...)

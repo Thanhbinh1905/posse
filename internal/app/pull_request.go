@@ -1613,9 +1613,19 @@ func pullRequestDisplay(ctx context.Context, db *store.DB, task store.Task) (map
 	if task.PRURL == "" {
 		return nil, "", nil
 	}
+	reviewStatus := func(observed string) string {
+		if observed != "" {
+			return strings.ToLower(observed)
+		}
+		plan, err := task.AdmittedPlan()
+		if err == nil && plan != nil && plan.Review == "none" {
+			return "none"
+		}
+		return "unknown"
+	}
 	observation, err := db.LatestPRObservation(ctx, task.ID)
 	if errors.Is(err, store.ErrNotFound) {
-		return map[string]any{"url": task.PRURL, "state": "OPEN", "checks": "pending", "review": "unknown", "mergeable": "unknown", "updated": ""}, "OPEN", nil
+		return map[string]any{"url": task.PRURL, "state": "OPEN", "checks": "pending", "review": reviewStatus(""), "mergeable": "unknown", "updated": ""}, "OPEN", nil
 	}
 	if err != nil {
 		return nil, "", err
@@ -1628,7 +1638,7 @@ func pullRequestDisplay(ctx context.Context, db *store.DB, task store.Task) (map
 	updated := time.UnixMilli(observation.ObservedAt).Local().Format(time.RFC3339)
 	return map[string]any{
 		"url": observation.PRURL, "state": observation.State, "checks": checkLabel,
-		"review":    defaultValue(strings.ToLower(observation.Review), "unknown"),
+		"review":    reviewStatus(observation.Review),
 		"mergeable": defaultValue(strings.ToLower(observation.Mergeable), "unknown"), "updated": updated,
 	}, observation.State, nil
 }

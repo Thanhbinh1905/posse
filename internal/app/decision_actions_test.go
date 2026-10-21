@@ -29,6 +29,7 @@ func TestDiscardDecisionEligibilityIsScopedByKind(t *testing.T) {
 		{kind: "recovery", state: store.StateMerged},
 		{kind: "worker_exited", state: store.StateDone, want: true},
 		{kind: "worker_exited", state: store.StateReported},
+		{kind: "merge_ready", state: store.StateDone, want: true},
 		{kind: "merge_ready", state: store.StateMerging, want: true},
 		{kind: "merge_ready", state: store.StateMerged},
 		{kind: "pr_closed", state: store.StateFailed, want: true},

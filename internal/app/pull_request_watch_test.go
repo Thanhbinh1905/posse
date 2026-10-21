@@ -1169,6 +1169,33 @@ func TestPRMergeAutoTeardownRetriesAfterHerdrReturns(t *testing.T) {
 	}
 }
 
+func TestPRWatchRaisesMergeReadyDecisionAfterObservation(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateMerging {
+		t.Fatalf("fixture Task is not merging: %#v, %v", task, err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", task.GatedSHA)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(`[defaults]
+pr_poll = "1ms"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.Herdr = nil
+	if err := fixture.service.maintainProjectWatch(context.Background(), fixture.db, fixture.project); err != nil {
+		t.Fatalf("maintain Project Watch: %v", err)
+	}
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "merge_ready" {
+		notices, _ := fixture.db.Notices(context.Background(), fixture.project.ID, true)
+		t.Fatalf("PR Watch did not raise the merge_ready Decision in the polling cycle: decisions=%#v, notices=%#v, err=%v", decisions, notices, err)
+	}
+}
+
 func TestPRWatchAttributesPartialGraphQLErrorsAndKeepsGlobalFailures(t *testing.T) {
 	for _, test := range []struct {
 		name, alias string

@@ -371,7 +371,7 @@ func canDiscardFromDecision(kind string, state store.State) bool {
 	case "worker_exited":
 		return state == store.StateDone || state == store.StateMerging
 	case "merge_ready":
-		return state == store.StateMerging
+		return state == store.StateDone || state == store.StateMerging
 	case "pr_closed":
 		return state != store.StateReported && state != store.StateMerged
 	case "orphan":
