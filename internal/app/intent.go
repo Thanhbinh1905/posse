@@ -34,10 +34,6 @@ func (s *Service) startTaskIntentWithInitialStep(ctx context.Context, db *store.
 	return intent, err
 }
 
-func (s *Service) startTaskIntentWithPayloadLocked(ctx context.Context, db *store.DB, projectID, taskID int64, command, payload string) (store.Intent, error) {
-	return s.startTaskIntentWithPayloadLockedAtStep(ctx, db, projectID, taskID, command, payload, "started")
-}
-
 func (s *Service) startTaskIntentWithPayloadLockedAtStep(ctx context.Context, db *store.DB, projectID, taskID int64, command, payload, initialStep string) (store.Intent, error) {
 	processID := os.Getpid()
 	intent, err := db.IntentByTask(ctx, taskID)
