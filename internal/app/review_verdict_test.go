@@ -108,6 +108,35 @@ func (f *reviewVerdictFixture) commitToChange(t *testing.T) {
 	gitTest(t, f.worktree, "commit", "-m", "later change")
 }
 
+func TestQuickReviewCarryTreatsUnavailableRemoteAsNoCarry(t *testing.T) {
+	for _, remote := range []string{"missing", "unreachable"} {
+		t.Run(remote, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "local", store.StateDone)
+			installGateValidationPlanForReview(t, fixture, 1, "quick")
+			ctx := context.Background()
+			change, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.task = change
+			if remote == "missing" {
+				gitTest(t, fixture.worktree, "remote", "remove", "origin")
+			} else {
+				gitTest(t, fixture.worktree, "remote", "set-url", "origin", filepath.Join(fixture.root, "missing-origin.git"))
+			}
+			head := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+			err = ensureReviewCarry(ctx, fixture.db, fixture.project, change, []store.ReviewTarget{{Repository: fixture.project.Name, Commit: head}})
+			if err != nil {
+				t.Fatalf("unavailable remote prevented local review handling: %v", err)
+			}
+			var carries int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM review_carries WHERE ship_task_id=?`, change.ID).Scan(&carries); err != nil || carries != 0 {
+				t.Fatalf("unavailable remote created %d carry rows, err=%v", carries, err)
+			}
+		})
+	}
+}
+
 func TestReviewVerdictRecordedFromPosseRecords(t *testing.T) {
 	f := newReviewVerdictFixture(t)
 	code, out := f.signal(t, f.review.PaneID, "done", "Looks right", "--report", "report.md", "--verdict", "pass")

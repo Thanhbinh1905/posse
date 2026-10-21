@@ -27,6 +27,7 @@ type Brief struct {
 	Target         string
 	TargetByRepo   map[string]string
 	ReviewOf       string
+	Supersedes     string
 	ReportKind     string
 	AutonomyReview string
 	AutonomyMerge  string
@@ -40,7 +41,10 @@ type Brief struct {
 	Body   string
 }
 
-var workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
+var (
+	workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
+	taskIDPattern        = regexp.MustCompile(`^t[1-9][0-9]*$`)
+)
 
 type IssueRef struct {
 	Repository string
@@ -140,7 +144,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		if key == "autonomy" && allowHistoricalMultiIssue {
 			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "base", "target", "review_of", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "base", "target", "review_of", "supersedes", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -159,6 +163,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		WorkflowRun: unquote(values["workflow_run"]),
 		Stage:       unquote(values["stage"]),
 		ReviewOf:    unquote(values["review_of"]),
+		Supersedes:  unquote(values["supersedes"]),
 		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
@@ -286,6 +291,11 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	}
 	if brief.ReviewRounds > 0 && brief.Type != "change" {
 		return Brief{}, &BriefError{Field: "review_rounds", Reason: "is valid only for a Change Task"}
+	}
+	if brief.Supersedes != "" {
+		if brief.Type != "change" || !taskIDPattern.MatchString(brief.Supersedes) {
+			return Brief{}, &BriefError{Field: "supersedes", Reason: "must name a Change Task such as t12"}
+		}
 	}
 	if brief.Title == "" {
 		return Brief{}, &BriefError{Field: "title", Reason: "is required"}

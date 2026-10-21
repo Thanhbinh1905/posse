@@ -56,6 +56,21 @@ func TestBriefReviewRoundsAreChangeOnlyAndBounded(t *testing.T) {
 	}
 }
 
+func TestSupersedesIsChangeOnlyAndRequiresTaskReference(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Rethink\ndone_when: checked\nsupersedes: t12\n---\n")
+	if err != nil || brief.Supersedes != "t12" {
+		t.Fatalf("supersedes parse = %#v, %v", brief, err)
+	}
+	for _, text := range []string{
+		"---\ntype: research\ntitle: Report\ndone_when: checked\nsupersedes: t12\n---\n",
+		"---\ntype: change\ntitle: Invalid\ndone_when: checked\nsupersedes: 12\n---\n",
+	} {
+		if _, err := ParseBriefText(text); err == nil {
+			t.Fatalf("accepted invalid supersedes Brief %q", text)
+		}
+	}
+}
+
 func TestReviewPolicyTighteningAndScopedChoice(t *testing.T) {
 	for _, tc := range []struct {
 		current, requested string
