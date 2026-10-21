@@ -259,10 +259,16 @@ func (db *DB) Decision(ctx context.Context, projectID, id int64) (Decision, erro
 	return decisionRow(db.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND id=?`, projectID, id))
 }
 
-// DecisionSourceNotices returns only Notices beyond the Project's evaluated cursor.
+// DecisionSourceNotices returns unevaluated Notices and merge_ready Notices
+// without a Decision, even if the cursor advanced before reconciliation completed.
 func (db *DB) DecisionSourceNotices(ctx context.Context, projectID int64) ([]Notice, error) {
 	rows, err := db.QueryContext(ctx, `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
-		FROM notices n WHERE n.project_id=? AND n.id>COALESCE((SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?),0)
+		FROM notices n WHERE n.project_id=? AND (
+		n.id>COALESCE((SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?),0)
+		OR (n.kind='merge_ready'
+			AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=n.task_id AND t.state IN ('done','merging') AND t.autonomy_land<>'auto')
+			AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id))
+		)
 		ORDER BY n.id`, projectID, projectID)
 	if err != nil {
 		return nil, err

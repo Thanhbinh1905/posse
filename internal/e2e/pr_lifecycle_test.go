@@ -1019,6 +1019,48 @@ func TestMergeReadyNoticeWhileTaskIsDoneRaisesDecision(t *testing.T) {
 	}
 }
 
+func TestMergeReadyDecisionBackfillsAfterDeferredReconciliation(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	task := prepareDiscardPRTask(t, fixture)
+	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", task.GatedSHA)
+	writer, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(context.Background(), `UPDATE projects SET name=name WHERE id=?`, fixture.project.ID); err != nil {
+		_ = writer.Rollback()
+		t.Fatal(err)
+	}
+	command := exec.Command(fixture.binary, "show", "t1")
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	output, commandErr := command.CombinedOutput()
+	if err := writer.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if commandErr != nil || !strings.Contains(string(output), "Project observations were deferred") {
+		t.Fatalf("store contention did not defer reconciliation: err=%v output=%s", commandErr, output)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	var noticeID int64
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT id FROM notices WHERE task_id=? AND kind='merge_ready' ORDER BY id DESC LIMIT 1`, task.ID).Scan(&noticeID); err != nil {
+		t.Fatalf("PR watch did not persist merge_ready while Task was merging: %v", err)
+	}
+	// Recreate the durable state of a deferred reconciliation that advanced the cursor
+	// before saving its Decision, after the PR watcher persisted the real Notice.
+	if _, err := fixture.db.ExecContext(context.Background(), `DELETE FROM decisions WHERE project_id=? AND origin=?`, fixture.project.ID, fmt.Sprintf("notice:%d", noticeID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.AdvanceDecisionNoticeCursor(context.Background(), fixture.project.ID, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	output = []byte(runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "decisions"))
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "merge_ready" {
+		t.Fatalf("merge_ready Decision was not recovered after deferred reconciliation: decisions=%#v err=%v output=%s", decisions, err, output)
+	}
+}
+
 func TestMergeReadyDecisionCanDiscardUnmergedPR(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
