@@ -608,6 +608,13 @@ func (s *Service) verifySandboxForegroundSignalOwnership(ctx context.Context, pr
 	}
 	info, err := s.sandboxPaneProcessInfo(ctx, expectedPane.PaneID)
 	if err != nil {
+		snapshot, snapshotErr := s.snapshot(ctx)
+		if snapshotErr != nil {
+			return fmt.Errorf("could not recheck foreground process in pane %s before signaling: %w; could not confirm pane closure: %v", expectedPane.PaneID, err, snapshotErr)
+		}
+		if _, found := snapshotPane(snapshot, expectedPane.PaneID); !found {
+			return nil // The retained process identity remains authoritative after Herdr closes the verified pane.
+		}
 		return fmt.Errorf("could not recheck foreground process in pane %s before signaling: %w", expectedPane.PaneID, err)
 	}
 	if info.ShellPID <= 1 || info.ForegroundProcessGroup != foregroundPID {
