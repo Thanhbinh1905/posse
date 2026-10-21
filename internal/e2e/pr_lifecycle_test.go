@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -761,7 +762,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.ghState, encoded, 0o600); err != nil {
+	if err := atomicfile.Write(fixture.ghState, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(fixture.root, "gh-exit-nonzero"), nil, 0o600); err != nil {
@@ -2419,7 +2420,7 @@ func (fixture *prLifecycleFixture) writeGraphQL(t *testing.T, alias, state, chec
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.ghState, encoded, 0o600); err != nil {
+	if err := atomicfile.Write(fixture.ghState, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
