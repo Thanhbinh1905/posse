@@ -741,7 +741,7 @@ func workflowShell(shell string) (string, []string, error) {
 
 func workflowProcessEnvironment(root, scratch, jobID string) ([]string, error) {
 	if scratch == "" {
-		return nil, fmt.Errorf("Task scratch path is required for local workflow execution")
+		return nil, fmt.Errorf("task scratch path is required for local workflow execution")
 	}
 	home := filepath.Join(scratch, "workflow-home", jobID)
 	if err := os.MkdirAll(home, 0o700); err != nil {
