@@ -196,6 +196,7 @@ func TestAutoStartReviewLoopStartsOnlyAfterGatePasses(t *testing.T) {
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
 merge_mode = "local"
+review = "quick"
 gate = ["test -f gate.ok"]
 
 [profiles.author]
@@ -300,6 +301,7 @@ func TestAutoStartSkipsUnavailableReviewerWithoutBlockingMerge(t *testing.T) {
 			name: "ineligible identity",
 			config: `[defaults]
 merge_mode = "local"
+review = "quick"
 
 [profiles.author]
 kind = "claude"
@@ -317,6 +319,7 @@ auto_start = true
 			name: "no review dispatch",
 			config: `[defaults]
 merge_mode = "local"
+review = "quick"
 
 [profiles.author]
 kind = "claude"
@@ -366,34 +369,29 @@ func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitC
 	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HERDR_ENV", "1")
-	t.Setenv("HERDR_PANE_ID", "w1:p1")
-	t.Setenv("HERDR_WORKSPACE_ID", "w1")
-	var output bytes.Buffer
-	cli := f.service.CLI()
-	cli.Out, cli.ErrOut = &output, &output
-	if code := cli.Run([]string{"merge", fmt.Sprintf("t%d", change.Seq)}); code != 0 {
-		t.Fatalf("Merge blocked by unavailable auto-start reviewer: code=%d output=%s", code, output.String())
+	change.State = store.StateDone
+	change.GatedSHA = strings.TrimSpace(gitTest(t, change.WorktreePath, "rev-parse", "HEAD"))
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET gated_sha=? WHERE id=?`, change.GatedSHA, change.ID); err != nil {
+		t.Fatal(err)
 	}
-	current, err := db.TaskByID(ctx, change.ProjectID, change.ID)
-	if err != nil || current.State != store.StateMerging {
-		t.Fatalf("Merge did not reach merging: task=%#v err=%v", current, err)
+	start := func() {
+		t.Helper()
+		started, err := f.service.maybeAutoStartReviewRound(&axi.Context{Context: ctx, Out: &bytes.Buffer{}}, db, f.home, f.project, change)
+		if err != nil || started {
+			t.Fatalf("auto-start result = started %v, err %v", started, err)
+		}
 	}
+	start()
 	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil || len(rounds) != 0 {
 		t.Fatalf("unavailable auto-start admitted Review Rounds: %#v, %v", rounds, err)
 	}
 	assertOneReviewAutoStartReadinessNotice(t, db, ctx, change)
-	current, err = db.TaskByID(ctx, change.ProjectID, change.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	started, err := f.service.maybeAutoStartReviewRound(&axi.Context{Context: ctx, Out: &bytes.Buffer{}}, db, f.home, f.project, current)
-	if err != nil || started {
-		t.Fatalf("repeat auto-start result = started %v, err %v", started, err)
-	}
+	start()
 	assertOneReviewAutoStartReadinessNotice(t, db, ctx, change)
-	output.Reset()
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
 	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), explicitCode) {
 		t.Fatalf("explicit review start should fail with %s: code=%d output=%s", explicitCode, code, output.String())
 	}

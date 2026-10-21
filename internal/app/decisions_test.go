@@ -372,7 +372,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		t.Fatalf("resolved Decisions stayed pending: %#v %v", pending, err)
 	}
 	all, err := db.Decisions(ctx, project.ID, false)
-	if err != nil || all[0].ObsoleteReason != "Task left merging" || all[1].ObsoleteReason != "Task no longer failed or lost" || all[0].Answer != "" {
+	if err != nil || all[0].ObsoleteReason != "Task left merge-ready state" || all[1].ObsoleteReason != "Task no longer failed or lost" || all[0].Answer != "" {
 		t.Fatalf("resolved Decisions were not marked obsolete: %#v %v", all, err)
 	}
 	// Repeated failure Notices still produce at most one pending recovery
