@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
@@ -22,15 +23,15 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("down takes no arguments; run it in the Project folder")
 	}
-	db, home, err := s.openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
 	dir, err := currentDir()
 	if err != nil {
 		return err
 	}
+	db, home, err := s.openDBForDown(ctx.Context, dir)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
 	actor := s.configCaller(ctx.Context, db)
 	if actor.role == "worker" || actor.role == "agent" {
 		return axi.Failure("user_only", "posse down cannot run from a Worker or agent context", false, "Run `posse down` from a User shell in the Project folder")
@@ -210,4 +211,73 @@ func stringsToAny(values []string) []any {
 		result = append(result, value)
 	}
 	return result
+}
+
+func (s *Service) openDBForDown(ctx context.Context, dir string) (*store.DB, string, error) {
+	db, home, err := s.openDB()
+	if err == nil || !retryableStoreBusy(err) {
+		return db, home, err
+	}
+	if s.canStopProjectPollerFromDown(ctx) {
+		if _, stopErr := stopProjectPollerAtDirectoryAfterContention(ctx, home, dir); stopErr != nil {
+			return nil, home, errors.Join(err, stopErr)
+		}
+	}
+	for retry := 0; retry < 2; retry++ {
+		timer := time.NewTimer(time.Duration(50<<retry) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, home, ctx.Err()
+		case <-timer.C:
+		}
+		db, home, err = s.openDB()
+		if err == nil || !retryableStoreBusy(err) {
+			return db, home, err
+		}
+	}
+	return nil, home, err
+}
+
+func retryableStoreBusy(err error) bool {
+	var failure *axi.Error
+	return errors.As(err, &failure) && failure.Code == "store_busy" && failure.Retryable
+}
+
+func (s *Service) canStopProjectPollerFromDown(ctx context.Context) bool {
+	if os.Getenv(workerHomeEnv) != "" {
+		return false
+	}
+	paneID := os.Getenv("HERDR_PANE_ID")
+	for _, ancestor := range processAncestors(procRoot, os.Getpid()) {
+		if ancestor.env[workerHomeEnv] != "" || ancestor.agent {
+			return false
+		}
+		for _, key := range agentEnvironment {
+			if ancestor.env[key] != "" {
+				return false
+			}
+		}
+		if paneID == "" {
+			paneID = ancestor.env["HERDR_PANE_ID"]
+		}
+	}
+	for _, key := range agentEnvironment {
+		if os.Getenv(key) != "" {
+			return false
+		}
+	}
+	if paneID == "" {
+		return true
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == paneID {
+			return pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped"
+		}
+	}
+	return false
 }
