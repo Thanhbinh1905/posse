@@ -474,6 +474,7 @@ auto_teardown = "finished"
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: "posse-shop-t1-1", PaneID: "w2:p1"}}
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	removeFixtureTaskPane(f)
+	t.Chdir(f.repo)
 	cfg, err := config.Load(f.home, f.project.Name)
 	if err != nil {
 		t.Fatal(err)

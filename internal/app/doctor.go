@@ -84,6 +84,8 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	}
 	cacheStatus, cacheDetail, cacheAction := sharedGoCacheDiagnostic(ctx.Context)
 	addCheck("Shared Go build cache", cacheStatus, cacheDetail, cacheAction)
+	workerCacheStatus, workerCacheDetail, workerCacheAction := workerGoBuildCacheDiagnostic(home)
+	addCheck("Posse Worker Go build cache", workerCacheStatus, workerCacheDetail, workerCacheAction)
 	if configErr != nil {
 		addCheck("config", "fail", configErr.Error(), "Fix the reported configuration key")
 	} else {

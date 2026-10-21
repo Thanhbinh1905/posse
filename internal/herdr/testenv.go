@@ -17,11 +17,12 @@ import (
 // IsolatedTestEnvironment strips every inherited HERDR_* value and redirects all
 // persisted state to a short disposable test root.
 func IsolatedTestEnvironment(root string) []string {
+	resolvedRoot := resolvedTestPath(root)
 	scratchRoot := os.Getenv("POSSE_E2E_TMP_ROOT")
-	if !safeTaskScratchRoot(scratchRoot) || !inside(scratchRoot, root) {
-		scratchRoot = taskScratchRootContaining(root)
+	if !safeTaskScratchRoot(scratchRoot) || !inside(scratchRoot, resolvedRoot) {
+		scratchRoot = taskScratchRootContaining(resolvedRoot)
 	}
-	if !safeTaskScratchRoot(scratchRoot) || !inside(scratchRoot, root) {
+	if !safeTaskScratchRoot(scratchRoot) || !inside(scratchRoot, resolvedRoot) {
 		scratchRoot = ""
 	}
 	values := make([]string, 0, len(os.Environ())+8)
@@ -131,6 +132,7 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 		root = filepath.Dir(configHome)
 	}
 	rootAbs, rootErr := filepath.Abs(root)
+	resolvedRoot, resolveErr := filepath.EvalSymlinks(rootAbs)
 	tmpDir := env["TMPDIR"]
 	if tmpDir == "" {
 		tmpDir = os.TempDir()
@@ -140,8 +142,7 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 		_, tmpDirErr = filepath.EvalSymlinks(tmpDirAbs)
 	}
 	scratchRoot := filepath.Clean(env["POSSE_E2E_TMP_ROOT"])
-	insideScratch := safeTaskScratchRoot(scratchRoot) && inside(scratchRoot, rootAbs)
-	resolvedRoot, resolveErr := filepath.EvalSymlinks(rootAbs)
+	insideScratch := safeTaskScratchRoot(scratchRoot) && resolveErr == nil && inside(scratchRoot, resolvedRoot)
 	parent := filepath.Dir(resolvedRoot)
 	parentIsTemp := parent == "/tmp" || parent == "/var/tmp"
 	insideTemp := false
@@ -246,6 +247,17 @@ func isolatedDefaultShell(config string) string {
 		return ""
 	}
 	return ""
+}
+
+func resolvedTestPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(absolute)
 }
 
 func inside(root, path string) bool {

@@ -709,6 +709,7 @@ func TestWorkerPublishesPRToFrozenNonDefaultTarget(t *testing.T) {
 	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	f.service.Herdr = adapter
 	removeFixtureTaskPane(f)
+	t.Chdir(f.repo)
 	if err := f.service.autoTeardownMergedTasks(context.Background(), f.db, f.project, cfg); err != nil {
 		t.Fatalf("teardown merged Task: %v", err)
 	}
@@ -1396,7 +1397,25 @@ func (fixture *prMergeFixture) run(args ...string) (int, string, string) {
 	if len(args) > 0 && (args[0] == "signal" || args[0] == "publish") {
 		cwd = fixture.worktree
 	}
-	fixture.test.Chdir(cwd)
+	previousCWD, err := os.Getwd()
+	if err != nil {
+		fixture.test.Fatalf("get test working directory: %v", err)
+	}
+	previousPWD, hadPWD := os.LookupEnv("PWD")
+	if err := os.Chdir(cwd); err != nil {
+		fixture.test.Fatalf("change CLI working directory: %v", err)
+	}
+	_ = os.Setenv("PWD", cwd)
+	defer func() {
+		if err := os.Chdir(previousCWD); err != nil {
+			fixture.test.Errorf("restore test working directory: %v", err)
+		}
+		if hadPWD {
+			_ = os.Setenv("PWD", previousPWD)
+		} else {
+			_ = os.Unsetenv("PWD")
+		}
+	}()
 	// The fixture has a Task worktree but no Pool Sandbox row. Mark publish
 	// as a Worker invocation; restore before the next Lead command.
 	if len(args) > 0 && args[0] == "publish" {

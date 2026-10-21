@@ -106,8 +106,8 @@ INSERT INTO tasks(
     herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, agent_session_kind, pr_url,
     landed_ref, last_output_hash, last_worktree_hash, last_progress_at,
     agent_absent_since, idle_since, created_at, updated_at, plan_json, report_kind,
-    containment_mode, containment_path, containment_marker
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    containment_mode, containment_path, containment_marker, pane_shell_identity
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertProject :execresult
 INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)
@@ -185,7 +185,10 @@ DELETE FROM mounts WHERE id = ? AND project_id = ? AND state IN ('idle', 'broken
 UPDATE tasks SET mount_id = ?, worktree_path = ?, updated_at = ? WHERE id = ?;
 
 -- name: UpdateTaskWorkspace :exec
-UPDATE tasks SET herdr_workspace_id = ?, pane_id = ?, updated_at = ? WHERE id = ?;
+UPDATE tasks SET herdr_workspace_id = ?, pane_id = ?, pane_shell_identity = '', updated_at = ? WHERE id = ?;
+
+-- name: SetTaskPaneShellIdentity :exec
+UPDATE tasks SET pane_shell_identity = ?, updated_at = ? WHERE id = ?;
 
 -- name: SetTaskContainment :exec
 UPDATE tasks SET containment_mode = ?, containment_path = ?, containment_marker = ?, updated_at = ? WHERE id = ?;

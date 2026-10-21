@@ -46,6 +46,7 @@ func TestTeardownStopsDetachedTaskServer(t *testing.T) {
 	}
 	serverScript := fmt.Sprintf(`import os, socket, sys, time
 root = sys.argv[1]
+reference = open(sys.argv[2], "rb")
 os.chdir("/")
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -87,8 +88,9 @@ while True:
 	}
 	values := strings.Split(strings.TrimSpace(string(environment)), "\t")
 	expectedScratch := filepath.Join(f.home, "scratch", "shop", fmt.Sprintf("t%d", task.Seq))
-	if len(values) != 6 || values[0] != expectedScratch || values[1] != expectedScratch || values[2] != expectedScratch || values[3] != expectedScratch || values[4] != expectedScratch || values[5] != task.ContainmentMarker {
-		t.Fatalf("Worker Task environment = %#v, Task = %#v; want every temp variable set to %s and the recorded marker", values, task, expectedScratch)
+	expectedCache := filepath.Join(f.home, "cache", "worker-go-build")
+	if len(values) != 7 || values[0] != expectedScratch || values[1] != expectedScratch || values[2] != expectedScratch || values[3] != expectedScratch || values[4] != expectedScratch || values[5] != task.ContainmentMarker || values[6] != expectedCache {
+		t.Fatalf("Worker Task environment = %#v, Task = %#v; want every temp variable set to %s, the recorded marker, and shared Posse GOCACHE %s", values, task, expectedScratch, expectedCache)
 	}
 	if task.ContainmentMarker == "" {
 		t.Fatalf("Task process containment identity = %#v", task)
@@ -267,8 +269,8 @@ exec -a "ssh -M -S $2" bash -c 'sleep 300 & echo $! > "$1"; wait' e2e-control-ch
 	teardown.Dir, teardown.Env = f.repo, f.leadEnv
 	outputBytes, teardownErr := teardown.CombinedOutput()
 	output := string(outputBytes)
-	if teardownErr == nil || !strings.Contains(output, "preserving detached shared daemon") || !strings.Contains(output, strconv.Itoa(pid)) {
-		t.Fatalf("Teardown did not report the preserved ControlMaster: err=%v output=%s", teardownErr, output)
+	if teardownErr == nil || !strings.Contains(output, "cannot release the Sandbox while live processes still reference it") || !strings.Contains(output, strconv.Itoa(pid)) {
+		t.Fatalf("Teardown did not block release for ControlMaster PID %d (child %d, ordinary process %d): err=%v output=%s", pid, childPID, ordinaryPID, teardownErr, output)
 	}
 	if !teardownFixtureProcessRunning(master) {
 		t.Fatalf("Teardown signalled detached ControlMaster PID %d", pid)

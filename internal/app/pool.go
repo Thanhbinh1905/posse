@@ -24,8 +24,11 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 	if args[0] == "reconcile-resource" {
 		return s.reconcileResourceLease(ctx, args[1:])
 	}
+	if args[0] == "repair" {
+		return s.repairPoolSandbox(ctx, args[1:])
+	}
 	if args[0] != "prune" {
-		return axi.Usage("pool accepts only the prune or reconcile-resource subcommand", "Run `posse pool` to list Sandboxes")
+		return axi.Usage("pool accepts the prune, repair, or reconcile-resource subcommand", "Run `posse pool` to list Sandboxes")
 	}
 	parsed, err := parseArgs("pool prune", args[1:], map[string]flagSpec{"yes": {boolean: true}})
 	if err != nil {
@@ -879,21 +882,19 @@ func requireNoSandboxProcesses(path string, approvedDiscard bool) error {
 	if err != nil {
 		return err
 	}
-	pids, err := processIDsInRoots([]ownedProcessRoot{{path: root}})
+	pids, err := processIDsInRoots([]ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true}})
 	if err != nil {
 		return err
 	}
 	if len(pids) == 0 {
 		return nil
 	}
-	labels := make([]string, len(pids))
-	for index, pid := range pids {
-		labels[index] = strconv.Itoa(pid)
-	}
+	processes := taskOwnedProcessDetails(pids)
+	description := describeTaskProcesses(processes)
 	if approvedDiscard {
-		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Sandbox while processes remain", true, strings.Join(labels, ","), "No process was stopped or signalled. Inspect the Sandbox processes, then retry discard")
+		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Sandbox while processes still reference it: "+description, true, "No process was stopped or signalled. Inspect the listed processes, then retry discard")
 	}
-	return axi.Failure("sandbox_process_identity_unavailable", "cannot release the Sandbox because live processes were not authorized during ownership proof: "+strings.Join(labels, ","), true, strings.Join(labels, ","), "Inspect the Sandbox processes and retry Teardown after they exit")
+	return axi.Failure("sandbox_processes_present", "cannot release the Sandbox while live processes still reference it: "+description, true, "Stop or wait for the listed processes to exit, then retry Teardown. The Sandbox remains held until no process has it as its cwd, open file, or mapped file")
 }
 
 func finishReleasingSandbox(ctx context.Context, db *store.DB, project store.Project, sandbox store.Sandbox, task store.Task) error {
@@ -1061,6 +1062,7 @@ type ownedProcessRoot struct {
 	includeOpenFiles   bool
 	includeMappedFiles bool
 	excluded           map[int]bool
+	excludedExact      map[int]bool
 }
 
 type ownedProcess struct {
@@ -1514,6 +1516,9 @@ func processRootReferences(pid int, roots []ownedProcessRoot) (references, fileR
 }
 
 func ownedProcessRootExcludesPID(pid int, root ownedProcessRoot) (bool, error) {
+	if root.excludedExact[pid] {
+		return true, nil
+	}
 	if len(root.excluded) == 0 {
 		return false, nil
 	}

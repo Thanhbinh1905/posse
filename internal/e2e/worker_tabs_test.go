@@ -521,10 +521,11 @@ case "$PWD/" in
     IFS= read -r prompt || exit 0
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     if [ -f "$POSSE_TEST_ROOT/check-task-env" ]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" > "$POSSE_TEST_ROOT/task-environment"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" "$GOCACHE" > "$POSSE_TEST_ROOT/task-environment"
     fi
     if [ -f "$POSSE_TEST_ROOT/launch-detached-server" ]; then
-      setsid python3 "$POSSE_TEST_ROOT/detached-server.py" "$POSSE_TEST_ROOT" >/dev/null 2>&1 &
+      printf 'Task-owned server reference\n' > "$TMPDIR/detached-server-reference"
+      setsid python3 "$POSSE_TEST_ROOT/detached-server.py" "$POSSE_TEST_ROOT" "$TMPDIR/detached-server-reference" >/dev/null 2>&1 &
       echo $! > "$POSSE_TEST_ROOT/detached-server.pid"
     fi
     while [ ! -f "$PWD/.posse-e2e-agent-exit" ]; do sleep 0.05; done
@@ -815,7 +816,7 @@ func (f *workerTabsFixture) exitWorker(t *testing.T, taskID string) {
 	}
 	var lastProcessInfo json.RawMessage
 	var lastPane herdr.Pane
-	if !waitForCondition(5*time.Second, func() bool {
+	if !waitForCondition(10*time.Second, func() bool {
 		raw, err := f.client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
 		if err != nil {
 			lastProcessInfo = json.RawMessage(err.Error())

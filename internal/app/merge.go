@@ -287,7 +287,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		if completedElsewhere {
 			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
+		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
@@ -499,7 +499,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}})
+		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
 	}
 	if !inPlace && store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateMerged {
 		return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, "Pass `--discard --user-approved \"<User's words>\"`")
@@ -519,7 +519,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}})
+	return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
 }
 
 func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string) (teardownResult, error) {
@@ -582,7 +582,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		return result, s.teardownIncomplete(ctx, db, project, task, "Task artifact access", err)
 	}
 	var processAuthorization *sandboxProcessAuthorization
-	if !discardable && s.Herdr != nil && task.AgentName != "" && sandboxHeld {
+	if !discardable && s.Herdr != nil && sandboxHeld {
 		processAuthorization = newSandboxProcessAuthorization()
 		if err := s.verifySandboxForegroundOwnershipWithAuthorization(ctx, db, project, task, processAuthorization); err != nil {
 			processAuthorization.Close()
@@ -599,7 +599,8 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		return result, s.teardownIncomplete(ctx, db, project, task, "pane inspection", err)
 	}
 	var stopped []string
-	var inPlaceShellPID int
+	var inPlaceShellPID, inPlaceForegroundPID int
+	var inPlaceAuthorization *sandboxProcessAuthorization
 	var workerPlan *discardWorkerPlan
 	if discardable {
 		workerPlan, err = s.retainDiscardWorker(ctx, db, project, task, intent, panePlan)
@@ -659,13 +660,15 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		}
 	}
 	if !discardable {
-		if err := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
+		processStopErr := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
 			if inPlace {
-				paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
+				paneInfo, authorization, err := s.retainInPlaceTaskProcesses(ctx, db, project, task)
 				if err != nil {
 					return err
 				}
 				inPlaceShellPID = paneInfo.ShellPID
+				inPlaceForegroundPID = paneInfo.ForegroundProcessGroup
+				inPlaceAuthorization = authorization
 				if task.AgentName != "" && processIdentityCapabilityError() != "" {
 					snapshot, err := s.snapshot(ctx)
 					if err != nil {
@@ -682,7 +685,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			signalGuard := taskProcessSignalGuard(nil)
 			if inPlace {
 				signalGuard = func(pid int, _ syscall.Signal) error {
-					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, inPlaceShellPID)
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, inPlaceShellPID, inPlaceForegroundPID, inPlaceAuthorization)
 				}
 			} else if processAuthorization != nil {
 				signalGuard = processAuthorization.guardSignal
@@ -705,8 +708,12 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			}
 			stopped = append(stopped, scratchStopped...)
 			return nil
-		}); err != nil {
-			return result, s.teardownIncomplete(ctx, db, project, task, "Task process shutdown", err)
+		})
+		if inPlaceAuthorization != nil {
+			defer inPlaceAuthorization.Close()
+		}
+		if processStopErr != nil {
+			return result, s.teardownIncomplete(ctx, db, project, task, "Task process shutdown", processStopErr)
 		}
 	}
 	var paneResult teardownPanes
@@ -909,31 +916,31 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		if !discardable {
 			var signalGuard taskProcessSignalGuard
 			shellPID := 0
-			if inPlace {
-				signalGuard = func(pid int, _ syscall.Signal) error {
-					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, shellPID)
+			if inPlace && inPlaceAuthorization == nil && processIdentityCapabilityError() == "" {
+				paneInfo, authorization, proofErr := s.retainInPlaceTaskProcesses(ctx, db, project, task)
+				if proofErr != nil {
+					return proofErr
 				}
-				if len(taskContainmentProcessDetails(task)) > 0 {
-					paneInfo, err := s.verifyInPlaceForegroundOwnership(ctx, project, task)
-					if err != nil {
-						return err
-					}
-					shellPID = paneInfo.ShellPID
+				inPlaceShellPID = paneInfo.ShellPID
+				inPlaceForegroundPID = paneInfo.ForegroundProcessGroup
+				inPlaceAuthorization = authorization
+				if authorization != nil {
+					defer authorization.Close()
+				}
+			}
+			if inPlace {
+				shellPID = inPlaceShellPID
+				signalGuard = func(pid int, _ syscall.Signal) error {
+					return s.verifyInPlaceProcessSignalOwnership(ctx, project, task, pid, inPlaceShellPID, inPlaceForegroundPID, inPlaceAuthorization)
 				}
 			} else if processAuthorization != nil {
 				signalGuard = processAuthorization.guardSignal
 			}
-			if _, err := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard, shellPID); err != nil {
-				return err
-			}
-			preservedProcesses, _, err := taskSharedProcessExclusions(task)
+			preservedProcesses, err := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard, shellPID)
 			if err != nil {
 				return err
 			}
-			if len(preservedProcesses) > 0 {
-				return fmt.Errorf("cannot release the Task Sandbox while preserving detached shared daemon processes: %s", describeSharedTaskProcesses(preservedProcesses))
-			}
-			if err := retireEmptyTaskCgroup(task); err != nil {
+			if err := retireEmptyTaskCgroupWithPreserved(task, taskProcessDetailsPIDSet(preservedProcesses)); err != nil {
 				return err
 			}
 		}
@@ -1065,7 +1072,19 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {
 		return result, err
 	}
+	if detail, err := s.trimWorkerGoBuildCache(ctx, home); err != nil {
+		result.CacheMaintenance = "warning: " + err.Error()
+	} else {
+		result.CacheMaintenance = detail
+	}
 	return result, nil
+}
+
+func withCacheMaintenance(fields axi.Object, result teardownResult) axi.Object {
+	if result.CacheMaintenance != "" {
+		fields = append(fields, axi.Field{Key: "worker_go_cache", Value: result.CacheMaintenance})
+	}
+	return fields
 }
 
 func taskSandboxHeldBy(ctx context.Context, db *store.DB, task store.Task) (bool, error) {

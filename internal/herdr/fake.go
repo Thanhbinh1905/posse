@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 )
@@ -77,6 +78,37 @@ func (f *Fake) Call(_ context.Context, method string, params map[string]any) (js
 	}
 	if method == "worktree.open" {
 		return json.RawMessage(`{"workspace":{"workspace_id":"fake:child"},"tab":{"tab_id":"fake:child:t1"},"root_pane":{"pane_id":"fake:child:p1","tab_id":"fake:child:t1"}}`), nil
+	}
+	if method == "pane.process_info" {
+		paneID, _ := params["pane_id"].(string)
+		snapshot := f.SnapshotValue
+		if raw, ok := f.Results["session.snapshot"]; ok {
+			if decoded, err := decodeSnapshot(raw); err == nil {
+				snapshot = decoded
+			}
+		}
+		cwd, name := "", "bash"
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID == paneID {
+				cwd = pane.CWD
+				if pane.Agent != "" {
+					name = pane.Agent
+				}
+				break
+			}
+		}
+		for _, agent := range snapshot.Agents {
+			if agent.PaneID == paneID && agent.Agent != "" {
+				name = agent.Agent
+				break
+			}
+		}
+		if cwd == "" {
+			cwd = string(os.PathSeparator)
+		}
+		pid := os.Getpid()
+		result, err := json.Marshal(map[string]any{"process_info": map[string]any{"pane_id": paneID, "shell_pid": pid, "foreground_process_group_id": pid, "foreground_processes": []map[string]any{{"pid": pid, "name": name, "cwd": cwd}}}})
+		return result, err
 	}
 	return json.RawMessage(`{}`), nil
 }

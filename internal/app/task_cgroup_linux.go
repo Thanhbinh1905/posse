@@ -212,13 +212,6 @@ func processInCgroup(pid int, cgroupPath string) bool {
 	return err == nil && (current == relative || strings.HasPrefix(current, strings.TrimSuffix(relative, "/")+"/"))
 }
 
-func processInTaskCgroup(pid int, task store.Task) bool {
-	if pid <= 1 || task.ContainmentMode != "cgroup" || task.ContainmentPath == "" {
-		return false
-	}
-	return validateTaskCgroupPath(task.ContainmentPath, task) == nil && processInCgroup(pid, task.ContainmentPath)
-}
-
 func cgroupProcesses(cgroupPath string) ([]int, error) {
 	if _, err := taskCgroupRelativePath(cgroupPath); err != nil {
 		return nil, err
@@ -265,6 +258,10 @@ func cgroupProcesses(cgroupPath string) ([]int, error) {
 }
 
 func retireEmptyTaskCgroup(task store.Task) error {
+	return retireEmptyTaskCgroupWithPreserved(task, nil)
+}
+
+func retireEmptyTaskCgroupWithPreserved(task store.Task, preserved map[int]bool) error {
 	if task.ContainmentPath == "" {
 		return nil
 	}
@@ -276,7 +273,21 @@ func retireEmptyTaskCgroup(task store.Task) error {
 		return err
 	}
 	if len(pids) > 0 {
-		return fmt.Errorf("task cgroup still contains processes: %v", pids)
+		if preserved == nil {
+			preservedPIDs, err := detachedSharedTaskProcessPIDs(task)
+			if err != nil {
+				return err
+			}
+			preserved = taskProcessPIDSet(preservedPIDs)
+		}
+		for _, pid := range pids {
+			if !preserved[pid] {
+				return fmt.Errorf("task cgroup still contains processes outside the final preserved set: %v", pids)
+			}
+		}
+		// A detached shared daemon remains in this Task cgroup until it exits.
+		// Keep the emptying/reap path available to `posse clean` afterward.
+		return nil
 	}
 	return removeEmptyTaskCgroup(task.ContainmentPath)
 }
@@ -311,13 +322,13 @@ func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard tas
 	}
 	handles := map[int]*sandboxProcessHandle{}
 	terminated := map[int]bool{}
+	terminatedAt := map[int]time.Time{}
 	defer func() {
 		for _, handle := range handles {
 			_ = handle.Close()
 		}
 	}()
-	started := time.Now()
-	deadline := started.Add(8 * time.Second)
+	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		allPIDs, err := cgroupProcesses(task.ContainmentPath)
 		if err != nil {
@@ -379,9 +390,16 @@ func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard tas
 					return err
 				}
 				terminated[pid] = true
-			} else if time.Since(started) >= 2*time.Second {
-				if err := handle.Signal(syscall.SIGKILL); err != nil {
-					return err
+				terminatedAt[pid] = time.Now()
+			} else {
+				grace := 2 * time.Second
+				if pid == paneShellPID {
+					grace = 250 * time.Millisecond
+				}
+				if time.Since(terminatedAt[pid]) >= grace {
+					if err := handle.Signal(syscall.SIGKILL); err != nil {
+						return err
+					}
 				}
 			}
 		}

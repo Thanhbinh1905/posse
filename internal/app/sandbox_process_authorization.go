@@ -11,12 +11,15 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// mountProcessAuthorization retains process handles established while Herdr
+var errTaskProcessOutsideOwnedPaths = errors.New("task-marked process no longer references task-owned paths")
+
+// sandboxProcessAuthorization retains process handles established while Herdr
 // ownership is proved. CWD discovery during cleanup may verify these handles,
 // but must not authorize a new process.
 type sandboxProcessAuthorization struct {
-	handles       map[int]*sandboxProcessHandle
-	processGroups map[int][]*sandboxProcessHandle
+	handles              map[int]*sandboxProcessHandle
+	processGroups        map[int][]*sandboxProcessHandle
+	authorizeTaskProcess func(int) error
 }
 
 func newSandboxProcessAuthorization() *sandboxProcessAuthorization {
@@ -137,7 +140,30 @@ func (authorization *sandboxProcessAuthorization) setSignalGuard(pid int, guard 
 
 func (authorization *sandboxProcessAuthorization) guardSignal(pid int, signal syscall.Signal) error {
 	handle := authorization.handle(pid)
-	if handle == nil || handle.signalGuard == nil {
+	if handle == nil && authorization != nil && authorization.authorizeTaskProcess != nil {
+		if err := authorization.authorizeTaskProcess(pid); err != nil {
+			return err
+		}
+		handle = authorization.handle(pid)
+	}
+	if handle == nil {
+		alive, err := unretainedSandboxProcessAlive(pid)
+		if err != nil {
+			return fmt.Errorf("cannot verify unretained Task process %d: %w", pid, err)
+		}
+		if !alive {
+			return nil
+		}
+		return fmt.Errorf("PID %d was not retained during Task ownership proof; preserving it", pid)
+	}
+	alive, err := verifySandboxProcessHandleIfAlive(pid, handle)
+	if err != nil {
+		return err
+	}
+	if !alive {
+		return nil
+	}
+	if handle.signalGuard == nil {
 		return nil
 	}
 	return handle.signalGuard(signal)
@@ -172,6 +198,13 @@ func (authorization *sandboxProcessAuthorization) verifyIfAlive(pid int) (bool, 
 }
 
 func verifySandboxProcessHandleIfAlive(pid int, handle *sandboxProcessHandle) (bool, error) {
+	alive, err := handle.Alive()
+	if err != nil {
+		return false, fmt.Errorf("cannot verify Sandbox process %d liveness: %w", pid, err)
+	}
+	if !alive {
+		return false, nil
+	}
 	bootID, startTime, err := store.ProcessIdentityForPID(pid)
 	if err != nil {
 		if processGone(err) {
@@ -180,13 +213,26 @@ func verifySandboxProcessHandleIfAlive(pid int, handle *sandboxProcessHandle) (b
 		return false, fmt.Errorf("cannot verify Sandbox process %d identity: %w", pid, err)
 	}
 	if handle.Identity() != bootID+"/"+startTime {
+		alive, err := handle.Alive()
+		if err != nil {
+			return false, fmt.Errorf("cannot recheck Sandbox process %d liveness: %w", pid, err)
+		}
+		if !alive {
+			return false, nil
+		}
 		return false, fmt.Errorf("sandbox PID %d changed process instance; preserving its work", pid)
 	}
-	alive, err := handle.Alive()
-	if err != nil {
-		return false, fmt.Errorf("cannot verify Sandbox process %d liveness: %w", pid, err)
+	zombie, err := sandboxProcessIsZombie(pid)
+	if processGone(err) {
+		return false, nil
 	}
-	return alive, nil
+	if err != nil {
+		return false, fmt.Errorf("cannot verify Sandbox process %d state: %w", pid, err)
+	}
+	if zombie {
+		return false, nil
+	}
+	return handle.Alive()
 }
 
 func unretainedSandboxProcessAlive(pid int) (bool, error) {

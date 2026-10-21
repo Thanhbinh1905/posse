@@ -33,11 +33,17 @@ func retireEmptyTaskCgroup(store.Task) error {
 	return nil
 }
 
+func retireEmptyTaskCgroupWithPreserved(store.Task, map[int]bool) error {
+	return nil
+}
+
 func taskContainmentProcessDetails(store.Task) []taskProcessDetail { return nil }
 
-func processHasTaskMarker(int, string) bool { return false }
+func retainTaskContainmentProcesses(*sandboxProcessAuthorization, store.Task, []ownedProcessRoot) error {
+	return nil
+}
 
-func processInTaskCgroup(int, store.Task) bool { return false }
+func processHasTaskMarker(int, string) bool { return false }
 
 func taskSharedProcessExclusions(store.Task) ([]taskProcessDetail, map[int]bool, error) {
 	return nil, map[int]bool{}, nil

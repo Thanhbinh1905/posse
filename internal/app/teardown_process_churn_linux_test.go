@@ -74,6 +74,59 @@ func TestSandboxCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 	}
 }
 
+func TestSandboxForegroundSignalAllowsVerifiedPaneClosedDuringConcurrentTeardown(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	attachPRFixtureSandbox(t, fixture)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskLaunch(ctx, fixture.task.ID, fixture.worktree, "w2", "w2:p1", "posse:shop:t1", agentName("shop", fixture.task.Seq, 1)); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foreground := startSandboxProcess(t, fixture.worktree)
+	pane := herdr.Pane{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, TabID: "w2:t1", Label: task.PaneLabel, CWD: fixture.worktree, Agent: "claude"}
+	adapter := &unavailablePaneProcessAdapter{
+		Fake:     fixture.service.Herdr.(*herdr.Fake),
+		snapshot: herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude"}}},
+	}
+	fixture.service.Herdr = adapter
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	if _, err := authorization.bind(foreground.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+
+	err = fixture.service.verifySandboxForegroundSignalOwnership(ctx, fixture.project, task, fixture.worktree, pane, foreground.Process.Pid, agentName("shop", task.Seq, 1), authorization)
+	if err != nil {
+		t.Fatalf("retained foreground process was refused after its verified pane closed: %v", err)
+	}
+
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, pane)
+	err = fixture.service.verifySandboxForegroundSignalOwnership(ctx, fixture.project, task, fixture.worktree, pane, foreground.Process.Pid, agentName("shop", task.Seq, 1), authorization)
+	if err == nil {
+		t.Fatal("foreground process was authorized while Herdr still reported its pane")
+	}
+}
+
+type unavailablePaneProcessAdapter struct {
+	*herdr.Fake
+	snapshot herdr.Snapshot
+}
+
+func (adapter *unavailablePaneProcessAdapter) Snapshot(context.Context) (herdr.Snapshot, error) {
+	return adapter.snapshot, nil
+}
+
+func (adapter *unavailablePaneProcessAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	if method == "pane.process_info" {
+		return nil, &herdr.Error{Code: "pane_process_unavailable", Message: "pane shell is no longer running"}
+	}
+	return adapter.Fake.Call(ctx, method, params)
+}
+
 func TestReportedCodexResearchAcceptsNamelessAgentWithRecordedSession(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	attachPRFixtureSandbox(t, fixture)

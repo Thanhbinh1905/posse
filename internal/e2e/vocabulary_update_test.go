@@ -25,6 +25,9 @@ import (
 )
 
 func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
+	if testProcessHasHerdrAncestor(os.Getpid()) {
+		t.Skip("release update fixture requires a process tree outside an active Herdr session")
+	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("official v0.15.0 release fixture is Linux amd64")
 	}
@@ -75,6 +78,9 @@ func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
 }
 
 func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
+	if testProcessHasHerdrAncestor(os.Getpid()) {
+		t.Skip("release update fixture requires a process tree outside an active Herdr session")
+	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("official v0.14.0 release fixture is Linux amd64")
 	}
@@ -179,6 +185,39 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 	if code, output := runReleaseCLI(t, legacyBinary, f.repo, setupEnv, "setup", "--binary", legacyBinary); code != 0 || !strings.Contains(output, "manifest:") {
 		t.Fatalf("setup did not complete after command-line repair: code=%d output=%s", code, output)
 	}
+}
+
+func testProcessHasHerdrAncestor(pid int) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	for pid > 1 {
+		environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+		if err == nil {
+			for _, entry := range bytes.Split(environ, []byte{0}) {
+				key, _, _ := strings.Cut(string(entry), "=")
+				if strings.HasPrefix(key, "HERDR_") {
+					return true
+				}
+			}
+		}
+		status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+		if err != nil {
+			return false
+		}
+		parent := 0
+		for _, line := range strings.Split(string(status), "\n") {
+			if value, found := strings.CutPrefix(line, "PPid:"); found {
+				parent, _ = strconv.Atoi(strings.TrimSpace(value))
+				break
+			}
+		}
+		if parent <= 0 || parent == pid {
+			return false
+		}
+		pid = parent
+	}
+	return false
 }
 
 func runReleaseCLIInUserPane(t *testing.T, fixture *prLifecycleFixture, binary, cwd string, env []string, args ...string) (int, string) {

@@ -133,6 +133,10 @@ func knownSharedTaskDaemon(pid int) (bool, error) {
 	return isSharedTaskDaemonCommand(strings.TrimSpace(string(comm)), args), nil
 }
 
+func knownSharedSSHMasterDaemonCommand(comm string, args []string) bool {
+	return isSharedTaskDaemonCommand(comm, args)
+}
+
 func isSharedTaskDaemonCommand(comm string, args []string) bool {
 	command := strings.ToLower(strings.Join(args, " "))
 	commandName := ""

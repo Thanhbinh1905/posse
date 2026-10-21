@@ -86,6 +86,246 @@ func taskContainmentProcessDetails(task store.Task) []taskProcessDetail {
 	return processDetails(pids)
 }
 
+func retainTaskContainmentProcesses(authorization *sandboxProcessAuthorization, task store.Task, roots []ownedProcessRoot) error {
+	if authorization == nil {
+		return fmt.Errorf("task process authorization is unavailable")
+	}
+	pids := map[int]bool{}
+	if task.ContainmentMode == "cgroup" && task.ContainmentPath != "" {
+		if err := validateTaskCgroupPath(task.ContainmentPath, task); err != nil {
+			return fmt.Errorf("verify Task cgroup before retaining its processes: %w", err)
+		}
+		cgroupPIDs, err := cgroupProcesses(task.ContainmentPath)
+		if err != nil {
+			return fmt.Errorf("enumerate Task cgroup processes: %w", err)
+		}
+		for _, pid := range cgroupPIDs {
+			pids[pid] = true
+		}
+	}
+	if task.ContainmentMarker != "" {
+		markedPIDs, err := markedTaskPIDs(task.ContainmentMarker)
+		if err != nil {
+			return fmt.Errorf("enumerate Task-marked processes: %w", err)
+		}
+		for _, pid := range markedPIDs {
+			pids[pid] = true
+		}
+	}
+	ordered := make([]int, 0, len(pids))
+	for pid := range pids {
+		if pid > 1 {
+			ordered = append(ordered, pid)
+		}
+	}
+	sort.Ints(ordered)
+	for _, pid := range ordered {
+		if !taskContainsProcess(pid, task, roots) {
+			continue
+		}
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if processGone(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect Task-contained process %d: %w", pid, err)
+		}
+		if !taskContainsProcess(pid, task, roots) {
+			return fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
+		}
+		retained, err := retainTaskProcessHandle(pid, bootID+"/"+startTime, task, roots, authorization)
+		if err != nil {
+			return fmt.Errorf("retain Task-contained process %d: %w", pid, err)
+		}
+		if !retained {
+			continue
+		}
+		processPID := pid
+		authorization.setSignalGuard(processPID, func(syscall.Signal) error {
+			stillAlive, err := authorization.verifyIfAlive(processPID)
+			if err != nil {
+				return err
+			}
+			if stillAlive {
+				owned, err := taskProcessHasOwnershipProof(processPID, task, roots, authorization)
+				if err != nil {
+					return err
+				}
+				if !owned {
+					return fmt.Errorf("%w: PID %d", errTaskProcessOutsideOwnedPaths, processPID)
+				}
+			}
+			return nil
+		})
+	}
+	authorization.authorizeTaskProcess = func(pid int) error {
+		zombie, err := sandboxProcessIsZombie(pid)
+		if processGone(err) || err == nil && zombie {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect newly observed task process %d state: %w", pid, err)
+		}
+		owned, err := taskProcessHasOwnershipProof(pid, task, roots, authorization)
+		if err != nil {
+			return fmt.Errorf("verify newly observed Task process %d ownership: %w", pid, err)
+		}
+		if !owned {
+			alive, err := unretainedSandboxProcessAlive(pid)
+			if processGone(err) || err == nil && !alive {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("verify newly observed task process %d: %w", pid, err)
+			}
+			return fmt.Errorf("%w: PID %d", errTaskProcessOutsideOwnedPaths, pid)
+		}
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if processGone(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect newly observed Task process %d: %w", pid, err)
+		}
+		handle, err := authorization.bind(pid)
+		if processGone(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("retain newly observed Task process %d: %w", pid, err)
+		}
+		if handle.Identity() != bootID+"/"+startTime {
+			if authorization.handles[pid] == handle {
+				delete(authorization.handles, pid)
+			}
+			_ = handle.Close()
+			return fmt.Errorf("newly observed Task process %d changed containment identity while retaining its handle", pid)
+		}
+		alive, err := verifySandboxProcessHandleIfAlive(pid, handle)
+		if err != nil {
+			return fmt.Errorf("recheck newly observed Task process %d identity: %w", pid, err)
+		}
+		if alive {
+			owned, err := taskProcessHasOwnershipProof(pid, task, roots, authorization)
+			if err != nil {
+				return fmt.Errorf("recheck newly observed Task process %d ownership: %w", pid, err)
+			}
+			if !owned {
+				return fmt.Errorf("%w: PID %d", errTaskProcessOutsideOwnedPaths, pid)
+			}
+		}
+		authorization.setSignalGuard(pid, func(syscall.Signal) error {
+			alive, err := verifySandboxProcessHandleIfAlive(pid, handle)
+			if err != nil {
+				return err
+			}
+			if alive {
+				owned, err := taskProcessHasOwnershipProof(pid, task, roots, authorization)
+				if err != nil {
+					return err
+				}
+				if !owned {
+					return fmt.Errorf("%w: PID %d", errTaskProcessOutsideOwnedPaths, pid)
+				}
+			}
+			return nil
+		})
+		return nil
+	}
+	return nil
+}
+
+func retainTaskProcessHandle(pid int, observedIdentity string, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {
+	if authorization == nil {
+		return false, fmt.Errorf("task process authorization is unavailable")
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		handle, err := authorization.bind(pid)
+		if processGone(err) {
+			return false, nil
+		}
+		if errors.Is(err, errSandboxProcessChangedWhileBinding) {
+			owned, proofErr := taskProcessHasOwnershipProof(pid, task, roots, authorization)
+			if proofErr != nil || !owned {
+				return false, proofErr
+			}
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if handle.Identity() != observedIdentity {
+			alive, err := handle.Alive()
+			if err != nil {
+				return false, fmt.Errorf("verify Task process %d handle after identity changed: %w", pid, err)
+			}
+			if !alive {
+				if authorization.handles[pid] == handle {
+					delete(authorization.handles, pid)
+				}
+				_ = handle.Close()
+				owned, err := taskProcessHasOwnershipProof(pid, task, roots, authorization)
+				if err != nil || !owned {
+					return false, err
+				}
+				continue
+			}
+			owned, err := taskProcessHasOwnershipProof(pid, task, roots, authorization)
+			if err != nil {
+				return false, err
+			}
+			if !owned {
+				if authorization.handles[pid] == handle {
+					delete(authorization.handles, pid)
+				}
+				_ = handle.Close()
+				return false, nil
+			}
+			alive, err = verifySandboxProcessHandleIfAlive(pid, handle)
+			if err != nil {
+				return false, fmt.Errorf("recheck Task process %d after identity changed: %w", pid, err)
+			}
+			if !alive {
+				if authorization.handles[pid] == handle {
+					delete(authorization.handles, pid)
+				}
+				_ = handle.Close()
+				return false, nil
+			}
+		}
+		alive, err := authorization.verifyIfAlive(pid)
+		if err != nil {
+			return false, err
+		}
+		if alive && !taskContainsProcess(pid, task, roots) {
+			return false, fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
+		}
+		return alive, nil
+	}
+	return false, fmt.Errorf("task process %d kept changing identity while retaining its handle", pid)
+}
+
+func taskProcessHasOwnershipProof(pid int, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {
+	if taskContainsProcess(pid, task, roots) {
+		return true, nil
+	}
+	if task.ContainmentMarker == "" || !processHasTaskMarker(pid, task.ContainmentMarker) {
+		return false, nil
+	}
+	return hasRetainedSandboxProcessAncestor(pid, authorization)
+}
+
+func taskContainsProcess(pid int, task store.Task, roots []ownedProcessRoot) bool {
+	if task.ContainmentMode == "cgroup" && task.ContainmentPath != "" && processInCgroup(pid, task.ContainmentPath) {
+		return true
+	}
+	if task.ContainmentMarker == "" || !processHasTaskMarker(pid, task.ContainmentMarker) {
+		return false
+	}
+	references, _ := processRootReferences(pid, roots)
+	return references
+}
+
 func excludeTaskProcessTree(pids []int, excluded map[int]bool) ([]int, error) {
 	if len(excluded) == 0 || len(pids) == 0 {
 		return pids, nil
@@ -170,13 +410,14 @@ func processHasTaskMarker(pid int, marker string) bool {
 func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, excluded map[int]bool, paneShellPID int) ([]taskProcessDetail, error) {
 	handles := map[int]*sandboxProcessHandle{}
 	terminated := map[int]bool{}
+	terminatedAt := map[int]time.Time{}
+	ignoredUnowned := map[int]string{}
 	defer func() {
 		for _, handle := range handles {
 			_ = handle.Close()
 		}
 	}()
-	started := time.Now()
-	deadline := started.Add(8 * time.Second)
+	deadline := time.Now().Add(8 * time.Second)
 	excludedPIDs := excluded
 	skipPaneShell := false
 	for time.Now().Before(deadline) {
@@ -193,6 +434,10 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 		if err != nil {
 			return nil, err
 		}
+		pids, err = filterIgnoredUnownedTaskProcesses(pids, marker, ignoredUnowned)
+		if err != nil {
+			return nil, err
+		}
 		paneShellSkippedThisPass := false
 		for _, pid := range pids {
 			paneShell := pid == paneShellPID && paneShellPID > 1
@@ -201,6 +446,11 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 					if forgetStalePaneShellProcess(pid, paneShellPID, marker, handles, terminated, err) {
 						skipPaneShell = true
 						paneShellSkippedThisPass = true
+						continue
+					}
+					if errors.Is(err, errTaskProcessOutsideOwnedPaths) {
+						ignoreUnownedTaskProcess(pid, handles, terminated, terminatedAt, ignoredUnowned)
+						pids = removeTaskProcessPID(pids, pid)
 						continue
 					}
 					return processDetails(pids), err
@@ -261,17 +511,34 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 						pids = removeTaskProcessPID(pids, pid)
 						continue
 					}
-					return processDetails(pids), err
-				}
-				terminated[pid] = true
-			} else if time.Since(started) >= 2*time.Second {
-				if err := handle.Signal(syscall.SIGKILL); err != nil {
-					if forgetStalePaneShellProcess(pid, paneShellPID, marker, handles, terminated, err) {
-						skipPaneShell = true
+					if errors.Is(err, errTaskProcessOutsideOwnedPaths) {
+						ignoreUnownedTaskProcess(pid, handles, terminated, terminatedAt, ignoredUnowned)
 						pids = removeTaskProcessPID(pids, pid)
 						continue
 					}
 					return processDetails(pids), err
+				}
+				terminated[pid] = true
+				terminatedAt[pid] = time.Now()
+			} else {
+				grace := 2 * time.Second
+				if pid == paneShellPID {
+					grace = 250 * time.Millisecond
+				}
+				if time.Since(terminatedAt[pid]) >= grace {
+					if err := handle.Signal(syscall.SIGKILL); err != nil {
+						if forgetStalePaneShellProcess(pid, paneShellPID, marker, handles, terminated, err) {
+							skipPaneShell = true
+							pids = removeTaskProcessPID(pids, pid)
+							continue
+						}
+						if errors.Is(err, errTaskProcessOutsideOwnedPaths) {
+							ignoreUnownedTaskProcess(pid, handles, terminated, terminatedAt, ignoredUnowned)
+							pids = removeTaskProcessPID(pids, pid)
+							continue
+						}
+						return processDetails(pids), err
+					}
 				}
 			}
 			alive = true
@@ -295,6 +562,10 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 	if err != nil {
 		return nil, err
 	}
+	remaining, err = filterIgnoredUnownedTaskProcesses(remaining, marker, ignoredUnowned)
+	if err != nil {
+		return nil, err
+	}
 	if shellHandle := handles[paneShellPID]; paneShellPID > 1 && shellHandle != nil {
 		alive, err := shellHandle.Alive()
 		if err != nil {
@@ -307,6 +578,51 @@ func stopMarkedTaskProcesses(marker string, signalGuard taskProcessSignalGuard, 
 		}
 	}
 	return processDetails(remaining), fmt.Errorf("task processes survived marker shutdown: %v", remaining)
+}
+
+func ignoreUnownedTaskProcess(pid int, handles map[int]*sandboxProcessHandle, terminated map[int]bool, terminatedAt map[int]time.Time, ignored map[int]string) {
+	identity := ""
+	if handle := handles[pid]; handle != nil {
+		identity = handle.Identity()
+		_ = handle.Close()
+		delete(handles, pid)
+	}
+	if identity == "" {
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if err == nil {
+			identity = bootID + "/" + startTime
+		}
+	}
+	if identity != "" {
+		ignored[pid] = identity
+	}
+	delete(terminated, pid)
+	delete(terminatedAt, pid)
+}
+
+func filterIgnoredUnownedTaskProcesses(pids []int, marker string, ignored map[int]string) ([]int, error) {
+	filtered := make([]int, 0, len(pids))
+	for _, pid := range pids {
+		identity, found := ignored[pid]
+		if !found {
+			filtered = append(filtered, pid)
+			continue
+		}
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if processGone(err) {
+			delete(ignored, pid)
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("verify ignored Task process %d identity: %w", pid, err)
+		}
+		if identity == bootID+"/"+startTime && processHasTaskMarker(pid, marker) {
+			continue
+		}
+		delete(ignored, pid)
+		filtered = append(filtered, pid)
+	}
+	return filtered, nil
 }
 
 func forgetStalePaneShellProcess(pid, paneShellPID int, marker string, handles map[int]*sandboxProcessHandle, terminated map[int]bool, err error) bool {

@@ -27,64 +27,42 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	db, home, err := s.openDBForDown(ctx.Context, dir)
+	db, home, err := s.openDB()
 	if err != nil {
-		return err
+		if !storeBusyOpenFailure(err) {
+			return err
+		}
+		readDB, readErr := store.OpenReadOnly(home)
+		if readErr != nil {
+			return errors.Join(err, readErr)
+		}
+		project, _, validationErr := s.validateDownRequest(ctx.Context, readDB)
+		closeErr := readDB.Close()
+		if validationErr != nil {
+			return validationErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if stopErr := stopProjectPollerAfterContention(ctx.Context, home, project); stopErr != nil {
+			return errors.Join(err, stopErr)
+		}
+		// Retry opening the database only after the read-only validation above
+		// identifies and stops this Project's poller.
+		db, home, err = s.openDBForDown(ctx.Context, dir)
+		if err != nil {
+			return err
+		}
 	}
 	defer db.Close()
-	actor := s.configCaller(ctx.Context, db)
-	if actor.role == "worker" || actor.role == "agent" {
-		return axi.Failure("user_only", "posse down cannot run from a Worker or agent context", false, "Run `posse down` from a User shell in the Project folder")
-	}
-	if task, taskErr := taskForPath(ctx.Context, db, dir); taskErr == nil {
-		plan, planErr := task.AdmittedPlan()
-		if planErr != nil {
-			return admittedPlanFailure(planErr)
-		}
-		if plan == nil || plan.Execution.Mode != "in-place" {
-			return axi.Failure("user_only", "posse down cannot run inside a Worker Sandbox", false, "Run `posse down` in the Project folder")
-		}
-	} else if !store.IsNotFound(taskErr) {
-		return taskErr
-	}
-	project, registered, err := registeredProjectFor(ctx.Context, db, dir)
+	project, callerPaneID, err := s.validateDownRequest(ctx.Context, db)
 	if err != nil {
 		return err
 	}
-	if !registered {
-		return axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse down` in a registered Project folder; `posse` lists them")
-	}
-	// A Lead pane whose agent has exited is the User's shell again.
-	callerPaneID := actor.paneID
-	if callerPaneID == "" {
-		callerPaneID = os.Getenv("HERDR_PANE_ID")
-	}
-	switch actor.role {
-	case "worker", "agent":
-		return axi.Failure("user_only", "posse down can only be run by the User", false)
-	case "lead":
-		if s.recordedLeadIsLive(ctx.Context, callerPaneID) {
-			return axi.Failure("user_only", "posse down can only be run by the User", false, "Exit the Lead agent, or run `posse down` from another shell in the Project folder")
-		}
-	}
-	tasks, err := db.LiveTasks(ctx.Context, project.ID)
-	if err != nil {
-		return err
-	}
-	if len(tasks) > 0 {
-		names := make([]string, 0, len(tasks))
-		for _, task := range tasks {
-			names = append(names, taskIDString(task.Seq)+" ("+string(task.State)+")")
-		}
-		return axi.Failure("tasks_open", fmt.Sprintf("Project %s still has running Tasks: %s", project.Name, strings.Join(names, ", ")), false, "Finish or teardown them first; `posse list` shows them")
-	}
-	if s.Herdr == nil {
-		return axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
-	}
+	// If the Watch is wedged while holding SQLite's writer lock, stop that
+	// exact Project process and retry the state change once its connection closes.
 	// Mark the Project down before closing anything, so the pane and
-	// workspace close events this command causes do not recover it. If the
-	// Watch is wedged while holding SQLite's writer lock, stop that exact
-	// Project process and retry the state change once its connection closes.
+	// workspace close events this command causes do not recover it.
 	if err := db.MarkProjectDown(ctx.Context, project.ID); err != nil {
 		if !store.IsBusy(err) {
 			return err
@@ -184,6 +162,70 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		result = append(result, axi.Field{Key: "kept_panes", Value: stringsToAny(kept)})
 	}
 	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse up` here to start the Lead again"}}))
+}
+
+func (s *Service) validateDownRequest(ctx context.Context, db *store.DB) (store.Project, string, error) {
+	dir, err := currentDir()
+	if err != nil {
+		return store.Project{}, "", err
+	}
+	actor := s.configCaller(ctx, db)
+	if actor.role == "worker" || actor.role == "agent" {
+		return store.Project{}, "", axi.Failure("user_only", "posse down cannot run from a Worker or agent context", false, "Run `posse down` from a User shell in the Project folder")
+	}
+	if task, taskErr := taskForPath(ctx, db, dir); taskErr == nil {
+		plan, planErr := task.AdmittedPlan()
+		if planErr != nil {
+			return store.Project{}, "", admittedPlanFailure(planErr)
+		}
+		if plan == nil || plan.Execution.Mode != "in-place" {
+			return store.Project{}, "", axi.Failure("user_only", "posse down cannot run inside a Worker Sandbox", false, "Run `posse down` in the Project folder")
+		}
+	} else if !store.IsNotFound(taskErr) {
+		return store.Project{}, "", taskErr
+	}
+	project, registered, err := registeredProjectFor(ctx, db, dir)
+	if err != nil {
+		return store.Project{}, "", err
+	}
+	if !registered {
+		return store.Project{}, "", axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse down` in a registered Project folder; `posse` lists them")
+	}
+	callerPaneID := actor.paneID
+	if callerPaneID == "" {
+		callerPaneID = os.Getenv("HERDR_PANE_ID")
+	}
+	switch actor.role {
+	case "worker", "agent":
+		return store.Project{}, "", axi.Failure("user_only", "posse down can only be run by the User", false)
+	case "lead":
+		if s.recordedLeadIsLive(ctx, callerPaneID) {
+			return store.Project{}, "", axi.Failure("user_only", "posse down can only be run by the User", false, "Exit the Lead agent, or run `posse down` from another shell in the Project folder")
+		}
+	}
+	tasks, err := db.LiveTasks(ctx, project.ID)
+	if err != nil {
+		return store.Project{}, "", err
+	}
+	if len(tasks) > 0 {
+		names := make([]string, 0, len(tasks))
+		for _, task := range tasks {
+			names = append(names, taskIDString(task.Seq)+" ("+string(task.State)+")")
+		}
+		return store.Project{}, "", axi.Failure("tasks_open", fmt.Sprintf("Project %s still has running Tasks: %s", project.Name, strings.Join(names, ", ")), false, "Finish or teardown them first; `posse list` shows them")
+	}
+	if s.Herdr == nil {
+		return store.Project{}, "", axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
+	}
+	return project, callerPaneID, nil
+}
+
+func storeBusyOpenFailure(err error) bool {
+	if store.IsBusy(err) {
+		return true
+	}
+	var failure *axi.Error
+	return errors.As(err, &failure) && failure.Code == "store_busy"
 }
 
 // closeOwnPane closes a Posse pane's tab when the tab holds nothing else, and

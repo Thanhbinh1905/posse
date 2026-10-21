@@ -39,8 +39,8 @@ func fixturePrefix(suffix string) string {
 	return prefix + suffix
 }
 
-// shortFixtureRootPath uses a procfs path alias when a long Task scratch path
-// would make Herdr choose a sibling socket path that desktop clients ignore.
+// shortFixtureRootPath uses a short symlink under a procfs directory alias when
+// a long Task scratch path would make Herdr choose a sibling socket path.
 func shortFixtureRootPath(t *testing.T, root string) string {
 	t.Helper()
 	defaultSocketPath := filepath.Join(root, "xdg", "herdr", "herdr.sock")
@@ -52,7 +52,17 @@ func shortFixtureRootPath(t *testing.T, root string) string {
 		t.Fatal(err)
 	}
 	fixtureRootPathHandles.Store(root, parent)
-	alias := fmt.Sprintf("/proc/%d/fd/%d/%s", os.Getpid(), parent.Fd(), filepath.Base(root))
+	aliasName := fmt.Sprintf("posse-e2e-%x", time.Now().UnixNano())
+	aliasTarget := filepath.Join(filepath.Dir(root), aliasName)
+	if err := os.Symlink(root, aliasTarget); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(aliasTarget); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove short E2E fixture alias %s: %v", aliasTarget, err)
+		}
+	})
+	alias := fmt.Sprintf("/proc/%d/fd/%d/%s", os.Getpid(), parent.Fd(), aliasName)
 	resolvedAlias, err := filepath.EvalSymlinks(alias)
 	if err != nil {
 		t.Fatalf("resolve short E2E fixture path %s: %v", alias, err)

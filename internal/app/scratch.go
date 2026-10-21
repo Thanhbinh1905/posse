@@ -135,9 +135,18 @@ func exportTaskScratch(ctx context.Context, s *Service, paneID, scratch, taskMar
 	if paneID == "" || scratch == "" || taskMarker == "" {
 		return fmt.Errorf("task environment requires a pane, scratch directory, and process marker")
 	}
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	workerCache, err := ensureWorkerGoBuildCache(home)
+	if err != nil {
+		return err
+	}
 	quotedScratch := shellQuote(scratch)
 	quotedMarker := shellQuote(taskMarker)
-	command := "export TMPDIR=" + quotedScratch + " GOTMPDIR=" + quotedScratch + " TMP=" + quotedScratch + " TEMP=" + quotedScratch + " POSSE_TASK_TEMP=" + quotedScratch + " POSSE_TASK_ID=" + quotedMarker
-	_, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": command, "keys": []string{"enter"}})
+	quotedCache := shellQuote(workerCache)
+	command := "export TMPDIR=" + quotedScratch + " GOTMPDIR=" + quotedScratch + " TMP=" + quotedScratch + " TEMP=" + quotedScratch + " POSSE_TASK_TEMP=" + quotedScratch + " POSSE_TASK_ID=" + quotedMarker + " GOCACHE=" + quotedCache
+	_, err = s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": command, "keys": []string{"enter"}})
 	return err
 }

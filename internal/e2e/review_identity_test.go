@@ -125,6 +125,174 @@ func requireReviewIdentityRefusal(t *testing.T, code int, output string) {
 	}
 }
 
+func TestFinishedReviewTaskReleasesIgnoredCacheAndMount(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	if code, output := startReviewIdentityTask(t, fixture, "Cache author", "author", ""); code != 0 {
+		t.Fatalf("start author Task: %s", output)
+	}
+	if code, output := startReviewIdentityTask(t, fixture, "Cache review", "reviewer", "t1"); code != 0 {
+		t.Fatalf("start Review Task: %s", output)
+	}
+	review, err := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitDir := strings.TrimSpace(gitTest(t, fixture.env, review.WorktreePath, "rev-parse", "--git-dir"))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(review.WorktreePath, gitDir)
+	}
+	excludePath := filepath.Join(gitDir, "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(excludePath, []byte("/.review-cache/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(review.WorktreePath, ".review-cache")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(cacheDir, "review-index")
+	if err := os.WriteFile(cachePath, []byte("stale review cache\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docPath := filepath.Join(review.WorktreePath, "docs", "spec.md")
+	if err := os.MkdirAll(filepath.Dir(docPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(docPath, []byte("review evidence attachment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(review.WorktreePath, "report.md")
+	if err := os.WriteFile(reportPath, []byte("Review passed.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, fixture, review, "--report", reportPath, "--verdict", "pass")
+	command := exec.Command(fixture.binary, "teardown", "t2")
+	command.Dir = fixture.repo
+	command.Env = setEnv(fixture.leadEnv, "POSSE_INTENT_CRASH_AT", "teardown:after:report.attachments")
+	crashOutput, crashErr := command.CombinedOutput()
+	if exit, ok := crashErr.(*exec.ExitError); !ok || exit.ExitCode() != 86 {
+		t.Fatalf("Teardown interruption after Report attachment save = %v, want exit 86; output:\n%s", crashErr, crashOutput)
+	}
+	if current, err := fixture.db.Task(context.Background(), fixture.project.ID, "t2"); err != nil || string(current.State) != "reported" {
+		t.Fatalf("Review Task state after interrupted Teardown = %q, %v", current.State, err)
+	}
+	sandboxAfterCrash, err := fixture.db.SandboxByTask(context.Background(), review.ID)
+	if err != nil || sandboxAfterCrash.ID != review.SandboxID || sandboxAfterCrash.State != "held" || sandboxAfterCrash.TaskID != review.ID {
+		t.Fatalf("Review Mount after interrupted Teardown = %#v, %v", sandboxAfterCrash, err)
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("interrupted Teardown removed the cache before releasing the Mount: %v", err)
+	}
+	if code, output := runReviewIdentityCLI(t, fixture, "teardown", "t2"); code != 0 {
+		t.Fatalf("retry finished Review Task Teardown: %s", output)
+	}
+	finished, err := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
+	if err != nil || string(finished.State) != "torn-down" {
+		t.Fatalf("Review Task state after Teardown = %q, %v", finished.State, err)
+	}
+	sandboxes, err := fixture.db.Sandboxes(context.Background(), fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sandbox := range sandboxes {
+		if sandbox.ID == review.SandboxID && (sandbox.State != "idle" || sandbox.TaskID != 0) {
+			t.Fatalf("Review Mount was not released: %#v", sandbox)
+		}
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("Teardown left ignored Review cache in the released Mount: %v", err)
+	}
+	savedDocPath := filepath.Join(fixture.home, "projects", fixture.project.Name, "tasks", "t2", "docs", "spec.md")
+	if contents, err := os.ReadFile(savedDocPath); err != nil || string(contents) != "review evidence attachment\n" {
+		t.Fatalf("Teardown did not preserve the Report attachment: %q %v", contents, err)
+	}
+}
+
+func TestReviewAttachmentConflictCanBeDiscardedByRecordedDecision(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	if code, output := startReviewIdentityTask(t, fixture, "Conflict author", "author", ""); code != 0 {
+		t.Fatalf("start author Task: %s", output)
+	}
+	if code, output := startReviewIdentityTask(t, fixture, "Conflict review", "reviewer", "t1"); code != 0 {
+		t.Fatalf("start Review Task: %s", output)
+	}
+	review, err := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	docPath := filepath.Join(review.WorktreePath, "docs", "spec.md")
+	if err := os.MkdirAll(filepath.Dir(docPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(docPath, []byte("unsaved Review attachment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conflictPath := filepath.Join(fixture.home, "projects", fixture.project.Name, "tasks", "t2", "docs", "spec.md")
+	if err := os.MkdirAll(filepath.Dir(conflictPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conflictPath, []byte("previous partial attachment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(review.WorktreePath, "report.md")
+	if err := os.WriteFile(reportPath, []byte("Review passed.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, fixture, review, "--report", reportPath, "--verdict", "pass")
+	code, output := runReviewIdentityCLI(t, fixture, "teardown", "t2")
+	if code != 1 || !strings.Contains(output, "teardown_incomplete") || !strings.Contains(output, "conflicts with an existing saved file") {
+		t.Fatalf("Teardown did not stop at the existing saved-file conflict: code=%d output=%s", code, output)
+	}
+	current, err := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
+	if err != nil || string(current.State) != "reported" {
+		t.Fatalf("Review Task changed state after attachment conflict: %q %v", current.State, err)
+	}
+	sandbox, err := fixture.db.SandboxByTask(context.Background(), review.ID)
+	if err != nil || sandbox.State != "held" || sandbox.TaskID != review.ID {
+		t.Fatalf("attachment conflict released the Review Mount: %#v %v", sandbox, err)
+	}
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var discardDecisionID int64
+	for _, decision := range decisions {
+		if decision.TaskID == review.ID && decision.Kind == "orphan" && strings.Join(decision.Options, ",") == "repair,discard" {
+			discardDecisionID = decision.ID
+			break
+		}
+	}
+	if discardDecisionID == 0 {
+		t.Fatalf("attachment conflict did not create repair/discard Decision: %#v", decisions)
+	}
+	quote := "User approved discarding the conflicting Review attachment"
+	if code, output := runReviewIdentityCLI(t, fixture, "decide", fmt.Sprint(discardDecisionID), "discard", "--user-approved", quote); code != 0 {
+		t.Fatalf("record User-approved discard: %s", output)
+	}
+	if code, output := runReviewIdentityCLI(t, fixture, "apply", fmt.Sprint(discardDecisionID)); code != 0 {
+		t.Fatalf("apply User-approved discard Decision: %s", output)
+	}
+	current, err = fixture.db.Task(context.Background(), fixture.project.ID, "t2")
+	if err != nil || string(current.State) != "torn-down" {
+		t.Fatalf("Review Task after approved discard = %q %v", current.State, err)
+	}
+	sandboxes, err := fixture.db.Sandboxes(context.Background(), fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	for _, candidate := range sandboxes {
+		if candidate.ID == review.SandboxID && candidate.State == "idle" && candidate.TaskID == 0 {
+			released = true
+		}
+	}
+	if !released {
+		t.Fatalf("approved discard did not release Review Mount %d: %#v", review.SandboxID, sandboxes)
+	}
+}
+
 func TestReviewRejectsExplicitAuthorSessionResume(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
 	const session = "99e0a111-1ad9-4010-a1a1-1e2944973bce"

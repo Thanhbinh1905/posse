@@ -228,6 +228,9 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	if err := db.normalizeLegacyTaskContainmentMigration(ctx); err != nil {
 		return err
 	}
+	if err := db.normalizeLegacyTaskPaneShellIdentityMigration(ctx); err != nil {
+		return err
+	}
 	sources, err := embeddedMigrations()
 	if err != nil {
 		return err
@@ -371,6 +374,43 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
+}
+
+// TransitionLostUnlessTeardownIntent gives an admitted Teardown ownership of
+// the Task's terminal transition. The intent check and state change share one
+// transaction so reconciliation cannot race an intent inserted concurrently.
+func (db *DB) TransitionLostUnlessTeardownIntent(ctx context.Context, taskID int64, expected State, source, note string) (bool, error) {
+	if !transitions[expected][StateLost] {
+		return false, fmt.Errorf("transition %q -> %q is not allowed", expected, StateLost)
+	}
+	if !oneOfSource(source) {
+		return false, fmt.Errorf("invalid transition source %q", source)
+	}
+	if err := validateTransitionSource(expected, StateLost, source); err != nil {
+		return false, err
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var hasTeardown int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM intents WHERE task_id=? AND command='teardown')`, taskID).Scan(&hasTeardown); err != nil {
+		return false, err
+	}
+	if hasTeardown != 0 {
+		return false, nil
+	}
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, expected, StateLost, source, note); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (db *DB) TransitionInPlacePreserved(ctx context.Context, task Task, expected State, note, quote string) error {
@@ -605,7 +645,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, MergedRef: task.MergedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
 		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now, PlanJson: planJSON,
-		ReportKind: task.ReportKind,
+		ReportKind: task.ReportKind, PaneShellIdentity: task.PaneShellIdentity,
 	})
 	if err != nil {
 		return 0, err
@@ -693,6 +733,7 @@ type Task struct {
 	HerdrWorkspaceID     string         `toml:"herdr_workspace_id"`
 	PaneID               string         `toml:"pane_id"`
 	PaneLabel            string         `toml:"pane_label"`
+	PaneShellIdentity    string         `toml:"pane_shell_identity,omitempty"`
 	AgentName            string         `toml:"agent_name"`
 	AgentSession         string         `toml:"agent_session"`
 	AgentSessionKind     string         `toml:"agent_session_kind"`
@@ -995,6 +1036,40 @@ func (db *DB) UpdateTaskWorkspace(ctx context.Context, taskID int64, workspaceID
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
+}
+
+func (db *DB) RepairBrokenSandbox(ctx context.Context, sandboxID int64) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var projectID int64
+	if err := tx.QueryRowContext(ctx, `SELECT project_id FROM mounts WHERE id=? AND state='broken' AND task_id IS NULL`, sandboxID).Scan(&projectID); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrStateRace
+		}
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE mounts SET state='idle',task_id=NULL,released_at=? WHERE id=? AND state='broken' AND task_id IS NULL`, time.Now().UnixMilli(), sandboxID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrStateRace
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_leases WHERE mount_id=?`, sandboxID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 func (db *DB) BreakSandbox(ctx context.Context, sandboxID, taskID int64) error {
@@ -2715,7 +2790,18 @@ func taskFromDB(row dbgen.Task) Task {
 		PRURL: row.PrUrl, MergedRef: row.MergedRef, LastOutputHash: row.LastOutputHash,
 		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson,
-		ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath, ContainmentMarker: row.ContainmentMarker}
+		ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath, ContainmentMarker: row.ContainmentMarker,
+		PaneShellIdentity: row.PaneShellIdentity}
+}
+
+func (db *DB) UpdateTaskPaneShellIdentity(ctx context.Context, taskID int64, identity string) error {
+	if identity == "" {
+		return fmt.Errorf("Task pane shell identity cannot be empty")
+	}
+	if err := db.queries.SetTaskPaneShellIdentity(ctx, dbgen.SetTaskPaneShellIdentityParams{PaneShellIdentity: identity, UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) UpdateTaskContainment(ctx context.Context, taskID int64, mode, path, marker string) error {

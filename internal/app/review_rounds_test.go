@@ -150,7 +150,7 @@ guidance = ["docs/review.md"]
 	if err := os.Remove(launchPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := restoreAdmittedLaunchFiles(f.project, review, plan); err != nil {
+	if err := restoreAdmittedLaunchFiles(f.home, f.project, review, plan); err != nil {
 		t.Fatalf("restore generated review inputs: %v", err)
 	}
 	if restored := read("review/delta.patch"); !bytes.Equal(restored, delta) {

@@ -28,6 +28,13 @@ func (s *Service) releaseSandboxWithAuthorization(ctx context.Context, db *store
 	if sandbox.ID == 0 || sandbox.TaskID != task.ID || (sandbox.State != "held" && sandbox.State != "releasing") {
 		return nil, nil
 	}
+	var taskShared map[int]bool
+	if !approvedDiscard {
+		_, taskShared, err = taskSharedProcessExclusions(task)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if sandbox.State == "releasing" || approvedDiscard {
 		if err := requireNoSandboxProcesses(sandbox.Path, approvedDiscard); err != nil {
 			return nil, err
@@ -38,7 +45,7 @@ func (s *Service) releaseSandboxWithAuthorization(ctx context.Context, db *store
 	}
 	var killed []string
 	if !approvedDiscard {
-		killed, err = stopSandboxProcessesAuthorized(sandbox.Path, authorization)
+		killed, err = stopSandboxProcessesAuthorized(sandbox.Path, authorization, taskShared)
 		if err != nil {
 			return killed, err
 		}

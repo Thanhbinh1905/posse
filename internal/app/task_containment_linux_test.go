@@ -21,6 +21,155 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestSandboxProcessHandleTreatsExitedPIDFDAsGoneBeforePIDReuseCheck(t *testing.T) {
+	command := exec.Command("sleep", "300")
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := openSandboxProcessHandle(command.Process.Pid)
+	if err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatal(err)
+	}
+	defer handle.Close()
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("process exited without a signal")
+	}
+
+	// Pair the exited process's pidfd with a different live PID to model the
+	// old PID slot having been reused before Teardown rechecks its handle.
+	reusedPID := *handle
+	reusedPID.pid = os.Getpid()
+	alive, err := verifySandboxProcessHandleIfAlive(reusedPID.pid, &reusedPID)
+	if err != nil || alive {
+		t.Fatalf("exited process handle was confused with its reused PID: alive=%t err=%v", alive, err)
+	}
+}
+
+func TestRetainTaskProcessHandleReprovesChangedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cwd  string
+		want bool
+	}{
+		{name: "Task path reference", cwd: "task", want: true},
+		{name: "marker without Task path reference", cwd: "/", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+			command := exec.Command("sleep", "300")
+			command.Dir = tc.cwd
+			if tc.cwd == "task" {
+				command.Dir = root
+			}
+			command.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "ready"), 0)
+			command.Stdout, command.Stderr = io.Discard, io.Discard
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			})
+			if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(command.Process.Pid, marker) }) {
+				t.Fatal("Task-marked process did not start")
+			}
+
+			authorization := newSandboxProcessAuthorization()
+			defer authorization.Close()
+			task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+			retained, err := retainTaskProcessHandle(command.Process.Pid, "stale-process-identity", task, []ownedProcessRoot{{path: root}}, authorization)
+			if err != nil || retained != tc.want {
+				t.Fatalf("retained=%t err=%v, want retained=%t", retained, err, tc.want)
+			}
+			if tc.want && authorization.handle(command.Process.Pid) == nil {
+				t.Fatal("Task-owned replacement process did not retain its exact handle")
+			}
+			if !tc.want {
+				if authorization.handle(command.Process.Pid) != nil {
+					t.Fatal("marker-only process was retained without Task ownership proof")
+				}
+				if err := command.Process.Signal(syscall.Signal(0)); err != nil {
+					t.Fatalf("marker-only process was signalled: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskContainmentRetainsNewProcessOnlyWithIndependentOwnershipProof(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d", os.Getpid())
+	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	if err := retainTaskContainmentProcesses(authorization, task, []ownedProcessRoot{{path: root}}); err != nil {
+		t.Fatal(err)
+	}
+
+	owned := exec.Command("sleep", "300")
+	owned.Dir = root
+	owned.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "owned-ready"), 0)
+	owned.Stdout, owned.Stderr = io.Discard, io.Discard
+	if err := owned.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ownedWaited := false
+	defer func() {
+		if !ownedWaited {
+			_ = owned.Process.Kill()
+			_ = owned.Wait()
+		}
+	}()
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(owned.Process.Pid, marker) }) {
+		t.Fatal("new Task-owned process did not expose its marker")
+	}
+	if err := authorization.guardSignal(owned.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("retain and signal a new process with marker and Task-path proof: %v", err)
+	}
+	handle := authorization.handle(owned.Process.Pid)
+	if handle == nil {
+		t.Fatal("newly authorized Task process did not retain its exact process handle")
+	}
+	if err := handle.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal newly authorized Task process: %v", err)
+	}
+	if err := owned.Wait(); err == nil {
+		t.Fatal("new Task-owned process exited without a signal")
+	}
+	ownedWaited = true
+
+	foreign := exec.Command("sleep", "300")
+	foreign.Dir = "/"
+	foreign.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "foreign-ready"), 0)
+	foreign.Stdout, foreign.Stderr = io.Discard, io.Discard
+	if err := foreign.Start(); err != nil {
+		t.Fatal(err)
+	}
+	foreignWaited := false
+	defer func() {
+		if !foreignWaited {
+			_ = foreign.Process.Kill()
+			_ = foreign.Wait()
+		}
+	}()
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(foreign.Process.Pid, marker) }) {
+		t.Fatal("foreign Task-marked process did not start")
+	}
+	if _, err := stopMarkedTaskProcesses(marker, authorization.guardSignal, nil, 0); err != nil {
+		t.Fatalf("marker-only process without a Task-path reference blocked Task teardown: %v", err)
+	}
+	if err := foreign.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("marker-only process was signaled despite lacking Task-path proof: %v", err)
+	}
+}
+
 func TestStopMarkedTaskProcessesStopsDetachedServer(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -147,16 +296,6 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 	if err != nil || pid <= 1 {
 		t.Fatalf("ControlMaster PID = %q: %v", pidBytes, err)
 	}
-	handle, err := openSandboxProcessHandle(pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if alive, _ := handle.Alive(); alive {
-			_ = handle.Signal(syscall.SIGKILL)
-		}
-		_ = handle.Close()
-	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		processes := processDetails([]int{pid})
@@ -168,6 +307,16 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	handle, err := openSandboxProcessHandle(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if alive, _ := handle.Alive(); alive {
+			_ = handle.Signal(syscall.SIGKILL)
+		}
+		_ = handle.Close()
+	}()
 	if !processHasTaskMarker(pid, marker) {
 		t.Fatalf("detached ControlMaster PID %d lost its inherited Task marker", pid)
 	}
@@ -252,8 +401,15 @@ func TestInPlaceContainmentPreservesForeignForegroundProcess(t *testing.T) {
 	}
 	fake.Results["pane.process_info"] = processInfo
 	service := testService(t.TempDir(), fake)
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	for _, pid := range []int{os.Getpid(), command.Process.Pid} {
+		if _, err := authorization.bind(pid); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_, err = stopTaskProcessContainmentWithGuard(context.Background(), task, func(pid int, _ syscall.Signal) error {
-		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, os.Getpid())
+		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, os.Getpid(), command.Process.Pid, authorization)
 	})
 	if err == nil || !strings.Contains(err.Error(), "foreign foreground process") {
 		t.Fatalf("foreign pane foreground was not refused: %v", err)
@@ -293,8 +449,13 @@ func TestInPlaceContainmentStopsMarkedProcessAfterPaneDisappears(t *testing.T) {
 	task := store.Task{ID: 2, Seq: 1, WorktreePath: root, HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:local:t1", ContainmentMode: "marker", ContainmentMarker: marker}
 	fake := herdr.NewFake()
 	service := testService(t.TempDir(), fake)
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	if _, err := authorization.bind(command.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := stopTaskProcessContainmentWithGuard(context.Background(), task, func(pid int, _ syscall.Signal) error {
-		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, 0)
+		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, 0, 0, authorization)
 	}); err != nil {
 		t.Fatalf("in-place Teardown failed after the Task pane disappeared: %v", err)
 	}
@@ -309,6 +470,39 @@ func TestInPlaceContainmentStopsMarkedProcessAfterPaneDisappears(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("in-place Teardown left the marker-owned process running after the pane disappeared")
 	}
+}
+
+func TestTaskPaneShellGetsShortSIGKILLGrace(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	ready := filepath.Join(root, "ready")
+	command := exec.Command("python3", "-c", `import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(__import__("os").environ["TASK_TEST_READY"],"w").write(str(__import__("os").getpid())); time.sleep(300)`)
+	command.Env = taskContainmentTestEnvironment(marker, ready, 0)
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	defer func() {
+		if !waited {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	}()
+	if !waitForTaskContainmentFile(5*time.Second, ready) {
+		t.Fatal("pane-shell fixture did not start")
+	}
+	started := time.Now()
+	if _, err := stopMarkedTaskProcesses(marker, nil, nil, command.Process.Pid); err != nil {
+		t.Fatalf("stop pane-shell fixture: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 1500*time.Millisecond {
+		t.Fatalf("pane-shell SIGKILL phase took %s, want less than 1.5s", elapsed)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("pane-shell fixture exited without a signal")
+	}
+	waited = true
 }
 
 func TestTaskContainmentSignalsPaneShellLast(t *testing.T) {
@@ -407,7 +601,7 @@ func TestTaskContainmentSkipsReusedPaneShellPID(t *testing.T) {
 	task := store.Task{ID: 2, Seq: 1, WorktreePath: root, HerdrWorkspaceID: "w1", PaneID: "w1:p2", PaneLabel: "posse:local:t1", ContainmentMode: "cgroup", ContainmentMarker: marker}
 	service := testService(t.TempDir(), herdr.NewFake())
 	_, err = stopTaskProcessContainmentWithGuard(context.Background(), task, func(pid int, signal syscall.Signal) error {
-		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, command.Process.Pid)
+		return service.verifyInPlaceProcessSignalOwnership(context.Background(), project, task, pid, command.Process.Pid, 0, nil)
 	}, command.Process.Pid)
 	if err != nil {
 		t.Fatalf("Teardown blocked on an unmarked process reusing a stale pane shell PID: %v", err)
@@ -469,6 +663,17 @@ func TestCgroupModeStopsMarkedProcessOutsideCgroup(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cgroup mode did not stop its marked out-of-cgroup process")
 	}
+}
+
+func waitForTaskContainmentCondition(timeout time.Duration, condition func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return condition()
 }
 
 func waitForTaskContainmentFile(timeout time.Duration, path string) bool {

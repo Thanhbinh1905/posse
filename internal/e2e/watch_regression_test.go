@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -719,6 +720,46 @@ func TestDownStopsAWedgedProjectWatch(t *testing.T) {
 	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
 		t.Fatalf("posse down returned while Watch PID %d remained running", pid)
 	}
+
+	t.Run("migration-lock-contention", func(t *testing.T) {
+		f := newPRLifecycleFixture(t)
+		defer f.db.Close()
+		if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+			t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
+		}
+		lock, err := os.OpenFile(filepath.Join(f.home, "posse.db.migrate.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			_ = lock.Close()
+			t.Fatal(err)
+		}
+		unlocked := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseLock := func() {
+			releaseOnce.Do(func() {
+				_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+				_ = lock.Close()
+				close(unlocked)
+			})
+		}
+		go func() {
+			time.Sleep(6 * time.Second)
+			releaseLock()
+		}()
+		t.Cleanup(releaseLock)
+
+		command := exec.Command(f.binary, "down")
+		command.Dir, command.Env = f.repo, f.env
+		output, err := command.CombinedOutput()
+		if err != nil || !strings.Contains(string(output), "state: down") {
+			t.Fatalf("posse down failed after migration-lock contention: err=%v output=%s", err, output)
+		}
+		if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
+			t.Fatalf("posse down returned while Watch remained running: %v", watchPIDs(f.root))
+		}
+	})
 }
 
 func TestPassiveWatchLeavesCommandBoundaryIntentsForNormalRecovery(t *testing.T) {

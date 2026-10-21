@@ -45,7 +45,17 @@ func ensureHeldSandboxLocks(ctx context.Context, db *store.DB, project store.Pro
 				if !os.IsNotExist(err) {
 					return err
 				}
-				found, err := db.HasNotice(ctx, project.ID, task.ID, "sandbox_missing")
+				intent, intentErr := db.IntentByTask(ctx, task.ID)
+				if intentErr != nil && !store.IsNotFound(intentErr) {
+					return intentErr
+				}
+				if task.State == store.StateSpawning && intentErr == nil && intent.Command == "start" {
+					// The start intent owns the gap between the durable Sandbox
+					// claim and Git materializing its worktree metadata. It will
+					// either finish the checkout or recover the interrupted start.
+					continue
+				}
+				found, err := hasUnrecoveredSandboxMissingNotice(ctx, db, project.ID, task.ID)
 				if err != nil {
 					return err
 				}
@@ -56,6 +66,9 @@ func ensureHeldSandboxLocks(ctx context.Context, db *store.DB, project store.Pro
 					return err
 				}
 				continue
+			}
+			if err := recordSandboxRecoveredNotice(ctx, db, project, task, sandbox); err != nil {
+				return err
 			}
 			if err := lockSandbox(ctx, project.Root, sandbox.Path, task.Seq); err != nil {
 				return err
@@ -103,6 +116,39 @@ func lockAvailableSandbox(ctx context.Context, db *store.DB, project store.Proje
 		}
 	}
 	return lockSandbox(ctx, project.Root, sandbox.Path, task.Seq)
+}
+
+func hasUnrecoveredSandboxMissingNotice(ctx context.Context, db *store.DB, projectID, taskID int64) (bool, error) {
+	notices, err := db.Notices(ctx, projectID, false)
+	if err != nil {
+		return false, err
+	}
+	missingEpisode := false
+	for _, notice := range notices {
+		if notice.TaskID != taskID {
+			continue
+		}
+		switch notice.Kind {
+		case "sandbox_missing":
+			missingEpisode = true
+		case "sandbox_recovered":
+			missingEpisode = false
+		}
+	}
+	return missingEpisode, nil
+}
+
+// recordSandboxRecoveredNotice closes the current missing episode without
+// acknowledging the Lead's original Notice. A later disappearance can then
+// create a new missing Notice even if the earlier one remains open.
+func recordSandboxRecoveredNotice(ctx context.Context, db *store.DB, project store.Project, task store.Task, sandbox store.Sandbox) error {
+	missingEpisode, err := hasUnrecoveredSandboxMissingNotice(ctx, db, project.ID, task.ID)
+	if err != nil || !missingEpisode {
+		return err
+	}
+	summary := fmt.Sprintf("sandbox-%d checkout reappeared while held by t%d; inspect the recovered checkout, then acknowledge the missing-Sandbox Notice", sandbox.Number, task.Seq)
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "sandbox_recovered", Summary: summary, DataJSON: `{}`})
+	return err
 }
 
 func posseLockTaskSeq(reason string) (int, bool) {

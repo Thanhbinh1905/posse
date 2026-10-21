@@ -672,7 +672,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			return err
 		}
 	}
-	launchContents := workerProtocol(project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, plan.ProseLanguage, fmt.Sprintf("launch:%d", launch)) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, plan.ProseLanguage, fmt.Sprintf("launch:%d", launch)) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -1148,7 +1148,7 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 	return s.finishTaskIntent(ctx, db, id)
 }
 
-func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief, launchPath, scratchPath, rootContext, proseLanguage string, turnTokens ...string) string {
+func workerProtocol(home string, project store.Project, task store.Task, brief dispatch.Brief, launchPath, scratchPath, rootContext, proseLanguage string, turnTokens ...string) string {
 	turnToken := "launch:1"
 	if len(turnTokens) > 0 && turnTokens[0] != "" {
 		turnToken = turnTokens[0]
@@ -1197,7 +1197,8 @@ func workerProtocol(project store.Project, task store.Task, brief dispatch.Brief
 		}
 	}
 	isolation := "Run any Herdr or posse experiment against an isolated Herdr server and a POSSE_HOME under a temp dir (unset every HERDR_* variable, then point XDG_CONFIG_HOME and POSSE_HOME there); never touch panes, tabs or workspaces you did not create."
-	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Sandbox. Keep `GOCACHE` and `GOMODCACHE` on the user's normal shared Go caches; never create per-Task copies.", scratchPath)
+	workerCache := workerGoBuildCachePath(home)
+	temporaryFiles := fmt.Sprintf("Use the Posse-owned Task scratch directory `%s` for every temporary file, repro fixture, test home and Task-specific cache. Posse exports `TMPDIR`, `GOTMPDIR`, `TMP` and `TEMP` to this directory. Do not write temporary data to `/tmp` or the Sandbox. Go builds use the shared Posse-owned `GOCACHE` at `%s`, which is shared across Tasks and periodically pruned; `GOMODCACHE` remains the user's shared module cache. Do not create per-Task Go caches.", scratchPath, workerCache)
 	signalFiles := fmt.Sprintf("Files passed to `--findings` and `--report` may be in this Task's scratch directory (`%s`); paths outside it are refused.", scratchPath)
 	if !project.IsDirectory() {
 		signalFiles = fmt.Sprintf("Files passed to `--findings` and `--report` may be in this Worker's worktree or this Task's scratch directory (`%s`); paths outside those locations are refused.", scratchPath)
@@ -2819,7 +2820,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 	}
 	if plan != nil {
-		if err := track("launch.restore", func() error { return restoreAdmittedLaunchFiles(project, task, plan) }); err != nil {
+		if err := track("launch.restore", func() error { return restoreAdmittedLaunchFiles(home, project, task, plan) }); err != nil {
 			return failure(err)
 		}
 	}
