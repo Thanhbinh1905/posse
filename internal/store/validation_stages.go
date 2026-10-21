@@ -27,7 +27,11 @@ type ValidationStageResult struct {
 }
 
 func (db *DB) RecordValidationStage(ctx context.Context, result ValidationStageResult) (ValidationStageResult, error) {
+	if result.Status == "" {
+		result.Status = "passed"
+	}
 	if result.TaskID < 1 || result.CandidateID < 1 || result.Stage != "test" && result.Stage != "docs" && result.Stage != "lint" ||
+		result.Status != "passed" && result.Status != "failed" ||
 		!validValidationSHA(result.CandidateSHA) || !validValidationSHA(result.TargetSHA) || len(result.ConfigSHA256) != 64 ||
 		result.Summary == "" || result.Evidence == "" {
 		return ValidationStageResult{}, fmt.Errorf("invalid validation stage result")
@@ -66,18 +70,32 @@ func (db *DB) RecordValidationStage(ctx context.Context, result ValidationStageR
 		if existing.TargetSHA != result.TargetSHA || existing.ConfigSHA256 != result.ConfigSHA256 {
 			return ValidationStageResult{}, fmt.Errorf("validation stage binding changed for the same candidate head")
 		}
+		if existing.Status == "passed" || existing.Status == result.Status && result.Status == "failed" {
+			if err := tx.Commit(); err != nil {
+				return ValidationStageResult{}, err
+			}
+			return existing, nil
+		}
+		result.ID, result.CreatedAt = existing.ID, time.Now().UnixMilli()
+		_, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET status=?,summary=?,evidence=?,coverage=?,invalidated_by_sha='',created_at=? WHERE id=?`,
+			result.Status, result.Summary, result.Evidence, result.Coverage, result.CreatedAt, result.ID)
+		if err != nil {
+			return ValidationStageResult{}, err
+		}
 		if err := tx.Commit(); err != nil {
 			return ValidationStageResult{}, err
 		}
-		return existing, nil
+		if err := db.PersistTask(ctx, result.TaskID); err != nil {
+			return result, err
+		}
+		return result, nil
 	}
 	if err != sql.ErrNoRows {
 		return ValidationStageResult{}, err
 	}
-	result.Status = "passed"
 	result.CreatedAt = time.Now().UnixMilli()
-	insert, err := tx.ExecContext(ctx, `INSERT INTO validation_stage_results(task_id,candidate_id,repo,stage,candidate_sha,target_sha,config_sha256,status,summary,evidence,coverage,created_at) VALUES(?,?,?,?,?,?,?,'passed',?,?,?,?)`,
-		result.TaskID, result.CandidateID, result.Repo, result.Stage, result.CandidateSHA, result.TargetSHA, result.ConfigSHA256, result.Summary, result.Evidence, result.Coverage, result.CreatedAt)
+	insert, err := tx.ExecContext(ctx, `INSERT INTO validation_stage_results(task_id,candidate_id,repo,stage,candidate_sha,target_sha,config_sha256,status,summary,evidence,coverage,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		result.TaskID, result.CandidateID, result.Repo, result.Stage, result.CandidateSHA, result.TargetSHA, result.ConfigSHA256, result.Status, result.Summary, result.Evidence, result.Coverage, result.CreatedAt)
 	if err != nil {
 		return ValidationStageResult{}, err
 	}
@@ -98,7 +116,7 @@ func (db *DB) InvalidateValidationStages(ctx context.Context, candidateID int64,
 	if candidateID < 1 || !validValidationSHA(invalidatedBySHA) {
 		return fmt.Errorf("invalid validation stage invalidation")
 	}
-	result, err := db.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status='passed'`, invalidatedBySHA, candidateID)
+	result, err := db.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status IN ('passed','failed')`, invalidatedBySHA, candidateID)
 	if err != nil {
 		return err
 	}
