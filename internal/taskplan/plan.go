@@ -162,6 +162,7 @@ type Plan struct {
 	Paths           Paths                     `json:"paths"`
 	Launch          Launch                    `json:"launch"`
 	Gate            []string                  `json:"gate"`
+	WorkflowJobs    bool                      `json:"workflow_jobs,omitempty"`
 	ValidationLoops *ValidationLoops          `json:"validation_loops,omitempty"`
 	Workflow        *config.WorkflowSelection `json:"workflow,omitempty"`
 	MergeMethod     string                    `json:"merge_method"`
@@ -182,6 +183,7 @@ type Request struct {
 	UserChoice      *UserChoice
 	Paths           Paths
 	Gate            []string
+	WorkflowJobs    bool
 	ValidationLoops *ValidationLoops
 	Workflow        *config.WorkflowSelection
 	MergeMethod     string
@@ -244,7 +246,7 @@ func Resolve(r Request) (Plan, error) {
 		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.merge", Value: autonomy.Merge, Source: mergeSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
-		Gate: r.Gate, ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool}
+		Gate: r.Gate, WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool}
 	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
 	for i, explicit := range []bool{brief.MergeMode != "", brief.Review != ""} {
 		if explicit {
@@ -288,12 +290,13 @@ func Resolve(r Request) (Plan, error) {
 		Delivery        string                    `json:"delivery"`
 		Grants          []Grant                   `json:"grants"`
 		Gate            []string                  `json:"gate"`
+		WorkflowJobs    bool                      `json:"workflow_jobs,omitempty"`
 		ValidationLoops *ValidationLoops          `json:"validation_loops,omitempty"`
 		Workflow        *config.WorkflowSelection `json:"workflow,omitempty"`
 		MergeMethod     string                    `json:"merge_method"`
 		ProseLanguage   string                    `json:"prose_language"`
 		Pool            config.Pool               `json:"pool"`
-	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool})
+	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.WorkflowJobs, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool})
 	if err != nil {
 		return Plan{}, err
 	}
