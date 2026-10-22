@@ -680,7 +680,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 	}
 	if task.Type == "change" && task.State == store.StateDone {
-		help = append(help, "Run `posse merge "+commandName+"` to run the Gate")
+		help = append(help, "Run `posse merge "+commandName+"` to record the merge head and check delivery readiness")
 	}
 	if task.State == store.StateNeedsDecision || task.State == store.StateBlocked {
 		help = append(help, "Run `posse send "+commandName+" <message>` to answer or steer this Worker")

@@ -201,9 +201,6 @@ auto_start = false
 docs = true
 guidance = ["docs/review.md"]
 
-[gate_loop]
-max_fix_rounds = 2
-
 [ci_loop]
 max_fix_rounds = 1
 rerun_cancelled = 2
@@ -224,7 +221,7 @@ rerun_cancelled = 2
 		t.Fatalf("admitted validation loops = %#v, %v", plan, err)
 	}
 	frozen := plan.ValidationLoops
-	if frozen.Review.MaxRounds != 3 || frozen.BriefReviewRounds != 2 || frozen.MaxReviewRounds() != 2 || frozen.Review.AutoStart || !frozen.Review.Docs || !reflect.DeepEqual(frozen.Review.Guidance, []string{"docs/review.md"}) || frozen.Gate.MaxFixRounds != 2 || frozen.CI.MaxFixRounds != 1 || frozen.CI.RerunCancelled != 2 {
+	if frozen.Review.MaxRounds != 3 || frozen.BriefReviewRounds != 2 || frozen.MaxReviewRounds() != 2 || frozen.Review.AutoStart || !frozen.Review.Docs || !reflect.DeepEqual(frozen.Review.Guidance, []string{"docs/review.md"}) || frozen.CI.MaxFixRounds != 1 || frozen.CI.RerunCancelled != 2 {
 		t.Fatalf("admitted validation settings = %#v", frozen)
 	}
 

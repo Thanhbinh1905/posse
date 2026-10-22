@@ -118,7 +118,7 @@ done
 	if paneErr != nil {
 		t.Fatalf("read startup output: %v %s", paneErr, pane)
 	}
-	for _, want := range []string{"kind: claude", "kind_source: only available kind", "gate_empty", "autonomy_ask"} {
+	for _, want := range []string{"kind: claude", "kind_source: only available kind", "autonomy_ask"} {
 		if !strings.Contains(string(pane), want) {
 			t.Fatalf("up omitted %q: %s", want, pane)
 		}
@@ -128,7 +128,7 @@ done
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
 	for _, command := range [][]string{nil, {"lead"}} {
 		output := runPosse(t, binary, repo, leadEnv, command...)
-		for _, want := range []string{"gate_empty", "autonomy_ask"} {
+		for _, want := range []string{"autonomy_ask"} {
 			if !strings.Contains(output, want) {
 				t.Fatalf("%v omitted %q: %s", command, want, output)
 			}
@@ -148,7 +148,7 @@ done
 	if leadResult.Instructions != string(startupInstructions) {
 		t.Fatalf("startup and posse lead instructions differ:\nstartup:\n%s\nlead:\n%s", startupInstructions, leadResult.Instructions)
 	}
-	for _, want := range []string{"one Change Brief and dispatch it directly", "Research Tasks, specifications, tickets and separate review Tasks are optional", "## Runtime obligations", "Never edit the Project repository", "In-place execution is available only for explicitly registered Directory Projects", "This is a status update, not another approval step"} {
+	for _, want := range []string{"one Change Brief and dispatch it directly", "Research Tasks, specifications, tickets and separate review Tasks are optional", "## Runtime obligations", "Never edit the Project repository", "Posse orchestrates Git repositories and Workspaces only", "This is a status update, not another approval step"} {
 		if !strings.Contains(leadResult.Instructions, want) {
 			t.Fatalf("composed instructions omit %q: %s", want, leadResult.Instructions)
 		}

@@ -190,16 +190,6 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		task.GatedSHA = gatedSHA
-		if gateErr := runMergeStep("gate.run", func() error { return runGates(ctx.Context, cfg, task) }); gateErr != nil {
-			if err := recordGateFailure(ctx.Context, db, project, task, gatedSHA, "", gateErr); err != nil {
-				return err
-			}
-			if finishErr := finishMergeIntent(); finishErr != nil {
-				return finishErr
-			}
-			_ = s.deliverNotices(ctx.Context, db, project)
-			return axi.Failure("gate_failed", gateErr.Error(), false, gateFailureHelp(task))
-		}
 		if started, err := s.maybeAutoStartReviewRound(ctx, db, home, project, task); err != nil {
 			return err
 		} else if started {
@@ -209,7 +199,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		if err := runMergeStep("task.merging", func() error {
-			return db.Transition(ctx.Context, task.ID, store.StateDone, store.StateMerging, "cli", "Gate passed and local fast-forward is ready")
+			return db.Transition(ctx.Context, task.ID, store.StateDone, store.StateMerging, "cli", "Local fast-forward is ready")
 		}); err != nil {
 			return err
 		}
@@ -250,13 +240,13 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		}
 	}
 	if task.GatedSHA == "" || latestSHA != task.GatedSHA {
-		if err := db.Transition(ctx.Context, task.ID, store.StateMerging, store.StateDone, "cli", "Task branch moved after the Gate passed"); err != nil {
+		if err := db.Transition(ctx.Context, task.ID, store.StateMerging, store.StateDone, "cli", "Task branch moved after its merge head was recorded"); err != nil {
 			return err
 		}
 		if err := finishMergeIntent(); err != nil {
 			return err
 		}
-		return axi.Failure("branch_moved", "Task branch moved after the Gate passed", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
+		return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 	}
 	quote := strings.TrimSpace(parsed.Flags["user-approved"])
 	if quote != "" {
@@ -388,16 +378,6 @@ func settleFailedMergeIntent(ctx context.Context, db *store.DB, project store.Pr
 		return err
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
-}
-
-func runGates(ctx context.Context, cfg config.Config, task store.Task) error {
-	for _, gate := range cfg.Defaults.Gate {
-		output, err := commandOutput(ctx, task.WorktreePath, gate)
-		if err != nil {
-			return newGateCommandFailure(gate, output, err)
-		}
-	}
-	return nil
 }
 
 func verifyFastForward(ctx context.Context, project store.Project, task store.Task) error {

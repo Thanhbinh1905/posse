@@ -1185,7 +1185,7 @@ func (db *DB) SetTaskGatedSHA(ctx context.Context, taskID int64, sha string) err
 	return db.PersistTask(ctx, taskID)
 }
 
-// ClearTaskGatedSHA forgets the commit the Gate passed, for the Task and for
+// ClearTaskGatedSHA forgets the recorded merge head, for the Task and for
 // each workspace member not already merging through a pull request.
 func (db *DB) ClearTaskGatedSHA(ctx context.Context, taskID int64) error {
 	now := time.Now().UnixMilli()

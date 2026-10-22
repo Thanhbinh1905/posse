@@ -112,7 +112,7 @@ func TestIntentCrashHookExitsAfterPersistingCompletedStep(t *testing.T) {
 	ctx := context.Background()
 	checkpoints := map[string][]string{
 		"start":           {"scratch.create", "sandbox.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"},
-		"merge --execute": {"gate.record", "gate.run", "task.merging", "notice.create", "approval.record", "merge", "merged_ref.record", "task.merged"},
+		"merge --execute": {"gate.record", "task.merging", "notice.create", "approval.record", "merge", "merged_ref.record", "task.merged"},
 		"teardown":        {"approval.record", "discard.capture", "process.stop", "panes.close", "sandbox.stop", "scratch.remove", "sandbox.release", "branch.remove", "task.torn_down"},
 		"relaunch":        {"git.inspect", "pane.open", "agent.stop", "pane.label", "scratch.environment", "agent.sequence", "agent.record", "pane.metadata", "agent.start", "relaunch.write", "agent.prompt", "task.working", "task.progress"},
 	}

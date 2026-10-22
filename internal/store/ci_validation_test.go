@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestGateAndCIFixesShareTheFrozenReviewCap(t *testing.T) {
+func TestReviewAndCIFixesShareTheFrozenReviewCap(t *testing.T) {
 	fixture := newReviewVerdictFixture(t, nil)
 	if err := fixture.db.Transition(fixture.ctx, fixture.change, StateSpawning, StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
@@ -21,9 +21,9 @@ func TestGateAndCIFixesShareTheFrozenReviewCap(t *testing.T) {
 	if _, err := fixture.db.ExecContext(fixture.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','verdict','changes_requested',1)`, fixture.change, fixture.review, reviewShaA, reviewShaA, reviewShaA, reviewShaA, reportHash); err != nil {
 		t.Fatal(err)
 	}
-	gate, err := fixture.db.QueueValidationFixInstructionWithSharedBudget(fixture.ctx, fixture.change, "gate", reviewShaA, "gate:shared", "Fix Gate", 3, 2)
-	if err != nil || !gate.Queued {
-		t.Fatalf("queue Gate repair: %+v %v", gate, err)
+	review, err := fixture.db.QueueValidationFixInstructionWithSharedBudget(fixture.ctx, fixture.change, "review", reviewShaA, "review:shared", "Fix review findings", 3, 2)
+	if err != nil || !review.Queued {
+		t.Fatalf("queue Review repair: %+v %v", review, err)
 	}
 	ci, err := fixture.db.QueueCIFixInstructionWithSharedBudget(fixture.ctx, fixture.change, reviewShaA, "https://github.com/acme/shop/pull/1", "ci:shared", "Fix CI", "", 3, 2)
 	if err != nil || !ci.SharedExhausted || ci.Queued {
@@ -40,7 +40,7 @@ func TestActiveReviewRoundReservesSharedRepairCapacity(t *testing.T) {
 	if _, err := fixture.db.ExecContext(fixture.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','admitted',NULL,1)`, fixture.change, fixture.review, reviewShaA, reviewShaA, reviewShaA, reviewShaA, reportHash); err != nil {
 		t.Fatal(err)
 	}
-	result, err := fixture.db.QueueValidationFixInstructionWithSharedBudget(fixture.ctx, fixture.change, "gate", reviewShaA, "gate:reserved", "Fix Gate", 3, 1)
+	result, err := fixture.db.QueueValidationFixInstructionWithSharedBudget(fixture.ctx, fixture.change, "review", reviewShaA, "review:reserved", "Fix review findings", 3, 1)
 	if err != nil || !result.SharedExhausted || result.Queued {
 		t.Fatalf("active Review did not reserve shared capacity: %+v %v", result, err)
 	}

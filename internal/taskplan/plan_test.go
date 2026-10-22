@@ -112,7 +112,6 @@ func TestLegacyBriefsResolveWithoutChangingInputsOrLaunchSettings(t *testing.T) 
 func TestValidationLoopsFreezeConfigAndBriefCanOnlyTightenReviewRounds(t *testing.T) {
 	loops := taskplan.ValidationLoops{
 		Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1", AutoStart: true, Guidance: []string{"docs/review.md"}},
-		Gate:   config.GateLoop{MaxFixRounds: 2},
 		CI:     config.CILoop{MaxFixRounds: 1, RerunCancelled: 2},
 	}
 	r := request("change")
@@ -122,13 +121,12 @@ func TestValidationLoopsFreezeConfigAndBriefCanOnlyTightenReviewRounds(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.ValidationLoops == nil || plan.ValidationLoops.Review.MaxRounds != 3 || plan.ValidationLoops.BriefReviewRounds != 2 || plan.ValidationLoops.MaxReviewRounds() != 2 || plan.ValidationLoops.Gate.MaxFixRounds != 2 || plan.ValidationLoops.CI.RerunCancelled != 2 {
+	if plan.ValidationLoops == nil || plan.ValidationLoops.Review.MaxRounds != 3 || plan.ValidationLoops.BriefReviewRounds != 2 || plan.ValidationLoops.MaxReviewRounds() != 2 || plan.ValidationLoops.CI.RerunCancelled != 2 {
 		t.Fatalf("validation loops were not frozen with the tightened review cap: %#v", plan.ValidationLoops)
 	}
 	loops.Review.MaxRounds = 1
 	loops.Review.Guidance[0] = "changed.md"
-	loops.Gate.MaxFixRounds = 0
-	if plan.ValidationLoops.Review.MaxRounds != 3 || plan.ValidationLoops.BriefReviewRounds != 2 || plan.ValidationLoops.MaxReviewRounds() != 2 || plan.ValidationLoops.Review.Guidance[0] != "docs/review.md" || plan.ValidationLoops.Gate.MaxFixRounds != 2 {
+	if plan.ValidationLoops.Review.MaxRounds != 3 || plan.ValidationLoops.BriefReviewRounds != 2 || plan.ValidationLoops.MaxReviewRounds() != 2 || plan.ValidationLoops.Review.Guidance[0] != "docs/review.md" {
 		t.Fatalf("frozen plan followed mutable config: %#v", plan.ValidationLoops)
 	}
 	encoded, err := plan.Encode()

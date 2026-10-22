@@ -159,10 +159,6 @@ jobs:
 	if err == nil || !failedWorkflowJob(mustWorkflowCoverageJSON(t, coverage)) {
 		t.Fatalf("failed workflow did not block: coverage=%+v err=%v", coverage, err)
 	}
-	if !strings.Contains(workflowCoverageFailureOutput(mustWorkflowCoverageJSON(t, coverage)), "failed") {
-		t.Fatalf("failed job output was not retained: %+v", coverage)
-	}
-
 	coverage, err = runLocalWorkflowJobs(context.Background(), root, scratch, false, "")
 	if err == nil || !strings.Contains(err.Error(), "not authorized") {
 		t.Fatalf("disabled supported workflow was treated as a pass: coverage=%+v err=%v", coverage, err)

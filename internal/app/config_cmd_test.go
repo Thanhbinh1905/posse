@@ -323,11 +323,11 @@ func TestConfigUserOnlyApprovalIsRecordedForLeadOnly(t *testing.T) {
 		t.Fatalf("Lead approval count = %d, %v", count, err)
 	}
 	run(1, "config_invalid", "config", "set", "autonomy.yolo", "not-a-boolean", "--project", "shop", "--user-approved", quote)
-	run(0, "", "config", "set", "defaults.gate", `[]`, "--user-approved", quote)
+	run(0, "", "config", "set", "defaults.review", `"quick"`, "--user-approved", quote)
 	if err := db.QueryRowContext(context.Background(), `SELECT project_id,key,action,value,user_quote FROM config_approvals ORDER BY id DESC LIMIT 1`).Scan(&projectID, &key, &action, &value, &recordedQuote); err != nil {
 		t.Fatal(err)
 	}
-	if projectID != project.ID || key != "defaults.gate" || action != "set" || value != "[]" || recordedQuote != quote {
+	if projectID != project.ID || key != "defaults.review" || action != "set" || value != `"quick"` || recordedQuote != quote {
 		t.Fatalf("global approval = %d %q %q %q %q", projectID, key, action, value, recordedQuote)
 	}
 	t.Setenv("HERDR_PANE_ID", "w1:p2")
@@ -337,7 +337,9 @@ func TestConfigUserOnlyApprovalIsRecordedForLeadOnly(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", "")
 	run(0, "", "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	run(0, "", "config", "unset", "autonomy.yolo", "--project", "shop")
-	run(0, "", "config", "unset", "defaults.gate")
+	run(1, "config_invalid", "config", "unset", "defaults.gate")
+	run(1, "config_invalid", "config", "set", "gate", `['make check']`)
+	run(1, "config_invalid", "config", "unset", "gate")
 	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM config_approvals`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("unexpected approval count = %d, %v", count, err)
 	}
@@ -570,7 +572,7 @@ func TestConfigSchemaRunsThroughCLIInToonAndJSON(t *testing.T) {
 	for _, row := range decoded.Keys {
 		userOnly[row.Key] = row.UserOnly
 	}
-	for key, want := range map[string]bool{"defaults.gate": true, "review_loop.max_rounds": true, "gate_loop.max_fix_rounds": true, "ci_loop.max_fix_rounds": true, "pool.setup": true, "kinds.<kind>.lead_auto_approve": true, "autonomy.yolo": true, "autonomy.review": true, "autonomy.merge": true, "defaults.merge_mode": false} {
+	for key, want := range map[string]bool{"review_loop.max_rounds": true, "gate_loop.max_fix_rounds": false, "defaults.gate": false, "ci_loop.max_fix_rounds": true, "pool.setup": true, "kinds.<kind>.lead_auto_approve": true, "autonomy.yolo": true, "autonomy.review": true, "autonomy.merge": true, "defaults.merge_mode": false} {
 		if userOnly[key] != want {
 			t.Fatalf("config schema user_only for %s = %v, want %v", key, userOnly[key], want)
 		}

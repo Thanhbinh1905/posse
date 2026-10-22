@@ -292,7 +292,7 @@ func TestSendToMergeRefusesWhileMergeIntentRuns(t *testing.T) {
 	}
 }
 
-func TestPRMergeRequiresCleanSandboxAndRunsTheConfiguredGate(t *testing.T) {
+func TestPRMergeRequiresCleanSandboxAndDoesNotRunLegacyGates(t *testing.T) {
 	dirty := newPRMergeFixture(t, "pr", store.StateDone)
 	if err := os.WriteFile(filepath.Join(dirty.worktree, "uncommitted.txt"), []byte("uncommitted\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -312,12 +312,12 @@ func TestPRMergeRequiresCleanSandboxAndRunsTheConfiguredGate(t *testing.T) {
 	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("PR merging with a passing Gate exit=%d output=%s error=%s", code, output, errOutput)
 	}
-	if _, err := os.Stat(filepath.Join(fixture.root, "gate-ran")); err != nil {
-		t.Fatalf("configured Gate did not run: %v", err)
+	if _, err := os.Stat(filepath.Join(fixture.root, "gate-ran")); !os.IsNotExist(err) {
+		t.Fatalf("removed Gate command ran: %v", err)
 	}
 }
 
-func TestPRMergeGateFailureDoesNotPushOrOpenPR(t *testing.T) {
+func TestPRMergeIgnoresLegacyFailingGateAndOpensPR(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\ngate = [\"exit 1\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -327,8 +327,8 @@ func TestPRMergeGateFailureDoesNotPushOrOpenPR(t *testing.T) {
 	notices, noticeErr := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	remotePRRefs := strings.TrimSpace(gitTest(t, fixture.remote, "for-each-ref", "--format=%(refname)", "refs/heads/posse/"))
 	ghLog, readErr := os.ReadFile(fixture.ghLog)
-	if code != 1 || !strings.Contains(output, "gate_failed") || err != nil || task.State != store.StateDone || task.GatedSHA == "" || noticeErr != nil || countNoticeKind(notices, "gate_failed") != 1 || remotePRRefs != "" || (readErr == nil && len(ghLog) != 0) || (readErr != nil && !os.IsNotExist(readErr)) {
-		t.Fatalf("failed Gate did not leave the Task unpushed and done: exit=%d output=%s task=%#v notices=%#v refs=%q gh=%q errors=%v/%v/%v", code, output, task, notices, remotePRRefs, ghLog, err, noticeErr, readErr)
+	if code != 0 || err != nil || task.State != store.StateMerging || task.GatedSHA == "" || task.PRURL == "" || noticeErr != nil || countNoticeKind(notices, "gate_failed") != 0 || remotePRRefs == "" || readErr != nil || !strings.Contains(string(ghLog), "pr create") {
+		t.Fatalf("legacy Gate blocked or altered PR delivery: exit=%d output=%s task=%#v notices=%#v refs=%q gh=%q errors=%v/%v/%v", code, output, task, notices, remotePRRefs, ghLog, err, noticeErr, readErr)
 	}
 }
 
@@ -1118,7 +1118,6 @@ func freezeCILoopWithReview(t *testing.T, fixture *prMergeFixture, maxFixRounds,
 		Paths: taskplan.Paths{Scratch: filepath.Join(fixture.home, "scratch", "shop", "t1"), Output: filepath.Join(fixture.home, "projects", "shop", "tasks", "t1")},
 		ValidationLoops: &taskplan.ValidationLoops{
 			Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"},
-			Gate:   config.GateLoop{MaxFixRounds: 3},
 			CI:     config.CILoop{MaxFixRounds: maxFixRounds, RerunCancelled: rerunCancelled},
 		},
 	})

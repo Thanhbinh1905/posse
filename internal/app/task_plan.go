@@ -74,7 +74,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		}
 	}
 	for _, member := range members {
-		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.MergeMode, Gate: memberGates(cfg, member.Name), Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
+		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.MergeMode, Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
 		if cfg.Repositories[member.Name].Review != "" {
 			selected.ReviewSource = "repositories." + member.Name + ".review"
 		}
@@ -122,9 +122,9 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	return taskplan.Resolve(taskplan.Request{Brief: taskplan.Select("brief", source, briefData), Inputs: inputs, Execution: execution, Launch: launch,
 		Review: review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
-		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
-		Gate:  cfg.Defaults.Gate, WorkflowJobs: cfg.FullPipeline.RunWorkflows,
-		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, Gate: cfg.GateLoop, CI: cfg.CILoop},
+		Paths:           taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
+		WorkflowJobs:    cfg.FullPipeline.RunWorkflows,
+		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, CI: cfg.CILoop},
 		MergeMethod:     cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup}})
 }
 

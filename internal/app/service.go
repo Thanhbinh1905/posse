@@ -161,7 +161,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Worker.", Handler: s.keys},
 		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Interrupt a working Worker and verify it stopped; report when no working turn can be interrupted.", Handler: s.interrupt},
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Worker in the same execution root, optionally with another Profile.", Handler: s.relaunch},
-		{Name: "merge", Usage: "$ merge <task> [--execute] [--user-approved <quote>]", Summary: "Merge a completed Change Task; PR merges require the gated head to include the target branch.", Handler: s.merge},
+		{Name: "merge", Usage: "$ merge <task> [--execute] [--user-approved <quote>]", Summary: "Merge a completed Change Task; PR merges require the recorded head to include the target branch.", Handler: s.merge},
 		{Name: "review", Usage: "$ review <change> [--full]", Summary: "Inspect Review Rounds, findings, carries and remaining budget.", Handler: s.reviewStatus, Subcommands: []*axi.Command{
 			{Name: "start", Usage: "$ review start <change> [--profile <name>] [--name <short>]", Summary: "Admit the next numbered Review Round with its frozen delta scope.", Handler: s.reviewStart},
 			{Name: "fix", Usage: "$ review fix <change> [--pattern P-n]...", Summary: "Queue one whole-pattern fix instruction for the Change Worker.", Handler: s.reviewFix},
