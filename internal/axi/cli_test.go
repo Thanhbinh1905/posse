@@ -30,6 +30,31 @@ func TestCommandDispatchAndGlobalJSON(t *testing.T) {
 	}
 }
 
+func TestExplicitFormatSelection(t *testing.T) {
+	for _, test := range []struct {
+		args  []string
+		json  bool
+		human bool
+	}{
+		{args: []string{"--format", "toon"}},
+		{args: []string{"--format=human"}, human: true},
+		{args: []string{"--format", "json"}, json: true},
+		{args: []string{"--json"}, json: true},
+	} {
+		var output bytes.Buffer
+		root := &Command{Handler: func(ctx *Context, _ []string) error {
+			if ctx.JSON != test.json || ctx.Human != test.human {
+				t.Errorf("context JSON=%t Human=%t, want JSON=%t Human=%t", ctx.JSON, ctx.Human, test.json, test.human)
+			}
+			return ctx.Print(Object{{Key: "status", Value: "ready"}})
+		}}
+		app := App{Name: "test", Root: root, Out: &output}
+		if code := app.Run(test.args); code != 0 {
+			t.Fatalf("%v: code %d, output %s", test.args, code, output.String())
+		}
+	}
+}
+
 func TestPrintWithoutHelpOmitsOnlyGeneratedHelp(t *testing.T) {
 	var out bytes.Buffer
 	ctx := &Context{Out: &out}

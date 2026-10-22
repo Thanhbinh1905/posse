@@ -17,7 +17,7 @@ import (
 )
 
 func (s *Service) doctor(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("doctor", args, map[string]flagSpec{"full": {boolean: true}})
+	parsed, err := parseArgs("doctor", args, map[string]flagSpec{"full": {boolean: true}, "verbose": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -34,7 +34,18 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 		output = append(output, axi.Field{Key: "agent_manifests", Value: jsonRaw(result.Manifests)})
 	}
 	update, _ := s.availableUpdate(ctx.Context, nil, nil)
-	return ctx.Print(addUpdateHelp(output, update))
+	output = addUpdateHelp(output, update)
+	for _, field := range output {
+		if field.Key == "help" {
+			if expanded, ok := field.Value.([]axi.Object); ok {
+				help = expanded
+			}
+		}
+	}
+	if ctx.Human {
+		return renderDoctorHuman(ctx, checks, help, parsed.Bool("verbose"))
+	}
+	return ctx.Print(output)
 }
 
 type doctorCheck struct {
