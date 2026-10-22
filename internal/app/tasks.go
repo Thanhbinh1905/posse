@@ -1892,35 +1892,31 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	refreshPR := task.PRURL != "" && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes")
-	if project.IsWorkspace() {
-		repos, err := db.TaskRepos(ctx.Context, task.ID)
-		if err != nil {
-			return err
+	// Plain sends refresh PR state best-effort to retain the merged-PR guard,
+	// but refresh failures must not prevent delivery using the last observation.
+	if !interrupting && !parsed.Bool("queue") {
+		refreshPR := task.PRURL != "" && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes")
+		if project.IsWorkspace() {
+			if repos, reposErr := db.TaskRepos(ctx.Context, task.ID); reposErr == nil {
+				for _, repo := range repos {
+					refreshPR = refreshPR || repo.PRURL != "" && repo.MergeMode == "pr"
+				}
+			}
 		}
-		for _, repo := range repos {
-			refreshPR = refreshPR || repo.PRURL != "" && repo.MergeMode == "pr"
-		}
-	}
-	if refreshPR && !parsed.Bool("queue") {
-		pollCtx, cancelPoll := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
-		pollErr := s.pollProjectPullRequests(pollCtx, db, project, cfg, true)
-		timedOut := errors.Is(pollCtx.Err(), context.DeadlineExceeded)
-		cancelPoll()
-		if timedOut {
-			return axi.Failure("send_preparation_timeout", "PR refresh exceeded the send time budget; the message was not queued", true, "Retry `posse send` after Project maintenance is available, or use `--queue` to enqueue without a PR refresh")
-		}
-		if pollErr != nil {
-			return pollErr
-		}
-		if err := s.autoTeardownMergedTasks(ctx.Context, db, project, cfg); err != nil {
-			return err
-		}
-		if task, err = db.TaskByID(ctx.Context, project.ID, task.ID); err != nil {
-			return err
-		}
-		if task.State == store.StateMerged || task.State == store.StateTornDown {
-			return axi.Failure("pr_merged", "pull request merged; Task Merged before the message could be sent", false)
+		if refreshPR {
+			pollCtx, cancelPoll := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
+			pollErr := s.pollProjectPullRequests(pollCtx, db, project, cfg, true)
+			timedOut := errors.Is(pollCtx.Err(), context.DeadlineExceeded)
+			cancelPoll()
+			if !timedOut && pollErr == nil {
+				_ = s.autoTeardownMergedTasks(ctx.Context, db, project, cfg)
+				if refreshed, refreshErr := db.TaskByID(ctx.Context, project.ID, task.ID); refreshErr == nil {
+					task = refreshed
+					if task.State == store.StateMerged || task.State == store.StateTornDown {
+						return axi.Failure("pr_merged", "pull request merged; Task Merged before the message could be sent", false)
+					}
+				}
+			}
 		}
 	}
 	if task.State == store.StateDone && task.Type != "change" {
