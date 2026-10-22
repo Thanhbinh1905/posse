@@ -226,10 +226,26 @@ func TestReviewTargetsAndVerdictSurviveRebuild(t *testing.T) {
 	}
 }
 
-func TestReviewEvidenceCoversEachMemberOfAWorkspacePass(t *testing.T) {
+func TestReviewEvidenceUsesOnePassForEveryWorkspaceMember(t *testing.T) {
 	reviewed := []ReviewTarget{{Repository: "api", Commit: reviewShaA}, {Repository: "web", Commit: reviewShaB}}
 	f := newReviewVerdictFixture(t, reviewed)
 	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, f.review), "done", "x", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewPass, ReportSHA256: reportHash}); err != nil {
+		t.Fatal(err)
+	}
+	// A second round passed a different combination of the same Members.
+	change := f.task(t, f.change)
+	other, err := f.db.CreateTask(f.ctx, change.ProjectID, Task{Seq: 3, Type: "review", ReviewsTaskID: f.change, Title: "Second review", MergeMode: "local",
+		ReviewTargets: []ReviewTarget{{Repository: "api", Commit: reviewShaB}, {Repository: "web", Commit: reviewShaA}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.NextTaskLaunchWithIdentity(f.ctx, other, "reviewer", "model-b", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(f.ctx, other, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, other), "done", "x", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewPass, ReportSHA256: reportHash}); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -237,13 +253,13 @@ func TestReviewEvidenceCoversEachMemberOfAWorkspacePass(t *testing.T) {
 		targets []ReviewTarget
 		want    bool
 	}{
-		{"both Members", reviewed, true},
-		{"one Member", reviewed[:1], true},
-		{"moved Member", []ReviewTarget{reviewed[0], {Repository: "web", Commit: reviewShaA}}, false},
+		{"exact Member set", reviewed, true},
+		{"Member subset of one pass", reviewed[:1], true},
+		{"heads from different passes", []ReviewTarget{reviewed[0], {Repository: "web", Commit: reviewShaA}}, false},
 		{"unreviewed Member", []ReviewTarget{{Repository: "docs", Commit: reviewShaA}}, false},
 	} {
 		evidence, err := f.db.ReviewEvidenceFor(f.ctx, f.change, tc.targets, nil)
-		if err != nil || evidence.Complete != tc.want {
+		if err != nil || evidence.Complete != tc.want || evidence.Pass != tc.want {
 			t.Fatalf("%s: evidence=%+v err=%v, want complete=%v", tc.name, evidence, err, tc.want)
 		}
 	}

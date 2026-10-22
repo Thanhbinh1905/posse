@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -308,9 +310,11 @@ func requireFullPipelineCandidateResults(ctx context.Context, db *store.DB, lane
 // that is its exact delivered head, against its current frozen target, with
 // current ordered results. commit pins a single-repository PR head; otherwise
 // the Task branch tip, the head local integration would fast-forward, is
-// checked. A Member already integrated under this barrier is not rechecked,
-// since its own integration moved its target.
-func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project store.Project, task store.Task, commit string) error {
+// checked; a local lane's gated head must also be the candidate, since local
+// Merge fast-forwards to it. A Member already integrated under this barrier
+// (recorded merged, or its PR merged at the validated head before the PR poll
+// recorded it) is not rechecked, since its own integration moved its target.
+func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit string) error {
 	lanes, err := changedCandidateLanes(ctx, db, project, task)
 	if err != nil {
 		return err
@@ -338,6 +342,15 @@ func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project 
 		if head != "" && head != candidate.CandidateSHA {
 			return axi.Failure("validation_stale", lane.memberLabel("head "+shortSHA(head)+" does not match the fully validated private candidate "+shortSHA(candidate.CandidateSHA)), false, "Run `posse publish` to submit the new head as a fresh candidate")
 		}
+		if gated := lane.task.GatedSHA; lane.localDelivery() && gated != "" && gated != candidate.CandidateSHA {
+			return axi.Failure("validation_stale", lane.memberLabel("gated head "+shortSHA(gated)+" is not the fully validated private candidate "+shortSHA(candidate.CandidateSHA)), false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate the validated head")
+		}
+		if integrated, err := memberPRMergedAtCandidate(ctx, cfg, lane, candidate); err != nil {
+			return err
+		} else if integrated {
+			validated++
+			continue
+		}
 		if err := requireFullPipelineCandidateValidation(ctx, db, lane, candidate); err != nil {
 			return err
 		}
@@ -347,6 +360,47 @@ func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project 
 		return axi.Failure("validation_required", "no changed full-pipeline repository has a validated candidate", false)
 	}
 	return nil
+}
+
+// memberPRMergedAtCandidate reports whether a workspace PR Member whose merge
+// was requested already merged on the forge at exactly its validated head. The
+// forge is asked only after the Member's target moved, which is what such a
+// merge does before the PR poll records the Member merged.
+func memberPRMergedAtCandidate(ctx context.Context, cfg config.Config, lane candidateLane, candidate store.ValidationCandidate) (bool, error) {
+	if lane.repo == "" || lane.localDelivery() || lane.member.State != store.TaskRepoMerge || lane.member.PRURL == "" || lane.member.GatedSHA != candidate.CandidateSHA {
+		return false, nil
+	}
+	targetHead, err := lane.targetHead(ctx)
+	if err != nil || targetHead == candidate.TargetSHA {
+		return false, err
+	}
+	forge, err := forgeForRepository(ctx, lane.project.Root, cfg, lane.repo)
+	if err != nil {
+		return false, prefixFailure(lane.repo, err)
+	}
+	number, err := forgeReference(lane.member.PRURL, forge)
+	if err != nil {
+		return false, axi.Failure("pr_url_invalid", lane.memberLabel(err.Error()), false)
+	}
+	if forge.Kind == "gitlab" {
+		mr, err := gitlabMR(ctx, forge, number)
+		if err != nil {
+			return false, axi.Failure("pr_view_failed", lane.memberLabel("could not verify the merge request state"), true, err.Error())
+		}
+		return mr.State == "merged" && mr.SHA == candidate.CandidateSHA, nil
+	}
+	output, err := commandOutputArgs(ctx, lane.project.Root, "gh", "pr", "view", lane.member.PRURL, "--json", "state,headRefOid")
+	if err != nil {
+		return false, axi.Failure("pr_view_failed", lane.memberLabel("could not verify the pull request state"), true, strings.TrimSpace(output))
+	}
+	var pull struct {
+		State      string `json:"state"`
+		HeadRefOID string `json:"headRefOid"`
+	}
+	if err := json.Unmarshal([]byte(output), &pull); err != nil {
+		return false, axi.Failure("pr_view_failed", lane.memberLabel("gh returned invalid pull request data"), true, err.Error())
+	}
+	return pull.State == "MERGED" && pull.HeadRefOID == candidate.CandidateSHA, nil
 }
 
 func candidateHasOwnerDocs(ctx context.Context, candidate store.ValidationCandidate) (bool, error) {

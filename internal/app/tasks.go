@@ -1425,18 +1425,18 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			if err := validateWorkspaceChangeSignal(ctx.Context, db, task); err != nil {
 				return axi.Failure("signal_invalid", err.Error(), false, "Commit the change in each member you changed and leave every member worktree clean before signalling done")
 			}
+			cfg, err := config.Load(home, project.Name)
+			if err != nil {
+				return configError(err)
+			}
 			// Every changed full-pipeline Member must be delivered from its
 			// promoted, fully validated private candidate.
 			if lanes, err := changedCandidateLanes(ctx.Context, db, project, task); err != nil {
 				return err
 			} else if len(lanes) > 0 {
-				if err := requireFullPipelineValidationAt(ctx.Context, db, project, task, ""); err != nil {
+				if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, ""); err != nil {
 					return err
 				}
-			}
-			cfg, err := config.Load(home, project.Name)
-			if err != nil {
-				return configError(err)
 			}
 			if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg); err != nil {
 				return err

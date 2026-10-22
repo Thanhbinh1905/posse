@@ -372,3 +372,208 @@ func TestFullPipelineWorkspaceMembersPublishOnlyValidatedCandidates(t *testing.T
 		t.Fatalf("api origin Task branch=%s after Merge, want validated candidate %s", published, candidates["api"].CandidateSHA)
 	}
 }
+
+// workspaceForgeScript fakes GitHub for workspace Members acme/<repo>, each
+// backed by the bare origin $POSSE_TEST_ROOT/ws-<repo>.git. A merge moves the
+// Member's origin main to the PR head and records the PR as merged.
+const workspaceForgeScript = `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$POSSE_TEST_ROOT/ws-gh.log"
+state="$POSSE_TEST_ROOT/ws-gh"
+mkdir -p "$state"
+remote() { printf '%s/ws-%s.git' "$POSSE_TEST_ROOT" "$1"; }
+number() { case "$1" in api) echo 31 ;; web) echo 32 ;; *) exit 91 ;; esac; }
+head_of() { git --git-dir="$(remote "$1")" rev-parse refs/heads/posse/t1; }
+pull_json() {
+  status=OPEN
+  if [ -e "$state/$1-merged" ]; then status=MERGED; fi
+  printf '{"url":"https://github.com/acme/%s/pull/%s","state":"%s","headRefOid":"%s","headRefName":"posse/t1","baseRefName":"main","headRepository":{"nameWithOwner":"acme/%s"}}' "$1" "$(number "$1")" "$status" "$(head_of "$1")" "$1"
+}
+case "$1 $2" in
+  "pr list")
+    repo=$(git config --get remote.origin.url | sed -E 's#.*/acme/([^/.]+)(\.git)?$#\1#')
+    if [ -e "$state/$repo-open" ]; then printf '[%s]\n' "$(pull_json "$repo")"; else printf '[]\n'; fi ;;
+  "pr create")
+    repo=$(git config --get remote.origin.url | sed -E 's#.*/acme/([^/.]+)(\.git)?$#\1#')
+    : > "$state/$repo-open"
+    printf 'https://github.com/acme/%s/pull/%s\n' "$repo" "$(number "$repo")" ;;
+  "pr view")
+    repo=$(printf '%s' "$3" | sed -E 's#https://github.com/acme/([^/]+)/pull/.*#\1#')
+    case "$*" in
+      *'--json title,body'*) printf '{"title":"t","body":"b"}\n' ;;
+      *) pull_json "$repo"; printf '\n' ;;
+    esac ;;
+  "pr edit") printf 'Edited\n' ;;
+  "pr merge")
+    repo=$(printf '%s' "$3" | sed -E 's#https://github.com/acme/([^/]+)/pull/.*#\1#')
+    sha=$(printf '%s\n' "$*" | sed -E 's#.*--match-head-commit ([0-9a-f]+).*#\1#')
+    if [ "$sha" != "$(head_of "$repo")" ]; then printf 'head moved\n' >&2; exit 1; fi
+    git --git-dir="$(remote "$repo")" update-ref refs/heads/main "$sha"
+    : > "$state/$repo-merged"
+    printf 'Merged\n' ;;
+  "api graphql") printf '{"data":{}}\n' ;;
+  "auth status") exit 0 ;;
+  *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
+esac
+`
+
+// TestFullPipelineWorkspaceMergesEveryPRMemberInOneRun proves that merging one
+// PR Member does not make the barrier refuse the next one, and that a mixed
+// workspace still requires its quick Member's own exact-head review.
+func TestFullPipelineWorkspaceMergesEveryPRMemberInOneRun(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, f)
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "gh"), []byte(workspaceForgeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(f.root, "stack")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	remotes := map[string]string{}
+	for _, member := range []string{"api", "web"} {
+		remotes[member] = filepath.Join(f.root, "ws-"+member+".git")
+		path := filepath.Join(root, member)
+		initRepository(t, path, remotes[member], f.env)
+		url := "https://github.com/acme/" + member + ".git"
+		gitTest(t, f.env, path, "remote", "set-url", "origin", url)
+		gitTest(t, f.env, path, "config", "url.file://"+remotes[member]+".insteadOf", url)
+	}
+	zeta := filepath.Join(root, "zeta")
+	initRepository(t, zeta, filepath.Join(f.root, "ws-zeta.git"), f.env)
+	project, err := f.db.CreateWorkspaceProject(context.Background(), "stack", root, []store.ProjectRepo{
+		{Name: "api", Path: "api", DefaultBranch: "main", Status: store.RepoActive, OriginHost: "github.com"},
+		{Name: "zeta", Path: "zeta", DefaultBranch: "main", Status: store.RepoActive},
+		{Name: "web", Path: "web", DefaultBranch: "main", Status: store.RepoActive, OriginHost: "github.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := createWorkspace(herdr.NewWithEnv("herdr", f.env), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.SetProjectLead(context.Background(), project.ID, workspace.Workspace.WorkspaceID, workspace.RootPane.PaneID, "posse:stack:lead"); err != nil {
+		t.Fatal(err)
+	}
+	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", workspace.RootPane.PaneID)
+	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
+	for _, setting := range [][2]string{
+		{"defaults.review", "full-pipeline"}, {"autonomy.yolo", "true"},
+		{"repositories.api.merge_mode", "pr"}, {"repositories.web.merge_mode", "pr"},
+		{"repositories.zeta.merge_mode", "local"}, {"repositories.zeta.review", "quick"},
+	} {
+		runPosse(t, f.binary, root, f.env, "config", "set", setting[0], setting[1], "--project", "stack")
+	}
+	brief := filepath.Join(f.root, "two-pr-members.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Two PR Members\ndone_when: checked\nrepos: [api, web, zeta]\n---\nChange every Member.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "start", "--brief", brief, "--name", "two-pr-members", "--profile", "author"); code != 0 {
+		t.Fatalf("start workspace Change Task: code=%d %s", code, output)
+	}
+	change := mustProjectTask(t, f, project.ID, "t1")
+	repos, err := f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil || len(repos) != 3 {
+		t.Fatalf("workspace Members: %+v %v", repos, err)
+	}
+	worktrees := map[string]string{}
+	for _, repo := range repos {
+		worktrees[repo.Repo] = repo.WorktreePath
+		if err := os.WriteFile(filepath.Join(repo.WorktreePath, "change.txt"), []byte(repo.Repo+" candidate\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, f.env, repo.WorktreePath, "add", "change.txt")
+		gitTest(t, f.env, repo.WorktreePath, "commit", "-m", "change "+repo.Repo)
+	}
+	originMain := map[string]string{}
+	for _, member := range []string{"api", "web"} {
+		originMain[member] = gitRef(t, f, remotes[member], "refs/heads/main")
+	}
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	candidates := map[string]store.ValidationCandidate{}
+	for _, member := range []string{"api", "web"} {
+		code, output := runReleaseCLI(t, f.binary, worktrees[member], workerEnv,
+			"publish", "--repo", member, member+" candidate summary", "--verify", "go test ./... -> passed",
+			"--proof", "Intent behavior verified", "--risk", "Risk: low\nRollback: revert the "+member+" change")
+		if code != 0 || !strings.Contains(output, "validation required before publication") {
+			t.Fatalf("submit %s private candidate: code=%d %s", member, code, output)
+		}
+		candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, member)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidates[member] = candidate
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "review", "start", "t1", "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start workspace Review Round: code=%d %s", code, output)
+	}
+	review := mustProjectTask(t, f, project.ID, "t2")
+	waitForReviewIdentityAgent(t, f, review.PaneID)
+	scratch := filepath.Join(f.home, "scratch", "stack", "t2")
+	report := filepath.Join(scratch, "report.md")
+	findings := filepath.Join(scratch, "findings.json")
+	if err := os.WriteFile(report, []byte("Every Member passed review.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(findings, []byte(`{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "pass")
+	for _, member := range []string{"api", "web"} {
+		recordCandidateStages(t, f, workerEnv, candidates[member], func(string) {}, "--repo", member)
+		if code, output := runReleaseCLI(t, f.binary, candidates[member].WorktreePath, workerEnv, "publish", "--repo", member, "Promote"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+			t.Fatalf("promote validated %s candidate: code=%d %s", member, code, output)
+		}
+		if main := gitRef(t, f, remotes[member], "refs/heads/main"); main != originMain[member] {
+			t.Fatalf("%s origin main moved on promotion", member)
+		}
+	}
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "Every Member validated"); code != 0 {
+		t.Fatalf("done Signal: code=%d %s", code, output)
+	}
+
+	// One run merges both PR Members: the first merge moves api's origin
+	// main, and the barrier still admits web. The local quick Member zeta
+	// merges last and fails on a busy target checkout, leaving both PR
+	// Members merged on the forge before the PR poll records them.
+	reviewedZeta := gitRef(t, f, worktrees["zeta"], "HEAD")
+	zetaTarget := gitRef(t, f, zeta, "refs/heads/main")
+	busy := filepath.Join(zeta, "busy.txt")
+	if err := os.WriteFile(busy, []byte("uncommitted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "merge", "t1", "--execute", "--user-approved", "Merge every Member"); code == 0 || !strings.Contains(output, "merge_target_busy") {
+		t.Fatalf("first Merge run: code=%d %s", code, output)
+	}
+	for _, member := range []string{"api", "web"} {
+		if main := gitRef(t, f, remotes[member], "refs/heads/main"); main != candidates[member].CandidateSHA {
+			t.Fatalf("%s origin main=%s after one Merge run, want validated candidate %s", member, main, candidates[member].CandidateSHA)
+		}
+	}
+	if err := os.Remove(busy); err != nil {
+		t.Fatal(err)
+	}
+
+	// With every full-pipeline Member integrated, the quick Member still
+	// needs its own exact-head review.
+	if err := os.WriteFile(filepath.Join(worktrees["zeta"], "late.txt"), []byte("unreviewed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, worktrees["zeta"], "add", "late.txt")
+	gitTest(t, f.env, worktrees["zeta"], "commit", "-m", "unreviewed quick edit")
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "merge", "t1", "--execute", "--user-approved", "Merge every Member"); code == 0 || !strings.Contains(output, "review_required") {
+		t.Fatalf("Merge with an unreviewed quick Member: code=%d %s", code, output)
+	}
+	if main := gitRef(t, f, zeta, "refs/heads/main"); main != zetaTarget {
+		t.Fatalf("unreviewed zeta head merged: target=%s", main)
+	}
+	gitTest(t, f.env, worktrees["zeta"], "reset", "-q", "--hard", reviewedZeta)
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "merge", "t1", "--execute", "--user-approved", "Merge every Member"); code != 0 {
+		t.Fatalf("Merge the reviewed quick Member: code=%d %s", code, output)
+	}
+	if main := gitRef(t, f, zeta, "refs/heads/main"); main != reviewedZeta {
+		t.Fatalf("zeta target=%s after Merge, want reviewed head %s", main, reviewedZeta)
+	}
+}

@@ -262,8 +262,12 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 			return err
 		}
 	}
+	// A mixed workspace needs both: full-pipeline Members their barrier and
+	// quick Members their own exact-head review.
 	if fullPipeline {
-		return requireFullPipelineValidationAt(ctx, db, project, task, commit)
+		if err := requireFullPipelineValidationAt(ctx, db, project, cfg, task, commit); err != nil {
+			return err
+		}
 	}
 	if local {
 		return requireReviewPass(ctx, db, project, task, commit)
