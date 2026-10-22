@@ -300,6 +300,20 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": fixture.leadPaneID}); err != nil {
 		t.Fatalf("focus the Lead before list recovery: %v", err)
 	}
+	// Missing Worker tabs now get the same absence grace as legacy grouped
+	// Workers, even while the Lead tab remains present.
+	taskDB, openErr := store.Open(fixture.home)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	missing, taskErr := taskDB.Task(context.Background(), fixture.projectID, "t3")
+	if taskErr == nil {
+		taskErr = taskDB.UpdateTaskObservation(context.Background(), missing.ID, missing.PaneID, missing.HerdrWorkspaceID, missing.AgentSession, missing.AgentSessionKind, time.Now().Add(-3*time.Minute).UnixMilli(), missing.IdleSince, missing.AgentServerStartedAt)
+	}
+	_ = taskDB.Close()
+	if taskErr != nil {
+		t.Fatal(taskErr)
+	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
 	fixture.waitState(t, "t3", store.StateLost)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "relaunch", "t3")
@@ -310,8 +324,7 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture.assertWorkerTab(t, snapshot, relaunched)
 	fixture.assertWorkerLabels(t, snapshot, relaunched)
 
-	// Herdr restores the Sandbox's native grouping across a server restart.
-	// The legacy tab was a moved process, so recovery places it under the Lead.
+	// Recovery reopens the Worker as a Lead tab after the Herdr restart.
 	killServer(t, fixture.server)
 	fixture.server = startServer(t, client)
 	output = runPosse(t, fixture.binary, fixture.repo, fixture.env, "recover", "--all")
@@ -321,18 +334,21 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 		t.Fatalf("recovery did not relaunch the Worker: before=%d after=%d output=%s", relaunched.Launches, recovered.Launches, output)
 	}
 	snapshot = fixture.snapshot(t)
-	grouped := false
-	for _, workspace := range snapshot.Workspaces {
-		if workspace.WorkspaceID == recovered.HerdrWorkspaceID && workspace.Worktree.CheckoutPath == recovered.WorktreePath {
-			grouped = true
-		}
-	}
-	if !grouped {
-		t.Fatalf("restored Worker lost Sandbox grouping: %#v", recovered)
-	}
 	lead, found := findLeadInSnapshot(snapshot)
 	if !found {
 		t.Fatal("Lead pane disappeared after Herdr restart")
+	}
+	if recovered.HerdrWorkspaceID != lead.WorkspaceID {
+		t.Fatalf("restored Worker did not reopen in the Lead workspace: task=%#v Lead=%#v", recovered, lead)
+	}
+	workerTab := false
+	for _, tab := range snapshot.Tabs {
+		if tab.WorkspaceID == lead.WorkspaceID && tab.TabID == tabOf(t, snapshot, recovered.PaneID) {
+			workerTab = true
+		}
+	}
+	if !workerTab {
+		t.Fatalf("restored Worker tab is missing from the Lead workspace: task=%#v tabs=%#v", recovered, snapshot.Tabs)
 	}
 	db, err := store.OpenReadOnly(fixture.home)
 	if err != nil {

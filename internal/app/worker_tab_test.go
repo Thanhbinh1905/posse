@@ -270,7 +270,14 @@ func TestOpenWorkerTabRejectsAnOccupiedLegacySandboxButAllowsAnEmptyWorkspace(t 
 		t.Fatalf("openWorkerTab with an occupied legacy workspace = %v, calls %#v", err, adapter.Calls)
 	}
 
-	adapter.snapshot.Panes = adapter.snapshot.Panes[:len(adapter.snapshot.Panes)-1]
+	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "foreign", Label: "notes"})
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "foreign:p1", WorkspaceID: "foreign", CWD: task.WorktreePath})
+	_, err = service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
+	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || adapter.CallCount("tab.create") != 0 {
+		t.Fatalf("openWorkerTab with a foreign Sandbox cwd = %v, calls %#v", err, adapter.Calls)
+	}
+
+	adapter.snapshot.Panes = adapter.snapshot.Panes[:len(adapter.snapshot.Panes)-2]
 	_, err = service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
 	if err != nil || adapter.CallCount("tab.create") != 1 {
 		t.Fatalf("openWorkerTab with an empty legacy workspace = %v, calls %#v", err, adapter.Calls)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
@@ -65,6 +66,15 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 					return openedTab{}, axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox", false, "Inspect the Sandbox's open panes before retrying")
 				}
 			}
+		}
+	}
+	for _, pane := range snapshot.Panes {
+		if filepath.Clean(pane.CWD) != filepath.Clean(path) || pane.PaneID == task.PaneID {
+			continue
+		}
+		otherTaskPane := strings.HasPrefix(pane.Label, "posse:"+project.Name+":t") && pane.Label != task.PaneLabel
+		if pane.WorkspaceID != workspaceID || otherTaskPane {
+			return openedTab{}, axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox", false, "Inspect the Sandbox's open panes before retrying")
 		}
 	}
 	raw, err := s.herdrCall(ctx, "tab.create", map[string]any{

@@ -207,7 +207,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		if task.State == store.StateDone || task.State == store.StateMerging {
 			return nil, db.CreateWorkerExitedNotice(ctx, task, now)
 		}
-		groupedWorker := !project.IsWorkspace() && project.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != project.HerdrWorkspaceID
+		groupedWorker := !project.IsWorkspace() && project.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != ""
 		restartPending := task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
 		absentSince := task.AgentAbsentSince
 		if absentSince == 0 {
