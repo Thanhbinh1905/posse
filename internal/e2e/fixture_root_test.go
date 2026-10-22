@@ -178,8 +178,8 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 		// A Herdr plugin can still be finishing a Posse command after the
 		// server stops. Wait for fixture processes to exit before removing
 		// their database, or a late backup write can race RemoveAll.
+		canRemove := true
 		if runtime.GOOS == "linux" {
-			stopFixtureWatchRuntimes(root)
 			servers, err := fixtureHerdrServerProcesses(root)
 			if err != nil {
 				t.Errorf("inspect isolated Herdr servers for %s: %v", root, err)
@@ -188,6 +188,10 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 				if err := stopFixtureHerdrServerProcesses(root, 3*time.Second); err != nil {
 					t.Errorf("stop isolated Herdr servers for %s: %v", root, err)
 				}
+			}
+			if err := stopFixtureWatchRuntimes(root); err != nil {
+				t.Errorf("stop isolated fixture Watches for %s: %v", root, err)
+				canRemove = false
 			}
 			deadline := time.Now().Add(10 * time.Second)
 			for {
@@ -202,10 +206,18 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 				if time.Now().After(deadline) {
 					processes, processErr := fixtureProcessDetails(root)
 					t.Errorf("E2E fixture processes still running for %s: %v (inspect: %v)", root, processes, processErr)
+					canRemove = false
 					break
 				}
 				time.Sleep(50 * time.Millisecond)
 			}
+		}
+		if !canRemove {
+			_ = lock.Close()
+			if handle, ok := fixtureRootPathHandles.LoadAndDelete(root); ok {
+				_ = handle.(*os.File).Close()
+			}
+			return
 		}
 		socketPath := herdr.IsolatedTestSocketPath(root)
 		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -427,6 +439,16 @@ func fixtureProcessDetails(root string) ([]string, error) {
 	return details, nil
 }
 
+func fixtureHasPOSSEHome(environ []byte, root string) bool {
+	for _, item := range strings.Split(string(environ), "\x00") {
+		key, value, found := strings.Cut(item, "=")
+		if found && key == "POSSE_HOME" && pathWithinRoot(root, value) {
+			return true
+		}
+	}
+	return false
+}
+
 func fixtureEnvironmentBelongsToRoot(environ []byte, root, resolvedRoot string) bool {
 	procFDPrefix := fmt.Sprintf("/proc/%d/fd/", os.Getpid())
 	for _, item := range strings.Split(string(environ), "\x00") {
@@ -435,6 +457,10 @@ func fixtureEnvironmentBelongsToRoot(environ []byte, root, resolvedRoot string) 
 			continue
 		}
 		switch key {
+		case "POSSE_HOME":
+			if pathWithinRoot(root, value) {
+				return true
+			}
 		case "POSSE_TEST_ROOT":
 			if value == root {
 				return true
