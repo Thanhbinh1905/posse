@@ -456,7 +456,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 			continue
 		}
 		args := call.Params["args"].([]string)
-		started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 10 && equalStrings(args[:8], []string{"--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9"}) && equalStrings(args[8:], []string{"--plugin-dir", skillRoots[0]})
+		started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 12 && equalStrings(args[:10], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9"}) && equalStrings(args[10:], []string{"--plugin-dir", skillRoots[0]})
 	}
 	if !started {
 		t.Fatalf("relaunch omitted the complete resume args: %#v", fake.Calls)

@@ -212,6 +212,9 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		if lane.localDelivery() {
 			return s.completeLocalPromotion(out, db, lane, candidate)
 		}
+		if err := refuseAgentAttribution(ctx, task.WorktreePath, candidate.CandidateSHA, task, candidate.TargetSHA); err != nil {
+			return err
+		}
 		if err := db.RecordPublishPrePushHead(ctx, task.ID, repoName, candidate.ExpectedRemoteSHA); err != nil {
 			return err
 		}
