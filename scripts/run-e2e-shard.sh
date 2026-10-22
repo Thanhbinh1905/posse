@@ -286,6 +286,8 @@ assignments='
 4 TestApprovedDiscardKeepsSandboxHeldWhenPRCloseFails
 4 TestApprovedDiscardRefusesMergedPR
 4 TestClosedPRDiscardRechecksForgeStateBeforeTeardown
+4 TestResearchChildrenRunThroughTheDetachedRunner
+4 TestResearchHookRefusesWriteCapableClaudeChildren
 '
 
 validate_assignments() {
