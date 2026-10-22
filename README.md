@@ -4,7 +4,7 @@
 
 **One Lead. A whole crew. Running on Herdr.**
 
-Posse is a local-first CLI for coordinating coding agents. You talk to one Lead in a Herdr pane; the Lead writes task briefs and dispatches Workers (worker agents) into isolated worktrees. Posse tracks tasks, relays progress and decisions, and gates changes before they merge. It supports a single repository or a workspace of repositories.
+Posse is a local-first CLI for coordinating coding agents in Git repositories and workspaces. You talk to one Lead in a Herdr pane; the Lead writes task briefs and dispatches Workers (worker agents) into isolated worktrees. Posse tracks tasks, relays progress and decisions, and integrates changes through pull requests or local fast-forwards. Pull-request Merges rely on green forge CI at the exact merged commit. Local Merges have no automated verification; verification is the User's responsibility. Edit non-Git directories directly outside Posse.
 
 ## How it works
 
@@ -48,7 +48,7 @@ Custom scripts and Herdr layouts that consume Posse output must use the renamed 
 ## Get started
 
 1. Open a Herdr pane in your repository or workspace folder and run `posse up`. It asks once before registering an unregistered Project.
-2. State the outcome you want, for example: "Fix the CSV export bug; open a PR, don't merge." The Lead raises only missing settings that affect this request, such as forge authentication or a Gate, then starts work.
+2. State the outcome you want, for example: "Fix the CSV export bug; open a PR, don't merge." The Lead raises only missing settings that affect this request, such as forge authentication, then starts work.
 
 With one available agent kind, `posse up` selects it without saving a preference. With several, choose with `posse up --<kind>` or `lead.kind`. Without Dispatch Rules or `dispatch.default.use`, Workers use the Lead's kind with its default model and effort. Inspect consequential gaps with `posse`.
 

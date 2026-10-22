@@ -89,7 +89,7 @@ func detectProject(ctx context.Context, dir string) (detectedProject, error) {
 		return detectedProject{}, err
 	}
 	if len(repos) == 0 {
-		return detectedProject{}, axi.Failure("not_in_git_repository", "this folder is not a Git repository and has no Git repositories directly inside it", false, "Run `posse up` inside a repository, or in a folder whose direct subfolders are repositories; use `posse project add --directory` for a local directory Project")
+		return detectedProject{}, axi.Failure("not_in_git_repository", "this folder is not a Git repository and has no Git repositories directly inside it", false, "Run `posse up` inside a repository, or in a folder whose direct subfolders are repositories. Edit non-Git directories directly outside Posse")
 	}
 	return detectedProject{Kind: store.ProjectKindWorkspace, Root: dir, Name: projectName(filepath.Base(dir)), Repos: repos}, nil
 }
@@ -339,8 +339,6 @@ func registerDetected(ctx context.Context, db *store.DB, detected detectedProjec
 			repos = append(repos, store.ProjectRepo{Name: repo.Name, Path: repo.Path, DefaultBranch: repo.DefaultBranch, OriginHost: savedOriginHost(repo.Remote)})
 		}
 		project, err = db.CreateWorkspaceProject(ctx, detected.Name, detected.Root, repos)
-	} else if detected.Kind == store.ProjectKindDirectory {
-		project, err = db.CreateDirectoryProject(ctx, detected.Name, detected.Root)
 	} else {
 		project, err = db.CreateProject(ctx, detected.Name, detected.Root, detected.DefaultBranch)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -900,27 +901,6 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}); err != nil {
 		return result, s.teardownIncomplete(ctx, db, project, task, "Task scratch removal", err)
 	}
-	if inPlace {
-		if err := s.runIntentStep(ctx, db, intent, "in_place.output", func() error {
-			baselinePath := inPlaceBaselinePath(*plan)
-			if _, statErr := os.Stat(baselinePath); os.IsNotExist(statErr) && task.Launches == 0 {
-				return nil
-			} else if statErr != nil {
-				return statErr
-			}
-			output, outputErr := captureInPlaceOutput(ctx, *plan, task.WorktreePath)
-			if outputErr != nil {
-				var failure *axi.Error
-				if !errors.As(outputErr, &failure) || failure.Code != "in_place_scope_violation" {
-					return outputErr
-				}
-				return recordInPlaceScopeNotice(ctx, db, project, task, output)
-			}
-			return nil
-		}); err != nil {
-			return result, s.teardownIncomplete(ctx, db, project, task, "in-place output capture", err)
-		}
-	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "sandbox.release", func() error {
 		latestPanes, paneErr := s.verifyTaskPanesClosed(ctx, project, task, panePlan)
@@ -965,7 +945,19 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			}
 		}
 		if inPlace {
-			return releaseInPlaceLeases(ctx, db, project, task)
+			leases, err := db.ResourceLeases(ctx, project.ID)
+			if err != nil {
+				return err
+			}
+			manager := execution.NewManager(db)
+			prefix := fmt.Sprintf("in-place:%d:", task.ID)
+			for _, lease := range leases {
+				if lease.OwnerTaskID == task.ID && strings.HasPrefix(lease.SourceKey, prefix) {
+					if err := manager.Reconcile(ctx, lease, "Legacy Directory Task was stopped and its source was preserved"); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		var releaseErr error
 		killed, releaseErr = s.releaseSandboxWithAuthorization(ctx, db, project, task, cfg.Pool.Clean, discardable, processAuthorization)

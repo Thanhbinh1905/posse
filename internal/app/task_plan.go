@@ -53,21 +53,21 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
+	if project.IsDirectory() {
+		return taskplan.Plan{}, axi.Failure("project_directory_removed", "Directory Projects no longer admit Tasks", false)
+	}
 	launch, err := frozenLaunch(resolution, cfg.Kinds)
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
 	execution := taskplan.Execution{Mode: "sandbox", Scope: project.Kind, Base: task.BaseRef, Target: task.TargetBranch, RootContext: brief.RootContext}
-	if project.IsDirectory() {
-		execution.Mode, execution.Scope, execution.Base, execution.Target = "in-place", store.ProjectKindDirectory, "", ""
-	}
-	if !project.IsWorkspace() && !project.IsDirectory() && execution.Target == "" {
+	if !project.IsWorkspace() && execution.Target == "" {
 		execution.Target = project.DefaultBranch
 	}
 	if execution.Scope == "" {
 		execution.Scope = "repo"
 	}
-	if brief.Base != "" && !project.IsWorkspace() && !project.IsDirectory() {
+	if brief.Base != "" && !project.IsWorkspace() {
 		execution.BaseCommit, err = selectedBaseCommit(ctx, project.Root, task.BaseRef)
 		if err != nil {
 			return taskplan.Plan{}, err
@@ -116,10 +116,6 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	}
 	delivery := cfg.Defaults.MergeMode
 	review := cfg.Defaults.Review
-	if project.IsDirectory() {
-		delivery = "local"
-		review = "none"
-	}
 	if project.IsWorkspace() {
 		delivery = task.MergeMode
 	}

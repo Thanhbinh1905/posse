@@ -15,7 +15,7 @@ import (
 )
 
 func TestUnsupportedBriefsRefuseBeforePreparationOrResourceAllocation(t *testing.T) {
-	for _, field := range []string{"executor: lead\n", "execution: in-place\n", "repos: [api]\n", "base: {api: main}\n", "target: [main]\n"} {
+	for _, field := range []string{"executor: lead\n", "execution: in-place\n", "paths: [src]\n", "repos: [api]\n", "base: {api: main}\n", "target: [main]\n"} {
 		t.Run(strings.TrimSpace(field), func(t *testing.T) {
 			f := newStartFixture(t)
 			text := "---\ntype: change\ntitle: Launch probe\ndone_when: checked\n" + field + "---\nInspect.\n"
@@ -25,6 +25,12 @@ func TestUnsupportedBriefsRefuseBeforePreparationOrResourceAllocation(t *testing
 			code, output := f.start(t)
 			if code != 1 || !strings.Contains(output, "brief_invalid") {
 				t.Fatalf("unsupported Brief was not refused: code=%d %s", code, output)
+			}
+			if strings.TrimSpace(field) == "execution: in-place" && !strings.Contains(output, "in-place execution was removed") {
+				t.Fatalf("removed execution error is unclear: %s", output)
+			}
+			if strings.TrimSpace(field) == "paths: [src]" && !strings.Contains(output, "paths was removed") {
+				t.Fatalf("removed paths error is unclear: %s", output)
 			}
 			if len(f.fake.Calls) != 0 {
 				t.Fatalf("admission called Herdr before refusal: %#v", f.fake.Calls)

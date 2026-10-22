@@ -285,91 +285,14 @@ func TestUnsupportedExecutionCombinationsAreRejected(t *testing.T) {
 	}
 }
 
-func TestInPlaceExecutionRequiresConsentLocalDeliveryAndNonOverlappingScopes(t *testing.T) {
-	makeRequest := func() taskplan.Request {
+func TestBriefRejectsRemovedInPlaceExecution(t *testing.T) {
+	for _, field := range []string{"execution: in-place\n", "paths: [src]\n"} {
+		brief := taskplan.Select("brief", "legacy.md", []byte("---\ntype: change\ntitle: Update docs\ndone_when: checks pass\n"+field+"---\n"))
 		r := request("change")
-		r.Review = "none"
-		r.Execution = taskplan.Execution{Mode: "sandbox", Scope: "directory"}
-		r.Brief = taskplan.Select("brief", "local.md", []byte("---\ntype: change\ntitle: Update docs\ndone_when: checks pass\nexecution: in-place\npaths: [src, docs/guide.md]\n---\n"))
-		r.UserChoice = &taskplan.UserChoice{Quote: "I approve edits to src and docs/guide.md", Actor: "lead", Source: "start --user-approved"}
-		return r
-	}
-	r := makeRequest()
-	plan, err := taskplan.Resolve(r)
-	if err != nil || plan.Execution.Mode != "in-place" || plan.Execution.Scope != "directory" || strings.Join(plan.Execution.Paths, ",") != "src,docs/guide.md" || strings.Join(plan.UserChoice.Fields, ",") != "execution,paths" {
-		t.Fatalf("in-place plan = %#v, %v", plan, err)
-	}
-	legacy := plan
-	legacy.Version, legacy.Review = 1, "never"
-	legacy.Preferences = append([]taskplan.Preference(nil), plan.Preferences...)
-	legacy.Preferences[1].Value = "never"
-	if err := legacy.Validate(); err != nil {
-		t.Fatalf("legacy in-place plan rejected: %v", err)
-	}
-	for _, change := range []struct {
-		name string
-		edit func(*taskplan.Request)
-	}{
-		{"missing consent", func(r *taskplan.Request) { r.UserChoice = nil }},
-		{"pull request", func(r *taskplan.Request) { r.Delivery = "pr" }},
-		{"no mistakes", func(r *taskplan.Request) { r.Delivery = "no-mistakes" }},
-		{"Review policy alias", func(r *taskplan.Request) { r.Review = "local" }},
-
-		{"requested Review", func(r *taskplan.Request) {
-			r.Brief = taskplan.Select("brief", "review-policy.md", []byte(`---
-type: change
-title: Update docs
-done_when: checks pass
-execution: in-place
-paths: [src]
-review: local
----
-`))
-		}},
-		{"Git base", func(r *taskplan.Request) {
-			r.UserChoice.Fields = []string{"base", "execution", "paths"}
-			r.Brief = taskplan.Select("brief", "base.md", []byte(`---
-type: change
-title: Update docs
-done_when: checks pass
-execution: in-place
-paths: [src]
-base: main
----
-`))
-		}},
-		{"review revision", func(r *taskplan.Request) {
-			r.ReviewOf = 3
-			r.Brief = taskplan.Select("brief", "review.md", []byte(`---
-type: review
-title: Review docs
-done_when: report is saved
-review_of: t3
-execution: in-place
-paths: [src]
----
-`))
-		}},
-		{"ticket closure", func(r *taskplan.Request) {
-			r.Brief = taskplan.Select("brief", "ticket.md", []byte("---\ntype: change\ntitle: Close ticket\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nticket: 12\n---\n"))
-		}},
-		{"issue references", func(r *taskplan.Request) {
-			r.Brief = taskplan.Select("brief", "refs.md", []byte("---\ntype: change\ntitle: Add issue reference\ndone_when: checks pass\nexecution: in-place\npaths: [src]\nrefs: [18]\n---\n"))
-		}},
-		{"overlap", func(r *taskplan.Request) {
-			r.Brief = taskplan.Select("brief", "overlap.md", []byte("---\ntype: change\ntitle: Update docs\ndone_when: checks pass\nexecution: in-place\npaths: [src, src/nested]\n---\n"))
-		}},
-		{"git metadata", func(r *taskplan.Request) {
-			r.Brief = taskplan.Select("brief", "git.md", []byte("---\ntype: change\ntitle: Update docs\ndone_when: checks pass\nexecution: in-place\npaths: [.git/config]\n---\n"))
-		}},
-	} {
-		t.Run(change.name, func(t *testing.T) {
-			candidate := makeRequest()
-			change.edit(&candidate)
-			if _, err := taskplan.Resolve(candidate); err == nil {
-				t.Fatal("unsupported in-place plan was admitted")
-			}
-		})
+		r.Brief = brief
+		if _, err := taskplan.Resolve(r); err == nil || !strings.Contains(err.Error(), "removed") {
+			t.Errorf("expected removed-feature error for %q, got %v", field, err)
+		}
 	}
 }
 

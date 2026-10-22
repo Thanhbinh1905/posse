@@ -199,47 +199,22 @@ func TestUpRegistersWorkspaceAfterOneConfirmation(t *testing.T) {
 	}
 }
 
-func TestProjectAddRegistersGitAndNonGitDirectories(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		withGit bool
-		flag    bool
-	}{
-		{name: "git directory", withGit: true, flag: true},
-		{name: "plain directory", withGit: false, flag: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			parent := t.TempDir()
-			directory := filepath.Join(parent, "local-project")
-			if err := os.MkdirAll(directory, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if test.withGit {
-				initRepo(t, directory)
-			}
-			harness := newUpHarness(t, parent, directory)
-			args := []string{"project", "add", "--name", "local"}
-			if test.flag {
-				args = append(args, "--directory")
-			}
-			if code := harness.run(args...); code != 0 {
-				t.Fatalf("project add: %d\n%s", code, harness.out.String())
-			}
-			project, err := harness.db(t).ProjectByRoot(context.Background(), directory)
-			if err != nil || !project.IsDirectory() || project.DefaultBranch != "" {
-				t.Fatalf("registered directory = %#v, %v", project, err)
-			}
-			if code := harness.run("project", "show"); code != 0 || !strings.Contains(harness.out.String(), "kind: directory") || !strings.Contains(harness.out.String(), "execution_mode: in-place") || !strings.Contains(harness.out.String(), "merge_mode: local") || strings.Contains(harness.out.String(), "target_branch") {
-				t.Fatalf("Directory Project summary is misleading: %d\n%s", code, harness.out.String())
-			}
-			if code := harness.run("up", "--claude"); code != 0 || !strings.Contains(harness.out.String(), "lead: starting") {
-				t.Fatalf("start Lead for Directory Project: %d\n%s", code, harness.out.String())
-			}
-		})
+func TestProjectAddRejectsDirectoryFlagWithoutRegistering(t *testing.T) {
+	parent := t.TempDir()
+	directory := filepath.Join(parent, "local-project")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness := newUpHarness(t, parent, directory)
+	if code := harness.run("project", "add", "--directory", "--name", "local"); code == 0 || !strings.Contains(harness.out.String(), "Directory Projects are no longer supported") {
+		t.Fatalf("project add --directory was not refused clearly: %d\n%s", code, harness.out.String())
+	}
+	if _, err := harness.db(t).ProjectByRoot(context.Background(), directory); !store.IsNotFound(err) {
+		t.Fatalf("unsupported Directory Project was registered: %v", err)
 	}
 }
 
-func TestProjectAddCanRegisterDirectoryInsideRegisteredRepository(t *testing.T) {
+func TestProjectAddDirectoryFlagIsRejectedInsideRepository(t *testing.T) {
 	parent := t.TempDir()
 	repo := filepath.Join(parent, "repository")
 	if err := os.MkdirAll(repo, 0o700); err != nil {
@@ -247,23 +222,16 @@ func TestProjectAddCanRegisterDirectoryInsideRegisteredRepository(t *testing.T) 
 	}
 	initRepo(t, repo)
 	harness := newUpHarness(t, parent, repo)
-	if code := harness.run("project", "add", "--name", "repository"); code != 0 {
-		t.Fatalf("register repository: %d\n%s", code, harness.out.String())
-	}
 	directory := filepath.Join(repo, "local")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(directory)
-	if code := harness.run("project", "add", "--directory", "--name", "local"); code != 0 {
-		t.Fatalf("register nested directory: %d\n%s", code, harness.out.String())
+	if code := harness.run("project", "add", "--directory", "--name", "local"); code == 0 || !strings.Contains(harness.out.String(), "Directory Projects are no longer supported") {
+		t.Fatalf("nested Directory Project registration was not refused: %d\n%s", code, harness.out.String())
 	}
-	project, err := harness.db(t).ProjectByRoot(context.Background(), directory)
-	if err != nil || !project.IsDirectory() {
-		t.Fatalf("nested Directory Project = %#v, %v", project, err)
-	}
-	if current, found, err := registeredProjectFor(context.Background(), harness.db(t), directory); err != nil || !found || current.ID != project.ID {
-		t.Fatalf("nested Directory Project resolution = %#v found=%t err=%v", current, found, err)
+	if _, err := harness.db(t).ProjectByRoot(context.Background(), directory); !store.IsNotFound(err) {
+		t.Fatalf("nested Directory Project was registered: %v", err)
 	}
 }
 

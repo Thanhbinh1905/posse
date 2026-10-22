@@ -141,6 +141,12 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 			}
 			value = "sandbox"
 		}
+		if key == "execution" && unquote(value) == "in-place" && !allowHistoricalMultiIssue {
+			return Brief{}, &BriefError{Field: key, Reason: "in-place execution was removed; use sandbox"}
+		}
+		if key == "paths" && !allowHistoricalMultiIssue {
+			return Brief{}, &BriefError{Field: key, Reason: "paths was removed; use a Git repository or Workspace Task"}
+		}
 		if key == "autonomy" && allowHistoricalMultiIssue {
 			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
 		}
