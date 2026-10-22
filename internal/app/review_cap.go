@@ -60,7 +60,14 @@ func createReviewCapNotice(ctx context.Context, db *store.DB, project store.Proj
 	}
 	data := marshalJSON(map[string]any{"head_sha": head, "rounds_used": used, "max_rounds": max})
 	var exists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='review_cap_reached' AND json_valid(data_json) AND json_extract(data_json,'$.head_sha')=?)`, task.ID, head).Scan(&exists); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM notices n
+		WHERE n.task_id=? AND n.kind='review_cap_reached'
+		AND n.id=(SELECT MAX(latest.id) FROM notices latest WHERE latest.task_id=n.task_id AND latest.kind='review_cap_reached')
+		AND json_valid(n.data_json) AND json_extract(n.data_json,'$.head_sha')=?
+		AND (NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id)
+			OR EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id AND d.answered_at=0 AND d.obsolete_at=0))
+	)`, task.ID, head).Scan(&exists); err != nil {
 		return err
 	}
 	if exists {

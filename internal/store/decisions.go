@@ -281,7 +281,10 @@ func (db *DB) Decision(ctx context.Context, projectID, id int64) (Decision, erro
 // ReviewCapNotices returns cap Notices regardless of the general decision cursor,
 // so a newer exact-head cap cannot be skipped by older reconciliation state.
 func (db *DB) ReviewCapNotices(ctx context.Context, projectID int64) ([]Notice, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id,project_id,COALESCE(task_id,0),kind,summary,data_json,created_at,COALESCE(delivered_at,0),COALESCE(acked_at,0) FROM notices WHERE project_id=? AND kind='review_cap_reached' ORDER BY id`, projectID)
+	rows, err := db.QueryContext(ctx, `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
+		FROM notices n JOIN tasks t ON t.id=n.task_id
+		WHERE n.project_id=? AND n.kind='review_cap_reached' AND t.type='change' AND t.state<>'torn_down'
+		ORDER BY n.id`, projectID)
 	if err != nil {
 		return nil, err
 	}
