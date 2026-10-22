@@ -490,14 +490,16 @@ func (s *Service) cancelResearchAttempt(ctx context.Context, db *store.DB, attem
 }
 
 // stopResearchProcesses signals the recorded runner and child instances. A
-// PID reused by another process is never signalled.
+// PID reused by another process is never signalled. The child leads the
+// process group its runner created, so the group is stopped with it.
 func stopResearchProcesses(attempt store.ResearchAttempt) error {
 	var errs []error
 	for _, process := range []struct {
 		pid      int
 		identity string
-	}{{attempt.RunnerPID, attempt.RunnerIdentity}, {attempt.ChildPID, attempt.ChildIdentity}} {
-		if process.pid < 1 || process.identity == "" {
+		group    bool
+	}{{attempt.RunnerPID, attempt.RunnerIdentity, false}, {attempt.ChildPID, attempt.ChildIdentity, true}} {
+		if process.pid < 1 || process.identity == "" || process.pid == os.Getpid() {
 			continue
 		}
 		handle, err := openSandboxProcessHandle(process.pid)
@@ -510,6 +512,11 @@ func stopResearchProcesses(attempt store.ResearchAttempt) error {
 		}
 		if handle.Identity() == process.identity {
 			errs = append(errs, handle.Signal(syscall.SIGTERM))
+			if group, err := sandboxProcessGroupID(process.pid); process.group && err == nil && group == process.pid {
+				if err := syscall.Kill(-group, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+					errs = append(errs, err)
+				}
+			}
 		}
 		_ = handle.Close()
 	}

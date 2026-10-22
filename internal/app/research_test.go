@@ -60,9 +60,12 @@ func newResearchFixture(t *testing.T) *researchFixture {
 	procRoot = researchFakeProc(t, repo, []string{"HERDR_PANE_ID=w1:p1"})
 	researchProcessIdentity = func(pid int) (string, error) {
 		if identity, ok := f.identities[pid]; ok {
+			if identity == "" {
+				return "", fmt.Errorf("no process %d", pid)
+			}
 			return identity, nil
 		}
-		return "", fmt.Errorf("no process %d", pid)
+		return previousIdentity(pid)
 	}
 	t.Cleanup(func() { procRoot, researchProcessIdentity = previousRoot, previousIdentity })
 	t.Chdir(repo)
@@ -296,7 +299,7 @@ func TestClaudeResearchParentRestartInterruptsOrResumes(t *testing.T) {
 		t.Fatal("bind failed")
 	}
 	// The parent Claude process instance exits; Plan never started.
-	delete(f.identities, researchAgentPID)
+	f.identities[researchAgentPID] = ""
 	code, output := runCLI(t, f.service, "research", "list", "--all")
 	if code != 0 {
 		t.Fatal(output)

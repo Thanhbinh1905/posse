@@ -172,6 +172,9 @@ func (s *Service) commands() *axi.Command {
 		{Name: "research", Summary: "Inspect and control bounded read-only native research children of the Lead or a Task.", Subcommands: []*axi.Command{
 			{Name: "list", Usage: "$ research list [--all] [--task <task>]", Summary: "List active research attempts with parent, child identity, scope, usage and result pointers; --all includes finished ones.", Handler: s.researchList},
 			{Name: "show", Usage: "$ research show <attempt> [--result]", Summary: "Show one attempt; --result prints its digest-checked result.", Handler: s.researchShow},
+			{Name: "start", Usage: "$ research start --harness codex|pi --scope <dir> (--prompt <text>|--prompt-file <file>) [--model <m>] [--key <k>] [--wait] [--timeout ms]", Summary: "Register and launch a read-only Codex or Pi child in an explicit scope; --key makes a repeated start return the same attempt.", Handler: s.researchStart},
+			{Name: "follow-up", Usage: "$ research follow-up <attempt> (--prompt <text>|--prompt-file <file>) [--key <k>] [--wait] [--timeout ms]", Summary: "Continue a completed or resumable interrupted child's own thread or session as a new linked attempt.", Handler: s.researchFollowUp},
+			{Name: "wait", Usage: "$ research wait <attempt> [--timeout ms]", Summary: "Wait until an attempt settles and print it with its result.", Handler: s.researchWait},
 			{Name: "cancel", Usage: "$ research cancel <attempt>", Summary: "Cancel the exact child of a registered or running attempt; later output is not accepted.", Handler: s.researchCancel},
 		}},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},

@@ -17,17 +17,20 @@ const workerHomeEnv = "POSSE_WORKER_HOME"
 // workerCommands are the only commands a Worker may run against its own posse
 // home.
 var workerCommands = map[string]bool{
-	"brief":           true,
-	"status":          true,
-	"signal":          true,
-	"publish":         true,
-	"validate":        true,
-	"_context":        true,
-	"config schema":   true,
-	"research list":   true,
-	"research show":   true,
-	"research cancel": true,
-	"config show":     true,
+	"brief":              true,
+	"status":             true,
+	"signal":             true,
+	"publish":            true,
+	"validate":           true,
+	"_context":           true,
+	"config schema":      true,
+	"research list":      true,
+	"research show":      true,
+	"research cancel":    true,
+	"research start":     true,
+	"research wait":      true,
+	"research follow-up": true,
+	"config show":        true,
 }
 
 // guardWorkers wraps every handler in the tree so a Worker cannot run
