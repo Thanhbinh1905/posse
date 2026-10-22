@@ -10,7 +10,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-const largeSharedGoCacheBytes = sharedGoBuildCacheLimitBytes
+const largeSharedGoCacheBytes int64 = 8 << 30
 
 func taskDiskLeakSummary(home string, project store.Project, tasks []store.Task) (string, string) {
 	var total int64
@@ -111,7 +111,7 @@ func projectDiskUsage(home string, project store.Project) (string, error) {
 	return fmt.Sprintf("%d bytes total (%s)", total, strings.Join(parts, ", ")), nil
 }
 
-func workerGoBuildCacheDiagnostic(home string) (status, detail, action string) {
+func workerGoBuildCacheDiagnostic(home string, policy workerGoCachePolicy) (status, detail, action string) {
 	cachePath := workerGoBuildCachePath(home)
 	info, err := os.Lstat(cachePath)
 	if os.IsNotExist(err) {
@@ -127,9 +127,9 @@ func workerGoBuildCacheDiagnostic(home string) (status, detail, action string) {
 	if err != nil {
 		return "warn", fmt.Sprintf("Posse Worker GOCACHE %s could not be measured: %v", cachePath, err), "Check POSSE_HOME permissions"
 	}
-	detail = fmt.Sprintf("Posse Worker GOCACHE uses %d bytes at %s; old entries are trimmed after Teardown when usage reaches %d bytes", bytes, cachePath, sharedGoBuildCacheLimitBytes)
-	if bytes >= sharedGoBuildCacheLimitBytes {
-		return "warn", detail, "Wait for Go builds to stop; Posse trims entries older than six hours after Teardown"
+	detail = fmt.Sprintf("Posse Worker GOCACHE uses %d bytes at %s; entries unused for %s are trimmed at most every %s once usage reaches %d bytes (worker_go_cache)", bytes, cachePath, policy.minAge, policy.interval, policy.maxSize)
+	if bytes >= policy.maxSize {
+		return "warn", detail, fmt.Sprintf("Posse trims entries unused for %s within %s; if recent Worker builds keep usage above the limit, raise worker_go_cache.max_size or lower worker_go_cache.min_age", policy.minAge, policy.interval)
 	}
 	return "ok", detail, ""
 }
