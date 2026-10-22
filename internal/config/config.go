@@ -118,6 +118,8 @@ type Profile struct {
 	Model  string   `toml:"model" json:"model"`
 	Effort string   `toml:"effort" json:"effort"`
 	Args   []string `toml:"args" json:"args"`
+	// Attribution keeps the agent's commit and PR attribution; off by default.
+	Attribution bool `toml:"attribution" json:"attribution,omitempty"`
 }
 
 type Rule struct {

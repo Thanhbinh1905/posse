@@ -394,7 +394,7 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 		}
 		if call.Method == "agent.start" {
 			args := call.Params["args"].([]string)
-			restartedWithBypass = len(args) >= 1 && args[0] == "--dangerously-skip-permissions"
+			restartedWithBypass = len(args) >= 3 && equalStrings(args[:3], []string{"--settings", claudeNoAttributionSettings, "--dangerously-skip-permissions"})
 		}
 	}
 	if !found {
