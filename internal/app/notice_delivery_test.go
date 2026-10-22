@@ -64,6 +64,9 @@ func TestWatchExposesAmbiguousNoticeDelivery(t *testing.T) {
 	if len(batch.Notices) != 1 || batch.Notices[0].ID != noticeID || batch.Delivery.DeliveryID == "" || batch.Delivery.OwnerToken == "" {
 		t.Fatalf("handoff result = %+v", batch)
 	}
+	if fake.CallCount("session.snapshot") != 1 || len(fake.Calls) != 1 || len(fake.Runs) != 0 {
+		t.Fatalf("receiver performed Project or executor work: Herdr calls=%#v CLI runs=%#v", fake.Calls, fake.Runs)
+	}
 
 	code, output = runCLI(t, service, "watch", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "uncertain", "--receipt-token", batch.Delivery.OwnerToken)
 	if code != 0 {
