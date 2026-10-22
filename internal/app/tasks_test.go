@@ -416,7 +416,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	lead := herdr.Pane{PaneID: "w3:p1", WorkspaceID: "w3", TabID: "w3:t0", Label: "posse:shop:lead"}
 	fake := herdr.NewFake()
 	fake.SnapshotValue.Panes = []herdr.Pane{lead}
-	fake.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w4"},"tab":{"tab_id":"w4:t1"},"root_pane":{"pane_id":"w3:p2","tab_id":"w4:t1"}}`)
+	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w3:t1","workspace_id":"w3"},"root_pane":{"pane_id":"w3:p2","tab_id":"w3:t1"}}`)
 	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
@@ -467,8 +467,8 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 		switch call.Method {
 		case "workspace.rename":
 			workspaceRenamed = true
-		case "worktree.open":
-			tabCreated = call.Params["label"] == "worker-tree" && call.Params["path"] == sandbox
+		case "tab.create":
+			tabCreated = call.Params["label"] == "worker-tree" && call.Params["cwd"] == sandbox && call.Params["workspace_id"] == "w3"
 		case "agent.start":
 			startedIndex = index
 		case "pane.report_metadata":
@@ -497,7 +497,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	}
 	defer observer.Close()
 	updated, err := observer.Task(ctx, project.ID, "t1")
-	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != sandbox || updated.HerdrWorkspaceID != "w4" || updated.PaneID != "w3:p2" || updated.Profile != "fast" || updated.DispatchRule != "relaunch --profile fast" {
+	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != sandbox || updated.HerdrWorkspaceID != "w3" || updated.PaneID != "w3:p2" || updated.Profile != "fast" || updated.DispatchRule != "relaunch --profile fast" {
 		t.Fatalf("relaunch changed Task Sandbox/state incorrectly: %#v, %v", updated, err)
 	}
 	transitions, err := observer.TaskTransitions(ctx, taskID, 10)

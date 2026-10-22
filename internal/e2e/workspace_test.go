@@ -268,6 +268,28 @@ esac
 		log, _ := os.ReadFile(workerLog)
 		t.Fatalf("Worker did not finish: state=%s log=%s", task.State, log)
 	}
+	snapshot, err := client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workerPane herdr.Pane
+	for _, pane := range snapshot.Panes {
+		if pane.Label == task.PaneLabel {
+			workerPane = pane
+		}
+	}
+	if workerPane.PaneID == "" || workerPane.WorkspaceID != leadPane.Workspace.WorkspaceID || task.HerdrWorkspaceID != leadPane.Workspace.WorkspaceID {
+		t.Fatalf("two-member Workspace Worker did not open as a Lead tab: pane=%#v task=%#v lead=%#v", workerPane, task, leadPane)
+	}
+	workerTabFound := false
+	for _, tab := range snapshot.Tabs {
+		if tab.TabID == workerPane.TabID && tab.WorkspaceID == leadPane.Workspace.WorkspaceID && tab.Label == task.ShortName {
+			workerTabFound = true
+		}
+	}
+	if !workerTabFound {
+		t.Fatalf("two-member Workspace Worker tab is missing: pane=%#v", workerPane)
+	}
 	plan, err := task.AdmittedPlan()
 	if err != nil || plan == nil || plan.Execution.Scope != "workspace" || plan.Execution.Mode != "sandbox" || len(plan.Execution.Members) != 2 {
 		t.Fatalf("Workspace admission lost scope: %#v %v", plan, err)

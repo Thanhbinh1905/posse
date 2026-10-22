@@ -381,6 +381,30 @@ func TestMissedEventStateIsRecoveredByReconcile(t *testing.T) {
 	}
 }
 
+func TestMissingLeadTabWaitsForGroupRecoveryInsteadOfMarkingWorkerLost(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p2", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	lead := herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude"}
+	present := herdr.Snapshot{ServerStartedAt: "server-start-1", Panes: []herdr.Pane{{PaneID: task.PaneID, WorkspaceID: "w1", Label: task.PaneLabel, Agent: "claude"}, lead}}
+	if _, err := ReconcileSnapshot(context.Background(), db, project.ID, present, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	closed := herdr.Snapshot{ServerStartedAt: "server-start-1"}
+	if _, err := ReconcileSnapshot(context.Background(), db, project.ID, closed, time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.Task(context.Background(), project.ID, "t1")
+	if err != nil || updated.State != store.StateWorking {
+		t.Fatalf("Worker tab was marked lost while its Lead workspace was closed: task=%#v err=%v", updated, err)
+	}
+	if updated.AgentAbsentSince == 0 {
+		t.Fatal("missing Worker observation was not recorded for later recovery")
+	}
+}
+
 func TestAgentWithRecordedSessionIsLostAfterTwoMinutesWithoutServerRestart(t *testing.T) {
 	db, project, task := createWorkingTask(t)
 	defer db.Close()

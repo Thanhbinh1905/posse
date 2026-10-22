@@ -218,29 +218,29 @@ func TestLeadWorkspaceRequiresTheLeadOrItsLabel(t *testing.T) {
 
 func TestOpenWorkerTabUsesTheLeadWorkspace(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
-	adapter.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w5"},"tab":{"tab_id":"w5:t1"},"root_pane":{"pane_id":"w5:p1","tab_id":"w5:t1"}}`)
+	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t5"},"root_pane":{"pane_id":"w1:p5","tab_id":"w1:t5"}}`)
 	task.ShortName = "first-worker"
 	home := t.TempDir()
 	opened, err := testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
-	if err != nil || opened != (openedTab{WorkspaceID: "w5", TabID: "w5:t1", PaneID: "w5:p1"}) {
+	if err != nil || opened != (openedTab{WorkspaceID: "w1", TabID: "w1:t5", PaneID: "w1:p5"}) {
 		t.Fatalf("openWorkerTab = %#v, %v", opened, err)
 	}
 	var methods []string
 	for _, call := range adapter.Calls {
 		methods = append(methods, call.Method)
-		if call.Method == "worktree.open" {
-			if call.Params["workspace_id"] != "w1" || call.Params["path"] != task.WorktreePath || call.Params["label"] != "first-worker" || call.Params["focus"] != false {
-				t.Fatalf("worktree.open params = %#v", call.Params)
+		if call.Method == "tab.create" {
+			if call.Params["workspace_id"] != "w1" || call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "first-worker" || call.Params["focus"] != false || call.Params["env"].(map[string]string)[workerHomeEnv] != filepath.Clean(home) {
+				t.Fatalf("tab.create params = %#v", call.Params)
 			}
 		}
-		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w5:p1" || call.Params["label"] != task.PaneLabel) {
+		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w1:p5" || call.Params["label"] != task.PaneLabel) {
 			t.Fatalf("pane.rename params = %#v", call.Params)
 		}
-		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w5:p1" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "") {
+		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w1:p5" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "└─ first-worker") {
 			t.Fatalf("initial Worker metadata = %#v", call.Params)
 		}
 	}
-	if strings.Join(methods, ",") != "worktree.open,pane.report_metadata,pane.rename" {
+	if strings.Join(methods, ",") != "tab.create,pane.report_metadata,pane.rename" {
 		t.Fatalf("openWorkerTab calls = %v", methods)
 	}
 
@@ -248,8 +248,39 @@ func TestOpenWorkerTabUsesTheLeadWorkspace(t *testing.T) {
 	adapter = &changingSnapshotAdapter{Fake: herdr.NewFake(), snapshot: herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "notes"}}}}
 	_, err = testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
 	var cliErr *axi.Error
-	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("worktree.open") != 0 || adapter.CallCount("workspace.create") != 0 {
+	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("tab.create") != 0 || adapter.CallCount("worktree.open") != 0 || adapter.CallCount("workspace.create") != 0 {
 		t.Fatalf("openWorkerTab without the Lead = %v, calls %#v", err, adapter.Calls)
+	}
+}
+
+func TestOpenWorkerTabRejectsAnOccupiedLegacySandboxButAllowsAnEmptyWorkspace(t *testing.T) {
+	project, task, adapter := workerTabSession(t)
+	legacy := herdr.Workspace{WorkspaceID: "legacy"}
+	legacy.Worktree.CheckoutPath = task.WorktreePath
+	legacy.Worktree.IsLinkedWorktree = true
+	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, legacy)
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{
+		PaneID: "legacy:p1", WorkspaceID: "legacy", TabID: "legacy:t1", CWD: task.WorktreePath,
+	})
+
+	service := testService(t.TempDir(), adapter)
+	_, err := service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
+	var cliErr *axi.Error
+	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || adapter.CallCount("tab.create") != 0 {
+		t.Fatalf("openWorkerTab with an occupied legacy workspace = %v, calls %#v", err, adapter.Calls)
+	}
+
+	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "foreign", Label: "notes"})
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "foreign:p1", WorkspaceID: "foreign", CWD: task.WorktreePath})
+	_, err = service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
+	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || adapter.CallCount("tab.create") != 0 {
+		t.Fatalf("openWorkerTab with a foreign Sandbox cwd = %v, calls %#v", err, adapter.Calls)
+	}
+
+	adapter.snapshot.Panes = adapter.snapshot.Panes[:len(adapter.snapshot.Panes)-2]
+	_, err = service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
+	if err != nil || adapter.CallCount("tab.create") != 1 {
+		t.Fatalf("openWorkerTab with an empty legacy workspace = %v, calls %#v", err, adapter.Calls)
 	}
 }
 

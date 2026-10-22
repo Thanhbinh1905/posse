@@ -295,9 +295,9 @@ func TestStartFocusedDuringLaunchRemainsSpawning(t *testing.T) {
 	fixture := newStartFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
-			fixture.fake.SnapshotValue.FocusedPaneID = "fake:child:p1"
-			fixture.fake.SnapshotValue.FocusedWorkspaceID = "fake:child"
-			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
+			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
+			fixture.fake.SnapshotValue.FocusedWorkspaceID = "w1"
+			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
 		}
 	}
 	code, output := fixture.start(t)
@@ -311,9 +311,9 @@ func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T)
 	fixture := newStartFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
-			fixture.fake.SnapshotValue.FocusedPaneID = "fake:child:p1"
-			fixture.fake.SnapshotValue.FocusedWorkspaceID = "fake:child"
-			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
+			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
+			fixture.fake.SnapshotValue.FocusedWorkspaceID = "w1"
+			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
 		}
 	}
 	if code, output := fixture.start(t); code != 0 {
