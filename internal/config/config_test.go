@@ -425,3 +425,65 @@ func writeConfig(t *testing.T, path, contents string) {
 		t.Fatal(err)
 	}
 }
+
+func TestWorkerGoCacheIsUserConfigOnlyWithSafeBounds(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkerGoCache != (WorkerGoCache{MaxSize: "8GiB", MinAge: "6h", Interval: "1h"}) {
+		t.Fatalf("default worker_go_cache = %#v", cfg.WorkerGoCache)
+	}
+	globalPath := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(globalPath, []byte("[worker_go_cache]\nmax_size = \"512MiB\"\nmin_age = \"3h\"\ninterval = \"30m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkerGoCache != (WorkerGoCache{MaxSize: "512MiB", MinAge: "3h", Interval: "30m"}) {
+		t.Fatalf("User worker_go_cache = %#v", cfg.WorkerGoCache)
+	}
+
+	projectPath := filepath.Join(home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectPath, []byte("[worker_go_cache]\nmax_size = \"1TiB\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(home, "shop"); err == nil || !strings.Contains(err.Error(), "worker_go_cache is valid only in the User config") {
+		t.Fatalf("Project worker_go_cache load error = %v", err)
+	}
+	if issues := ValidationIssues(home, "shop"); len(issues) == 0 || !strings.Contains(issues[0].Error(), "valid only in the User config") {
+		t.Fatalf("Project worker_go_cache validation issues = %v", issues)
+	}
+	if _, err := SetFile(projectPath, "worker_go_cache.min_age", "4h", true); err == nil || !strings.Contains(err.Error(), "valid only in the User config") {
+		t.Fatalf("Project worker_go_cache edit error = %v", err)
+	}
+
+	for value, want := range map[string]string{"90m": "must be at least 2h0m0s", "soon": "must be a positive duration"} {
+		if _, err := SetFile(globalPath, "worker_go_cache.min_age", value, false); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("min_age %q error = %v, want %q", value, err, want)
+		}
+	}
+	for _, value := range []string{"0", "-1GiB", "8GB", "lots"} {
+		if _, err := SetFile(globalPath, "worker_go_cache.max_size", value, false); err == nil || !strings.Contains(err.Error(), "positive size") {
+			t.Fatalf("max_size %q error = %v", value, err)
+		}
+	}
+}
+
+func TestParseByteSize(t *testing.T) {
+	for text, want := range map[string]int64{"1": 1, "2B": 2, "3KiB": 3 << 10, "4 MiB": 4 << 20, "8GiB": 8 << 30, "1TiB": 1 << 40} {
+		got, err := ParseByteSize(text)
+		if err != nil || got != want {
+			t.Errorf("ParseByteSize(%q) = %d, %v; want %d", text, got, err, want)
+		}
+	}
+	if _, err := ParseByteSize("9999999999TiB"); err == nil {
+		t.Error("overflowing size should be refused")
+	}
+}

@@ -213,6 +213,7 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return configError(err)
 	}
+	s.startWorkerGoCacheTrim(ctx, db, project, home)
 	if project.IsWorkspace() {
 		var failures []error
 		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {
