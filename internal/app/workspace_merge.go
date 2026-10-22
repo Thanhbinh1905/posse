@@ -639,6 +639,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		target      pollTarget
 		observation store.PRObservation
 		checks      []failedCheck
+		ciChecks    []failedCheck
 		forge       repositoryForge
 		err         error
 	}
@@ -723,6 +724,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				err := forgeErr
 				var observation store.PRObservation
 				var checks []failedCheck
+				checksRunning := false
 				skipChecks := false
 				if err == nil {
 					headSHA := member.repo.GatedSHA
@@ -734,7 +736,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 						err = freshnessErr
 					} else if !freshness.Fresh {
 						skipChecks = true
-						err = queuePRTargetSyncInstruction(pollCtx, db, target.task, member.repo.Repo, member.repo.MergeMode, freshness, headSHA)
+						_, err = queuePRTargetSyncInstruction(pollCtx, db, target.task, member.repo.Repo, member.repo.MergeMode, freshness, headSHA)
 					}
 				}
 				if err == nil {
@@ -745,6 +747,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 						pull, err = viewMemberPullRequest(pollCtx, member, !skipChecks)
 						if err == nil {
 							observation, checks, err = makePRObservation(project.ID, member.task, pull, now, taskTargetBranch(member.project, member.task))
+							checksRunning = pull.checksRunning()
 						}
 					}
 				}
@@ -753,7 +756,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 					if freshnessErr != nil {
 						err = freshnessErr
 					} else if !freshness.Fresh {
-						if queueErr := queuePRTargetSyncInstruction(pollCtx, db, target.task, member.repo.Repo, member.repo.MergeMode, freshness, observation.HeadSHA); queueErr != nil {
+						if _, queueErr := queuePRTargetSyncInstruction(pollCtx, db, target.task, member.repo.Repo, member.repo.MergeMode, freshness, observation.HeadSHA); queueErr != nil {
 							err = queueErr
 						} else {
 							observation.Checks = stalePRChecks()
@@ -761,7 +764,11 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 						}
 					}
 				}
-				results <- pollResult{target: target, observation: observation, checks: checks, forge: forge, err: err}
+				ciChecks := checks
+				if checksRunning {
+					ciChecks = nil
+				}
+				results <- pollResult{target: target, observation: observation, checks: checks, ciChecks: ciChecks, forge: forge, err: err}
 			}
 		}()
 	}
@@ -839,7 +846,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			continue
 		}
 		if observation.State == "OPEN" {
-			if err := s.processCIObservation(ctx, db, project, member.task, observation, result.checks, result.forge, member.repo.Repo); err != nil {
+			if err := s.processCIObservation(ctx, db, project, member.task, observation, result.ciChecks, result.forge, member.repo.Repo); err != nil {
 				processingErr = err
 				cancelPoll()
 				continue

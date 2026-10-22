@@ -22,6 +22,23 @@ func mergeIntentFailure(err error) error {
 	return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 }
 
+// taskStateChangedFailure reports a normal race with another Task state change
+// by public Task ID; the caller can inspect the Task and retry.
+func taskStateChangedFailure(task store.Task) error {
+	id := taskIDString(task.Seq)
+	return axi.Failure("task_state_changed", "Task "+id+" changed state while the command ran", true, "Run `posse show "+id+"` to inspect its state, then retry")
+}
+
+// structureTaskStateRace replaces an unstructured store state race, which names
+// the database row, with the typed retryable failure for the public Task ID.
+func structureTaskStateRace(err error, task store.Task) error {
+	var structured *axi.Error
+	if err == nil || errors.As(err, &structured) || !isOnlyStateRace(err) {
+		return err
+	}
+	return taskStateChangedFailure(task)
+}
+
 func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	parsed, err := parseArgs("merge", args, map[string]flagSpec{"execute": {boolean: true}, "user-approved": {}})
 	if err != nil {
@@ -46,6 +63,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	defer func() { returnErr = structureTaskStateRace(returnErr, task) }()
 	plan, planErr := task.AdmittedPlan()
 	if planErr != nil {
 		return admittedPlanFailure(planErr)
