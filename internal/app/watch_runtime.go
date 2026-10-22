@@ -607,8 +607,9 @@ func watchRuntimeDropsEnvironmentVariable(key string) bool {
 }
 
 func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args []string) {
-	// Notice receipts are delivery work, not a Project maintenance boundary. Handoffs also repair the observer.
-	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" || command == "watch" && (containsArgument(args, "--poll-only") || containsArgument(args, "--repair") || containsArgument(args, "--receipt") || containsArgument(args, "--receipt-outcome") || containsArgument(args, "--receipt-token")) {
+	// Adapter handoffs own only receipt-backed delivery. They never start or
+	// repair the independent Project observer.
+	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" || command == "watch" && (containsArgument(args, "--handoff") || containsArgument(args, "--poll-only") || containsArgument(args, "--repair") || containsArgument(args, "--receipt") || containsArgument(args, "--receipt-outcome") || containsArgument(args, "--receipt-token")) {
 		return
 	}
 	binary, err := os.Executable()
