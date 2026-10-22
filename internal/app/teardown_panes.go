@@ -32,11 +32,12 @@ type taskPaneTeardownPlan struct {
 }
 
 type teardownResult struct {
-	Panes            teardownPanes
-	BranchRemoved    bool
-	StoppedProcesses []string
-	CacheMaintenance string
-	AlreadyTornDown  bool
+	Panes               teardownPanes
+	BranchRemoved       bool
+	RemoteBranchRemoved bool
+	StoppedProcesses    []string
+	CacheMaintenance    string
+	AlreadyTornDown     bool
 }
 
 type paneProcessInfo struct {

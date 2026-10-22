@@ -1142,6 +1142,41 @@ func freezeCILoopWithReview(t *testing.T, fixture *prMergeFixture, maxFixRounds,
 	}
 }
 
+func TestDeleteMergedRemoteBranchRequiresCurrentMergedPRHead(t *testing.T) {
+	for _, scenario := range []string{"merged", "advanced", "open", "closed"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			fixture.task.PRURL = "https://github.com/acme/shop/pull/17"
+			gitTest(t, fixture.root, "--git-dir", fixture.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+			gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+			t.Setenv("POSSE_TEST_GH_VIEW_STATE", map[string]string{"merged": "MERGED", "advanced": "MERGED", "open": "OPEN", "closed": "CLOSED"}[scenario])
+			if scenario == "advanced" {
+				gitTest(t, fixture.worktree, "commit", "--allow-empty", "-m", "advance after merge")
+				gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+			}
+			removed, err := deleteMergedRemoteBranch(context.Background(), fixture.project, fixture.task, config.Config{}, fixture.headSHA)
+			if err != nil {
+				t.Fatalf("deleteMergedRemoteBranch: %v", err)
+			}
+			wantRemoved := scenario == "merged"
+			if removed != wantRemoved {
+				t.Fatalf("removed = %t, want %t", removed, wantRemoved)
+			}
+			ref := "refs/heads/posse/t1"
+			remote := gitTest(t, fixture.repo, "ls-remote", "--heads", "origin", ref)
+			if wantRemoved && strings.TrimSpace(remote) != "" {
+				t.Fatalf("merged remote branch remains: %s", remote)
+			}
+			if scenario == "advanced" && !strings.Contains(remote, strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))) {
+				t.Fatalf("advanced branch was not preserved: %s", remote)
+			}
+			if (scenario == "open" || scenario == "closed") && strings.TrimSpace(remote) == "" {
+				t.Fatalf("unmerged remote branch was deleted")
+			}
+		})
+	}
+}
+
 func newPRMergeFixture(t *testing.T, mode string, state store.State) *prMergeFixture {
 	t.Helper()
 	root := t.TempDir()
