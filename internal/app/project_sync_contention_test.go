@@ -116,7 +116,7 @@ func TestRepositorySyncSkipsAnOverlappingSameTarget(t *testing.T) {
 		t.Fatal("could not reserve repository sync target")
 	}
 	defer fixture.service.endMaintenance(key)
-	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now())
+	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now(), false)
 	if err != nil || result.Status != "skipped" {
 		t.Fatalf("overlapping repository sync = %+v, %v; want skipped", result, err)
 	}
@@ -192,7 +192,7 @@ func TestRepositorySyncSkipsWhenLocalRootWriterOwnsThePath(t *testing.T) {
 	}
 	defer func() { _ = fixture.db.ReleaseResourceLease(context.Background(), lease.ID, lease.CustodyToken) }()
 	target := repoTarget{Root: fixture.repo, DefaultBranch: fixture.project.DefaultBranch}
-	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now())
+	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now(), false)
 	if err != nil || result.Status != "skipped" || !strings.Contains(result.Reason, "local root writer") {
 		t.Fatalf("sync with an overlapping root writer = %+v, %v; want a named lease refusal", result, err)
 	}
@@ -209,12 +209,36 @@ func TestRepositorySyncSkipsAnInterprocessOverlap(t *testing.T) {
 	target := repoTarget{Root: fixture.repo, DefaultBranch: fixture.project.DefaultBranch}
 	// The holder is already syncing; a foreground command must not wait for it.
 	started := time.Now()
-	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now())
+	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now(), false)
 	if err != nil || result.Status != "skipped" {
 		t.Fatalf("interprocess repository overlap = %+v, %v; want skipped", result, err)
 	}
 	if elapsed := time.Since(started); elapsed >= fileLockWaitBudget/2 {
 		t.Fatalf("interprocess repository overlap waited %s for the sync lock, want an immediate skip", elapsed)
+	}
+}
+
+func TestForcedRepositorySyncWaitsForTheLockHolder(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	owner, err := acquireRepositorySyncLock(context.Background(), fixture.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	// A merge's Git effects may hold the lock; the post-merge sync must follow it.
+	const held = 200 * time.Millisecond
+	go func() {
+		time.Sleep(held)
+		_ = unix.Flock(int(owner.Fd()), unix.LOCK_UN)
+	}()
+	target := repoTarget{Root: fixture.repo, DefaultBranch: fixture.project.DefaultBranch}
+	started := time.Now()
+	result, err := fixture.service.syncRepository(context.Background(), fixture.db, fixture.project, target, time.Now(), true)
+	if err != nil || result.Reason == "repository sync already running" {
+		t.Fatalf("forced repository sync = %+v, %v; want it to run after the holder releases the lock", result, err)
+	}
+	if elapsed := time.Since(started); elapsed < held {
+		t.Fatalf("forced repository sync finished after %s, before the holder released the lock", elapsed)
 	}
 }
 

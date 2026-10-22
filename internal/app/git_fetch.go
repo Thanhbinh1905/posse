@@ -48,12 +48,6 @@ func acquireRepositoryFetchLock(ctx context.Context, root string) (*os.File, err
 	return acquireFileLock(ctx, filepath.Join(commonDir, "posse-fetch.lock"))
 }
 
-// tryRepositorySyncLock fails at once while another process syncs the
-// repository, since that holder is already doing the same work.
-func tryRepositorySyncLock(ctx context.Context, root string) (*os.File, error) {
-	return repositorySyncLock(ctx, root, 0)
-}
-
 func acquireRepositorySyncLock(ctx context.Context, root string) (*os.File, error) {
 	return repositorySyncLock(ctx, root, fileLockWaitBudget)
 }

@@ -133,7 +133,7 @@ func (s *Service) startWorkspaceCheckoutSync(ctx context.Context, db *store.DB, 
 		}
 		go func() {
 			defer s.endMaintenance(key)
-			result, syncErr := s.syncRepository(memberCtx, db, project, target, now)
+			result, syncErr := s.syncRepository(memberCtx, db, project, target, now, false)
 			if syncErr == nil && result.Status != "skipped" {
 				reason := result.Reason
 				if reason == "" && result.Err != nil {
@@ -172,7 +172,7 @@ func (s *Service) startMergedMemberSync(ctx context.Context, db *store.DB, proje
 		target, err := s.projectTarget(memberCtx, db, project, repo)
 		if err == nil {
 			now := time.Now()
-			result, err = s.syncRepository(memberCtx, db, project, target, now)
+			result, err = s.syncRepository(memberCtx, db, project, target, now, true)
 			if err == nil && result.Status != "skipped" {
 				reason := result.Reason
 				if reason == "" && result.Err != nil {

@@ -293,7 +293,7 @@ Rules:
 
 The schema sketch below uses current domain names. Published SQL identifiers remain unchanged for compatibility, including `mounts`, `mount_id`, `landing_mode`, `autonomy_land`, `landed_ref`, `lookout_*`, `completed_rider_busy` and `ship_task_id`; see ADR 0026.
 
-WAL mode, `busy_timeout = 5000`. Every state transition is one transaction that checks the expected prior state (compare and set) and inserts a `transitions` row.
+WAL mode, `synchronous = NORMAL`, `busy_timeout = 5000`. Commits do not fsync; the WAL is synced at checkpoints. A process crash loses nothing, and the database stays consistent after any crash, but an OS crash or power loss can roll back the last commits. After such a rollback, Task and Project snapshots may be newer than the database, interrupted intents are recovered again and the lost detector may fire again; `posse recover --rebuild` restores state from the snapshots. Opening a store whose applied migrations and checksums match the build skips the migration lock. Every state transition is one transaction that checks the expected prior state (compare and set) and inserts a `transitions` row.
 
 ```sql
 projects(
