@@ -62,7 +62,7 @@ func TestWorkspaceMemberCommittedAfterFirstPollCannotBeSkippedAsUnchanged(t *tes
 	}
 	// A later authorized Teardown must preserve even clean committed work.
 	member := f.repos()["e2e-tool"]
-	target, err := f.service.projectTarget(ctx, f.db, f.project, member.Repo)
+	target, err := projectTarget(ctx, f.db, f.project, member.Repo)
 	if err != nil {
 		t.Fatal(err)
 	}

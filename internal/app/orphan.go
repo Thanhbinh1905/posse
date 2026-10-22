@@ -223,7 +223,7 @@ func (s *Service) obsoleteEmptyOrphans(ctx context.Context, db *store.DB, projec
 			if !ok {
 				continue
 			}
-			target, err := s.projectTarget(ctx, db, project, member)
+			target, err := projectTarget(ctx, db, project, member)
 			if err != nil {
 				return err
 			}

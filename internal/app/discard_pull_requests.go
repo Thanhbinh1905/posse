@@ -33,7 +33,7 @@ func (s *Service) discardPullRequests(ctx context.Context, db *store.DB, project
 		}
 		return []discardPullRequest{{project: project, task: task, url: task.PRURL}}, nil
 	}
-	members, err := s.workspaceMembers(ctx, db, project, task)
+	members, err := workspaceMembers(ctx, db, project, task)
 	if err != nil {
 		return nil, err
 	}

@@ -8,10 +8,14 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// promotePrivateCandidate is an internal VP-C seam, not a production command.
-// Its caller must establish all frozen local validation evidence before entry.
-func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home string, project store.Project, task store.Task, repoName string, cfg config.Config) (returnErr error) {
+// promotePrivateCandidate publishes a lane's fully validated private
+// candidate. PR delivery fast-forwards the Task branch, pushes it without
+// force and opens or updates the PR/MR. Local delivery fast-forwards only the
+// author Task branch; its target ref moves later, through Merge, which
+// re-checks the same validation evidence.
+func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home string, lane candidateLane, cfg config.Config) (returnErr error) {
 	ctx := out.Context
+	project, task, repoName := lane.project, lane.task, lane.repo
 	candidate, err := db.LatestValidationCandidate(ctx, task.ID, repoName)
 	if err != nil {
 		if store.IsNotFound(err) {
@@ -20,7 +24,7 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		return err
 	}
 	if candidate.State == store.ValidationCandidatePromoted {
-		return printPromotedCandidate(out, db, task, candidate, repoName)
+		return printPromotedCandidate(out, db, lane, candidate)
 	}
 	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoting {
 		return candidateSubmissionError(task, candidate, "candidate_not_promotable", "candidate is not active", false)
@@ -70,11 +74,11 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 	if !gitAncestor(ctx, task.WorktreePath, candidate.SubmittedSHA, candidate.CandidateSHA) {
 		return axi.Failure("candidate_not_fast_forward", "candidate is not a fast-forward of the submitted author head", false)
 	}
-	remoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
+	remoteHead, err := lane.remoteTaskHead(ctx)
 	if err != nil {
 		return axi.Failure("candidate_remote_head_failed", "could not inspect the Task branch before promotion", true, err.Error())
 	}
-	alreadyPushed := candidate.State == store.ValidationCandidatePromoting && remoteHead == candidate.CandidateSHA
+	alreadyPushed := !lane.localDelivery() && candidate.State == store.ValidationCandidatePromoting && remoteHead == candidate.CandidateSHA
 	if !alreadyPushed && remoteHead != candidate.ExpectedRemoteSHA {
 		invalidator := remoteHead
 		if invalidator == "" {
@@ -86,10 +90,10 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		return candidateSubmissionError(task, candidate, "candidate_remote_moved", "origin Task branch moved after candidate submission", false)
 	}
 	if alreadyPushed {
-		if err := requireFullPipelineCandidateResults(ctx, db, project, task, candidate); err != nil {
+		if err := requireFullPipelineCandidateResults(ctx, db, lane, candidate); err != nil {
 			return err
 		}
-	} else if err := requireFullPipelineCandidateValidation(ctx, db, project, task, candidate); err != nil {
+	} else if err := requireFullPipelineCandidateValidation(ctx, db, lane, candidate); err != nil {
 		return err
 	}
 	candidateStatus, err := gitStatusOutput(ctx, candidate.WorktreePath, "--porcelain", "--untracked-files=all")
@@ -113,12 +117,12 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		return candidateAuthorMovedFailure(task, candidate, actualAuthor, authorBranch)
 	}
 	if !alreadyPushed {
-		targetHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+taskTargetBranch(project, task))
+		targetHead, err := lane.targetHead(ctx)
 		if err != nil {
 			return axi.Failure("candidate_target_head_failed", "could not recheck the frozen target before promotion", true, err.Error())
 		}
 		if targetHead == "" {
-			return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
+			return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
 		}
 		if targetHead != candidate.TargetSHA {
 			if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
@@ -181,7 +185,7 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		if branch != "refs/heads/"+task.Branch || current != candidate.CandidateSHA {
 			return axi.Failure("candidate_author_moved", "Task branch did not fast-forward to the candidate", false, shortSHA(candidate.CandidateSHA), shortSHA(current))
 		}
-		remoteHead, err = remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
+		remoteHead, err = lane.remoteTaskHead(ctx)
 		if err != nil {
 			return axi.Failure("candidate_remote_head_failed", "could not recheck the Task branch on origin", true, err.Error())
 		}
@@ -192,18 +196,21 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		if err != nil || !candidateRefFound || candidateRefHead != candidate.CandidateSHA {
 			return axi.Failure("candidate_ref_moved", "private candidate ref changed before push", false, candidate.RefName)
 		}
-		targetHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+taskTargetBranch(project, task))
+		targetHead, err := lane.targetHead(ctx)
 		if err != nil {
 			return axi.Failure("candidate_target_head_failed", "could not recheck the frozen target immediately before promotion", true, err.Error())
 		}
 		if targetHead == "" {
-			return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
+			return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
 		}
 		if targetHead != candidate.TargetSHA {
 			if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
 				return err
 			}
 			return axi.Failure("candidate_target_moved", "the frozen target moved before promotion", false, "Refresh candidate freshness and rerun validation before promotion")
+		}
+		if lane.localDelivery() {
+			return s.completeLocalPromotion(out, db, lane, candidate)
 		}
 		if err := db.RecordPublishPrePushHead(ctx, task.ID, repoName, candidate.ExpectedRemoteSHA); err != nil {
 			return err
@@ -269,4 +276,24 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		{Key: "task", Value: taskIDString(task.Seq)}, {Key: "candidate_head", Value: candidate.CandidateSHA},
 		{Key: "pr_url", Value: prURL}, {Key: "result", Value: fmt.Sprintf("promoted: candidate %s at %s", taskIDString(task.Seq), shortSHA(candidate.CandidateSHA))},
 	})
+}
+
+// completeLocalPromotion records a local-delivery candidate as promoted once
+// the author Task branch is exactly the validated head. Nothing is pushed and
+// no PR/MR is opened; Merge integrates the head into the target ref.
+func (s *Service) completeLocalPromotion(out *axi.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
+	if err := db.CompleteValidationCandidatePromotion(out.Context, candidate.ID, candidate.CandidateSHA); err != nil {
+		return err
+	}
+	help := "Run `posse signal done \"<summary>\"`; Merge fast-forwards the target to this validated head"
+	result := axi.Object{{Key: "task", Value: taskIDString(lane.task.Seq)}}
+	if lane.repo != "" {
+		result = append(result, axi.Field{Key: "repo", Value: lane.repo})
+		help = "Promote every changed full-pipeline Member, then run `posse signal done \"<summary>\"`"
+	}
+	return out.Print(append(result,
+		axi.Field{Key: "candidate_head", Value: candidate.CandidateSHA},
+		axi.Field{Key: "result", Value: fmt.Sprintf("promoted: candidate %s at %s for local delivery; target unchanged until Merge", taskIDString(lane.task.Seq), shortSHA(candidate.CandidateSHA))},
+		axi.Field{Key: "help", Value: []any{help}},
+	))
 }

@@ -173,57 +173,21 @@ func (s *Service) prepareReviewCandidateCheckouts(ctx context.Context, db *store
 	if plan == nil {
 		return nil
 	}
-	if plan.Execution.Scope != "workspace" {
-		candidate, err := db.LatestValidationCandidate(ctx, change.ID, "")
-		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
-			return axi.Failure("candidate_missing", "full-pipeline review requires a submitted private candidate", false)
-		}
-		if candidate.State == store.ValidationCandidateActive {
-			if err := s.ensureCandidateCheckout(ctx, db, home, change, candidate); err != nil {
-				return err
-			}
-		}
-		targetHead, err := remoteBranchHead(ctx, candidate.WorktreePath, "refs/heads/"+taskTargetBranch(project, change))
-		if err != nil {
-			return err
-		}
-		if targetHead == "" || targetHead != candidate.TargetSHA {
-			if candidate.State == store.ValidationCandidateActive && targetHead != "" {
-				if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
-					return err
-				}
-			} else if targetHead != "" {
-				if err := db.InvalidateValidationStages(ctx, candidate.ID, targetHead); err != nil {
-					return err
-				}
-			}
-			return axi.Failure("candidate_target_moved", "frozen target changed before Review admission", false, "Submit a fresh candidate and rerun validation")
-		}
-		return nil
-	}
-	repos, err := db.TaskRepos(ctx, change.ID)
+	lanes, err := changedCandidateLanes(ctx, db, project, change)
 	if err != nil {
 		return err
 	}
-	for _, repo := range repos {
-		if repo.State == store.TaskRepoUnchanged || !isFullPipelineTask(change, repo.Repo) {
-			continue
-		}
-		candidate, err := db.LatestValidationCandidate(ctx, change.ID, repo.Repo)
+	for _, lane := range lanes {
+		candidate, err := db.LatestValidationCandidate(ctx, change.ID, lane.repo)
 		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
-			return axi.Failure("candidate_missing", "full-pipeline review requires a submitted private candidate for Member "+repo.Repo, false)
+			return axi.Failure("candidate_missing", lane.memberLabel("full-pipeline review requires a submitted private candidate"), false)
 		}
 		if candidate.State == store.ValidationCandidateActive {
-			memberTask := change
-			memberTask.WorktreePath = repo.WorktreePath
-			if err := s.ensureCandidateCheckout(ctx, db, home, memberTask, candidate); err != nil {
+			if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
 				return err
 			}
 		}
-		if repo.TargetBranch == "" {
-			return axi.Failure("candidate_target_missing", "Member "+repo.Repo+" has no frozen target branch", false)
-		}
-		targetHead, err := remoteBranchHead(ctx, candidate.WorktreePath, "refs/heads/"+repo.TargetBranch)
+		targetHead, err := lane.targetHead(ctx)
 		if err != nil {
 			return err
 		}
@@ -237,7 +201,7 @@ func (s *Service) prepareReviewCandidateCheckouts(ctx context.Context, db *store
 					return err
 				}
 			}
-			return axi.Failure("candidate_target_moved", "frozen target changed before Review admission for Member "+repo.Repo, false, "Submit a fresh candidate and rerun validation")
+			return axi.Failure("candidate_target_moved", lane.memberLabel("frozen target changed before Review admission"), false, "Submit a fresh candidate and rerun validation")
 		}
 	}
 	return nil

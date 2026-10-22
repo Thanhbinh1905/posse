@@ -12,6 +12,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -46,11 +47,15 @@ func installFullPipelinePlan(t *testing.T, fixture *prMergeFixture, workflowOptI
 	}
 }
 
+func singleCandidateLane(project store.Project, task store.Task) candidateLane {
+	return candidateLane{owner: project, ownerTask: task, project: project, task: task}
+}
+
 func submitCandidateForTest(t *testing.T, fixture *prMergeFixture) error {
 	t.Helper()
 	return fixture.service.submitPrivateCandidate(
 		&axi.Context{Context: context.Background(), Out: &bytes.Buffer{}}, fixture.db, fixture.home,
-		fixture.project, fixture.task, "", "Candidate summary", "go test ./... -> passed", "Intent proof: verified", "Risk: low\nRollback: revert", false,
+		singleCandidateLane(fixture.project, fixture.task), "Candidate summary", "go test ./... -> passed", "Intent proof: verified", "Risk: low\nRollback: revert", false,
 	)
 }
 
@@ -64,7 +69,7 @@ func runCandidatePromotionForTest(t *testing.T, fixture *prMergeFixture) error {
 	fixture.output.Reset()
 	return fixture.service.promotePrivateCandidate(
 		&axi.Context{Context: ctx, Out: &fixture.output, ErrOut: &fixture.errOut}, fixture.db, fixture.home,
-		fixture.project, fixture.task, "", cfg,
+		singleCandidateLane(fixture.project, fixture.task), cfg,
 	)
 }
 
@@ -572,5 +577,37 @@ func TestCandidateAuthorMovementRequiresResubmission(t *testing.T) {
 	archivedHead, found, err := readGitRef(context.Background(), fixture.worktree, candidateArchiveRefName(fixture.task, stale))
 	if err != nil || !found || archivedHead != stale.CandidateSHA {
 		t.Fatalf("archived candidate head=%q found=%v err=%v", archivedHead, found, err)
+	}
+}
+
+func TestWorkerProtocolGuidesFullPipelineLanes(t *testing.T) {
+	plan, err := taskplan.Resolve(taskplan.Request{
+		Brief:     taskplan.Select("brief", "change.md", []byte("---\ntype: change\ntitle: Candidate\ndone_when: candidate is promoted\n---\nImplement the requested change.\n")),
+		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
+		Launch:    taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
+		Review:    "full-pipeline", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
+		Paths: taskplan.Paths{Scratch: "/home/user/.posse/scratch/shop/t1", Output: "/home/user/.posse/projects/shop/tasks/t1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief := dispatch.Brief{Type: "change", DoneWhen: "candidate is promoted"}
+	local := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 1, Type: "change", MergeMode: "local", PlanJSON: encoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
+	for _, want := range []string{"Full-pipeline validation", "`posse publish \"<summary>\" --verify", "`posse validate test --verify", "local delivery only fast-forwards the Task branch"} {
+		if !strings.Contains(local, want) {
+			t.Fatalf("local full-pipeline protocol lacks %q: %s", want, local)
+		}
+	}
+	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 2, Type: "change", PlanJSON: encoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t2", "none", "English")
+	if !strings.Contains(workspace, "`posse validate lint --repo <member>") || !strings.Contains(workspace, "`posse publish --repo <member> \"<summary>\"` to promote") {
+		t.Fatalf("workspace full-pipeline protocol lacks per-Member commands: %s", workspace)
+	}
+	quick := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none", "English")
+	if strings.Contains(quick, "Full-pipeline") {
+		t.Fatalf("protocol without full-pipeline mentions it: %s", quick)
 	}
 }

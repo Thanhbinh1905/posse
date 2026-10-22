@@ -206,7 +206,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		{Key: "watch", Value: s.watchRuntimeRow(ctx.Context, db, home, project)},
 	}
 	if project.IsWorkspace() {
-		targets, err := s.projectTargets(ctx.Context, db, project)
+		targets, err := projectTargets(ctx.Context, db, project)
 		if err != nil {
 			return err
 		}

@@ -56,7 +56,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	targets, err := s.projectTargets(ctx.Context, db, project)
+	targets, err := projectTargets(ctx.Context, db, project)
 	if err != nil {
 		return err
 	}
@@ -323,7 +323,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return err
 	}
-	issueTargets, err := s.projectTargets(ctx.Context, db, project)
+	issueTargets, err := projectTargets(ctx.Context, db, project)
 	if err != nil {
 		return err
 	}
@@ -1164,6 +1164,15 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 	} else if merge == "no-mistakes" {
 		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Deliver only through `no-mistakes axi run --intent <from Brief>`. If Posse asks you to catch up with the target after publication, merge `origin/<target>` into this branch, resolve conflicts, then rerun the pipeline with `--skip=rebase` so the pushed branch is updated by merge, not rebase. Never push directly, rebase a pushed branch, or open a PR."
 	}
+	if task.Type == "change" && !project.IsDirectory() {
+		if plan, err := task.AdmittedPlan(); err == nil && plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan)) {
+			repoFlag := ""
+			if project.IsWorkspace() {
+				repoFlag = " --repo <member>"
+			}
+			work += "\n\nFull-pipeline validation: nothing reaches the target before validation. Run `posse publish" + repoFlag + " \"<summary>\" --verify \"<command> -> <result>\" --proof \"<markdown>\" --risk \"<risk and rollback>\"` in the Sandbox to submit a private candidate; it pushes nothing. Make every further commit in the private candidate checkout it prints. After an independent Review passes on that exact candidate, run there, in order, `posse validate test" + repoFlag + " --verify \"<command> -> <result>\" --proof \"<intent/E2E evidence>\"`, `posse validate docs" + repoFlag + " --no-comments passed --proof \"<documentation review>\"` (add `--no-owner-doc-change \"<reason>\"` when no owner docs change) and `posse validate lint" + repoFlag + " --proof \"<result>\" --coverage \"<workflow jobs and gaps>\"`, then `posse publish" + repoFlag + " \"<summary>\"` to promote it. A new candidate commit repeats Review -> test -> docs -> lint. PR delivery pushes and opens the PR on promotion; local delivery only fast-forwards the Task branch for Merge. Signal done after every changed full-pipeline repository is promoted."
+		}
+	}
 	if task.Type == "change" && !project.IsWorkspace() && !project.IsDirectory() {
 		work += fmt.Sprintf("\n\nBranch plan: start from `%s`; PR/MR target `%s`.", task.BaseRef, taskTargetBranch(project, task))
 	}
@@ -1381,7 +1390,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		rootContext = plan.Execution.RootContext
 	}
 	if task.Type == "change" {
-		if err := s.refuseMovedCandidateAuthor(ctx.Context, db, task, false); err != nil {
+		if err := s.refuseMovedCandidateAuthor(ctx.Context, db, project, task, false); err != nil {
 			return err
 		}
 	}
@@ -1415,6 +1424,15 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if task.Type == "change" && project.IsWorkspace() {
 			if err := validateWorkspaceChangeSignal(ctx.Context, db, task); err != nil {
 				return axi.Failure("signal_invalid", err.Error(), false, "Commit the change in each member you changed and leave every member worktree clean before signalling done")
+			}
+			// Every changed full-pipeline Member must be delivered from its
+			// promoted, fully validated private candidate.
+			if lanes, err := changedCandidateLanes(ctx.Context, db, project, task); err != nil {
+				return err
+			} else if len(lanes) > 0 {
+				if err := requireFullPipelineValidationAt(ctx.Context, db, project, task, ""); err != nil {
+					return err
+				}
 			}
 			cfg, err := config.Load(home, project.Name)
 			if err != nil {
@@ -2745,7 +2763,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	if prepareChanged && !inPlace {
 		if err := track("repository.prepare", func() error {
 			if project.IsWorkspace() && kindConfig.Prepare == "claude-trust" {
-				members, err := s.workspaceMembers(ctx, db, project, task)
+				members, err := workspaceMembers(ctx, db, project, task)
 				if err != nil {
 					return err
 				}

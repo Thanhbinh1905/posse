@@ -225,3 +225,26 @@ func TestReviewTargetsAndVerdictSurviveRebuild(t *testing.T) {
 		t.Fatalf("rebuilt pass current = %v, %v", got, err)
 	}
 }
+
+func TestReviewEvidenceCoversEachMemberOfAWorkspacePass(t *testing.T) {
+	reviewed := []ReviewTarget{{Repository: "api", Commit: reviewShaA}, {Repository: "web", Commit: reviewShaB}}
+	f := newReviewVerdictFixture(t, reviewed)
+	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, f.review), "done", "x", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewPass, ReportSHA256: reportHash}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		targets []ReviewTarget
+		want    bool
+	}{
+		{"both Members", reviewed, true},
+		{"one Member", reviewed[:1], true},
+		{"moved Member", []ReviewTarget{reviewed[0], {Repository: "web", Commit: reviewShaA}}, false},
+		{"unreviewed Member", []ReviewTarget{{Repository: "docs", Commit: reviewShaA}}, false},
+	} {
+		evidence, err := f.db.ReviewEvidenceFor(f.ctx, f.change, tc.targets, nil)
+		if err != nil || evidence.Complete != tc.want {
+			t.Fatalf("%s: evidence=%+v err=%v, want complete=%v", tc.name, evidence, err, tc.want)
+		}
+	}
+}

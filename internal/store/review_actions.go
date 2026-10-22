@@ -205,20 +205,21 @@ func (db *DB) ReviewCapUsage(ctx context.Context, taskID int64) (ReviewCapUsage,
 }
 
 // ReviewEvidenceFor reports whether each target is covered by a qualified pass,
-// a proved carry, or an exact-head User disposition. Carries and dispositions
-// never imply test, docs, lint or CI evidence.
+// a proved carry, or an exact-head User disposition. A workspace pass binds
+// every reviewed Member, so it covers each target it names exactly. Carries
+// and dispositions never imply test, docs, lint or CI evidence.
 func (db *DB) ReviewEvidenceFor(ctx context.Context, taskID int64, targets []ReviewTarget, qualifies func(ReviewVerdict) bool) (ReviewEvidence, error) {
 	var evidence ReviewEvidence
 	if len(targets) == 0 {
 		return evidence, nil
 	}
+	verdicts, err := db.ReviewVerdictsFor(ctx, taskID)
+	if err != nil {
+		return evidence, err
+	}
 	evidence.Complete = true
 	for _, target := range targets {
-		_, passed, err := db.CurrentReviewPass(ctx, taskID, []ReviewTarget{target}, qualifies)
-		if err != nil {
-			return evidence, err
-		}
-		if passed {
+		if reviewPassCovers(verdicts, target, qualifies) {
 			evidence.Pass = true
 			continue
 		}
@@ -236,6 +237,20 @@ func (db *DB) ReviewEvidenceFor(ctx context.Context, taskID int64, targets []Rev
 		evidence.Disposition = evidence.Disposition || disposed
 	}
 	return evidence, nil
+}
+
+func reviewPassCovers(verdicts []ReviewVerdict, target ReviewTarget, qualifies func(ReviewVerdict) bool) bool {
+	for _, verdict := range verdicts {
+		if verdict.Verdict != ReviewPass || qualifies != nil && !qualifies(verdict) {
+			continue
+		}
+		for _, reviewed := range verdict.Targets {
+			if reviewed == target {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RecordReviewCarry persists proof that a target merge changes no reviewed code.
