@@ -72,6 +72,14 @@ func TestWatchExposesAmbiguousNoticeDelivery(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("record ambiguous receipt: %s", output)
 	}
+	for _, call := range fake.Calls {
+		if call.Method != "session.snapshot" {
+			t.Fatalf("receipt resolution performed Herdr work beyond read-only identity checks: %#v", fake.Calls)
+		}
+	}
+	if len(fake.Runs) != 0 {
+		t.Fatalf("receipt resolution invoked Herdr CLI commands: %#v", fake.Runs)
+	}
 	code, output = runCLI(t, service, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
 	if code != 0 || !strings.Contains(output, `"state":"uncertain"`) || !strings.Contains(output, batch.Delivery.BatchID) || !strings.Contains(output, "Inspect that Lead session before retrying") {
 		t.Fatalf("ambiguous receipt was not exposed: code=%d output=%s", code, output)
