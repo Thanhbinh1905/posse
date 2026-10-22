@@ -25,19 +25,20 @@ type watchExecutableIdentity struct {
 }
 
 type watchProcess struct {
-	PID            int
-	Executable     watchExecutableIdentity
-	PaneID         string
-	WorkingDir     string
-	Project        string
-	Kind           string
-	PollOnly       bool
-	QuietRoutine   bool
-	StopHook       bool
-	ForceKilled    bool
-	WatchProjectID int64
-	WatchToken     string
-	WatchStartedAt int64
+	PID             int
+	Executable      watchExecutableIdentity
+	PaneID          string
+	WorkingDir      string
+	Project         string
+	Kind            string
+	PollOnly        bool
+	PollOnlyBounded bool
+	QuietRoutine    bool
+	StopHook        bool
+	ForceKilled     bool
+	WatchProjectID  int64
+	WatchToken      string
+	WatchStartedAt  int64
 }
 
 var watchStopGracePeriod = 5 * time.Second
@@ -241,13 +242,23 @@ func watchFromArgs(pid int, args []string, environment map[string]string, home s
 		WatchStartedAt: parseProcessInt64(startedBinding),
 	}
 	process.WatchProjectID = parseProcessInt64(projectBinding)
-	for _, arg := range args[2:] {
+	for index := 2; index < len(args); index++ {
+		arg := args[index]
 		switch arg {
 		case "--poll-only":
 			process.PollOnly = true
 			process.Kind = "watch"
 		case "--quiet-routine":
 			process.QuietRoutine = true
+		case "--timeout":
+			if index+1 < len(args) && parseProcessInt64(args[index+1]) > 0 {
+				process.PollOnlyBounded = true
+				index++
+			}
+		default:
+			if strings.HasPrefix(arg, "--timeout=") && parseProcessInt64(strings.TrimPrefix(arg, "--timeout=")) > 0 {
+				process.PollOnlyBounded = true
+			}
 		}
 	}
 	return process, true

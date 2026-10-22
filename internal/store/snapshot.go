@@ -74,6 +74,11 @@ type projectStateSnapshot struct {
 	DecisionNoticeCursor int64                   `toml:"decision_notice_cursor"`
 }
 
+// Project snapshots are recovery input, not an unbounded audit log. Keep all
+// actionable records and a bounded tail of historical records so a busy
+// Project does not spend every persistence pass encoding its entire history.
+const projectSnapshotHistoryLimit = 128
+
 type sandboxSnapshot struct {
 	ID         int64  `toml:"id"`
 	ProjectID  int64  `toml:"project_id"`
@@ -451,31 +456,60 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 	for _, lease := range leases {
 		state.ResourceLeases = append(state.ResourceLeases, resourceLeaseSnapshotFromLease(lease))
 	}
-	rows, err := db.QueryContext(ctx, decisionSelect+` WHERE project_id=? ORDER BY id`, projectID)
+	decisionRows, err := db.QueryContext(ctx, decisionSelect+` WHERE project_id=? AND
+		(answered_at=0 AND obsolete_at=0 OR id IN (
+			SELECT id FROM decisions WHERE project_id=? ORDER BY id DESC LIMIT ?
+		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
 	if err != nil {
 		return projectStateSnapshot{}, err
 	}
-	for rows.Next() {
-		decision, err := decisionRow(rows)
+	for decisionRows.Next() {
+		decision, err := decisionRow(decisionRows)
 		if err != nil {
-			_ = rows.Close()
+			_ = decisionRows.Close()
 			return projectStateSnapshot{}, err
 		}
 		state.Decisions = append(state.Decisions, decisionSnapshot(decision))
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
+	if err := decisionRows.Err(); err != nil {
+		_ = decisionRows.Close()
 		return projectStateSnapshot{}, err
 	}
-	if err := rows.Close(); err != nil {
+	if err := decisionRows.Close(); err != nil {
 		return projectStateSnapshot{}, err
 	}
-	notices, err := db.Notices(ctx, projectID, false)
+	noticeRows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+		FROM notices WHERE project_id=? AND
+		(acked_at IS NULL OR id IN (
+			SELECT id FROM notices WHERE project_id=? ORDER BY id DESC LIMIT ?
+		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
 	if err != nil {
 		return projectStateSnapshot{}, err
 	}
-	for _, notice := range notices {
+	for noticeRows.Next() {
+		var notice Notice
+		var taskID, deliveredAt, ackedAt sql.NullInt64
+		if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
+			_ = noticeRows.Close()
+			return projectStateSnapshot{}, err
+		}
+		if taskID.Valid {
+			notice.TaskID = taskID.Int64
+		}
+		if deliveredAt.Valid {
+			notice.DeliveredAt = deliveredAt.Int64
+		}
+		if ackedAt.Valid {
+			notice.AckedAt = ackedAt.Int64
+		}
 		state.Notices = append(state.Notices, noticeSnapshot(notice))
+	}
+	if err := noticeRows.Err(); err != nil {
+		_ = noticeRows.Close()
+		return projectStateSnapshot{}, err
+	}
+	if err := noticeRows.Close(); err != nil {
+		return projectStateSnapshot{}, err
 	}
 	err = db.QueryRowContext(ctx, `SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?`, projectID).Scan(&state.DecisionNoticeCursor)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

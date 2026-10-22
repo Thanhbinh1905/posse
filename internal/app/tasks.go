@@ -3227,6 +3227,8 @@ func defaultValue(value, fallback string) string {
 const (
 	admissionPreparationAttempts = 4
 	admissionPreparationDelay    = 150 * time.Millisecond
+	commandContentionAttempts    = 3
+	commandContentionDelay       = 150 * time.Millisecond
 )
 
 // retryBusy repeats an idempotent step that failed only on transient store

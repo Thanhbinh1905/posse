@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -405,6 +406,131 @@ func TestRebuildRestoresPRWatchFailureStreakAndClearsIntentRuntimeForeignKeys(t 
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(consecutive_failures),0),COALESCE(MAX(pr_url),''),COALESCE(MAX(last_error),'') FROM pr_task_watch_failures`).Scan(&failureRows, &failureCount, &failureURL, &failureMessage); err != nil || failureRows != 1 || failureCount != 1 || failureURL != prURL || failureMessage != "offline" {
 		t.Fatalf("rebuild did not restore the PR watch failure streak: rows=%d count=%d url=%q error=%q err=%v", failureRows, failureCount, failureURL, failureMessage, err)
 	}
+}
+
+func TestProjectSnapshotBoundsHistoricalNoticeAndDecisionHistory(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Snapshot history", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO decisions(project_id,task_id,origin,question,options_json,created_at,answered_at,kind,task_launches) VALUES(?,?,?,?,?,?,0,'worker_question',0)`, project.ID, taskID, "active-decision", "Continue?", `["continue","stop"]`, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'worker_question','active notice','{}',?)`, project.ID, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	insertHistory := func(start, count int) {
+		t.Helper()
+		for index := start; index < start+count; index++ {
+			at := int64(index + 1)
+			if _, err := db.ExecContext(ctx, `INSERT INTO decisions(project_id,task_id,origin,question,options_json,answer,user_quote,created_at,answered_at,kind,task_launches) VALUES(?,?,?,?,?,?,?, ?,?,?,?)`, project.ID, taskID, fmt.Sprintf("history-decision-%d", index), "Continue?", `["continue","stop"]`, "continue", "User answered", at, at, "worker_question", 0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, `INSERT INTO notices(project_id,kind,summary,data_json,created_at,delivered_at,acked_at) VALUES(?,'worker_question',?,?,?, ?, ?)`, project.ID, fmt.Sprintf("history notice %d", index), `{}`, at, at, at); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	insertHistory(0, projectSnapshotHistoryLimit*2)
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(db.ProjectSnapshotPath(project.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstSnapshot projectSnapshot
+	if _, err := toml.Decode(string(first), &firstSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstSnapshot.State.Decisions) != projectSnapshotHistoryLimit+1 || len(firstSnapshot.State.Notices) != projectSnapshotHistoryLimit+1 {
+		t.Fatalf("bounded Project history = decisions %d, Notices %d; want %d each plus the active record", len(firstSnapshot.State.Decisions), len(firstSnapshot.State.Notices), projectSnapshotHistoryLimit)
+	}
+	if firstSnapshot.State.Decisions[0].Origin != "active-decision" || firstSnapshot.State.Notices[0].Summary != "active notice" {
+		t.Fatalf("actionable history was pruned: decisions=%#v notices=%#v", firstSnapshot.State.Decisions[0], firstSnapshot.State.Notices[0])
+	}
+	firstSize := len(first)
+	legacyFirstSize, err := unboundedProjectSnapshotSize(ctx, db, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertHistory(projectSnapshotHistoryLimit*2, projectSnapshotHistoryLimit*2)
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(db.ProjectSnapshotPath(project.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondSnapshot projectSnapshot
+	if _, err := toml.Decode(string(second), &secondSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondSnapshot.State.Decisions) != projectSnapshotHistoryLimit+1 || len(secondSnapshot.State.Notices) != projectSnapshotHistoryLimit+1 {
+		t.Fatalf("Project history grew after another batch: decisions %d, Notices %d", len(secondSnapshot.State.Decisions), len(secondSnapshot.State.Notices))
+	}
+	legacySecondSize, err := unboundedProjectSnapshotSize(ctx, db, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Project snapshot history: bounded first=%d bytes, bounded second=%d bytes, unbounded first=%d bytes, unbounded second=%d bytes", firstSize, len(second), legacyFirstSize, legacySecondSize)
+	if len(second)-firstSize > 256 || firstSize-len(second) > 256 {
+		t.Fatalf("snapshot size grew with discarded history: first=%d second=%d", firstSize, len(second))
+	}
+	if legacySecondSize <= legacyFirstSize {
+		t.Fatalf("unbounded comparison did not grow: first=%d second=%d", legacyFirstSize, legacySecondSize)
+	}
+}
+
+func unboundedProjectSnapshotSize(ctx context.Context, db *DB, project Project) (int, error) {
+	state, err := db.projectStateSnapshot(ctx, project.ID)
+	if err != nil {
+		return 0, err
+	}
+	state.Decisions = nil
+	rows, err := db.QueryContext(ctx, decisionSelect+` WHERE project_id=? ORDER BY id`, project.ID)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		decision, err := decisionRow(rows)
+		if err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		state.Decisions = append(state.Decisions, decisionSnapshot(decision))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		return 0, err
+	}
+	state.Notices = make([]noticeSnapshot, 0, len(notices))
+	for _, notice := range notices {
+		state.Notices = append(state.Notices, noticeSnapshot(notice))
+	}
+	var encoded bytes.Buffer
+	if err := toml.NewEncoder(&encoded).Encode(projectSnapshot{Version: 1, Project: project, State: state}); err != nil {
+		return 0, err
+	}
+	return encoded.Len(), nil
 }
 
 // Every command reconciles each Task and persists the Project snapshot. Only a
