@@ -20,10 +20,13 @@ type sandboxProcessAuthorization struct {
 	handles              map[int]*sandboxProcessHandle
 	processGroups        map[int][]*sandboxProcessHandle
 	authorizeTaskProcess func(int) error
+	// escaped records Task-marked processes refused because they no longer
+	// reference Task-owned paths, keyed by PID with their start identity.
+	escaped map[int]string
 }
 
 func newSandboxProcessAuthorization() *sandboxProcessAuthorization {
-	return &sandboxProcessAuthorization{handles: make(map[int]*sandboxProcessHandle), processGroups: make(map[int][]*sandboxProcessHandle)}
+	return &sandboxProcessAuthorization{handles: make(map[int]*sandboxProcessHandle), processGroups: make(map[int][]*sandboxProcessHandle), escaped: make(map[int]string)}
 }
 
 func (authorization *sandboxProcessAuthorization) bind(pid int) (*sandboxProcessHandle, error) {
@@ -139,6 +142,33 @@ func (authorization *sandboxProcessAuthorization) setSignalGuard(pid int, guard 
 }
 
 func (authorization *sandboxProcessAuthorization) guardSignal(pid int, signal syscall.Signal) error {
+	err := authorization.checkSignal(pid, signal)
+	if authorization != nil && authorization.escaped != nil && errors.Is(err, errTaskProcessOutsideOwnedPaths) {
+		if bootID, startTime, identityErr := store.ProcessIdentityForPID(pid); identityErr == nil {
+			authorization.escaped[pid] = bootID + "/" + startTime
+		}
+	}
+	return err
+}
+
+// escapedProcessPIDs returns the refused Task-marked processes that are still
+// the same live instances, so Teardown can report them instead of hiding them.
+func (authorization *sandboxProcessAuthorization) escapedProcessPIDs() []int {
+	if authorization == nil {
+		return nil
+	}
+	pids := make([]int, 0, len(authorization.escaped))
+	for pid, identity := range authorization.escaped {
+		bootID, startTime, err := store.ProcessIdentityForPID(pid)
+		if err == nil && bootID+"/"+startTime == identity {
+			pids = append(pids, pid)
+		}
+	}
+	sort.Ints(pids)
+	return pids
+}
+
+func (authorization *sandboxProcessAuthorization) checkSignal(pid int, signal syscall.Signal) error {
 	handle := authorization.handle(pid)
 	if handle == nil && authorization != nil && authorization.authorizeTaskProcess != nil {
 		if err := authorization.authorizeTaskProcess(pid); err != nil {

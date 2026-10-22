@@ -26,6 +26,7 @@ assignments='
 1 TestFailedRecoveryBoundWithRealHerdr
 1 TestE2ELockOwnerCannotOutliveTestProcess
 1 TestTeardownStopsDetachedTaskServer
+1 TestTeardownReportsEscapedTaskMarkedProcess
 1 TestTeardownPreservesDetachedSSHControlMaster
 1 TestTeardownStopsProcessStartedThroughHerdrServer
 1 TestStoppedWorkerPaneCanBeRelaunched

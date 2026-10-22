@@ -389,3 +389,80 @@ func TestTeardownStopsProcessStartedThroughHerdrServer(t *testing.T) {
 		t.Fatalf("Teardown left Herdr-launched lock owner %d running", pid)
 	}
 }
+
+// TestTeardownReportsEscapedTaskMarkedProcess covers marker containment, where
+// a Task-marked daemon that left the Sandbox and scratch has no Task ownership
+// proof. Teardown leaves it running but must report it instead of hiding it.
+func TestTeardownReportsEscapedTaskMarkedProcess(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	// Without user systemd, Posse falls back to marker containment.
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "systemctl"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	serverScript := `import os, sys, time
+os.chdir("/")
+open(os.path.join(sys.argv[1], "detached-server.ready"), "w").close()
+while True:
+    time.sleep(1)
+`
+	if err := os.WriteFile(filepath.Join(f.root, "detached-server.py"), []byte(serverScript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "launch-detached-server"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processes := map[string]teardownFixtureProcess{}
+	t.Cleanup(func() { cleanupTeardownFixtureProcesses(t, f.root, []string{"detached-server"}, processes) })
+	task := f.start(t, "t1", "Escaped marked process", "escaped-marked-process")
+	if task.ContainmentMode != "marker" || task.ContainmentMarker == "" {
+		t.Fatalf("Task containment = %q/%q, want marker mode", task.ContainmentMode, task.ContainmentMarker)
+	}
+	if !waitForCondition(10*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(f.root, "detached-server.ready"))
+		return err == nil
+	}) {
+		t.Fatal("Worker's detached process did not start")
+	}
+	pidBytes, err := os.ReadFile(filepath.Join(f.root, "detached-server.pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("detached process PID = %q: %v", pidBytes, err)
+	}
+	bootID, startTime, err := store.ProcessIdentityForPID(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes["detached-server"] = teardownFixtureProcess{PID: pid, BootID: bootID, StartTime: startTime}
+	if filepath.Clean(processCWD(pid)) != "/" {
+		t.Fatalf("detached process kept a Sandbox working directory: %q", processCWD(pid))
+	}
+
+	markTaskReported(t, f, task)
+	f.exitWorker(t, "t1")
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1")
+	if !strings.Contains(output, "torn-down") || !strings.Contains(output, "escaped_processes") || !strings.Contains(output, fmt.Sprintf("PID %d", pid)) {
+		t.Fatalf("Teardown did not report the escaped Task-marked process %d: %s", pid, output)
+	}
+	if !teardownFixtureProcessRunning(processes["detached-server"]) {
+		t.Fatal("Teardown stopped a process it could not prove was Task-owned")
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(context.Background(), f.projectID, false)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reported := false
+	for _, notice := range notices {
+		reported = reported || notice.TaskID == task.ID && notice.Kind == "teardown_escaped_processes" && strings.Contains(notice.Summary, fmt.Sprintf("PID %d", pid))
+	}
+	if !reported {
+		t.Fatalf("Teardown raised no teardown_escaped_processes Notice for PID %d: %#v", pid, notices)
+	}
+}

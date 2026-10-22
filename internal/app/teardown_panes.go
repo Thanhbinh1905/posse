@@ -36,8 +36,12 @@ type teardownResult struct {
 	BranchRemoved       bool
 	RemoteBranchRemoved bool
 	StoppedProcesses    []string
-	CacheMaintenance    string
-	AlreadyTornDown     bool
+	// EscapedProcesses are Task-marked processes that left the Sandbox and
+	// Task scratch without a retained ancestor; Teardown cannot prove they are
+	// Task-owned, so it reports them instead of stopping them.
+	EscapedProcesses []taskProcessDetail
+	CacheMaintenance string
+	AlreadyTornDown  bool
 }
 
 type paneProcessInfo struct {

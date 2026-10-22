@@ -325,7 +325,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		if completedElsewhere {
 			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 		}
-		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
+		return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
@@ -537,7 +537,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
+		return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
 	}
 	if !inPlace && store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateMerged {
 		return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, "Pass `--discard --user-approved \"<User's words>\"`")
@@ -557,7 +557,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
+	return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
 }
 
 func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string, keepBranchOption ...bool) (result teardownResult, returnErr error) {
@@ -1002,6 +1002,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}
 	result.Panes = paneResult
 	result.StoppedProcesses = append(stopped, killed...)
+	result.EscapedProcesses = taskOwnedProcessDetails(processAuthorization.escapedProcessPIDs())
 	if project.IsWorkspace() {
 		err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
 			if keepBranch {
@@ -1162,6 +1163,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		return result, err
 	}
 	intentFinished = true
+	if err := recordTeardownEscapedProcesses(ctx, db, project, task, result.EscapedProcesses); err != nil {
+		return result, err
+	}
 	if detail, err := s.trimWorkerGoBuildCache(ctx, home); err != nil {
 		result.CacheMaintenance = "warning: " + err.Error()
 	} else {
@@ -1170,7 +1174,10 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	return result, nil
 }
 
-func withCacheMaintenance(fields axi.Object, result teardownResult) axi.Object {
+func withTeardownDetails(fields axi.Object, result teardownResult) axi.Object {
+	if len(result.EscapedProcesses) > 0 {
+		fields = append(fields, axi.Field{Key: "escaped_processes", Value: describeTaskProcesses(result.EscapedProcesses)})
+	}
 	if result.CacheMaintenance != "" {
 		fields = append(fields, axi.Field{Key: "worker_go_cache", Value: result.CacheMaintenance})
 	}
