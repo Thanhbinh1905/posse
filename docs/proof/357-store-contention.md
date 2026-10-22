@@ -52,7 +52,7 @@ go test ./internal/app -run 'Test(MergeIntentFailurePreservesRetryableStoreConte
 go test -tags=e2e ./internal/e2e -run '^TestT357(Repro(Up|Merge)UnderWriter|ReapLeakedPollOnlyWatch)$' -count=1 -timeout=15m -v -> pass; up=7.403s, merge=7.361s, leaked Watch reaped
 ```
 
-The full unit command for `internal/store` passed in 129.251s. A concurrent full `internal/app` run hit the ten-minute test timeout while SQLite `fsync` work was stalled under shared-host load. The concurrent race run also hit the timeout and its migration-lock test reported one environment contention failure before the timeout. The focused application tests above were rerun sequentially and passed, and vet, Staticcheck, generation stability, build and `git diff --check` passed.
+The configured Gate passed on a sequential rerun: `go test ./...` passed in 412.292s for `internal/app` and 68.053s for `internal/store`, with all packages green. An earlier concurrent full app/race attempt hit shared-host SQLite `fsync` and migration-lock contention; the exact Gate rerun passed. Vet, Staticcheck, generation stability, build and `git diff --check` also passed.
 
 ## Risk and rollback
 
