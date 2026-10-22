@@ -57,29 +57,76 @@ func watchPIDs(root string) []int {
 			}
 		}
 		cmdline, _ := os.ReadFile(filepath.Join(processRoot, "cmdline"))
-		if !strings.Contains(string(cmdline), "--poll-only") {
+		args := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+		if len(args) < 2 || args[1] != "watch" || !strings.Contains(string(cmdline), "--poll-only") {
 			continue
 		}
-		environ, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "environ"))
-		if strings.Contains(string(environ), root) {
+		environ, _ := os.ReadFile(filepath.Join(processRoot, "environ"))
+		if fixtureHasPOSSEHome(environ, root) {
 			pids = append(pids, pid)
 		}
 	}
 	return pids
 }
 
-func stopFixtureWatchRuntimes(root string) {
-	pids := watchPIDs(root)
-	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+func stopFixtureWatchRuntimes(root string) error {
+	stop := func(signal syscall.Signal) error {
+		for _, pid := range watchPIDs(root) {
+			if err := syscall.Kill(pid, signal); err != nil && err != syscall.ESRCH {
+				return fmt.Errorf("signal fixture Watch %d with %s: %w", pid, signal, err)
+			}
+		}
+		return nil
+	}
+	if err := stop(syscall.SIGTERM); err != nil {
+		return err
 	}
 	if waitForCondition(3*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
-		return
+		return nil
 	}
-	for _, pid := range watchPIDs(root) {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+	if err := stop(syscall.SIGKILL); err != nil {
+		return err
 	}
-	_ = waitForCondition(2*time.Second, func() bool { return len(watchPIDs(root)) == 0 })
+	if !waitForCondition(2*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
+		return fmt.Errorf("fixture poll-only Watches remain: %v", watchPIDs(root))
+	}
+	return nil
+}
+
+func TestFixtureCleanupStopsDirectPollOnlyWatch(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	if err := stopFixtureWatchRuntimes(f.root); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command(f.binary, "watch", "--poll-only")
+	command.Dir, command.Env = f.repo, f.env
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start direct fixture Watch: %v", err)
+	}
+	waited := false
+	defer func() {
+		if !waited {
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			_ = command.Wait()
+		}
+	}()
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("direct poll-only Watch did not start: %v", watchPIDs(f.root))
+	}
+	if err := stopFixtureWatchRuntimes(f.root); err != nil {
+		t.Fatal(err)
+	}
+	_ = command.Wait() // SIGTERM is an expected exit after fixture cleanup.
+	waited = true
+	if got := watchPIDs(f.root); len(got) != 0 {
+		t.Fatalf("fixture poll-only Watches survived cleanup: %v", got)
+	}
+	if err := stopFixtureWatchRuntimes(f.root); err != nil {
+		t.Fatalf("repeated fixture Watch cleanup was not idempotent: %v", err)
+	}
 }
 
 func TestWatchRestartsAfterProcessExit(t *testing.T) {
