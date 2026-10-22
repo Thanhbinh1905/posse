@@ -259,6 +259,9 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 			} else {
 				// Compatibility with Change Tasks completed before Worker publishing existed.
 				branchRef := "refs/heads/" + task.Branch
+				if err := refuseAgentAttribution(ctx, project.Root, branchRef, task); err != nil {
+					return err
+				}
 				if _, err := gitOutput(ctx, project.Root, "push", "origin", branchRef+":"+branchRef); err != nil {
 					return axi.Failure("pr_push_failed", "could not push the gated Task branch", true, err.Error())
 				}

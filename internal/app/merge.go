@@ -298,7 +298,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		if completedElsewhere {
 			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 		}
-		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
+		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
@@ -447,7 +447,7 @@ func mergeLocal(ctx context.Context, project store.Project, task store.Task) err
 }
 
 func (s *Service) teardown(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("teardown", args, map[string]flagSpec{"discard": {boolean: true}, "user-approved": {}})
+	parsed, err := parseArgs("teardown", args, map[string]flagSpec{"discard": {boolean: true}, "keep-branch": {boolean: true}, "user-approved": {}})
 	if err != nil {
 		return err
 	}
@@ -496,11 +496,11 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return configError(err)
 		}
-		result, err := s.teardownTask(ctx.Context, db, project, cfg, task, true, quote)
+		result, err := s.teardownTask(ctx.Context, db, project, cfg, task, true, quote, parsed.Bool("keep-branch"))
 		if err != nil {
 			return err
 		}
-		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
+		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
 	}
 	if !inPlace && store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateMerged {
 		return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, "Pass `--discard --user-approved \"<User's words>\"`")
@@ -516,15 +516,16 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if inPlace && (task.State == store.StateFailed || task.State == store.StateLost) {
 		preserveQuote = quote
 	}
-	result, err := s.teardownTask(ctx.Context, db, project, cfg, task, false, preserveQuote)
+	result, err := s.teardownTask(ctx.Context, db, project, cfg, task, false, preserveQuote, parsed.Bool("keep-branch"))
 	if err != nil {
 		return err
 	}
-	return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
+	return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
 }
 
-func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string) (teardownResult, error) {
+func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string, keepBranchOption ...bool) (teardownResult, error) {
 	result := teardownResult{}
+	keepBranch := len(keepBranchOption) > 0 && keepBranchOption[0]
 	if discardable {
 		if strings.TrimSpace(quote) == "" {
 			return result, axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
@@ -533,7 +534,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
 		}
 	}
-	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote}))
+	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch}))
 	if err != nil {
 		return result, axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
@@ -950,6 +951,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	result.StoppedProcesses = append(stopped, killed...)
 	if project.IsWorkspace() {
 		err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
+			if keepBranch {
+				return nil
+			}
 			tips := ""
 			if discardable {
 				var tipsErr error
@@ -970,6 +974,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	} else if discardable {
 		if task.Branch != "" {
 			err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
+				if keepBranch {
+					return nil
+				}
 				ref := "refs/heads/" + task.Branch
 				sha, err := db.LatestApprovalBranchSHA(ctx, task.ID, "discard")
 				if err != nil {
@@ -990,6 +997,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	} else {
 		if task.Branch != "" {
 			err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
+				if keepBranch {
+					return nil
+				}
 				// A PR branch advanced after its external merge stays at its
 				// existing tip even when the Sandbox can be safely released.
 				if task.MergeMode == "pr" || task.MergeMode == "no-mistakes" {
@@ -1039,6 +1049,40 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			})
 			if err != nil {
 				return result, s.teardownIncomplete(ctx, db, project, task, "Task branch removal", err)
+			}
+		}
+	}
+	if !discardable && !keepBranch && task.State == store.StateMerged {
+		if project.IsWorkspace() {
+			members, memberErr := workspaceMembers(ctx, db, project, task)
+			if memberErr != nil {
+				return result, memberErr
+			}
+			for _, member := range members {
+				if member.repo.State != store.TaskRepoMerged || member.repo.MergeMode != "pr" || member.repo.PRURL == "" {
+					continue
+				}
+				observation, observationErr := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+				if observationErr != nil {
+					return result, observationErr
+				}
+				removed, removeErr := deleteMergedRemoteBranch(ctx, member.project, member.task, cfg, observation.HeadSHA)
+				if removeErr != nil {
+					return result, removeErr
+				}
+				result.RemoteBranchRemoved = result.RemoteBranchRemoved || removed
+			}
+		} else if task.MergeMode == "pr" || task.MergeMode == "no-mistakes" {
+			observation, observationErr := db.LatestPRObservation(ctx, task.ID)
+			if observationErr != nil && !store.IsNotFound(observationErr) {
+				return result, observationErr
+			}
+			if observationErr == nil && observation.State == "MERGED" {
+				removed, removeErr := deleteMergedRemoteBranch(ctx, project, task, cfg, observation.HeadSHA)
+				if removeErr != nil {
+					return result, removeErr
+				}
+				result.RemoteBranchRemoved = removed
 			}
 		}
 	}

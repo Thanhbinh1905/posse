@@ -264,6 +264,9 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 				}
 				// Tasks completed before member publishing was available still Merge.
 				branchRef := "refs/heads/" + task.Branch
+				if err := refuseAgentAttribution(ctx, member.target.Root, branchRef, member.task); err != nil {
+					return prefixFailure(repo.Repo, err)
+				}
 				if err := s.runIntentStep(ctx, db, intent, "push:"+repo.Repo, func() error {
 					_, pushErr := gitOutput(ctx, member.target.Root, "push", "origin", branchRef+":"+branchRef)
 					return pushErr

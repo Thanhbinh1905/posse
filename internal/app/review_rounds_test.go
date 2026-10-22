@@ -15,6 +15,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -100,6 +101,14 @@ guidance = ["docs/review.md"]
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The fake Herdr adapter does not materialize panes created by tab.create.
+	// Keep the admitted Review Worker visible so the next start exercises the
+	// active-round guard rather than marking the absent pane lost first.
+	f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{
+		PaneID: review.PaneID, WorkspaceID: review.HerdrWorkspaceID, Label: review.PaneLabel,
+		Agent: "claude", AgentStatus: "working",
+	})
+	f.fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"review worker is active"}}`)
 	plan, err := review.AdmittedPlan()
 	if err != nil || plan == nil || len(plan.Inputs) == 0 || !strings.Contains(string(plan.Inputs[0].Bytes), "Create a committed file.") {
 		t.Fatalf("generated Review Brief lost Change intent: plan=%#v err=%v", plan, err)

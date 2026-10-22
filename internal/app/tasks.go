@@ -610,6 +610,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	kindConfig := cfg.Kinds[kind]
 	taskHome := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(sequence))
+	argsForAgent = prependAttributionArgs(kind, plan.Launch.Profile, argsForAgent)
 	if kind == "claude" || kind == "codex" || kind == "pi" {
 		skills, skillErr := freezePosseLaunchSkillInputs(home, project.Name, project.Root, plan.Inputs)
 		if skillErr != nil {
@@ -1135,6 +1136,11 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 	}
 	if task.Type == "change" && !project.IsWorkspace() {
 		work += fmt.Sprintf("\n\nBranch plan: start from `%s`; PR/MR target `%s`.", task.BaseRef, taskTargetBranch(project, task))
+	}
+	if task.Type == "change" && !project.IsDirectory() {
+		if plan, err := task.AdmittedPlan(); err != nil || plan == nil || !plan.Launch.Profile.Attribution {
+			work += "\n\nCommit messages carry no agent attribution trailer such as `Co-Authored-By: Claude`; Posse refuses to push a Task commit that has one. Reword such a commit before publishing."
+		}
 	}
 	signal := fmt.Sprintf("posse signal done \"<summary>\" --turn %s", turnToken)
 	if task.Type == "change" {
@@ -2678,6 +2684,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}); err != nil {
 		return failure(err)
 	}
+	startArgs = prependAttributionArgs(kind, profile, startArgs)
 	if kind == "claude" || kind == "codex" || kind == "pi" {
 		var inputs []taskplan.Input
 		if plan != nil {

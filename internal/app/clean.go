@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 
@@ -81,11 +82,6 @@ func (s *Service) clean(ctx *axi.Context, args []string) error {
 				return err
 			}
 			item := cleanTaskItem{project: project, task: task, scratchBytes: scratchBytes}
-			scratchProcesses, err := taskScratchProcessDetails(home, project, task)
-			if err != nil {
-				return err
-			}
-			scratchHasProcesses := len(scratchProcesses) > 0
 			sandbox, sandboxErr := db.SandboxByTask(ctx.Context, task.ID)
 			if sandboxErr == nil {
 				item.sandbox = sandbox
@@ -98,9 +94,7 @@ func (s *Service) clean(ctx *axi.Context, args []string) error {
 			} else if !store.IsNotFound(sandboxErr) {
 				return sandboxErr
 			}
-			if task.State != store.StateTornDown || scratchBytes > 0 || scratchHasProcesses || len(taskContainmentProcessDetails(task)) > 0 || (item.sandbox.State == "held" || item.sandbox.State == "releasing") {
-				items = append(items, item)
-			}
+			items = append(items, item)
 		}
 	}
 
@@ -186,6 +180,54 @@ func (s *Service) cleanTornDownTask(ctx context.Context, db *store.DB, home stri
 	}
 	if err := removeTaskScratch(home, project, task); err != nil {
 		return err
+	}
+	intent, intentErr := db.IntentByTask(ctx, task.ID)
+	if intentErr != nil && !store.IsNotFound(intentErr) {
+		return intentErr
+	}
+	if intentErr == nil {
+		var payload struct {
+			KeepBranch bool `json:"keep_branch"`
+		}
+		if json.Unmarshal([]byte(intent.PayloadJSON), &payload) == nil && payload.KeepBranch {
+			return nil
+		}
+	}
+	if project.IsWorkspace() {
+		members, err := workspaceMembers(ctx, db, project, task)
+		if err != nil {
+			return err
+		}
+		cfg, err := config.Load(home, project.Name)
+		if err != nil {
+			return configError(err)
+		}
+		for _, member := range members {
+			if member.repo.State != store.TaskRepoMerged || member.repo.MergeMode != "pr" || member.repo.PRURL == "" {
+				continue
+			}
+			observation, err := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+			if err != nil {
+				return err
+			}
+			if _, err := deleteMergedRemoteBranch(ctx, member.project, member.task, cfg, observation.HeadSHA); err != nil {
+				return err
+			}
+		}
+	} else if (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") && task.PRURL != "" {
+		cfg, err := config.Load(home, project.Name)
+		if err != nil {
+			return configError(err)
+		}
+		observation, err := db.LatestPRObservation(ctx, task.ID)
+		if err != nil && !store.IsNotFound(err) {
+			return err
+		}
+		if err == nil && observation.State == "MERGED" {
+			if _, err := deleteMergedRemoteBranch(ctx, project, task, cfg, observation.HeadSHA); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

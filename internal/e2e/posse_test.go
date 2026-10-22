@@ -1021,12 +1021,15 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("prune changed the retained Sandbox: %q %v", got, err)
 	}
 	oldLeadPaneID := project.LeadPaneID
-	recoveryCaller, err := createTab(client, project.HerdrWorkspaceID, repo, "recovery-caller")
+	// Closing the Lead's primary workspace also closes its Worker tabs. Keep
+	// the recovery caller in a separate User workspace so it survives.
+	recoveryCaller, err := createWorkspace(client, repo)
 	if err != nil {
-		t.Fatalf("create a shell pane for missing-Lead recovery: %v", err)
+		t.Fatalf("create a shell workspace for missing-Lead recovery: %v", err)
 	}
 	callerEnv = setEnv(callerEnv, "HERDR_PANE_ID", recoveryCaller.RootPane.PaneID)
 	callerEnv = setEnv(callerEnv, "HERDR_TAB_ID", recoveryCaller.RootPane.TabID)
+	callerEnv = setEnv(callerEnv, "HERDR_WORKSPACE_ID", recoveryCaller.Workspace.WorkspaceID)
 	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": oldLeadPaneID}); err != nil {
 		t.Fatal(err)
 	}
@@ -1239,16 +1242,18 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		if processErr != nil || json.Unmarshal(raw, &processResult) != nil || processResult.ProcessInfo.ShellPID <= 1 || processResult.ProcessInfo.ForegroundProcessGroup != processResult.ProcessInfo.ShellPID {
 			t.Fatalf("Herdr restored a torn-down Task pane with an unverified foreground process: pane=%#v processInfo=%s err=%v", restoredTornDownPane, raw, processErr)
 		}
+		var recoveryState store.TaskRecovery
 		if !waitForCondition(15*time.Second, func() bool {
 			recoveryDB, openErr := store.OpenReadOnly(home)
 			if openErr != nil {
 				return false
 			}
 			defer recoveryDB.Close()
-			recovery, recoveryErr := recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
-			return recoveryErr == nil && recovery.Status == "pending" && recovery.Attempts > 0 && recovery.LastError == "another Herdr workspace already holds this Sandbox"
+			var recoveryErr error
+			recoveryState, recoveryErr = recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
+			return recoveryErr == nil && recoveryState.Status == "pending" && recoveryState.Attempts > 0 && recoveryState.LastError == "another Herdr workspace already holds this Sandbox"
 		}) {
-			t.Fatal("startup recovery did not fail closed on the restored torn-down Task workspace")
+			t.Fatalf("startup recovery did not fail closed on the restored torn-down Task workspace: %#v", recoveryState)
 		}
 		if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": restoredTornDownPane.PaneID}); err != nil {
 			t.Fatalf("remove the fixture's restored torn-down Task shell after confirming recovery refused it: %v", err)
@@ -1793,17 +1798,16 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 			tab = candidate
 		}
 	}
-	if workspace.Label != task.ShortName || workspace.Worktree.CheckoutPath != task.WorktreePath || !workspace.Worktree.IsLinkedWorktree ||
+	if workspaceLabel != "" && workspace.Label != workspaceLabel || workspace.WorkspaceID != task.HerdrWorkspaceID ||
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
 		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_name"] != task.ShortName || pane.Tokens["posse_sandbox"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.Branch ||
-		tab.Label == task.ShortName {
-		t.Fatalf("isolated Worker sidebar/cwd mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
+		tab.Label != task.ShortName {
+		t.Fatalf("Worker tab/sidebar mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
 	}
 }
 
-// assertWorkerIsolation checks the Worker guard and Sandbox identity. The group
-// close replay runs in TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup.
+// assertWorkerIsolation checks the Worker guard and Sandbox identity.
 func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home, repo, root string, callerEnv []string, projectID int64, leadPaneID string) {
 	t.Helper()
 	db, err := store.Open(home)
@@ -1819,14 +1823,16 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 	if err != nil {
 		t.Fatal(err)
 	}
-	grouped := false
-	for _, workspace := range snapshot.Workspaces {
-		if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Worktree.CheckoutPath == task.WorktreePath && workspace.Worktree.IsLinkedWorktree {
-			grouped = true
+	lead, found := findLeadInSnapshot(snapshot)
+	workerTabID := tabOf(t, snapshot, task.PaneID)
+	workerTab := false
+	for _, candidate := range snapshot.Tabs {
+		if candidate.TabID == workerTabID && candidate.WorkspaceID == lead.WorkspaceID && candidate.Label == task.ShortName {
+			workerTab = true
 		}
 	}
-	if !grouped {
-		t.Fatalf("Worker is not a grouped child: %#v", snapshot.Workspaces)
+	if !found || task.HerdrWorkspaceID != lead.WorkspaceID || !workerTab {
+		t.Fatalf("Worker is not a tab in the Lead workspace: task=%#v lead=%#v tabs=%#v", task, lead, snapshot.Tabs)
 	}
 	if runtime.GOOS == "linux" {
 		raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})

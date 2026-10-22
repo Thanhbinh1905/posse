@@ -85,6 +85,7 @@ var keySpecs = []KeySpec{
 	{Key: "profiles.<profile>.model", Type: TypeString, Default: "", Meaning: "Model argument value supplied through the kind template."},
 	{Key: "profiles.<profile>.effort", Type: TypeString, Default: "", Meaning: "Reasoning effort supplied through the kind template."},
 	{Key: "profiles.<profile>.args", Type: TypeStringArray, Default: []string{}, Meaning: "Additional arguments passed to this Profile's agent.", UserOnly: true},
+	{Key: "profiles.<profile>.attribution", Type: TypeBoolean, Default: false, Meaning: "Keep the agent's commit co-author trailer and PR attribution. When false, Claude launches get attribution disabled and publish refuses commits with agent attribution trailers.", UserOnly: true},
 	{Key: "workflows.<workflow>.stages", Type: TypeTableArray, Meaning: "Ordered User-owned workflow stages; a Project replaces a named workflow as a whole.", UserOnly: true},
 	{Key: "dispatch", Type: TypeTableArray, Default: []any{}, Meaning: "Ordered dispatch rules that select a Profile."},
 	{Key: "dispatch.default.use", Type: TypeString, Default: "", Meaning: "Fallback Profile used when no dispatch rule matches."},

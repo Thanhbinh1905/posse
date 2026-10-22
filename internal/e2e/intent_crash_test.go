@@ -577,7 +577,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			}
 			harness.session.mu.Unlock()
 			if created != 0 {
-				t.Fatalf("%s created %d top-level Herdr workspaces; Workers open as linked worktrees", item.command, created)
+				t.Fatalf("%s created %d top-level Herdr workspaces", item.command, created)
 			}
 			if item.command == "start" {
 				if err := fixture.openDB(t, func(db *store.DB) error {

@@ -149,6 +149,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if branchHead != sha {
 		return axi.Failure("publish_refused", "Task branch moved while publish was inspecting the Sandbox", true, "Retry `posse publish` after the branch settles")
 	}
+	if err := refuseAgentAttribution(out.Context, task.WorktreePath, sha, task); err != nil {
+		return err
+	}
 	forge, err := forgeForRepository(out.Context, project.Root, cfg, parsed.Flags["repo"])
 	if err != nil {
 		return err
@@ -250,6 +253,9 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 		return err
 	} else if branchHead != head {
 		return axi.Failure("publish_refused", "Task branch moved while publish was inspecting the Sandbox", true, "Retry `posse publish` after the branch settles")
+	}
+	if err := refuseAgentAttribution(ctx, lane.task.WorktreePath, head, lane.task); err != nil {
+		return err
 	}
 	if candidateCWD {
 		if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
