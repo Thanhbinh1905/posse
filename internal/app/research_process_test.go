@@ -452,7 +452,7 @@ esac
 	for _, line := range strings.Split(string(calls), "\n") {
 		if strings.HasPrefix(line, "research start") {
 			starts++
-			for _, want := range []string{"--harness pi", "--scope /repo", "--key pi-tool:session-1:call-", "--json"} {
+			for _, want := range []string{"--harness pi", "--scope=/repo", "--key=pi-tool:session-1:call-", "--json"} {
 				if !strings.Contains(line, want) {
 					t.Fatalf("start %q missing %q", line, want)
 				}
@@ -460,7 +460,7 @@ esac
 		}
 	}
 	// Both executions of call-1 used one key; Posse returns the same attempt.
-	if starts != 3 || strings.Count(string(calls), "--key pi-tool:session-1:call-1 ") != 2 {
+	if starts != 3 || strings.Count(string(calls), "--key=pi-tool:session-1:call-1 ") != 2 {
 		t.Fatalf("starts=%d calls:\n%s", starts, calls)
 	}
 	if strings.Count(string(calls), "research cancel r9") < 1 || strings.Contains(string(calls), "research cancel r7") {

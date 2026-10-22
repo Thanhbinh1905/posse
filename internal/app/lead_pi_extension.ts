@@ -101,8 +101,9 @@ function registerResearch(pi) {
 			if (!params?.task || !params?.scope) throw new Error("posse_research needs a task and an explicit scope directory");
 			const session = ctx?.sessionManager?.getSessionId?.() ?? "unknown";
 			const key = `pi-tool:${session}:${toolCallId}`;
-			const args = ["research", "start", "--harness", "pi", "--scope", params.scope, "--prompt", params.task, "--key", key];
-			if (params.model) args.push("--model", params.model);
+			// The name=value form keeps a task that begins with "--" a value.
+			const args = ["research", "start", "--harness", "pi", `--scope=${params.scope}`, `--prompt=${params.task}`, `--key=${key}`];
+			if (params.model) args.push(`--model=${params.model}`);
 			const started = await runPosseJSON(args);
 			const id = started.research.id;
 			research.owned.set(key, id);
