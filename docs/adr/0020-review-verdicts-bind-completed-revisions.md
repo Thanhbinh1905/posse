@@ -1,5 +1,7 @@
 # Review verdicts bind completed revisions
 
+**Current status:** ADR 0028 removes configurable command Gates. PR review evidence is still bound to `gated_sha` and forge CI; local delivery has no automated verification.
+
 ## Context
 
 A Review Task read a moving Change branch and its Report was prose, so nothing recorded which revision a review covered or whether it passed. A Reviewer could not be prevented from reviewing something other than the candidate that would Merge.

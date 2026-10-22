@@ -91,15 +91,14 @@ func preferenceFields(brief dispatch.Brief) []string {
 }
 
 type Member struct {
-	Review       string   `json:"review,omitempty"`
-	ReviewSource string   `json:"review_source,omitempty"`
-	Name         string   `json:"name"`
-	Path         string   `json:"path"`
-	Base         string   `json:"base"`
-	BaseCommit   string   `json:"base_commit,omitempty"`
-	Target       string   `json:"target"`
-	Delivery     string   `json:"delivery"`
-	Gate         []string `json:"gate"`
+	Review       string `json:"review,omitempty"`
+	ReviewSource string `json:"review_source,omitempty"`
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	Base         string `json:"base"`
+	BaseCommit   string `json:"base_commit,omitempty"`
+	Target       string `json:"target"`
+	Delivery     string `json:"delivery"`
 }
 
 type Execution struct {
@@ -130,7 +129,6 @@ type Paths struct {
 
 type ValidationLoops struct {
 	Review            config.ReviewLoop `json:"review_loop"`
-	Gate              config.GateLoop   `json:"gate_loop"`
 	CI                config.CILoop     `json:"ci_loop"`
 	BriefReviewRounds int               `json:"brief_review_rounds,omitempty"`
 }
@@ -161,7 +159,6 @@ type Plan struct {
 	Inputs          []Input                   `json:"inputs"`
 	Paths           Paths                     `json:"paths"`
 	Launch          Launch                    `json:"launch"`
-	Gate            []string                  `json:"gate"`
 	WorkflowJobs    bool                      `json:"workflow_jobs,omitempty"`
 	ValidationLoops *ValidationLoops          `json:"validation_loops,omitempty"`
 	Workflow        *config.WorkflowSelection `json:"workflow,omitempty"`
@@ -182,7 +179,6 @@ type Request struct {
 	ConfigSources   []string
 	UserChoice      *UserChoice
 	Paths           Paths
-	Gate            []string
 	WorkflowJobs    bool
 	ValidationLoops *ValidationLoops
 	Workflow        *config.WorkflowSelection
@@ -246,7 +242,7 @@ func Resolve(r Request) (Plan, error) {
 		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.merge", Value: autonomy.Merge, Source: mergeSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
-		Gate: r.Gate, WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool}
+		WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool}
 	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
 	for i, explicit := range []bool{brief.MergeMode != "", brief.Review != ""} {
 		if explicit {
@@ -289,14 +285,13 @@ func Resolve(r Request) (Plan, error) {
 		Review          string                    `json:"review"`
 		Delivery        string                    `json:"delivery"`
 		Grants          []Grant                   `json:"grants"`
-		Gate            []string                  `json:"gate"`
 		WorkflowJobs    bool                      `json:"workflow_jobs,omitempty"`
 		ValidationLoops *ValidationLoops          `json:"validation_loops,omitempty"`
 		Workflow        *config.WorkflowSelection `json:"workflow,omitempty"`
 		MergeMethod     string                    `json:"merge_method"`
 		ProseLanguage   string                    `json:"prose_language"`
 		Pool            config.Pool               `json:"pool"`
-	}{p.Execution, p.Review, p.Delivery, p.Grants, p.Gate, p.WorkflowJobs, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool})
+	}{p.Execution, p.Review, p.Delivery, p.Grants, p.WorkflowJobs, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool})
 	if err != nil {
 		return Plan{}, err
 	}
@@ -533,7 +528,6 @@ func (p Plan) Validate() error {
 			{"review_loop.auto_start", p.ValidationLoops.Review.AutoStart},
 			{"review_loop.docs", p.ValidationLoops.Review.Docs},
 			{"review_loop.guidance", p.ValidationLoops.Review.Guidance},
-			{"gate_loop.max_fix_rounds", p.ValidationLoops.Gate.MaxFixRounds},
 			{"ci_loop.max_fix_rounds", p.ValidationLoops.CI.MaxFixRounds},
 			{"ci_loop.rerun_cancelled", p.ValidationLoops.CI.RerunCancelled},
 		}

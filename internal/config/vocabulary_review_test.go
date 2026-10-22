@@ -51,7 +51,7 @@ func TestVocabularyProjectShorthandUpgrade(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if cfg.Defaults.MergeMode != mode || cfg.Defaults.AutoTeardown != "merged" || len(cfg.Defaults.Gate) != 1 || cfg.Defaults.Gate[0] != "just test" {
+				if cfg.Defaults.MergeMode != mode || cfg.Defaults.AutoTeardown != "merged" || !strings.Contains(strings.Join(cfg.Warnings, "\n"), "gate was removed") {
 					t.Fatalf("Project shorthand changed meaning: %#v", cfg.Defaults)
 				}
 			}

@@ -843,25 +843,3 @@ func failedWorkflowJob(encoded string) bool {
 	}
 	return false
 }
-
-func workflowCoverageFailureOutput(encoded string) string {
-	var coverage localWorkflowCoverage
-	if err := json.Unmarshal([]byte(encoded), &coverage); err != nil {
-		return err.Error()
-	}
-	var details []string
-	for _, workflow := range coverage.Workflows {
-		for _, job := range workflow.Jobs {
-			if job.Status != "failed" {
-				continue
-			}
-			details = append(details, workflow.File+" job "+job.Name+": "+job.Reason)
-			for _, step := range job.Steps {
-				if step.Status == "failed" && step.Output != "" {
-					details = append(details, step.Output)
-				}
-			}
-		}
-	}
-	return strings.Join(details, "\n")
-}

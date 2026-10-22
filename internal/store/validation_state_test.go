@@ -155,7 +155,7 @@ func TestReviewRoundAdmissionSharesRepairBudgetOnlyWhenEnabled(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
-			if _, err := f.db.QueueValidationFixInstruction(f.ctx, f.change, "gate", reviewShaA, "prior-gate-fix", "Prior Gate fix"); err != nil {
+			if _, err := f.db.QueueValidationFixInstruction(f.ctx, f.change, "review", reviewShaA, "prior-review-fix", "Prior Review fix"); err != nil {
 				t.Fatal(err)
 			}
 			admission := ReviewRoundAdmission{
@@ -175,7 +175,7 @@ func TestReviewRoundAdmissionSharesRepairBudgetOnlyWhenEnabled(t *testing.T) {
 				t.Fatalf("shared budget admission error = %v, want cap", err)
 			}
 			if !shared && err != nil {
-				t.Fatalf("separate review-round budget was reduced by a Gate fix: %v", err)
+				t.Fatalf("separate review-round budget was reduced by a Review fix: %v", err)
 			}
 		})
 	}

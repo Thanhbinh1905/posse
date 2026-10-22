@@ -151,20 +151,6 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 		if strings.TrimSpace(parsed.Flags["proof"]) == "" || strings.TrimSpace(parsed.Flags["coverage"]) == "" {
 			return axi.Failure("validation_evidence_required", "lint requires --proof <result> and --coverage <local workflow jobs and gaps>", false)
 		}
-		cfg, err := s.prepareProject(out.Context, db, project)
-		if err != nil {
-			return err
-		}
-		gates := cfg.Defaults.Gate
-		if lane.repo != "" {
-			gates = memberGates(cfg, lane.repo)
-		}
-		if gateErr := runMemberGates(out.Context, gates, candidate.WorktreePath); gateErr != nil {
-			if recordErr := recordGateFailure(out.Context, db, project, task, candidate.CandidateSHA, candidate.Repo, gateErr); recordErr != nil {
-				return recordErr
-			}
-			return axi.Failure("gate_failed", gateErr.Error(), false, "Fix the Gate failure in the private candidate, then rerun review -> test -> docs -> lint")
-		}
 		scratch, err := ensureTaskScratchForTask(out.Context, db, home, project, task)
 		if err != nil {
 			return err
@@ -209,11 +195,7 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 	}
 	if workflowFailure != nil {
 		if failedWorkflowJob(coverageText) {
-			gateErr := newGateCommandFailure("local workflow job", workflowCoverageFailureOutput(coverageText), workflowFailure)
-			if recordErr := recordGateFailure(out.Context, db, project, task, candidate.CandidateSHA, candidate.Repo, gateErr); recordErr != nil {
-				return recordErr
-			}
-			return axi.Failure("gate_failed", gateErr.Error(), false, "Fix the local workflow failure in the private candidate, then rerun review -> test -> docs -> lint")
+			return axi.Failure("workflow_jobs_failed", workflowFailure.Error(), false, "Fix the failing workflow jobs in the private candidate, then rerun review -> test -> docs -> lint")
 		}
 		return axi.Failure("workflow_jobs_blocked", workflowFailure.Error(), false, "Enable full_pipeline.run_workflows in User Project config before admitting a full-pipeline Task, or resolve the workflow parsing/coverage blocker")
 	}
@@ -343,7 +325,7 @@ func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project 
 			return axi.Failure("validation_stale", lane.memberLabel("head "+shortSHA(head)+" does not match the fully validated private candidate "+shortSHA(candidate.CandidateSHA)), false, "Run `posse publish` to submit the new head as a fresh candidate")
 		}
 		if gated := lane.task.GatedSHA; lane.localDelivery() && gated != "" && gated != candidate.CandidateSHA {
-			return axi.Failure("validation_stale", lane.memberLabel("gated head "+shortSHA(gated)+" is not the fully validated private candidate "+shortSHA(candidate.CandidateSHA)), false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate the validated head")
+			return axi.Failure("validation_stale", lane.memberLabel("gated head "+shortSHA(gated)+" is not the fully validated private candidate "+shortSHA(candidate.CandidateSHA)), false, "Run `posse merge "+taskIDString(task.Seq)+"` again to record the validated head")
 		}
 		if integrated, err := memberPRMergedAtCandidate(ctx, cfg, lane, candidate); err != nil {
 			return err

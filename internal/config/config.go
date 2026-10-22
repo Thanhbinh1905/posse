@@ -36,21 +36,20 @@ type Lead struct {
 }
 
 type Defaults struct {
-	MaxWorkers          int      `toml:"max_workers" json:"max_workers"`
-	DispatchInheritance string   `toml:"dispatch_inheritance" json:"dispatch_inheritance"`
-	StallAfter          string   `toml:"stall_after" json:"stall_after"`
-	IdleAfter           string   `toml:"idle_after" json:"idle_after"`
-	AutoTeardown        string   `toml:"auto_teardown" json:"auto_teardown"`
-	AutoRecover         bool     `toml:"auto_recover" json:"auto_recover"`
-	RecoveryAttempts    int      `toml:"recovery_attempts" json:"recovery_attempts"`
-	RecoveryBackoff     string   `toml:"recovery_backoff" json:"recovery_backoff"`
-	MergeMode           string   `toml:"merge_mode" json:"merge_mode"`
-	TargetBranch        string   `toml:"target_branch" json:"target_branch"`
-	MergeMethod         string   `toml:"merge_method" json:"merge_method"`
-	Forge               string   `toml:"forge" json:"forge"`
-	PRPoll              string   `toml:"pr_poll" json:"pr_poll"`
-	Review              string   `toml:"review" json:"review"`
-	Gate                []string `toml:"gate" json:"gate"`
+	MaxWorkers          int    `toml:"max_workers" json:"max_workers"`
+	DispatchInheritance string `toml:"dispatch_inheritance" json:"dispatch_inheritance"`
+	StallAfter          string `toml:"stall_after" json:"stall_after"`
+	IdleAfter           string `toml:"idle_after" json:"idle_after"`
+	AutoTeardown        string `toml:"auto_teardown" json:"auto_teardown"`
+	AutoRecover         bool   `toml:"auto_recover" json:"auto_recover"`
+	RecoveryAttempts    int    `toml:"recovery_attempts" json:"recovery_attempts"`
+	RecoveryBackoff     string `toml:"recovery_backoff" json:"recovery_backoff"`
+	MergeMode           string `toml:"merge_mode" json:"merge_mode"`
+	TargetBranch        string `toml:"target_branch" json:"target_branch"`
+	MergeMethod         string `toml:"merge_method" json:"merge_method"`
+	Forge               string `toml:"forge" json:"forge"`
+	PRPoll              string `toml:"pr_poll" json:"pr_poll"`
+	Review              string `toml:"review" json:"review"`
 }
 
 type ReviewLoop struct {
@@ -60,10 +59,6 @@ type ReviewLoop struct {
 	AutoStart bool     `toml:"auto_start" json:"auto_start"`
 	Docs      bool     `toml:"docs" json:"docs"`
 	Guidance  []string `toml:"guidance" json:"guidance"`
-}
-
-type GateLoop struct {
-	MaxFixRounds int `toml:"max_fix_rounds" json:"max_fix_rounds"`
 }
 
 type CILoop struct {
@@ -151,11 +146,10 @@ type Autonomy struct {
 
 // Repository is the per-member policy of a workspace Project.
 type Repository struct {
-	Review       string   `toml:"review" json:"review"`
-	MergeMode    string   `toml:"merge_mode" json:"merge_mode"`
-	TargetBranch string   `toml:"target_branch" json:"target_branch"`
-	Gate         []string `toml:"gate" json:"gate"`
-	Forge        string   `toml:"forge" json:"forge"`
+	Review       string `toml:"review" json:"review"`
+	MergeMode    string `toml:"merge_mode" json:"merge_mode"`
+	TargetBranch string `toml:"target_branch" json:"target_branch"`
+	Forge        string `toml:"forge" json:"forge"`
 }
 
 type Lowkey struct {
@@ -169,7 +163,6 @@ type Config struct {
 	Lead                Lead                       `toml:"lead" json:"lead"`
 	Defaults            Defaults                   `toml:"defaults" json:"defaults"`
 	ReviewLoop          ReviewLoop                 `toml:"review_loop" json:"review_loop"`
-	GateLoop            GateLoop                   `toml:"gate_loop" json:"gate_loop"`
 	CILoop              CILoop                     `toml:"ci_loop" json:"ci_loop"`
 	FullPipeline        FullPipeline               `toml:"full_pipeline" json:"full_pipeline"`
 	Pool                Pool                       `toml:"pool" json:"pool"`
@@ -184,6 +177,7 @@ type Config struct {
 	Autonomy            Autonomy                   `toml:"autonomy" json:"autonomy"`
 	Files               []string                   `toml:"-" json:"-"`
 	LeadLanguageDefault bool                       `toml:"-" json:"-"`
+	Warnings            []string                   `toml:"-" json:"-"`
 }
 
 type DispatchDefault struct {
@@ -283,6 +277,7 @@ func ValidationIssues(home, projectName string) []error {
 		issues = append(issues, globalErr)
 		global = map[string]any{}
 	}
+	removeLegacyGateSettings(globalPath, global)
 	if _, found := global["autonomy"]; found {
 		issues = append(issues, &InvalidError{File: globalPath, Key: "autonomy", Reason: "autonomy is valid only in a Project config"})
 	}
@@ -298,6 +293,7 @@ func ValidationIssues(home, projectName string) []error {
 			issues = append(issues, projectErr)
 			project = map[string]any{}
 		}
+		removeLegacyGateSettings(projectPath, project)
 		if _, found := project["worker_go_cache"]; found {
 			issues = append(issues, &InvalidError{File: projectPath, Key: "worker_go_cache", Reason: userConfigOnlyReason("worker_go_cache")})
 		}
@@ -344,6 +340,7 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	warnings := removeLegacyGateSettings(globalPath, global)
 	if _, found := global["autonomy"]; found {
 		return Config{}, &InvalidError{File: globalPath, Key: "autonomy", Reason: "autonomy is valid only in a Project config"}
 	}
@@ -358,6 +355,7 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
+		warnings = append(warnings, removeLegacyGateSettings(projectPath, project)...)
 		if _, found := project["worker_go_cache"]; found {
 			return Config{}, &InvalidError{File: projectPath, Key: "worker_go_cache", Reason: userConfigOnlyReason("worker_go_cache")}
 		}
@@ -369,10 +367,40 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.Warnings = warnings
 	if err := cfg.Validate(projectName != ""); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func removeLegacyGateSettings(path string, values map[string]any) []string {
+	warnings := []string{}
+	if _, found := values["gate"]; found {
+		delete(values, "gate")
+		warnings = append(warnings, fmt.Sprintf("%s: gate was removed and is ignored", path))
+	}
+	if defaults, ok := values["defaults"].(map[string]any); ok {
+		if _, found := defaults["gate"]; found {
+			delete(defaults, "gate")
+			warnings = append(warnings, fmt.Sprintf("%s: defaults.gate was removed and is ignored; PR delivery uses forge CI, local delivery has no automated verification", path))
+		}
+	}
+	if repositories, ok := values["repositories"].(map[string]any); ok {
+		for name, raw := range repositories {
+			if repository, ok := raw.(map[string]any); ok {
+				if _, found := repository["gate"]; found {
+					delete(repository, "gate")
+					warnings = append(warnings, fmt.Sprintf("%s: repositories.%s.gate was removed and is ignored", path, name))
+				}
+			}
+		}
+	}
+	if _, found := values["gate_loop"]; found {
+		delete(values, "gate_loop")
+		warnings = append(warnings, fmt.Sprintf("%s: gate_loop was removed and is ignored", path))
+	}
+	return warnings
 }
 
 func configFromMaps(globalPath string, global map[string]any, projectPath string, project map[string]any, projectName string) (Config, error) {
@@ -501,7 +529,7 @@ func applyProjectScalars(project map[string]any) map[string]any {
 	if !ok {
 		defaults = map[string]any{}
 	}
-	for _, key := range []string{"max_workers", "stall_after", "idle_after", "auto_teardown", "merge_mode", "merge_method", "forge", "pr_poll", "review", "gate"} {
+	for _, key := range []string{"max_workers", "stall_after", "idle_after", "auto_teardown", "merge_mode", "merge_method", "forge", "pr_poll", "review"} {
 		if value, found := project[key]; found {
 			defaults[key] = value
 			delete(project, key)
@@ -591,14 +619,13 @@ func defaultMap() map[string]any {
 		"retention":       map[string]any{"task_artifacts": "2160h"},
 		"worker_go_cache": map[string]any{"max_size": DefaultWorkerGoCache.MaxSize, "min_age": DefaultWorkerGoCache.MinAge, "interval": DefaultWorkerGoCache.Interval},
 		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}},
-		"gate_loop":       map[string]any{"max_fix_rounds": 3},
 		"ci_loop":         map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1},
 		"full_pipeline":   map[string]any{"run_workflows": false},
 		"lead":            map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey":          map[string]any{"lead": false},
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
-			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "none", "gate": []string{},
+			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "none",
 		},
 		"kinds": map[string]any{
 			"claude":   map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryWatch, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},

@@ -132,7 +132,7 @@ func TestFirstOutcomeUpKindSelection(t *testing.T) {
 				if !strings.Contains(output, tc.source) || f.service.pendingLead == nil || f.service.pendingLead.Kind != tc.kind {
 					t.Fatalf("selection: %s %#v", output, f.service.pendingLead)
 				}
-				for _, code := range []string{"gate_empty", "autonomy_ask", "machine_setup"} {
+				for _, code := range []string{"autonomy_ask", "machine_setup"} {
 					if !strings.Contains(output, code) {
 						t.Fatalf("up missing %s: %s", code, output)
 					}
@@ -141,7 +141,7 @@ func TestFirstOutcomeUpKindSelection(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !strings.Contains(string(instructions), "gate_empty") {
+				if !strings.Contains(string(instructions), "autonomy_ask") {
 					t.Fatalf("startup readiness absent: %s", instructions)
 				}
 			}
@@ -550,9 +550,6 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 				if gap.Consequence == "" || gap.Fix == "" {
 					t.Fatalf("incomplete gap: %#v", gap)
 				}
-				if gap.Code == "gate_empty" && (!gap.UserOnly || gap.Key != "defaults.gate") {
-					t.Fatalf("Gate authority: %#v", gap)
-				}
 			}
 			for _, code := range want {
 				if !codes[code] {
@@ -566,11 +563,11 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 			}
 		}
 	}
-	check([]string{"forge_auth", "gate_empty", "autonomy_ask", "machine_setup"}, []string{"no_mistakes_uninitialized"})
+	check([]string{"forge_auth", "autonomy_ask", "machine_setup"}, []string{"no_mistakes_uninitialized"})
 	if err := os.WriteFile(filepath.Join(f.root, "gh-ready"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	outcomeCLI(t, f.service, 0, "config", "set", "defaults.gate", "['true']", "--project", "shop", "--user-approved", "Use true as the fixture Gate")
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_method", "merge", "--project", "shop")
 	outcomeCLI(t, f.service, 0, "config", "set", "autonomy.yolo", "true", "--project", "shop", "--user-approved", "Grant standing fixture Autonomy")
 	cfg, err := config.Load(f.home, "shop")
 	if err != nil {
@@ -579,7 +576,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	if _, err := cachedForgeProbe(context.Background(), f.repo, "github.com", cfg, "github"); err != nil {
 		t.Fatal(err)
 	}
-	check([]string{"machine_setup"}, []string{"forge_auth", "gate_empty", "autonomy_ask"})
+	check([]string{"machine_setup"}, []string{"forge_auth", "autonomy_ask"})
 	outcomeCLI(t, f.service, 0, "config", "set", "defaults.forge", "gitlab", "--project", "shop")
 	gitTest(t, f.repo, "remote", "set-url", "origin", "https://gitlab.example.com/group/project.git")
 	output := outcomeCLI(t, f.service, 0, "--json")
@@ -620,7 +617,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	f.fake.RunOut["plugin link "+filepath.Join(f.home, "plugin", "herdr-plugin.toml")] = []byte(`{}`)
 	outcomeCLI(t, f.service, 0, "setup", "--binary", "/usr/bin/true")
 	f.fake.RunOut["plugin list --json"] = []byte(`{"plugins":[{"id":"posse.herdr","path":"` + filepath.Join(f.home, "plugin", "herdr-plugin.toml") + `"}]}`)
-	check(nil, []string{"forge_auth", "gate_empty", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"})
+	check(nil, []string{"forge_auth", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"})
 	output = outcomeCLI(t, f.service, 0, "--json")
 	if strings.Contains(output, `"readiness"`) {
 		t.Fatalf("fully ready status retained readiness: %s", output)
@@ -635,7 +632,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	output := outcomeCLI(t, f.service, 0, "lead")
-	for _, rule := range []string{"Default workflow guidance", "lightest workflow", "one Change Brief and dispatch it directly", "Research Tasks, specifications, tickets and separate review Tasks are optional", "consequential questions", "Investigate repository facts before asking the User", "runtime obligations", "explicit yes", "--user-approved", "one-off permission never becomes standing Autonomy", "deliverable", "verification", "permitted effects", "return conditions", "setup and personalization optional", "at most once", "language they write in", "lowkey", "posse preferences set <lead|worker> --file <file>", "Workers cannot write preferences"} {
+	for _, rule := range []string{"Default workflow guidance", "lightest workflow", "one Change Brief and dispatch it directly", "Research Tasks, specifications, tickets and separate review Tasks are optional", "consequential questions", "Investigate repository facts before asking the User", "runtime obligations", "explicit User approval", "--user-approved", "one-off permission never becomes standing Autonomy", "deliverable", "verification", "permitted effects", "return conditions", "setup and personalization optional", "at most once", "language they write in", "lowkey", "posse preferences set <lead|worker> --file <file>", "Workers cannot write preferences"} {
 		if !strings.Contains(output, rule) {
 			t.Fatalf("Lead missing %q: %s", rule, output)
 		}

@@ -98,7 +98,7 @@ func (db *DB) ObserveCompletedWorker(ctx context.Context, expected Task, paneID,
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET gated_sha='' WHERE id=?`, expected.ID); err != nil {
 		return nil, err
 	}
-	// Preserve already merged members, but invalidate every remaining gate.
+	// Preserve already merged members, but clear every remaining merge head.
 	if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='',state=CASE WHEN state IN ('gated','unchanged','merging') THEN 'open' ELSE state END,updated_at=? WHERE task_id=? AND state<>'merged'`, now.UnixMilli(), expected.ID); err != nil {
 		return nil, err
 	}

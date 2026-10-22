@@ -1,5 +1,7 @@
 # 27. Thin core and User-owned workflow profiles
 
+**Current status:** ADR 0028 removes configurable command Gates and in-place execution. The historical design details below do not describe supported command or Task options; workflow stage `gate = "user"` remains a User decision.
+
 Posse is a dispatch-control layer: it assigns the right work to the right isolated Worker. The User's multi-stage process is an optional workflow profile, not a required product lifecycle. The User decides between stages; the Lead does not advance them automatically.
 
 ## Context
@@ -26,13 +28,13 @@ The core has three frames. They describe the work, not mandatory separate Tasks:
 
 **Ship is Git delivery after the frames**, not a fourth frame: publish/PR, forge CI and merge. Deliver does not mean production rollout, deployment permissions or monitoring.
 
-The default remains one unconfigured `pi` or `claude` Worker that discovers, plans and codes by itself. There are no required workflow stages, bundles or Gates, and no Profile setup prerequisite. Configured review, Gates and merge authority still apply; selecting the direct path cannot bypass them. `defaults.review = "none"` is the unconfigured review default.
+The default remains one unconfigured `pi` or `claude` Worker that discovers, plans and codes by itself. There are no required workflow stages, bundles or Profile setup prerequisites. Selected review policy and merge authority still apply; selecting the direct path cannot bypass them. PR delivery relies on forge CI at the recorded head; local delivery has no automated verification. `defaults.review = "none"` is the unconfigured review default.
 
 ### Three non-disableable guardrails
 
 No workflow profile, preference, stage approval or Autonomy setting can disable:
 
-- **Isolation:** each repository Worker has its own Sandbox and per-Task processes. Teardown never touches resources outside its Task. Existing explicitly consented in-place directory execution keeps its scoped path leases and source-preservation rules; a profile cannot select it implicitly.
+- **Isolation:** each repository Worker has its own Sandbox and per-Task processes. Teardown never touches resources outside its Task. Legacy Directory Projects and in-place Tasks are readable for compatibility but cannot admit or resume work; existing Tasks can be torn down.
 - **Ship authority:** Workers never merge or force-push. Merge follows `autonomy.merge` or explicit User approval; stage approval grants no extra merge, discard or executable authority.
 - **Selected review:** the admitted review mode must be satisfied. A missing reviewer, failed validation or exhausted budget is a blocker, not permission to downgrade. A scoped User choice for a different mode is a separate admission decision, not a profile bypass.
 
@@ -83,7 +85,7 @@ stages = [
 
 Here `ship` denotes delivery outside the three frames. Review allocates no reviewer for `none`, or one independent reviewer per round for `quick`/`full-pipeline`; full-pipeline also performs its required test/docs/lint work in the private candidate lane. Selecting `none` records review as not required, not passed; the User still decides the profile's next-stage transition.
 
-Creating a workflow run freezes the selected profile's exact content, stage order, gates, Task types, Worker bounds, source and digest in the initial Task plan. Later Tasks, stage Decisions and status use that run snapshot, not edited dotfiles; deleting or renaming the source does not affect the run. Config changes affect new runs only. A User who wants an active run to adopt an edit starts a new run; in-place migration is not supported. No profile is frozen for an unconfigured direct Task. This is an ordered recipe over existing Tasks, not a general workflow DSL, new Task hierarchy, scheduler or five-table workflow runner.
+Creating a workflow run freezes the selected profile's exact content, stage order, gates, Task types, Worker bounds, source and digest in the initial Task plan. Later Tasks, stage Decisions and status use that run snapshot, not edited dotfiles; deleting or renaming the source does not affect the run. Config changes affect new runs only. A User who wants an active run to adopt an edit starts a new run; active runs are not migrated. No profile is frozen for an unconfigured direct Task. This is an ordered recipe over existing Tasks, not a general workflow DSL, new Task hierarchy, scheduler or five-table workflow runner.
 
 Skill fields remain opaque placeholders. Skill sets, bundle contents, registries, loaders and default skill selection are explicitly deferred until the workflow takes shape; S01-S03 (#161-#163) are not prerequisites for the direct path or this workflow decision.
 

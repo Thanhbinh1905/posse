@@ -201,12 +201,11 @@ func TestAutoStartReviewLoopRespectsSelectedReviewPolicy(t *testing.T) {
 	}
 }
 
-func TestAutoStartReviewLoopStartsOnlyAfterGatePasses(t *testing.T) {
+func TestAutoStartReviewLoopStartsWhenMergeIsRequested(t *testing.T) {
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
 merge_mode = "local"
 review = "quick"
-gate = ["test -f gate.ok"]
 
 [profiles.author]
 kind = "claude"
@@ -267,24 +266,11 @@ auto_start = true
 		code := cli.Run([]string{"merge", fmt.Sprintf("t%d", change.Seq)})
 		return code, output.String()
 	}
-	beforeTabs := f.fake.CallCount("tab.create")
-	if code, output := merge(); code != 1 || !strings.Contains(output, "gate_failed") {
-		t.Fatalf("failed gate exit=%d output=%s", code, output)
-	}
-	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
-	if err != nil || len(rounds) != 0 || f.fake.CallCount("tab.create") != beforeTabs {
-		t.Fatalf("auto_start admitted before gate pass: rounds=%#v err=%v tabs=%d", rounds, err, f.fake.CallCount("tab.create"))
-	}
-	if err := os.WriteFile(filepath.Join(change.WorktreePath, "gate.ok"), []byte("pass\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	gitTest(t, change.WorktreePath, "add", "gate.ok")
-	gitTest(t, change.WorktreePath, "commit", "-m", "satisfy gate")
 	mergeCode, mergeOutput := merge()
 	if mergeCode != 0 {
 		t.Fatalf("auto-start merge exit=%d output=%s", mergeCode, mergeOutput)
 	}
-	rounds, err = db.ReviewRoundsFor(ctx, change.ID)
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil || len(rounds) != 1 || rounds[0].Round != 1 || rounds[0].Status != "admitted" {
 		current, _ := db.TaskByID(ctx, change.ProjectID, change.ID)
 		frozen, _ := current.AdmittedPlan()

@@ -47,7 +47,7 @@ func prBranchBehindFailure(taskSeq int, headSHA string, freshness prTargetFreshn
 		"pr_branch_behind",
 		message,
 		false,
-		"Merge origin/"+freshness.Branch+" into the Task branch, rerun the Gate, republish, and report done before retrying `posse merge "+taskIDString(taskSeq)+"`; never rebase a pushed branch",
+		"Merge origin/"+freshness.Branch+" into the Task branch, republish, and report done before retrying `posse merge "+taskIDString(taskSeq)+"`; never rebase a pushed branch",
 	)
 }
 
@@ -112,12 +112,12 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 		memberLabel = "Workspace member " + member + ": "
 	}
 	instruction := fmt.Sprintf(
-		"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, rerun the configured Gate, republish the updated head through this Task's delivery mode, and signal done again.",
+		"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, republish the updated head through this Task's delivery mode, and signal done again.",
 		memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
 	)
 	if mergeMode == "no-mistakes" {
 		instruction = fmt.Sprintf(
-			"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, then rerun no-mistakes with `--skip=rebase` and the Brief intent so its Gate and publication run on the updated head. Signal done again afterward.",
+			"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, then rerun no-mistakes with `--skip=rebase` and the Brief intent. Signal done again afterward.",
 			memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
 		)
 	} else if member != "" {

@@ -13,7 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
-func TestWorkspacePRWatchRunsCILoopAgainstMemberGate(t *testing.T) {
+func TestWorkspacePRWatchRunsCILoopAgainstMemberPR(t *testing.T) {
 	configText := `[defaults]
 merge_mode = "local"
 review = "none"
@@ -24,8 +24,6 @@ merge_mode = "pr"
 enabled = true
 max_rounds = 3
 block_at = "P1"
-[gate_loop]
-max_fix_rounds = 3
 [ci_loop]
 max_fix_rounds = 3
 rerun_cancelled = 1
@@ -57,7 +55,6 @@ rerun_cancelled = 1
 		Paths: taskplan.Paths{Scratch: filepath.Join(fixture.home, "scratch", "stack", "t1"), Output: filepath.Join(fixture.home, "projects", "stack", "tasks", "t1")},
 		ValidationLoops: &taskplan.ValidationLoops{
 			Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"},
-			Gate:   config.GateLoop{MaxFixRounds: 3},
 			CI:     config.CILoop{MaxFixRounds: 3, RerunCancelled: 1},
 		},
 	})

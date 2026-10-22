@@ -49,13 +49,6 @@ func workspaceMembers(ctx context.Context, db *store.DB, project store.Project, 
 	return members, nil
 }
 
-func memberGates(cfg config.Config, name string) []string {
-	if repository, ok := cfg.Repositories[name]; ok && repository.Gate != nil {
-		return repository.Gate
-	}
-	return cfg.Defaults.Gate
-}
-
 func (s *Service) mergeWorkspace(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merge bool, quote string) (returnErr error) {
 	ctx := out.Context
 	if task.State != store.StateDone && task.State != store.StateMerging {
@@ -183,8 +176,8 @@ func (s *Service) mergeWorkspace(out *axi.Context, db *store.DB, project store.P
 	return out.Print(append(result, axi.Field{Key: "help", Value: []any{help}}))
 }
 
-// openWorkspaceMerge gates every changed member and opens its merging: a
-// recorded gated commit for local members, a pushed branch and pull request for
+// openWorkspaceMerge records every changed member's merge head and opens its merging: a
+// recorded commit for local members, a pushed branch and pull request for
 // pr members. The Task moves to merging once every changed member is ready.
 func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, members []memberMerge) error {
 	changed := 0
@@ -238,16 +231,10 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 				return prefixFailure(repo.Repo, err)
 			}
 		}
-		if gateErr := s.runIntentStep(ctx, db, intent, "gate.run:"+repo.Repo, func() error { return runMemberGates(ctx, memberGates(cfg, repo.Repo), repo.WorktreePath) }); gateErr != nil {
-			if err := recordGateFailure(ctx, db, project, gated, gatedSHA, repo.Repo, gateErr); err != nil {
-				return err
-			}
-			return axi.Failure("gate_failed", repo.Repo+": "+gateErr.Error(), false, gateFailureHelp(gated))
-		}
 		if current, err := gitOutput(ctx, repo.WorktreePath, "rev-parse", "refs/heads/"+task.Branch); err != nil {
 			return memberFailure(repo.Repo, err)
 		} else if current != gatedSHA {
-			return axi.Failure("branch_moved", repo.Repo+": Task branch moved while the Gate was running", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
+			return axi.Failure("branch_moved", repo.Repo+": Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 		}
 		if repo.MergeMode == "pr" {
 			if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, repo.Repo, repo.MergeMode, gatedSHA); err != nil {
@@ -318,7 +305,7 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 			return err
 		}
 	}
-	note := "Every changed member is gated or has an open pull request"
+	note := "Every changed member has a recorded merge head or an open pull request"
 	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", note); err != nil {
 		return err
 	}
@@ -345,10 +332,10 @@ func (s *Service) mergeWorkspaceMembers(ctx context.Context, db *store.DB, proje
 				return memberFailure(repo.Repo, err)
 			}
 			if latest != repo.GatedSHA {
-				if err := s.reopenWorkspaceTask(ctx, db, task, repo, "Task branch in "+repo.Repo+" moved after the Gate passed"); err != nil {
+				if err := s.reopenWorkspaceTask(ctx, db, task, repo, "Task branch in "+repo.Repo+" moved after its merge head was recorded"); err != nil {
 					return err
 				}
-				return axi.Failure("branch_moved", repo.Repo+": Task branch moved after the Gate passed", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
+				return axi.Failure("branch_moved", repo.Repo+": Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 			}
 			if err := s.runIntentStep(ctx, db, intent, "merge:"+repo.Repo, func() error {
 				pathScope, err := localMergePathScope(ctx, member.project, member.task)
@@ -420,10 +407,10 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 		headSHA = head.HeadRefOID
 	}
 	if headSHA != repo.GatedSHA {
-		if err := s.reopenWorkspaceTask(ctx, db, task, repo, "Pull request head in "+repo.Repo+" moved after the Gate passed"); err != nil {
+		if err := s.reopenWorkspaceTask(ctx, db, task, repo, "Pull request head in "+repo.Repo+" moved after its merge head was recorded"); err != nil {
 			return err
 		}
-		return axi.Failure("branch_moved", repo.Repo+": pull request head moved after the Gate passed", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
+		return axi.Failure("branch_moved", repo.Repo+": pull request head moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 	}
 	mergeLock, err := acquirePRMergeLock(ctx, member.target.Root)
 	if err != nil {
@@ -456,7 +443,7 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 }
 
 // reopenWorkspaceTask sends a merging Task back to done when one member's branch
-// moved, so the next `posse merge` gates that member again.
+// moved, so the next `posse merge` records that member's current head again.
 func (s *Service) reopenWorkspaceTask(ctx context.Context, db *store.DB, task store.Task, repo store.TaskRepo, note string) error {
 	repo.State, repo.GatedSHA = store.TaskRepoOpen, ""
 	if err := db.UpdateTaskRepo(ctx, repo); err != nil {
@@ -504,16 +491,6 @@ func (s *Service) recoverWorkspaceMergeIntent(ctx context.Context, db *store.DB,
 		return err
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
-}
-
-func runMemberGates(ctx context.Context, gates []string, worktree string) error {
-	for _, gate := range gates {
-		output, err := commandOutput(ctx, worktree, gate)
-		if err != nil {
-			return newGateCommandFailure(gate, output, err)
-		}
-	}
-	return nil
 }
 
 func memberRows(members []memberMerge) []any {
