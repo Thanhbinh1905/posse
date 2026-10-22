@@ -1,0 +1,40 @@
+#!/bin/sh
+# Fake Pi CLI for research tests. FAKE_PI_MODE selects sleep, wrong-session
+# or no-append (a resume that does not continue the session file).
+set -eu
+if [ "${1:-}" = "--version" ]; then
+	echo "${FAKE_PI_VERSION:-1.3.0}"
+	exit 0
+fi
+printf '%s\n' "$*" >>"$FAKE_RESEARCH_LOG"
+session_dir=""
+session_id=""
+session_file=""
+prompt=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--session-dir) session_dir=$2; shift 2 ;;
+	--session-id) session_id=$2; shift 2 ;;
+	--session) session_file=$2; shift 2 ;;
+	--) prompt=$2; shift $# ;;
+	*) shift ;;
+	esac
+done
+if [ -z "$session_file" ]; then
+	session_file="$session_dir/2026-10-23T00-00-00-000Z_$session_id.jsonl"
+	printf '{"type":"session","version":3,"id":"%s"}\n' "$session_id" >"$session_file"
+else
+	session_id=$(sed -n 's/.*"type":"session","version":3,"id":"\([^"]*\)".*/\1/p' "$session_file" | head -1)
+fi
+if [ "${FAKE_PI_MODE:-}" = "wrong-session" ]; then
+	session_id=11111111-2222-4333-8444-555555555555
+fi
+printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$session_id" "$(pwd)"
+if [ "${FAKE_PI_MODE:-}" = "sleep" ]; then
+	sleep 30
+fi
+if [ "${FAKE_PI_MODE:-}" != "no-append" ]; then
+	printf '{"type":"message","role":"user","text":"%s"}\n' "$prompt" >>"$session_file"
+fi
+printf '{"type":"message_end","message":{"role":"assistant","model":"fake-model","content":[{"type":"text","text":"pi answer to: %s"}],"usage":{"input":20,"output":5,"cacheRead":2,"cacheWrite":1,"cost":{"total":0.002}}}}\n' "$prompt"
+printf '{"type":"agent_end"}\n'

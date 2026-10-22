@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import { Text } from "@earendil-works/pi-tui";
 import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import { Type } from "@earendil-works/pi-ai";
 
 const posse = "posse"; // POSSE_EXECUTABLE
 const maxBackoffMs = 60_000;
@@ -53,7 +54,81 @@ function installLowkeyLayout() {
 	return state;
 }
 
+// Run one posse command and parse its JSON output.
+function runPosseJSON(args) {
+	return new Promise((resolve, reject) => {
+		const command = spawn(posse, [...args, "--json"], { stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		command.stdout.on("data", (chunk) => { stdout += chunk; });
+		command.stderr.on("data", (chunk) => { stderr += chunk; });
+		command.on("error", reject);
+		command.on("close", (code) => {
+			let parsed;
+			try { parsed = JSON.parse(stdout || stderr); } catch {}
+			if (code !== 0) return reject(new Error(parsed?.error?.message || stderr.trim() || `posse ${args[0]} exited ${code}`));
+			if (!parsed) return reject(new Error(`posse ${args.join(" ")} returned no JSON`));
+			resolve(parsed);
+		});
+	});
+}
+
+// The posse_research tool runs a tracked read-only Pi child through
+// `posse research`. Posse owns the child process, its persisted session and
+// its result; this extension only starts, waits for and cancels attempts it
+// started. A reload reuses the same per-call key, so it never duplicates a
+// child, and shutdown cancels exactly the attempts this Pi process owns.
+const researchKey = Symbol.for("posse:pi-research:v1");
+function registerResearch(pi) {
+	if (typeof pi.registerTool !== "function") return async () => {};
+	const research = globalThis[researchKey] ??= { owned: new Map() };
+	const schema = typeof Type === "object" && Type ? Type.Object({
+		task: Type.String({ description: "Self-contained research question for the child" }),
+		scope: Type.String({ description: "Absolute directory the child may read: the Project root or a Task Sandbox" }),
+		model: Type.Optional(Type.String({ description: "Model pattern for the child; defaults to Pi's default" })),
+	}) : {
+		type: "object",
+		required: ["task", "scope"],
+		properties: { task: { type: "string" }, scope: { type: "string" }, model: { type: "string" } },
+	};
+	const cancel = (id) => runPosseJSON(["research", "cancel", id]).catch(() => {});
+	pi.registerTool({
+		name: "posse_research",
+		label: "Posse research",
+		description: "Delegate bounded read-only research to a Posse-tracked Pi child with its own context. The child can only read, grep, find and ls inside the explicit scope directory and returns its final answer; it cannot edit files, run shell commands or start further children.",
+		parameters: schema,
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
+			if (!params?.task || !params?.scope) throw new Error("posse_research needs a task and an explicit scope directory");
+			const session = ctx?.sessionManager?.getSessionId?.() ?? "unknown";
+			const key = `pi-tool:${session}:${toolCallId}`;
+			const args = ["research", "start", "--harness", "pi", "--scope", params.scope, "--prompt", params.task, "--key", key];
+			if (params.model) args.push("--model", params.model);
+			const started = await runPosseJSON(args);
+			const id = started.research.id;
+			research.owned.set(key, id);
+			const abort = () => { void cancel(id); };
+			if (signal?.aborted) abort();
+			signal?.addEventListener?.("abort", abort, { once: true });
+			try {
+				const settled = await runPosseJSON(["research", "wait", id]);
+				const attempt = settled.research;
+				if (attempt.state !== "completed") throw new Error(`Posse research ${id} ${attempt.state}: ${attempt.note || "no result"}`);
+				return { content: [{ type: "text", text: attempt.result_text ?? "" }], details: { attempt: id, state: attempt.state, usage: attempt.usage, result: attempt.result } };
+			} finally {
+				signal?.removeEventListener?.("abort", abort);
+				research.owned.delete(key);
+			}
+		},
+	});
+	return async () => {
+		const owned = [...research.owned.values()];
+		research.owned.clear();
+		await Promise.all(owned.map(cancel));
+	};
+}
+
 export default function (pi) {
+	const shutdownResearch = registerResearch(pi);
 	let layout;
 	try { layout = installLowkeyLayout(); }
 	catch (error) { console.error(`Posse lowkey: transcript presentation adapter unavailable, skipping. ${error}`); }
@@ -493,6 +568,7 @@ export default function (pi) {
 	});
 
 	pi.on("session_shutdown", async (event) => {
+		await shutdownResearch();
 		if (runtime.owner !== owner) return;
 		runtime.generation++;
 		runtime.running = false;

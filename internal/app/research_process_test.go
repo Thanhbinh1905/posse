@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -270,5 +272,198 @@ func TestCodexResearchBoundsOutput(t *testing.T) {
 	truncated := f.attempts()[0]
 	if truncated.State != "completed" || !truncated.ResultTruncated || truncated.ResultBytes != 16 {
 		t.Fatalf("truncated %+v", truncated)
+	}
+}
+
+func TestPiResearchPersistsSessionIdentityAndVerifiesResume(t *testing.T) {
+	f := newProcessResearch(t)
+	code, output := runCLI(t, f.service, "research", "start", "--harness", "pi", "--scope", f.repo, "--prompt", "map", "--key", "pi-tool:s1:call-1", "--wait", "--timeout", "20000")
+	if code != 0 || !strings.Contains(output, "pi answer to: map") {
+		t.Fatalf("start: %d %s", code, output)
+	}
+	first := f.attempts()[0]
+	dir := researchDirectory(f.home, f.project.Name, first.ID)
+	if first.State != "completed" || first.ChildID == "" || !strings.HasPrefix(first.SessionRef, filepath.Join(dir, "sessions")) || !regularFileExists(first.SessionRef) || !first.Resumable || first.Model != "fake-model" {
+		t.Fatalf("first %+v", first)
+	}
+	if usage := research.ParseUsage(first.Usage); usage.InputTokens != 20 || usage.CostUSD != 0.002 {
+		t.Fatalf("usage %s", first.Usage)
+	}
+	invocation := f.harnessLog()
+	for _, want := range []string{"--mode json -p", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-mcp", "--no-approve", "--tools read,grep,find,ls", "--session-id " + first.ChildID} {
+		if !strings.Contains(invocation, want) {
+			t.Fatalf("pi invocation %q missing %q", invocation, want)
+		}
+	}
+	if strings.Contains(invocation, "--no-session") {
+		t.Fatalf("pi child ran without a persistent session: %s", invocation)
+	}
+	// A reloaded parent repeating the same tool call reuses the attempt.
+	if code, output := runCLI(t, f.service, "research", "start", "--harness", "pi", "--scope", f.repo, "--prompt", "map", "--key", "pi-tool:s1:call-1", "--wait"); code != 0 || f.runs() != 1 {
+		t.Fatalf("repeated start: runs=%d %s", f.runs(), output)
+	}
+
+	// Resume continues the same Posse-owned session file.
+	code, output = runCLI(t, f.service, "research", "follow-up", research.AttemptID(first.ID), "--prompt", "deeper", "--wait", "--timeout", "20000")
+	if code != 0 || !strings.Contains(output, "pi answer to: deeper") {
+		t.Fatalf("follow-up: %d %s", code, output)
+	}
+	second := f.attempts()[0]
+	if second.PreviousID != first.ID || second.ChildID != first.ChildID || second.SessionRef != first.SessionRef || second.State != "completed" {
+		t.Fatalf("second %+v", second)
+	}
+	if !strings.Contains(f.harnessLog(), "--session "+first.SessionRef) {
+		t.Fatalf("resume invocation %s", f.harnessLog())
+	}
+
+	// A resume that does not continue the session is reported interrupted.
+	t.Setenv("FAKE_PI_MODE", "no-append")
+	code, output = runCLI(t, f.service, "research", "follow-up", research.AttemptID(second.ID), "--prompt", "again", "--wait", "--timeout", "20000")
+	if code != 0 || !strings.Contains(output, "interrupted") || strings.Contains(output, "result_text") {
+		t.Fatalf("unverified resume: %d %s", code, output)
+	}
+
+	// A child that opens a different session is refused.
+	t.Setenv("FAKE_PI_MODE", "wrong-session")
+	code, output = runCLI(t, f.service, "research", "start", "--harness", "pi", "--scope", f.repo, "--prompt", "map", "--wait", "--timeout", "20000")
+	if code != 0 || !strings.Contains(output, "refused") || !strings.Contains(output, "Posse-owned session") {
+		t.Fatalf("wrong session: %d %s", code, output)
+	}
+}
+
+func TestPiResearchWithoutPersistedSessionCannotResume(t *testing.T) {
+	f := newProcessResearch(t)
+	ctx := context.Background()
+	lost, _, err := f.db.CreateResearchAttempt(ctx, store.ResearchAttempt{ProjectID: f.project.ID, ParentRole: "lead", Harness: "pi", Scope: f.repo, State: "registered"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.identities[434343] = ""
+	pid, identity, child := 434343, "boot/gone", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	if _, err := f.db.UpdateResearchAttempt(ctx, lost.ID, nil, store.ResearchChange{State: researchState(research.Running), RunnerPID: &pid, RunnerIdentity: &identity, ChildID: &child}); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runCLI(t, f.service, "research", "list", "--all"); code != 0 {
+		t.Fatal(output)
+	}
+	interrupted := f.attempt(lost.ID)
+	if interrupted.State != "interrupted" || interrupted.Resumable || !strings.Contains(interrupted.Note, "no persisted Pi session") {
+		t.Fatalf("lost pi %+v", interrupted)
+	}
+	if code, output := runCLI(t, f.service, "research", "follow-up", research.AttemptID(lost.ID), "--prompt", "resume"); code == 0 || !strings.Contains(output, "research_not_resumable") || !strings.Contains(output, "remains interrupted") {
+		t.Fatalf("resume without session: %d %s", code, output)
+	}
+	if f.runs() != 0 {
+		t.Fatalf("a non-resumable child was relaunched: runs=%d", f.runs())
+	}
+
+	// Cancelling a running Pi child stops exactly that child.
+	t.Setenv("FAKE_PI_MODE", "sleep")
+	if code, output := runCLI(t, f.service, "research", "start", "--harness", "pi", "--scope", f.repo, "--prompt", "long"); code != 0 {
+		t.Fatal(output)
+	}
+	running := f.attempts()[0]
+	deadline := time.Now().Add(10 * time.Second)
+	for running.ChildPID == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("child never recorded: %+v", running)
+		}
+		time.Sleep(20 * time.Millisecond)
+		running = f.attempt(running.ID)
+	}
+	if code, output := runCLI(t, f.service, "research", "cancel", research.AttemptID(running.ID)); code != 0 {
+		t.Fatal(output)
+	}
+	f.wg.Wait()
+	if cancelled := f.attempt(running.ID); cancelled.State != "cancelled" || cancelled.ResultPath != "" || researchProcessAlive(cancelled.ChildPID, cancelled.ChildIdentity) {
+		t.Fatalf("cancelled %+v", cancelled)
+	}
+}
+
+func TestPiResearchToolTracksOwnedAttempts(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable to load the Pi extension")
+	}
+	root := t.TempDir()
+	log := filepath.Join(root, "posse.log")
+	fake := filepath.Join(root, "posse")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >>"` + log + `"
+case "$1 $2" in
+"research start")
+	case "$*" in
+	*call-3*) id=r9 ;;
+	*) id=r7 ;;
+	esac
+	printf '{"research":{"id":"%s","state":"registered"}}\n' "$id" ;;
+"research wait")
+	if [ "$FAKE_POSSE_WAIT" = hang ]; then
+		i=0
+		while [ ! -e "` + log + `.cancel-$3" ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+		printf '{"research":{"id":"%s","state":"cancelled","note":"cancelled by posse research cancel"}}\n' "$3"
+	else
+		printf '{"research":{"id":"%s","state":"completed","result_text":"the store lives in internal/store","usage":"in=1 out=1"}}\n' "$3"
+	fi ;;
+"research cancel")
+	: >"` + log + `.cancel-$3"
+	printf '{"research":{"id":"%s","state":"cancelled"}}\n' "$3" ;;
+*)
+	printf '{}\n' ;;
+esac
+`
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	extension, err := filepath.Abs("lead_pi_extension.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(node, filepath.Join("testdata", "pi-research-tool.mjs"))
+	command.Env = append(os.Environ(), "POSSE_PI_EXTENSION="+extension, "POSSE_FAKE_BIN="+fake)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node harness: %v\n%s", err, output)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var results struct {
+		Answer       string         `json:"answer"`
+		Details      map[string]any `json:"details"`
+		MissingScope string         `json:"missingScope"`
+		Aborted      string         `json:"aborted"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &results); err != nil {
+		t.Fatalf("harness output %s: %v", output, err)
+	}
+	if results.Answer != "the store lives in internal/store" || results.Details["attempt"] != "r7" {
+		t.Fatalf("answer %+v", results)
+	}
+	if !strings.Contains(results.MissingScope, "explicit scope") {
+		t.Fatalf("missing scope accepted: %+v", results)
+	}
+	if !strings.Contains(results.Aborted, "r9 cancelled") {
+		t.Fatalf("abort did not cancel the owned attempt: %+v", results)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts := 0
+	for _, line := range strings.Split(string(calls), "\n") {
+		if strings.HasPrefix(line, "research start") {
+			starts++
+			for _, want := range []string{"--harness pi", "--scope /repo", "--key pi-tool:session-1:call-", "--json"} {
+				if !strings.Contains(line, want) {
+					t.Fatalf("start %q missing %q", line, want)
+				}
+			}
+		}
+	}
+	// Both executions of call-1 used one key; Posse returns the same attempt.
+	if starts != 3 || strings.Count(string(calls), "--key pi-tool:session-1:call-1 ") != 2 {
+		t.Fatalf("starts=%d calls:\n%s", starts, calls)
+	}
+	if strings.Count(string(calls), "research cancel r9") < 1 || strings.Contains(string(calls), "research cancel r7") {
+		t.Fatalf("cancel did not bind to the owned attempt:\n%s", calls)
 	}
 }
