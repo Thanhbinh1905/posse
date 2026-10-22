@@ -385,9 +385,10 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 	return db.PersistTask(ctx, taskID)
 }
 
-// TransitionLostUnlessTeardownIntent gives an admitted Teardown ownership of
-// the Task's terminal transition. The intent check and state change share one
-// transaction so reconciliation cannot race an intent inserted concurrently.
+// TransitionLostUnlessTeardownIntent gives an admitted Teardown, including an
+// approved discard, ownership of the Task's terminal transition. The intent
+// check and state change share one transaction so reconciliation cannot race
+// an intent inserted concurrently.
 func (db *DB) TransitionLostUnlessTeardownIntent(ctx context.Context, taskID int64, expected State, source, note string) (bool, error) {
 	if !transitions[expected][StateLost] {
 		return false, fmt.Errorf("transition %q -> %q is not allowed", expected, StateLost)
