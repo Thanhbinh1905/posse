@@ -365,7 +365,7 @@ func TestProjectAddAndScanTrackWorkspaceMembers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	targets, err := harness.service.projectTargets(context.Background(), harness.db(t), project)
+	targets, err := projectTargets(context.Background(), harness.db(t), project)
 	if err != nil || len(targets) != 3 {
 		t.Fatalf("targets = %#v, %v", targets, err)
 	}

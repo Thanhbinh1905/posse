@@ -100,17 +100,15 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return axi.Failure("publish_refused", "could not resolve the current directory", false)
 	}
-	candidateCWD := false
 	if isFullPipelineTask(task, repoFilter) {
-		candidate, candidateErr := db.LatestValidationCandidate(out.Context, task.ID, repoFilter)
-		candidateCWD = candidateErr == nil && pathWithin(candidate.WorktreePath, cwd)
+		return s.publishFullPipeline(out, db, home, project, task, repoFilter, cwd, cfg, parsed)
 	}
-	if !pathWithin(task.WorktreePath, cwd) && !candidateCWD {
-		return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox or its private candidate checkout", false)
+	if !pathWithin(task.WorktreePath, cwd) {
+		return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox", false)
 	}
 	var member *memberMerge
 	if project.IsWorkspace() {
-		members, err := s.workspaceMembers(out.Context, db, project, task)
+		members, err := workspaceMembers(out.Context, db, project, task)
 		if err != nil {
 			return err
 		}
@@ -129,21 +127,8 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("publish_refused", "only a PR-mode Change Task may be published without --repo", false)
 		}
 		root, err := gitTop(out.Context, "")
-		expectedRoot := task.WorktreePath
-		if candidateCWD {
-			candidate, candidateErr := db.LatestValidationCandidate(out.Context, task.ID, repoFilter)
-			if candidateErr != nil {
-				return candidateErr
-			}
-			expectedRoot = candidate.WorktreePath
-		}
-		if err != nil || !samePath(root, expectedRoot) {
-			return axi.Failure("publish_refused", "publish must run at the Task Sandbox or its private candidate checkout", false)
-		}
-	}
-	if isFullPipelineTask(task, repoFilter) {
-		if err := s.refuseMovedCandidateAuthor(out.Context, db, task, true); err != nil {
-			return err
+		if err != nil || !samePath(root, task.WorktreePath) {
+			return axi.Failure("publish_refused", "publish must run at the Task Sandbox", false)
 		}
 	}
 	if err := validateChangeSignal(out.Context, task); err != nil {
@@ -163,19 +148,6 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	if branchHead != sha {
 		return axi.Failure("publish_refused", "Task branch moved while publish was inspecting the Sandbox", true, "Retry `posse publish` after the branch settles")
-	}
-	if isFullPipelineTask(task, repoFilter) {
-		if candidateCWD {
-			candidate, err := db.LatestValidationCandidate(out.Context, task.ID, repoFilter)
-			if err != nil {
-				return err
-			}
-			if err := s.ensureCandidateCheckout(out.Context, db, home, task, candidate); err != nil {
-				return err
-			}
-			return s.promotePrivateCandidate(out, db, home, project, task, repoFilter, cfg)
-		}
-		return s.submitPrivateCandidate(out, db, home, project, task, repoFilter, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
 	}
 	forge, err := forgeForRepository(out.Context, project.Root, cfg, parsed.Flags["repo"])
 	if err != nil {
@@ -237,10 +209,61 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	return out.Print(append(result, axi.Field{Key: "help", Value: []any{help}}))
 }
 
+// publishFullPipeline is the full-pipeline entry point of publish for one
+// lane. From the author Sandbox it submits a private candidate; from that
+// candidate's checkout it promotes the fully validated head. PR and local
+// delivery, single-repository and per-Member, share this path.
+func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home string, project store.Project, task store.Task, repo, cwd string, cfg config.Config, parsed parsedArgs) error {
+	ctx := out.Context
+	lane, err := resolveCandidateLane(ctx, db, project, task, repo)
+	if err != nil {
+		return err
+	}
+	if lane.task.MergeMode != "pr" && !lane.localDelivery() {
+		return axi.Failure("publish_refused", lane.memberLabel("full-pipeline publication supports PR and local delivery only"), false)
+	}
+	candidate, candidateErr := db.LatestValidationCandidate(ctx, task.ID, repo)
+	candidateCWD := candidateErr == nil && pathWithin(candidate.WorktreePath, cwd)
+	if candidateCWD {
+		root, err := gitTop(ctx, "")
+		if err != nil || !samePath(root, candidate.WorktreePath) {
+			return axi.Failure("publish_refused", "publish must run at the root of the private candidate checkout", false)
+		}
+	} else if project.IsWorkspace() {
+		if !pathWithin(task.WorktreePath, cwd) {
+			return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox or the Member's private candidate checkout", false)
+		}
+	} else if root, err := gitTop(ctx, ""); err != nil || !samePath(root, task.WorktreePath) {
+		return axi.Failure("publish_refused", "publish must run at the Task Sandbox or its private candidate checkout", false)
+	}
+	if err := s.refuseMovedCandidateAuthor(ctx, db, project, task, true); err != nil {
+		return err
+	}
+	if err := validateChangeSignal(ctx, lane.task); err != nil {
+		return axi.Failure("publish_refused", lane.memberLabel(err.Error()), false)
+	}
+	head, branch, err := authorBranchHead(ctx, lane.task)
+	if err != nil || branch != "refs/heads/"+task.Branch {
+		return axi.Failure("publish_refused", lane.memberLabel("Sandbox must be checked out on its Task branch"), false)
+	}
+	if branchHead, err := gitOutput(ctx, lane.task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch); err != nil {
+		return err
+	} else if branchHead != head {
+		return axi.Failure("publish_refused", "Task branch moved while publish was inspecting the Sandbox", true, "Retry `posse publish` after the branch settles")
+	}
+	if candidateCWD {
+		if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
+			return err
+		}
+		return s.promotePrivateCandidate(out, db, home, lane, cfg)
+	}
+	return s.submitPrivateCandidate(out, db, home, lane, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
+}
+
 // A workspace Signal must account for every changed PR-mode member, not just
 // one URL in the Task row. Local and unchanged members need no PR.
 func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config) error {
-	members, err := s.workspaceMembers(ctx, db, project, task)
+	members, err := workspaceMembers(ctx, db, project, task)
 	if err != nil {
 		return err
 	}

@@ -56,7 +56,7 @@ func (s *Service) startWorkspacePRPolls(ctx context.Context, db *store.DB, proje
 		return err
 	}
 	defer releaseProjectPRPollWithRetry(db, project.ID, projectClaim)
-	targets, err := s.projectTargets(ctx, db, project)
+	targets, err := projectTargets(ctx, db, project)
 	if err != nil {
 		return err
 	}
@@ -107,7 +107,7 @@ func (s *Service) startWorkspacePRPolls(ctx context.Context, db *store.DB, proje
 }
 
 func (s *Service) startWorkspaceCheckoutSync(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
-	targets, err := s.projectTargets(ctx, db, project)
+	targets, err := projectTargets(ctx, db, project)
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func (s *Service) startMergedMemberSync(ctx context.Context, db *store.DB, proje
 	go func() {
 		defer s.endMaintenance(key)
 		var result projectSyncResult
-		target, err := s.projectTarget(memberCtx, db, project, repo)
+		target, err := projectTarget(memberCtx, db, project, repo)
 		if err == nil {
 			now := time.Now()
 			result, err = s.syncRepository(memberCtx, db, project, target, now, true)

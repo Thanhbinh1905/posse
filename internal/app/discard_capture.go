@@ -39,7 +39,7 @@ func (s *Service) captureDiscardTips(ctx context.Context, db *store.DB, home str
 			if !ok || repository == "" || sha == "" {
 				return fmt.Errorf("invalid approved workspace discard tip %q", pair)
 			}
-			target, err := s.projectTarget(ctx, db, project, repository)
+			target, err := projectTarget(ctx, db, project, repository)
 			if err != nil {
 				return err
 			}

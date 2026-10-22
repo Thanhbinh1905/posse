@@ -27,14 +27,14 @@ type memberMerge struct {
 	task    store.Task    // the Task seen in this member: its worktree, gated commit and PR
 }
 
-func (s *Service) workspaceMembers(ctx context.Context, db *store.DB, project store.Project, task store.Task) ([]memberMerge, error) {
+func workspaceMembers(ctx context.Context, db *store.DB, project store.Project, task store.Task) ([]memberMerge, error) {
 	repos, err := db.TaskRepos(ctx, task.ID)
 	if err != nil {
 		return nil, err
 	}
 	members := make([]memberMerge, 0, len(repos))
 	for _, repo := range repos {
-		target, err := s.projectTarget(ctx, db, project, repo.Repo)
+		target, err := projectTarget(ctx, db, project, repo.Repo)
 		if err != nil {
 			return nil, err
 		}
@@ -64,7 +64,7 @@ func (s *Service) mergeWorkspace(out *axi.Context, db *store.DB, project store.P
 	if merge && task.AutonomyMerge != "auto" && quote == "" {
 		return axi.Failure("merge_approval_required", "merging a workspace Task needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
 	}
-	members, err := s.workspaceMembers(ctx, db, project, task)
+	members, err := workspaceMembers(ctx, db, project, task)
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func (s *Service) mergeWorkspace(out *axi.Context, db *store.DB, project store.P
 			return err
 		}
 		task.State = store.StateMerging
-		if members, err = s.workspaceMembers(ctx, db, project, task); err != nil {
+		if members, err = workspaceMembers(ctx, db, project, task); err != nil {
 			return err
 		}
 	}
@@ -138,7 +138,7 @@ func (s *Service) mergeWorkspace(out *axi.Context, db *store.DB, project store.P
 			_ = s.deliverNotices(ctx, db, project)
 			return err
 		}
-		if members, err = s.workspaceMembers(ctx, db, project, task); err != nil {
+		if members, err = workspaceMembers(ctx, db, project, task); err != nil {
 			return err
 		}
 	}
@@ -308,7 +308,9 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 	if planErr != nil {
 		return admittedPlanFailure(planErr)
 	}
-	if !autoStartReviewLoop(plan) {
+	// Review auto-start cannot satisfy full-pipeline: its candidates were
+	// reviewed before promotion, so the barrier is checked before merging.
+	if !autoStartReviewLoop(plan) || workspaceHasFullPipeline(plan) {
 		if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
 			return err
 		}
@@ -470,7 +472,7 @@ func (s *Service) reopenWorkspaceTask(ctx context.Context, db *store.DB, task st
 // recoverWorkspaceMergeIntent settles a workspace Merge that was interrupted: a
 // gated local member whose commit already reached its frozen target is merged.
 func (s *Service) recoverWorkspaceMergeIntent(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent) error {
-	members, err := s.workspaceMembers(ctx, db, project, task)
+	members, err := workspaceMembers(ctx, db, project, task)
 	if err != nil {
 		return err
 	}
@@ -648,7 +650,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		if task.State == store.StateMerged || task.State == store.StateTornDown || task.State == store.StateReported {
 			continue
 		}
-		members, err := s.workspaceMembers(ctx, db, project, task)
+		members, err := workspaceMembers(ctx, db, project, task)
 		if err != nil {
 			return err
 		}
@@ -1003,7 +1005,7 @@ func (s *Service) workspaceBranchTips(ctx context.Context, db *store.DB, project
 	}
 	tips := []string{}
 	for _, repo := range repos {
-		target, err := s.projectTarget(ctx, db, project, repo.Repo)
+		target, err := projectTarget(ctx, db, project, repo.Repo)
 		if err != nil {
 			continue
 		}
@@ -1036,7 +1038,7 @@ func (s *Service) removeWorkspaceBranches(ctx context.Context, db *store.DB, pro
 	ref := "refs/heads/" + task.Branch
 	removed := false
 	for _, repo := range repos {
-		target, err := s.projectTarget(ctx, db, project, repo.Repo)
+		target, err := projectTarget(ctx, db, project, repo.Repo)
 		if err != nil {
 			continue
 		}

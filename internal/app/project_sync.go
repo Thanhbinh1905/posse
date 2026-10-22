@@ -67,7 +67,7 @@ func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project st
 		return nil, err
 	}
 	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
-	targets, err := s.projectTargets(ctx, db, project)
+	targets, err := projectTargets(ctx, db, project)
 	if err != nil {
 		return nil, err
 	}

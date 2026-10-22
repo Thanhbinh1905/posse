@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -204,36 +205,62 @@ func (db *DB) ReviewCapUsage(ctx context.Context, taskID int64) (ReviewCapUsage,
 	return usage, nil
 }
 
-// ReviewEvidenceFor reports whether each target is covered by a qualified pass,
-// a proved carry, or an exact-head User disposition. Carries and dispositions
-// never imply test, docs, lint or CI evidence.
+// ReviewEvidenceFor reports whether the targets are covered by one qualified
+// pass, with any target outside that pass covered by a proved carry or an
+// exact-head User disposition. Passes from different Review Rounds are never
+// combined: a workspace pass binds the Member heads its Reviewer saw together,
+// so it covers exactly those heads, or a subset of them. Carries and
+// dispositions never imply test, docs, lint or CI evidence.
 func (db *DB) ReviewEvidenceFor(ctx context.Context, taskID int64, targets []ReviewTarget, qualifies func(ReviewVerdict) bool) (ReviewEvidence, error) {
 	var evidence ReviewEvidence
 	if len(targets) == 0 {
 		return evidence, nil
 	}
-	evidence.Complete = true
-	for _, target := range targets {
-		_, passed, err := db.CurrentReviewPass(ctx, taskID, []ReviewTarget{target}, qualifies)
-		if err != nil {
+	verdicts, err := db.ReviewVerdictsFor(ctx, taskID)
+	if err != nil {
+		return evidence, err
+	}
+	carried := make([]bool, len(targets))
+	disposed := make([]bool, len(targets))
+	for index, target := range targets {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?)`, taskID, target.Repository, target.Commit).Scan(&carried[index]); err != nil {
 			return evidence, err
 		}
-		if passed {
-			evidence.Pass = true
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, target.Commit).Scan(&disposed[index]); err != nil {
+			return evidence, err
+		}
+	}
+	// coveredBy reports whether reviewed, plus carries and dispositions, covers
+	// every target, and records which evidence it needed.
+	coveredBy := func(reviewed []ReviewTarget) (ReviewEvidence, bool) {
+		result := ReviewEvidence{Complete: true}
+		for index, target := range targets {
+			if slices.Contains(reviewed, target) {
+				result.Pass = true
+				continue
+			}
+			if !carried[index] && !disposed[index] {
+				return ReviewEvidence{}, false
+			}
+			result.Carry = result.Carry || carried[index]
+			result.Disposition = result.Disposition || disposed[index]
+		}
+		return result, true
+	}
+	for _, verdict := range verdicts {
+		if verdict.Verdict != ReviewPass || qualifies != nil && !qualifies(verdict) {
 			continue
 		}
-		var carried, disposed bool
-		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?)`, taskID, target.Repository, target.Commit).Scan(&carried); err != nil {
-			return evidence, err
+		if result, ok := coveredBy(verdict.Targets); ok && result.Pass {
+			return result, nil
 		}
-		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, target.Commit).Scan(&disposed); err != nil {
-			return evidence, err
-		}
-		if !carried && !disposed {
-			evidence.Complete = false
-		}
-		evidence.Carry = evidence.Carry || carried
-		evidence.Disposition = evidence.Disposition || disposed
+	}
+	if result, ok := coveredBy(nil); ok {
+		return result, nil
+	}
+	for index := range targets {
+		evidence.Carry = evidence.Carry || carried[index]
+		evidence.Disposition = evidence.Disposition || disposed[index]
 	}
 	return evidence, nil
 }

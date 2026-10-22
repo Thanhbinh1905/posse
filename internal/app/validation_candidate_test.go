@@ -12,6 +12,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -46,11 +47,15 @@ func installFullPipelinePlan(t *testing.T, fixture *prMergeFixture, workflowOptI
 	}
 }
 
+func singleCandidateLane(project store.Project, task store.Task) candidateLane {
+	return candidateLane{owner: project, ownerTask: task, project: project, task: task}
+}
+
 func submitCandidateForTest(t *testing.T, fixture *prMergeFixture) error {
 	t.Helper()
 	return fixture.service.submitPrivateCandidate(
 		&axi.Context{Context: context.Background(), Out: &bytes.Buffer{}}, fixture.db, fixture.home,
-		fixture.project, fixture.task, "", "Candidate summary", "go test ./... -> passed", "Intent proof: verified", "Risk: low\nRollback: revert", false,
+		singleCandidateLane(fixture.project, fixture.task), "Candidate summary", "go test ./... -> passed", "Intent proof: verified", "Risk: low\nRollback: revert", false,
 	)
 }
 
@@ -64,7 +69,7 @@ func runCandidatePromotionForTest(t *testing.T, fixture *prMergeFixture) error {
 	fixture.output.Reset()
 	return fixture.service.promotePrivateCandidate(
 		&axi.Context{Context: ctx, Out: &fixture.output, ErrOut: &fixture.errOut}, fixture.db, fixture.home,
-		fixture.project, fixture.task, "", cfg,
+		singleCandidateLane(fixture.project, fixture.task), cfg,
 	)
 }
 
@@ -591,5 +596,154 @@ func TestCandidateAuthorMovementRequiresResubmission(t *testing.T) {
 	archivedHead, found, err := readGitRef(context.Background(), fixture.worktree, candidateArchiveRefName(fixture.task, stale))
 	if err != nil || !found || archivedHead != stale.CandidateSHA {
 		t.Fatalf("archived candidate head=%q found=%v err=%v", archivedHead, found, err)
+	}
+}
+
+func TestWorkerProtocolGuidesFullPipelineLanes(t *testing.T) {
+	plan, err := taskplan.Resolve(taskplan.Request{
+		Brief:     taskplan.Select("brief", "change.md", []byte("---\ntype: change\ntitle: Candidate\ndone_when: candidate is promoted\n---\nImplement the requested change.\n")),
+		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
+		Launch:    taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
+		Review:    "full-pipeline", Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
+		Paths: taskplan.Paths{Scratch: "/home/user/.posse/scratch/shop/t1", Output: "/home/user/.posse/projects/shop/tasks/t1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief := dispatch.Brief{Type: "change", DoneWhen: "candidate is promoted"}
+	local := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 1, Type: "change", MergeMode: "local", PlanJSON: encoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
+	for _, want := range []string{"Full-pipeline validation", "`posse publish \"<summary>\" --verify", "`posse validate test --verify", "local delivery only fast-forwards the Task branch"} {
+		if !strings.Contains(local, want) {
+			t.Fatalf("local full-pipeline protocol lacks %q: %s", want, local)
+		}
+	}
+	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 2, Type: "change", PlanJSON: encoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t2", "none", "English")
+	if !strings.Contains(workspace, "`posse validate lint --repo <member>") || !strings.Contains(workspace, "`posse publish --repo <member> \"<summary>\"` to promote") {
+		t.Fatalf("workspace full-pipeline protocol lacks per-Member commands: %s", workspace)
+	}
+	quick := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none", "English")
+	if strings.Contains(quick, "Full-pipeline") {
+		t.Fatalf("protocol without full-pipeline mentions it: %s", quick)
+	}
+}
+
+func TestLocalFullPipelineBarrierRequiresGatedHeadToBeTheCandidate(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitted := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	submitThroughCLI(t, fixture)
+	candidateHead := addCandidateFix(t, fixture)
+	recordCandidateReviewPass(t, fixture, candidateHead)
+	recordCandidateStages(t, fixture)
+	if err := runCandidatePromotionForTest(t, fixture); err != nil {
+		t.Fatalf("promote local candidate: %v (%s)", err, fixture.output.String())
+	}
+	if head := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD")); head != candidateHead {
+		t.Fatalf("local promotion left Task branch at %s, want %s", head, candidateHead)
+	}
+	ctx := context.Background()
+	cfg, err := fixture.service.prepareProject(ctx, fixture.db, fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.GatedSHA = candidateHead
+	if err := requireSelectedReview(ctx, fixture.db, fixture.project, cfg, task); err != nil {
+		t.Fatalf("validated local candidate refused: %v", err)
+	}
+	// Local Merge fast-forwards to the gated head, so a gated head other than
+	// the candidate fails even while the branch tip is the candidate.
+	task.GatedSHA = submitted
+	if err := requireSelectedReview(ctx, fixture.db, fixture.project, cfg, task); err == nil || !strings.Contains(err.Error(), "gated head") {
+		t.Fatalf("gated head %s accepted for candidate %s: %v", submitted, candidateHead, err)
+	}
+}
+
+// Once every full-pipeline Member merged on the forge, before the PR poll
+// records it, the barrier admits those Members; a quick Member in the same
+// workspace must still need its own exact-head review.
+func TestMixedWorkspaceQuickMemberKeepsReviewAfterFullPipelineMembersMerge(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker", "e2e-tool"}, []string{"worker", "e2e-tool"})
+	ctx := context.Background()
+	plan, err := taskplan.Resolve(taskplan.Request{
+		Brief: taskplan.Select("brief", "workspace.md", []byte("---\ntype: change\ntitle: Mixed\ndone_when: checked\nrepos: [worker, e2e-tool]\n---\n")),
+		Execution: taskplan.Execution{Scope: "workspace", Members: []taskplan.Member{
+			{Name: "e2e-tool", Path: "e2e-tool", Delivery: "local", Review: "quick", ReviewSource: "repositories.e2e-tool.review"},
+			{Name: "worker", Path: "worker", Delivery: "pr", Review: "full-pipeline", ReviewSource: "defaults.review"},
+		}},
+		Launch: taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
+		Review: "full-pipeline", Delivery: "pr", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
+		Paths: taskplan.Paths{Scratch: filepath.Join(f.home, "scratch", "stack", "t1"), Output: filepath.Join(f.home, "projects", "stack", "tasks", "t1")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, "UPDATE tasks SET plan_json=? WHERE id=?", encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, f.task.ID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	origin := filepath.Join(f.workspace, "worker")
+	gitTest(t, origin, "remote", "set-url", "origin", "https://github.com/acme/worker.git")
+	gitTest(t, origin, "config", "url.file://"+filepath.Join(f.root, "remotes", "worker.git")+".insteadOf", "https://github.com/acme/worker.git")
+	worktree := filepath.Join(f.task.WorktreePath, "worker")
+	head := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "refs/heads/posse/t1"))
+	// The forge merged the PR at the validated head and moved origin main.
+	frozenTarget := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "refs/heads/posse/t1~1"))
+	gitTest(t, worktree, "push", "origin", head+":refs/heads/posse/t1")
+	gitTest(t, f.root, "--git-dir", filepath.Join(f.root, "remotes", "worker.git"), "update-ref", "refs/heads/main", head)
+	prURL := "https://github.com/acme/worker/pull/7"
+	if _, err := f.db.ExecContext(ctx, `UPDATE task_repos SET landing_mode=CASE repo WHEN 'worker' THEN 'pr' ELSE 'local' END, state=CASE repo WHEN 'worker' THEN 'merging' ELSE state END, gated_sha=CASE repo WHEN 'worker' THEN ? ELSE gated_sha END, pr_url=CASE repo WHEN 'worker' THEN ? ELSE pr_url END WHERE task_id=?`, head, prURL, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := f.db.CreateValidationCandidate(ctx, store.ValidationCandidate{
+		TaskID: f.task.ID, Repo: "worker", SubmittedSHA: head, CandidateSHA: head, TargetSHA: frozenTarget,
+		RefName: "refs/posse/candidate/t1", WorktreePath: filepath.Join(f.home, "projects", "stack", "tasks", "t1", "candidates", "worker", "g1"),
+		Summary: "s", Verification: "v -> ok", Proof: "p", Risk: "Rollback: revert",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.ActivateValidationCandidate(ctx, candidate.ID, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.BeginValidationCandidatePromotion(ctx, candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.CompleteValidationCandidatePromotion(ctx, candidate.ID, head); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(f.root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ncase \"$1 $2\" in\n \"pr view\") printf '{\"state\":\"MERGED\",\"headRefOid\":\"" + head + "\"}\\n' ;;\n *) exit 90 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	task, err := f.db.TaskByID(ctx, f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := f.config()
+	if err := requireFullPipelineValidationAt(ctx, f.db, f.project, cfg, task, ""); err != nil {
+		t.Fatalf("forge-merged full-pipeline Member was not admitted: %v", err)
+	}
+	err = requireSelectedReview(ctx, f.db, f.project, cfg, task)
+	if err == nil || !strings.Contains(err.Error(), "review_required") && !strings.Contains(err.Error(), "no passing Review") {
+		t.Fatalf("quick Member merged without its own review: %v", err)
 	}
 }

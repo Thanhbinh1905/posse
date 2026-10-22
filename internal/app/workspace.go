@@ -191,7 +191,7 @@ func savedMemberMergeMode(cfg config.Config, name, remote string) string {
 }
 
 // projectTargets lists the repositories of a Project: the Project itself, or its active members.
-func (s *Service) projectTargets(ctx context.Context, db *store.DB, project store.Project) ([]repoTarget, error) {
+func projectTargets(ctx context.Context, db *store.DB, project store.Project) ([]repoTarget, error) {
 	if project.IsDirectory() {
 		return nil, nil
 	}
@@ -212,8 +212,8 @@ func (s *Service) projectTargets(ctx context.Context, db *store.DB, project stor
 	return targets, nil
 }
 
-func (s *Service) projectTarget(ctx context.Context, db *store.DB, project store.Project, name string) (repoTarget, error) {
-	targets, err := s.projectTargets(ctx, db, project)
+func projectTarget(ctx context.Context, db *store.DB, project store.Project, name string) (repoTarget, error) {
+	targets, err := projectTargets(ctx, db, project)
 	if err != nil {
 		return repoTarget{}, err
 	}

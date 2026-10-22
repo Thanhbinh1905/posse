@@ -767,7 +767,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			if !project.IsWorkspace() {
 				return snapshotPROrphan(ctx, db, project, task)
 			}
-			members, err := s.workspaceMembers(ctx, db, project, task)
+			members, err := workspaceMembers(ctx, db, project, task)
 			if err != nil {
 				return err
 			}
