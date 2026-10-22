@@ -488,6 +488,26 @@ esac
 	}
 	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", firstHead)
 	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	if !waitForCondition(20*time.Second, func() bool {
+		observation, err := f.db.LatestPRObservation(context.Background(), change.ID)
+		if err != nil || observation.HeadSHA != firstHead || !strings.Contains(observation.Checks, "FAILURE") {
+			return false
+		}
+		notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+		if err != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.TaskID == change.ID && notice.Kind == "ci_fix_queued" {
+				return true
+			}
+		}
+		return false
+	}) {
+		observation, observationErr := f.db.LatestPRObservation(context.Background(), change.ID)
+		notices, noticesErr := f.db.Notices(context.Background(), f.project.ID, false)
+		t.Fatalf("failed CI observation did not queue a repair: observation=%#v err=%v notices=%#v err=%v", observation, observationErr, notices, noticesErr)
+	}
 	f.requireNotice(t, "t1", "ci_fix_queued")
 	var fixRoundCount int
 	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, change.ID).Scan(&fixRoundCount); err != nil || fixRoundCount != 1 {
