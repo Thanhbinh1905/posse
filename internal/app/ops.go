@@ -323,9 +323,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Bool("repair") {
 		return s.repairWatch(ctx, db, home, project)
 	}
-	// Adapter-owned receivers must not trigger Project poller repair. Their
-	// adapter lifecycle owns waiting and re-arming independently of observation.
-	if !parsed.Bool("poll-only") && !parsed.Bool("handoff") && parsed.Flags["receipt"] == "" {
+	// Keep the Project observer alive independently of receipt work; its poller
+	// performs maintenance out of process while adapters own receiver re-arming.
+	if !parsed.Bool("poll-only") && parsed.Flags["receipt"] == "" {
 		if err := s.ensureWatchRuntime(ctx.Context, db, home, project); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Watch supervision for %s failed: %v\n", project.Name, err)
 		}
