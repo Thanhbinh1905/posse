@@ -88,7 +88,7 @@ func (s *Service) readiness(ctx context.Context, db *store.DB, project store.Pro
 }
 
 func (s *Service) projectReadinessChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]doctorCheck, error) {
-	targets, err := s.projectTargets(ctx, db, project)
+	targets, err := projectTargets(ctx, db, project)
 	if err != nil {
 		return nil, err
 	}

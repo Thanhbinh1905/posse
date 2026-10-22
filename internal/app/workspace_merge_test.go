@@ -237,7 +237,7 @@ func TestWorkspaceDiscardCaptureBundlesEveryApprovedMemberTip(t *testing.T) {
 		if !ok {
 			t.Fatalf("invalid workspace tip %q", pair)
 		}
-		target, err := f.service.projectTarget(ctx, f.db, f.project, repository)
+		target, err := projectTarget(ctx, f.db, f.project, repository)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -283,7 +283,7 @@ func TestWorkspaceTeardownRemovesOnlyRecordedMergedPRHeads(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, repo := range repos {
-		target, err := f.service.projectTarget(ctx, f.db, f.project, repo.Repo)
+		target, err := projectTarget(ctx, f.db, f.project, repo.Repo)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -323,7 +323,7 @@ func TestWorkspaceTeardownRemovesOnlyRecordedMergedPRHeads(t *testing.T) {
 		t.Fatalf("remove merged workspace PR branch: removed=%v err=%v", removed, err)
 	}
 	for _, repo := range repos {
-		target, err := f.service.projectTarget(ctx, f.db, f.project, repo.Repo)
+		target, err := projectTarget(ctx, f.db, f.project, repo.Repo)
 		if err != nil {
 			t.Fatal(err)
 		}
