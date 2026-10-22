@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/mattn/go-isatty"
+	"golang.org/x/term"
 )
 
 type Error struct {
@@ -58,6 +62,9 @@ type Command struct {
 type Context struct {
 	Context context.Context
 	JSON    bool
+	Human   bool
+	Verbose bool
+	Width   int
 	Out     io.Writer
 	ErrOut  io.Writer
 }
@@ -209,15 +216,50 @@ func (a *App) Run(args []string) int {
 		a.Context = context.Background()
 	}
 	jsonOutput := false
+	format := ""
+	formatSet := false
 	filtered := make([]string, 0, len(args))
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		if arg == "--json" {
 			jsonOutput = true
 			continue
 		}
+		if arg == "--format" || strings.HasPrefix(arg, "--format=") {
+			formatSet = true
+			if arg == "--format" {
+				i++
+				if i >= len(args) {
+					return a.printError(&Context{Context: a.Context, Out: a.Out, ErrOut: a.ErrOut}, Usage("--format requires human, toon or json"))
+				}
+				format = args[i]
+			} else {
+				format = strings.TrimPrefix(arg, "--format=")
+			}
+			continue
+		}
 		filtered = append(filtered, arg)
 	}
-	ctx := &Context{Context: a.Context, JSON: jsonOutput, Out: a.Out, ErrOut: a.ErrOut}
+	if formatSet && format != "human" && format != "toon" && format != "json" {
+		return a.printError(&Context{Context: a.Context, Out: a.Out, ErrOut: a.ErrOut}, Usage("--format must be human, toon or json"))
+	}
+	if jsonOutput && formatSet && format != "json" {
+		return a.printError(&Context{Context: a.Context, JSON: true, Out: a.Out, ErrOut: a.ErrOut}, Usage("--json cannot be combined with a non-json --format"))
+	}
+	if format == "json" {
+		jsonOutput = true
+	}
+	human := format == "human" || format == "" && isTTY(a.Out)
+	width := 80
+	if file, ok := a.Out.(*os.File); ok && isatty.IsTerminal(file.Fd()) {
+		if columns, _, err := term.GetSize(int(file.Fd())); err == nil && columns >= 40 {
+			width = columns
+		}
+	}
+	if columns, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && columns >= 40 {
+		width = columns
+	}
+	ctx := &Context{Context: a.Context, JSON: jsonOutput, Human: human && !jsonOutput, Width: width, Out: a.Out, ErrOut: a.ErrOut}
 	if len(filtered) == 1 && filtered[0] == "--version" {
 		if jsonOutput {
 			fmt.Fprintf(a.Out, "{\"name\":%q,\"version\":%q}\n", a.Name, a.Version)
@@ -315,10 +357,10 @@ func (a *App) printHelp(command *Command, path []string) {
 		}
 	}
 	if command == a.Root {
-		fmt.Fprintf(a.Out, "\nflags: --json, --help, --version\n")
+		fmt.Fprintf(a.Out, "\nflags: --json, --format human|toon|json, --help, --version\n")
 		return
 	}
-	fmt.Fprintf(a.Out, "\nflags: --json, --help\n")
+	fmt.Fprintf(a.Out, "\nflags: --json, --format human|toon|json, --help\n")
 }
 
 func (a *App) printError(ctx *Context, err error) int {
@@ -349,6 +391,11 @@ func (a *App) printError(ctx *Context, err error) int {
 			quote(structured.Code), quote(structured.Message), structured.Retryable, help)
 	}
 	return structured.ExitCode
+}
+
+func isTTY(writer io.Writer) bool {
+	file, ok := writer.(*os.File)
+	return ok && isatty.IsTerminal(file.Fd())
 }
 
 func hasFlag(args []string, flags ...string) bool {
