@@ -64,10 +64,21 @@ func TestWatchExposesAmbiguousNoticeDelivery(t *testing.T) {
 	if len(batch.Notices) != 1 || batch.Notices[0].ID != noticeID || batch.Delivery.DeliveryID == "" || batch.Delivery.OwnerToken == "" {
 		t.Fatalf("handoff result = %+v", batch)
 	}
+	if fake.CallCount("session.snapshot") != 1 || len(fake.Calls) != 1 || len(fake.Runs) != 0 {
+		t.Fatalf("receiver performed Project or executor work: Herdr calls=%#v CLI runs=%#v", fake.Calls, fake.Runs)
+	}
 
 	code, output = runCLI(t, service, "watch", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "uncertain", "--receipt-token", batch.Delivery.OwnerToken)
 	if code != 0 {
 		t.Fatalf("record ambiguous receipt: %s", output)
+	}
+	for _, call := range fake.Calls {
+		if call.Method != "session.snapshot" {
+			t.Fatalf("receipt resolution performed Herdr work beyond read-only identity checks: %#v", fake.Calls)
+		}
+	}
+	if len(fake.Runs) != 0 {
+		t.Fatalf("receipt resolution invoked Herdr CLI commands: %#v", fake.Runs)
 	}
 	code, output = runCLI(t, service, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
 	if code != 0 || !strings.Contains(output, `"state":"uncertain"`) || !strings.Contains(output, batch.Delivery.BatchID) || !strings.Contains(output, "Inspect that Lead session before retrying") {

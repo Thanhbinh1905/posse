@@ -427,7 +427,7 @@ func TestWatchRuntimeReexecsAfterBinaryReplacement(t *testing.T) {
 	}
 }
 
-func TestWatchHandoffRepairsDeadPoller(t *testing.T) {
+func TestWatchHandoffStartsProjectObserver(t *testing.T) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
 	for _, destination := range []string{"opencode:repair", "pi:repair"} {
@@ -447,7 +447,7 @@ func TestWatchHandoffRepairsDeadPoller(t *testing.T) {
 			pids := watchPIDs(f.root)
 			return len(pids) == 1 && pids[0] != oldPID
 		}) {
-			t.Fatalf("%s handoff did not repair the hidden Watch: %v", destination, watchPIDs(f.root))
+			t.Fatalf("%s receiver did not leave the independent Project observer running: %v", destination, watchPIDs(f.root))
 		}
 	}
 }
