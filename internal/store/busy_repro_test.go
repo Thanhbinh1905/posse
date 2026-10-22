@@ -37,6 +37,32 @@ func TestOpenMigrationLockWaitDoesNotConsumeMigrationBudget(t *testing.T) {
 	}
 }
 
+// TestOpenersOfCurrentStoreDoNotWaitForMigrationLock covers the routine case:
+// every CLI command opens a store that already holds this build's schema. Such
+// opens must not serialize on the cross-process migration lock.
+func TestOpenersOfCurrentStoreDoNotWaitForMigrationLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	lock, err := acquireMigrationLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	for range 4 {
+		opened, err := openAt(path, 100*time.Millisecond)
+		if err != nil {
+			t.Fatalf("open of a current store waited for the migration lock: %v", err)
+		}
+		if err := opened.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestConcurrentOpenersReturnRetryableContentionUnderWriterLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "posse.db")
 	db, err := OpenAt(path)
@@ -44,6 +70,10 @@ func TestConcurrentOpenersReturnRetryableContentionUnderWriterLoad(t *testing.T)
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// A missing checksum receipt sends the open through the locked migration path.
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM posse_migration_checksums WHERE version=(SELECT MAX(version) FROM posse_migration_checksums)`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.ExecContext(context.Background(), `CREATE TABLE contention_writes (value INTEGER)`); err != nil {
 		t.Fatal(err)
 	}

@@ -33,7 +33,7 @@ func (s *Service) syncTaskTarget(ctx context.Context, db *store.DB, project stor
 	if project.IsWorkspace() {
 		return projectSyncResult{Status: "skipped", Reason: "workspace Task target requires a member Project"}, nil
 	}
-	return s.syncRepository(ctx, db, project, target, time.Now())
+	return s.syncRepository(ctx, db, project, target, time.Now(), true)
 }
 
 func (s *Service) syncProjectRoot(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool) (projectSyncResult, error) {
@@ -100,7 +100,7 @@ func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project st
 		workers.Add(1)
 		go func(index int, target repoTarget) {
 			defer workers.Done()
-			result, syncErr := s.syncRepository(ctx, db, project, target, now)
+			result, syncErr := s.syncRepository(ctx, db, project, target, now, force)
 			if syncErr == nil && result.Status != "skipped" {
 				errorMu.Lock()
 				attempted = true
@@ -133,7 +133,10 @@ func (s *Service) syncProjectRepos(ctx context.Context, db *store.DB, project st
 	return results, db.RecordCheckoutAttempt(ctx, project.ID, now.UnixMilli())
 }
 
-func (s *Service) syncRepository(ctx context.Context, db *store.DB, project store.Project, target repoTarget, now time.Time) (result projectSyncResult, returnErr error) {
+// syncRepository fast-forwards one repository. A periodic sync skips at once
+// while another process holds the sync lock; a forced sync after a merge waits
+// for that holder, which may be a merge rather than a sync.
+func (s *Service) syncRepository(ctx context.Context, db *store.DB, project store.Project, target repoTarget, now time.Time, force bool) (result projectSyncResult, returnErr error) {
 	key := repositorySyncKey(project, target)
 	if !s.beginMaintenance(key) {
 		return projectSyncResult{Status: "skipped", Reason: "repository sync already running"}, nil
@@ -150,7 +153,11 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 		result.Reason = "origin remote unavailable: " + truncate(strings.TrimSpace(err.Error()), 240)
 		return result, nil
 	}
-	lock, err := acquireRepositorySyncLock(ctx, target.Root)
+	lockBudget := time.Duration(0)
+	if force {
+		lockBudget = fileLockWaitBudget
+	}
+	lock, err := repositorySyncLock(ctx, target.Root, lockBudget)
 	if err != nil {
 		if store.IsBusy(err) {
 			return projectSyncResult{Status: "skipped", Reason: "repository sync already running"}, nil

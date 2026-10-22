@@ -406,3 +406,55 @@ func TestRebuildRestoresPRWatchFailureStreakAndClearsIntentRuntimeForeignKeys(t 
 		t.Fatalf("rebuild did not restore the PR watch failure streak: rows=%d count=%d url=%q error=%q err=%v", failureRows, failureCount, failureURL, failureMessage, err)
 	}
 }
+
+// Every command reconciles each Task and persists the Project snapshot. Only a
+// state change may rewrite it; otherwise each pass would fsync identical data.
+func TestUnchangedProjectSnapshotIsNotRewritten(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := db.ProjectSnapshotPath(project.Name)
+	capturedAt := func() int64 {
+		t.Helper()
+		var snapshot projectSnapshot
+		if _, err := toml.DecodeFile(path, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		return snapshot.State.CapturedAt
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCapture := capturedAt()
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || capturedAt() != firstCapture {
+		t.Fatal("unchanged Project state rewrote its snapshot")
+	}
+	if _, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "worker_idle", Summary: "changed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if capturedAt() <= firstCapture {
+		t.Fatal("changed Project state kept the previous snapshot capture time")
+	}
+}
