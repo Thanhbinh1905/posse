@@ -202,7 +202,9 @@ func migrateVocabularyFile(path string) error {
 	}
 	// Check the rewritten schema before recording completion. Allow Project
 	// shorthand here; Load enforces the actual file's global/Project scope.
-	if err := ValidateSchemaMap(path, values, true); err != nil {
+	validationValues := clone(values).(map[string]any)
+	removeLegacyGateSettings(path, validationValues)
+	if err := ValidateSchemaMap(path, validationValues, true); err != nil {
 		return err
 	}
 	inlineVersion := vocabularyMarkerVersion(data)

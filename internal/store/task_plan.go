@@ -56,7 +56,7 @@ func (db *DB) TaskPlanRevisions(ctx context.Context, taskID int64) ([]string, er
 }
 
 // ReviseTaskPlan compares the admitted revision before recording an explicit
-// launch reconfiguration. Gate evidence is invalidated in the same transaction;
+// launch reconfiguration. Recorded merge-head evidence is invalidated in the same transaction;
 // old revisions and Signals remain history, not evidence for the new revision.
 func (db *DB) ReviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan) error {
 	previous, err := task.AdmittedPlan()

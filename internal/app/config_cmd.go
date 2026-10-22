@@ -49,23 +49,31 @@ func (s *Service) configShow(ctx *axi.Context, args []string) error {
 	if err := s.validateConfigForEdit(home, projectName); err != nil {
 		return configError(err)
 	}
+	cfg, err := config.Load(home, projectName)
+	if err != nil {
+		return configError(err)
+	}
 	if parsed.Bool("effective") {
-		cfg, err := config.Load(home, projectName)
-		if err != nil {
-			return configError(err)
-		}
 		sources, err := cfg.EffectiveSources()
 		if err != nil {
 			return configError(err)
 		}
-		return ctx.Print(axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "effective", Value: cfg}, {Key: "sources", Value: sources}, {Key: "help", Value: []any{"Run `posse config schema` to inspect every key"}}})
+		result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "effective", Value: cfg}, {Key: "sources", Value: sources}}
+		if len(cfg.Warnings) > 0 {
+			result = append(result, axi.Field{Key: "warnings", Value: stringsToAny(cfg.Warnings)})
+		}
+		return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse config schema` to inspect every key"}}))
 	}
 	path := config.ConfigPath(home, projectName)
 	values, _, err := config.ReadFile(path)
 	if err != nil {
 		return configError(err)
 	}
-	return ctx.Print(axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "file", Value: path}, {Key: "values", Value: values}, {Key: "help", Value: []any{"Run `posse config show --effective` to include defaults and Project overrides"}}})
+	result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "file", Value: path}, {Key: "values", Value: values}}
+	if len(cfg.Warnings) > 0 {
+		result = append(result, axi.Field{Key: "warnings", Value: stringsToAny(cfg.Warnings)})
+	}
+	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse config show --effective` to include defaults and Project overrides"}}))
 }
 
 func (s *Service) configSet(ctx *axi.Context, args []string) error {
@@ -88,6 +96,9 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 		}
 	}
 	key := parsed.Positionals[0]
+	if config.IsRemovedGateKey(key) {
+		return configError(&config.InvalidError{Key: key, Reason: "command Gates were removed; PR delivery uses forge CI and local delivery has no automated verification"})
+	}
 	approvalProjectID, err := s.configApprovalProject(ctx.Context, db, key, projectName, parsed.Flags["user-approved"])
 	if err != nil {
 		return err
@@ -165,6 +176,9 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 		}
 	}
 	key := parsed.Positionals[0]
+	if config.IsRemovedGateKey(key) {
+		return configError(&config.InvalidError{Key: key, Reason: "command Gates were removed; PR delivery uses forge CI and local delivery has no automated verification"})
+	}
 	approvalProjectID, err := s.configApprovalProject(ctx.Context, db, key, projectName, parsed.Flags["user-approved"])
 	if err != nil {
 		return err
