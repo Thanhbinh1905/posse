@@ -384,6 +384,9 @@ func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
 	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code != 0 || !strings.Contains(output, "final-fix-queued") {
 		t.Fatalf("apply final-fix: %d %s", code, output)
 	}
+	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code == 0 || strings.Contains(output, "final-fix-queued") {
+		t.Fatalf("duplicate final-fix must not report a newly queued instruction: %d %s", code, output)
+	}
 	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)
 	}

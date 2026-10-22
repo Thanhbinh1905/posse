@@ -40,14 +40,6 @@ func (s *Service) recordWorkerSignalWithContinuity(
 	if verb != "done" || task.Type != "change" || inPlace || project.IsWorkspace() {
 		return record(nil)
 	}
-	plan, planErr := task.AdmittedPlan()
-	if planErr != nil {
-		return "", admittedPlanFailure(planErr)
-	}
-	if plan != nil && plan.Review == "full-pipeline" {
-		return record(nil)
-	}
-
 	for attempt := 0; attempt < 3; attempt++ {
 		validation, err := s.checkedValidationContinuity(ctx, db, project, task)
 		if err != nil {
@@ -71,12 +63,22 @@ func (s *Service) checkedValidationContinuity(ctx context.Context, db *store.DB,
 	if err != nil {
 		return validation, err
 	}
-	actualHead, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+	worktreePath := task.WorktreePath
+	if fullPipelineSelected(task, "") {
+		candidate, candidateErr := db.LatestValidationCandidate(ctx, task.ID, "")
+		if candidateErr != nil {
+			return validation, candidateErr
+		}
+		if candidate.State == store.ValidationCandidateActive {
+			worktreePath = candidate.WorktreePath
+		}
+	}
+	actualHead, err := gitOutput(ctx, worktreePath, "rev-parse", "HEAD")
 	if err != nil {
 		return validation, err
 	}
 	for _, expectedHead := range validation.Heads {
-		if _, err := gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", expectedHead, actualHead); err != nil {
+		if _, err := gitOutput(ctx, worktreePath, "merge-base", "--is-ancestor", expectedHead, actualHead); err != nil {
 			return validation, recordHeadDiscontinuity(ctx, db, project, task, expectedHead, actualHead)
 		}
 	}
