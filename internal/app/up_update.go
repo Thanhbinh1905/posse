@@ -30,7 +30,9 @@ func (s *Service) up(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	err = s.upCore(ctx, args)
+	err = retryBusy(ctx.Context, commandContentionAttempts, commandContentionDelay, func() error {
+		return s.upCore(ctx, args)
+	})
 	if !known {
 		return err
 	}

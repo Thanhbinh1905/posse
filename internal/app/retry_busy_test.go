@@ -7,8 +7,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestMergeIntentFailurePreservesRetryableStoreContention(t *testing.T) {
+	busy := mergeIntentFailure(fmt.Errorf("reserve merge intent: %w", store.ErrBusy))
+	var busyFailure *axi.Error
+	if !errors.As(busy, &busyFailure) || busyFailure.Code != "store_busy" || !busyFailure.Retryable {
+		t.Fatalf("busy merge intent failure = %v, want retryable store_busy", busy)
+	}
+	active := mergeIntentFailure(errors.New("task already has an active merge --execute intent"))
+	var activeFailure *axi.Error
+	if !errors.As(active, &activeFailure) || activeFailure.Code != "intent_active" || !activeFailure.Retryable {
+		t.Fatalf("active merge intent failure = %v, want retryable intent_active", active)
+	}
+}
 
 func TestRetryBusyRepeatsOnlyTransientContention(t *testing.T) {
 	calls := 0

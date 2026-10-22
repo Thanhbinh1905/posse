@@ -275,6 +275,22 @@ func TestStartedWatchProcessIsReapedByItsParent(t *testing.T) {
 	t.Fatalf("exited child PID %d remained in the process table; Wait did not reap it", command.Process.Pid)
 }
 
+func TestUnboundIndefinitePollOnlyWatchIsMarkedForReaping(t *testing.T) {
+	project := store.Project{ID: 42, Root: "/workspace/shop"}
+	unbounded, found := watchFromArgs(31, []string{"/usr/local/bin/posse", "watch", "--poll-only"}, map[string]string{"POSSE_HOME": "/tmp/shop", "PWD": project.Root}, "/tmp/shop")
+	if !found || !unbounded.PollOnly || unbounded.PollOnlyBounded {
+		t.Fatalf("unbounded poll-only Watch = %#v, found=%t", unbounded, found)
+	}
+	bounded, found := watchFromArgs(32, []string{"/usr/local/bin/posse", "watch", "--poll-only", "--timeout", "2500"}, map[string]string{"POSSE_HOME": "/tmp/shop", "PWD": project.Root}, "/tmp/shop")
+	if !found || !bounded.PollOnly || !bounded.PollOnlyBounded {
+		t.Fatalf("bounded poll-only Watch = %#v, found=%t", bounded, found)
+	}
+	leaked := leakedPollOnlyWatchesForProject([]watchProcess{unbounded, bounded}, project)
+	if len(leaked) != 1 || leaked[0].PID != unbounded.PID {
+		t.Fatalf("leaked poll-only Watches = %#v, want only unbounded process", leaked)
+	}
+}
+
 func TestWatchProcessListingExtractsWatchIdentity(t *testing.T) {
 	listing := "31 /usr/local/bin/posse watch --poll-only POSSE_HOME=/tmp/shop POSSE_WATCH_PROJECT_ID=8 POSSE_WATCH_TOKEN=abc POSSE_WATCH_STARTED_AT=900 PWD=/workspace/shop\n"
 	processes := watchProcessesInListingWithVerifier(listing, "/tmp/shop", func(path string) bool { return filepath.Base(path) == "posse" })
