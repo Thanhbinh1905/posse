@@ -59,26 +59,24 @@ func TestListRecoversRestartWithoutStartupHook(t *testing.T) {
 	if restored.PaneID == "" || restored.PaneID != after.PaneID || restored.WorkspaceID != after.HerdrWorkspaceID || restored.CWD != after.WorktreePath {
 		t.Fatalf("recovered Worker pane does not match its Task: pane=%#v task=%#v", restored, after)
 	}
-	grouped := false
-	for _, workspace := range fixture.snapshot(t).Workspaces {
-		if workspace.WorkspaceID == after.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == after.WorktreePath {
-			grouped = true
-		}
-	}
-	if !grouped {
-		t.Fatalf("restored Worker lost native worktree grouping: %#v", after)
-	}
 	recoveredSnapshot := fixture.snapshot(t)
 	lead, found := findLeadInSnapshot(recoveredSnapshot)
 	if !found {
 		t.Fatal("recovered Lead is missing")
 	}
-	assertLeadSidebarPresentation(t, fixture.client, lead.WorkspaceID, lead.PaneID, "Lead:shop")
-	for i, workspace := range recoveredSnapshot.Workspaces {
-		if workspace.WorkspaceID == lead.WorkspaceID && (i+1 >= len(recoveredSnapshot.Workspaces) || recoveredSnapshot.Workspaces[i+1].WorkspaceID != after.HerdrWorkspaceID) {
-			t.Fatalf("recovered Worker is not directly below its Lead: %#v", recoveredSnapshot.Workspaces)
+	if after.HerdrWorkspaceID != lead.WorkspaceID {
+		t.Fatalf("recovered Worker did not migrate into the Lead workspace: task=%#v Lead=%#v", after, lead)
+	}
+	foundTab := false
+	for _, tab := range recoveredSnapshot.Tabs {
+		if tab.WorkspaceID == lead.WorkspaceID && tab.TabID == restored.TabID && tab.Label == after.ShortName {
+			foundTab = true
 		}
 	}
+	if !foundTab {
+		t.Fatalf("recovered Worker tab is missing from the Lead workspace: %#v", recoveredSnapshot.Tabs)
+	}
+	assertLeadSidebarPresentation(t, fixture.client, lead.WorkspaceID, lead.PaneID, "Lead:shop")
 	db, err = store.OpenReadOnly(fixture.home)
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +158,7 @@ func TestTaskNamesBranchesAndLegacyRecoveryRemainIndependent(t *testing.T) {
 	f.exitWorker(t, "t2")
 }
 
-// TestFocusedWorkerLaunch focuses the new Worker child before prompt delivery,
+// TestFocusedWorkerLaunch focuses the new Worker tab before prompt delivery,
 // then verifies the Lead can safely complete delivery after unfocusing it.
 func TestFocusedWorkerLaunch(t *testing.T) {
 	f := newWorkerTabsFixture(t)
@@ -188,7 +186,7 @@ func TestFocusedWorkerLaunch(t *testing.T) {
 		}
 		return false
 	}) {
-		t.Fatal("Worker child never opened")
+		t.Fatal("Worker tab never opened")
 	}
 	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": paneID}); err != nil {
 		t.Fatal(err)

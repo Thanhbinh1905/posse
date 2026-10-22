@@ -39,7 +39,6 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 	if ctx.Err() != nil {
 		return
 	}
-	s.groupWorkerWorkspaces(ctx, snapshot, project, tasks)
 	labels, rows := projectTabPresentation(snapshot, project, tasks)
 	for _, tab := range snapshot.Tabs {
 		if ctx.Err() != nil {
@@ -85,8 +84,18 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 	}
 }
 
-// projectTabPresentation only claims tabs identified by a Project Lead pane or a
-// Task's labeled pane. Worker order follows the tab array from the snapshot.
+// projectTabPresentation claims tabs identified by the Lead pane or a Task's
+// labeled pane. New Worker tabs get tree rows; legacy linked-child workspaces
+// keep their native workspace labels.
+func legacyLinkedWorkerTab(snapshot herdr.Snapshot, tab herdr.Tab, task store.Task) bool {
+	for _, workspace := range snapshot.Workspaces {
+		if workspace.WorkspaceID == tab.WorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == task.WorktreePath {
+			return true
+		}
+	}
+	return false
+}
+
 func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, tasks []store.Task) (map[string]string, map[string]string) {
 	labels := make(map[string]string)
 	rows := make(map[string]string)
@@ -131,15 +140,7 @@ func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, task
 		if !exists || candidate.ambiguous {
 			continue
 		}
-		// Native child workspaces already render their workspace label. Keep
-		// their tab label at Herdr's default instead of duplicating the name.
-		linked := false
-		for _, workspace := range snapshot.Workspaces {
-			if workspace.WorkspaceID == tab.WorkspaceID && workspace.Worktree.CheckoutPath == candidate.task.WorktreePath {
-				linked = true
-				break
-			}
-		}
+		linked := legacyLinkedWorkerTab(snapshot, tab, candidate.task)
 		if linked {
 			if pane, found := findTaskPane(snapshot.Panes, candidate.task); found && pane.TabID == tab.TabID {
 				rows[pane.PaneID] = ""
