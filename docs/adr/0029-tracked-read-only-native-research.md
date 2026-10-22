@@ -1,4 +1,4 @@
-# 28. Tracked read-only native research children
+# 29. Tracked read-only native research children
 
 A Lead or Worker may delegate bounded read-only research to a native child of its harness, but only through a Posse research attempt registered before any result is accepted. Native children never implement changes, claim Tasks or adopt worktrees.
 

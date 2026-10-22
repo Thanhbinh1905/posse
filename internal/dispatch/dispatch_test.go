@@ -291,20 +291,11 @@ func TestBriefRootContextMustBeExplicitAndReadOnly(t *testing.T) {
 	}
 }
 
-func TestBriefInPlaceExecutionRequiresAnExplicitRelativePathList(t *testing.T) {
-	brief, err := ParseBriefText("---\ntype: change\ntitle: Update notes\ndone_when: the check passes\nexecution: in-place\npaths: [src, docs/guide.md]\n---\n")
-	if err != nil || brief.Execution != "in-place" || strings.Join(brief.Paths, ",") != "src,docs/guide.md" {
-		t.Fatalf("in-place scope = %#v, %v", brief, err)
-	}
-	for _, frontmatter := range []string{
-		"execution: in-place\n",
-		"paths: [src]\n",
-		"execution: copy\npaths: [src]\n",
-		"execution: in-place\npaths: []\n",
-	} {
-		source := "---\ntype: change\ntitle: Update notes\ndone_when: check passes\n" + frontmatter + "---\n"
-		if _, err := ParseBriefText(source); err == nil {
-			t.Errorf("accepted invalid in-place scope:\n%s", source)
+func TestBriefRejectsRemovedInPlaceFields(t *testing.T) {
+	for _, field := range []string{"execution: in-place\n", "paths: [src]\n"} {
+		source := "---\ntype: change\ntitle: Update notes\ndone_when: check passes\n" + field + "---\n"
+		if _, err := ParseBriefText(source); err == nil || !strings.Contains(err.Error(), "removed") {
+			t.Errorf("expected removed-feature error for %q, got %v", field, err)
 		}
 	}
 }

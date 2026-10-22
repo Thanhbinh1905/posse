@@ -12,6 +12,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -189,16 +190,6 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		task.GatedSHA = gatedSHA
-		if gateErr := runMergeStep("gate.run", func() error { return runGates(ctx.Context, cfg, task) }); gateErr != nil {
-			if err := recordGateFailure(ctx.Context, db, project, task, gatedSHA, "", gateErr); err != nil {
-				return err
-			}
-			if finishErr := finishMergeIntent(); finishErr != nil {
-				return finishErr
-			}
-			_ = s.deliverNotices(ctx.Context, db, project)
-			return axi.Failure("gate_failed", gateErr.Error(), false, gateFailureHelp(task))
-		}
 		if started, err := s.maybeAutoStartReviewRound(ctx, db, home, project, task); err != nil {
 			return err
 		} else if started {
@@ -208,7 +199,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		if err := runMergeStep("task.merging", func() error {
-			return db.Transition(ctx.Context, task.ID, store.StateDone, store.StateMerging, "cli", "Gate passed and local fast-forward is ready")
+			return db.Transition(ctx.Context, task.ID, store.StateDone, store.StateMerging, "cli", "Local fast-forward is ready")
 		}); err != nil {
 			return err
 		}
@@ -249,13 +240,13 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		}
 	}
 	if task.GatedSHA == "" || latestSHA != task.GatedSHA {
-		if err := db.Transition(ctx.Context, task.ID, store.StateMerging, store.StateDone, "cli", "Task branch moved after the Gate passed"); err != nil {
+		if err := db.Transition(ctx.Context, task.ID, store.StateMerging, store.StateDone, "cli", "Task branch moved after its merge head was recorded"); err != nil {
 			return err
 		}
 		if err := finishMergeIntent(); err != nil {
 			return err
 		}
-		return axi.Failure("branch_moved", "Task branch moved after the Gate passed", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
+		return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 	}
 	quote := strings.TrimSpace(parsed.Flags["user-approved"])
 	if quote != "" {
@@ -387,16 +378,6 @@ func settleFailedMergeIntent(ctx context.Context, db *store.DB, project store.Pr
 		return err
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
-}
-
-func runGates(ctx context.Context, cfg config.Config, task store.Task) error {
-	for _, gate := range cfg.Defaults.Gate {
-		output, err := commandOutput(ctx, task.WorktreePath, gate)
-		if err != nil {
-			return newGateCommandFailure(gate, output, err)
-		}
-	}
-	return nil
 }
 
 func verifyFastForward(ctx context.Context, project store.Project, task store.Task) error {
@@ -908,27 +889,6 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}); err != nil {
 		return result, s.teardownIncomplete(ctx, db, project, task, "Task scratch removal", err)
 	}
-	if inPlace {
-		if err := s.runIntentStep(ctx, db, intent, "in_place.output", func() error {
-			baselinePath := inPlaceBaselinePath(*plan)
-			if _, statErr := os.Stat(baselinePath); os.IsNotExist(statErr) && task.Launches == 0 {
-				return nil
-			} else if statErr != nil {
-				return statErr
-			}
-			output, outputErr := captureInPlaceOutput(ctx, *plan, task.WorktreePath)
-			if outputErr != nil {
-				var failure *axi.Error
-				if !errors.As(outputErr, &failure) || failure.Code != "in_place_scope_violation" {
-					return outputErr
-				}
-				return recordInPlaceScopeNotice(ctx, db, project, task, output)
-			}
-			return nil
-		}); err != nil {
-			return result, s.teardownIncomplete(ctx, db, project, task, "in-place output capture", err)
-		}
-	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "sandbox.release", func() error {
 		latestPanes, paneErr := s.verifyTaskPanesClosed(ctx, project, task, panePlan)
@@ -973,7 +933,19 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			}
 		}
 		if inPlace {
-			return releaseInPlaceLeases(ctx, db, project, task)
+			leases, err := db.ResourceLeases(ctx, project.ID)
+			if err != nil {
+				return err
+			}
+			manager := execution.NewManager(db)
+			prefix := fmt.Sprintf("in-place:%d:", task.ID)
+			for _, lease := range leases {
+				if lease.OwnerTaskID == task.ID && strings.HasPrefix(lease.SourceKey, prefix) {
+					if err := manager.Reconcile(ctx, lease, "Legacy Directory Task was stopped and its source was preserved"); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		var releaseErr error
 		killed, releaseErr = s.releaseSandboxWithAuthorization(ctx, db, project, task, cfg.Pool.Clean, discardable, processAuthorization)

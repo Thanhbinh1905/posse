@@ -139,7 +139,7 @@ func TestSetDispatchRejectsFieldsItCannotWrite(t *testing.T) {
 }
 
 func TestSchemaDrivesUserOnlyAndNewKeys(t *testing.T) {
-	for _, key := range []string{"defaults.gate", "review_loop.enabled", "review_loop.max_rounds", "review_loop.block_at", "review_loop.auto_start", "review_loop.docs", "review_loop.guidance", "gate_loop.max_fix_rounds", "ci_loop.max_fix_rounds", "ci_loop.rerun_cancelled", "pool.setup", "kinds.claude.lead_auto_approve", "autonomy.review", "autonomy.merge", "autonomy.yolo"} {
+	for _, key := range []string{"review_loop.enabled", "review_loop.max_rounds", "review_loop.block_at", "review_loop.auto_start", "review_loop.docs", "review_loop.guidance", "ci_loop.max_fix_rounds", "ci_loop.rerun_cancelled", "pool.setup", "kinds.claude.lead_auto_approve", "autonomy.review", "autonomy.merge", "autonomy.yolo"} {
 		if !IsUserOnly(key) {
 			t.Errorf("%s is not User-only", key)
 		}
@@ -155,7 +155,12 @@ func TestSchemaDrivesUserOnlyAndNewKeys(t *testing.T) {
 	if err := ValidateSetting("review_loop.max_rounds", int64(4), false); err == nil {
 		t.Fatal("accepted review_loop.max_rounds=4")
 	}
-	for _, key := range []string{"gate_loop.max_fix_rounds", "ci_loop.max_fix_rounds", "ci_loop.rerun_cancelled"} {
+	for _, key := range []string{"gate", "defaults.gate", "gate_loop.max_fix_rounds", "repositories.backend.gate"} {
+		if !IsRemovedGateKey(key) {
+			t.Errorf("%s is not identified as removed", key)
+		}
+	}
+	for _, key := range []string{"ci_loop.max_fix_rounds", "ci_loop.rerun_cancelled"} {
 		if err := ValidateSetting(key, int64(-1), false); err == nil {
 			t.Errorf("accepted negative %s", key)
 		}

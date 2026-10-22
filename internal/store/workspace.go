@@ -25,7 +25,7 @@ const (
 )
 
 // Task member states. A member without commits ahead of its base is unchanged
-// and never Merges; the others move open -> gated (local) or merging (pr) -> merged.
+// and never Merges; the others record a merge head (local) or enter merging (pr) -> merged.
 const (
 	TaskRepoOpen      = "open"
 	TaskRepoUnchanged = "unchanged"

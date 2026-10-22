@@ -180,7 +180,7 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("pr_push_failed", "could not push the Task branch", true, err.Error())
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
-	task.GatedSHA = sha // ephemeral: only the Lead's Gate may persist a gated SHA.
+	task.GatedSHA = sha // ephemeral until the Lead records the merge head.
 	verification := strings.Join(parsed.Repeated["verify"], "\n")
 	proof := strings.Join(parsed.Repeated["proof"], "\n\n")
 	risk := strings.Join(parsed.Repeated["risk"], "\n\n")

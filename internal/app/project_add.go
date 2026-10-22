@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -17,6 +16,9 @@ func (s *Service) projectAdd(ctx *axi.Context, args []string) error {
 	parsed, err := parseArgs("project add", args, map[string]flagSpec{"name": {}, "directory": {boolean: true}})
 	if err != nil {
 		return err
+	}
+	if parsed.Bool("directory") {
+		return axi.Failure("project_directory_removed", "Directory Projects are no longer supported", false, "Register a Git repository with `posse project add`")
 	}
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("project add takes no positional arguments")
@@ -33,31 +35,16 @@ func (s *Service) projectAdd(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	var existing store.Project
-	var found bool
-	if parsed.Bool("directory") {
-		existing, err = db.ProjectByRoot(ctx.Context, dir)
-		found = err == nil
-		if err != nil && !store.IsNotFound(err) {
-			return err
-		}
-	} else {
-		existing, found, err = registeredProjectFor(ctx.Context, db, dir)
-		if err != nil {
-			return err
-		}
+	existing, found, err := registeredProjectFor(ctx.Context, db, dir)
+	if err != nil {
+		return err
 	}
 	if found {
 		return ctx.Print(axi.Object{{Key: "project", Value: existing.Name}, {Key: "root", Value: existing.Root}, {Key: "registered", Value: false}, {Key: "help", Value: []any{"Run `posse config set --project " + existing.Name + " <key> <value>` to configure it"}}})
 	}
-	var detected detectedProject
-	if parsed.Bool("directory") {
-		detected = detectedProject{Kind: store.ProjectKindDirectory, Root: dir, Name: projectName(filepath.Base(dir))}
-	} else {
-		detected, err = detectProject(ctx.Context, dir)
-		if err != nil {
-			return err
-		}
+	detected, err := detectProject(ctx.Context, dir)
+	if err != nil {
+		return err
 	}
 	if err := applyProjectName(&detected, parsed.Flags["name"]); err != nil {
 		return err

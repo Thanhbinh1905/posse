@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -303,7 +302,7 @@ func TestFullPipelineDoneChecksCandidateContinuityAgainstFixInstruction(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	fix, err := fixture.db.QueueValidationFixInstruction(context.Background(), fixture.task.ID, "gate", candidate.CandidateSHA, "gate:continuity", "Fix the Gate")
+	fix, err := fixture.db.QueueValidationFixInstruction(context.Background(), fixture.task.ID, "ci", candidate.CandidateSHA, "ci:continuity", "Fix the failing CI")
 	if err != nil || !fix.Queued {
 		t.Fatalf("queue candidate fix instruction: %#v, %v", fix, err)
 	}
@@ -327,12 +326,6 @@ func TestFullPipelineRepairsReturnThroughPrivateCandidateValidation(t *testing.T
 	for _, required := range []string{"submit a private candidate", "Review -> test -> docs -> lint", "do not push the fix directly", "from that candidate checkout to promote it"} {
 		if !strings.Contains(strings.ToLower(ci), strings.ToLower(required)) {
 			t.Errorf("full-pipeline CI instruction omitted %q: %s", required, ci)
-		}
-	}
-	gate := gateFixInstruction(fixture.task, plan.Inputs, fixture.headSHA, "", "/private/candidate", newGateCommandFailure("go test ./...", "failed", errors.New("exit 1")))
-	for _, required := range []string{"/private/candidate", "Review -> test -> docs -> lint", "from the private candidate checkout", "Do not push"} {
-		if !strings.Contains(gate, required) {
-			t.Errorf("full-pipeline Gate instruction omitted %q: %s", required, gate)
 		}
 	}
 }
@@ -415,7 +408,7 @@ jobs:
 	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"); code != 0 {
 		t.Fatalf("docs stage: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
-	if code, output, _ := runCandidateCLI(t, fixture, candidate, "validate", "lint", "--proof", "Gates passed", "--coverage", "Execute pull-request workflow jobs"); code != 1 || !strings.Contains(output, "gate_failed") {
+	if code, output, _ := runCandidateCLI(t, fixture, candidate, "validate", "lint", "--proof", "Gates passed", "--coverage", "Execute pull-request workflow jobs"); code != 1 || !strings.Contains(output, "workflow_jobs_failed") {
 		t.Fatalf("supported workflow failure did not fail lint: exit=%d output=%s", code, output)
 	}
 	stages, err := fixture.db.ValidationStages(context.Background(), fixture.task.ID)

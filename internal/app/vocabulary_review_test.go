@@ -11,20 +11,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
-	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
-
-func TestGateFixInstructionPreservesHistoricalBriefIntent(t *testing.T) {
-	original := "---\ntype: ship\ntitle: Old Brief\ndone_when: checked\n---\nUser said Rider must land.\n"
-	input := taskplan.Select("brief", "/stored/brief.md", []byte(original))
-	instruction := gateFixInstruction(store.Task{Seq: 1}, []taskplan.Input{input}, "gated-head", "", "", errors.New("lint failed"))
-	if !strings.Contains(instruction, "User said Rider must land.") {
-		t.Fatalf("Gate fix lost the historical User intent: %s", instruction)
-	}
-	if string(input.Bytes) != original {
-		t.Fatal("rendering changed admitted evidence")
-	}
-}
 
 func TestLegacyWatchRejectsNonAdapterInvocations(t *testing.T) {
 	service := testService(t.TempDir(), herdr.NewFake())
