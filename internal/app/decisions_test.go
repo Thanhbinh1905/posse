@@ -61,6 +61,42 @@ func TestWorkerExitedNoticePastCursorStillRaisesDecision(t *testing.T) {
 	}
 }
 
+func TestTornDownReviewCapNoticesAreExcludedFromReconciliation(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	ctx := context.Background()
+	if _, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, TaskID: fixture.task.ID, Kind: "review_cap_reached", Summary: "stale cap"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='torn_down' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := fixture.db.ReviewCapNotices(ctx, fixture.project.ID)
+	if err != nil || len(notices) != 0 {
+		t.Fatalf("torn-down Review cap notices = %#v, %v; want none", notices, err)
+	}
+}
+
+func TestReviewCapNoticeIsRecreatedWhenHeadReturns(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	ctx := context.Background()
+	service := testService(fixture.home, herdr.NewFake())
+	for _, head := range []string{fixture.headSHA, strings.Repeat("a", 40), fixture.headSHA} {
+		if err := createReviewCapNotice(ctx, fixture.db, fixture.project, fixture.task, head, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var noticeCount int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='review_cap_reached'`, fixture.task.ID).Scan(&noticeCount); err != nil {
+		t.Fatal(err)
+	}
+	if noticeCount != 3 {
+		t.Fatalf("returned cap head notices=%d, want 3", noticeCount)
+	}
+}
+
 func TestMergeReadyNoticeRaisesDecisionWhileTaskIsDone(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()

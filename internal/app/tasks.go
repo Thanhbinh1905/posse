@@ -1479,7 +1479,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 					return axi.Failure("signal_invalid", err.Error(), false, "Commit the change and leave the worktree clean before signalling done")
 				}
 			}
-			if !project.IsWorkspace() && !fullPipelineSelected(task, "") {
+			if !project.IsWorkspace() {
 				if _, err := s.checkedValidationContinuity(ctx.Context, db, project, task); err != nil {
 					return err
 				}

@@ -295,6 +295,25 @@ func TestFullPipelineTargetMovementInvalidatesAndRefreshesCandidate(t *testing.T
 	}
 }
 
+func TestFullPipelineDoneChecksCandidateContinuityAgainstFixInstruction(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fix, err := fixture.db.QueueValidationFixInstruction(context.Background(), fixture.task.ID, "gate", candidate.CandidateSHA, "gate:continuity", "Fix the Gate")
+	if err != nil || !fix.Queued {
+		t.Fatalf("queue candidate fix instruction: %#v, %v", fix, err)
+	}
+	gitTest(t, candidate.WorktreePath, "commit", "--allow-empty", "--amend", "-m", "rewrite candidate history")
+	_, err = fixture.service.recordWorkerSignalWithContinuity(context.Background(), fixture.db, fixture.project, fixture.task, "done", "Finished the fix", nil, "task_done", nil, false)
+	if err == nil || !strings.Contains(err.Error(), "does not descend from expected head") {
+		t.Fatalf("discontinuous full-pipeline candidate was accepted: %v", err)
+	}
+}
+
 func TestFullPipelineRepairsReturnThroughPrivateCandidateValidation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
