@@ -85,6 +85,21 @@ type Retention struct {
 	TaskArtifacts string `toml:"task_artifacts" json:"task_artifacts"`
 }
 
+// WorkerGoCache bounds the Posse-owned Go build cache shared by every Worker.
+// It is valid only in the User config because the cache spans Projects.
+type WorkerGoCache struct {
+	MaxSize  string `toml:"max_size" json:"max_size"`
+	MinAge   string `toml:"min_age" json:"min_age"`
+	Interval string `toml:"interval" json:"interval"`
+}
+
+// MinWorkerGoCacheAge is the shortest allowed worker_go_cache.min_age. Go
+// refreshes a cache entry's mtime only when it is over an hour old, so a
+// longer floor keeps every entry used within the last hour.
+const MinWorkerGoCacheAge = 2 * time.Hour
+
+var DefaultWorkerGoCache = WorkerGoCache{MaxSize: "8GiB", MinAge: "6h", Interval: "1h"}
+
 type Kind struct {
 	Disabled           bool     `toml:"disabled" json:"disabled"`
 	AutoApproveArgs    []string `toml:"auto_approve_args" json:"auto_approve_args"`
@@ -157,6 +172,7 @@ type Config struct {
 	FullPipeline        FullPipeline               `toml:"full_pipeline" json:"full_pipeline"`
 	Pool                Pool                       `toml:"pool" json:"pool"`
 	Retention           Retention                  `toml:"retention" json:"retention"`
+	WorkerGoCache       WorkerGoCache              `toml:"worker_go_cache" json:"worker_go_cache"`
 	Kinds               map[string]Kind            `toml:"kinds" json:"kinds"`
 	Profiles            map[string]Profile         `toml:"profiles" json:"profiles"`
 	Workflows           map[string]WorkflowProfile `toml:"workflows" json:"workflows"`
@@ -280,6 +296,9 @@ func ValidationIssues(home, projectName string) []error {
 			issues = append(issues, projectErr)
 			project = map[string]any{}
 		}
+		if _, found := project["worker_go_cache"]; found {
+			issues = append(issues, &InvalidError{File: projectPath, Key: "worker_go_cache", Reason: userConfigOnlyReason("worker_go_cache")})
+		}
 		issues = append(issues, SchemaValidationErrors(projectPath, project, true)...)
 	}
 	if globalErr == nil && projectErr == nil {
@@ -336,6 +355,9 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 		project, err = readConfigMap(projectPath, migrate)
 		if err != nil {
 			return Config{}, err
+		}
+		if _, found := project["worker_go_cache"]; found {
+			return Config{}, &InvalidError{File: projectPath, Key: "worker_go_cache", Reason: userConfigOnlyReason("worker_go_cache")}
 		}
 		if err := ValidateSchemaMap(projectPath, project, true); err != nil {
 			return Config{}, err
@@ -563,14 +585,15 @@ func defaultMap() map[string]any {
 			"lead":   map[string]any{"name": "Lead", "persona": "", "language": "en", "address_user": ""},
 			"worker": map[string]any{"display_prefix": "worker"},
 		},
-		"pool":          map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
-		"retention":     map[string]any{"task_artifacts": "2160h"},
-		"review_loop":   map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}},
-		"gate_loop":     map[string]any{"max_fix_rounds": 3},
-		"ci_loop":       map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1},
-		"full_pipeline": map[string]any{"run_workflows": false},
-		"lead":          map[string]any{"kind": "", "profiles": map[string]any{}},
-		"lowkey":        map[string]any{"lead": false},
+		"pool":            map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
+		"retention":       map[string]any{"task_artifacts": "2160h"},
+		"worker_go_cache": map[string]any{"max_size": DefaultWorkerGoCache.MaxSize, "min_age": DefaultWorkerGoCache.MinAge, "interval": DefaultWorkerGoCache.Interval},
+		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}},
+		"gate_loop":       map[string]any{"max_fix_rounds": 3},
+		"ci_loop":         map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1},
+		"full_pipeline":   map[string]any{"run_workflows": false},
+		"lead":            map[string]any{"kind": "", "profiles": map[string]any{}},
+		"lowkey":          map[string]any{"lead": false},
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
 			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "none", "gate": []string{},
@@ -608,6 +631,15 @@ func (c *Config) normalizeBuiltins() {
 	}
 	if c.Retention.TaskArtifacts == "" {
 		c.Retention.TaskArtifacts = "2160h"
+	}
+	if c.WorkerGoCache.MaxSize == "" {
+		c.WorkerGoCache.MaxSize = DefaultWorkerGoCache.MaxSize
+	}
+	if c.WorkerGoCache.MinAge == "" {
+		c.WorkerGoCache.MinAge = DefaultWorkerGoCache.MinAge
+	}
+	if c.WorkerGoCache.Interval == "" {
+		c.WorkerGoCache.Interval = DefaultWorkerGoCache.Interval
 	}
 	if c.Profiles == nil {
 		c.Profiles = map[string]Profile{}

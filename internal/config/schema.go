@@ -71,6 +71,9 @@ var keySpecs = []KeySpec{
 	{Key: "pool.setup", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in a Sandbox after it is acquired.", UserOnly: true},
 	{Key: "pool.keep_idle", Type: TypeInteger, Default: 4, Meaning: "Idle Sandboxes kept for each Project."},
 	{Key: "retention.task_artifacts", Type: TypeDuration, Default: "2160h", Meaning: "How long Teardown keeps Reports, saved Task attachments and approved discard-tip bundles; `posse pool prune` removes expired artifacts."},
+	{Key: "worker_go_cache.max_size", Type: TypeString, Default: "8GiB", Meaning: "Size of the shared Posse Worker GOCACHE at which Posse trims least-recently-used entries; accepts bytes or a KiB, MiB, GiB or TiB suffix. User config only."},
+	{Key: "worker_go_cache.min_age", Type: TypeDuration, Default: "6h", Meaning: "Worker GOCACHE entries used more recently are never trimmed, so active Workers keep their builds; at least 2h. User config only."},
+	{Key: "worker_go_cache.interval", Type: TypeDuration, Default: "1h", Meaning: "Minimum time between Worker GOCACHE trims run by Project watches and Teardown. User config only."},
 	{Key: "kinds.<kind>.disabled", Type: TypeBoolean, Default: false, Meaning: "Disable this kind for new Worker dispatch without removing its historical or frozen launch settings."},
 	{Key: "kinds.<kind>.auto_approve_args", Type: TypeStringArray, Default: []string{}, Meaning: "Arguments that enable automatic approvals for this agent kind; Leads also get them by default when lead_auto_approve is true.", UserOnly: true},
 	{Key: "kinds.<kind>.lead_auto_approve", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": true, "opencode": true}, Meaning: "Whether Leads of this kind also get auto_approve_args; set false to keep the harness's approval prompts. User-only. Pi has no permission system.", UserOnly: true},
@@ -119,6 +122,15 @@ func Lookup(key string) (KeySpec, bool) {
 func IsUserOnly(key string) bool {
 	spec, found := Lookup(key)
 	return found && spec.UserOnly
+}
+
+// userConfigOnlyReason explains why a Project config may not set key, or
+// returns "" when it may.
+func userConfigOnlyReason(key string) string {
+	if key == "worker_go_cache" || strings.HasPrefix(key, "worker_go_cache.") {
+		return "worker_go_cache is valid only in the User config"
+	}
+	return ""
 }
 
 func CanonicalProjectKey(key string) string {
@@ -194,6 +206,20 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 			parsed, err := time.ParseDuration(text)
 			if err != nil || parsed <= 0 {
 				return fmt.Errorf("%s must be a positive duration", key)
+			}
+		}
+	}
+	if key == "worker_go_cache.max_size" {
+		if text, ok := value.(string); ok {
+			if _, err := ParseByteSize(text); err != nil {
+				return fmt.Errorf("%s %v", key, err)
+			}
+		}
+	}
+	if key == "worker_go_cache.min_age" {
+		if text, ok := value.(string); ok {
+			if parsed, err := time.ParseDuration(text); err == nil && parsed < MinWorkerGoCacheAge {
+				return fmt.Errorf("%s must be at least %s", key, MinWorkerGoCacheAge)
 			}
 		}
 	}
