@@ -4,7 +4,7 @@
 
 **One Lead. A whole crew. Running on Herdr.**
 
-Posse is a local-first CLI for coordinating coding agents in Git repositories and workspaces. You talk to one Lead in a Herdr pane; the Lead writes task briefs and dispatches Workers (worker agents) into isolated worktrees. Posse tracks tasks, relays progress and decisions, and integrates changes through pull requests or local fast-forwards. Pull-request Merges rely on green forge CI at the exact merged commit. Local Merges have no automated verification; verification is the User's responsibility. Edit non-Git directories directly outside Posse.
+Posse is a local-first CLI for coordinating coding agents in Git repositories and workspaces. You talk to one Lead in a Herdr pane; the Lead writes task briefs and dispatches Workers (worker agents) into isolated worktrees. Posse tracks tasks, relays progress and decisions, and integrates changes through pull requests or local fast-forwards. Pull-request Merges rely on green forge CI at the exact `gated_sha`. Local Merges have no automated verification; verification is the User's responsibility. Edit non-Git directories directly outside Posse.
 
 ## How it works
 
