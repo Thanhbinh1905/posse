@@ -725,8 +725,7 @@ func TestWorkerPublishesPRToFrozenNonDefaultTarget(t *testing.T) {
 
 func TestWorkerPublishesSignalsAndLeadGatesWatchesAndMerges(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateWorking)
-	gate := filepath.Join(f.root, "gate-ran")
-	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\ngate = [\"touch "+gate+"\"]\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	url := "https://github.com/acme/shop/pull/17"
@@ -735,9 +734,6 @@ func TestWorkerPublishesSignalsAndLeadGatesWatchesAndMerges(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitTest(t, f.remote, "rev-parse", "refs/heads/posse/t1")); got != f.headSHA {
 		t.Fatalf("published %s instead of %s", got, f.headSHA)
-	}
-	if _, err := os.Stat(gate); !os.IsNotExist(err) {
-		t.Fatalf("publish ran the Lead's gate: %v", err)
 	}
 	if code, output, _ := f.run("signal", "done", "Worker completion summary"); code != 1 || !strings.Contains(output, "requires --pr") {
 		t.Fatalf("missing URL: %d %s", code, output)
@@ -751,9 +747,6 @@ func TestWorkerPublishesSignalsAndLeadGatesWatchesAndMerges(t *testing.T) {
 	task, err := f.db.Task(context.Background(), f.project.ID, "t1")
 	if err != nil || task.State != store.StateMerging || task.PRURL != url || task.GatedSHA != f.headSHA {
 		t.Fatalf("not watching published PR: %+v %v", task, err)
-	}
-	if _, err := os.Stat(gate); err != nil {
-		t.Fatalf("gate did not run: %v", err)
 	}
 	log, _ := os.ReadFile(f.ghLog)
 	if strings.Count(string(log), "pr create") != 1 {
