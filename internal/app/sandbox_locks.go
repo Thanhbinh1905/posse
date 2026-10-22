@@ -49,7 +49,7 @@ func ensureHeldSandboxLocks(ctx context.Context, db *store.DB, project store.Pro
 				if intentErr != nil && !store.IsNotFound(intentErr) {
 					return intentErr
 				}
-				if task.State == store.StateSpawning && intentErr == nil && intent.Command == "start" {
+				if intentErr == nil && intent.Command == "start" {
 					// The start intent owns the gap between the durable Sandbox
 					// claim and Git materializing its worktree metadata. It will
 					// either finish the checkout or recover the interrupted start.
