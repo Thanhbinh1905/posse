@@ -17,6 +17,7 @@ package_assignments='
 2 github.com/thanhbinh1905/posse/internal/setup
 2 github.com/thanhbinh1905/posse/internal/taskplan
 3 github.com/thanhbinh1905/posse/internal/runtime
+3 github.com/thanhbinh1905/posse/internal/research
 4 github.com/thanhbinh1905/posse/internal/store
 4 github.com/thanhbinh1905/posse/internal/store/sqlc
 '
