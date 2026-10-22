@@ -40,12 +40,6 @@ func TestLeadHarnessAndRepositoryWorkerSidebar(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := f.client.Call(context.Background(), "workspace.move_block", map[string]any{
-		"workspace_ids":       []string{first.HerdrWorkspaceID, second.HerdrWorkspaceID},
-		"before_workspace_id": f.userBefore.Workspace.WorkspaceID,
-	}); err != nil {
-		t.Fatal(err)
-	}
 	runPosse(t, f.binary, f.repo, f.leadEnv, "list")
 	assertLeadWorkerSidebarSnapshot(t, f, first, second)
 }
@@ -62,8 +56,12 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 			}
 		}
 		for _, task := range tasks {
-			if pane.PaneID == task.PaneID && (pane.DisplayAgent != "claude" || pane.Tokens["posse_row"] != "") {
-				t.Errorf("Worker sidebar must show its harness without repeating its workspace name: %#v", pane)
+			wantRow := "└─ " + task.ShortName
+			if task.Seq == 1 {
+				wantRow = "├─ " + task.ShortName
+			}
+			if pane.PaneID == task.PaneID && (pane.DisplayAgent != "claude" || pane.Tokens["posse_row"] != wantRow) {
+				t.Errorf("Worker sidebar row = %q harness=%q, want %q and claude", pane.Tokens["posse_row"], pane.DisplayAgent, wantRow)
 			}
 		}
 	}
@@ -75,10 +73,12 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 		order = append(order, workspace.WorkspaceID+"="+workspace.Label)
 	}
 	want := []string{f.userBefore.Workspace.WorkspaceID + "=notes", f.leadWorkspaceID + "=Lead:shop"}
-	for _, task := range tasks {
-		want = append(want, task.HerdrWorkspaceID+"="+task.ShortName)
-	}
 	want = append(want, f.userAfter.Workspace.WorkspaceID+"=scratch")
+	for _, task := range tasks {
+		if task.HerdrWorkspaceID != f.leadWorkspaceID {
+			t.Errorf("Worker %s is not in the Lead workspace: %s", task.ShortName, task.HerdrWorkspaceID)
+		}
+	}
 	t.Logf("native workspace order: %v", order)
 	if strings.Join(order, ",") != strings.Join(want, ",") {
 		t.Errorf("Workers are not directly below their Lead or User layout changed: got %v, want %v", order, want)

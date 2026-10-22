@@ -15,6 +15,13 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func mergeIntentFailure(err error) error {
+	if store.IsOnlyBusy(err) {
+		return axi.Failure("store_busy", "the store was busy while recording the merge intent", true, "Retry the command after the store is available")
+	}
+	return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+}
+
 func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	parsed, err := parseArgs("merge", args, map[string]flagSpec{"execute": {boolean: true}, "user-approved": {}})
 	if err != nil {
@@ -66,18 +73,28 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	var prMergeIntent *store.Intent
 	if parsed.Bool("execute") && !project.IsWorkspace() && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
-		intent, intentErr := s.startTaskIntentAtStep(ctx.Context, db, project.ID, task.ID, "merge --execute", "in_progress:pr.merge")
+		var prIntent store.Intent
+		intentErr := retryBusy(ctx.Context, commandContentionAttempts, commandContentionDelay, func() error {
+			var err error
+			prIntent, err = s.startTaskIntentAtStep(ctx.Context, db, project.ID, task.ID, "merge --execute", "in_progress:pr.merge")
+			return err
+		})
 		if intentErr != nil {
-			return axi.Failure("intent_active", "Task already has an unfinished command", true, intentErr.Error())
+			return mergeIntentFailure(intentErr)
 		}
-		prMergeIntent = &intent
+		prMergeIntent = &prIntent
 		defer func() {
-			if finishErr := db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID); returnErr == nil && finishErr != nil {
+			if finishErr := db.FinishIntent(ctx.Context, prIntent.ID, prIntent.ProcessID); returnErr == nil && finishErr != nil {
 				returnErr = finishErr
 			}
 		}()
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	var cfg config.Config
+	err = retryBusy(ctx.Context, commandContentionAttempts, commandContentionDelay, func() error {
+		var prepareErr error
+		cfg, prepareErr = s.prepareProject(ctx.Context, db, project)
+		return prepareErr
+	})
 	if err != nil {
 		return err
 	}
@@ -106,8 +123,11 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		if hasIntent {
 			return nil
 		}
-		var intentErr error
-		intent, intentErr = s.startTaskIntent(ctx.Context, db, project.ID, task.ID, "merge --execute")
+		intentErr := retryBusy(ctx.Context, commandContentionAttempts, commandContentionDelay, func() error {
+			var err error
+			intent, err = s.startTaskIntent(ctx.Context, db, project.ID, task.ID, "merge --execute")
+			return err
+		})
 		if intentErr == nil {
 			hasIntent = true
 		}
@@ -162,7 +182,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		if parsed.Bool("execute") {
 			if err := startMergeIntent(); err != nil {
-				return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+				return mergeIntentFailure(err)
 			}
 		}
 		if err := runMergeStep("gate.record", func() error { return db.SetTaskGatedSHA(ctx.Context, task.ID, gatedSHA) }); err != nil {
@@ -216,7 +236,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("merge_state_invalid", "Task is already waiting for its local merge", false, "Run `posse merge "+taskIDString(task.Seq)+" --execute`")
 	}
 	if err := startMergeIntent(); err != nil {
-		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+		return mergeIntentFailure(err)
 	}
 	latestSHA, err := gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 	if err != nil {

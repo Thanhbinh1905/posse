@@ -5,348 +5,116 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"fmt"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestWorkersAsGroupedChildrenRecoverAfterAnotherPrimaryClosesGroup(t *testing.T) {
+func TestRepositoryWorkersOpenAsLeadTabsAndTeardownIsScoped(t *testing.T) {
 	f := newWorkerTabsFixture(t)
-	// Install only the event hook, on this isolated server and home.
-	manifest := filepath.Join(f.root, "group-recovery-plugin", "herdr-plugin.toml")
-	if err := os.MkdirAll(filepath.Dir(manifest), 0700); err != nil {
-		t.Fatal(err)
-	}
-	body := fmt.Sprintf("id = \"posse.group-e2e\"\nname = \"Group recovery E2E\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\nplatforms = [\"linux\"]\n[[events]]\non = \"workspace.closed\"\ncommand = [%q, \"_ingest\"]\n", f.binary)
-	if err := os.WriteFile(manifest, []byte(body), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.client.Call(context.Background(), "plugin.link", map[string]any{"path": manifest, "enabled": true}); err != nil {
-		t.Fatal(err)
-	}
 	first := f.start(t, "t1", "Native first", "native-first")
 	second := f.start(t, "t2", "Native second", "native-second")
-	staleProjectDB, err := store.OpenReadOnly(f.home)
-	if err != nil {
-		t.Fatal(err)
+	snapshot := f.snapshot(t)
+	t.Logf("Herdr layout after Worker launches: %#v", snapshot)
+	lead, found := findLeadInSnapshot(snapshot)
+	if !found {
+		t.Fatal("Lead pane is missing")
 	}
-	staleProject, err := staleProjectDB.ProjectByID(context.Background(), f.projectID)
-	_ = staleProjectDB.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	snap := f.snapshot(t)
-	if snap.FocusedPaneID != f.leadPaneID {
-		t.Fatalf("start stole focus: %s", snap.FocusedPaneID)
-	}
-	leadRepoKey := ""
-	for _, w := range snap.Workspaces {
-		if w.WorkspaceID == f.leadWorkspaceID {
-			leadRepoKey = w.Worktree.RepoKey
-		}
-	}
-	if leadRepoKey == "" {
-		t.Fatal("Lead was not promoted to the worktree group primary")
+	if snapshot.FocusedPaneID != f.leadPaneID {
+		t.Fatalf("Worker start stole focus: %s", snapshot.FocusedPaneID)
 	}
 	for _, task := range []store.Task{first, second} {
-		if task.HerdrWorkspaceID == f.leadWorkspaceID {
-			t.Fatalf("Worker %d opened as tab", task.Seq)
+		if task.HerdrWorkspaceID != lead.WorkspaceID {
+			t.Fatalf("Worker %d opened outside Lead workspace: task=%#v Lead=%#v", task.Seq, task, lead)
 		}
-		found := false
-		for _, w := range snap.Workspaces {
-			if w.WorkspaceID == task.HerdrWorkspaceID {
-				found = w.Worktree.IsLinkedWorktree && w.Worktree.RepoKey == leadRepoKey && w.Worktree.CheckoutPath == task.WorktreePath && w.Label == task.ShortName
-			}
-		}
-		if !found {
-			t.Fatalf("Worker is not a linked child: %#v", snap.Workspaces)
-		}
-		for _, tab := range snap.Tabs {
-			if tab.WorkspaceID == task.HerdrWorkspaceID && tab.Label == task.ShortName {
-				t.Fatalf("child tab duplicates workspace label")
+		f.assertWorkerTab(t, snapshot, task)
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.Worktree.CheckoutPath == task.WorktreePath {
+				t.Fatalf("Worker %d created a linked workspace: %#v", task.Seq, workspace)
 			}
 		}
 	}
-	assertNativeWorktreeSidebar(t, f, first.ShortName, second.ShortName)
-	if f.snapshot(t).FocusedPaneID != f.leadPaneID {
-		t.Fatal("sidebar client stole focus")
+
+	// Verify Teardown remains tab-scoped: the first tab closes, while the Lead
+	// and sibling Worker tab remain untouched.
+	f.fail(t, "t1")
+	f.exitWorker(t, "t1")
+	firstTab := tabOf(t, f.snapshot(t), first.PaneID)
+	if _, err := f.client.Call(context.Background(), "tab.close", map[string]any{"tab_id": firstTab}); err != nil {
+		t.Fatalf("close exited Worker tab: %v", err)
 	}
-	// Leave uncommitted work in the Sandbox. Recovery must not reset the checkout.
-	changed := filepath.Join(first.WorktreePath, "unfinished.txt")
-	if err := os.WriteFile(changed, []byte("keep this work"), 0600); err != nil {
-		t.Fatal(err)
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved the tab teardown test")
+	if !strings.Contains(output, "torn-down") {
+		t.Fatalf("Teardown failed: %s", output)
 	}
-	strayPath := filepath.Join(f.root, "stray-linked")
-	gitTest(t, f.env, f.repo, "worktree", "add", "--detach", strayPath)
-	defer gitTest(t, f.env, f.repo, "worktree", "remove", "--force", strayPath)
-	stray := createLabeledWorkspace(t, f.client, f.repo, "stray-primary")
-	if _, err := f.client.Call(context.Background(), "worktree.open", map[string]any{"workspace_id": stray.Workspace.WorkspaceID, "path": strayPath, "focus": false}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": stray.Workspace.WorkspaceID, "close_group": true}); err != nil {
-		t.Fatal(err)
-	}
-	if !waitForCondition(30*time.Second, func() bool {
-		a, b := f.task(t, "t1"), f.task(t, "t2")
-		snap := f.snapshot(t)
-		_, ok := findLeadInSnapshot(snap)
-		return ok && a.Launches > first.Launches && b.Launches > second.Launches
-	}) {
-		logs, logErr := f.client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.group-e2e"})
-		t.Logf("hook logs=%s error=%v", logs, logErr)
-		t.Fatalf("group close did not automatically restore Lead and Workers: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
-	}
-	snap = f.snapshot(t)
-	assertRecoveredWorkerRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
-	if !waitForCondition(30*time.Second, func() bool {
-		db, err := store.OpenReadOnly(f.home)
-		if err != nil {
-			return false
-		}
-		defer db.Close()
-		project, err := db.ProjectByID(context.Background(), f.projectID)
-		return err == nil && project.LeadPaneID != ""
-	}) {
-		t.Fatal("Lead recovery did not finish")
-	}
-	if data, err := os.ReadFile(changed); err != nil || string(data) != "keep this work" {
-		t.Fatalf("unfinished work lost: %q %v", data, err)
-	}
-	if snap.FocusedPaneID == f.task(t, "t1").PaneID || snap.FocusedPaneID == f.task(t, "t2").PaneID {
-		t.Fatalf("recovery focused a Worker: %s", snap.FocusedPaneID)
-	}
-	for _, task := range []store.Task{f.task(t, "t1"), f.task(t, "t2")} {
-		present := false
-		for _, w := range snap.Workspaces {
-			if w.WorkspaceID == task.HerdrWorkspaceID && w.Worktree.CheckoutPath == task.WorktreePath {
-				present = true
-			}
-		}
-		if !present {
-			t.Fatalf("recovered child lost grouping: %#v", task)
-		}
-	}
-	db, err := store.OpenReadOnly(f.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	notices, err := db.Notices(context.Background(), f.projectID, false)
-	_ = db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	recoveredNotice := false
-	for _, n := range notices {
-		if n.Kind == "recovery" && strings.Contains(n.Summary, "group close") {
-			recoveredNotice = true
-		}
-	}
-	if !recoveredNotice {
-		t.Fatalf("no group-close recovery Notice: %#v", notices)
-	}
-	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatal("foreign-primary recovery did not preserve the hidden Watch runtime")
-	}
-	if panes, processes := watchPanes(t, f.client), watchPIDs(f.root); len(panes) != 0 || len(processes) != 1 {
-		t.Fatalf("group recovery left visible or duplicate Watches: panes=%d processes=%d", len(panes), len(processes))
-	}
-	// The primary row uses the same close-group operation as a foreign primary.
-	firstBeforeLeadClose, secondBeforeLeadClose := f.task(t, "t1"), f.task(t, "t2")
-	leadBeforeClose, ok := findLeadInSnapshot(snap)
-	if !ok {
-		t.Fatal("recovered Lead missing before primary close")
-	}
-	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": leadBeforeClose.WorkspaceID, "close_group": true}); err != nil {
-		t.Fatal(err)
-	}
-	if !waitForCondition(30*time.Second, func() bool {
-		a, b := f.task(t, "t1"), f.task(t, "t2")
-		project := f.project(t)
-		snapshot := f.snapshot(t)
-		for _, pane := range snapshot.Panes {
-			if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == "posse:shop:lead" {
-				return a.Launches > firstBeforeLeadClose.Launches && b.Launches > secondBeforeLeadClose.Launches
-			}
-		}
-		return false
-	}) {
-		db, err := store.OpenReadOnly(f.home)
-		if err == nil {
-			project, _ := db.ProjectByID(context.Background(), f.projectID)
-			recovery, _ := db.ProjectRecovery(context.Background(), f.projectID)
-			firstRecovery, _ := db.TaskRecovery(context.Background(), first.ID)
-			secondRecovery, _ := db.TaskRecovery(context.Background(), second.ID)
-			t.Logf("Project=%#v recovery=%#v first=%#v second=%#v", project, recovery, firstRecovery, secondRecovery)
-			_ = db.Close()
-		}
-		logs, logErr := f.client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.group-e2e"})
-		t.Logf("hook logs=%s error=%v", logs, logErr)
-		t.Fatalf("Lead group close did not restore both Workers: %#v %#v", f.task(t, "t1"), f.task(t, "t2"))
-	}
-	snap = f.snapshot(t)
-	if !waitForCondition(10*time.Second, func() bool {
-		db, err := store.OpenReadOnly(f.home)
-		if err != nil {
-			return false
-		}
-		defer db.Close()
-		project, err := db.ProjectByID(context.Background(), f.projectID)
-		return err == nil && project.LeadPaneID != "" && project.LeadLabel != ""
-	}) {
-		t.Fatal("Lead recovery did not finish recording its identity")
-	}
-	snap = f.snapshot(t)
-	assertRecoveredWorkerRecordsMatchSnapshot(t, f.home, []store.Task{f.task(t, "t1"), f.task(t, "t2")}, snap)
-	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatal("Lead-primary recovery did not preserve the hidden Watch runtime")
-	}
-	if panes, processes := watchPanes(t, f.client), watchPIDs(f.root); len(panes) != 0 || len(processes) != 1 {
-		t.Fatalf("Lead group close left visible or duplicate Watches: panes=%d processes=%d", len(panes), len(processes))
-	}
-	db, err = store.OpenReadOnly(f.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, task := range []store.Task{firstBeforeLeadClose, secondBeforeLeadClose} {
-		transitions, err := db.TaskTransitions(context.Background(), task.ID, 20)
-		if err != nil {
-			_ = db.Close()
-			t.Fatal(err)
-		}
-		for _, transition := range transitions {
-			if transition.To == string(store.StateLost) {
-				_ = db.Close()
-				t.Fatalf("Worker %s was marked lost during group recovery: %#v", task.ShortName, transitions)
-			}
-		}
-	}
-	_ = db.Close()
-	if data, err := os.ReadFile(changed); err != nil || string(data) != "keep this work" {
-		t.Fatalf("Lead group close lost unfinished work: %q %v", data, err)
-	}
-	// A normal Teardown closes only the child and unlocks its released Sandbox.
-	second = f.task(t, "t2")
-	f.fail(t, "t2")
-	f.exitWorker(t, "t2")
-	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": second.HerdrWorkspaceID}); err != nil {
-		t.Fatalf("close the exited Worker child workspace: %v", err)
-	}
-	var lead herdr.Pane
-	if !waitForCondition(5*time.Second, func() bool {
-		project := f.project(t)
-		for _, pane := range f.snapshot(t).Panes {
-			if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && pane.Label == "posse:shop:lead" && pane.Agent != "" {
-				lead = pane
-				return true
-			}
-		}
-		return false
-	}) {
-		db, err := store.OpenReadOnly(f.home)
-		if err != nil {
-			t.Fatalf("recovered Lead identity did not settle before child Teardown: open store: %v", err)
-		}
-		project, projectErr := db.ProjectByID(context.Background(), f.projectID)
-		recovery, recoveryErr := db.ProjectRecovery(context.Background(), f.projectID)
-		firstRecovery, firstRecoveryErr := db.TaskRecovery(context.Background(), first.ID)
-		secondRecovery, secondRecoveryErr := db.TaskRecovery(context.Background(), second.ID)
-		_ = db.Close()
-		logs, logErr := f.client.Call(context.Background(), "plugin.log.list", map[string]any{"plugin_id": "posse.group-e2e"})
-		t.Logf("Project=%#v recovery=%#v first=%#v second=%#v errors=%v/%v/%v/%v hook logs=%s log error=%v", project, recovery, firstRecovery, secondRecovery, projectErr, recoveryErr, firstRecoveryErr, secondRecoveryErr, logs, logErr)
-		t.Fatalf("recovered Lead identity did not settle before child Teardown: Project=%#v err=%v", project, projectErr)
-	}
-	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", lead.PaneID)
-	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", lead.WorkspaceID)
-	leadEnv = setEnv(leadEnv, "HERDR_TAB_ID", lead.TabID)
-	if role := runPosse(t, f.binary, f.repo, leadEnv, "_context"); !strings.Contains(role, "role: lead\nproject: shop") {
-		t.Fatalf("recovered Lead caller did not resolve as Lead before child Teardown: %s", role)
-	}
-	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": f.userBefore.RootPane.PaneID}); err != nil {
-		t.Fatal(err)
-	}
-	focusedBeforeClose := f.snapshot(t).FocusedPaneID
-	// A delayed reconciliation can still carry the pre-recovery Lead identity.
-	// Reproduce that stale observation after the recovered Lead has settled.
-	staleObservationDB, err := store.OpenAt(filepath.Join(f.home, "posse.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := staleObservationDB.UpdateProjectObservation(context.Background(), staleProject, staleProject.LeadPaneID, staleProject.HerdrWorkspaceID, time.Now().UnixMilli()); err != nil {
-		_ = staleObservationDB.Close()
-		t.Fatal(err)
-	}
-	currentProject, err := staleObservationDB.ProjectByID(context.Background(), f.projectID)
-	_ = staleObservationDB.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if currentProject.LeadPaneID != lead.PaneID || currentProject.HerdrWorkspaceID != lead.WorkspaceID {
-		t.Fatalf("stale observation reverted the recovered Lead identity: got %#v, want pane=%s workspace=%s", currentProject, lead.PaneID, lead.WorkspaceID)
-	}
-	command := exec.Command(f.binary, "teardown", "t2", "--discard", "--user-approved", "User approved the child teardown test")
-	command.Dir, command.Env = f.repo, leadEnv
-	commandOutput, commandErr := command.CombinedOutput()
-	if commandErr != nil {
-		db, dbErr := store.OpenReadOnly(f.home)
-		if dbErr == nil {
-			project, projectErr := db.ProjectByName(context.Background(), "shop")
-			db.Close()
-			t.Fatalf("posse teardown t2 failed: %v\n%s\ncontext=%s leadPane=%s project=%#v projectErr=%v", commandErr, commandOutput, runPosse(t, f.binary, f.repo, leadEnv, "_context"), lead.PaneID, project, projectErr)
-		}
-		t.Fatalf("posse teardown t2 failed: %v\n%s\nopen project: %v", commandErr, commandOutput, dbErr)
-	}
-	snap = f.snapshot(t)
-	if snap.FocusedPaneID != focusedBeforeClose {
-		t.Fatalf("Teardown stole focus: before %s after %s", focusedBeforeClose, snap.FocusedPaneID)
-	}
-	for _, w := range snap.Workspaces {
-		if w.WorkspaceID == second.HerdrWorkspaceID {
-			t.Fatalf("teardown left child open")
-		}
-	}
-	if _, ok := findLeadInSnapshot(snap); !ok {
-		t.Fatal("teardown closed the Lead")
-	}
-	f.assertAlive(t, snap, f.task(t, "t1").PaneID)
-	list := exec.Command("git", "-C", f.repo, "worktree", "list", "--porcelain")
-	list.Env = f.env
-	output, err := list.CombinedOutput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, block := range strings.Split(string(output), "\n\n") {
-		if strings.HasPrefix(block, "worktree "+second.WorktreePath+"\n") && strings.Contains(block, "locked ") {
-			t.Fatalf("released Sandbox still locked: %s", block)
-		}
+	snapshot = f.snapshot(t)
+	t.Logf("Herdr layout after t1 Teardown: %#v", snapshot)
+	f.assertAlive(t, snapshot, f.leadPaneID, second.PaneID)
+	f.assertGone(t, snapshot, first.PaneID)
+	if _, found := findLeadInSnapshot(snapshot); !found {
+		t.Fatal("Teardown closed the Lead")
 	}
 }
 
-func assertRecoveredWorkerRecordsMatchSnapshot(t *testing.T, home string, tasks []store.Task, snapshot herdr.Snapshot) {
-	t.Helper()
-	db, err := store.OpenReadOnly(home)
+func TestLegacyLinkedWorkerChildTearsDownWithoutClosingLeadOrSibling(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	legacy := f.start(t, "t1", "Legacy linked Worker", "legacy-linked")
+	sibling := f.start(t, "t2", "Sibling tab Worker", "sibling-tab")
+	f.fail(t, "t1")
+	f.exitWorker(t, "t1")
+	oldTab := tabOf(t, f.snapshot(t), legacy.PaneID)
+	if _, err := f.client.Call(context.Background(), "tab.close", map[string]any{"tab_id": oldTab}); err != nil {
+		t.Fatalf("close exited tab before migrating legacy fixture: %v", err)
+	}
+	raw, err := f.client.Call(context.Background(), "worktree.open", map[string]any{
+		"workspace_id": f.leadWorkspaceID, "path": legacy.WorktreePath, "label": legacy.ShortName, "focus": false,
+	})
+	if err != nil {
+		t.Fatalf("recreate legacy linked Worker workspace: %v", err)
+	}
+	var opened struct {
+		Workspace struct {
+			WorkspaceID string `json:"workspace_id"`
+		} `json:"workspace"`
+		RootPane struct {
+			PaneID string `json:"pane_id"`
+		} `json:"root_pane"`
+	}
+	if err := json.Unmarshal(raw, &opened); err != nil || opened.Workspace.WorkspaceID == "" || opened.RootPane.PaneID == "" {
+		t.Fatalf("legacy linked Worker response = %s: %v", raw, err)
+	}
+	if _, err := f.client.Call(context.Background(), "pane.rename", map[string]any{"pane_id": opened.RootPane.PaneID, "label": legacy.PaneLabel}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	for _, task := range tasks {
-		state, err := db.TaskRecovery(context.Background(), task.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if state.Status != "recovered" {
-			continue
-		}
-		pane, found := herdr.FindPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-		if !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped" {
-			t.Fatalf("Task %s recovery says recovered without a live Worker pane: state=%#v pane=%#v found=%v", task.ShortName, state, pane, found)
-		}
+	if err := db.UpdateTaskWorkspace(context.Background(), legacy.ID, opened.Workspace.WorkspaceID, opened.RootPane.PaneID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	// Herdr removes the child's shell when its last tab closes. Posse must still
+	// finish legacy Teardown without closing the Lead or the sibling tab.
+	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": opened.Workspace.WorkspaceID}); err != nil {
+		t.Fatalf("close only the legacy child workspace: %v", err)
+	}
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved the legacy linked-child teardown test")
+	if !strings.Contains(output, "torn-down") {
+		t.Fatalf("legacy linked-child Teardown failed: %s", output)
+	}
+	snapshot := f.snapshot(t)
+	f.assertAlive(t, snapshot, f.leadPaneID, sibling.PaneID)
+	f.assertGone(t, snapshot, opened.RootPane.PaneID)
+	if _, found := findLeadInSnapshot(snapshot); !found {
+		t.Fatal("legacy linked-child Teardown closed the Lead")
 	}
 }
 

@@ -1,6 +1,6 @@
 # Workspace Project Workers open as tabs of the Lead's workspace
 
-*Amended by [ADR 0012](0012-group-repository-workers-under-lead.md): repository Workers now open as linked worktree children of the Lead, while Workspace Project Workers and legacy Tasks keep this tab behavior.*
+*Amended by [ADR 0012](0012-group-repository-workers-under-lead.md) and superseded for repository Worker placement by [ADR 0013](0013-all-workers-open-as-lead-tabs.md): every new Worker opens as a tab of its Lead workspace. Existing linked-child Workers remain supported until teardown.*
 
 Each Worker used to open in its own Herdr workspace ([ADR 0007](0007-isolate-workers-from-the-user-session.md) layer 1). With several Workers the sidebar held one row per Worker, interleaved with the User's own workspaces, and every launch or teardown renamed sibling Worker workspaces to keep the `├─`/`└─` connectors in order. The User chose one shared workspace for the Lead and its Workers.
 
