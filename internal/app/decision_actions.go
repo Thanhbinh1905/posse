@@ -215,7 +215,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				if !ok {
 					return fmt.Errorf("invalid workspace Orphan origin")
 				}
-				member, err := s.projectTarget(out.Context, db, project, name)
+				member, err := projectTarget(out.Context, db, project, name)
 				if err != nil {
 					return err
 				}
@@ -294,7 +294,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		target := project.Root
 		memberName := ""
 		if project.IsWorkspace() {
-			members, err := s.workspaceMembers(out.Context, db, project, task)
+			members, err := workspaceMembers(out.Context, db, project, task)
 			if err != nil {
 				return err
 			}

@@ -24,7 +24,7 @@ func TestWorkspaceDiscardClosesEveryRecordedMemberPR(t *testing.T) {
 	}
 	heads := make(map[string]string, len(repos))
 	for _, repo := range repos {
-		target, err := f.service.projectTarget(ctx, f.db, f.project, repo.Repo)
+		target, err := projectTarget(ctx, f.db, f.project, repo.Repo)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +114,7 @@ func TestDiscardClosesRecordedGitLabMergeRequest(t *testing.T) {
 		t.Fatalf("Task member = %#v, %v", repos, err)
 	}
 	repo := repos[0]
-	target, err := f.service.projectTarget(ctx, f.db, f.project, repo.Repo)
+	target, err := projectTarget(ctx, f.db, f.project, repo.Repo)
 	if err != nil {
 		t.Fatal(err)
 	}

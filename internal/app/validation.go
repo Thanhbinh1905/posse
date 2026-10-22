@@ -2,32 +2,15 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
-
-func validationCandidateTargetBranch(ctx context.Context, db *store.DB, project store.Project, task store.Task, candidate store.ValidationCandidate) (string, error) {
-	if project.IsWorkspace() && candidate.Repo != "" {
-		repos, err := db.TaskRepos(ctx, task.ID)
-		if err != nil {
-			return "", err
-		}
-		for _, repo := range repos {
-			if repo.Repo == candidate.Repo {
-				if repo.TargetBranch == "" {
-					return "", axi.Failure("candidate_target_missing", "Member "+repo.Repo+" has no frozen target branch", false)
-				}
-				return repo.TargetBranch, nil
-			}
-		}
-		return "", axi.Failure("validation_repo_invalid", "candidate Member is not part of this Task", false)
-	}
-	return taskTargetBranch(project, task), nil
-}
 
 func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 	parsed, err := parseArgs("validate", args, map[string]flagSpec{
@@ -58,26 +41,12 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if project.IsWorkspace() {
-		if parsed.Flags["repo"] == "" {
-			return axi.Failure("validation_repo_required", "workspace validation requires --repo <member>", false)
-		}
-		repos, err := db.TaskRepos(out.Context, task.ID)
-		if err != nil {
-			return err
-		}
-		found := false
-		for _, repo := range repos {
-			if repo.Repo == parsed.Flags["repo"] && repo.State != store.TaskRepoUnchanged {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return axi.Failure("validation_repo_invalid", "the named Member is not changed by this Task", false)
-		}
-	} else if parsed.Flags["repo"] != "" {
-		return axi.Failure("validation_repo_invalid", "--repo is only valid for a workspace Task", false)
+	lane, err := resolveCandidateLane(out.Context, db, project, task, parsed.Flags["repo"])
+	if err != nil {
+		return err
+	}
+	if lane.repo != "" && lane.member.State == store.TaskRepoUnchanged {
+		return axi.Failure("validation_repo_invalid", "the named Member is not changed by this Task", false)
 	}
 	candidate, err := db.LatestValidationCandidate(out.Context, task.ID, parsed.Flags["repo"])
 	if err != nil {
@@ -90,7 +59,7 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted && !(stage == "status" && candidate.State == store.ValidationCandidateStale) {
 		return candidateSubmissionError(task, candidate, "candidate_not_active", "candidate is not available for validation", false)
 	}
-	if err := s.ensureCandidateCheckout(out.Context, db, home, task, candidate); err != nil {
+	if err := s.ensureCandidateCheckout(out.Context, db, home, lane.task, candidate); err != nil {
 		return err
 	}
 	candidate, err = db.LatestValidationCandidate(out.Context, task.ID, parsed.Flags["repo"])
@@ -102,7 +71,7 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 		return axi.Failure("validation_custody_required", "run validation from this Task's private candidate checkout", false, candidate.WorktreePath)
 	}
 	if candidate.State == store.ValidationCandidateActive {
-		if err := s.requireCandidateSubmissionFreshness(out.Context, db, task, candidate); err != nil {
+		if err := s.requireCandidateSubmissionFreshness(out.Context, db, lane, candidate); err != nil {
 			return err
 		}
 		candidate, err = db.LatestValidationCandidate(out.Context, task.ID, parsed.Flags["repo"])
@@ -111,7 +80,7 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 		}
 	}
 	if stage == "status" {
-		return s.printCandidateValidationStatus(out, db, task, candidate)
+		return s.printCandidateValidationStatus(out, db, lane, candidate)
 	}
 	if candidate.State != store.ValidationCandidateActive {
 		return axi.Failure("candidate_not_active", "a promoted candidate cannot accept new local validation results", false)
@@ -130,16 +99,12 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 	if status != "" {
 		return axi.Failure("candidate_dirty", "commit candidate changes before recording validation", false)
 	}
-	targetBranch, err := validationCandidateTargetBranch(out.Context, db, project, task, candidate)
-	if err != nil {
-		return err
-	}
-	targetHead, err := remoteBranchHead(out.Context, candidate.WorktreePath, "refs/heads/"+targetBranch)
+	targetHead, err := lane.targetHead(out.Context)
 	if err != nil {
 		return axi.Failure("candidate_target_head_failed", "could not inspect the frozen target before validation", true, err.Error())
 	}
 	if targetHead == "" {
-		return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
+		return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
 	}
 	if targetHead != candidate.TargetSHA {
 		if err := db.MarkValidationCandidateStale(out.Context, candidate.ID, targetHead); err != nil {
@@ -186,14 +151,15 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 		if strings.TrimSpace(parsed.Flags["proof"]) == "" || strings.TrimSpace(parsed.Flags["coverage"]) == "" {
 			return axi.Failure("validation_evidence_required", "lint requires --proof <result> and --coverage <local workflow jobs and gaps>", false)
 		}
-		candidateTask := task
-		candidateTask.WorktreePath = candidate.WorktreePath
-		candidateTask.GatedSHA = candidate.CandidateSHA
 		cfg, err := s.prepareProject(out.Context, db, project)
 		if err != nil {
 			return err
 		}
-		if gateErr := runGates(out.Context, cfg, candidateTask); gateErr != nil {
+		gates := cfg.Defaults.Gate
+		if lane.repo != "" {
+			gates = memberGates(cfg, lane.repo)
+		}
+		if gateErr := runMemberGates(out.Context, gates, candidate.WorktreePath); gateErr != nil {
 			if recordErr := recordGateFailure(out.Context, db, project, task, candidate.CandidateSHA, candidate.Repo, gateErr); recordErr != nil {
 				return recordErr
 			}
@@ -299,20 +265,16 @@ func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store
 	return nil
 }
 
-func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, project store.Project, task store.Task, candidate store.ValidationCandidate) error {
+func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
 	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted && candidate.State != store.ValidationCandidatePromoting {
-		return axi.Failure("candidate_not_active", "candidate is not eligible for full-pipeline promotion", false)
+		return axi.Failure("candidate_not_active", lane.memberLabel("candidate is not eligible for full-pipeline promotion"), false)
 	}
-	targetBranch, err := validationCandidateTargetBranch(ctx, db, project, task, candidate)
-	if err != nil {
-		return err
-	}
-	targetHead, err := remoteBranchHead(ctx, candidate.WorktreePath, "refs/heads/"+targetBranch)
+	targetHead, err := lane.targetHead(ctx)
 	if err != nil {
 		return err
 	}
 	if targetHead == "" {
-		return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
+		return axi.Failure("candidate_target_missing", lane.memberLabel("the frozen target branch is missing"), false)
 	}
 	if targetHead != candidate.TargetSHA {
 		if candidate.State == store.ValidationCandidateActive || candidate.State == store.ValidationCandidatePromoting {
@@ -322,74 +284,123 @@ func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, p
 		} else if err := db.InvalidateValidationStages(ctx, candidate.ID, targetHead); err != nil {
 			return err
 		}
-		return axi.Failure("validation_stale", "the frozen target moved after local validation", false, "Submit a fresh candidate and rerun review -> test -> docs -> lint")
+		return axi.Failure("validation_stale", lane.memberLabel("the frozen target moved after local validation"), false, "Submit a fresh candidate and rerun review -> test -> docs -> lint")
 	}
-	return requireFullPipelineCandidateResults(ctx, db, project, task, candidate)
+	return requireFullPipelineCandidateResults(ctx, db, lane, candidate)
 }
 
-func requireFullPipelineCandidateResults(ctx context.Context, db *store.DB, project store.Project, task store.Task, candidate store.ValidationCandidate) error {
-	if err := requireCandidateReviewPass(ctx, db, project, task, candidate); err != nil {
+func requireFullPipelineCandidateResults(ctx context.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
+	if err := requireCandidateReviewPass(ctx, db, lane.owner, lane.ownerTask, candidate); err != nil {
 		return err
 	}
-	plan, err := task.AdmittedPlan()
+	plan, err := lane.ownerTask.AdmittedPlan()
 	if err != nil || plan == nil {
 		return admittedPlanFailure(fmt.Errorf("full-pipeline Task has no valid admitted plan"))
 	}
 	for _, stage := range []string{"test", "docs", "lint"} {
 		if _, err := db.ValidationStage(ctx, candidate.ID, stage, candidate.CandidateSHA, candidate.TargetSHA, plan.SHA256()); err != nil {
-			return axi.Failure("validation_stage_required", "candidate "+shortSHA(candidate.CandidateSHA)+" has no current passing "+stage+" result", false, "Complete review -> test -> docs -> lint in the private candidate checkout before publishing")
+			return axi.Failure("validation_stage_required", lane.memberLabel("candidate "+shortSHA(candidate.CandidateSHA)+" has no current passing "+stage+" result"), false, "Complete review -> test -> docs -> lint in the private candidate checkout before publishing")
 		}
 	}
 	return nil
 }
 
-func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project store.Project, task store.Task, commit string) error {
-	if !project.IsWorkspace() {
-		candidate, err := db.LatestValidationCandidate(ctx, task.ID, "")
-		if err != nil {
-			return axi.Failure("candidate_missing", "full-pipeline Task has no submitted private candidate", false)
-		}
-		if candidate.State != store.ValidationCandidatePromoted {
-			return axi.Failure("candidate_not_promoted", "full-pipeline candidates must be promoted through the private fast-forward path before Merge", false)
-		}
-		if commit != "" && candidate.CandidateSHA != commit {
-			return axi.Failure("validation_stale", "published head does not match the fully validated private candidate", false)
-		}
-		return requireFullPipelineCandidateValidation(ctx, db, project, task, candidate)
-	}
-	plan, err := task.AdmittedPlan()
-	if err != nil || plan == nil {
-		return admittedPlanFailure(fmt.Errorf("full-pipeline Task has no valid admitted plan"))
-	}
-	repos, err := db.TaskRepos(ctx, task.ID)
+// requireFullPipelineValidationAt is the publication barrier of Merge and the
+// done Signal: every changed full-pipeline lane needs a promoted candidate
+// that is its exact delivered head, against its current frozen target, with
+// current ordered results. commit pins a single-repository PR head; otherwise
+// the Task branch tip, the head local integration would fast-forward, is
+// checked; a local lane's gated head must also be the candidate, since local
+// Merge fast-forwards to it. A Member already integrated under this barrier
+// (recorded merged, or its PR merged at the validated head before the PR poll
+// recorded it) is not rechecked, since its own integration moved its target.
+func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit string) error {
+	lanes, err := changedCandidateLanes(ctx, db, project, task)
 	if err != nil {
 		return err
 	}
 	validated := 0
-	for _, repo := range repos {
-		if repo.State == store.TaskRepoUnchanged || !isFullPipelineTask(task, repo.Repo) {
+	for _, lane := range lanes {
+		if lane.member.State == store.TaskRepoMerged {
+			validated++
 			continue
 		}
-		candidate, err := db.LatestValidationCandidate(ctx, task.ID, repo.Repo)
+		candidate, err := db.LatestValidationCandidate(ctx, task.ID, lane.repo)
 		if err != nil {
-			return axi.Failure("candidate_missing", "full-pipeline Member "+repo.Repo+" has no private candidate", false)
+			return axi.Failure("candidate_missing", lane.memberLabel("full-pipeline Task has no submitted private candidate"), false)
 		}
-		branchHead, err := gitOutput(ctx, repo.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
-		if err != nil {
+		if candidate.State != store.ValidationCandidatePromoted {
+			return axi.Failure("candidate_not_promoted", lane.memberLabel("full-pipeline candidates must be promoted through the private fast-forward path before Merge"), false)
+		}
+		head := commit
+		if lane.repo != "" || head == "" && lane.localDelivery() {
+			head, err = gitOutput(ctx, lane.task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+			if err != nil {
+				return err
+			}
+		}
+		if head != "" && head != candidate.CandidateSHA {
+			return axi.Failure("validation_stale", lane.memberLabel("head "+shortSHA(head)+" does not match the fully validated private candidate "+shortSHA(candidate.CandidateSHA)), false, "Run `posse publish` to submit the new head as a fresh candidate")
+		}
+		if gated := lane.task.GatedSHA; lane.localDelivery() && gated != "" && gated != candidate.CandidateSHA {
+			return axi.Failure("validation_stale", lane.memberLabel("gated head "+shortSHA(gated)+" is not the fully validated private candidate "+shortSHA(candidate.CandidateSHA)), false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate the validated head")
+		}
+		if integrated, err := memberPRMergedAtCandidate(ctx, cfg, lane, candidate); err != nil {
 			return err
+		} else if integrated {
+			validated++
+			continue
 		}
-		if branchHead != candidate.CandidateSHA || candidate.State != store.ValidationCandidatePromoted {
-			return axi.Failure("validation_stale", "Member "+repo.Repo+" head does not match its validated candidate", false)
-		}
-		if err := requireFullPipelineCandidateValidation(ctx, db, project, task, candidate); err != nil {
+		if err := requireFullPipelineCandidateValidation(ctx, db, lane, candidate); err != nil {
 			return err
 		}
 		validated++
 	}
 	if validated == 0 {
-		return axi.Failure("validation_required", "no full-pipeline workspace Members have validated candidates", false)
+		return axi.Failure("validation_required", "no changed full-pipeline repository has a validated candidate", false)
 	}
 	return nil
+}
+
+// memberPRMergedAtCandidate reports whether a workspace PR Member whose merge
+// was requested already merged on the forge at exactly its validated head. The
+// forge is asked only after the Member's target moved, which is what such a
+// merge does before the PR poll records the Member merged.
+func memberPRMergedAtCandidate(ctx context.Context, cfg config.Config, lane candidateLane, candidate store.ValidationCandidate) (bool, error) {
+	if lane.repo == "" || lane.localDelivery() || lane.member.State != store.TaskRepoMerge || lane.member.PRURL == "" || lane.member.GatedSHA != candidate.CandidateSHA {
+		return false, nil
+	}
+	targetHead, err := lane.targetHead(ctx)
+	if err != nil || targetHead == candidate.TargetSHA {
+		return false, err
+	}
+	forge, err := forgeForRepository(ctx, lane.project.Root, cfg, lane.repo)
+	if err != nil {
+		return false, prefixFailure(lane.repo, err)
+	}
+	number, err := forgeReference(lane.member.PRURL, forge)
+	if err != nil {
+		return false, axi.Failure("pr_url_invalid", lane.memberLabel(err.Error()), false)
+	}
+	if forge.Kind == "gitlab" {
+		mr, err := gitlabMR(ctx, forge, number)
+		if err != nil {
+			return false, axi.Failure("pr_view_failed", lane.memberLabel("could not verify the merge request state"), true, err.Error())
+		}
+		return mr.State == "merged" && mr.SHA == candidate.CandidateSHA, nil
+	}
+	output, err := commandOutputArgs(ctx, lane.project.Root, "gh", "pr", "view", lane.member.PRURL, "--json", "state,headRefOid")
+	if err != nil {
+		return false, axi.Failure("pr_view_failed", lane.memberLabel("could not verify the pull request state"), true, strings.TrimSpace(output))
+	}
+	var pull struct {
+		State      string `json:"state"`
+		HeadRefOID string `json:"headRefOid"`
+	}
+	if err := json.Unmarshal([]byte(output), &pull); err != nil {
+		return false, axi.Failure("pr_view_failed", lane.memberLabel("gh returned invalid pull request data"), true, err.Error())
+	}
+	return pull.State == "MERGED" && pull.HeadRefOID == candidate.CandidateSHA, nil
 }
 
 func candidateHasOwnerDocs(ctx context.Context, candidate store.ValidationCandidate) (bool, error) {
@@ -412,25 +423,18 @@ func candidateHasCompleteDescription(candidate store.ValidationCandidate) bool {
 		strings.TrimSpace(candidate.Proof) != "" && strings.TrimSpace(candidate.Risk) != "" && strings.Contains(strings.ToLower(candidate.Risk), "rollback")
 }
 
-func (s *Service) printCandidateValidationStatus(out *axi.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate) error {
+func (s *Service) printCandidateValidationStatus(out *axi.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
+	project, task := lane.owner, lane.ownerTask
 	plan, err := task.AdmittedPlan()
 	if err != nil || plan == nil {
 		return admittedPlanFailure(fmt.Errorf("full-pipeline Task has no valid admitted plan"))
 	}
-	project, err := db.ProjectByID(out.Context, task.ProjectID)
-	if err != nil {
-		return err
-	}
-	targetBranch, err := validationCandidateTargetBranch(out.Context, db, project, task, candidate)
-	if err != nil {
-		return err
-	}
-	targetHead, err := remoteBranchHead(out.Context, candidate.WorktreePath, "refs/heads/"+targetBranch)
+	targetHead, err := lane.targetHead(out.Context)
 	if err != nil {
 		return err
 	}
 	if targetHead == "" {
-		return axi.Failure("candidate_target_missing", "the frozen target branch is missing from origin", false)
+		return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
 	}
 	targetFresh := targetHead == candidate.TargetSHA
 	if !targetFresh {
@@ -459,10 +463,14 @@ func (s *Service) printCandidateValidationStatus(out *axi.Context, db *store.DB,
 			return err
 		}
 	}
-	return out.Print(axi.Object{
-		{Key: "task", Value: taskIDString(task.Seq)}, {Key: "candidate_head", Value: candidate.CandidateSHA},
+	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}}
+	if lane.repo != "" {
+		result = append(result, axi.Field{Key: "repo", Value: lane.repo})
+	}
+	return out.Print(append(result, axi.Object{
+		{Key: "delivery", Value: lane.task.MergeMode}, {Key: "candidate_head", Value: candidate.CandidateSHA},
 		{Key: "target_head", Value: candidate.TargetSHA}, {Key: "target_current", Value: targetFresh},
 		{Key: "candidate_state", Value: candidate.State}, {Key: "review_pass", Value: reviewPass},
 		{Key: "local_stages", Value: current}, {Key: "publication_ready", Value: candidate.State == store.ValidationCandidateActive && targetFresh && reviewPass && current["test"] != nil && current["docs"] != nil && current["lint"] != nil},
-	})
+	}...))
 }
