@@ -414,11 +414,25 @@ func (db *DB) PersistProject(ctx context.Context, projectID int64) error {
 	if snapshot.State, err = db.projectStateSnapshot(ctx, projectID); err != nil {
 		return err
 	}
+	path := db.ProjectSnapshotPath(project.Name)
+	// Unchanged state keeps its capture time, so the write below is skipped.
+	// Recovery orders snapshots by that time; equal state cannot reorder them.
+	if data, err := os.ReadFile(path); err == nil {
+		var previous projectSnapshot
+		if _, err := toml.Decode(string(data), &previous); err == nil && previous.State.CapturedAt != 0 {
+			unchanged := snapshot
+			unchanged.State.CapturedAt = previous.State.CapturedAt
+			var encoded bytes.Buffer
+			if err := toml.NewEncoder(&encoded).Encode(unchanged); err == nil && bytes.Equal(encoded.Bytes(), data) {
+				return nil
+			}
+		}
+	}
 	var encoded bytes.Buffer
 	if err := toml.NewEncoder(&encoded).Encode(snapshot); err != nil {
 		return err
 	}
-	return atomicfile.Write(db.ProjectSnapshotPath(project.Name), encoded.Bytes(), 0o600)
+	return atomicfile.Write(path, encoded.Bytes(), 0o600)
 }
 
 func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {

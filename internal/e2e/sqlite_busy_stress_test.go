@@ -24,52 +24,10 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 		t.Fatalf("isolated Watch runtime did not start: pids=%v", watchPIDs(f.root))
 	}
 
-	client := herdr.NewWithEnv("herdr", f.env)
 	ctx := context.Background()
 	const workerCount = 6
 	const iterations = 8
-	type stressWorker struct {
-		taskID int64
-		cwd    string
-		env    []string
-	}
-	workers := make([]stressWorker, 0, workerCount)
-	for seq := 1; seq <= workerCount; seq++ {
-		label := fmt.Sprintf("posse:shop:t%d", seq)
-		worker, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, label)
-		if err != nil {
-			t.Fatalf("create isolated Worker %d pane: %v", seq, err)
-		}
-		if _, err := client.Call(ctx, "pane.rename", map[string]any{"pane_id": worker.RootPane.PaneID, "label": label}); err != nil {
-			t.Fatalf("label isolated Worker %d pane: %v", seq, err)
-		}
-		if _, err := client.Run(ctx, "pane", "report-agent", worker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
-			t.Fatalf("mark isolated Worker %d working: %v", seq, err)
-		}
-		branch := fmt.Sprintf("posse/concurrent-store-stress-%d", seq)
-		taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
-			Seq: seq, Type: "change", Title: fmt.Sprintf("Concurrent store stress %d", seq), ShortName: fmt.Sprintf("concurrent-store-stress-%d", seq),
-			Profile: "deep", MergeMode: "local", Branch: branch, BaseRef: "main",
-			HerdrWorkspaceID: f.project.HerdrWorkspaceID, PaneID: worker.RootPane.PaneID,
-			PaneLabel: label, AgentName: "claude", AutonomyReview: "ask", AutonomyMerge: "ask",
-		})
-		if err != nil {
-			t.Fatalf("create isolated Worker %d Task: %v", seq, err)
-		}
-		sandbox, err := f.db.AcquireSandbox(ctx, f.project.ID, taskID, filepath.Join(f.root, "posse", "pool"))
-		if err != nil {
-			t.Fatalf("acquire isolated Worker %d Sandbox: %v", seq, err)
-		}
-		gitTest(t, f.env, f.repo, "worktree", "add", "-b", branch, sandbox.Path, "main")
-		if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker ready"); err != nil {
-			t.Fatalf("start isolated Worker %d Task: %v", seq, err)
-		}
-		workerEnv := setEnv(f.env, "HERDR_ENV", "1")
-		workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", worker.RootPane.PaneID)
-		workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
-		workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", worker.RootPane.TabID)
-		workers = append(workers, stressWorker{taskID: taskID, cwd: sandbox.Path, env: workerEnv})
-	}
+	workers := createStressWorkers(t, f, workerCount, func(seq int) string { return fmt.Sprintf("posse/concurrent-store-stress-%d", seq) })
 	if _, err := f.db.RecordPRPoll(ctx, f.project.ID, 0, ""); err != nil {
 		t.Fatalf("reset isolated Watch poll timestamp: %v", err)
 	}
@@ -77,7 +35,6 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 		lower := strings.ToLower(output)
 		return strings.Contains(lower, "store_busy") || strings.Contains(lower, "sqlite_busy") || strings.Contains(lower, "database is locked") || strings.Contains(lower, "database table is locked")
 	}
-
 	for iteration := 0; iteration < iterations; iteration++ {
 		var contentionReleased chan struct{}
 		if iteration == 0 {
@@ -163,6 +120,60 @@ func TestConcurrentWatchSignalsAndLeadCommandsNeverReturnStoreBusy(t *testing.T)
 			t.Fatalf("Watch recorded a visible contention Notice: %#v", notice)
 		}
 	}
+}
+
+type stressWorker struct {
+	taskID int64
+	seq    int
+	cwd    string
+	env    []string
+}
+
+// createStressWorkers registers working Tasks on branchFor(seq) with live
+// isolated Herdr panes and Sandboxes, so Worker commands resolve their Task
+// from the environment.
+func createStressWorkers(t *testing.T, f *prLifecycleFixture, workerCount int, branchFor func(int) string) []stressWorker {
+	t.Helper()
+	client := herdr.NewWithEnv("herdr", f.env)
+	ctx := context.Background()
+	workers := make([]stressWorker, 0, workerCount)
+	for seq := 1; seq <= workerCount; seq++ {
+		label := fmt.Sprintf("posse:shop:t%d", seq)
+		worker, err := createTab(client, f.project.HerdrWorkspaceID, f.repo, label)
+		if err != nil {
+			t.Fatalf("create isolated Worker %d pane: %v", seq, err)
+		}
+		if _, err := client.Call(ctx, "pane.rename", map[string]any{"pane_id": worker.RootPane.PaneID, "label": label}); err != nil {
+			t.Fatalf("label isolated Worker %d pane: %v", seq, err)
+		}
+		if _, err := client.Run(ctx, "pane", "report-agent", worker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+			t.Fatalf("mark isolated Worker %d working: %v", seq, err)
+		}
+		branch := branchFor(seq)
+		taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
+			Seq: seq, Type: "change", Title: fmt.Sprintf("Concurrent store stress %d", seq), ShortName: fmt.Sprintf("concurrent-store-stress-%d", seq),
+			Profile: "deep", MergeMode: "local", Branch: branch, BaseRef: "main",
+			HerdrWorkspaceID: f.project.HerdrWorkspaceID, PaneID: worker.RootPane.PaneID,
+			PaneLabel: label, AgentName: "claude", AutonomyReview: "ask", AutonomyMerge: "ask",
+		})
+		if err != nil {
+			t.Fatalf("create isolated Worker %d Task: %v", seq, err)
+		}
+		sandbox, err := f.db.AcquireSandbox(ctx, f.project.ID, taskID, filepath.Join(f.root, "posse", "pool"))
+		if err != nil {
+			t.Fatalf("acquire isolated Worker %d Sandbox: %v", seq, err)
+		}
+		gitTest(t, f.env, f.repo, "worktree", "add", "-b", branch, sandbox.Path, "main")
+		if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker ready"); err != nil {
+			t.Fatalf("start isolated Worker %d Task: %v", seq, err)
+		}
+		workerEnv := setEnv(f.env, "HERDR_ENV", "1")
+		workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", worker.RootPane.PaneID)
+		workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
+		workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", worker.RootPane.TabID)
+		workers = append(workers, stressWorker{taskID: taskID, seq: seq, cwd: sandbox.Path, env: workerEnv})
+	}
+	return workers
 }
 
 func runStressCommand(binary, cwd string, env []string, args []string) stressCommandResult {

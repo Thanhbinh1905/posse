@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ForceMigrationEnv set to 1 lets the User run a build against a schema it
@@ -36,7 +37,10 @@ type migrationSource struct {
 	checksum string
 }
 
-func embeddedMigrations() ([]migrationSource, error) {
+// embeddedMigrations hashes the migrations compiled into this build once.
+var embeddedMigrations = sync.OnceValues(loadEmbeddedMigrations)
+
+func loadEmbeddedMigrations() ([]migrationSource, error) {
 	entries, err := fs.ReadDir(migrationFiles, "migrations")
 	if err != nil {
 		return nil, err
@@ -61,6 +65,48 @@ func embeddedMigrations() ([]migrationSource, error) {
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].version < sources[j].version })
 	return sources, nil
+}
+
+// schemaCurrent reports, using only reads, whether the database already holds
+// exactly this build's migrations with matching checksums in WAL mode. Such a
+// database needs no normalization, migration or checksum write, so opening it
+// does not take the cross-process migration lock. Any doubt returns false.
+func (db *DB) schemaCurrent(ctx context.Context, sources []migrationSource) bool {
+	var journalMode string
+	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil || !strings.EqualFold(journalMode, "wal") {
+		return false
+	}
+	var tables int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('goose_db_version','posse_migration_checksums')`).Scan(&tables); err != nil || tables != 2 {
+		return false
+	}
+	applied, err := db.appliedMigrations(ctx)
+	if err != nil || len(applied) != len(sources) {
+		return false
+	}
+	rows, err := db.QueryContext(ctx, `SELECT version, sha256 FROM posse_migration_checksums`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	recorded := map[int64]string{}
+	for rows.Next() {
+		var version int64
+		var checksum string
+		if err := rows.Scan(&version, &checksum); err != nil {
+			return false
+		}
+		recorded[version] = checksum
+	}
+	if rows.Err() != nil || len(recorded) != len(sources) {
+		return false
+	}
+	for _, source := range sources {
+		if !applied[source.version] || recorded[source.version] != source.checksum {
+			return false
+		}
+	}
+	return true
 }
 
 // checkSchema refuses a database this build does not know or that another

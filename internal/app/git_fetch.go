@@ -49,11 +49,15 @@ func acquireRepositoryFetchLock(ctx context.Context, root string) (*os.File, err
 }
 
 func acquireRepositorySyncLock(ctx context.Context, root string) (*os.File, error) {
+	return repositorySyncLock(ctx, root, fileLockWaitBudget)
+}
+
+func repositorySyncLock(ctx context.Context, root string, budget time.Duration) (*os.File, error) {
 	commonDir, err := repositoryCommonDir(ctx, root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Git common directory for sync lock: %w", err)
 	}
-	return acquireFileLock(ctx, filepath.Join(commonDir, "posse-sync.lock"))
+	return acquireFileLockWithin(ctx, filepath.Join(commonDir, "posse-sync.lock"), budget)
 }
 
 func repositoryCommonDir(ctx context.Context, root string) (string, error) {
