@@ -542,8 +542,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
 }
 
-func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string, keepBranchOption ...bool) (teardownResult, error) {
-	result := teardownResult{}
+func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string, keepBranchOption ...bool) (result teardownResult, returnErr error) {
 	keepBranch := len(keepBranchOption) > 0 && keepBranchOption[0]
 	if discardable {
 		if strings.TrimSpace(quote) == "" {
@@ -557,7 +556,15 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
-	defer func() { _ = db.FinishIntent(ctx, intent.ID, intent.ProcessID) }()
+	intentFinished := false
+	defer func() {
+		if intentFinished {
+			return
+		}
+		if finishErr := db.FinishIntent(context.WithoutCancel(ctx), intent.ID, intent.ProcessID); finishErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("finish Teardown intent: %w", finishErr))
+		}
+	}()
 	current, err := db.TaskByID(ctx, project.ID, task.ID)
 	if err != nil {
 		return result, err
@@ -1136,6 +1143,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {
 		return result, err
 	}
+	intentFinished = true
 	if detail, err := s.trimWorkerGoBuildCache(ctx, home); err != nil {
 		result.CacheMaintenance = "warning: " + err.Error()
 	} else {

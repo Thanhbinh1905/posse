@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -440,6 +441,43 @@ func TestAgentWithRecordedSessionIsLostAfterTwoMinutesWithoutServerRestart(t *te
 	var count int
 	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='task_lost'`, task.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("task_lost Notice count = %d, %v", count, err)
+	}
+}
+
+func TestTeardownIntentOwnsMissingPaneUntilIntentFinishes(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	start := time.Now().Truncate(time.Millisecond)
+	if err := db.StartIntent(ctx, project.ID, task.ID, "teardown", "in_progress:panes.close", `{"discard":true}`, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := db.IntentByTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absent := herdr.Snapshot{}
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, absent, start); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := ReconcileSnapshot(ctx, db, project.ID, absent, start.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.State != store.StateWorking || len(notices) != 0 {
+		t.Fatalf("active discard intent did not retain transition ownership: task=%#v notices=%#v err=%v", updated, notices, err)
+	}
+	if err := db.FinishIntent(ctx, intent.ID, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = ReconcileSnapshot(ctx, db, project.ID, absent, start.Add(10*time.Minute+time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err = db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.State != store.StateLost || len(notices) != 1 || notices[0].Kind != "task_lost" {
+		t.Fatalf("real loss was not detected after intent completion: task=%#v notices=%#v err=%v", updated, notices, err)
 	}
 }
 

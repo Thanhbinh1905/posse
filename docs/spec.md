@@ -418,7 +418,7 @@ spawning ─► working ─┬─► done ─► merging ─► merged ─► to
 | done / merging → working | watcher | after the completed turn ends (`idle` or `done`), Herdr reports a new `working` turn; cancels pending pre-merge Merge, clears Task and unmerged Member gates, keeps branch and PR, raises `worker_resumed`; leaves the Task merging if merge has started |
 | any non-merged PR Task → merged | cli | forge reports the Task's verified PR head merged; records the merge commit without passing through `done` |
 | done → reported | cli | research/review: Report copied in; in-place Change: output evidence recorded without Merge |
-| spawning (with a pane), working, needs-decision, blocked, stalled → lost | cli | reconcile: pane gone and no resumable session |
+| spawning (with a pane), working, needs-decision, blocked, stalled → lost | cli | reconcile: pane gone and no resumable session, unless an admitted Teardown intent owns the Task transition |
 | merged / reported → torn-down | cli | `posse teardown` |
 | lost / failed / stalled → working | lead | `posse relaunch` (section 17) |
 | spawning → failed | cli | reconcile: a `start` intent older than 5 minutes with no pane; its Sandbox is released |
@@ -428,6 +428,8 @@ spawning ─► working ─┬─► done ─► merging ─► merged ─► to
 A Worker shell that exits closes its pane: Herdr emits `pane.exited` and the pane id stops resolving.
 
 Live states: spawning, working, needs-decision, blocked, stalled, done, merging.
+
+An admitted Teardown intent, including approved discard, owns the Task transition while it is active. Reconcile checks for that intent in the same transaction as a possible `lost` transition, so closing the pane cannot emit `task_lost` or create a recovery Decision during Teardown. Teardown clears the intent on completion or failure; if the Task remains live after failure, a later reconcile can detect a real loss.
 
 `done` and `merging` are never marked `lost`: their work is committed and the Worker is no longer needed. If their pane disappears, reconcile records a `worker_exited` Notice once and leaves the state alone.
 
