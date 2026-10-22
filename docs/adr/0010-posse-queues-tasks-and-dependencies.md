@@ -5,7 +5,7 @@ The v1 spec left automatic Task queueing out: at `max_workers`, `start` refused,
 ## Decision
 
 - `start --queue` creates the Task in a new `queued` state when no Worker slot is free. `start --after <task-id>` creates it `queued` until that Task has Merged.
-- A `queued` Task holds no Sandbox, pane or branch. Posse spawns it through the normal `start` path as soon as a slot is free and every dependency has Merged. The check runs from the same callers that evaluate Stalls: every `posse` call, plugin events and the `posse watch` tick. No daemon is added.
+- A `queued` Task holds no Sandbox, pane or branch. Posse spawns it through the normal `start` path as soon as a slot is free and every dependency has Merged. The check runs from the same callers that evaluate Stalls: every `posse` call, plugin events and the Project observer tick. Adapter-owned `watch --handoff` waits are receiver-only and never run Task, executor or Project maintenance. No daemon is added.
 - A dependency waits for `merged` only. The new Task branches from a default branch that already contains the dependency's change. Stacked branches (waiting for `done` and branching from the dependency's branch) are out of scope.
 - If a dependency becomes `failed`, `lost` or torn down without Merge, the queued Task becomes a Decision for the User: cancel it, or drop the dependency and run it.
 
