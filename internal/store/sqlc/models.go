@@ -306,6 +306,43 @@ type ReportReview struct {
 	RecordedAt     int64
 }
 
+type ResearchAttempt struct {
+	ID              int64
+	ProjectID       int64
+	TaskID          sql.NullInt64
+	ParentRole      string
+	ParentSession   string
+	ParentPid       int64
+	ParentIdentity  string
+	Harness         string
+	HarnessVersion  string
+	IdempotencyKey  string
+	PreviousID      sql.NullInt64
+	ChildID         string
+	AgentType       string
+	Model           string
+	Tools           string
+	Access          string
+	Scope           string
+	PromptDigest    string
+	State           string
+	Resumable       int64
+	SessionRef      string
+	RunnerPid       int64
+	RunnerIdentity  string
+	ChildPid        int64
+	ChildIdentity   string
+	Usage           string
+	ResultPath      string
+	ResultBytes     int64
+	ResultDigest    string
+	ResultTruncated int64
+	Note            string
+	CreatedAt       int64
+	UpdatedAt       int64
+	EndedAt         sql.NullInt64
+}
+
 type ResourceLease struct {
 	ID             int64
 	ResourceType   string
