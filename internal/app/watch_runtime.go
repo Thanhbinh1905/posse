@@ -244,9 +244,19 @@ func (s *Service) ensureWatchRuntime(ctx context.Context, db *store.DB, home str
 	if err != nil {
 		return err
 	}
-	// Only a complete private binding identifies a supervised Watch. A
-	// foreground `watch --poll-only` has no binding and must not be stopped as
-	// an orphan or legacy process, even when it runs from the Project folder.
+	if err := s.reapLeakedPollOnlyWatches(ctx, home, project, processes); err != nil {
+		return err
+	}
+	if leaked := leakedPollOnlyWatchesForProject(processes, project); len(leaked) > 0 {
+		processes, err = systemWatchProcesses(home)
+		if err != nil {
+			return err
+		}
+	}
+	// Only a complete private binding identifies a supervised Watch. Bounded
+	// foreground `watch --poll-only` commands are user waits and remain alone;
+	// an unbound indefinite process from this Project is a leaked old poller and
+	// is reaped above before it can compete for the shared store.
 	projectProcesses := supervisedWatchProcessesForProject(processes, project)
 
 	var stored *watchProcess
@@ -375,6 +385,26 @@ func stopDuplicateWatchRuntimes(ctx context.Context, home string, processes []wa
 		}
 		if err := stopStoredWatchRuntime(ctx, home, process); err != nil {
 			return fmt.Errorf("stop duplicate Project Watch: %w", err)
+		}
+	}
+	return nil
+}
+
+func leakedPollOnlyWatchesForProject(processes []watchProcess, project store.Project) []watchProcess {
+	leaked := make([]watchProcess, 0)
+	for _, process := range processes {
+		if !process.PollOnly || process.PollOnlyBounded || process.WatchProjectID != 0 || process.WatchToken != "" || process.WatchStartedAt != 0 || !processWorkingInProject(process, project) {
+			continue
+		}
+		leaked = append(leaked, process)
+	}
+	return leaked
+}
+
+func (s *Service) reapLeakedPollOnlyWatches(ctx context.Context, home string, project store.Project, processes []watchProcess) error {
+	for _, process := range leakedPollOnlyWatchesForProject(processes, project) {
+		if err := stopStoredWatchRuntimeForDown(ctx, home, process); err != nil {
+			return fmt.Errorf("reap leaked Project Watch PID %d: %w", process.PID, err)
 		}
 	}
 	return nil

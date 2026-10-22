@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -144,7 +145,7 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 	if err := verifySandboxProcessSet(root, handles, transients, authorization, false, excludedPIDs); err != nil {
 		return nil, err
 	}
-	for _, handle := range handles {
+	for _, handle := range sandboxHandlesInSignalOrder(handles) {
 		if err := handle.Signal(syscall.SIGTERM); err != nil {
 			return nil, err
 		}
@@ -167,7 +168,7 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 	if err != nil {
 		return nil, err
 	}
-	for _, handle := range alive {
+	for _, handle := range sandboxHandlesInSignalOrderByPID(alive) {
 		if err := handle.Signal(syscall.SIGKILL); err != nil {
 			return nil, err
 		}
@@ -206,6 +207,49 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 		return nil, err
 	}
 	return processLabels(allPIDs), fmt.Errorf("sandbox processes survived teardown: %v", survivors)
+}
+
+// sandboxHandlesInSignalOrder stops retained parent processes before their
+// children. A pane can return foreground ownership to its shell only after a
+// Worker exits; random map iteration can run the shell's ownership guard while
+// the pane still reports the already-signaled Worker.
+func sandboxHandlesInSignalOrder(handles map[int]*sandboxProcessHandle) []*sandboxProcessHandle {
+	ordered := make([]*sandboxProcessHandle, 0, len(handles))
+	for _, handle := range handles {
+		ordered = append(ordered, handle)
+	}
+	return sandboxHandlesInSignalOrderByPID(ordered)
+}
+
+func sandboxHandlesInSignalOrderByPID(handles []*sandboxProcessHandle) []*sandboxProcessHandle {
+	ordered := append([]*sandboxProcessHandle(nil), handles...)
+	known := make(map[int]bool, len(ordered))
+	parents := make(map[int]int, len(ordered))
+	for _, handle := range ordered {
+		pid := handle.PID()
+		known[pid] = true
+		if parent, err := sandboxProcessParentID(pid); err == nil {
+			parents[pid] = parent
+		}
+	}
+	var depth func(int, map[int]bool) int
+	depth = func(pid int, visiting map[int]bool) int {
+		parent, found := parents[pid]
+		if !found || !known[parent] || visiting[pid] {
+			return 0
+		}
+		visiting[pid] = true
+		return 1 + depth(parent, visiting)
+	}
+	sort.SliceStable(ordered, func(left, right int) bool {
+		leftDepth := depth(ordered[left].PID(), map[int]bool{})
+		rightDepth := depth(ordered[right].PID(), map[int]bool{})
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		return ordered[left].PID() < ordered[right].PID()
+	})
+	return ordered
 }
 
 func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxProcessHandle, authorization *sandboxProcessAuthorization, waitForTransients bool, excluded map[int]bool) error {

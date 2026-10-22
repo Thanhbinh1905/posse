@@ -86,6 +86,9 @@ assignments='
 1 TestDoneSignalRefusesStaleWorkerInstanceAfterRelaunch
 1 TestRealPiInterruptStopsBusyTurnE2E
 1 TestT229RebuildPreservesStoppedProject
+1 TestT357ReapLeakedPollOnlyWatch
+1 TestT357ReproMergeUnderWriter
+1 TestT357ReproUpUnderWriter
 2 Test014LeadAdapterVocabularyHandoffAndReceipt
 2 Test014LookoutReexecReportsReplacement
 2 TestSupervised014PollerReexecsThroughWatchCompatibility
