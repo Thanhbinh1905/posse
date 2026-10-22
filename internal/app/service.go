@@ -169,6 +169,11 @@ func (s *Service) commands() *axi.Command {
 			{Name: "dispose", Usage: "$ review dispose <change> <F-n|P-n>... <fix|accept|defer|withdraw|reclassify> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]", Summary: "Record a finding disposition or queue a whole-pattern fix.", Handler: s.reviewDispose},
 			{Name: "merge", Usage: "$ review merge <change> <P-n> <P-n>...", Summary: "Merge duplicate Finding Patterns into the first pattern.", Handler: s.reviewMergePatterns},
 		}},
+		{Name: "research", Summary: "Inspect and control bounded read-only native research children of the Lead or a Task.", Subcommands: []*axi.Command{
+			{Name: "list", Usage: "$ research list [--all] [--task <task>]", Summary: "List active research attempts with parent, child identity, scope, usage and result pointers; --all includes finished ones.", Handler: s.researchList},
+			{Name: "show", Usage: "$ research show <attempt> [--result]", Summary: "Show one attempt; --result prints its digest-checked result.", Handler: s.researchShow},
+			{Name: "cancel", Usage: "$ research cancel <attempt>", Summary: "Cancel the exact child of a registered or running attempt; later output is not accepted.", Handler: s.researchCancel},
+		}},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "teardown", Summary: "Teardown a finished Task, preserve and stop failed in-place work, or cancel and discard Sandbox work with User approval and verified Worker shutdown.", Handler: s.teardown},
 		{Name: "watch", Usage: "$ watch [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Acknowledge requested Notices, wait, or perform a User-only repair of the Project watch.", Handler: s.wait},

@@ -498,6 +498,11 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			view["plan"] = plan
 		}
 	}
+	if children, err := taskResearchViews(ctx.Context, db, task); err != nil {
+		return err
+	} else if len(children) > 0 {
+		view["research_children"] = children
+	}
 	if task.Type == "research" {
 		view["report_digest"] = task.ReportDigest
 		if task.ReportKind != "" {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/research"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -25,6 +26,8 @@ func TestMain(m *testing.M) {
 			_ = os.Unsetenv(key)
 		}
 	}
+	// Launches never probe a real harness binary; research tests opt in.
+	researchHarnessVersion = func(context.Context, research.Harness) string { return "" }
 	// Hundreds of tests create a store; migrate one and copy it for the rest.
 	store.SeedNewStoresFromTemplate()
 	_ = os.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
