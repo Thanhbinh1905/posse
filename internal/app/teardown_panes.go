@@ -428,14 +428,16 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 		if !finalFound || finalName != currentAgentName || finalPane.Agent != currentPane.Agent || foreignShellPane && !finalForeignShell || !foreignShellPane && !finalTaskPane {
 			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("foreground process %d in Sandbox pane %s changed Herdr ownership during verification", foreground, pane.PaneID), false, "Stop or inspect the unrelated agent, preserve its work, then retry Teardown")
 		}
-		if taskPane && task.PaneShellIdentity == "" && foreground != first.ShellPID {
-			shellHandle := authorization.handle(first.ShellPID)
-			if shellHandle == nil || shellHandle.ExecutableIdentity() == "" {
-				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("Task pane %s shell PID %d has no verified executable image", pane.PaneID, first.ShellPID), true)
+		// Backfill a legacy Task's shell image, or record a respawned upgraded
+		// shell, from the retained handle whose image was verified above.
+		if shellHandle := authorization.handle(first.ShellPID); taskPane && shellHandle != nil && shellHandle.ExecutableIdentity() != "" && shellHandle.ExecutableIdentity() != task.PaneShellIdentity {
+			if task.PaneShellIdentity == "" || verifyTaskPaneShellImageIdentity(task.Seq, first.ShellPID, task.PaneShellIdentity) == nil {
+				if err := db.UpdateTaskPaneShellIdentity(ctx, task.ID, shellHandle.ExecutableIdentity()); err != nil {
+					return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not record the verified shell image for Task pane %s", pane.PaneID), true, err.Error())
+				}
 			}
-			if err := db.UpdateTaskPaneShellIdentity(ctx, task.ID, shellHandle.ExecutableIdentity()); err != nil {
-				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not record the verified shell image for Task pane %s", pane.PaneID), true, err.Error())
-			}
+		} else if taskPane && task.PaneShellIdentity == "" && foreground != first.ShellPID {
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("Task pane %s shell PID %d has no verified executable image", pane.PaneID, first.ShellPID), true)
 		}
 		for _, pid := range processPIDs {
 			handle := authorization.handle(pid)
@@ -837,18 +839,29 @@ func verifyTaskPaneShellImageAuthorized(task store.Task, pid int, authorization 
 	return verifyTaskPaneShellImageIdentity(task.Seq, pid, identity)
 }
 
+// verifyTaskPaneShellImageIdentity proves the Task pane's shell PID still runs
+// a shell rather than a command that replaced it. A legacy Task has no recorded
+// image, and a shell package upgrade gives a respawned shell a new inode, so a
+// missing or different image is accepted when it is still a login shell.
 func verifyTaskPaneShellImageIdentity(taskSeq, pid int, expected string) error {
-	if expected == "" {
-		return fmt.Errorf("task t%d has no verified pane-shell image identity", taskSeq)
-	}
 	identity, err := sandboxProcessExecutableIdentity(pid)
 	if err != nil {
 		return fmt.Errorf("inspect executable image for PID %d: %w", pid, err)
 	}
-	if identity != expected {
-		return fmt.Errorf("PID %d executable image differs from the verified Task pane shell", pid)
+	if expected != "" && identity == expected {
+		return nil
 	}
-	return nil
+	shell, err := sandboxProcessRunsLoginShell(pid)
+	if err != nil {
+		return fmt.Errorf("inspect executable path for PID %d: %w", pid, err)
+	}
+	if shell {
+		return nil
+	}
+	if expected == "" {
+		return fmt.Errorf("task t%d has no verified pane-shell image identity and PID %d does not run a login shell", taskSeq, pid)
+	}
+	return fmt.Errorf("PID %d executable image differs from the verified Task pane shell", pid)
 }
 
 func uniqueTeardownProcessIDs(pids []int) []int {
