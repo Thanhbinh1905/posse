@@ -66,8 +66,11 @@ func TestConcurrentStartsDoNotReportSandboxMissingDuringCheckout(t *testing.T) {
 		t.Fatalf("blocked checkout unexpectedly exists before git worktree add: %v", err)
 	}
 
-	// Run three more real CLI starts while the first has claimed its Sandbox
-	// row but Git has not materialized the checkout metadata.
+	// Reconcile explicitly while the first start owns a claimed Sandbox but
+	// Git has not materialized the checkout metadata.
+	runPosse(t, f.binary, f.repo, f.leadEnv, "list")
+
+	// Run three more real CLI starts in parallel with the held checkout.
 	for index := 2; index <= 4; index++ {
 		command, output := startCommand(fmt.Sprintf("concurrent-%d", index))
 		if err := command.Run(); err != nil {
