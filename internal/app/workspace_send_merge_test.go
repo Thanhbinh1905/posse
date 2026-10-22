@@ -11,7 +11,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestWorkspaceSendRefreshesMergedMemberBeforePromptingWorker(t *testing.T) {
+func TestWorkspaceSendRefusesRefreshedMergedMemberPR(t *testing.T) {
 	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n[repositories.worker]\nforge = \"github\"\n", []string{"worker", "e2e-tool"}, []string{"worker"})
 	bin := filepath.Join(f.root, "bin")
 	_ = os.MkdirAll(bin, 0o700)
@@ -38,7 +38,7 @@ func TestWorkspaceSendRefreshesMergedMemberBeforePromptingWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code := f.run("send", "t1", "Add another fix"); code == 0 || !strings.Contains(f.out.String(), "pr_merged") {
-		t.Fatalf("send did not refuse a merged Member PR: code=%d output=%s", code, f.out.String())
+		t.Fatalf("send did not refuse a refreshed merged Member PR: code=%d output=%s", code, f.out.String())
 	}
 	if state := f.state(); state != store.StateMerged && state != store.StateTornDown {
 		t.Fatalf("merged Member was not Merged: %s", state)

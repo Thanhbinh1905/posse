@@ -44,7 +44,29 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", brief, "--name", "busy-pi-worker")
 	task := fixture.mustTask(t, "t1")
+	stopBackgroundWatch(t, fixture)
+	prURL := "https://github.com/acme/shop/pull/17"
+	head := strings.TrimSpace(gitTest(t, fixture.env, fixture.repo, "rev-parse", "HEAD"))
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=?,landing_mode='pr',gated_sha=? WHERE id=?`, prURL, head, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.PersistTask(context.Background(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	task = fixture.mustTask(t, "t1")
+	blockedForge := filepath.Join(fixture.root, "blocked-pr-refresh")
+	releaseForge := filepath.Join(fixture.root, "release-pr-refresh")
+	ghPath := filepath.Join(fixture.root, "bin", "gh")
+	ghRealPath := filepath.Join(fixture.root, "bin", "gh-real")
+	if err := os.Rename(ghPath, ghRealPath); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "#!/bin/sh\nif [ \"$1 $2\" = 'api graphql' ]; then : > " + shellQuote(blockedForge) + "; while [ ! -e " + shellQuote(releaseForge) + " ]; do sleep 0.02; done; fi\nexec " + shellQuote(ghRealPath) + " \"$@\"\n"
+	if err := os.WriteFile(ghPath, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
+		_ = os.WriteFile(releaseForge, []byte("release\n"), 0o600)
 		_, _ = client.Call(context.Background(), "agent.send_keys", map[string]any{"target": task.PaneID, "keys": []string{"esc"}})
 	})
 	if !waitForCondition(15*time.Second, func() bool {
@@ -60,6 +82,12 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		return false
 	}) {
 		t.Fatal("fake Pi Worker did not become busy and unfocused")
+	}
+	if task.State == store.StateWorking {
+		if err := fixture.db.Transition(context.Background(), task.ID, store.StateWorking, store.StateDone, "worker", "E2E PR refresh setup"); err != nil {
+			t.Fatal(err)
+		}
+		task = fixture.mustTask(t, "t1")
 	}
 
 	if _, err := client.Run(context.Background(), "pane", "report-agent", task.PaneID, "--source", "posse.e2e", "--agent", "pi", "--state", "unknown"); err != nil {
@@ -99,11 +127,13 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 		t.Fatalf("background delivery did not steer past the wait-for-idle head: output=%s message=%#v pane=%#v screen=%s input=%q logs=%s notices=%#v", backgroundOutput, backgroundMessage, currentPane(t, client, task.PaneID), screen, input, logs, notices)
 	}
 
-	// Stop the independent Watch so its valid delivery cannot race this foreground send.
-	stopBackgroundWatch(t, fixture)
+	// The independent Watch is stopped so it cannot race this foreground send.
 	steering := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "Send-time steering")
 	if !strings.Contains(steering, "state: delivered") || !strings.Contains(steering, "reason: steered") {
 		t.Fatalf("send-time steering did not report the sent message: %s", steering)
+	}
+	if _, err := os.Stat(blockedForge); err != nil {
+		t.Fatalf("posse send did not attempt the bounded PR refresh: stat err=%v", err)
 	}
 	inputLog := filepath.Join(fixture.root, "fake-agent-input.log")
 	if !waitForCondition(5*time.Second, func() bool {
@@ -179,10 +209,15 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = os.Remove(blockedForge)
+	_ = os.Remove(releaseForge)
 
 	interrupt := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", "--interrupt", "Stop and redirect this turn")
 	if !strings.Contains(interrupt, "state: delivered") || !strings.Contains(interrupt, "reason: delivered_after_interrupt") {
 		t.Fatalf("send --interrupt did not verify and deliver the redirect: %s", interrupt)
+	}
+	if _, err := os.Stat(blockedForge); !os.IsNotExist(err) {
+		t.Fatalf("posse send --interrupt waited for or started the blocked PR refresh: stat err=%v", err)
 	}
 	remaining, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)
 	if err != nil || remaining.ID != claimed.ID || remaining.Body != "Keep this queued" {
