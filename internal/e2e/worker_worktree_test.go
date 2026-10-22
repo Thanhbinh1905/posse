@@ -118,28 +118,6 @@ func TestLegacyLinkedWorkerChildTearsDownWithoutClosingLeadOrSibling(t *testing.
 	}
 }
 
-func assertRecoveredWorkerRecordsMatchSnapshot(t *testing.T, home string, tasks []store.Task, snapshot herdr.Snapshot) {
-	t.Helper()
-	db, err := store.OpenReadOnly(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, task := range tasks {
-		state, err := db.TaskRecovery(context.Background(), task.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if state.Status != "recovered" {
-			continue
-		}
-		pane, found := herdr.FindPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-		if !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped" {
-			t.Fatalf("Task %s recovery says recovered without a live Worker pane: state=%#v pane=%#v found=%v", task.ShortName, state, pane, found)
-		}
-	}
-}
-
 // A real attached Herdr 0.9.0 client must render the grouped names without
 // any Posse-specific sidebar configuration.
 func assertNativeWorktreeSidebar(t *testing.T, f *workerTabsFixture, names ...string) []byte {
