@@ -323,7 +323,8 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Bool("repair") {
 		return s.repairWatch(ctx, db, home, project)
 	}
-	// Every adapter handoff repairs the independent Project poller; receipt operations only deliver Notices.
+	// Keep the Project observer alive independently of receipt work; its poller
+	// performs maintenance out of process while adapters own receiver re-arming.
 	if !parsed.Bool("poll-only") && parsed.Flags["receipt"] == "" {
 		if err := s.ensureWatchRuntime(ctx.Context, db, home, project); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Watch supervision for %s failed: %v\n", project.Name, err)
@@ -467,7 +468,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			}
 		}
 		if len(notices) == 0 {
-			if lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute {
+			if !parsed.Bool("handoff") && (lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute) {
 				if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
 					if store.IsBusy(err) {
 						// Contention is transient. Keep this Watch armed, and retry
@@ -480,11 +481,13 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					lastHerdrReconcile = time.Now()
 				}
 			}
-			if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
-				if store.IsBusy(err) {
-					fmt.Fprintf(ctx.ErrOut, "Watch maintenance deferred: %v\n", normalizeCommandError(err))
-				} else if noticeErr := s.recordWatchMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
-					return noticeErr
+			if !parsed.Bool("handoff") {
+				if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
+					if store.IsBusy(err) {
+						fmt.Fprintf(ctx.ErrOut, "Watch maintenance deferred: %v\n", normalizeCommandError(err))
+					} else if noticeErr := s.recordWatchMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
+						return noticeErr
+					}
 				}
 			}
 			if retryDelivery == nil {
