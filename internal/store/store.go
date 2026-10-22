@@ -316,6 +316,7 @@ func missingMigrationVersions(ctx context.Context, provider *goose.Provider) ([]
 type State string
 
 const (
+	StateQueued        State = "queued"
 	StateSpawning      State = "spawning"
 	StateWorking       State = "working"
 	StateNeedsDecision State = "needs-decision"
@@ -345,6 +346,7 @@ func taskAcceptsInstruction(state State, taskType string) bool {
 }
 
 var transitions = map[State]map[State]bool{
+	StateQueued:        {StateSpawning: true, StateTornDown: true},
 	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateMerged: true, StateTornDown: true},
 	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateMerged: true, StateTornDown: true},
 	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateMerged: true, StateTornDown: true},
@@ -637,8 +639,8 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 	if task.State == "" {
 		task.State = StateSpawning
 	}
-	if task.State != StateSpawning {
-		return 0, fmt.Errorf("new Task must begin in spawning")
+	if task.State != StateSpawning && task.State != StateQueued {
+		return 0, fmt.Errorf("new Task must begin in spawning or queued")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -865,7 +867,7 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 		}
 		seq++
 	}
-	if task.Branch == "" && !inPlace {
+	if task.Branch == "" && !inPlace && task.State != StateQueued {
 		task.Branch = TaskBranchName(seq)
 	}
 	if task.Branch != "" {
@@ -897,9 +899,18 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if err != nil {
 		return 0, 0, err
 	}
+	if task.State == "" {
+		task.State = StateSpawning
+	}
+	if task.State != StateSpawning && task.State != StateQueued {
+		return 0, 0, fmt.Errorf("new Task must begin in spawning or queued")
+	}
+	if task.State == StateQueued && task.Branch != "" {
+		return 0, 0, fmt.Errorf("queued Task cannot have a branch")
+	}
 	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at,plan_json,report_kind)
-VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?) RETURNING id`,
-		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, task.Profile, task.DispatchRule,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?) RETURNING id`,
+		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, string(task.State), task.Profile, task.DispatchRule,
 		task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
 		projectName, seq, now, now, planJSON, task.ReportKind).Scan(&id)
 	if err != nil {
@@ -923,7 +934,7 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 			return 0, 0, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES (?, '', 'spawning', 'cli', 'Task created', ?)`, id, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES (?, '', ?, 'cli', 'Task created', ?)`, id, string(task.State), now); err != nil {
 		return 0, 0, err
 	}
 	if intentCommand != "" {

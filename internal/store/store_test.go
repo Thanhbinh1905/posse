@@ -13,6 +13,45 @@ import (
 	"time"
 )
 
+func TestQueuedTaskIsDurableAndResourceFree(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, seq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "research", Title: "Queued research", ShortName: "queued-research", State: StateQueued}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Seq != seq || task.State != StateQueued || task.Branch != "" || task.WorktreePath != "" || task.SandboxID != 0 || task.PaneID != "" {
+		t.Fatalf("queued Task is not durable and resource-free: %+v", task)
+	}
+	count, err := db.ActiveWorkerCount(ctx, project.ID)
+	if err != nil || count != 0 {
+		t.Fatalf("queued Task consumes a Worker slot: count=%d err=%v", count, err)
+	}
+	if err := db.Transition(ctx, id, StateQueued, StateSpawning, "cli", "slot available"); err != nil {
+		t.Fatalf("queued Task cannot be dispatched: %v", err)
+	}
+}
+
 func TestQuietPROpenedAckIsAtomicRetryableAndLeavesClaimedNotices(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())

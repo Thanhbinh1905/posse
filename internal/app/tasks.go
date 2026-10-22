@@ -118,7 +118,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generatedReviewRound) error {
-	parsed, err := parseArgs("start", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-orphan": {}, "user-approved": {}})
+	parsed, err := parseArgs("start", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-orphan": {}, "user-approved": {}, "queue": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -208,9 +208,11 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return err
 	}
-	if count >= cfg.Defaults.MaxWorkers {
-		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config")
+	queued := count >= cfg.Defaults.MaxWorkers && parsed.Flags["queue"] == ""
+	if count >= cfg.Defaults.MaxWorkers && queued {
+		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config; use `--queue` to admit it without starting")
 	}
+	queued = count >= cfg.Defaults.MaxWorkers
 	resolution, err := s.resolveDispatch(ctx.Context, project, cfg, brief.Type, parsed.Flags["profile"])
 	if err != nil {
 		return profileError(err)
@@ -441,7 +443,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		}
 	}
 	branch := ""
-	if !project.IsDirectory() {
+	if !queued && !project.IsDirectory() {
 		sequenceCandidate, err := nextTaskSequence(ctx.Context, db, project, home)
 		if err != nil {
 			return err
@@ -478,17 +480,24 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	// Admission must finish before preparation can recover other Workers or
 	// allocate this Task's scratch, Sandbox, branch or pane.
-	if err := retryBusy(ctx.Context, admissionPreparationAttempts, admissionPreparationDelay, func() error {
-		_, err := s.prepareProjectForTask(ctx.Context, db, project)
-		return err
-	}); err != nil {
-		return err
+	if !queued {
+		if err := retryBusy(ctx.Context, admissionPreparationAttempts, admissionPreparationDelay, func() error {
+			_, err := s.prepareProjectForTask(ctx.Context, db, project)
+			return err
+		}); err != nil {
+			return err
+		}
+	} else {
+		task.State = store.StateQueued
+		task.Branch = ""
 	}
 	crashIntentAt("start", "before", "task.create")
 	var taskID int64
 	var sequence int
 	var intent store.Intent
-	if generated != nil {
+	if queued {
+		taskID, sequence, err = createTaskWithSequence(ctx.Context, db, project, home, task)
+	} else if generated != nil {
 		taskID, sequence, intent, err = createReviewRoundTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, generated.Admission)
 	} else {
 		taskID, sequence, intent, err = createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
@@ -504,6 +513,12 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	if err != nil {
 		return workflowAdmissionFailure(err)
+	}
+	if queued {
+		if err := s.regenerateProjects(ctx.Context, db); err != nil {
+			return err
+		}
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}})
 	}
 	defer func() { _ = db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID) }()
 	crashIntentAt("start", "after", "task.create")

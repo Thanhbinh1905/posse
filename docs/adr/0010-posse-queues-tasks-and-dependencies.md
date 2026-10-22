@@ -4,17 +4,18 @@ The v1 spec left automatic Task queueing out: at `max_workers`, `start` refused,
 
 ## Decision
 
-- `start --queue` creates the Task in a new `queued` state when no Worker slot is free. `start --after <task-id>` creates it `queued` until that Task has Merged.
-- A `queued` Task holds no Sandbox, pane or branch. Posse spawns it through the normal `start` path as soon as a slot is free and every dependency has Merged. The check runs from the same callers that evaluate Stalls: every `posse` call, plugin events and the `posse watch` tick. No daemon is added.
-- A dependency waits for `merged` only. The new Task branches from a default branch that already contains the dependency's change. Stacked branches (waiting for `done` and branching from the dependency's branch) are out of scope.
+- `start --queue` durably admits a Task in `queued` state at capacity. Without the flag, `start` retains the `worker_limit` refusal. A queued Task has no Sandbox, pane or branch; its admitted Brief and Playbook are frozen in the plan.
+- The intended scheduler refills queued Tasks through existing CLI, plugin and Watch callers, using the normal spawn intent path and never exceeding `max_workers`. Queue admission and restart recovery are implemented; scheduler refill and safe cancellation remain incomplete.
+- Local Task dependencies are not implemented. The intended model records typed `reported`, `accepted` or `landed` prerequisites atomically, uses `review_of` for Review readiness, and starts a dependent Change Task from the default branch only after `landed`. Stacked branches remain out of scope.
+- Native GitHub `blocked_by` relationships are not implemented. Until that ships, core users must check ticket blockers manually.
 - If a dependency becomes `failed`, `lost` or torn down without Merge, the queued Task becomes a Decision for the User: cancel it, or drop the dependency and run it.
 
 ## Considered options
 
-- **Leave queueing to the Lead.** No state change, but the Lead holds a timer in its context and loses it across restarts.
-- **Also allow waiting for `done` and stacking.** Merge a stack in `pr` mode needs retargeting and rebasing each PR, which is a much larger change. It can be added later as a separate dependency kind.
+- **Leave queueing to the Lead.** No durable admission record, and the Lead must remember what to start after a Worker finishes.
+- **Also allow waiting for `done` and stacking.** Merge a stack in `pr` mode needs retargeting and rebasing each PR. This remains out of scope.
 
 ## Consequences
 
-- The lifecycle gains `queued -> spawning` and `queued -> torn-down` (cancel).
-- As with Stalls, a queued Task can start late if nothing calls `posse` and no event fires ([spec section 23](../spec.md#23-open-risks), "Timers need a caller").
+- The lifecycle gains `queued -> spawning` and `queued -> torn-down` (cancel); cancellation is not yet exposed for queued Tasks.
+- As with Stalls, queued Tasks can start late if nothing calls `posse` and no event fires ([spec section 23](../spec.md#23-open-risks), "Timers need a caller").

@@ -157,6 +157,56 @@ func TestStartRejectsInvalidOptionalDisplayName(t *testing.T) {
 	}
 }
 
+func TestStartQueueAdmitsWithoutAllocatingResourcesAtCapacity(t *testing.T) {
+	fixture := newStartFixture(t)
+	configText := `[defaults]
+max_workers = 1
+merge_mode = "local"
+
+[profiles.claude]
+kind = "claude"
+
+[dispatch.default]
+use = "claude"
+`
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Existing Worker", ShortName: "existing-worker", State: store.StateSpawning, MergeMode: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", "launch-probe", "--queue"}); code != 0 {
+		t.Fatalf("queued start exit=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("Tasks=%#v err=%v", tasks, err)
+	}
+	queued := tasks[1]
+	if queued.State != store.StateQueued || queued.Branch != "" || queued.WorktreePath != "" || queued.SandboxID != 0 || queued.PaneID != "" {
+		t.Fatalf("queued Task allocated resources: %+v", queued)
+	}
+	plan, err := queued.AdmittedPlan()
+	if err != nil || plan == nil || string(plan.Inputs[0].Bytes) == "" {
+		t.Fatalf("queued Task did not retain its admitted Brief: plan=%#v err=%v", plan, err)
+	}
+}
+
 func TestStartRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {
 	fixture := newStartFixture(t)
 	gitTest(t, fixture.repo, "branch", "posse/t1")
