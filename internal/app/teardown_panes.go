@@ -213,6 +213,15 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 func (s *Service) verifyNoForeignTaskMarkedForeground(ctx context.Context, task store.Task, pane herdr.Pane) error {
 	info, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
 	if err != nil {
+		// A sibling pane that closed during the scan has no foreground left.
+		if missingPaneError(err) {
+			return nil
+		}
+		if snapshot, snapshotErr := s.snapshot(ctx); snapshotErr == nil {
+			if _, found := snapshotPane(snapshot, pane.PaneID); !found {
+				return nil
+			}
+		}
 		return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not verify processes in Task-marked pane %s", pane.PaneID), true, err.Error())
 	}
 	for _, process := range info.ForegroundProcesses {
