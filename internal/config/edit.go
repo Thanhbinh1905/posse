@@ -39,6 +39,9 @@ func SetFile(path, key, text string, projectFile bool) (any, error) {
 	if !ok {
 		return nil, &InvalidError{File: path, Key: key, Reason: unknownKeyReason(key)}
 	}
+	if reason := userConfigOnlyReason(schemaKey); projectFile && reason != "" {
+		return nil, &InvalidError{File: path, Key: key, Reason: reason}
+	}
 	value, literal, err := parseSetting(schemaKey, spec, text, projectFile)
 	if err != nil {
 		return nil, &InvalidError{File: path, Key: key, Reason: err.Error()}
