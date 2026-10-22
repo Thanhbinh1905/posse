@@ -181,8 +181,8 @@ func TestWorkspacePRPollAndDiscardSkipMemberlessResearch(t *testing.T) {
 	}
 }
 
-func TestWorkspacePRMergeQueuesFreshnessBeforeMemberGate(t *testing.T) {
-	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\ngate = [\"touch gate-ran\"]\n", []string{"worker"}, []string{"worker"})
+func TestWorkspacePRMergeChecksTargetFreshnessBeforeRecordingHead(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
 	ctx := context.Background()
 	workerRoot := filepath.Join(f.workspace, "worker")
 	advanceTree := filepath.Join(f.root, "worker-target-advance")
@@ -201,9 +201,6 @@ func TestWorkspacePRMergeQueuesFreshnessBeforeMemberGate(t *testing.T) {
 	member := f.repos()["worker"]
 	if member.GatedSHA != "" || member.State != store.TaskRepoOpen || f.state() != store.StateDone {
 		t.Fatalf("stale workspace member was gated or merged: member=%#v task=%s", member, f.state())
-	}
-	if _, err := os.Stat(filepath.Join(member.WorktreePath, "gate-ran")); !os.IsNotExist(err) {
-		t.Fatalf("Gate ran before target freshness was established: %v", err)
 	}
 	var instruction string
 	if err := f.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, f.task.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Workspace member worker") || !strings.Contains(instruction, "--repo worker") {

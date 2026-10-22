@@ -192,14 +192,14 @@ AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb=
 	return pending, err
 }
 
-// ReviewCapUsage combines verdict-recorded rounds with review, Gate and CI code
+// ReviewCapUsage combines verdict-recorded rounds with review and CI code
 // repair instructions. Provider cancellation reruns do not create fix rounds.
 func (db *DB) ReviewCapUsage(ctx context.Context, taskID int64) (ReviewCapUsage, error) {
 	var usage ReviewCapUsage
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status='verdict'`, taskID).Scan(&usage.ReviewRounds); err != nil {
 		return usage, err
 	}
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','gate','ci')`, taskID).Scan(&usage.RepairRounds); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','ci')`, taskID).Scan(&usage.RepairRounds); err != nil {
 		return usage, err
 	}
 	return usage, nil

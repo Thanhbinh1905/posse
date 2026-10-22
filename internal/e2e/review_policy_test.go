@@ -582,13 +582,10 @@ func assertTaskBranchAbsentOnBareOrigin(t *testing.T, f *prLifecycleFixture, bra
 	}
 }
 
-func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
+func TestSelectedReviewPolicyNoneKeepsMergeAuthorityWithoutCommandGates(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	stopBackgroundWatch(t, f)
-	// No explicit review setting: the built-in policy is none. Keep the Gate
-	// failure manual so this test isolates review and merge authority.
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "gate_loop.max_fix_rounds", "0", "--user-approved", "Keep this test on the manual Gate failure path")
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["exit 1"]`)
+	// No explicit review setting: the built-in policy is none.
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.enabled", "true")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.max_rounds", "1")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.auto_start", "true")
@@ -617,13 +614,12 @@ func TestSelectedReviewPolicyNoneKeepsGateAndMergeAuthority(t *testing.T) {
 		t.Fatalf("authority bypassed: %d %s", code, out)
 	}
 	code, out = runReviewIdentityCLI(t, f, "merge", "t1")
-	if code != 1 || !strings.Contains(out, "gate_failed") {
-		t.Fatalf("Gate bypassed: %d %s", code, out)
+	if code != 0 {
+		t.Fatalf("local merge readiness: %d %s", code, out)
 	}
 	if got := gitTest(t, f.env, f.repo, "rev-parse", "main"); got != before {
 		t.Fatal("refusal changed target")
 	}
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.gate", `["true"]`)
 	if code, out = runReviewIdentityCLIWithResourceConflictRetry(t, f, "merge", "t1", "--execute", "--user-approved", "Merge this checked Task"); code != 0 {
 		t.Fatalf("none refused: %d %s", code, out)
 	}

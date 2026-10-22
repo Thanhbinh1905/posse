@@ -106,7 +106,7 @@ WHERE rr.ship_task_id=? AND rr.status='admitted'
 		return err
 	}
 	if admission.SharedRepairBudget {
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','gate','ci')`, admission.ChangeTaskID).Scan(&repairs); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','ci')`, admission.ChangeTaskID).Scan(&repairs); err != nil {
 			return err
 		}
 	}

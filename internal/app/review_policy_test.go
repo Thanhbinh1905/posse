@@ -125,47 +125,32 @@ func TestWorkspaceSelectedReviewOverridesStayFrozen(t *testing.T) {
 	}
 }
 
-func TestLocalReviewRecheckedAfterGateAndBeforeMerge(t *testing.T) {
-	for _, boundary := range []string{"gate", "merging"} {
-		t.Run(boundary, func(t *testing.T) {
-			f := newReviewVerdictFixture(t)
-			configText := "[defaults]\nmerge_mode='local'\nreview='quick'\nauto_teardown='never'\n"
-			if boundary == "gate" {
-				// The Gate changes the candidate after the initial evidence check.
-				script := filepath.Join(f.root, "invalidate-review")
-				text := "#!/bin/sh\n" + "git commit --allow-empty -m gate-follow-up >/dev/null\n"
-				if err := os.WriteFile(script, []byte(text), 0700); err != nil {
-					t.Fatal(err)
-				}
-				configText += "gate=['" + script + "']\n"
-			}
-			if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if code, out := f.signal(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
-				t.Fatalf("verdict: %d %s", code, out)
-			}
-			before := gitTest(t, f.repo, "rev-parse", "main")
-			if boundary == "merging" {
-				if code, out, _ := f.run("merge", "t1"); code != 0 {
-					t.Fatalf("merge: %d %s", code, out)
-				}
-				// Evidence becomes ineligible even though the branch still equals the gated SHA.
-				if _, err := f.db.NextTaskLaunchWithIdentity(context.Background(), f.task.ID, "reviewer", "model-b", true); err != nil {
-					t.Fatal(err)
-				}
-			}
-			code, out, _ := f.run("merge", "t1", "--execute", "--user-approved", "Merge this candidate")
-			if code != 1 || !strings.Contains(out, "review_required") {
-				t.Fatalf("boundary %s: %d %s", boundary, code, out)
-			}
-			if got := gitTest(t, f.repo, "rev-parse", "main"); got != before {
-				t.Fatal("refusal changed target")
-			}
-			task, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
-			if err != nil || task.State == store.StateMerged {
-				t.Fatalf("refusal merged: %#v %v", task, err)
-			}
-		})
+func TestLocalReviewRecheckedBeforeMerge(t *testing.T) {
+	f := newReviewVerdictFixture(t)
+	configText := "[defaults]\nmerge_mode='local'\nreview='quick'\nauto_teardown='never'\n"
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := f.signal(t, f.review.PaneID, "done", "Checked", "--report", "report.md", "--verdict", "pass"); code != 0 {
+		t.Fatalf("verdict: %d %s", code, out)
+	}
+	if code, out, _ := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge: %d %s", code, out)
+	}
+	before := gitTest(t, f.repo, "rev-parse", "main")
+	// Evidence becomes ineligible even though the branch still equals the recorded merge head.
+	if _, err := f.db.NextTaskLaunchWithIdentity(context.Background(), f.task.ID, "reviewer", "model-b", true); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := f.run("merge", "t1", "--execute", "--user-approved", "Merge this candidate")
+	if code != 1 || !strings.Contains(out, "review_required") {
+		t.Fatalf("merge boundary: %d %s", code, out)
+	}
+	if got := gitTest(t, f.repo, "rev-parse", "main"); got != before {
+		t.Fatal("refusal changed target")
+	}
+	task, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil || task.State == store.StateMerged {
+		t.Fatalf("refusal merged: %#v %v", task, err)
 	}
 }

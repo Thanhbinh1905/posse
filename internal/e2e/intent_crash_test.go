@@ -441,7 +441,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 			phase   string
 		}{"start", step, "after"})
 	}
-	for _, step := range []string{"gate.record", "gate.run", "task.merging", "notice.create", "approval.record", "merge", "merged_ref.record", "task.merged"} {
+	for _, step := range []string{"gate.record", "task.merging", "notice.create", "approval.record", "merge", "merged_ref.record", "task.merged"} {
 		steps = append(steps, struct {
 			command string
 			step    string

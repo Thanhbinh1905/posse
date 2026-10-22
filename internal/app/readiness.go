@@ -28,7 +28,7 @@ type readinessGap struct {
 // the same effective config and diagnostics produce the same conversation.
 func projectReadiness(cfg config.Config, checks []doctorCheck) []readinessGap {
 	gaps := []readinessGap{}
-	for _, code := range []string{"forge_auth", "gate_empty", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"} {
+	for _, code := range []string{"forge_auth", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"} {
 		if code == "autonomy_ask" {
 			if cfg.Defaults.MergeMode == "" {
 				continue // Machine-only diagnostics have no Project authority.
@@ -249,24 +249,11 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 	probes.Wait()
 
 	for index, target := range targets {
-		mode, gate, gateKey := modes[index], cfg.Defaults.Gate, "defaults.gate"
-		if target.Name != "" {
-			if override, ok := cfg.Repositories[target.Name]; ok && override.Gate != nil {
-				gate = override.Gate
-			}
-			gateKey = "repositories." + target.Name + ".gate"
-		}
+		mode := modes[index]
 		suffix := ""
 		if target.Name != "" {
 			suffix = " for Member " + target.Name
 		}
-		gateCheck := doctorCheck{Name: "Gate" + suffix, Status: "ok", Detail: "Gate configured", GapCode: "gate_empty", Key: gateKey, Member: target.Name, UserOnly: true}
-		if len(gate) == 0 {
-			gateCheck.Status = "info"
-			gateCheck.Detail = "No Project Gate commands run before Merge" + suffix + "."
-			gateCheck.Action = "Propose Gate commands found in the repository; save them only after an explicit yes with --user-approved, or continue without a Gate if the User declines."
-		}
-		checks = append(checks, gateCheck)
 		if mode == "pr" {
 			forgeCheck := forgeChecks[index]
 			auth := doctorCheck{Name: "forge auth" + suffix, Status: "ok", Detail: "authenticated", GapCode: "forge_auth", Key: "defaults.forge", Member: target.Name}

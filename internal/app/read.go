@@ -3,12 +3,8 @@ package app
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -308,7 +304,7 @@ func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice)
 			help = append(help, "Run `posse show "+show+"` to inspect this Task")
 		}
 	} else if project.IsDirectory() {
-		help = append(help, "Run `posse start --brief <file> --name <short> --user-approved \"<User's words>\"` with `execution: in-place` and selected `paths:` to delegate a Task")
+		help = append(help, "Directory Projects no longer admit Tasks; register a Git repository instead")
 	} else {
 		help = append(help, "Run `posse start --brief <file> [--name <short>]` to delegate a Task")
 	}
@@ -324,7 +320,7 @@ func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice)
 		}
 		help = append(help, "Run `posse ack "+strings.Join(ids, ",")+"` after handling these Notices")
 	} else if project.IsDirectory() {
-		help = append(help, "Run `posse pool` to inspect active path leases")
+		help = append(help, "Legacy Directory Projects do not admit new Tasks")
 	} else {
 		help = append(help, "Run `posse pool` to inspect released Sandboxes")
 	}
@@ -684,7 +680,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 	}
 	if task.Type == "change" && task.State == store.StateDone {
-		help = append(help, "Run `posse merge "+commandName+"` to run the Gate")
+		help = append(help, "Run `posse merge "+commandName+"` to record the merge head and check delivery readiness")
 	}
 	if task.State == store.StateNeedsDecision || task.State == store.StateBlocked {
 		help = append(help, "Run `posse send "+commandName+" <message>` to answer or steer this Worker")
@@ -715,54 +711,6 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		view["signals"] = taskSignalRows(task, signals)
 		view["transitions"] = taskTransitionRows(task, transitions)
-		if plan != nil && plan.Execution.Mode == "in-place" {
-			if data, err := os.ReadFile(inPlaceOutputPath(*plan)); err == nil {
-				var output inPlaceOutput
-				if err := json.Unmarshal(data, &output); err != nil {
-					return fmt.Errorf("decode in-place output evidence: %w", err)
-				}
-				view["in_place_output"] = output
-			} else if !os.IsNotExist(err) {
-				return err
-			}
-			archives, err := filepath.Glob(filepath.Join(plan.Paths.Output, "in-place-output-launch-*.json"))
-			if err != nil {
-				return err
-			}
-			sort.Slice(archives, func(i, j int) bool {
-				launchAndSuffix := func(path string) (int, int) {
-					stem := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "in-place-output-launch-"), ".json")
-					launchText, suffixText, hasSuffix := strings.Cut(stem, "-")
-					launch, _ := strconv.Atoi(launchText)
-					suffix := 1
-					if hasSuffix {
-						suffix, _ = strconv.Atoi(suffixText)
-					}
-					return launch, suffix
-				}
-				launchI, suffixI := launchAndSuffix(archives[i])
-				launchJ, suffixJ := launchAndSuffix(archives[j])
-				if launchI != launchJ {
-					return launchI < launchJ
-				}
-				return suffixI < suffixJ
-			})
-			history := make([]any, 0, len(archives))
-			for _, archive := range archives {
-				data, err := os.ReadFile(archive)
-				if err != nil {
-					return err
-				}
-				var output inPlaceOutput
-				if err := json.Unmarshal(data, &output); err != nil {
-					return fmt.Errorf("decode in-place output evidence %s: %w", filepath.Base(archive), err)
-				}
-				history = append(history, map[string]any{"attempt": filepath.Base(archive), "evidence": output})
-			}
-			if len(history) > 0 {
-				view["in_place_output_history"] = history
-			}
-		}
 		view["profile"] = task.Profile
 		view["launches"] = task.Launches
 		launchIdentities, err := db.TaskLaunchIdentities(ctx.Context, task.ID)

@@ -217,13 +217,6 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 				return err
 			}
 			task.GatedSHA = gatedSHA
-			if gateErr := runGates(ctx, cfg, task); gateErr != nil {
-				if err := recordGateFailure(ctx, db, project, task, gatedSHA, "", gateErr); err != nil {
-					return err
-				}
-				_ = s.deliverNotices(ctx, db, project)
-				return axi.Failure("gate_failed", gateErr.Error(), false, gateFailureHelp(task))
-			}
 			currentSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 			if err != nil {
 				return err
@@ -232,7 +225,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 				if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
 					return err
 				}
-				return axi.Failure("branch_moved", "Task branch moved while the Gate was running", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
+				return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 			}
 			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, gatedSHA); err != nil {
 				if clearErr := db.ClearTaskGatedSHA(ctx, task.ID); clearErr != nil {
@@ -669,13 +662,13 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		return axi.Failure("pr_view_failed", "gh pr view returned no headRefOid", true, strings.TrimSpace(output))
 	}
 	if head.HeadRefOID != task.GatedSHA {
-		if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateDone, "cli", "Pull request head moved after the Gate passed"); err != nil {
+		if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateDone, "cli", "Pull request head moved after its merge head was recorded"); err != nil {
 			return err
 		}
 		if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
 			return err
 		}
-		return axi.Failure("branch_moved", "pull request head moved after the Gate passed", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
+		return axi.Failure("branch_moved", "pull request head moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 	}
 	mergeLock, err := acquirePRMergeLock(ctx, project.Root)
 	if err != nil {

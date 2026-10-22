@@ -57,13 +57,13 @@ func TestPosseSetupSkillNamesOnlySchemaKeys(t *testing.T) {
 		}
 		checked[key] = true
 	}
-	for _, key := range []string{"defaults.gate", "pool.setup", "kinds.<kind>.lead_auto_approve", "autonomy.review", "autonomy.merge", "autonomy.yolo"} {
+	for _, key := range []string{"pool.setup", "kinds.<kind>.lead_auto_approve", "autonomy.review", "autonomy.merge", "autonomy.yolo"} {
 		if !checked[key] {
 			t.Errorf("skill no longer names User-only key %s", key)
 		}
 	}
 	for _, line := range strings.Split(string(skill), "\n") {
-		if strings.Contains(line, "posse config set defaults.gate") || strings.Contains(line, "posse config set autonomy.") {
+		if strings.Contains(line, "posse config set autonomy.") {
 			if !strings.Contains(line, "`! posse config set") {
 				t.Errorf("skill tells the agent to run a User-only write itself: %s", line)
 			}

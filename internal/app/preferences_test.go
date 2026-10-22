@@ -476,7 +476,7 @@ func TestWorkerCannotWritePreferences(t *testing.T) {
 	}
 }
 
-func TestDirectoryLeadInstructionsRequireConsentedPathScopes(t *testing.T) {
+func TestDirectoryLeadInstructionsRefuseNewTasks(t *testing.T) {
 	home := t.TempDir()
 	cfg, err := config.Load(home, "")
 	if err != nil {
@@ -486,14 +486,12 @@ func TestDirectoryLeadInstructionsRequireConsentedPathScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"execution: in-place", "non-overlapping relative `paths:`", "--user-approved", "local only", "Never Merge or discard an in-place Task", "in-place recovery Decision", "preserves source and stops it", "never Merged"} {
-		if !strings.Contains(result.Text, required) {
-			t.Errorf("Directory Lead instructions omit %q", required)
-		}
+	if !strings.Contains(result.Text, "Posse no longer admits Tasks here") || !strings.Contains(result.Text, "Existing Tasks may be inspected and torn down") {
+		t.Fatalf("legacy Directory instructions omit the compatibility boundary: %s", result.Text)
 	}
-	for _, forbidden := range []string{"Every code change must be done by a Worker in its Task Sandbox", "Posse does not support those paths yet", "posse retitle", "posse publish", "`merge_ready`", "`pr_opened`"} {
-		if strings.Contains(result.Text, forbidden) {
-			t.Errorf("Directory Lead instructions retain incompatible rule %q", forbidden)
+	for _, removed := range []string{"execution: in-place", "non-overlapping relative `paths:`", "in-place recovery Decision", "path leases", "approved checks"} {
+		if strings.Contains(result.Text, removed) {
+			t.Errorf("Directory Lead instructions still present removed feature %q", removed)
 		}
 	}
 }

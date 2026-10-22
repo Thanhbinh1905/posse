@@ -132,7 +132,7 @@ func (db *DB) QueueCIFixInstruction(ctx context.Context, taskID int64, expectedB
 }
 
 // QueueCIFixInstructionWithSharedBudget includes CI repairs in the shared
-// Review/Gate/CI cap while preserving the independent per-CI-round limit.
+// Review/CI cap while preserving the independent per-CI-round limit.
 func (db *DB) QueueCIFixInstructionWithSharedBudget(ctx context.Context, taskID int64, expectedBaseHead, prURL, dedupeKey, body, member string, maxFixRounds, sharedMax int) (QueueValidationFixResult, error) {
 	if taskID < 1 || !validCommitSHA(expectedBaseHead) || strings.TrimSpace(prURL) == "" || strings.TrimSpace(dedupeKey) == "" || strings.TrimSpace(body) == "" || maxFixRounds < 0 || sharedMax < 0 {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid CI fix instruction or budget")
@@ -183,7 +183,7 @@ func (db *DB) QueueCIFixInstructionWithSharedBudget(ctx context.Context, taskID 
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status IN ('admitted','verdict')`, taskID).Scan(&reviews); err != nil {
 			return QueueValidationFixResult{}, err
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','gate','ci')`, taskID).Scan(&repairs); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','ci')`, taskID).Scan(&repairs); err != nil {
 			return QueueValidationFixResult{}, err
 		}
 		if reviews+repairs >= sharedMax {

@@ -53,28 +53,28 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
+	if project.IsDirectory() {
+		return taskplan.Plan{}, axi.Failure("project_directory_removed", "Directory Projects no longer admit Tasks", false)
+	}
 	launch, err := frozenLaunch(resolution, cfg.Kinds)
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
 	execution := taskplan.Execution{Mode: "sandbox", Scope: project.Kind, Base: task.BaseRef, Target: task.TargetBranch, RootContext: brief.RootContext}
-	if project.IsDirectory() {
-		execution.Mode, execution.Scope, execution.Base, execution.Target = "in-place", store.ProjectKindDirectory, "", ""
-	}
-	if !project.IsWorkspace() && !project.IsDirectory() && execution.Target == "" {
+	if !project.IsWorkspace() && execution.Target == "" {
 		execution.Target = project.DefaultBranch
 	}
 	if execution.Scope == "" {
 		execution.Scope = "repo"
 	}
-	if brief.Base != "" && !project.IsWorkspace() && !project.IsDirectory() {
+	if brief.Base != "" && !project.IsWorkspace() {
 		execution.BaseCommit, err = selectedBaseCommit(ctx, project.Root, task.BaseRef)
 		if err != nil {
 			return taskplan.Plan{}, err
 		}
 	}
 	for _, member := range members {
-		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.MergeMode, Gate: memberGates(cfg, member.Name), Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
+		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.MergeMode, Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
 		if cfg.Repositories[member.Name].Review != "" {
 			selected.ReviewSource = "repositories." + member.Name + ".review"
 		}
@@ -116,19 +116,15 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	}
 	delivery := cfg.Defaults.MergeMode
 	review := cfg.Defaults.Review
-	if project.IsDirectory() {
-		delivery = "local"
-		review = "none"
-	}
 	if project.IsWorkspace() {
 		delivery = task.MergeMode
 	}
 	return taskplan.Resolve(taskplan.Request{Brief: taskplan.Select("brief", source, briefData), Inputs: inputs, Execution: execution, Launch: launch,
 		Review: review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage(cfg),
-		Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
-		Gate:  cfg.Defaults.Gate, WorkflowJobs: cfg.FullPipeline.RunWorkflows,
-		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, Gate: cfg.GateLoop, CI: cfg.CILoop},
+		Paths:           taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
+		WorkflowJobs:    cfg.FullPipeline.RunWorkflows,
+		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, CI: cfg.CILoop},
 		MergeMethod:     cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup}})
 }
 

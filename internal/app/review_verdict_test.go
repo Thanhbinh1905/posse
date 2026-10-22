@@ -112,7 +112,7 @@ func TestQuickReviewCarryTreatsUnavailableRemoteAsNoCarry(t *testing.T) {
 	for _, remote := range []string{"missing", "unreachable"} {
 		t.Run(remote, func(t *testing.T) {
 			fixture := newPRMergeFixture(t, "local", store.StateDone)
-			installGateValidationPlanForReview(t, fixture, 1, "quick")
+			installValidationPlanForReview(t, fixture, "quick")
 			ctx := context.Background()
 			change, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
 			if err != nil {

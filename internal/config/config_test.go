@@ -33,7 +33,8 @@ use = "deep"
 [dispatch.default]
 use = "deep"
 `
-	project := `merge_mode = "no-mistakes"
+	project := `[defaults]
+merge_mode = "no-mistakes"
 gate = ["go test ./...", "go vet ./..."]
 
 [autonomy]
@@ -49,7 +50,7 @@ use = "fast"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Defaults.MaxWorkers != 5 || cfg.Defaults.MergeMode != "no-mistakes" || len(cfg.Defaults.Gate) != 2 {
+	if cfg.Defaults.MaxWorkers != 5 || cfg.Defaults.MergeMode != "no-mistakes" || !strings.Contains(strings.Join(cfg.Warnings, "\n"), "defaults.gate was removed") {
 		t.Fatalf("merged defaults = %#v", cfg.Defaults)
 	}
 	if cfg.Identity.Lead.Name != "Lead" || cfg.Identity.Lead.Language != "vi" {
@@ -297,8 +298,8 @@ auto_start = false
 	if cfg.ReviewLoop.MaxRounds != 1 || cfg.ReviewLoop.AutoStart || cfg.ReviewLoop.BlockAt != "P1" || !cfg.ReviewLoop.Enabled || !reflect.DeepEqual(cfg.ReviewLoop.Guidance, []string{"docs/review.md"}) {
 		t.Fatalf("effective review loop = %#v", cfg.ReviewLoop)
 	}
-	if cfg.GateLoop.MaxFixRounds != 0 || cfg.CILoop.MaxFixRounds != 1 || cfg.CILoop.RerunCancelled != 0 {
-		t.Fatalf("effective fix loops = gate %#v, ci %#v", cfg.GateLoop, cfg.CILoop)
+	if cfg.CILoop.MaxFixRounds != 1 || cfg.CILoop.RerunCancelled != 0 || !strings.Contains(strings.Join(cfg.Warnings, "\n"), "gate_loop was removed") {
+		t.Fatalf("effective CI loop = %#v, warnings = %v", cfg.CILoop, cfg.Warnings)
 	}
 
 	writeConfig(t, filepath.Join(home, "config.toml"), "[review_loop]\nmax_rounds = 4\n")
