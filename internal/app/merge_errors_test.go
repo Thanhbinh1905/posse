@@ -28,7 +28,7 @@ func TestPRMergeBehindTargetReportsQueuedTargetSyncInstruction(t *testing.T) {
 	// explain the queued instruction instead of a generic state refusal.
 	for attempt := 0; attempt < 2; attempt++ {
 		code, output, stderr = fixture.run("merge", "t1", "--execute", "--user-approved", "merge it")
-		if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, "fell behind origin/main") || !strings.Contains(output, "Posse queued the Worker an instruction") || strings.Contains(output, "must be done or merging") {
+		if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) || !strings.Contains(output, "Posse queued the Worker an instruction") || strings.Contains(output, "must be done or merging") {
 			t.Fatalf("retry %d after the queued instruction was misleading: exit=%d output=%s error=%s", attempt, code, output, stderr)
 		}
 	}

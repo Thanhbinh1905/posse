@@ -66,12 +66,11 @@ func pendingTargetSyncFailure(ctx context.Context, db *store.DB, project store.P
 		return err
 	}
 	branch := taskTargetBranch(project, task)
-	return axi.Failure(
-		"pr_branch_behind",
-		fmt.Sprintf("pull request head %s fell behind origin/%s; Posse queued the Worker an instruction to merge origin/%s", headSHA, branch, branch),
-		false,
-		queuedTargetSyncHelp(task.Seq),
-	)
+	freshness, err := inspectPRTargetFreshness(ctx, project.Root, branch, headSHA)
+	if err != nil {
+		return err
+	}
+	return prBranchBehindFailure(task.Seq, headSHA, freshness, true)
 }
 
 func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
