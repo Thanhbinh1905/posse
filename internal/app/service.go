@@ -122,7 +122,7 @@ func isOnlyStateRace(err error) bool {
 }
 
 func (s *Service) commands() *axi.Command {
-	root := &axi.Command{Usage: "$ [--full] [--json]", Summary: "A local-first Lead and Worker CLI for Herdr. `posse --full` prints the full Project dashboard."}
+	root := &axi.Command{Usage: "$ [--full] [--json] [--format human|toon|json]", Summary: "A local-first Lead and Worker CLI for Herdr. `posse --full` prints the full Project dashboard."}
 	root.Handler = s.home
 	root.Subcommands = []*axi.Command{
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
@@ -193,7 +193,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "setup", Summary: "Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).", Handler: s.setup},
 		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Workers or rebuild Projects, Tasks, Sandboxes, Decisions and Notices from snapshots.", Handler: s.recover},
 		{Name: "_context", Summary: "Print Lead or Worker context inside a posse pane.", Hidden: true, Handler: s.context},
-		{Name: "doctor", Summary: "Check Herdr, plugin, config, database and merging tools.", Handler: s.doctor},
+		{Name: "doctor", Usage: "$ doctor [--full] [--verbose] [--json]", Summary: "Check Herdr, plugin, config, database and merging tools; --verbose expands successful checks.", Handler: s.doctor},
 	}
 	return root
 }

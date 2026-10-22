@@ -185,6 +185,9 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 		if len(watches) > 0 {
 			help = append(help, "Running Watches re-exec automatically after an update; pass `--stop-watches` only to force-stop them")
 		}
+		if ctx.Human {
+			return renderUpdateCheckHuman(ctx, s.currentVersion(), release.Tag, watches)
+		}
 		return ctx.Print(axi.Object{{Key: "update", Value: axi.Row{{Key: "current", Value: s.currentVersion()}, {Key: "latest", Value: release.Tag}}}, {Key: "changelog", Value: release.Body}, {Key: "watches", Value: watchRows(watches, false)}, {Key: "help", Value: help}})
 	}
 	if tag == "" && s.currentVersion() != "dev" && !newerVersion(s.currentVersion(), release.Tag) {
@@ -201,6 +204,9 @@ func (s *Service) update(ctx *axi.Context, args []string) error {
 	}
 	if installed.backupWarning != "" {
 		result = append(result, axi.Field{Key: "binary_backup_warning", Value: installed.backupWarning})
+	}
+	if ctx.Human {
+		return renderUpdateInstalledHuman(ctx, s.currentVersion(), release.Tag, installed.binary, stopped, installed.reexecWatches, installed.reexecWarning, installed.backupWarning)
 	}
 	return ctx.Print(result)
 }
