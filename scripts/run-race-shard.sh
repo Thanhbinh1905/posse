@@ -3,24 +3,8 @@ set -eu
 
 shard_count=4
 app_package=github.com/thanhbinh1905/posse/internal/app
-package_assignments='
-1 github.com/thanhbinh1905/posse/cmd/posse
-1 github.com/thanhbinh1905/posse/internal/atomicfile
-1 github.com/thanhbinh1905/posse/internal/axi
-1 github.com/thanhbinh1905/posse/internal/config
-1 github.com/thanhbinh1905/posse/internal/dispatch
-1 github.com/thanhbinh1905/posse/internal/execgroup
-2 github.com/thanhbinh1905/posse/internal/execution
-2 github.com/thanhbinh1905/posse/internal/herdr
-2 github.com/thanhbinh1905/posse/internal/prepare
-2 github.com/thanhbinh1905/posse/internal/sessionref
-2 github.com/thanhbinh1905/posse/internal/setup
-2 github.com/thanhbinh1905/posse/internal/taskplan
-3 github.com/thanhbinh1905/posse/internal/runtime
-3 github.com/thanhbinh1905/posse/internal/research
-4 github.com/thanhbinh1905/posse/internal/store
-4 github.com/thanhbinh1905/posse/internal/store/sqlc
-'
+# Shared with TestRaceShardManifestCoversEveryPackage in internal/e2e.
+package_assignments=$(cat "$(dirname "$0")/race-shards.txt")
 
 app_tests() {
   go test -list '^Test' ./internal/app |
