@@ -296,6 +296,8 @@ assignments='
 4 TestCIFixAfterReviewPassHasNoReviewEvidence
 4 TestCleanTargetMergeAfterReviewPassLandsWithoutANewRound
 4 TestBlockingReviewFindingRefusesMergeUnderReviewNone
+4 TestDefaultCapRoundThreeChangesRequestedRaisesOneUserOnlyDecision
+4 TestRethinkSuccessorSuppressesInheritedFingerprints
 '
 
 validate_assignments() {
