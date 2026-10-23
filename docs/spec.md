@@ -592,9 +592,18 @@ ticket: 12                  # optional: the one issue this Change Task should cl
 # issues: [12]              # legacy singleton alias for ticket:
 refs: [18]                  # optional: issues this Task refers to without closing
 # Workspace Projects scope issue references to a member: ticket: worker#12
+# Issue references accept 12, "#12" and worker#12; quote "#12", since an unquoted # starts a YAML comment
 autonomy: { merge: ask }     # optional, tighten only
 ---
 <body: goal, context, constraints, User's intent in their words>
+```
+
+Brief frontmatter is a flat `key: value` subset of YAML. `done_when` also accepts a block list of items, which Posse joins with `; ` into one criterion; every other field rejects a YAML list with `YAML lists are unsupported`, whatever the item text. Use inline `[a, b]` lists where a field takes several values.
+
+```yaml
+done_when:
+  - tests pass
+  - "Root cause at foo_test.go:178 is identified"
 ```
 
 A Change Brief may use `supersedes: t12` only after the prior Change Task's User-approved Review-cap `rethink`; the new Task inherits its Finding Ledger as visible, non-blocking entries and suppresses repeat reports. A Change Brief may name one closing issue with `ticket: 12`; a standalone Change Task may omit it. During compatibility, `issues: [12]` is accepted as the same singleton, and if both fields appear they must name the same issue. New Change Briefs reject multiple `issues` before a Sandbox is acquired. Existing multi-issue Tasks remain historical and their Briefs are not rewritten. Workspace Projects qualify the ticket and each `refs` entry with its owning member, such as `ticket: worker#12` and `refs: [worker#18]`. A ticket cannot also appear in `refs`. `ticket` closes only that issue when a PR/MR Merges; `refs` never closes issues. `posse dispatch` warns when a listed issue does not exist or is already closed, and says when it cannot verify one. `posse show` and `posse list --full` display the ticket and references.
