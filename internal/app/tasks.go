@@ -443,7 +443,6 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			return err
 		}
 	}
-	}
 	if project.HerdrWorkspaceID == "" {
 		return axi.Failure("lead_missing", "Project has no Herdr workspace recorded", false, "Run `posse up` to restart the Lead")
 	}
