@@ -253,10 +253,66 @@ func TestBriefParsesTaskBaseAndTargetBranches(t *testing.T) {
 }
 
 func TestBriefExplainsYAMLListFrontmatter(t *testing.T) {
-	_, err := ParseBriefText("---\ntype: change\ntitle: List value\ndone_when:\n  - tests pass\n---\n")
-	briefErr, ok := err.(*BriefError)
-	if !ok || briefErr.Field != "frontmatter" || !strings.Contains(briefErr.Reason, "YAML lists are unsupported") {
-		t.Fatalf("YAML list error = %#v", err)
+	for _, item := range []string{"tests pass", `"Root cause at a_test.go:178 is identified"`, "key: value"} {
+		source := "---\ntype: change\ntitle: List value\ndone_when: ok\nrefs:\n  - " + item + "\n---\n"
+		_, err := ParseBriefText(source)
+		briefErr, ok := err.(*BriefError)
+		if !ok || briefErr.Field != "frontmatter" || !strings.Contains(briefErr.Reason, "YAML lists are unsupported") {
+			t.Fatalf("YAML list error for %q = %#v", item, err)
+		}
+	}
+}
+
+func TestBriefParsesDoneWhenList(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: change\ntitle: List\ndone_when:\n  - tests pass\n  - \"Root cause at a_test.go:178 is identified\" # note\n  -   'lint is clean'\nmerge_mode: pr\n---\nbody\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "tests pass; Root cause at a_test.go:178 is identified; lint is clean"; brief.DoneWhen != want {
+		t.Fatalf("DoneWhen = %q, want %q", brief.DoneWhen, want)
+	}
+	if brief.MergeMode != "pr" || brief.Body != "body" {
+		t.Fatalf("fields after list = %#v", brief)
+	}
+}
+
+func TestBriefRejectsInvalidDoneWhenList(t *testing.T) {
+	for _, frontmatter := range []string{
+		"done_when:\n",
+		"done_when:\ntitle: x\n",
+		"done_when:\n  -\n",
+		"done_when: tests pass\n  - extra\n",
+		"done_when:\n  - a\ndone_when: b\n",
+	} {
+		source := "---\ntype: research\ntitle: List\n" + frontmatter + "---\n"
+		if _, err := ParseBriefText(source); err == nil {
+			t.Fatalf("accepted invalid done_when:\n%s", source)
+		}
+	}
+}
+
+func TestBriefAcceptsHashPrefixedIssueReferences(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Hash refs\ndone_when: ok\nticket: \"#439\"\nrefs: [\"#12\", member#16, 18]\n---\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brief.Ticket == nil || *brief.Ticket != (IssueRef{Number: 439}) {
+		t.Fatalf("ticket = %#v", brief.Ticket)
+	}
+	want := []IssueRef{{Number: 12}, {Repository: "member", Number: 16}, {Number: 18}}
+	if len(brief.Refs) != len(want) {
+		t.Fatalf("refs = %#v", brief.Refs)
+	}
+	for i := range want {
+		if brief.Refs[i] != want[i] {
+			t.Fatalf("refs = %#v", brief.Refs)
+		}
+	}
+	if _, err := ParseBriefText("---\ntype: change\ntitle: Dup\ndone_when: ok\nticket: \"#439\"\nrefs: [439]\n---\n"); err == nil {
+		t.Fatal("accepted #439 duplicated as 439 in refs")
+	}
+	if _, err := ParseBriefText("---\ntype: change\ntitle: Bad\ndone_when: ok\nticket: \"#\"\n---\n"); err == nil {
+		t.Fatal("accepted bare #")
 	}
 }
 
