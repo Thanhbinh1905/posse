@@ -564,7 +564,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}
 	readSkills, err := os.ReadFile(skillReadsLog)
 	if err != nil || !strings.Contains(string(readSkills), "name: posse") || !strings.Contains(string(readSkills), "name: posse-setup") || !strings.Contains(string(readSkills), "name: posse-down") || !strings.Contains(string(readSkills), "name: posse-update") {
-		t.Fatalf("fake Claude could not read both injected skills: %s err=%v", readSkills, err)
+		t.Fatalf("fake Claude could not read all injected skills: %s err=%v", readSkills, err)
 	}
 	for _, path := range []string{filepath.Join(repo, ".agents"), filepath.Join(repo, ".claude", "skills"), filepath.Join(task.WorktreePath, ".agents")} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
