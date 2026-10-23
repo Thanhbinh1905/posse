@@ -249,6 +249,10 @@ func seedProjectReference(t *testing.T, db *store.DB, table string, foreignKeys 
 				values[column] = taskID
 				continue
 			}
+			// A self-reference has no earlier row to point to; it stays null.
+			if strings.EqualFold(parent, table) {
+				continue
+			}
 			parentColumn := foreignKey.parentColumns[index]
 			if parentColumn == "" {
 				parentColumn = primaryKeyColumn(t, db, parent)
@@ -271,6 +275,11 @@ func seedProjectReference(t *testing.T, db *store.DB, table string, foreignKeys 
 	}
 	if table == "resource_leases" {
 		values["resource_type"] = store.ResourcePath
+	}
+	if table == "research_attempts" {
+		values["parent_role"] = "worker"
+		values["harness"] = "codex"
+		values["state"] = "completed"
 	}
 	if table == "task_target_changes" {
 		values["status"] = "pending"

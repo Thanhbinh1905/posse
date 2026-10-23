@@ -209,7 +209,13 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 	if plan != nil {
 		admission = "admitted"
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "admission", Value: admission}, {Key: "launches", Value: task.Launches}, {Key: "review_evidence", Value: reviewEvidenceStatus(task)}, {Key: "plan", Value: plan}})
+	output := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "admission", Value: admission}, {Key: "launches", Value: task.Launches}, {Key: "review_evidence", Value: reviewEvidenceStatus(task)}}
+	if children, err := taskResearchViews(ctx.Context, db, task); err != nil {
+		return err
+	} else if len(children) > 0 {
+		output = append(output, axi.Field{Key: "research_children", Value: children})
+	}
+	return ctx.Print(append(output, axi.Field{Key: "plan", Value: plan}))
 }
 
 func admittedPlanFailure(err error) error {

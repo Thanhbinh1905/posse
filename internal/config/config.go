@@ -76,6 +76,24 @@ type Pool struct {
 	KeepIdle int      `toml:"keep_idle" json:"keep_idle"`
 }
 
+// Research bounds tracked native research children (ADR 0029).
+type Research struct {
+	Native         string `toml:"native" json:"native"`
+	MaxActive      int    `toml:"max_active" json:"max_active"`
+	MaxResultBytes int    `toml:"max_result_bytes" json:"max_result_bytes"`
+	MaxOutputBytes int    `toml:"max_output_bytes" json:"max_output_bytes"`
+	Timeout        string `toml:"timeout" json:"timeout"`
+}
+
+// Research modes: tracked admits read-only children through Posse; off leaves
+// harness children unmanaged and refuses `posse research start`.
+const (
+	ResearchTracked = "tracked"
+	ResearchOff     = "off"
+)
+
+var DefaultResearch = Research{Native: ResearchTracked, MaxActive: 2, MaxResultBytes: 256 << 10, MaxOutputBytes: 8 << 20, Timeout: "30m"}
+
 type Retention struct {
 	TaskArtifacts string `toml:"task_artifacts" json:"task_artifacts"`
 }
@@ -167,6 +185,7 @@ type Config struct {
 	FullPipeline        FullPipeline               `toml:"full_pipeline" json:"full_pipeline"`
 	Pool                Pool                       `toml:"pool" json:"pool"`
 	Retention           Retention                  `toml:"retention" json:"retention"`
+	Research            Research                   `toml:"research" json:"research"`
 	WorkerGoCache       WorkerGoCache              `toml:"worker_go_cache" json:"worker_go_cache"`
 	Kinds               map[string]Kind            `toml:"kinds" json:"kinds"`
 	Profiles            map[string]Profile         `toml:"profiles" json:"profiles"`
@@ -617,6 +636,7 @@ func defaultMap() map[string]any {
 		},
 		"pool":            map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
 		"retention":       map[string]any{"task_artifacts": "2160h"},
+		"research":        map[string]any{"native": DefaultResearch.Native, "max_active": DefaultResearch.MaxActive, "max_result_bytes": DefaultResearch.MaxResultBytes, "max_output_bytes": DefaultResearch.MaxOutputBytes, "timeout": DefaultResearch.Timeout},
 		"worker_go_cache": map[string]any{"max_size": DefaultWorkerGoCache.MaxSize, "min_age": DefaultWorkerGoCache.MinAge, "interval": DefaultWorkerGoCache.Interval},
 		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}},
 		"ci_loop":         map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1},
@@ -660,6 +680,12 @@ func (c *Config) normalizeBuiltins() {
 	}
 	if c.Retention.TaskArtifacts == "" {
 		c.Retention.TaskArtifacts = "2160h"
+	}
+	if c.Research.Native == "" {
+		c.Research.Native = DefaultResearch.Native
+	}
+	if c.Research.Timeout == "" {
+		c.Research.Timeout = DefaultResearch.Timeout
 	}
 	if c.WorkerGoCache.MaxSize == "" {
 		c.WorkerGoCache.MaxSize = DefaultWorkerGoCache.MaxSize
@@ -708,6 +734,21 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	}
 	if !oneOf(c.Defaults.DispatchInheritance, "kind", "lead_profile") {
 		add("defaults.dispatch_inheritance", "must be kind or lead_profile")
+	}
+	if !oneOf(c.Research.Native, ResearchTracked, ResearchOff) {
+		add("research.native", "must be tracked or off")
+	}
+	if c.Research.MaxActive < 1 {
+		add("research.max_active", "must be positive")
+	}
+	if c.Research.MaxResultBytes < 1 {
+		add("research.max_result_bytes", "must be positive")
+	}
+	if c.Research.MaxOutputBytes < c.Research.MaxResultBytes {
+		add("research.max_output_bytes", "must be at least research.max_result_bytes")
+	}
+	if timeout, err := time.ParseDuration(c.Research.Timeout); err != nil || timeout <= 0 {
+		add("research.timeout", "must be a positive duration")
 	}
 	if c.Defaults.RecoveryAttempts < 1 {
 		add("defaults.recovery_attempts", "must be positive")

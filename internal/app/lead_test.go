@@ -103,7 +103,7 @@ func TestConcurrentUpStartsAtMostOneLead(t *testing.T) {
 	if err != nil || len(skillRoots) != 1 {
 		t.Fatalf("skill snapshot roots = %q, %v", skillRoots, err)
 	}
-	wantArgs := []string{"--settings", claudeNoAttributionSettings, "--dangerously-skip-permissions", "--append-system-prompt-file", filepath.Join(home, "projects", "shop", "lead.md"), "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--plugin-dir", skillRoots[0], "--profile-extra", "--model=opus", "--effort", "high"}
+	wantArgs := []string{"--settings", claudeNoAttributionSettings, "--dangerously-skip-permissions", "--append-system-prompt-file", filepath.Join(home, "projects", "shop", "lead.md"), "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "claude-research"), "--profile-extra", "--model=opus", "--effort", "high"}
 	if service.pendingLead == nil || service.pendingLead.PaneID != "w1:p1" || !equalStrings(service.pendingLead.Args, wantArgs) {
 		t.Fatalf("pending Lead launch = %#v, want pane w1:p1 and args %#v", service.pendingLead, wantArgs)
 	}
@@ -257,7 +257,7 @@ func TestUpSchedulesProfileLeadPromptWithoutSystemPromptWhenNoticesArePending(t 
 	if err != nil || len(skillRoots) != 1 {
 		t.Fatalf("skill snapshot roots = %q, %v", skillRoots, err)
 	}
-	if service.pendingLead == nil || !service.pendingLead.NeedsPrompt || !equalStrings(service.pendingLead.Args, []string{"--settings", claudeNoAttributionSettings, "--dangerously-skip-permissions", "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--plugin-dir", skillRoots[0], "--profile-arg", "--model", "sonnet"}) {
+	if service.pendingLead == nil || !service.pendingLead.NeedsPrompt || !equalStrings(service.pendingLead.Args, []string{"--settings", claudeNoAttributionSettings, "--dangerously-skip-permissions", "--plugin-dir", filepath.Join(home, "projects", "shop", "lead-claude-lowkey"), "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "claude-research"), "--profile-arg", "--model", "sonnet"}) {
 		t.Fatalf("profile Lead startup did not preserve its arguments and prompt requirement: %#v", service.pendingLead)
 	}
 	if fake.CallCount("agent.prompt") != 0 {

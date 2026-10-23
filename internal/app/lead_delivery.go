@@ -162,6 +162,10 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 			return leadLaunch{}, err
 		}
 		launch.Args = append(launch.Args, "--plugin-dir", plugin, "--plugin-dir", skills.ClaudePluginDir)
+		launch.Args, err = appendResearchLaunchArgs(context.Background(), home, project, cfg, kind, launch.Args)
+		if err != nil {
+			return leadLaunch{}, err
+		}
 		launch.Args = prependAttributionArgs(kind, cfg.Profiles[cfg.Lead.Profiles[kind]], launch.Args)
 		launch.Env = map[string]string{
 			"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",

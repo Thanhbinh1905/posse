@@ -622,6 +622,11 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
 		}
+		argsForAgent, skillErr = appendResearchLaunchArgs(ctx.Context, home, project, cfg, kind, argsForAgent)
+		if skillErr != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
+			return skillErr
+		}
 	}
 	briefPath := filepath.Join(taskHome, "brief.md")
 	launchPath := filepath.Join(taskHome, "launch.md")
@@ -2694,6 +2699,10 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			return failure(skillErr)
 		}
 		startArgs, skillErr = appendAdmittedSkillArgs(kind, startArgs, skills, plan)
+		if skillErr != nil {
+			return failure(skillErr)
+		}
+		startArgs, skillErr = appendResearchLaunchArgs(ctx, home, project, cfg, kind, startArgs)
 		if skillErr != nil {
 			return failure(skillErr)
 		}

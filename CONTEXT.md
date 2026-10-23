@@ -18,6 +18,10 @@ _Avoid_: Primary, orchestrator, supervisor
 An agent that carries out exactly one Task on the Lead's behalf. Formerly: Rider.
 _Avoid_: Subagent, child
 
+**Research Child**:
+A bounded read-only native child of a Lead's or Worker's harness that Posse registers as a research attempt before accepting its result; it is not a Worker and changes no files.
+_Avoid_: Subagent swarm, helper Worker
+
 **Task**:
 One unit of delegated work with an explicit contract, carried out by one Worker.
 _Avoid_: Job, ticket, run

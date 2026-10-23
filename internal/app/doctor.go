@@ -467,7 +467,11 @@ func executionResourceSummary(ctx context.Context, db *store.DB, projectID int64
 			parkedResources++
 		}
 	}
-	return fmt.Sprintf("active_workers=%d/%d; native_children=0 tracked (native execution unsupported); parked_resources=%d", activeWorkers, maxWorkers, parkedResources), nil
+	children, err := db.ResearchAttempts(ctx, store.ResearchAttemptFilter{ProjectID: projectID, Active: true})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("active_workers=%d/%d; native_children=%d tracked (read-only research; native write execution unsupported); parked_resources=%d", activeWorkers, maxWorkers, len(children), parkedResources), nil
 }
 
 func stringListContains(values []string, wanted string) bool {

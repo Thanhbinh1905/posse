@@ -17,14 +17,20 @@ const workerHomeEnv = "POSSE_WORKER_HOME"
 // workerCommands are the only commands a Worker may run against its own posse
 // home.
 var workerCommands = map[string]bool{
-	"brief":         true,
-	"status":        true,
-	"signal":        true,
-	"publish":       true,
-	"validate":      true,
-	"_context":      true,
-	"config schema": true,
-	"config show":   true,
+	"brief":              true,
+	"status":             true,
+	"signal":             true,
+	"publish":            true,
+	"validate":           true,
+	"_context":           true,
+	"config schema":      true,
+	"research list":      true,
+	"research show":      true,
+	"research cancel":    true,
+	"research start":     true,
+	"research wait":      true,
+	"research follow-up": true,
+	"config show":        true,
 }
 
 // guardWorkers wraps every handler in the tree so a Worker cannot run
@@ -61,7 +67,7 @@ func (s *Service) refuseWorker(ctx context.Context, command string) error {
 		name += " " + command
 	}
 	return axi.Failure("worker_forbidden",
-		"`"+name+"` cannot run from a Worker against the posse home "+home+"; Workers may run only `posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate` and `posse config show|schema` there",
+		"`"+name+"` cannot run from a Worker against the posse home "+home+"; Workers may run only `posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse research` for their own children and `posse config show|schema` there",
 		false,
 		"Experiment with posse under a temporary POSSE_HOME and an isolated Herdr server",
 		"Report what the Lead should do with `posse signal needs-decision`")
