@@ -89,6 +89,38 @@ func recordPassingReview(t *testing.T, f *prLifecycleFixture, changeSeq string) 
 	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "pass")
 }
 
+func TestLeadCanDeferP2FindingWithIssue(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.review", "lead", "--project", "shop")
+	_, _, changeSeq := startPrivateReviewChange(t, f, "3")
+	if code, output := runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start Review Round: %d %s", code, output)
+	}
+	review := f.mustTask(t, "t2")
+	waitForReviewIdentityAgent(t, f, review.PaneID)
+	report := filepath.Join(f.home, "scratch", "shop", "t2", "report.md")
+	findings := filepath.Join(f.home, "scratch", "shop", "t2", "findings.json")
+	if err := os.WriteFile(report, []byte("One low-priority pattern requires follow-up.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"schema":"posse.review-findings.v1","patterns":[{"key":"minor-operation","title":"Minor operation","rule":"Operations should be validated","root_cause":"The value lacks a low-risk validation","fix_guidance":"Validate the operation","severity":"P2","origin":"introduced","instances":[{"repository":"shop","path":"review-issue.txt","line":1,"symbol":"operation","excerpt":"unsafe operation","description":"Low-priority unvalidated operation"}]}],"resolutions":[]}`
+	if err := os.WriteFile(findings, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "pass")
+	const issue = "https://github.com/acme/shop/issues/299"
+	if code, output := runReviewIdentityCLI(t, f, "review", "dispose", changeSeq, "P-1", "defer", "--issue", issue); code != 0 {
+		t.Fatalf("Lead could not defer P2 finding with issue: %d %s", code, output)
+	}
+	var severity, savedIssue, state, actor string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT f.severity,f.follow_up_url,f.state,e.actor FROM review_findings f JOIN review_finding_events e ON e.finding_id=f.id WHERE f.ship_task_id=(SELECT id FROM tasks WHERE seq=1 AND type='change') ORDER BY e.id DESC LIMIT 1`).Scan(&severity, &savedIssue, &state, &actor); err != nil {
+		t.Fatal(err)
+	}
+	if severity != "P2" || savedIssue != issue || state != "deferred" || actor != "lead" {
+		t.Fatalf("defer=(severity %s, issue %s, state %s, actor %s), want P2, %s, deferred, lead", severity, savedIssue, state, actor, issue)
+	}
+}
+
 func TestFullPipelineWholePatternFixRequiresPrivateCandidateResolutions(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "3")
