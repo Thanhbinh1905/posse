@@ -1563,3 +1563,78 @@ func TestFailSpawnDeliversTaskFailedNoticeToIdleLead(t *testing.T) {
 		t.Fatalf("spawn failure Notice = %#v, %v", notices, err)
 	}
 }
+
+func TestDoneChangeTaskKeepsWorkerSlotAgainstQueuedRefill(t *testing.T) {
+	fixture := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 1\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	changeID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Current Worker", ShortName: "current-worker", State: store.StateSpawning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", "refill-probe", "--queue"}); code != 0 {
+		t.Fatalf("queue admission exit=%d output=%s", code, output.String())
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.ProjectByID(ctx, fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(fixture.home, fixture.fake)
+	for _, step := range []struct {
+		from, to store.State
+		source   string
+	}{
+		{store.StateSpawning, store.StateWorking, "cli"},
+		{store.StateWorking, store.StateDone, "worker"},
+	} {
+		if err := db.Transition(ctx, changeID, step.from, step.to, step.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The done Change Task keeps its Worker, so the refill must not reuse its slot.
+	if err := service.retryPendingLaunches(ctx, db, project, cfg, fixture.fake.SnapshotValue); err != nil {
+		t.Fatalf("refill: %v", err)
+	}
+	if queued, err := db.Task(ctx, fixture.project.ID, "t2"); err != nil || queued.State != store.StateQueued {
+		t.Fatalf("refill admitted a Task into a done Worker's slot: task=%+v err=%v", queued, err)
+	}
+	// A follow-up reopens the done Task without exceeding max_workers.
+	messageID, err := db.QueueMessage(ctx, changeID, "fix CI", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "fixture-claim"
+	if _, err := db.ExecContext(ctx, `UPDATE messages SET status='claimed',claim_token=?,claimed_at=1 WHERE id=?`, token, messageID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkMessageSubmitting(ctx, messageID, token); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.ActiveWorkerCount(ctx, fixture.project.ID); err != nil || got != 1 {
+		t.Fatalf("follow-up exceeded max_workers: active=%d err=%v", got, err)
+	}
+	// Releasing the Worker frees the slot for the queued Task.
+	if err := db.Transition(ctx, changeID, store.StateWorking, store.StateFailed, "worker", "fixture Worker exited"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.retryPendingLaunches(ctx, db, project, cfg, fixture.fake.SnapshotValue); err != nil {
+		t.Fatalf("refill after teardown: %v", err)
+	}
+	if started, err := db.Task(ctx, fixture.project.ID, "t2"); err != nil || started.State != store.StateWorking {
+		t.Fatalf("queued Task did not start after the Worker exited: task=%+v err=%v", started, err)
+	}
+}

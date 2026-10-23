@@ -142,7 +142,7 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	if err := db.Transition(ctx, parkedID, store.StateSpawning, store.StateWorking, "cli", "fixture start"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transition(ctx, parkedID, store.StateWorking, store.StateDone, "worker", "fixture done"); err != nil {
+	if err := db.Transition(ctx, parkedID, store.StateWorking, store.StateFailed, "worker", "fixture failed"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.AcquireSandbox(ctx, project.ID, parkedID, filepath.Join(home, "pool", "shop")); err != nil {

@@ -1791,3 +1791,36 @@ func TestConcurrentTaskSequenceAllocationSerializesAndBothTasksSucceed(t *testin
 		t.Fatalf("allocated sequences = %#v, want 1 and 2", seen)
 	}
 }
+
+func TestActiveWorkerCountHoldsSlotForDoneAndMergingChangeTasks(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []State{StateDone, StateMerging} {
+		id, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Change " + string(state), ShortName: "change-" + string(state)}, func(int) (bool, error) { return false, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
+			t.Fatal(err)
+		}
+		if state == StateMerging {
+			if err := db.Transition(ctx, id, StateDone, StateMerging, "cli", "merging"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if count, err := db.ActiveWorkerCount(ctx, project.ID); err != nil || count != 2 {
+		t.Fatalf("done and merging Change Tasks must hold slots: count=%d err=%v", count, err)
+	}
+}
