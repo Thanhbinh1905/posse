@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -25,14 +26,7 @@ func produceTaskDiff(ctx context.Context, sources []taskDiffSource, stat bool) (
 		if source.member != "" {
 			fmt.Fprintf(&output, "Member: %s\n", source.member)
 		}
-		args := []string{"diff", "--no-ext-diff"}
-		if stat {
-			args = append(args, "--stat")
-		}
-		if source.base != "" {
-			args = append(args, source.base+"...HEAD")
-		}
-		patch, err := gitOutputRaw(ctx, source.root, args...)
+		patch, err := taskWorktreeDiff(ctx, source, stat)
 		if err != nil {
 			return "", err
 		}
@@ -42,6 +36,39 @@ func produceTaskDiff(ctx context.Context, sources []taskDiffSource, stat bool) (
 		}
 	}
 	return output.String(), nil
+}
+
+func taskWorktreeDiff(ctx context.Context, source taskDiffSource, stat bool) (string, error) {
+	index, err := os.CreateTemp("", "posse-diff-index-")
+	if err != nil {
+		return "", fmt.Errorf("create temporary Git index: %w", err)
+	}
+	indexPath := index.Name()
+	if err := index.Close(); err != nil {
+		_ = os.Remove(indexPath)
+		return "", fmt.Errorf("close temporary Git index: %w", err)
+	}
+	defer os.Remove(indexPath)
+	env := []string{"GIT_INDEX_FILE=" + indexPath}
+	if _, err := commandStdoutArgsWithEnv(ctx, source.root, env, "git", "read-tree", "HEAD"); err != nil {
+		return "", fmt.Errorf("initialize temporary Git index: %w", err)
+	}
+	if _, err := commandStdoutArgsWithEnv(ctx, source.root, env, "git", "add", "-N", "--", "."); err != nil {
+		return "", fmt.Errorf("register untracked files in temporary Git index: %w", err)
+	}
+	args := []string{"diff", "--no-ext-diff"}
+	if stat {
+		args = append(args, "--stat")
+	}
+	if source.base != "" {
+		args = append(args, "--merge-base", source.base)
+	}
+	args = append(args, "--")
+	output, err := commandStdoutArgsWithEnv(ctx, source.root, env, "git", args...)
+	if err != nil {
+		return "", fmt.Errorf("git diff: %w", err)
+	}
+	return output, nil
 }
 
 func (s *Service) diff(ctx *axi.Context, args []string) error {
