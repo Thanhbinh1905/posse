@@ -6,6 +6,8 @@ disable-model-invocation: true
 
 # posse update
 
+The CLI is the source of truth. Check `posse --help` and follow actual command output rather than relying on remembered behavior.
+
 Do not install an update from an agent pane. Run `posse update --check` and report `current`, `latest`, the changelog summary and the running `watches` list. If versions match, stop and say no restart is needed.
 
 Then run `posse --full` and `posse doctor`. Report live Tasks, failed or lost Tasks, pending Decisions, undelivered Notices, and setup, skill or Watch warnings that will survive an update. An update can refuse with `migration_refused` if the release requires no live Tasks and one is live. Never suggest `--force` unless the User explicitly accepts that risk.

@@ -6,6 +6,8 @@ disable-model-invocation: true
 
 # posse down
 
+The CLI is the source of truth. Check `posse --help` and follow the actual command output; do not infer shutdown success from pane state alone.
+
 Inspect `posse --full` from the Project folder. Review Project state, Tasks, `needs_you`, undelivered Notices, and Watch state. Stop if any live Task exists in `spawning`, `working`, `needs-decision`, `blocked`, `stalled`, `done` or `merging`. Ask the User to finish, merge, accept or teardown those Tasks first.
 
 `posse down` has no force flag. Do not imitate it with Signals, pane closes or database edits. Shutdown does not delete the registered Project, Tasks, branches, Sandboxes, Decisions or Notices. Failed or lost Tasks, pending Decisions and undelivered Notices remain, but no Lead acts on them until `posse up`.
