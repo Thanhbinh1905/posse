@@ -117,7 +117,7 @@ func TestTaskCreationAndScratchAcquisitionSharePruneLock(t *testing.T) {
 	defer lock.Close()
 	createResult := make(chan error, 1)
 	go func() {
-		_, _, _, err := createTaskWithSequenceAndIntent(ctx, db, project, home, store.Task{Type: "change", Title: "Concurrent Worker", ShortName: "concurrent-worker", Branch: "posse/concurrent-worker", BaseRef: "main"})
+		_, _, _, err := createTaskWithSequenceAndIntent(ctx, db, project, home, store.Task{Type: "change", Title: "Concurrent Worker", ShortName: "concurrent-worker", Branch: "posse/concurrent-worker", BaseRef: "main"}, 2)
 		createResult <- err
 	}()
 	select {

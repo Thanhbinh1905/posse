@@ -514,12 +514,23 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if queued {
 		taskID, sequence, err = createTaskWithSequence(ctx.Context, db, project, home, task)
 	} else if generated != nil {
-		taskID, sequence, intent, err = createReviewRoundTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, generated.Admission)
+		taskID, sequence, intent, err = createReviewRoundTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, generated.Admission, cfg.Defaults.MaxWorkers)
 	} else {
-		taskID, sequence, intent, err = createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
+		taskID, sequence, intent, err = createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, cfg.Defaults.MaxWorkers)
 	}
 	if generated != nil {
 		err = mapReviewRoundAdmissionError(err)
+	}
+	if errors.Is(err, store.ErrWorkerLimit) && parsed.Bool("queue") && generated == nil {
+		// Capacity changed after the initial observation. Re-admit the same
+		// frozen Task plan as a resource-free queue entry instead of failing.
+		queued = true
+		task.State = store.StateQueued
+		task.Branch = ""
+		taskID, sequence, err = createTaskWithSequence(ctx.Context, db, project, home, task)
+	}
+	if errors.Is(err, store.ErrWorkerLimit) {
+		return axi.Failure("worker_limit", fmt.Sprintf("%s reached max_workers=%d during Task admission", project.Name, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or use `--queue` to admit the Task without starting")
 	}
 	if errors.Is(err, store.ErrTaskBranchExists) {
 		return branchTaken(branch, "in Project "+project.Name+" Task history")
@@ -557,6 +568,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	} else if admitted != nil {
 		plan = *admitted
 	}
+	return s.launchAdmittedTask(ctx, db, home, project, cfg, task, taskID, sequence, intent, plan, brief, briefData, resolution, mode, name, members, generated, reviewIdentityDetails, true)
+}
+
+func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, taskID int64, sequence int, intent store.Intent, plan taskplan.Plan, brief dispatch.Brief, briefData []byte, resolution dispatch.Resolution, mode, name string, members []taskMember, generated *generatedReviewRound, reviewIdentityDetails map[string]any, report bool) error {
 	var scratchPath string
 	if err := s.runIntentStep(ctx.Context, db, intent, "scratch.create", func() error {
 		var createErr error
@@ -760,7 +775,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 				result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning("merge_mode")}})
 			}
 			result = append(result, axi.Field{Key: "help", Value: []any{"Brief delivery waits for the Worker pane to become unfocused"}})
-			return ctx.Print(result)
+			if report {
+				return ctx.Print(result)
+			}
+			return nil
 		}
 		if err != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -804,7 +822,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if workflow := plan.Workflow; workflow != nil {
 		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
 	}
-	return ctx.Print(result)
+	if report {
+		return ctx.Print(result)
+	}
+	return nil
 }
 
 // Herdr otherwise prefers the unique agent.start name over its detected
@@ -965,24 +986,24 @@ func createTaskWithSequence(ctx context.Context, db *store.DB, project store.Pro
 	return db.CreateTaskWithSequence(ctx, project.ID, project.Name, task, taskSequenceOccupied(ctx, db, project, home))
 }
 
-func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task) (int64, int, store.Intent, error) {
-	return createTaskWithIntent(ctx, db, project, home, task, nil)
+func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, maxWorkers int) (int64, int, store.Intent, error) {
+	return createTaskWithIntent(ctx, db, project, home, task, nil, maxWorkers)
 }
 
-func createReviewRoundTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission store.ReviewRoundAdmission) (int64, int, store.Intent, error) {
-	return createTaskWithIntent(ctx, db, project, home, task, &admission)
+func createReviewRoundTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission store.ReviewRoundAdmission, maxWorkers int) (int64, int, store.Intent, error) {
+	return createTaskWithIntent(ctx, db, project, home, task, &admission, maxWorkers)
 }
 
-func createTaskWithIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission *store.ReviewRoundAdmission) (int64, int, store.Intent, error) {
+func createTaskWithIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission *store.ReviewRoundAdmission, maxWorkers int) (int64, int, store.Intent, error) {
 	var taskID int64
 	var sequence int
 	var intent store.Intent
 	err := withSandboxStateLock(ctx, db, func() error {
 		var err error
 		if admission == nil {
-			taskID, sequence, err = db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "start", os.Getpid(), taskSequenceOccupied(ctx, db, project, home))
+			taskID, sequence, err = db.CreateTaskWithSequenceAndIntentWithinLimit(ctx, project.ID, project.Name, task, "start", os.Getpid(), maxWorkers, taskSequenceOccupied(ctx, db, project, home))
 		} else {
-			taskID, sequence, err = db.CreateReviewRoundTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "start", os.Getpid(), *admission, taskSequenceOccupied(ctx, db, project, home))
+			taskID, sequence, err = db.CreateReviewRoundTaskWithSequenceAndIntentWithinLimit(ctx, project.ID, project.Name, task, "start", os.Getpid(), maxWorkers, *admission, taskSequenceOccupied(ctx, db, project, home))
 		}
 		if err != nil {
 			return err

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -46,6 +47,57 @@ func TestGitHubIssueBlockersFailClosedOnInvalidPageOrRepository(t *testing.T) {
 				t.Fatal("invalid or non-canonical blocker data was accepted")
 			}
 		})
+	}
+}
+
+func TestQueuedTaskShowsNativeBlockerWaitReason(t *testing.T) {
+	fixture := newStartFixture(t)
+	gitTest(t, fixture.repo, "remote", "add", "origin", "https://github.com/acme/shop.git")
+	configText := `[defaults]
+max_workers = 1
+merge_mode = "local"
+
+[profiles.claude]
+kind = "claude"
+
+[dispatch.default]
+use = "claude"
+`
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	gh := filepath.Join(bin, "gh")
+	if err := os.WriteFile(gh, []byte("#!/bin/sh\nprintf '%s' '[[]]'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Current Worker", ShortName: "current-worker", State: store.StateSpawning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(fixture.home, "ticket.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Ticketed queue\ndone_when: blocker closes\nticket: 12\n---\nWait for the blocker.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", brief, "--queue"}); code != 0 {
+		t.Fatalf("ticket queue admission exit=%d output=%s", code, output.String())
+	}
+	if err := os.WriteFile(gh, []byte("#!/bin/sh\nprintf '%s' '[[{\"number\":17,\"state\":\"open\",\"repository_url\":\"https://api.github.com/repos/acme/shop\",\"html_url\":\"https://github.com/acme/shop/issues/17\"}]]'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"show", "t2"}); code != 0 || !strings.Contains(output.String(), "waiting for Change Task waits for open native blocker https://github.com/acme/shop/issues/17") {
+		t.Fatalf("queued blocker wait was not visible: code=%d output=%s", code, output.String())
 	}
 }
 

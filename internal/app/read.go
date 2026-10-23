@@ -410,7 +410,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.prepareProject(ctx.Context, db, project)
+	cfg, err := s.prepareProject(ctx.Context, db, project)
 	if err = deferObservationContention(ctx, err, "Some Task observations were deferred; showing their last recorded state."); err != nil {
 		return err
 	}
@@ -427,7 +427,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 				return err
 			}
 		} else if task.State == store.StateQueued {
-			row.Reason, err = queuedTaskWaitReason(ctx.Context, db, project, task)
+			row.Reason, err = queuedTaskWaitReason(ctx.Context, db, project, task, cfg)
 			if err != nil {
 				return err
 			}
@@ -455,7 +455,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: rows}, {Key: "help", Value: []any{"Run `posse show " + taskCLIName(tasks[0]) + "` to inspect a Task"}}})
 }
 
-func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Project, task store.Task) (string, error) {
+func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config) (string, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil {
 		return "", admittedPlanFailure(err)
@@ -468,6 +468,13 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 		if len(unmet) > 0 {
 			return "waiting for " + strings.Join(unmet, ", "), nil
 		}
+	}
+	blockerReason, err := queuedTaskBlockerWaitReason(ctx, db, project, cfg, plan)
+	if err != nil {
+		return "", err
+	}
+	if blockerReason != "" {
+		return "waiting for " + blockerReason, nil
 	}
 	return "waiting for a Worker slot", nil
 }
@@ -491,6 +498,10 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return configError(err)
 	}
 	var preparationErr error
 	if project.IsWorkspace() {
@@ -517,7 +528,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["admission"], view["plan_revision"] = "admitted", plan.Revision
 		view["execution_mode"] = plan.Execution.Mode
 		if task.State == store.StateQueued {
-			waitReason, err := queuedTaskWaitReason(ctx.Context, db, project, task)
+			waitReason, err := queuedTaskWaitReason(ctx.Context, db, project, task, cfg)
 			if err != nil {
 				return err
 			}

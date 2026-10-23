@@ -361,6 +361,79 @@ var transitions = map[State]map[State]bool{
 	StateLost:          {StateWorking: true, StateTornDown: true, StateMerged: true},
 }
 
+// ClaimQueuedTask atomically reserves a Worker slot, assigns the Task-bound
+// branch and creates the normal start intent. Queued Tasks hold none of these
+// resources before this transaction succeeds.
+func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, maxWorkers int, branch string, processID int) (bool, error) {
+	if maxWorkers < 1 || processID < 1 {
+		return false, fmt.Errorf("worker limit and process id are required")
+	}
+	sequence, valid := taskBranchSequence(branch)
+	if branch != "" && (!valid || sequence < 1) {
+		return false, fmt.Errorf("invalid Task branch %q", branch)
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var state State
+	var taskSequence int
+	if err := tx.QueryRowContext(ctx, `SELECT state,seq FROM tasks WHERE id=? AND project_id=?`, taskID, projectID).Scan(&state, &taskSequence); err != nil {
+		return false, err
+	}
+	if state != StateQueued || branch != "" && sequence != taskSequence {
+		return false, nil
+	}
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN ('spawning','working','needs-decision','blocked','stalled')`, projectID).Scan(&active); err != nil {
+		return false, err
+	}
+	if active >= maxWorkers {
+		return false, nil
+	}
+	if branch != "" {
+		var branchExists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id=? AND branch=?)`, projectID, branch).Scan(&branchExists); err != nil {
+			return false, err
+		}
+		if branchExists {
+			return false, ErrTaskBranchExists
+		}
+	}
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, StateQueued, StateSpawning, "cli", "Worker capacity became available"); err != nil {
+		return false, err
+	}
+	if branch != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE tasks SET branch=?,updated_at=? WHERE id=? AND project_id=? AND state='spawning' AND branch=''`, branch, time.Now().UnixMilli(), taskID, projectID)
+		if err != nil {
+			return false, err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if changed != 1 {
+			return false, ErrStateRace
+		}
+	}
+	bootID, startTime, _ := ProcessIdentityForPID(processID)
+	now := time.Now().UnixMilli()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO intents(project_id,task_id,command,step,process_id,process_boot_id,process_start_time,updated_at,payload_json) VALUES(?,?,'start','done:task.admission',?,?,?,?, '{}')`, projectID, taskID, processID, bootID, startTime, now); err != nil {
+		if isUniqueConstraint(err) {
+			return false, ErrIntentOwned
+		}
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State, source, note string) error {
 	if !transitions[expected][next] {
 		return fmt.Errorf("transition %q -> %q is not allowed", expected, next)
@@ -780,14 +853,22 @@ type Sandbox struct {
 }
 
 func (db *DB) CreateTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, occupied func(int) (bool, error)) (int64, int, error) {
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, "", 0, occupied, nil)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, "", 0, occupied, nil, 0)
 }
 
 func (db *DB) CreateTaskWithSequenceAndIntent(ctx context.Context, projectID int64, projectName string, task Task, command string, processID int, occupied func(int) (bool, error)) (int64, int, error) {
+	return db.createTaskWithSequenceAndIntentWithinLimit(ctx, projectID, projectName, task, command, processID, 0, occupied)
+}
+
+func (db *DB) CreateTaskWithSequenceAndIntentWithinLimit(ctx context.Context, projectID int64, projectName string, task Task, command string, processID, maxWorkers int, occupied func(int) (bool, error)) (int64, int, error) {
+	return db.createTaskWithSequenceAndIntentWithinLimit(ctx, projectID, projectName, task, command, processID, maxWorkers, occupied)
+}
+
+func (db *DB) createTaskWithSequenceAndIntentWithinLimit(ctx context.Context, projectID int64, projectName string, task Task, command string, processID, maxWorkers int, occupied func(int) (bool, error)) (int64, int, error) {
 	if command == "" || processID < 1 {
 		return 0, 0, fmt.Errorf("intent command and process id are required")
 	}
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, nil)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, nil, maxWorkers)
 }
 
 // CreateReviewRoundTaskWithSequenceAndIntent atomically creates a Review Task
@@ -799,11 +880,22 @@ func (db *DB) CreateReviewRoundTaskWithSequenceAndIntent(ctx context.Context, pr
 	if task.Type != "review" || task.ReviewsTaskID != admission.ChangeTaskID {
 		return 0, 0, fmt.Errorf("review round task does not target its admitted Change Task")
 	}
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission, 0)
+}
+
+func (db *DB) CreateReviewRoundTaskWithSequenceAndIntentWithinLimit(ctx context.Context, projectID int64, projectName string, task Task, command string, processID, maxWorkers int, admission ReviewRoundAdmission, occupied func(int) (bool, error)) (int64, int, error) {
+	if command == "" || processID < 1 || maxWorkers < 1 {
+		return 0, 0, fmt.Errorf("intent command, process id and worker limit are required")
+	}
+	if task.Type != "review" || task.ReviewsTaskID != admission.ChangeTaskID {
+		return 0, 0, fmt.Errorf("review round task does not target its admitted Change Task")
+	}
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission, maxWorkers)
 }
 
 var ErrTaskBranchExists = errors.New("Task branch already used")
 var ErrTaskBranchSequenceMismatch = errors.New("Task branch does not match allocated Task sequence")
+var ErrWorkerLimit = errors.New("Worker limit reached during admission")
 
 // TaskBranchName returns the stable Git branch for a Task sequence.
 func TaskBranchName(sequence int) string {
@@ -829,7 +921,7 @@ func (db *DB) TaskBranchExists(ctx context.Context, projectID int64, branch stri
 	return exists, err
 }
 
-func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, intentCommand string, processID int, occupied func(int) (bool, error), roundAdmission *ReviewRoundAdmission) (int64, int, error) {
+func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, intentCommand string, processID int, occupied func(int) (bool, error), roundAdmission *ReviewRoundAdmission, maxWorkers int) (int64, int, error) {
 	if task.ShortName == "" {
 		return 0, 0, fmt.Errorf("Task short name is required")
 	}
@@ -853,6 +945,15 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if roundAdmission != nil {
 		if err := validateReviewRoundAdmissionTx(ctx, tx, *roundAdmission); err != nil {
 			return 0, 0, err
+		}
+	}
+	if maxWorkers > 0 && task.State != StateQueued {
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN ('spawning','working','needs-decision','blocked','stalled')`, projectID).Scan(&active); err != nil {
+			return 0, 0, err
+		}
+		if active >= maxWorkers {
+			return 0, 0, ErrWorkerLimit
 		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM tasks WHERE project_id=?`, projectID).Scan(&seq); err != nil {

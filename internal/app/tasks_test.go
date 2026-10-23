@@ -243,6 +243,76 @@ use = "claude"
 	}
 }
 
+func TestQueuedTaskRefillsAfterRestartWithFrozenAdmission(t *testing.T) {
+	fixture := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 1\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Current Worker", ShortName: "current-worker", State: store.StateSpawning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", "refill-probe", "--queue"}); code != 0 {
+		t.Fatalf("queue admission exit=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil || queued.State != store.StateQueued || queued.Branch != "" || queued.PaneID != "" || queued.SandboxID != 0 {
+		t.Fatalf("queued Task is not durably resource-free before restart: task=%+v err=%v", queued, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen the store as a cold recovery would, then release the old Worker.
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Transition(ctx, activeID, store.StateSpawning, store.StateFailed, "cli", "fixture Worker finished"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(fixture.home, fixture.fake)
+	project, err := db.ProjectByID(ctx, fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.retryPendingLaunches(ctx, db, project, cfg, fixture.fake.SnapshotValue); err != nil {
+		t.Fatalf("refill queued Task: %v", err)
+	}
+	started, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil || started.State != store.StateWorking || started.Branch != store.TaskBranchName(queued.Seq) || started.PaneID == "" || started.SandboxID == 0 {
+		t.Fatalf("queued Task was not launched through its admitted identity: task=%+v err=%v", started, err)
+	}
+	if got, err := db.ActiveWorkerCount(ctx, fixture.project.ID); err != nil || got != 1 {
+		t.Fatalf("refill exceeded max_workers: active=%d err=%v", got, err)
+	}
+	if tasks, err := db.Tasks(ctx, fixture.project.ID, true); err != nil || len(tasks) != 2 || tasks[1].ID != queued.ID {
+		t.Fatalf("refill recreated rather than resumed queued Task: tasks=%#v err=%v", tasks, err)
+	}
+	if _, err := db.IntentByTask(ctx, queued.ID); !store.IsNotFound(err) {
+		t.Fatalf("successful refill left a start intent behind: %v", err)
+	}
+}
+
 func TestStartWaitsOnTypedLandedPrerequisiteWithoutAllocatingResources(t *testing.T) {
 	fixture := newStartFixture(t)
 	db, err := store.Open(fixture.home)
