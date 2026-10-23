@@ -205,6 +205,25 @@ use = "claude"
 	if err != nil || plan == nil || string(plan.Inputs[0].Bytes) == "" {
 		t.Fatalf("queued Task did not retain its admitted Brief: plan=%#v err=%v", plan, err)
 	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"teardown", taskIDString(queued.Seq)}); code != 0 {
+		t.Fatalf("cancel queued Task exit=%d output=%s", code, output.String())
+	}
+	db, err = store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	canceled, err := db.TaskByID(context.Background(), fixture.project.ID, queued.ID)
+	if err != nil || canceled.State != store.StateTornDown || canceled.Branch != "" || canceled.WorktreePath != "" {
+		t.Fatalf("queued Task cancellation state=%+v err=%v", canceled, err)
+	}
+	if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
+		t.Fatalf("queued Task cancellation touched Herdr: %#v", fixture.fake.Calls)
+	}
 }
 
 func TestStartRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {

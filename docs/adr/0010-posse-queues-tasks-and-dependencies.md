@@ -17,5 +17,5 @@ The v1 spec left automatic Task queueing out: at `max_workers`, `start` refused,
 
 ## Consequences
 
-- The lifecycle gains `queued -> spawning` and `queued -> torn-down` (cancel); cancellation is not yet exposed for queued Tasks.
+- The lifecycle gains `queued -> spawning` and `queued -> torn-down` (cancel). `posse teardown <task>` cancels a queued Task without touching Worker resources.
 - As with Stalls, queued Tasks can start late if nothing calls `posse` and no event fires ([spec section 23](../spec.md#23-open-risks), "Timers need a caller").

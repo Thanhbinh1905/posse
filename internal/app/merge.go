@@ -492,6 +492,12 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if task.State == store.StateTornDown {
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "already_torn_down", Value: true}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}})
 	}
+	if task.State == store.StateQueued {
+		if err := db.Transition(ctx.Context, task.ID, store.StateQueued, store.StateTornDown, "cli", "Canceled before Worker dispatch"); err != nil {
+			return err
+		}
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "help", Value: []any{"Queued Task canceled without allocating a Sandbox, pane or branch"}}})
+	}
 	plan, planErr := task.AdmittedPlan()
 	if planErr != nil {
 		return admittedPlanFailure(planErr)
