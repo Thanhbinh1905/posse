@@ -203,19 +203,6 @@ func requireReviewPass(ctx context.Context, db *store.DB, project store.Project,
 		}
 	}
 	if evidence.Complete {
-		plan, planErr := change.AdmittedPlan()
-		if planErr != nil {
-			return admittedPlanFailure(planErr)
-		}
-		findings, err := db.ReviewFindingsForTask(ctx, change.ID)
-		if err != nil {
-			return err
-		}
-		for _, finding := range findings {
-			if reviewFindingBlocks(finding, plan) {
-				return axi.Failure("review_findings_open", "Task has a blocking Review finding that is not fixed or accepted by the User", false)
-			}
-		}
 		return nil
 	}
 	id := taskIDString(change.Seq)
@@ -270,7 +257,28 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 		}
 	}
 	if local {
-		return requireReviewPass(ctx, db, project, task, commit)
+		if err := requireReviewPass(ctx, db, project, task, commit); err != nil {
+			return err
+		}
+	}
+	return requireNoBlockingReviewFinding(ctx, db, task)
+}
+
+// requireNoBlockingReviewFinding applies under every review policy: a known
+// blocking finding stops Merge until it is fixed or accepted by the User.
+func requireNoBlockingReviewFinding(ctx context.Context, db *store.DB, task store.Task) error {
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return admittedPlanFailure(err)
+	}
+	findings, err := db.ReviewFindingsForTask(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	for _, finding := range findings {
+		if reviewFindingBlocks(finding, plan) {
+			return axi.Failure("review_findings_open", "Task has a blocking Review finding that is not fixed or accepted by the User", false)
+		}
 	}
 	return nil
 }
