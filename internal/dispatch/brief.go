@@ -111,15 +111,25 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if isListItem(line) {
+			return Brief{}, &BriefError{Field: "frontmatter", Reason: fmt.Sprintf("line %d starts a YAML list; YAML lists are unsupported in Brief frontmatter except under done_when", i+1)}
+		}
 		key, value, found := strings.Cut(line, ":")
 		if !found {
-			if strings.HasPrefix(line, "-") {
-				return Brief{}, &BriefError{Field: "frontmatter", Reason: fmt.Sprintf("line %d starts a YAML list; YAML lists are unsupported in Brief frontmatter", i+1)}
-			}
 			return Brief{}, &BriefError{Field: "frontmatter", Reason: fmt.Sprintf("line %d must be key: value", i+1)}
 		}
 		key = strings.TrimSpace(key)
 		value = stripTrailingComment(value)
+		if key == "done_when" && value == "" {
+			items, next, err := parseDoneWhenList(lines, i+1, closing)
+			if err != nil {
+				return Brief{}, err
+			}
+			if len(items) > 0 {
+				value = strconv.Quote(strings.Join(items, "; "))
+				i = next - 1
+			}
+		}
 		if key == "landing_mode" {
 			if !allowHistoricalMultiIssue {
 				return Brief{}, &BriefError{Field: key, Reason: "was removed; use merge_mode"}
@@ -357,6 +367,38 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	return brief, nil
 }
 
+func isListItem(line string) bool {
+	return line == "-" || strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "-\t")
+}
+
+// parseDoneWhenList reads the block list under `done_when:` starting at line index start.
+// It returns the items and the index of the first line after the list.
+func parseDoneWhenList(lines []string, start, closing int) ([]string, int, error) {
+	var items []string
+	next := start
+	for ; next < closing; next++ {
+		line := strings.TrimSpace(lines[next])
+		if line == "" || strings.HasPrefix(line, "#") {
+			if len(items) == 0 {
+				continue
+			}
+			break
+		}
+		if !isListItem(line) {
+			break
+		}
+		item := unquote(stripTrailingComment(strings.TrimPrefix(line, "-")))
+		if item == "" {
+			return nil, 0, &BriefError{Field: "done_when", Reason: fmt.Sprintf("line %d is an empty list item", next+1)}
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		return nil, start, nil
+	}
+	return items, next, nil
+}
+
 func parseDependencies(raw string) ([]Dependency, error) {
 	text := strings.TrimSpace(raw)
 	if strings.HasPrefix(text, "[") {
@@ -394,7 +436,7 @@ var issueNumber = regexp.MustCompile(`^[1-9][0-9]*$`)
 func parseTicket(raw string) (*IssueRef, error) {
 	text := strings.TrimSpace(raw)
 	if strings.HasPrefix(text, "[") || strings.Contains(text, ",") {
-		return nil, &BriefError{Field: "ticket", Reason: "must be one issue number or member#number, such as 121"}
+		return nil, &BriefError{Field: "ticket", Reason: "must be one issue number, #number or member#number, such as 121"}
 	}
 	refs, err := parseIssueRefs(text, "ticket")
 	if err != nil {
@@ -419,8 +461,8 @@ func parseIssueRefs(raw, field string) ([]IssueRef, error) {
 			continue
 		}
 		repository, numberText, found := strings.Cut(value, "#")
-		if found && (!repoName.MatchString(repository) || strings.Contains(numberText, "#")) {
-			return nil, &BriefError{Field: field, Reason: fmt.Sprintf("%q must be an issue number or member#number", value)}
+		if found && ((repository != "" && !repoName.MatchString(repository)) || strings.Contains(numberText, "#")) {
+			return nil, &BriefError{Field: field, Reason: fmt.Sprintf("%q must be an issue number, #number or member#number", value)}
 		}
 		if !found {
 			numberText = repository
