@@ -605,6 +605,27 @@ func (db *DB) LatestApprovalQuote(ctx context.Context, taskID int64, action stri
 	return quote, err
 }
 
+// TransitionWithoutUnmergedWork tears a finished (done) Task down without a
+// User-approved discard. The caller must have verified that the Task has
+// no commits beyond its base and a clean Sandbox, so nothing is discarded.
+func (db *DB) TransitionWithoutUnmergedWork(ctx context.Context, taskID int64, expected State, note string) error {
+	if expected != StateDone {
+		return ErrInvalidApprovedDiscardTransition
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, expected, StateTornDown, "cli", note); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
 func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
 	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
