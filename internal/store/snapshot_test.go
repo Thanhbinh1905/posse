@@ -3,10 +3,12 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -531,6 +533,50 @@ func unboundedProjectSnapshotSize(ctx context.Context, db *DB, project Project) 
 		return 0, err
 	}
 	return encoded.Len(), nil
+}
+
+func TestProjectSnapshotPersistenceWaitsForConcurrentMove(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := db.Path + ".project-" + strconv.FormatInt(project.ID, 10) + ".snapshot.lock"
+	lock, err := acquireStoreFileLock(ctx, lockPath, "test Project snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedCtx, cancel := context.WithTimeout(ctx, 75*time.Millisecond)
+	defer cancel()
+	if err := db.PersistProject(blockedCtx, project.ID); !errors.Is(err, context.DeadlineExceeded) {
+		_ = lock.Close()
+		t.Fatalf("Project snapshot persistence while lock held = %v, want deadline", err)
+	}
+	movedRoot := filepath.Join(home, "moved-repo")
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET root=? WHERE id=?`, movedRoot, project.ID); err != nil {
+		_ = lock.Close()
+		t.Fatal(err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot projectSnapshot
+	if _, err := toml.DecodeFile(db.ProjectSnapshotPath(project.Name), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Project.Root != movedRoot {
+		t.Fatalf("Project snapshot root=%q, want %q", snapshot.Project.Root, movedRoot)
+	}
 }
 
 // Every command reconciles each Task and persists the Project snapshot. Only a

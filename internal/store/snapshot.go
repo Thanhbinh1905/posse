@@ -406,6 +406,13 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 }
 
 func (db *DB) PersistProject(ctx context.Context, projectID int64) error {
+	lockPath := db.Path + ".project-" + strconv.FormatInt(projectID, 10) + ".snapshot.lock"
+	lock, err := acquireStoreFileLock(ctx, lockPath, "Project snapshot")
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+
 	project, err := db.ProjectByID(ctx, projectID)
 	if err != nil {
 		return err
