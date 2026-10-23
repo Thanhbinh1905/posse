@@ -3,12 +3,14 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os/exec"
+	"strconv"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -17,66 +19,77 @@ func TestTwoConcurrentHandoffWatchesForOneDestination(t *testing.T) {
 	f := newPRLifecycleFixtureWithManualWatchOwner(t)
 	defer f.db.Close()
 	ctx := context.Background()
-	noticeID, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, Kind: "task_done", Summary: "concurrent handoff"})
+	taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "change", Title: "state transition during handoff Watch", ShortName: "handoff-race"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	start := make(chan struct{})
-	outputs := make([][]byte, 2)
-	errs := make([]error, 2)
-	var group sync.WaitGroup
-	for i := range outputs {
-		group.Add(1)
-		go func(i int) {
-			defer group.Done()
-			cmd := exec.Command(f.binary, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:concurrent-session", "--timeout", "3000")
-			cmd.Dir, cmd.Env = f.repo, f.leadEnv
-			<-start
-			outputs[i], errs[i] = cmd.CombinedOutput()
-		}(i)
+	first := exec.Command(f.binary, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:concurrent-session")
+	first.Dir, first.Env = f.repo, f.leadEnv
+	var firstOutput bytes.Buffer
+	first.Stdout, first.Stderr = &firstOutput, &firstOutput
+	if err := first.Start(); err != nil {
+		t.Fatal(err)
 	}
-	close(start)
-	group.Wait()
+	defer func() {
+		if first.ProcessState == nil {
+			_ = first.Process.Kill()
+			_ = first.Wait()
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
 
-	for i := range outputs {
-		if errs[i] != nil && !strings.Contains(string(outputs[i]), `"state":"timeout"`) {
-			t.Errorf("Watch %d failed: %v\n%s", i, errs[i], outputs[i])
-		}
-		if strings.Contains(string(outputs[i]), "internal_error") || strings.Contains(string(outputs[i]), "Task state changed concurrently") {
-			t.Errorf("Watch %d leaked a state race: %s", i, outputs[i])
-		}
+	second := exec.Command(f.binary, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:concurrent-session", "--timeout", "3000")
+	second.Dir, second.Env = f.repo, f.leadEnv
+	var secondOutput bytes.Buffer
+	second.Stdout, second.Stderr = &secondOutput, &secondOutput
+	if err := second.Start(); err != nil {
+		t.Fatal(err)
 	}
-	var deliveries []string
-	for _, output := range outputs {
-		var payload struct {
-			State   string `json:"state"`
-			Notices []struct {
-				ID int64 `json:"id"`
-			} `json:"notices"`
-			Delivery struct {
-				DeliveryID string `json:"delivery_id"`
-			} `json:"delivery"`
-		}
-		if err := json.Unmarshal(output, &payload); err != nil {
-			if strings.Contains(string(output), `"state":"timeout"`) {
-				continue
-			}
-			t.Fatalf("decode Watch response %s: %v", output, err)
-		}
-		if len(payload.Notices) > 0 {
-			if len(payload.Notices) != 1 || payload.Notices[0].ID != noticeID || payload.Delivery.DeliveryID == "" {
-				t.Fatalf("unexpected delivery batch: %+v", payload)
-			}
-			deliveries = append(deliveries, payload.Delivery.DeliveryID)
-		}
+	// On the unfixed branch both processes stay in the wait loop here. The
+	// Task transition below races with two real handoff Watch processes.
+	time.Sleep(300 * time.Millisecond)
+	if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker Signal received"); err != nil {
+		t.Fatal(err)
 	}
-	if len(deliveries) != 1 {
-		t.Fatalf("expected exactly one Watch to hand off the Notice, got delivery IDs %v and outputs %q", deliveries, outputs)
+	noticeID, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, TaskID: taskID, Kind: "task_done", Summary: "concurrent handoff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondErr := second.Wait()
+	if secondErr == nil || !strings.Contains(secondOutput.String(), `"code":"watch_already_active"`) {
+		t.Fatalf("second Watch was not refused with watch_already_active: err=%v output=%s", secondErr, secondOutput.String())
+	}
+	var refusal struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(secondOutput.Bytes(), &refusal); err != nil || refusal.Code != "watch_already_active" {
+		t.Fatalf("decode active-Watch refusal %s: %+v, %v", secondOutput.String(), refusal, err)
+	}
+	fields := strings.Fields(refusal.Message)
+	activePID, err := strconv.Atoi(strings.TrimRight(fields[len(fields)-1], ")."))
+	if err != nil || activePID != first.Process.Pid {
+		t.Fatalf("active Watch PID was not named: first pid=%d refusal=%q parse err=%v", first.Process.Pid, refusal.Message, err)
+	}
+
+	if err := first.Wait(); err != nil {
+		t.Fatalf("first Watch failed: %v\n%s", err, firstOutput.String())
+	}
+	var handoff struct {
+		Notices []struct {
+			ID int64 `json:"id"`
+		} `json:"notices"`
+		Delivery struct {
+			DeliveryID string `json:"delivery_id"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal(firstOutput.Bytes(), &handoff); err != nil || len(handoff.Notices) != 1 || handoff.Notices[0].ID != noticeID || handoff.Delivery.DeliveryID == "" {
+		t.Fatalf("first Watch did not hand off exactly the pending Notice: %s; error=%v", firstOutput.String(), err)
 	}
 	pending, err := f.db.UndeliveredNotices(ctx, f.project.ID)
 	if err != nil || len(pending) != 0 {
-		t.Fatalf("handoff should hold the Notice exactly once: pending=%#v err=%v", pending, err)
+		t.Fatalf("handoff should hold the Notice once: pending=%#v err=%v", pending, err)
 	}
 	var count int
 	if err := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notice_delivery_receipts WHERE project_id=? AND destination=?`, f.project.ID, "pi:concurrent-session").Scan(&count); err != nil || count != 1 {
