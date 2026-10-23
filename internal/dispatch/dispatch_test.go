@@ -181,6 +181,27 @@ func TestBriefRejectsInvalidOrRepeatedIssueReferences(t *testing.T) {
 	}
 }
 
+func TestBriefParsesTypedTaskDependencies(t *testing.T) {
+	brief, err := ParseBriefText(`---
+type: research
+title: Consumer
+done_when: consume input
+after: [t12:accepted, t14:reported]
+---
+`)
+	if err != nil || len(brief.After) != 2 || brief.After[0] != (Dependency{TaskID: "t12", Milestone: "accepted"}) || brief.After[1] != (Dependency{TaskID: "t14", Milestone: "reported"}) {
+		t.Fatalf("typed dependencies=%#v err=%v", brief.After, err)
+	}
+}
+
+func TestBriefRejectsInvalidTypedTaskDependencies(t *testing.T) {
+	for _, value := range []string{"t0:landed", "t12:done", "t12:landed,t12:reported", "t12"} {
+		if _, err := ParseBriefText("---\ntype: change\ntitle: Consumer\ndone_when: consume input\nafter: " + value + "\n---\n"); err == nil {
+			t.Errorf("accepted invalid after value %q", value)
+		}
+	}
+}
+
 func TestBriefParsesPublicationBoundReportKind(t *testing.T) {
 	for _, kind := range []string{"spec", "tickets"} {
 		source := "---\ntype: research\ntitle: Planning Report\ndone_when: findings are complete\nreport_kind: " + kind + "\n---\n"

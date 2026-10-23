@@ -426,6 +426,11 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return err
 			}
+		} else if task.State == store.StateQueued {
+			row.Reason, err = queuedTaskWaitReason(ctx.Context, db, project, task)
+			if err != nil {
+				return err
+			}
 		}
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
@@ -448,6 +453,23 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 		return ctx.Print(axi.Object{{Key: "tasks", Value: []any{}}, {Key: "state", Value: "0 open Tasks"}, {Key: "help", Value: []any{"Run `posse start --brief <file> [--name <short>]` to delegate a Task"}}})
 	}
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: rows}, {Key: "help", Value: []any{"Run `posse show " + taskCLIName(tasks[0]) + "` to inspect a Task"}}})
+}
+
+func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Project, task store.Task) (string, error) {
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return "", admittedPlanFailure(err)
+	}
+	if plan != nil && len(plan.Dependencies) > 0 {
+		unmet, err := db.UnmetTaskDependencies(ctx, project.ID, plan.Dependencies)
+		if err != nil {
+			return "", err
+		}
+		if len(unmet) > 0 {
+			return "waiting for " + strings.Join(unmet, ", "), nil
+		}
+	}
+	return "waiting for a Worker slot", nil
 }
 
 func (s *Service) show(ctx *axi.Context, args []string) error {
@@ -494,6 +516,13 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if plan != nil {
 		view["admission"], view["plan_revision"] = "admitted", plan.Revision
 		view["execution_mode"] = plan.Execution.Mode
+		if task.State == store.StateQueued {
+			waitReason, err := queuedTaskWaitReason(ctx.Context, db, project, task)
+			if err != nil {
+				return err
+			}
+			view["wait_reason"] = waitReason
+		}
 		if parsed.Bool("full") {
 			view["plan"] = plan
 		}

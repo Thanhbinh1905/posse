@@ -204,15 +204,22 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	} else if brief.Execution == "in-place" {
 		return axi.Failure("in_place_project_required", "execution: in-place requires a Project registered with `posse project add --directory`", false)
 	}
+	if hasLandedPrerequisite(brief.After) && brief.Type != "change" {
+		return briefError(&dispatch.BriefError{Field: "after", Reason: "landed prerequisites are valid only for Change Tasks"})
+	}
+	unmetDependencies, err := db.UnmetTaskDependencies(ctx.Context, project.ID, brief.After)
+	if err != nil {
+		return axi.Failure("dependency_invalid", err.Error(), false)
+	}
 	count, err := db.ActiveWorkerCount(ctx.Context, project.ID)
 	if err != nil {
 		return err
 	}
-	queued := count >= cfg.Defaults.MaxWorkers && parsed.Flags["queue"] == ""
-	if count >= cfg.Defaults.MaxWorkers && queued {
+	atCapacity := count >= cfg.Defaults.MaxWorkers
+	if atCapacity && !parsed.Bool("queue") && len(unmetDependencies) == 0 {
 		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config; use `--queue` to admit it without starting")
 	}
-	queued = count >= cfg.Defaults.MaxWorkers
+	queued := atCapacity || len(unmetDependencies) > 0
 	resolution, err := s.resolveDispatch(ctx.Context, project, cfg, brief.Type, parsed.Flags["profile"])
 	if err != nil {
 		return profileError(err)
@@ -250,6 +257,9 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	mode, autonomy, err := dispatch.ResolveDelivery(tightening, deliveryDefault, cfg.Autonomy, choice != nil)
 	if err != nil {
 		return briefError(err)
+	}
+	if hasLandedPrerequisite(brief.After) && (brief.Base != "" || len(brief.BaseByRepo) != 0) {
+		return briefError(&dispatch.BriefError{Field: "base", Reason: "a Change Task after a landed prerequisite must start from the default branch"})
 	}
 	if !project.IsWorkspace() && !project.IsDirectory() && brief.Type == "change" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
 		return axi.Failure("brief_invalid", "a repository without origin can only Merge locally", false)
@@ -332,6 +342,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err := validateBriefIssueReferences(project, brief, issueTargets); err != nil {
 		return briefError(err)
 	}
+	ticketTargets := issueTargets
 	if project.IsWorkspace() {
 		taskIssueTargets := make([]repoTarget, 0, len(members))
 		for _, member := range members {
@@ -340,6 +351,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if err := validateChangeIssueTargets(brief, taskIssueTargets); err != nil {
 			return briefError(err)
 		}
+		ticketTargets = taskIssueTargets
+	}
+	if err := validateTicketBlockers(ctx.Context, cfg, brief, ticketTargets); err != nil {
+		return err
 	}
 	targetBranch := ""
 	if !project.IsWorkspace() && !project.IsDirectory() && brief.Type == "change" {
@@ -466,6 +481,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
+	plan.Dependencies = append([]dispatch.Dependency(nil), brief.After...)
 	if generated != nil {
 		plan.Inputs = append(plan.Inputs, reviewRoundPlanInputs(generated.Files)...)
 	}
@@ -518,7 +534,11 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if err := s.regenerateProjects(ctx.Context, db); err != nil {
 			return err
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}})
+		waitReason := "Worker capacity is full"
+		if len(unmetDependencies) > 0 {
+			waitReason = "Waiting for " + strings.Join(unmetDependencies, ", ")
+		}
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "wait_reason", Value: waitReason}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}})
 	}
 	defer func() { _ = db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID) }()
 	crashIntentAt("start", "after", "task.create")
@@ -930,6 +950,15 @@ func workerNameRetrySuggestion(name string) string {
 		slug = "task"
 	}
 	return slug + workerRetryNameSuffix
+}
+
+func hasLandedPrerequisite(dependencies []dispatch.Dependency) bool {
+	for _, dependency := range dependencies {
+		if dependency.Milestone == "landed" {
+			return true
+		}
+	}
+	return false
 }
 
 func createTaskWithSequence(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task) (int64, int, error) {

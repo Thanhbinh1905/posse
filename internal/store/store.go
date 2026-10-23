@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pressly/goose/v3"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	dbgen "github.com/thanhbinh1905/posse/internal/store/sqlc"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 	"modernc.org/sqlite"
@@ -899,6 +900,9 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if err != nil {
 		return 0, 0, err
 	}
+	if err := validateTaskDependenciesTx(ctx, tx.Tx, projectID, seq, task.Type, planJSON); err != nil {
+		return 0, 0, err
+	}
 	if task.State == "" {
 		task.State = StateSpawning
 	}
@@ -954,6 +958,100 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' ||
 		}
 	}
 	return id, seq, nil
+}
+
+func validateTaskDependenciesTx(ctx context.Context, tx *sql.Tx, projectID int64, taskSequence int, taskType, planJSON string) error {
+	if planJSON == "" {
+		return nil
+	}
+	plan, err := taskplan.Decode(planJSON)
+	if err != nil {
+		return err
+	}
+	if len(plan.Dependencies) == 0 {
+		return nil
+	}
+	if taskType == "review" {
+		return fmt.Errorf("Review readiness comes from review_of; after is not valid for Review Tasks")
+	}
+	seen := make(map[int]bool, len(plan.Dependencies))
+	for _, dependency := range plan.Dependencies {
+		predecessorSequence, parseErr := strconv.Atoi(strings.TrimPrefix(dependency.TaskID, "t"))
+		if parseErr != nil || predecessorSequence < 1 {
+			return fmt.Errorf("invalid Task prerequisite %q", dependency.TaskID)
+		}
+		if predecessorSequence == taskSequence {
+			return fmt.Errorf("Task cannot depend on itself")
+		}
+		if predecessorSequence > taskSequence {
+			return fmt.Errorf("Task prerequisite %s cannot refer to a future Task", dependency.TaskID)
+		}
+		if seen[predecessorSequence] {
+			return fmt.Errorf("Task prerequisite %s is duplicated", dependency.TaskID)
+		}
+		seen[predecessorSequence] = true
+		var predecessorType, reportKind string
+		var predecessorState State
+		err := tx.QueryRowContext(ctx, `SELECT type,state,report_kind FROM tasks WHERE project_id=? AND seq=?`, projectID, predecessorSequence).Scan(&predecessorType, &predecessorState, &reportKind)
+		if err != nil {
+			return fmt.Errorf("unknown Task prerequisite %s", dependency.TaskID)
+		}
+		switch dependency.Milestone {
+		case "reported":
+			if predecessorType != "research" && predecessorType != "review" {
+				return fmt.Errorf("reported prerequisite %s must be a Research or Review Task", dependency.TaskID)
+			}
+		case "accepted":
+			if predecessorType != "research" || reportKind != "spec" && reportKind != "tickets" {
+				return fmt.Errorf("accepted prerequisite %s must be a publication-bound Research Task", dependency.TaskID)
+			}
+		case "landed":
+			if predecessorType != "change" {
+				return fmt.Errorf("landed prerequisite %s must be a Change Task", dependency.TaskID)
+			}
+		default:
+			return fmt.Errorf("invalid prerequisite milestone %q", dependency.Milestone)
+		}
+	}
+	return nil
+}
+
+func (db *DB) UnmetTaskDependencies(ctx context.Context, projectID int64, dependencies []dispatch.Dependency) ([]string, error) {
+	unmet := make([]string, 0)
+	for _, dependency := range dependencies {
+		var predecessorID int64
+		var state State
+		var mergedRef, reportDigest string
+		if err := db.QueryRowContext(ctx, `SELECT id,state,landed_ref,report_digest FROM tasks WHERE project_id=? AND seq=?`, projectID, mustTaskSequence(dependency.TaskID)).Scan(&predecessorID, &state, &mergedRef, &reportDigest); err != nil {
+			return nil, fmt.Errorf("unknown Task prerequisite %s", dependency.TaskID)
+		}
+		ready := false
+		switch dependency.Milestone {
+		case "reported":
+			ready = state == StateReported && reportDigest != "" || state == StateTornDown && reportDigest != ""
+		case "accepted":
+			var accepted bool
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM report_acceptances WHERE report_task_id=?)`, predecessorID).Scan(&accepted); err != nil {
+				return nil, err
+			}
+			ready = accepted
+		case "landed":
+			ready = state == StateMerged || state == StateTornDown && mergedRef != ""
+		}
+		if !ready {
+			reason := dependency.TaskID + ":" + dependency.Milestone
+			if state == StateFailed || state == StateLost || state == StateTornDown {
+				reason += " (predecessor " + string(state) + ")"
+			}
+			unmet = append(unmet, reason)
+		}
+	}
+	return unmet, nil
+}
+
+func mustTaskSequence(taskID string) int {
+	sequence, _ := strconv.Atoi(strings.TrimPrefix(taskID, "t"))
+	return sequence
 }
 
 func (db *DB) AcquireSandbox(ctx context.Context, projectID, taskID int64, basePath string) (Sandbox, error) {

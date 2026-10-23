@@ -159,6 +159,13 @@ func TestStartRejectsInvalidOptionalDisplayName(t *testing.T) {
 
 func TestStartQueueAdmitsWithoutAllocatingResourcesAtCapacity(t *testing.T) {
 	fixture := newStartFixture(t)
+	preferences := filepath.Join(fixture.home, "projects", "shop", "preferences")
+	if err := os.MkdirAll(preferences, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(preferences, "worker.md"), []byte("Admission-time Worker guidance."), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	configText := `[defaults]
 max_workers = 1
 merge_mode = "local"
@@ -202,8 +209,18 @@ use = "claude"
 		t.Fatalf("queued Task allocated resources: %+v", queued)
 	}
 	plan, err := queued.AdmittedPlan()
-	if err != nil || plan == nil || string(plan.Inputs[0].Bytes) == "" {
-		t.Fatalf("queued Task did not retain its admitted Brief: plan=%#v err=%v", plan, err)
+	briefBytes, readErr := os.ReadFile(fixture.brief)
+	if err != nil || readErr != nil || plan == nil || !bytes.Equal(plan.Inputs[0].Bytes, briefBytes) {
+		t.Fatalf("queued Task did not retain its admitted Brief: plan=%#v err=%v readErr=%v", plan, err, readErr)
+	}
+	frozenPreference := false
+	for _, input := range plan.Inputs {
+		if input.Role == "preferences" && string(input.Bytes) == "Admission-time Worker guidance." {
+			frozenPreference = true
+		}
+	}
+	if !frozenPreference {
+		t.Fatalf("queued Task did not retain its admission-time Worker guidance: %#v", plan.Inputs)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -223,6 +240,106 @@ use = "claude"
 	}
 	if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
 		t.Fatalf("queued Task cancellation touched Herdr: %#v", fixture.fake.Calls)
+	}
+}
+
+func TestStartWaitsOnTypedLandedPrerequisiteWithoutAllocatingResources(t *testing.T) {
+	fixture := newStartFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", ShortName: "predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(context.Background(), predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := `---
+type: change
+title: Dependent change
+done_when: predecessor has landed
+after: t1:landed
+---
+Implement after the prerequisite.
+`
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+		t.Fatalf("dependent start exit=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dependent, err := db.Task(context.Background(), fixture.project.ID, "t2")
+	if err != nil || dependent.State != store.StateQueued || dependent.Branch != "" || dependent.WorktreePath != "" {
+		t.Fatalf("dependent Task=%+v err=%v", dependent, err)
+	}
+	plan, err := dependent.AdmittedPlan()
+	if err != nil || plan == nil || len(plan.Dependencies) != 1 || plan.Dependencies[0].Milestone != "landed" {
+		t.Fatalf("dependency was not frozen in admitted plan: plan=%+v err=%v", plan, err)
+	}
+	unmet, err := db.UnmetTaskDependencies(context.Background(), fixture.project.ID, plan.Dependencies)
+	if err != nil || len(unmet) != 1 || unmet[0] != "t1:landed" {
+		t.Fatalf("unmet dependencies=%v err=%v predecessor=%d", unmet, err, predecessorID)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"show", "t2"}); code != 0 || !strings.Contains(output.String(), "waiting for t1:landed") {
+		t.Fatalf("queued Task wait is not inspectable: code=%d output=%s", code, output.String())
+	}
+}
+
+func TestStartRejectsWrongTypedPrerequisiteAtomically(t *testing.T) {
+	fixture := newStartFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", ShortName: "predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(context.Background(), predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := `---
+type: research
+title: Invalid consumer
+done_when: dependency is rejected
+after: t1:reported
+---
+The predecessor is not a Report.
+`
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code == 0 {
+		t.Fatalf("wrong dependency type was admitted: %s", output.String())
+	}
+	db, err = store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("invalid dependency was partially admitted: tasks=%+v err=%v", tasks, err)
 	}
 }
 

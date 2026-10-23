@@ -154,6 +154,7 @@ type Plan struct {
 	Execution       Execution                 `json:"execution"`
 	Review          string                    `json:"review"`
 	ReviewOf        int64                     `json:"review_of,omitempty"`
+	Dependencies    []dispatch.Dependency     `json:"dependencies,omitempty"`
 	Delivery        string                    `json:"delivery"`
 	Grants          []Grant                   `json:"grants"`
 	Preferences     []Preference              `json:"preferences,omitempty"`
