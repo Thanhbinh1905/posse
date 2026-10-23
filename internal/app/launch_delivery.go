@@ -252,7 +252,7 @@ func frozenTaskBrief(task store.Task, plan *taskplan.Plan) ([]byte, dispatch.Bri
 		}
 	}
 	if len(briefBytes) == 0 {
-		return nil, dispatch.Brief{}, fmt.Errorf("Task %s has no frozen Brief input", taskIDString(task.Seq))
+		return nil, dispatch.Brief{}, fmt.Errorf("frozen Brief input missing for Task %s", taskIDString(task.Seq))
 	}
 	brief, err := dispatch.ParseHistoricalBriefText(string(briefBytes))
 	if err != nil {
@@ -275,7 +275,7 @@ func frozenTaskMembers(project store.Project, task store.Task, plan *taskplan.Pl
 	for _, frozen := range plan.Execution.Members {
 		target, ok := byName[frozen.Name]
 		if !ok {
-			return nil, fmt.Errorf("Task %s Member %q is no longer registered", taskIDString(task.Seq), frozen.Name)
+			return nil, fmt.Errorf("workspace member %q of Task %s is no longer registered", frozen.Name, taskIDString(task.Seq))
 		}
 		members = append(members, taskMember{repoTarget: target, Path: frozen.Path, MergeMode: frozen.Delivery, BaseRef: frozen.Base, TargetBranch: frozen.Target})
 	}
