@@ -6,13 +6,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
 
-// Counts contains token totals. Known distinguishes a readable session from an
-// unsupported kind, missing session, or unavailable session file.
+// Counts contains token totals. Known is false unless the session contains a
+// supported usage record.
 type Counts struct {
 	Input      int64 `json:"input_tokens,omitempty"`
 	Output     int64 `json:"output_tokens,omitempty"`
@@ -22,12 +21,14 @@ type Counts struct {
 }
 
 // Read resolves the recorded session reference inside the selected harness's
-// session store and reads that session only.
-func Read(kind, session string) Counts {
+// session store and reads that session only. cwd identifies Claude's project
+// directory without scanning the session store.
+func Read(kind, session, cwd string) Counts {
 	kind = strings.ToLower(kind)
-	if kind == "claude-code" {
+	switch kind {
+	case "claude-code":
 		kind = "claude"
-	} else if kind == "codex-cli" {
+	case "codex-cli":
 		kind = "codex"
 	}
 	if session == "" {
@@ -35,11 +36,10 @@ func Read(kind, session string) Counts {
 	}
 	path := session
 	if !filepath.IsAbs(path) {
-		matches := sessionFiles(kind, session)
-		if len(matches) != 1 {
-			return Counts{}
-		}
-		path = matches[0]
+		path = sessionFile(kind, session, cwd)
+	}
+	if path == "" {
+		return Counts{}
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -47,64 +47,58 @@ func Read(kind, session string) Counts {
 	}
 	defer file.Close()
 	counts, err := parse(kind, file)
-	if err != nil || !counts.Known {
+	if err != nil {
 		return Counts{}
 	}
 	return counts
 }
 
-func sessionFiles(kind, id string) []string {
+func sessionFile(kind, id, cwd string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil
+		return ""
 	}
 	var root string
 	switch kind {
-	case "claude", "claude-code":
+	case "claude":
 		root = os.Getenv("CLAUDE_CONFIG_DIR")
 		if root == "" {
 			root = filepath.Join(home, ".claude")
 		}
-		root = filepath.Join(root, "projects")
-	case "codex", "codex-cli":
+		if cwd == "" {
+			return ""
+		}
+		project := strings.ReplaceAll(filepath.Clean(cwd), string(os.PathSeparator), "-")
+		return filepath.Join(root, "projects", project, id+".jsonl")
+	case "codex":
 		root = os.Getenv("CODEX_HOME")
 		if root == "" {
 			root = filepath.Join(home, ".codex")
 		}
-		root = filepath.Join(root, "sessions")
 	case "pi":
 		root = os.Getenv("PI_CODING_AGENT_DIR")
 		if root == "" {
 			root = filepath.Join(home, ".pi", "agent")
 		}
-		root = filepath.Join(root, "sessions")
+		pattern := filepath.Join(root, "sessions", "*_"+id+".jsonl")
+		matches, _ := filepath.Glob(pattern)
+		if len(matches) == 1 {
+			return matches[0]
+		}
+		return ""
 	default:
-		return nil
+		return ""
 	}
-	var matches []string
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		base := filepath.Base(path)
-		if kind == "pi" {
-			if strings.HasSuffix(base, "_"+id+".jsonl") {
-				matches = append(matches, path)
-			}
-		} else if base == id+".jsonl" || kind == "codex" && strings.HasSuffix(base, "-"+id+".jsonl") {
-			matches = append(matches, path)
-		}
-		return nil
-	})
-	sort.Strings(matches)
-	return matches
+	pattern := filepath.Join(root, "sessions", "*", "*", "*", "rollout-*-"+id+".jsonl")
+	matches, _ := filepath.Glob(pattern)
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	return ""
 }
 
 func parse(kind string, file *os.File) (Counts, error) {
-	counts := Counts{Known: true}
+	var counts Counts
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 32<<20)
 	claudeMessages := map[string]Counts{}
@@ -114,12 +108,12 @@ func parse(kind string, file *os.File) (Counts, error) {
 		lineNumber++
 		line := scanner.Bytes()
 		switch kind {
-		case "claude", "claude-code":
+		case "claude":
 			var row struct {
 				Type    string `json:"type"`
-				Message struct {
+				Message *struct {
 					ID    string `json:"id"`
-					Usage struct {
+					Usage *struct {
 						Input  int64 `json:"input_tokens"`
 						Output int64 `json:"output_tokens"`
 						Read   int64 `json:"cache_read_input_tokens"`
@@ -127,36 +121,42 @@ func parse(kind string, file *os.File) (Counts, error) {
 					} `json:"usage"`
 				} `json:"message"`
 			}
-			if json.Unmarshal(line, &row) == nil && row.Type == "assistant" {
+			if json.Unmarshal(line, &row) == nil && row.Type == "assistant" && row.Message != nil && row.Message.Usage != nil {
 				id := row.Message.ID
 				if id == "" {
-					id = strconv.Itoa(lineNumber)
+					id = stringInt(lineNumber)
 				}
 				if _, exists := claudeMessages[id]; !exists {
 					claudeOrder = append(claudeOrder, id)
 				}
-				claudeMessages[id] = Counts{Input: row.Message.Usage.Input, Output: row.Message.Usage.Output, CacheRead: row.Message.Usage.Read, CacheWrite: row.Message.Usage.Write, Known: true}
+				u := row.Message.Usage
+				claudeMessages[id] = Counts{Input: u.Input, Output: u.Output, CacheRead: u.Read, CacheWrite: u.Write, Known: true}
 			}
-		case "codex", "codex-cli":
+		case "codex":
 			var row struct {
-				Type  string `json:"type"`
-				Usage struct {
-					Input  int64 `json:"input_tokens"`
-					Cached int64 `json:"cached_input_tokens"`
-					Output int64 `json:"output_tokens"`
-				} `json:"usage"`
+				Type    string `json:"type"`
+				Payload struct {
+					Type string `json:"type"`
+					Info *struct {
+						Total *struct {
+							Input      int64 `json:"input_tokens"`
+							Cached     int64 `json:"cached_input_tokens"`
+							CacheWrite int64 `json:"cache_write_input_tokens"`
+							Output     int64 `json:"output_tokens"`
+						} `json:"total_token_usage"`
+					} `json:"info"`
+				} `json:"payload"`
 			}
-			if json.Unmarshal(line, &row) == nil && row.Type == "turn.completed" {
-				counts.Input += row.Usage.Input
-				counts.CacheRead += row.Usage.Cached
-				counts.Output += row.Usage.Output
+			if json.Unmarshal(line, &row) == nil && row.Type == "event_msg" && row.Payload.Type == "token_count" && row.Payload.Info != nil && row.Payload.Info.Total != nil {
+				u := row.Payload.Info.Total
+				counts = Counts{Input: u.Input, Output: u.Output, CacheRead: u.Cached, CacheWrite: u.CacheWrite, Known: true}
 			}
 		case "pi":
 			var row struct {
 				Type    string `json:"type"`
-				Message struct {
+				Message *struct {
 					Role  string `json:"role"`
-					Usage struct {
+					Usage *struct {
 						Input  int64 `json:"input"`
 						Output int64 `json:"output"`
 						Read   int64 `json:"cacheRead"`
@@ -164,24 +164,31 @@ func parse(kind string, file *os.File) (Counts, error) {
 					} `json:"usage"`
 				} `json:"message"`
 			}
-			if json.Unmarshal(line, &row) == nil && row.Type == "message_end" && row.Message.Role == "assistant" {
-				counts.Input += row.Message.Usage.Input
-				counts.Output += row.Message.Usage.Output
-				counts.CacheRead += row.Message.Usage.Read
-				counts.CacheWrite += row.Message.Usage.Write
+			if json.Unmarshal(line, &row) == nil && row.Type == "message" && row.Message != nil && row.Message.Role == "assistant" && row.Message.Usage != nil {
+				u := row.Message.Usage
+				counts.Input += u.Input
+				counts.Output += u.Output
+				counts.CacheRead += u.Read
+				counts.CacheWrite += u.Write
+				counts.Known = true
 			}
 		default:
 			return Counts{}, nil
 		}
 	}
-	if kind == "claude" || kind == "claude-code" {
+	if kind == "claude" {
 		for _, id := range claudeOrder {
-			message := claudeMessages[id]
-			counts.Input += message.Input
-			counts.Output += message.Output
-			counts.CacheRead += message.CacheRead
-			counts.CacheWrite += message.CacheWrite
+			u := claudeMessages[id]
+			counts.Input += u.Input
+			counts.Output += u.Output
+			counts.CacheRead += u.CacheRead
+			counts.CacheWrite += u.CacheWrite
+			counts.Known = true
 		}
 	}
 	return counts, scanner.Err()
+}
+
+func stringInt(value int) string {
+	return strconv.Itoa(value)
 }

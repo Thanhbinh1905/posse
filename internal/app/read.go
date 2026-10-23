@@ -486,7 +486,7 @@ func taskUsage(task store.Task, cfg config.Config) usage.Counts {
 			kind = profile.Kind
 		}
 	}
-	return usage.Read(kind, agentSessionID(kind, task.AgentSession))
+	return usage.Read(kind, agentSessionID(kind, task.AgentSession), task.WorktreePath)
 }
 
 func (s *Service) show(ctx *axi.Context, args []string) error {
