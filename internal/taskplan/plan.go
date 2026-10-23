@@ -675,6 +675,34 @@ func (p Plan) Bind(taskID string) Plan {
 	return p
 }
 
+// WithoutDependency removes one declared prerequisite as an explicit plan revision.
+func (p Plan) WithoutDependency(taskID, milestone string) (Plan, error) {
+	if err := p.Validate(); err != nil {
+		return Plan{}, err
+	}
+	dependencies := make([]dispatch.Dependency, 0, len(p.Dependencies))
+	removed := false
+	for _, dependency := range p.Dependencies {
+		if dependency.TaskID == taskID && dependency.Milestone == milestone {
+			removed = true
+			continue
+		}
+		dependencies = append(dependencies, dependency)
+	}
+	if !removed {
+		return Plan{}, fmt.Errorf("prerequisite %s:%s is not in the admitted plan", taskID, milestone)
+	}
+	p.PreviousSHA256 = p.SHA256()
+	p.legacyJSON = ""
+	p.Revision++
+	p.Dependencies = dependencies
+	data, err := p.Encode()
+	if err != nil {
+		return Plan{}, err
+	}
+	return Decode(data)
+}
+
 // Reconfigure changes launch settings explicitly while retaining the admitted
 // contract. Evidence from earlier revisions cannot attest the new revision.
 func (p Plan) Reconfigure(launch Launch) (Plan, error) {
