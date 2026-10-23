@@ -121,7 +121,7 @@ func (s *Service) spawn(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generatedReviewRound) error {
-	parsed, err := parseArgs("start", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-orphan": {}, "user-approved": {}})
+	parsed, err := parseArgs("start", args, map[string]flagSpec{"brief": {}, "name": {}, "profile": {}, "from-orphan": {}, "user-approved": {}, "queue": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -191,13 +191,22 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err := validateWorkerName(name); err != nil {
 		return invalidWorkerNameFailure(name, err)
 	}
+	if hasLandedPrerequisite(brief.After) && brief.Type != "change" {
+		return briefError(&dispatch.BriefError{Field: "after", Reason: "landed prerequisites are valid only for Change Tasks"})
+	}
+	unmetDependencies, err := db.UnmetTaskDependencies(ctx.Context, project.ID, brief.After)
+	if err != nil {
+		return axi.Failure("dependency_invalid", err.Error(), false)
+	}
 	count, err := db.ActiveWorkerCount(ctx.Context, project.ID)
 	if err != nil {
 		return err
 	}
-	if count >= cfg.Defaults.MaxWorkers {
-		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config")
+	atCapacity := count >= cfg.Defaults.MaxWorkers
+	if atCapacity && !parsed.Bool("queue") && len(unmetDependencies) == 0 {
+		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config; use `--queue` to admit it without starting")
 	}
+	queued := atCapacity || len(unmetDependencies) > 0
 	resolution, err := s.resolveDispatch(ctx.Context, project, cfg, brief.Type, parsed.Flags["profile"])
 	if err != nil {
 		return profileError(err)
@@ -226,6 +235,9 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	mode, autonomy, err := dispatch.ResolveDelivery(tightening, deliveryDefault, cfg.Autonomy, choice != nil)
 	if err != nil {
 		return briefError(err)
+	}
+	if hasLandedPrerequisite(brief.After) && (brief.Base != "" || len(brief.BaseByRepo) != 0) {
+		return briefError(&dispatch.BriefError{Field: "base", Reason: "a Change Task after a landed prerequisite must start from the default branch"})
 	}
 	if !project.IsWorkspace() && brief.Type == "change" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
 		return axi.Failure("brief_invalid", "a repository without origin can only Merge locally", false)
@@ -305,6 +317,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err := validateBriefIssueReferences(project, brief, issueTargets); err != nil {
 		return briefError(err)
 	}
+	ticketTargets := issueTargets
 	if project.IsWorkspace() {
 		taskIssueTargets := make([]repoTarget, 0, len(members))
 		for _, member := range members {
@@ -313,6 +326,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if err := validateChangeIssueTargets(brief, taskIssueTargets); err != nil {
 			return briefError(err)
 		}
+		ticketTargets = taskIssueTargets
+	}
+	if err := validateTicketBlockers(ctx.Context, cfg, brief, ticketTargets); err != nil {
+		return err
 	}
 	targetBranch := ""
 	if !project.IsWorkspace() && brief.Type == "change" {
@@ -415,13 +432,16 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			}
 		}
 	}
-	sequenceCandidate, err := nextTaskSequence(ctx.Context, db, project, home)
-	if err != nil {
-		return err
-	}
-	branch := store.TaskBranchName(sequenceCandidate)
-	if err := taskBranchAvailableForBranch(ctx.Context, db, project, branch, members); err != nil {
-		return err
+	branch := ""
+	if !queued {
+		sequenceCandidate, err := nextTaskSequence(ctx.Context, db, project, home)
+		if err != nil {
+			return err
+		}
+		branch = store.TaskBranchName(sequenceCandidate)
+		if err := taskBranchAvailableForBranch(ctx.Context, db, project, branch, members); err != nil {
+			return err
+		}
 	}
 	if project.HerdrWorkspaceID == "" {
 		return axi.Failure("lead_missing", "Project has no Herdr workspace recorded", false, "Run `posse up` to restart the Lead")
@@ -436,6 +456,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
+	plan.Dependencies = append([]dispatch.Dependency(nil), brief.After...)
 	if generated != nil {
 		plan.Inputs = append(plan.Inputs, reviewRoundPlanInputs(generated.Files)...)
 	}
@@ -450,23 +471,41 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	// Admission must finish before preparation can recover other Workers or
 	// allocate this Task's scratch, Sandbox, branch or pane.
-	if err := retryBusy(ctx.Context, admissionPreparationAttempts, admissionPreparationDelay, func() error {
-		_, err := s.prepareProjectForTask(ctx.Context, db, project)
-		return err
-	}); err != nil {
-		return err
+	if !queued {
+		if err := retryBusy(ctx.Context, admissionPreparationAttempts, admissionPreparationDelay, func() error {
+			_, err := s.prepareProjectForTask(ctx.Context, db, project)
+			return err
+		}); err != nil {
+			return err
+		}
+	} else {
+		task.State = store.StateQueued
+		task.Branch = ""
 	}
 	crashIntentAt("start", "before", "task.create")
 	var taskID int64
 	var sequence int
 	var intent store.Intent
-	if generated != nil {
-		taskID, sequence, intent, err = createReviewRoundTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, generated.Admission)
+	if queued {
+		taskID, sequence, err = createTaskWithSequence(ctx.Context, db, project, home, task)
+	} else if generated != nil {
+		taskID, sequence, intent, err = createReviewRoundTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, generated.Admission, cfg.Defaults.MaxWorkers)
 	} else {
-		taskID, sequence, intent, err = createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task)
+		taskID, sequence, intent, err = createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, cfg.Defaults.MaxWorkers)
 	}
 	if generated != nil {
 		err = mapReviewRoundAdmissionError(err)
+	}
+	if errors.Is(err, store.ErrWorkerLimit) && parsed.Bool("queue") && generated == nil {
+		// Capacity changed after the initial observation. Re-admit the same
+		// frozen Task plan as a resource-free queue entry instead of failing.
+		queued = true
+		task.State = store.StateQueued
+		task.Branch = ""
+		taskID, sequence, err = createTaskWithSequence(ctx.Context, db, project, home, task)
+	}
+	if errors.Is(err, store.ErrWorkerLimit) {
+		return axi.Failure("worker_limit", fmt.Sprintf("%s reached max_workers=%d during Task admission", project.Name, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or use `--queue` to admit the Task without starting")
 	}
 	if errors.Is(err, store.ErrTaskBranchExists) {
 		return branchTaken(branch, "in Project "+project.Name+" Task history")
@@ -476,6 +515,16 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	if err != nil {
 		return workflowAdmissionFailure(err)
+	}
+	if queued {
+		if err := s.regenerateProjects(ctx.Context, db); err != nil {
+			return err
+		}
+		waitReason := "Worker capacity is full"
+		if len(unmetDependencies) > 0 {
+			waitReason = "Waiting for " + strings.Join(unmetDependencies, ", ")
+		}
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "wait_reason", Value: waitReason}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}})
 	}
 	defer func() { _ = db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID) }()
 	crashIntentAt("start", "after", "task.create")
@@ -494,6 +543,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	} else if admitted != nil {
 		plan = *admitted
 	}
+	return s.launchAdmittedTask(ctx, db, home, project, cfg, task, taskID, sequence, intent, plan, brief, briefData, resolution, mode, name, members, generated, reviewIdentityDetails, true)
+}
+
+func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, taskID int64, sequence int, intent store.Intent, plan taskplan.Plan, brief dispatch.Brief, briefData []byte, resolution dispatch.Resolution, mode, name string, members []taskMember, generated *generatedReviewRound, reviewIdentityDetails map[string]any, report bool) error {
 	var scratchPath string
 	if err := s.runIntentStep(ctx.Context, db, intent, "scratch.create", func() error {
 		var createErr error
@@ -692,7 +745,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 				result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning("merge_mode")}})
 			}
 			result = append(result, axi.Field{Key: "help", Value: []any{"Brief delivery waits for the Worker pane to become unfocused"}})
-			return ctx.Print(result)
+			if report {
+				return ctx.Print(result)
+			}
+			return nil
 		}
 		if err != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -736,7 +792,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if workflow := plan.Workflow; workflow != nil {
 		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
 	}
-	return ctx.Print(result)
+	if report {
+		return ctx.Print(result)
+	}
+	return nil
 }
 
 // Herdr otherwise prefers the unique agent.start name over its detected
@@ -884,28 +943,37 @@ func workerNameRetrySuggestion(name string) string {
 	return slug + workerRetryNameSuffix
 }
 
+func hasLandedPrerequisite(dependencies []dispatch.Dependency) bool {
+	for _, dependency := range dependencies {
+		if dependency.Milestone == "landed" {
+			return true
+		}
+	}
+	return false
+}
+
 func createTaskWithSequence(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task) (int64, int, error) {
 	return db.CreateTaskWithSequence(ctx, project.ID, project.Name, task, taskSequenceOccupied(ctx, db, project, home))
 }
 
-func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task) (int64, int, store.Intent, error) {
-	return createTaskWithIntent(ctx, db, project, home, task, nil)
+func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, maxWorkers int) (int64, int, store.Intent, error) {
+	return createTaskWithIntent(ctx, db, project, home, task, nil, maxWorkers)
 }
 
-func createReviewRoundTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission store.ReviewRoundAdmission) (int64, int, store.Intent, error) {
-	return createTaskWithIntent(ctx, db, project, home, task, &admission)
+func createReviewRoundTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission store.ReviewRoundAdmission, maxWorkers int) (int64, int, store.Intent, error) {
+	return createTaskWithIntent(ctx, db, project, home, task, &admission, maxWorkers)
 }
 
-func createTaskWithIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission *store.ReviewRoundAdmission) (int64, int, store.Intent, error) {
+func createTaskWithIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission *store.ReviewRoundAdmission, maxWorkers int) (int64, int, store.Intent, error) {
 	var taskID int64
 	var sequence int
 	var intent store.Intent
 	err := withSandboxStateLock(ctx, db, func() error {
 		var err error
 		if admission == nil {
-			taskID, sequence, err = db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "start", os.Getpid(), taskSequenceOccupied(ctx, db, project, home))
+			taskID, sequence, err = db.CreateTaskWithSequenceAndIntentWithinLimit(ctx, project.ID, project.Name, task, "start", os.Getpid(), maxWorkers, taskSequenceOccupied(ctx, db, project, home))
 		} else {
-			taskID, sequence, err = db.CreateReviewRoundTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "start", os.Getpid(), *admission, taskSequenceOccupied(ctx, db, project, home))
+			taskID, sequence, err = db.CreateReviewRoundTaskWithSequenceAndIntentWithinLimit(ctx, project.ID, project.Name, task, "start", os.Getpid(), maxWorkers, *admission, taskSequenceOccupied(ctx, db, project, home))
 		}
 		if err != nil {
 			return err

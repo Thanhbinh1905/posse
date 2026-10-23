@@ -504,6 +504,12 @@ func stopResearchProcesses(attempt store.ResearchAttempt) error {
 		}
 		handle, err := openSandboxProcessHandle(process.pid)
 		if err != nil {
+			// The process can exit after its identity was recorded but before
+			// executable inspection. ENOENT means there is no live image to
+			// signal; other inspection failures remain fail-closed below.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			if !researchProcessAlive(process.pid, process.identity) {
 				continue
 			}

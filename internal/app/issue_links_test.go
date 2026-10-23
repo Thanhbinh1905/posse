@@ -1,14 +1,136 @@
 package app
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestGitHubIssueBlockersReadPaginatedCanonicalRelationships(t *testing.T) {
+	bin := t.TempDir()
+	output := `[[{"number":17,"state":"open","repository_url":"https://api.github.com/repos/acme/shop","html_url":"https://github.com/acme/shop/issues/17"}],[{"number":18,"state":"closed","repository_url":"https://api.github.com/repos/acme/shop","html_url":"https://github.com/acme/shop/issues/18"}]]`
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\nprintf '%s' '"+output+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	blockers, err := githubIssueBlockers(context.Background(), repositoryForge{Kind: "github", Host: "github.com", Path: "acme/shop", Root: t.TempDir()}, 12)
+	if err != nil || len(blockers) != 2 || blockers[0].Number != 17 || blockers[1].State != "closed" {
+		t.Fatalf("paginated blockers=%+v err=%v", blockers, err)
+	}
+}
+
+func TestGitHubIssueBlockersFailClosedOnInvalidPageOrRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+	}{
+		{name: "malformed pagination", output: `[[]`},
+		{name: "different repository", output: `[[{"number":17,"state":"open","repository_url":"https://api.github.com/repos/other/repo"}]]`},
+		{name: "unknown state", output: `[[{"number":17,"repository_url":"https://api.github.com/repos/acme/shop"}]]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\nprintf '%s' '"+tc.output+"'\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if _, err := githubIssueBlockers(context.Background(), repositoryForge{Kind: "github", Host: "github.com", Path: "acme/shop", Root: t.TempDir()}, 12); err == nil {
+				t.Fatal("invalid or non-canonical blocker data was accepted")
+			}
+		})
+	}
+}
+
+func TestQueuedTaskShowsNativeBlockerWaitReason(t *testing.T) {
+	fixture := newStartFixture(t)
+	gitTest(t, fixture.repo, "remote", "add", "origin", "https://github.com/acme/shop.git")
+	configText := `[defaults]
+max_workers = 1
+merge_mode = "local"
+
+[profiles.claude]
+kind = "claude"
+
+[dispatch.default]
+use = "claude"
+`
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	gh := filepath.Join(bin, "gh")
+	if err := os.WriteFile(gh, []byte("#!/bin/sh\nprintf '%s' '[[]]'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Current Worker", ShortName: "current-worker", State: store.StateSpawning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(fixture.home, "ticket.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Ticketed queue\ndone_when: blocker closes\nticket: 12\n---\nWait for the blocker.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", brief, "--queue"}); code != 0 {
+		t.Fatalf("ticket queue admission exit=%d output=%s", code, output.String())
+	}
+	if err := os.WriteFile(gh, []byte("#!/bin/sh\nprintf '%s' '[[{\"number\":17,\"state\":\"open\",\"repository_url\":\"https://api.github.com/repos/acme/shop\",\"html_url\":\"https://github.com/acme/shop/issues/17\"}]]'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"show", "t2"}); code != 0 || !strings.Contains(output.String(), "waiting for Change Task waits for open native blocker https://github.com/acme/shop/issues/17") {
+		t.Fatalf("queued blocker wait was not visible: code=%d output=%s", code, output.String())
+	}
+}
+
+func TestTicketBlockerCheckPreventsDispatchAndFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+		want   string
+	}{
+		{name: "open blocker", script: "#!/bin/sh\nprintf '%s' '[[{\"number\":17,\"state\":\"open\",\"repository_url\":\"https://api.github.com/repos/acme/shop\"}]]'\n", want: "ticket_blocked"},
+		{name: "forge unavailable", script: "#!/bin/sh\necho unavailable >&2\nexit 1\n", want: "ticket_blockers_unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newStartFixture(t)
+			gitTest(t, fixture.repo, "remote", "add", "origin", "https://github.com/acme/shop.git")
+			cfg, err := config.Load(fixture.home, "shop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(tc.script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			brief := dispatch.Brief{Type: "change", Ticket: &dispatch.IssueRef{Number: 12}}
+			err = validateTicketBlockers(context.Background(), cfg, brief, []repoTarget{{Name: "shop", Root: fixture.repo}})
+			var failure *axi.Error
+			if err == nil || !errors.As(err, &failure) || failure.Code != tc.want {
+				t.Fatalf("blocker validation err=%v, want code %s", err, tc.want)
+			}
+		})
+	}
+}
 
 func TestDispatchWarnsForMissingAndClosedLinkedIssues(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)

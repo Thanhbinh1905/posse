@@ -186,6 +186,24 @@ func TestCodexResearchRefusesInheritedDangerAndUnsupportedVersions(t *testing.T)
 	}
 }
 
+func TestStopResearchProcessesTreatsExitedRecordedInstanceAsStopped(t *testing.T) {
+	command := exec.Command("sh", "-c", "exit 0")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := command.Process.Pid
+	identity, err := researchProcessIdentity(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stopResearchProcesses(store.ResearchAttempt{RunnerPID: pid, RunnerIdentity: identity}); err != nil {
+		t.Fatalf("stopping an already-exited recorded process: %v", err)
+	}
+}
+
 func TestCodexResearchCancelBudgetAndRunnerLoss(t *testing.T) {
 	f := newProcessResearch(t)
 	if code, output := runCLI(t, f.service, "config", "set", "research.max_active", "1"); code != 0 {

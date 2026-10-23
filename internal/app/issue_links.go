@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -110,6 +111,111 @@ func (s *Service) checkBriefIssues(ctx context.Context, cfg config.Config, brief
 		}
 	}
 	return warnings
+}
+
+type githubIssueBlocker struct {
+	Number        int    `json:"number"`
+	State         string `json:"state"`
+	RepositoryURL string `json:"repository_url"`
+	HTMLURL       string `json:"html_url"`
+}
+
+func githubIssueBlockers(ctx context.Context, forge repositoryForge, number int) ([]githubIssueBlocker, error) {
+	if forge.Kind != "github" || number < 1 {
+		return nil, fmt.Errorf("native issue blockers require a GitHub repository and valid issue number")
+	}
+	endpoint := fmt.Sprintf("repos/%s/issues/%d/dependencies/blocked_by?per_page=100", strings.Trim(forge.Path, "/"), number)
+	output, err := commandOutputArgs(ctx, forge.Root, "gh", "api", "--hostname", forge.Host, "--paginate", "--slurp", endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("read GitHub blocked_by relationships: %w: %s", err, strings.TrimSpace(output))
+	}
+	var pages []json.RawMessage
+	if err := json.Unmarshal([]byte(output), &pages); err != nil || pages == nil {
+		return nil, fmt.Errorf("GitHub blocked_by response did not contain complete paginated JSON")
+	}
+	var blockers []githubIssueBlocker
+	for _, page := range pages {
+		var rows []githubIssueBlocker
+		if err := json.Unmarshal(page, &rows); err != nil {
+			return nil, fmt.Errorf("GitHub blocked_by page is incomplete or invalid")
+		}
+		for _, blocker := range rows {
+			if blocker.Number < 1 || blocker.State == "" || !sameGitHubRepositoryIdentity(blocker.RepositoryURL, forge) {
+				return nil, fmt.Errorf("GitHub blocked_by response contains an incomplete or non-canonical issue identity")
+			}
+			blockers = append(blockers, blocker)
+		}
+	}
+	return blockers, nil
+}
+
+func sameGitHubRepositoryIdentity(repositoryURL string, forge repositoryForge) bool {
+	parsed, err := url.Parse(repositoryURL)
+	if err != nil || parsed.Host == "" || parsed.Scheme != "https" {
+		return false
+	}
+	path := strings.Trim(strings.TrimSuffix(parsed.Path, ".git"), "/")
+	marker := "/repos/"
+	if index := strings.LastIndex("/"+path, marker); index >= 0 {
+		path = ("/" + path)[index+len(marker):]
+	}
+	hostMatches := strings.EqualFold(parsed.Host, forge.Host) || strings.EqualFold(parsed.Host, "api."+forge.Host)
+	return hostMatches && strings.EqualFold(path, forge.Path)
+}
+
+func validateTicketBlockers(ctx context.Context, cfg config.Config, brief dispatch.Brief, targets []repoTarget) error {
+	if brief.Type != "change" || len(issueReferences(brief)) == 0 {
+		return nil
+	}
+	ref := issueReferences(brief)[0]
+	repository := ref.Repository
+	if repository == "" && len(targets) == 1 {
+		repository = targets[0].Name
+	}
+	var target *repoTarget
+	for i := range targets {
+		if targets[i].Name == repository {
+			if target != nil {
+				return axi.Failure("ticket_repository_ambiguous", "ticket repository identity is ambiguous", false)
+			}
+			target = &targets[i]
+		}
+	}
+	if target == nil {
+		return axi.Failure("ticket_repository_unavailable", "ticket repository is unavailable for blocker checks", false)
+	}
+	// A ticket link alone does not imply a native GitHub relationship. Only
+	// query blocked_by after resolving a canonical remote repository identity.
+	// Local repositories without an origin retain their normal local flow.
+	if originHost(ctx, target.Root) == "" {
+		return nil
+	}
+	forge, err := forgeForRepository(ctx, target.Root, cfg, target.Name)
+	if err != nil {
+		return axi.Failure("ticket_blockers_unavailable", "cannot verify native GitHub blockers: "+truncate(err.Error(), 180), true, "Restore GitHub access and retry; dispatch is held until blockers can be verified")
+	}
+	if forge.Kind != "github" {
+		return nil
+	}
+	blockers, err := githubIssueBlockers(ctx, forge, ref.Number)
+	if err != nil {
+		return axi.Failure("ticket_blockers_unavailable", "cannot verify native GitHub blockers: "+truncate(err.Error(), 180), true, "Restore GitHub access and retry; dispatch is held until blockers can be verified")
+	}
+	for _, blocker := range blockers {
+		switch strings.ToUpper(blocker.State) {
+		case "CLOSED":
+			continue
+		case "OPEN":
+			identity := fmt.Sprintf("#%d", blocker.Number)
+			if blocker.HTMLURL != "" {
+				identity = blocker.HTMLURL
+			}
+			return axi.Failure("ticket_blocked", "Change Task waits for open native blocker "+identity, false, "Wait for the blocker to close, then retry `posse start`")
+		default:
+			return axi.Failure("ticket_blockers_unavailable", "GitHub returned an unknown blocker state", true, "Retry after GitHub returns complete issue states")
+		}
+	}
+	return nil
 }
 
 func issueState(ctx context.Context, forge repositoryForge, number int) (string, string, error) {

@@ -11,7 +11,158 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
+
+func TestTaskDependencyReadinessRequiresSealedReportAndExplicitAcceptance(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Ticket Report", ReportKind: "tickets"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='reported',report_digest='sealed-digest' WHERE id=?`, reportID); err != nil {
+		t.Fatal(err)
+	}
+	accepted := []dispatch.Dependency{{TaskID: "t1", Milestone: "accepted"}}
+	unmet, err := db.UnmetTaskDependencies(ctx, project.ID, accepted)
+	if err != nil || len(unmet) != 1 {
+		t.Fatalf("unaccepted Report prerequisite was treated as ready: unmet=%v err=%v", unmet, err)
+	}
+	reported := []dispatch.Dependency{{TaskID: "t1", Milestone: "reported"}}
+	unmet, err = db.UnmetTaskDependencies(ctx, project.ID, reported)
+	if err != nil || len(unmet) != 0 {
+		t.Fatalf("sealed reported prerequisite remained unmet: unmet=%v err=%v", unmet, err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO report_acceptances(report_task_id,report_digest,accepted_by,recorded_by,provenance,user_quote,accepted_at) VALUES(?,'sealed-digest','user','user','user-command','',1)`, reportID); err != nil {
+		t.Fatal(err)
+	}
+	unmet, err = db.UnmetTaskDependencies(ctx, project.ID, accepted)
+	if err != nil || len(unmet) != 0 {
+		t.Fatalf("explicitly accepted Report prerequisite remained unmet: unmet=%v err=%v", unmet, err)
+	}
+}
+
+func TestQueuedTaskClaimIsAtomicCapacityBoundAndSingleUse(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Active", ShortName: "active"}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedID, queuedSeq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Queued", ShortName: "queued", State: StateQueued}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := db.ClaimQueuedTask(ctx, project.ID, queuedID, 1, TaskBranchName(queuedSeq), os.Getpid())
+	if err != nil || claimed {
+		t.Fatalf("queued Task claimed while capacity was full: claimed=%v err=%v", claimed, err)
+	}
+	if err := db.Transition(ctx, activeID, StateSpawning, StateFailed, "cli", "fixture Worker failed"); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	claimResults := make(chan struct {
+		claimed bool
+		err     error
+	}, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claimed, err := db.ClaimQueuedTask(ctx, project.ID, queuedID, 1, TaskBranchName(queuedSeq), os.Getpid())
+			claimResults <- struct {
+				claimed bool
+				err     error
+			}{claimed: claimed, err: err}
+		}()
+	}
+	wg.Wait()
+	close(claimResults)
+	claims := 0
+	for result := range claimResults {
+		if result.err != nil {
+			t.Fatalf("concurrent queued claim: %v", result.err)
+		}
+		if result.claimed {
+			claims++
+		}
+	}
+	if claims != 1 {
+		t.Fatalf("concurrent claim winners=%d, want exactly one", claims)
+	}
+	task, err := db.TaskByID(ctx, project.ID, queuedID)
+	if err != nil || task.State != StateSpawning || task.Branch != TaskBranchName(queuedSeq) {
+		t.Fatalf("claim did not atomically set Task state and branch: task=%+v err=%v", task, err)
+	}
+	intent, err := db.IntentByTask(ctx, queuedID)
+	if err != nil || intent.Command != "start" {
+		t.Fatalf("claim did not create normal start intent: intent=%+v err=%v", intent, err)
+	}
+	claimed, err = db.ClaimQueuedTask(ctx, project.ID, queuedID, 1, TaskBranchName(queuedSeq), os.Getpid())
+	if err != nil || claimed {
+		t.Fatalf("claim was not single-use: claimed=%v err=%v", claimed, err)
+	}
+	if _, _, err := db.CreateTaskWithSequenceAndIntentWithinLimit(ctx, project.ID, project.Name, Task{Type: "change", Title: "Over limit", ShortName: "over-limit"}, "start", os.Getpid(), 1, func(int) (bool, error) { return false, nil }); !errors.Is(err, ErrWorkerLimit) {
+		t.Fatalf("new spawn admission ignored the reserved slot: %v", err)
+	}
+}
+
+func TestQueuedTaskIsDurableAndResourceFree(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, seq, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "research", Title: "Queued research", ShortName: "queued-research", State: StateQueued}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Seq != seq || task.State != StateQueued || task.Branch != "" || task.WorktreePath != "" || task.SandboxID != 0 || task.PaneID != "" {
+		t.Fatalf("queued Task is not durable and resource-free: %+v", task)
+	}
+	count, err := db.ActiveWorkerCount(ctx, project.ID)
+	if err != nil || count != 0 {
+		t.Fatalf("queued Task consumes a Worker slot: count=%d err=%v", count, err)
+	}
+	if err := db.Transition(ctx, id, StateQueued, StateSpawning, "cli", "slot available"); err != nil {
+		t.Fatalf("queued Task cannot be dispatched: %v", err)
+	}
+}
 
 func TestQuietPROpenedAckIsAtomicRetryableAndLeavesClaimedNotices(t *testing.T) {
 	ctx := context.Background()

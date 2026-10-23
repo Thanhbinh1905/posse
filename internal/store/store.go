@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pressly/goose/v3"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	dbgen "github.com/thanhbinh1905/posse/internal/store/sqlc"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 	"modernc.org/sqlite"
@@ -316,6 +317,7 @@ func missingMigrationVersions(ctx context.Context, provider *goose.Provider) ([]
 type State string
 
 const (
+	StateQueued        State = "queued"
 	StateSpawning      State = "spawning"
 	StateWorking       State = "working"
 	StateNeedsDecision State = "needs-decision"
@@ -345,6 +347,7 @@ func taskAcceptsInstruction(state State, taskType string) bool {
 }
 
 var transitions = map[State]map[State]bool{
+	StateQueued:        {StateSpawning: true, StateTornDown: true},
 	StateSpawning:      {StateWorking: true, StateFailed: true, StateLost: true, StateMerged: true, StateTornDown: true},
 	StateWorking:       {StateNeedsDecision: true, StateFailed: true, StateBlocked: true, StateStalled: true, StateDone: true, StateLost: true, StateMerged: true, StateTornDown: true},
 	StateNeedsDecision: {StateWorking: true, StateFailed: true, StateLost: true, StateMerged: true, StateTornDown: true},
@@ -356,6 +359,79 @@ var transitions = map[State]map[State]bool{
 	StateReported:      {StateTornDown: true},
 	StateFailed:        {StateWorking: true, StateTornDown: true, StateMerged: true},
 	StateLost:          {StateWorking: true, StateTornDown: true, StateMerged: true},
+}
+
+// ClaimQueuedTask atomically reserves a Worker slot, assigns the Task-bound
+// branch and creates the normal start intent. Queued Tasks hold none of these
+// resources before this transaction succeeds.
+func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, maxWorkers int, branch string, processID int) (bool, error) {
+	if maxWorkers < 1 || processID < 1 {
+		return false, fmt.Errorf("worker limit and process id are required")
+	}
+	sequence, valid := taskBranchSequence(branch)
+	if branch != "" && (!valid || sequence < 1) {
+		return false, fmt.Errorf("invalid Task branch %q", branch)
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var state State
+	var taskSequence int
+	if err := tx.QueryRowContext(ctx, `SELECT state,seq FROM tasks WHERE id=? AND project_id=?`, taskID, projectID).Scan(&state, &taskSequence); err != nil {
+		return false, err
+	}
+	if state != StateQueued || branch != "" && sequence != taskSequence {
+		return false, nil
+	}
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN ('spawning','working','needs-decision','blocked','stalled')`, projectID).Scan(&active); err != nil {
+		return false, err
+	}
+	if active >= maxWorkers {
+		return false, nil
+	}
+	if branch != "" {
+		var branchExists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id=? AND branch=?)`, projectID, branch).Scan(&branchExists); err != nil {
+			return false, err
+		}
+		if branchExists {
+			return false, ErrTaskBranchExists
+		}
+	}
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, StateQueued, StateSpawning, "cli", "Worker capacity became available"); err != nil {
+		return false, err
+	}
+	if branch != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE tasks SET branch=?,updated_at=? WHERE id=? AND project_id=? AND state='spawning' AND branch=''`, branch, time.Now().UnixMilli(), taskID, projectID)
+		if err != nil {
+			return false, err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if changed != 1 {
+			return false, ErrStateRace
+		}
+	}
+	bootID, startTime, _ := ProcessIdentityForPID(processID)
+	now := time.Now().UnixMilli()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO intents(project_id,task_id,command,step,process_id,process_boot_id,process_start_time,updated_at,payload_json) VALUES(?,?,'start','done:task.admission',?,?,?,?, '{}')`, projectID, taskID, processID, bootID, startTime, now); err != nil {
+		if isUniqueConstraint(err) {
+			return false, ErrIntentOwned
+		}
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	if err := db.PersistTask(ctx, taskID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State, source, note string) error {
@@ -637,8 +713,8 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 	if task.State == "" {
 		task.State = StateSpawning
 	}
-	if task.State != StateSpawning {
-		return 0, fmt.Errorf("new Task must begin in spawning")
+	if task.State != StateSpawning && task.State != StateQueued {
+		return 0, fmt.Errorf("new Task must begin in spawning or queued")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -777,14 +853,22 @@ type Sandbox struct {
 }
 
 func (db *DB) CreateTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, occupied func(int) (bool, error)) (int64, int, error) {
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, "", 0, occupied, nil)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, "", 0, occupied, nil, 0)
 }
 
 func (db *DB) CreateTaskWithSequenceAndIntent(ctx context.Context, projectID int64, projectName string, task Task, command string, processID int, occupied func(int) (bool, error)) (int64, int, error) {
+	return db.createTaskWithSequenceAndIntentWithinLimit(ctx, projectID, projectName, task, command, processID, 0, occupied)
+}
+
+func (db *DB) CreateTaskWithSequenceAndIntentWithinLimit(ctx context.Context, projectID int64, projectName string, task Task, command string, processID, maxWorkers int, occupied func(int) (bool, error)) (int64, int, error) {
+	return db.createTaskWithSequenceAndIntentWithinLimit(ctx, projectID, projectName, task, command, processID, maxWorkers, occupied)
+}
+
+func (db *DB) createTaskWithSequenceAndIntentWithinLimit(ctx context.Context, projectID int64, projectName string, task Task, command string, processID, maxWorkers int, occupied func(int) (bool, error)) (int64, int, error) {
 	if command == "" || processID < 1 {
 		return 0, 0, fmt.Errorf("intent command and process id are required")
 	}
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, nil)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, nil, maxWorkers)
 }
 
 // CreateReviewRoundTaskWithSequenceAndIntent atomically creates a Review Task
@@ -796,11 +880,22 @@ func (db *DB) CreateReviewRoundTaskWithSequenceAndIntent(ctx context.Context, pr
 	if task.Type != "review" || task.ReviewsTaskID != admission.ChangeTaskID {
 		return 0, 0, fmt.Errorf("review round task does not target its admitted Change Task")
 	}
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission)
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission, 0)
+}
+
+func (db *DB) CreateReviewRoundTaskWithSequenceAndIntentWithinLimit(ctx context.Context, projectID int64, projectName string, task Task, command string, processID, maxWorkers int, admission ReviewRoundAdmission, occupied func(int) (bool, error)) (int64, int, error) {
+	if command == "" || processID < 1 || maxWorkers < 1 {
+		return 0, 0, fmt.Errorf("intent command, process id and worker limit are required")
+	}
+	if task.Type != "review" || task.ReviewsTaskID != admission.ChangeTaskID {
+		return 0, 0, fmt.Errorf("review round task does not target its admitted Change Task")
+	}
+	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission, maxWorkers)
 }
 
 var ErrTaskBranchExists = errors.New("Task branch already used")
 var ErrTaskBranchSequenceMismatch = errors.New("Task branch does not match allocated Task sequence")
+var ErrWorkerLimit = errors.New("worker limit reached during admission")
 
 // TaskBranchName returns the stable Git branch for a Task sequence.
 func TaskBranchName(sequence int) string {
@@ -826,7 +921,7 @@ func (db *DB) TaskBranchExists(ctx context.Context, projectID int64, branch stri
 	return exists, err
 }
 
-func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, intentCommand string, processID int, occupied func(int) (bool, error), roundAdmission *ReviewRoundAdmission) (int64, int, error) {
+func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, projectName string, task Task, intentCommand string, processID int, occupied func(int) (bool, error), roundAdmission *ReviewRoundAdmission, maxWorkers int) (int64, int, error) {
 	if task.ShortName == "" {
 		return 0, 0, fmt.Errorf("Task short name is required")
 	}
@@ -852,6 +947,15 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 			return 0, 0, err
 		}
 	}
+	if maxWorkers > 0 && task.State != StateQueued {
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN ('spawning','working','needs-decision','blocked','stalled')`, projectID).Scan(&active); err != nil {
+			return 0, 0, err
+		}
+		if active >= maxWorkers {
+			return 0, 0, ErrWorkerLimit
+		}
+	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM tasks WHERE project_id=?`, projectID).Scan(&seq); err != nil {
 		return 0, 0, err
 	}
@@ -865,7 +969,7 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 		}
 		seq++
 	}
-	if task.Branch == "" && !inPlace {
+	if task.Branch == "" && !inPlace && task.State != StateQueued {
 		task.Branch = TaskBranchName(seq)
 	}
 	if task.Branch != "" {
@@ -897,9 +1001,21 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if err != nil {
 		return 0, 0, err
 	}
+	if err := validateTaskDependenciesTx(ctx, tx.Tx, projectID, seq, task.Type, planJSON); err != nil {
+		return 0, 0, err
+	}
+	if task.State == "" {
+		task.State = StateSpawning
+	}
+	if task.State != StateSpawning && task.State != StateQueued {
+		return 0, 0, fmt.Errorf("new Task must begin in spawning or queued")
+	}
+	if task.State == StateQueued && task.Branch != "" {
+		return 0, 0, fmt.Errorf("queued Task cannot have a branch")
+	}
 	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at,plan_json,report_kind)
-VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?) RETURNING id`,
-		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, task.Profile, task.DispatchRule,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?) RETURNING id`,
+		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, string(task.State), task.Profile, task.DispatchRule,
 		task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
 		projectName, seq, now, now, planJSON, task.ReportKind).Scan(&id)
 	if err != nil {
@@ -923,7 +1039,7 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 			return 0, 0, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES (?, '', 'spawning', 'cli', 'Task created', ?)`, id, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES (?, '', ?, 'cli', 'Task created', ?)`, id, string(task.State), now); err != nil {
 		return 0, 0, err
 	}
 	if intentCommand != "" {
@@ -943,6 +1059,100 @@ VALUES (?, ?, ?, ?, ?, ?, 'spawning', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? |
 		}
 	}
 	return id, seq, nil
+}
+
+func validateTaskDependenciesTx(ctx context.Context, tx *sql.Tx, projectID int64, taskSequence int, taskType, planJSON string) error {
+	if planJSON == "" {
+		return nil
+	}
+	plan, err := taskplan.Decode(planJSON)
+	if err != nil {
+		return err
+	}
+	if len(plan.Dependencies) == 0 {
+		return nil
+	}
+	if taskType == "review" {
+		return fmt.Errorf("review readiness comes from review_of; after is not valid for Review Tasks")
+	}
+	seen := make(map[int]bool, len(plan.Dependencies))
+	for _, dependency := range plan.Dependencies {
+		predecessorSequence, parseErr := strconv.Atoi(strings.TrimPrefix(dependency.TaskID, "t"))
+		if parseErr != nil || predecessorSequence < 1 {
+			return fmt.Errorf("invalid Task prerequisite %q", dependency.TaskID)
+		}
+		if predecessorSequence == taskSequence {
+			return fmt.Errorf("Task cannot depend on itself")
+		}
+		if predecessorSequence > taskSequence {
+			return fmt.Errorf("Task prerequisite %s cannot refer to a future Task", dependency.TaskID)
+		}
+		if seen[predecessorSequence] {
+			return fmt.Errorf("Task prerequisite %s is duplicated", dependency.TaskID)
+		}
+		seen[predecessorSequence] = true
+		var predecessorType, reportKind string
+		var predecessorState State
+		err := tx.QueryRowContext(ctx, `SELECT type,state,report_kind FROM tasks WHERE project_id=? AND seq=?`, projectID, predecessorSequence).Scan(&predecessorType, &predecessorState, &reportKind)
+		if err != nil {
+			return fmt.Errorf("unknown Task prerequisite %s", dependency.TaskID)
+		}
+		switch dependency.Milestone {
+		case "reported":
+			if predecessorType != "research" && predecessorType != "review" {
+				return fmt.Errorf("reported prerequisite %s must be a Research or Review Task", dependency.TaskID)
+			}
+		case "accepted":
+			if predecessorType != "research" || reportKind != "spec" && reportKind != "tickets" {
+				return fmt.Errorf("accepted prerequisite %s must be a publication-bound Research Task", dependency.TaskID)
+			}
+		case "landed":
+			if predecessorType != "change" {
+				return fmt.Errorf("landed prerequisite %s must be a Change Task", dependency.TaskID)
+			}
+		default:
+			return fmt.Errorf("invalid prerequisite milestone %q", dependency.Milestone)
+		}
+	}
+	return nil
+}
+
+func (db *DB) UnmetTaskDependencies(ctx context.Context, projectID int64, dependencies []dispatch.Dependency) ([]string, error) {
+	unmet := make([]string, 0)
+	for _, dependency := range dependencies {
+		var predecessorID int64
+		var state State
+		var mergedRef, reportDigest string
+		if err := db.QueryRowContext(ctx, `SELECT id,state,landed_ref,report_digest FROM tasks WHERE project_id=? AND seq=?`, projectID, mustTaskSequence(dependency.TaskID)).Scan(&predecessorID, &state, &mergedRef, &reportDigest); err != nil {
+			return nil, fmt.Errorf("unknown Task prerequisite %s", dependency.TaskID)
+		}
+		ready := false
+		switch dependency.Milestone {
+		case "reported":
+			ready = state == StateReported && reportDigest != "" || state == StateTornDown && reportDigest != ""
+		case "accepted":
+			var accepted bool
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM report_acceptances WHERE report_task_id=?)`, predecessorID).Scan(&accepted); err != nil {
+				return nil, err
+			}
+			ready = accepted
+		case "landed":
+			ready = state == StateMerged || state == StateTornDown && mergedRef != ""
+		}
+		if !ready {
+			reason := dependency.TaskID + ":" + dependency.Milestone
+			if state == StateFailed || state == StateLost || state == StateTornDown {
+				reason += " (predecessor " + string(state) + ")"
+			}
+			unmet = append(unmet, reason)
+		}
+	}
+	return unmet, nil
+}
+
+func mustTaskSequence(taskID string) int {
+	sequence, _ := strconv.Atoi(strings.TrimPrefix(taskID, "t"))
+	return sequence
 }
 
 func (db *DB) AcquireSandbox(ctx context.Context, projectID, taskID int64, basePath string) (Sandbox, error) {

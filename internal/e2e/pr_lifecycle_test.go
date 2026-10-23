@@ -229,6 +229,52 @@ func stripManagedPublishedMarkers(body string) string {
 	return strings.Replace(body, endMarker, "", 1)
 }
 
+func TestNativeTicketBlockersFailClosedBeforeWorkerDispatchE2E(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-blockers.json"), []byte(`[[{"number":27,"state":"open","repository_url":"https://api.github.com/repos/acme/shop","html_url":"https://github.com/acme/shop/issues/27"}]]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(fixture.root, "ticket.md")
+	if err := os.WriteFile(brief, []byte(`---
+type: change
+title: Blocked ticket
+done_when: blocker is closed
+ticket: 12
+---
+Do not dispatch while blocked.
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(fixture.binary, "start", "--brief", brief)
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), `"ticket_blocked"`) {
+		t.Fatalf("open native blocker did not prevent dispatch: err=%v output=%s", err, output)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, "gh-blocker-fail"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command(fixture.binary, "start", "--brief", brief)
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	output, err = command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), `"ticket_blockers_unavailable"`) {
+		t.Fatalf("unavailable native blocker endpoint did not fail closed: err=%v output=%s", err, output)
+	}
+	tasks, err := fixture.db.Tasks(context.Background(), fixture.project.ID, true)
+	if err != nil || len(tasks) != 0 {
+		t.Fatalf("blocked ticket allocated a Task: tasks=%#v err=%v", tasks, err)
+	}
+	sandboxes, err := fixture.db.Sandboxes(context.Background(), fixture.project.ID)
+	if err != nil || len(sandboxes) != 0 {
+		t.Fatalf("blocked ticket allocated a Sandbox: sandboxes=%#v err=%v", sandboxes, err)
+	}
+	log := string(readTestFile(t, fixture.ghLog))
+	if !strings.Contains(log, "dependencies/blocked_by") {
+		t.Fatalf("fake forge did not receive native blocker query: %s", log)
+	}
+}
+
 func TestPRMergeLifecycleAndExternalMerge(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	gitTest(t, fixture.env, fixture.repo, "branch", "staging", "main")
@@ -1903,6 +1949,8 @@ func newPRLifecycleFixtureWithOptions(t *testing.T, liveLead, slowLoginShell, ma
 	env = setEnv(env, "POSSE_E2E_POSSE_BIN", filepath.Join(binDir, "posse"))
 	env = setEnv(env, "POSSE_TEST_GH_LOG", filepath.Join(root, "gh.log"))
 	env = setEnv(env, "POSSE_TEST_GH_STATE", filepath.Join(root, "gh-state.json"))
+	env = setEnv(env, "POSSE_TEST_GH_BLOCKERS", filepath.Join(root, "gh-blockers.json"))
+	env = setEnv(env, "POSSE_TEST_GH_BLOCKER_FAIL", filepath.Join(root, "gh-blocker-fail"))
 	env = setEnv(env, "POSSE_TEST_GH_OPEN_PRS", filepath.Join(root, "gh-open-prs.json"))
 	env = setEnv(env, "POSSE_TEST_GH_MERGE", filepath.Join(root, "gh-merge-called"))
 	env = setEnv(env, "POSSE_TEST_GH_BODY", filepath.Join(root, "gh-body.md"))
@@ -1990,6 +2038,12 @@ set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 case "$1 $2" in
   "api graphql") cat "$POSSE_TEST_GH_STATE"; if [ -e "$POSSE_TEST_ROOT/gh-exit-nonzero" ]; then exit 1; fi ;;
+  "api --hostname")
+    case "$*" in *'dependencies/blocked_by'*)
+      if [ -e "$POSSE_TEST_GH_BLOCKER_FAIL" ]; then printf 'permission denied\\n' >&2; exit 1; fi
+      cat "$POSSE_TEST_GH_BLOCKERS" ;;
+    *) exit 90 ;;
+    esac ;; 
   "pr list")
     case " $* " in *' --head posse/t1 '*) branch=posse/t1; number=17 ;; *' --head posse/t2 '*) branch=posse/t2; number=18 ;; *) exit 90 ;; esac
     if grep -q "/pull/$number" "$POSSE_TEST_GH_OPEN_PRS"; then
@@ -2065,6 +2119,11 @@ esac
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "gh-open-prs.json"), []byte("[]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Ticketed Task tests get a complete empty native blocker response by
+	// default; specific blocker tests replace this fixture explicitly.
+	if err := os.WriteFile(filepath.Join(root, "gh-blockers.json"), []byte("[]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "gh-state.json"), []byte(`{"data":{"repo1":{}}}`), 0o600); err != nil {

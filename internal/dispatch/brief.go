@@ -38,6 +38,7 @@ type Brief struct {
 	// Issues preserves the legacy `issues:` field, including historical multi-issue Briefs.
 	Issues []IssueRef
 	Refs   []IssueRef
+	After  []Dependency
 	Body   string
 }
 
@@ -49,6 +50,11 @@ var (
 type IssueRef struct {
 	Repository string
 	Number     int
+}
+
+type Dependency struct {
+	TaskID    string
+	Milestone string
 }
 
 func (ref IssueRef) String() string {
@@ -150,7 +156,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		if key == "autonomy" && allowHistoricalMultiIssue {
 			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "base", "target", "review_of", "supersedes", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs") {
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "base", "target", "review_of", "supersedes", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -173,6 +179,13 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
+	}
+	if raw, found := values["after"]; found {
+		dependencies, err := parseDependencies(raw)
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.After = dependencies
 	}
 	if raw, found := values["review_rounds"]; found {
 		rounds, err := strconv.Atoi(unquote(raw))
@@ -342,6 +355,37 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 		return Brief{}, &BriefError{Field: "review_of", Reason: "is valid only for a Review Task"}
 	}
 	return brief, nil
+}
+
+func parseDependencies(raw string) ([]Dependency, error) {
+	text := strings.TrimSpace(raw)
+	if strings.HasPrefix(text, "[") {
+		if !strings.HasSuffix(text, "]") {
+			return nil, &BriefError{Field: "after", Reason: "must be a comma-separated list such as [t12:landed, t14:accepted]"}
+		}
+		text = strings.TrimSpace(text[1 : len(text)-1])
+	}
+	seen := map[string]bool{}
+	dependencies := make([]Dependency, 0)
+	for _, item := range strings.Split(text, ",") {
+		value := unquote(strings.TrimSpace(item))
+		if value == "" {
+			continue
+		}
+		taskID, milestone, found := strings.Cut(value, ":")
+		if !found || !taskIDPattern.MatchString(taskID) || !oneOf(milestone, "reported", "accepted", "landed") {
+			return nil, &BriefError{Field: "after", Reason: fmt.Sprintf("%q must be a Task ID followed by reported, accepted or landed", value)}
+		}
+		if seen[taskID] {
+			return nil, &BriefError{Field: "after", Reason: taskID + " is listed more than once"}
+		}
+		seen[taskID] = true
+		dependencies = append(dependencies, Dependency{TaskID: taskID, Milestone: milestone})
+	}
+	if len(dependencies) == 0 {
+		return nil, &BriefError{Field: "after", Reason: "must list at least one typed Task prerequisite"}
+	}
+	return dependencies, nil
 }
 
 var repoName = regexp.MustCompile(`^[a-z0-9_-]+$`)
