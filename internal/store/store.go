@@ -1647,10 +1647,18 @@ func processAlive(pid int) bool {
 }
 
 func (db *DB) MoveProject(ctx context.Context, projectID int64, newRoot, defaultBranch string) error {
+	lock, err := db.projectSnapshotLock(ctx, projectID, true)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	if err := db.queries.MoveProject(ctx, dbgen.MoveProjectParams{Root: newRoot, DefaultBranch: defaultBranch, LastActivityAt: time.Now().UnixMilli(), ID: projectID}); err != nil {
 		return err
 	}
-	if err := db.PersistProject(ctx, projectID); err != nil {
+	if err := db.persistProject(ctx, projectID, true); err != nil {
+		return err
+	}
+	if err := lock.Close(); err != nil {
 		return err
 	}
 	rows, err := db.QueryContext(ctx, `SELECT id FROM tasks WHERE project_id=? ORDER BY id`, projectID)
