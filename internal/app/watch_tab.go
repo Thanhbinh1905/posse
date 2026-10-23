@@ -11,12 +11,14 @@ import (
 
 func watchTabLabel(project store.Project) string { return "posse:" + project.Name + ":watch" }
 
-func recordWatchFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFailure *string, phase string, err error) {
+// lastFailures is keyed by phase: one persistent cause usually fails both
+// phases, and alternating summaries must not raise a Notice every pass.
+func recordWatchFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFailures map[string]string, phase string, err error) {
 	if store.IsOnlyBusy(err) {
 		summary := "Watch " + phase + " deferred due to transient store contention; will retry"
-		if summary != *lastFailure {
+		if summary != lastFailures[phase] {
 			fmt.Fprintln(ctx.ErrOut, summary)
-			*lastFailure = summary
+			lastFailures[phase] = summary
 		}
 		return
 	}
@@ -25,9 +27,9 @@ func recordWatchFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFai
 		visible = err
 	}
 	summary := "Watch " + phase + " failed: " + truncate(visible.Error(), 240)
-	if summary != *lastFailure {
+	if summary != lastFailures[phase] {
 		_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: projectID, Kind: "pr_watch_failing", Summary: summary, DataJSON: `{}`})
-		*lastFailure = summary
+		lastFailures[phase] = summary
 	}
 }
 

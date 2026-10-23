@@ -3,10 +3,13 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -59,10 +62,13 @@ type TaskSnapshot struct {
 }
 
 type projectSnapshot struct {
-	Version int                  `toml:"version"`
-	Project Project              `toml:"project"`
-	Members []ProjectRepo        `toml:"members,omitempty"`
-	State   projectStateSnapshot `toml:"state"`
+	Version int `toml:"version"`
+	// StateDigest covers everything except the capture time. It precedes every
+	// table, so an unchanged check reads only the header of a large snapshot.
+	StateDigest string               `toml:"state_digest,omitempty"`
+	Project     Project              `toml:"project"`
+	Members     []ProjectRepo        `toml:"members,omitempty"`
+	State       projectStateSnapshot `toml:"state"`
 }
 
 type projectStateSnapshot struct {
@@ -419,25 +425,55 @@ func (db *DB) PersistProject(ctx context.Context, projectID int64) error {
 	if snapshot.State, err = db.projectStateSnapshot(ctx, projectID); err != nil {
 		return err
 	}
+	snapshot.StateDigest = projectSnapshotDigest(snapshot)
 	path := db.ProjectSnapshotPath(project.Name)
 	// Unchanged state keeps its capture time, so the write below is skipped.
 	// Recovery orders snapshots by that time; equal state cannot reorder them.
-	if data, err := os.ReadFile(path); err == nil {
-		var previous projectSnapshot
-		if _, err := toml.Decode(string(data), &previous); err == nil && previous.State.CapturedAt != 0 {
-			unchanged := snapshot
-			unchanged.State.CapturedAt = previous.State.CapturedAt
-			var encoded bytes.Buffer
-			if err := toml.NewEncoder(&encoded).Encode(unchanged); err == nil && bytes.Equal(encoded.Bytes(), data) {
-				return nil
-			}
-		}
+	// A Project with thousands of open Notices must not decode its whole
+	// snapshot on every Task write, so only the recorded digest is compared.
+	if recordedProjectSnapshotDigest(path) == snapshot.StateDigest {
+		return nil
 	}
 	var encoded bytes.Buffer
 	if err := toml.NewEncoder(&encoded).Encode(snapshot); err != nil {
 		return err
 	}
 	return atomicfile.Write(path, encoded.Bytes(), 0o600)
+}
+
+func projectSnapshotDigest(snapshot projectSnapshot) string {
+	snapshot.StateDigest = ""
+	snapshot.State.CapturedAt = 0
+	// %#v covers every field whatever its encoding tags, and these snapshot
+	// types hold only values, so equal state always prints identically.
+	digest := sha256.New()
+	fmt.Fprintf(digest, "%#v", snapshot)
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+// recordedProjectSnapshotDigest returns "" when the snapshot is missing,
+// unreadable or written before digests were recorded.
+func recordedProjectSnapshotDigest(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	header := make([]byte, 512)
+	n, _ := io.ReadFull(file, header)
+	header = header[:n]
+	end := bytes.Index(header, []byte("\n["))
+	if end < 0 {
+		return ""
+	}
+	var recorded struct {
+		Version     int    `toml:"version"`
+		StateDigest string `toml:"state_digest"`
+	}
+	if _, err := toml.Decode(string(header[:end]), &recorded); err != nil || recorded.Version != 1 {
+		return ""
+	}
+	return recorded.StateDigest
 }
 
 func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {

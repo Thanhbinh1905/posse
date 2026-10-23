@@ -79,10 +79,10 @@ func TestWatchDefersPureContentionButNotMixedFailures(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	var diagnostics bytes.Buffer
 	ctx := &axi.Context{Context: context.Background(), ErrOut: &diagnostics}
-	lastFailure := ""
+	lastFailures := map[string]string{}
 
 	busy := errors.Join(fmt.Errorf("checkout sync: %w", store.ErrBusy), store.ErrBusy)
-	recordWatchFailure(ctx, fixture.db, fixture.project.ID, &lastFailure, "reconcile", busy)
+	recordWatchFailure(ctx, fixture.db, fixture.project.ID, lastFailures, "reconcile", busy)
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func TestWatchDefersPureContentionButNotMixedFailures(t *testing.T) {
 
 	persistent := errors.New("Task t2 observation: constraint failed")
 	mixed := errors.Join(fmt.Errorf("Task t1 observation: %w", store.ErrBusy), persistent)
-	recordWatchFailure(ctx, fixture.db, fixture.project.ID, &lastFailure, "reconcile", mixed)
+	recordWatchFailure(ctx, fixture.db, fixture.project.ID, lastFailures, "reconcile", mixed)
 	notices, err = fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -299,5 +299,25 @@ func TestMergeWaitsForRepositorySyncBeforeAcquiringGitResources(t *testing.T) {
 	}
 	if err := fixture.db.FinishIntent(context.Background(), intent.ID, os.Getpid()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// One persistent configuration error fails both Watch phases on every pass.
+// The alternating summaries must raise one Notice per phase, not one per pass.
+func TestWatchFailureInBothPhasesRaisesOneNoticePerPhase(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	ctx := &axi.Context{Context: context.Background(), ErrOut: &bytes.Buffer{}}
+	lastFailures := map[string]string{}
+	persistent := errors.New("config.toml: defaults.review: legacy review policy")
+	for range 5 {
+		recordWatchFailure(ctx, fixture.db, fixture.project.ID, lastFailures, "reconcile", persistent)
+		recordWatchFailure(ctx, fixture.db, fixture.project.ID, lastFailures, "watch", persistent)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countNoticeKind(notices, "pr_watch_failing"); got != 2 {
+		t.Fatalf("alternating Watch phase failures raised %d Notices, want 2: %#v", got, notices)
 	}
 }

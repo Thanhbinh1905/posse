@@ -94,6 +94,15 @@ func (db *DB) EnsureSandboxResourceLease(ctx context.Context, request ResourceLe
 	if err := validateResourceLeaseRequest(request); err != nil {
 		return ResourceLease{}, err
 	}
+	// Every reconciliation ensures every held Sandbox. Confirm an existing
+	// lease from a read so routine passes do not queue for the write lock.
+	if existing, err := db.queries.ResourceLeaseBySource(ctx, request.SourceKey); err == nil {
+		if lease := resourceLeaseFromSource(existing); sameSandboxResourceLease(lease, request) {
+			return lease, nil
+		}
+	} else if !IsNotFound(err) {
+		return ResourceLease{}, err
+	}
 	token := fmt.Sprintf("sandbox:%d", request.SandboxID)
 	return db.claimResourceLease(ctx, request, token, true)
 }
@@ -120,7 +129,7 @@ func (db *DB) claimResourceLease(ctx context.Context, request ResourceLeaseReque
 	}
 	if existing, lookupErr := queries.ResourceLeaseBySource(ctx, request.SourceKey); lookupErr == nil {
 		lease := resourceLeaseFromSource(existing)
-		if !ensure || lease.ResourceType != request.ResourceType || lease.ScopeRoot != request.ScopeRoot || lease.ScopePath != request.ScopePath || lease.OwnerProjectID != request.OwnerProjectID || lease.SandboxID != request.SandboxID {
+		if !ensure || !sameSandboxResourceLease(lease, request) {
 			return ResourceLease{}, &ResourceLeaseConflict{Lease: lease}
 		}
 		if err := tx.Commit(); err != nil {
@@ -168,6 +177,10 @@ func (db *DB) claimResourceLease(ctx context.Context, request ResourceLeaseReque
 		return lease, err
 	}
 	return lease, nil
+}
+
+func sameSandboxResourceLease(lease ResourceLease, request ResourceLeaseRequest) bool {
+	return lease.ResourceType == request.ResourceType && lease.ScopeRoot == request.ScopeRoot && lease.ScopePath == request.ScopePath && lease.OwnerProjectID == request.OwnerProjectID && lease.SandboxID == request.SandboxID
 }
 
 func validateResourceLeaseRequest(request ResourceLeaseRequest) error {

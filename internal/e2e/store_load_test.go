@@ -20,12 +20,36 @@ import (
 // at once. Foreground commands must neither fail on contention nor report a
 // deferred Project reconciliation. POSSE_E2E_STORE_LOAD_ROUNDS raises the load.
 func TestStoreLoadAtWorkerLimitKeepsForegroundCommandsFree(t *testing.T) {
+	runStoreLoadAtWorkerLimit(t, false)
+}
+
+// TestStoreLoadWithProjectHistoryKeepsWatchAndLeadFree repeats the Worker
+// limit load on a store with weeks of Project history and a backlog of open
+// Notices (#428). Every Task write used to rebuild the Project snapshot from
+// that backlog, which held the Sandbox state lock and spent the reconcile
+// budget, so foreground commands reported contention and Watch fell behind.
+func TestStoreLoadWithProjectHistoryKeepsWatchAndLeadFree(t *testing.T) {
+	runStoreLoadAtWorkerLimit(t, true)
+}
+
+func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
 	if !waitForCondition(15*time.Second, func() bool { return len(watchPIDs(f.root)) > 0 }) {
 		t.Fatalf("isolated Watch runtime did not start: pids=%v", watchPIDs(f.root))
 	}
 	const workerCount = 6
+	if withHistory {
+		configPath := filepath.Join(f.home, "config.toml")
+		configText, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		limited := strings.Replace(string(configText), "[defaults]\n", fmt.Sprintf("[defaults]\nmax_workers = %d\n", workerCount), 1)
+		if err := os.WriteFile(configPath, []byte(limited), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	rounds := 6
 	if value, err := strconv.Atoi(os.Getenv("POSSE_E2E_STORE_LOAD_ROUNDS")); err == nil && value > 0 {
 		rounds = value
@@ -52,6 +76,9 @@ func TestStoreLoadAtWorkerLimitKeepsForegroundCommandsFree(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+	if withHistory {
+		seedProductionHistory(t, f)
 	}
 	publisher := workers[0]
 	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET landing_mode='pr' WHERE id=?`, publisher.taskID); err != nil {
@@ -115,6 +142,33 @@ func TestStoreLoadAtWorkerLimitKeepsForegroundCommandsFree(t *testing.T) {
 			}
 		}(writer)
 	}
+	// Sample the Watch heartbeat throughout the load. A stalled Watch loop or
+	// a failed heartbeat write shows up as a gap between observed advances.
+	loadStarted := time.Now()
+	heartbeatDone := make(chan struct{})
+	heartbeatGap := make(chan time.Duration, 1)
+	go func() {
+		var last int64
+		lastAdvance, maxGap := time.Now(), time.Duration(0)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				heartbeatGap <- max(maxGap, time.Since(lastAdvance))
+				return
+			case <-ticker.C:
+			}
+			var heartbeat int64
+			if err := f.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(heartbeat_at),0) FROM project_lookout_pollers WHERE project_id=?`, f.project.ID).Scan(&heartbeat); err != nil {
+				continue
+			}
+			if heartbeat != last {
+				maxGap = max(maxGap, time.Since(lastAdvance))
+				last, lastAdvance = heartbeat, time.Now()
+			}
+		}
+	}()
 	var group sync.WaitGroup
 	for _, worker := range workers {
 		group.Add(2)
@@ -142,6 +196,8 @@ func TestStoreLoadAtWorkerLimitKeepsForegroundCommandsFree(t *testing.T) {
 		}(worker)
 	}
 	group.Wait()
+	close(heartbeatDone)
+	maxHeartbeatGap := <-heartbeatGap
 	close(pressureDone)
 	pressure.Wait()
 	close(samples)
@@ -179,13 +235,26 @@ func TestStoreLoadAtWorkerLimitKeepsForegroundCommandsFree(t *testing.T) {
 		fmt.Fprintf(&report, "%-14s n=%-3d failed=%-3d busy=%-3d deferred=%-3d p50=%-7s p95=%-7s max=%s\n", command, len(list), failed, busy, deferred, percentile(50), percentile(95), percentile(100))
 	}
 	watchLog, _ := os.ReadFile(filepath.Join(f.home, "projects", f.project.Name, "watch.log"))
-	watchBusy := strings.Count(strings.ToLower(string(watchLog)), "sqlite_busy") + strings.Count(strings.ToLower(string(watchLog)), "database is locked")
-	fmt.Fprintf(&report, "watch.log contention lines=%d\n", watchBusy)
+	lowerWatchLog := strings.ToLower(string(watchLog))
+	watchBusy := strings.Count(lowerWatchLog, "sqlite_busy") + strings.Count(lowerWatchLog, "database is locked") + strings.Count(lowerWatchLog, "store contention")
+	var lastPoll int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COALESCE((SELECT pr_polled_at FROM project_watch_state WHERE project_id=?),0)`, f.project.ID).Scan(&lastPoll); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(&report, "watch.log contention lines=%d max heartbeat gap=%s\n", watchBusy, maxHeartbeatGap.Round(time.Millisecond))
 	t.Logf("store load with %d Workers, %d rounds:\n%s", workerCount, rounds, report.String())
 	if len(failures) > 0 {
 		t.Fatalf("%d foreground commands failed or deferred under load:\n%s\n%s", len(failures), report.String(), strings.Join(failures[:min(len(failures), 10)], "\n---\n"))
 	}
 	if watchBusy > 0 {
 		t.Fatalf("Watch logged %d contention failures under load:\n%s", watchBusy, watchLog)
+	}
+	// Watch passes run every two seconds; a third of the stale threshold
+	// leaves room for one slow pass but not for a stalled loop.
+	if maxHeartbeatGap > 10*time.Second {
+		t.Fatalf("Watch heartbeat did not advance for %s under load:\n%s", maxHeartbeatGap, report.String())
+	}
+	if lastPoll < loadStarted.UnixMilli() {
+		t.Fatalf("pull requests were not polled during the load: last poll %d, load started %d", lastPoll, loadStarted.UnixMilli())
 	}
 }

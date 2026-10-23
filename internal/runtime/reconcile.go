@@ -140,6 +140,14 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 			failures = append(failures, fmt.Errorf("reconcile Task %s: %w", taskID(task.Seq), err))
 		}
 	}
+	// Task observation writes refresh only Task snapshots. Repair the Project
+	// snapshot once per pass, in case an earlier write committed without it.
+	if err := reconcileWorkDeferred(ctx); err != nil {
+		return notices, errors.Join(append(failures, err)...)
+	}
+	if err := db.PersistProject(ctx, projectID); err != nil {
+		failures = append(failures, fmt.Errorf("persist Project snapshot: %w", err))
+	}
 	return notices, errors.Join(failures...)
 }
 

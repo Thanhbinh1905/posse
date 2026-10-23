@@ -864,7 +864,7 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
 	}
-	lastFailure := ""
+	lastFailures := map[string]string{}
 	for {
 		if watch != nil {
 			ok, err := db.HeartbeatWatchRuntime(loopCtx, project.ID, watch.PID, watch.Token, currentTime())
@@ -893,10 +893,10 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			return nil
 		}
 		if _, err := s.prepareProjectWatchObservation(loopCtx, db, fresh); err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) {
-			recordWatchFailure(ctx, db, project.ID, &lastFailure, "reconcile", err)
+			recordWatchFailure(ctx, db, project.ID, lastFailures, "reconcile", err)
 		}
 		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
-			recordWatchFailure(ctx, db, project.ID, &lastFailure, "watch", err)
+			recordWatchFailure(ctx, db, project.ID, lastFailures, "watch", err)
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return nil
