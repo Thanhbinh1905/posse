@@ -39,8 +39,8 @@ type Decision struct {
 }
 
 func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decision, error) {
-	if request.ProjectID < 1 || request.TaskID < 1 || strings.TrimSpace(request.Origin) == "" || strings.TrimSpace(request.Question) == "" || len(request.Options) < 2 {
-		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least two options")
+	if request.ProjectID < 1 || request.TaskID < 1 || strings.TrimSpace(request.Origin) == "" || strings.TrimSpace(request.Question) == "" || len(request.Options) < 1 {
+		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least one option")
 	}
 	switch request.Kind {
 	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency":
