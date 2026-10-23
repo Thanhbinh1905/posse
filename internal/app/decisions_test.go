@@ -372,7 +372,8 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	if err != nil || len(items) != 6 {
 		t.Fatalf("raised Decisions: %#v %v", items, err)
 	}
-	want := [][]string{{"merge", "wait", "discard"}, {"relaunch", "discard"}, {"relaunch", "discard"}, {"accept", "request-changes", "ignore"}, {"accept", "request-changes", "ignore"}, {"relaunch", "discard"}}
+	// Neither Task holds a Sandbox and both ran before, so relaunch is not offered.
+	want := [][]string{{"merge", "wait", "discard"}, {"discard"}, {"discard"}, {"accept", "request-changes", "ignore"}, {"accept", "request-changes", "ignore"}, {"relaunch", "discard"}}
 	wantKinds := []string{"merge_ready", "recovery", "recovery", "review", "review", "worker_exited"}
 	for i, d := range items {
 		if d.Kind != wantKinds[i] || !strings.HasPrefix(d.Origin, "notice:") {
