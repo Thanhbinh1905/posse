@@ -2121,6 +2121,11 @@ esac
 	if err := os.WriteFile(filepath.Join(root, "gh-open-prs.json"), []byte("[]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Ticketed Task tests get a complete empty native blocker response by
+	// default; specific blocker tests replace this fixture explicitly.
+	if err := os.WriteFile(filepath.Join(root, "gh-blockers.json"), []byte("[]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "gh-state.json"), []byte(`{"data":{"repo1":{}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
