@@ -97,9 +97,14 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			if plan != nil && plan.Execution.Mode == "in-place" {
 				request.Question = "Relaunch or preserve and stop " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? " + reason
 				request.Options = []string{"relaunch", "preserve"}
-			} else {
+			} else if relaunchable, err := taskRelaunchable(ctx, db, task); err != nil {
+				return err
+			} else if relaunchable {
 				request.Question = "Relaunch or discard " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? " + reason
 				request.Options = []string{"relaunch", "discard"}
+			} else {
+				request.Question = "Discard " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? Its Sandbox is gone and the Task has prior work, so it cannot be relaunched. " + reason
+				request.Options = []string{"discard"}
 			}
 		case notice.Kind == "task_done" && task.Type == "review" && task.ReviewsTaskID != 0 && task.AutonomyReview != "lead":
 			request.Kind = "review"
