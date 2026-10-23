@@ -129,6 +129,9 @@ func TestAcceptedNoticeReceiptSurvivesColdRebuild(t *testing.T) {
 	if err != nil || len(before) != 1 || before[0].DeliveredAt == 0 {
 		t.Fatalf("accepted Notice before cold rebuild = %+v, %v", before, err)
 	}
+	// Notice commands start the hidden Project Watch. Stop it before deleting the
+	// database so it cannot post a pr_watch_failing Notice against the missing schema.
+	stopLiveWatchRuntime(t, f.root)
 	if err := f.db.Close(); err != nil {
 		t.Fatal(err)
 	}
