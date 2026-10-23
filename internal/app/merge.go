@@ -527,9 +527,17 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
 	}
 	if !inPlace && store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateMerged {
-		return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, "Pass `--discard --user-approved \"<User's words>\"`")
-	}
-	if !inPlace && task.State != store.StateMerged && task.State != store.StateReported {
+		work := "a live Worker needs a User-approved cancellation"
+		if task.State == store.StateDone {
+			var err error
+			if work, err = s.unmergedWork(ctx.Context, db, project, task); err != nil {
+				return err
+			}
+		}
+		if work != "" {
+			return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, work, "Pass `--discard --user-approved \"<User's words>\"`")
+		}
+	} else if !inPlace && task.State != store.StateMerged && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
 	cfg, err := s.prepareProject(ctx.Context, db, project)
@@ -1124,6 +1132,16 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		}
 		if inPlace && strings.TrimSpace(quote) != "" && (task.State == store.StateFailed || task.State == store.StateLost) {
 			return db.TransitionInPlacePreserved(ctx, task, task.State, "in-place source preserved after User chose to stop recovery", quote)
+		}
+		if !inPlace && task.State == store.StateDone {
+			work, workErr := s.unmergedWork(ctx, db, project, task)
+			if workErr != nil {
+				return workErr
+			}
+			if work != "" {
+				return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, work)
+			}
+			return db.TransitionWithoutUnmergedWork(ctx, task.ID, task.State, "Task Sandbox released with no unmerged work")
 		}
 		note := "Task Sandbox released after completion"
 		if inPlace {
