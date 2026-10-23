@@ -11,7 +11,46 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
+
+func TestTaskDependencyReadinessRequiresSealedReportAndExplicitAcceptance(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Ticket Report", ReportKind: "tickets"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='reported',report_digest='sealed-digest' WHERE id=?`, reportID); err != nil {
+		t.Fatal(err)
+	}
+	accepted := []dispatch.Dependency{{TaskID: "t1", Milestone: "accepted"}}
+	unmet, err := db.UnmetTaskDependencies(ctx, project.ID, accepted)
+	if err != nil || len(unmet) != 1 {
+		t.Fatalf("unaccepted Report prerequisite was treated as ready: unmet=%v err=%v", unmet, err)
+	}
+	reported := []dispatch.Dependency{{TaskID: "t1", Milestone: "reported"}}
+	unmet, err = db.UnmetTaskDependencies(ctx, project.ID, reported)
+	if err != nil || len(unmet) != 0 {
+		t.Fatalf("sealed reported prerequisite remained unmet: unmet=%v err=%v", unmet, err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO report_acceptances(report_task_id,report_digest,accepted_by,recorded_by,provenance,user_quote,accepted_at) VALUES(?,'sealed-digest','user','user','user-command','',1)`, reportID); err != nil {
+		t.Fatal(err)
+	}
+	unmet, err = db.UnmetTaskDependencies(ctx, project.ID, accepted)
+	if err != nil || len(unmet) != 0 {
+		t.Fatalf("explicitly accepted Report prerequisite remained unmet: unmet=%v err=%v", unmet, err)
+	}
+}
 
 func TestQueuedTaskIsDurableAndResourceFree(t *testing.T) {
 	ctx := context.Background()
