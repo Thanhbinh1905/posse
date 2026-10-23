@@ -48,6 +48,43 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		return err
 	}
 	switch decision.Kind {
+	case "dependency":
+		if task.State != store.StateQueued {
+			return axi.Failure("decision_refused", "dependency Decision no longer applies to this queued Task", false)
+		}
+		switch decision.Answer {
+		case "cancel":
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		case "drop-prerequisite-and-run":
+			parts := strings.Split(decision.Origin, ":")
+			if len(parts) != 4 || parts[0] != "dependency" || parts[1] != taskIDString(task.Seq) {
+				return axi.Failure("decision_refused", "dependency Decision binding is invalid", false)
+			}
+			plan, err := task.AdmittedPlan()
+			if err != nil || plan == nil {
+				return axi.Failure("decision_refused", "queued Task has no admitted plan", false)
+			}
+			revised, err := plan.WithoutDependency(parts[2], parts[3])
+			if err != nil {
+				return axi.Failure("decision_refused", err.Error(), false)
+			}
+			if err := db.ReviseTaskPlan(out.Context, task, revised); err != nil {
+				return err
+			}
+			if err := s.refillQueuedTasks(out.Context, db, project, cfg); err != nil {
+				return err
+			}
+			updated, err := db.TaskByID(out.Context, project.ID, task.ID)
+			if err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: string(updated.State)}, {Key: "plan_revision", Value: revised.Revision}})
+		default:
+			return axi.Failure("decision_refused", "unknown dependency Decision answer", false)
+		}
 	case "merge_ready":
 		if decision.Answer == "discard" && task.State == store.StateTornDown {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
