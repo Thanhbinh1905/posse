@@ -372,8 +372,10 @@ func TestClaudeResearchRefusesBudgetVersionAndForeignScope(t *testing.T) {
 
 func TestClaudeResearchPluginInstallsHooksOnlyWhenTracked(t *testing.T) {
 	f := newResearchFixture(t)
+	probes := 0
+	version := "2.1.308 (Claude Code)"
 	previous := researchHarnessVersion
-	researchHarnessVersion = func(context.Context, research.Harness) string { return "2.1.308 (Claude Code)" }
+	researchHarnessVersion = func(context.Context, research.Harness) string { probes++; return version }
 	t.Cleanup(func() { researchHarnessVersion = previous })
 	cfg, err := f.service.researchConfig(f.home, f.project)
 	if err != nil {
@@ -383,14 +385,21 @@ func TestClaudeResearchPluginInstallsHooksOnlyWhenTracked(t *testing.T) {
 	if err != nil || len(args) != 4 || args[2] != "--plugin-dir" {
 		t.Fatalf("args=%v err=%v", args, err)
 	}
+	// Launching never runs the harness binary.
+	if probes != 0 {
+		t.Fatalf("launch probed the Claude binary %d times", probes)
+	}
 	hooks, err := os.ReadFile(filepath.Join(args[3], "hooks", "hooks.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"PreToolUse", "SubagentStart", "SubagentStop", "_research-hook claude --version '2.1.308'"} {
+	for _, want := range []string{"PreToolUse", "SubagentStart", "SubagentStop", "_research-hook claude"} {
 		if !strings.Contains(string(hooks), want) {
 			t.Fatalf("hooks.json missing %q: %s", want, hooks)
 		}
+	}
+	if strings.Contains(string(hooks), "--version") {
+		t.Fatalf("hooks.json pins a version: %s", hooks)
 	}
 	if args, _ := appendResearchLaunchArgs(context.Background(), f.home, f.project, cfg, "codex", []string{"x"}); len(args) != 1 {
 		t.Fatalf("codex args=%v", args)
@@ -398,5 +407,24 @@ func TestClaudeResearchPluginInstallsHooksOnlyWhenTracked(t *testing.T) {
 	cfg.Research.Native = "off"
 	if args, _ := appendResearchLaunchArgs(context.Background(), f.home, f.project, cfg, "claude", []string{"x"}); len(args) != 1 {
 		t.Fatalf("off args=%v", args)
+	}
+
+	// The hook probes the version only when an Agent call needs admission.
+	hook := func(event map[string]any) (int, string) {
+		event["session_id"], event["cwd"] = "parent-session", f.repo
+		data, _ := json.Marshal(event)
+		var stdout, stderr bytes.Buffer
+		code := f.service.RunResearchHook(bytes.NewReader(data), &stdout, &stderr, []string{"claude"})
+		return code, stderr.String()
+	}
+	if code, _ := hook(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": map[string]any{}}); code != 0 || probes != 0 {
+		t.Fatalf("ordinary tool call: code=%d probes=%d", code, probes)
+	}
+	if code, stderr := hook(agentCall("tool-1", "Explore", nil)); code != 0 || probes != 1 {
+		t.Fatalf("admission: code=%d probes=%d stderr=%s", code, probes, stderr)
+	}
+	version = ""
+	if code, stderr := hook(agentCall("tool-2", "Plan", nil)); code != guardExitBlocked || !strings.Contains(stderr, "version") {
+		t.Fatalf("unknown version: code=%d stderr=%s", code, stderr)
 	}
 }

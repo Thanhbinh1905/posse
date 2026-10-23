@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,7 +38,7 @@ type claudeResearchHookInput struct {
 // claudeAgentTools are the Claude Code tools that launch a subagent.
 func claudeAgentTool(name string) bool { return name == "Agent" || name == "Task" }
 
-// RunResearchHook is `posse _research-hook claude --version <v>`: Claude Code
+// RunResearchHook is `posse _research-hook claude [--version <v>]`: Claude Code
 // PreToolUse, SubagentStart and SubagentStop hooks of a Posse-launched Lead or
 // Worker. Exit 2 refuses a tool call and shows stderr to the agent.
 func (s *Service) RunResearchHook(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
@@ -148,7 +149,12 @@ func (s *Service) admitClaudeChild(ctx context.Context, db *store.DB, home strin
 	} else if !store.IsNotFound(err) {
 		return "", "", err
 	}
-	if _, err := research.CheckVersion(research.Claude, version); err != nil {
+	if version == "" {
+		version = claudeHookVersion(ctx, home, parent)
+	}
+	checked, err := research.CheckVersion(research.Claude, version)
+	attempt.HarnessVersion = checked
+	if err != nil {
 		return refuse(err.Error())
 	}
 	if scope, err := researchScopeAllowed(ctx, db, parent, input.CWD); err != nil {
@@ -407,19 +413,16 @@ func researchScopeAllowed(ctx context.Context, db *store.DB, parent researchPare
 	return "", fmt.Errorf("scope %s is outside the %s's checkout", dir, parent.label())
 }
 
-// claudeResearchPlugin writes the Posse-owned Claude plugin that installs the
-// research hooks for one Lead or Worker launch. The hook command carries the
-// installed Claude version; an unsupported or unknown version makes every
-// Agent call refuse visibly instead of running untracked.
-func writeClaudeResearchPlugin(home, project, version string) (string, error) {
+// writeClaudeResearchPlugin writes the Posse-owned Claude plugin that installs
+// the research hooks for one Lead or Worker launch. Launching never runs the
+// harness: the hook learns the Claude version only when an Agent call needs
+// admission, and an unsupported or unknown version refuses it visibly.
+func writeClaudeResearchPlugin(home, project string) (string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locate posse executable for the Claude research hooks: %w", err)
 	}
-	command := shellQuote(executable) + " _research-hook claude --version " + shellQuote(version)
-	if version == "" {
-		command = shellQuote(executable) + " _research-hook claude"
-	}
+	command := shellQuote(executable) + " _research-hook claude"
 	group := func(matcher string) []any {
 		entry := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command, "timeout": 10}}}
 		if matcher != "" {
@@ -454,13 +457,48 @@ func writeClaudeResearchPlugin(home, project, version string) (string, error) {
 // researchHarnessVersion reports `<harness> --version`, or "" when the harness
 // cannot report one. Tests replace it.
 var researchHarnessVersion = func(ctx context.Context, harness research.Harness) string {
+	return researchExecutableVersion(ctx, string(harness))
+}
+
+func researchExecutableVersion(ctx context.Context, executable string) string {
 	probe, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	output, err := execgroup.CommandContext(probe, string(harness), "--version").Output()
+	output, err := execgroup.CommandContext(probe, executable, "--version").Output()
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+// claudeHookVersion reports the version of the parent's Claude executable,
+// probed once per executable file and cached under POSSE_HOME. It falls back
+// to `claude` on PATH when the parent executable is unknown.
+func claudeHookVersion(ctx context.Context, home string, parent researchParent) string {
+	executable := ""
+	if parent.agentPID > 0 {
+		if path, err := os.Readlink(filepath.Join(procRoot, strconv.Itoa(parent.agentPID), "exe")); err == nil {
+			executable = strings.TrimSuffix(path, " (deleted)")
+		}
+	}
+	if executable == "" || !knownAgentProcess(executable) {
+		return researchHarnessVersion(ctx, research.Claude)
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		return researchHarnessVersion(ctx, research.Claude)
+	}
+	key := digestText(fmt.Sprintf("%s\x00%d\x00%d", executable, info.Size(), info.ModTime().UnixNano()))
+	cache := filepath.Join(home, "research-versions", "claude-"+key[:32])
+	if data, err := os.ReadFile(cache); err == nil {
+		return string(data)
+	}
+	version := researchExecutableVersion(ctx, executable)
+	if _, ok := research.ParseVersion(version); ok {
+		if err := os.MkdirAll(filepath.Dir(cache), 0o700); err == nil {
+			_ = writeFile(cache, []byte(version))
+		}
+	}
+	return version
 }
 
 // appendResearchLaunchArgs installs the research hooks for a Claude Lead or
@@ -470,11 +508,7 @@ func appendResearchLaunchArgs(ctx context.Context, home string, project store.Pr
 	if kind != string(research.Claude) || cfg.Research.Native != config.ResearchTracked {
 		return args, nil
 	}
-	version := ""
-	if parsed, ok := research.ParseVersion(researchHarnessVersion(ctx, research.Claude)); ok {
-		version = fmt.Sprintf("%d.%d.%d", parsed[0], parsed[1], parsed[2])
-	}
-	plugin, err := writeClaudeResearchPlugin(home, project.Name, version)
+	plugin, err := writeClaudeResearchPlugin(home, project.Name)
 	if err != nil {
 		return nil, err
 	}
