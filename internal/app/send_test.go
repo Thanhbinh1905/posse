@@ -110,7 +110,7 @@ func TestSendDeliveryPolicy(t *testing.T) {
 		{"pi unknown without compaction signal", "pi", "unknown", "queued", "agent_not_ready", false, false, false, false},
 		{"unknown kind", "custom", "working", "queued", "kind_does_not_support_steering", false, false, false, false},
 		{"forced queue", "claude", "working", "queued", "waiting_for_idle", true, false, false, false},
-		{"focused", "claude", "working", "queued", "focused", false, true, false, false},
+		{"focused", "claude", "working", "delivered", "steered", false, true, false, false},
 		{"blocked", "claude", "blocked", "queued", "blocked", false, false, false, false},
 		{"blocked task", "claude", "blocked", "queued", "blocked", false, false, true, false},
 		{"idle modal", "claude", "idle", "queued", "agent_ui_unknown", false, false, false, true},
@@ -769,7 +769,7 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 		{name: "accepted", wantState: "delivered", wantReason: "steered", wantHeadState: "queued", headWaitForIdle: true, wantPromptCalls: 1},
 		{name: "post-submit not-ready response remains uncertain", wantState: "submitting", wantHeadState: "queued", rejectPrompt: true, headWaitForIdle: true, wantError: true, wantPromptCalls: 1},
 		{name: "earlier steerable message failure remains uncertain", wantHeadState: "submitting", rejectPrompt: true, wantError: true, wantNoNewMessage: true, wantPromptCalls: 1},
-		{name: "earlier --queue message blocks focused Worker", wantState: "queued", wantReason: "earlier_message_pending", wantHeadState: "queued", headWaitForIdle: true, focused: true, wantBlocker: true},
+		{name: "explicit send steers focused Worker past earlier --queue", wantState: "delivered", wantReason: "steered", wantHeadState: "queued", headWaitForIdle: true, focused: true, wantPromptCalls: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

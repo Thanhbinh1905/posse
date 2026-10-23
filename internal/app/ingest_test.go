@@ -253,6 +253,40 @@ func TestNoticeBatchNotifiesOnceDeliversOneDigestAndClearsWorkspaceToken(t *test
 	}
 }
 
+func TestAutomaticQueuedMessageWaitsWhileWorkerIsFocused(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := db.QueueMessage(ctx, taskID, "Please keep the patch small", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{FocusedPaneID: "w2:p1", Panes: []herdr.Pane{{PaneID: "w2:p1", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working", Focused: true}}}
+	if err := testService(home, fake).deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+		t.Fatal(err)
+	}
+	message, err := db.MessageByID(ctx, messageID)
+	if err != nil || message.Status != "queued" || fake.CallCount("agent.prompt") != 0 {
+		t.Fatalf("automatic delivery typed into a focused Worker: message=%#v err=%v calls=%#v", message, err, fake.Calls)
+	}
+}
+
 func TestQueuedMessageDeliversWhenNextReconcileSeesIdleWorker(t *testing.T) {
 	home := t.TempDir()
 	db, err := store.Open(home)

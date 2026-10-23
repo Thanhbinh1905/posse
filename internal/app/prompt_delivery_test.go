@@ -262,32 +262,37 @@ func TestStartRejectsMultipleClosingIssuesBeforeAcquiringSandbox(t *testing.T) {
 	}
 }
 
-func TestCodexLaunchCarriesBriefWithoutTypingIntoFocusedComposer(t *testing.T) {
-	fixture := newStartFixture(t)
-	cfg := "[defaults]\nmerge_mode = \"local\"\n\n[profiles.codex]\nkind = \"codex\"\n\n[dispatch.default]\nuse = \"codex\"\n"
-	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fixture.fake.BeforeCall = func(method string) {
-		if method == "agent.start" {
-			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
-		}
-	}
-	if code, output := fixture.start(t); code != 0 || !strings.Contains(output, "state: working") {
-		t.Fatalf("codex launch: %d %s", code, output)
-	}
-	if fixture.fake.CallCount("agent.prompt") != 0 {
-		t.Fatal("codex launch typed into the composer")
-	}
-	found := false
-	for _, call := range fixture.fake.Calls {
-		if call.Method == "agent.start" {
-			args := call.Params["args"].([]string)
-			found = len(args) > 0 && strings.Contains(args[len(args)-1], "launch.md")
-		}
-	}
-	if !found {
-		t.Fatal("codex did not receive the launch Brief as its opening turn")
+func TestSupportedLaunchKindsCarryBriefWithoutTypingIntoFocusedComposer(t *testing.T) {
+	for _, kind := range []string{"claude", "codex", "pi", "opencode"} {
+		t.Run(kind, func(t *testing.T) {
+			fixture := newStartFixture(t)
+			cfg := "[defaults]\nmerge_mode = \"local\"\n\n[profiles." + kind + "]\nkind = \"" + kind + "\"\n\n[dispatch.default]\nuse = \"" + kind + "\"\n"
+			if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fixture.fake.BeforeCall = func(method string) {
+				if method == "agent.start" {
+					fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
+					fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t2", Label: "posse:shop:t1", Agent: kind, AgentStatus: "working", Focused: true})
+				}
+			}
+			if code, output := fixture.start(t); code != 0 || !strings.Contains(output, "state: working") {
+				t.Fatalf("%s launch: %d %s", kind, code, output)
+			}
+			if fixture.fake.CallCount("agent.prompt") != 0 {
+				t.Fatalf("%s launch typed into the composer", kind)
+			}
+			found := false
+			for _, call := range fixture.fake.Calls {
+				if call.Method == "agent.start" {
+					args := call.Params["args"].([]string)
+					found = strings.Contains(strings.Join(args, " "), "Read ") && strings.Contains(strings.Join(args, " "), "launch.md")
+				}
+			}
+			if !found {
+				t.Fatalf("%s did not receive the launch Brief as its opening argument", kind)
+			}
+		})
 	}
 }
 
@@ -302,12 +307,12 @@ func TestStartFocusedDuringLaunchRemainsSpawning(t *testing.T) {
 	}
 	code, output := fixture.start(t)
 	task, notices := fixture.onlyTask(t)
-	if code != 0 || task.State != store.StateSpawning || len(notices) != 0 {
-		t.Fatalf("focused start code=%d output=%s task=%#v notices=%#v", code, output, task, notices)
+	if code != 0 || task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 0 {
+		t.Fatalf("focused start code=%d output=%s task=%#v notices=%#v prompts=%d", code, output, task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 }
 
-func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T) {
+func TestFocusedLaunchNeedsNoFocusRetryOrNotice(t *testing.T) {
 	fixture := newStartFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
@@ -339,8 +344,8 @@ func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T)
 		}
 	}
 	task, notices := fixture.onlyTask(t)
-	if task.State != store.StateSpawning || len(notices) != 1 || notices[0].Kind != "spawn_waiting" || fixture.fake.CallCount("agent.prompt") != 0 {
-		t.Fatalf("focused retry task=%#v notices=%#v prompts=%d", task, notices, fixture.fake.CallCount("agent.prompt"))
+	if task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 0 {
+		t.Fatalf("focused launch task=%#v notices=%#v prompts=%d", task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 	fixture.fake.SnapshotValue.FocusedPaneID = "w1:p1"
 	fixture.fake.SnapshotValue.FocusedWorkspaceID = "w1"
@@ -349,37 +354,35 @@ func TestFocusedLaunchRetriesOnReconcileAndNoticesOnlyAfterTimeout(t *testing.T)
 		t.Fatal(err)
 	}
 	task, _ = fixture.onlyTask(t)
-	if task.State != store.StateWorking || fixture.fake.CallCount("agent.prompt") != 1 {
-		t.Fatalf("unfocused retry task=%#v prompts=%d", task, fixture.fake.CallCount("agent.prompt"))
+	if task.State != store.StateWorking || fixture.fake.CallCount("agent.prompt") != 0 {
+		t.Fatalf("focus reconciliation changed launch task=%#v prompts=%d", task, fixture.fake.CallCount("agent.prompt"))
 	}
 }
 
 func TestStartFailsTaskWhenLaunchPromptIsNeverPickedUp(t *testing.T) {
 	fixture := newStartFixture(t)
-	for range launchPromptAttempts {
-		fixture.fake.ErrorQueue["agent.prompt"] = append(fixture.fake.ErrorQueue["agent.prompt"], stalled())
+	fixture.fake.BeforeCall = func(method string) {
+		if method == "agent.start" {
+			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
+		}
 	}
-	if code, output := fixture.start(t); code != 1 || !strings.Contains(output, "prompt_not_delivered") {
-		t.Fatalf("start with a dropped launch prompt code=%d output=%s", code, output)
+	if code, output := fixture.start(t); code != 0 || !strings.Contains(output, "state: working") {
+		t.Fatalf("focused launch code=%d output=%s", code, output)
 	}
 	task, notices := fixture.onlyTask(t)
-	if task.State != store.StateFailed {
-		t.Fatalf("Task after dropped launch prompt = %#v", task)
-	}
-	if len(notices) != 1 || notices[0].Kind != "task_failed" || notices[0].DeliveredAt == 0 {
-		t.Fatalf("Lead was not told about the dropped launch prompt: %#v", notices)
+	if task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 0 {
+		t.Fatalf("Task after opening-argument launch = %#v notices=%#v", task, notices)
 	}
 }
 
-func TestFailedLaunchBeforeBriefDeliveryCanRelaunchOnSameSandbox(t *testing.T) {
+func TestFailedAgentStartCanRelaunchOnSameSandbox(t *testing.T) {
 	fixture := newStartFixture(t)
-	for range launchPromptAttempts {
-		fixture.fake.ErrorQueue["agent.prompt"] = append(fixture.fake.ErrorQueue["agent.prompt"], stalled())
-	}
-	if code, output := fixture.start(t); code != 1 || !strings.Contains(output, "prompt_not_delivered") {
+	fixture.fake.Errors["agent.start"] = stalled()
+	if code, output := fixture.start(t); code != 1 {
 		t.Fatalf("start: %d %s", code, output)
 	}
 	before, _ := fixture.onlyTask(t)
+	fixture.fake.Errors["agent.start"] = nil
 	if before.State != store.StateFailed || before.SandboxID == 0 {
 		t.Fatalf("failed launch lost its Sandbox: %#v", before)
 	}
