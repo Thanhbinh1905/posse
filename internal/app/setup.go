@@ -305,7 +305,7 @@ func (s *Service) setupPlan(home, binary, version string, dirs setupDirs, manife
 		configAction = "create"
 	}
 	rows = append(rows, map[string]any{"step": "default_config", "target": configPath, "action": configAction})
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range setupassets.SkillNames() {
 		rows = append(rows, skillSetupPlanRow(name, version, dirs, manifest.Skills, state.GlobalSkillsMode))
 	}
 	for _, hook := range setupHookTargets(claudeDir, codexDir) {
@@ -839,7 +839,7 @@ func (s *Service) applySetup(ctx context.Context, home, manifestPath string, man
 		return changed, err
 	}
 	if state.GlobalSkillsMode == "install" {
-		for _, name := range []string{"posse", "posse-setup"} {
+		for _, name := range setupassets.SkillNames() {
 			record, skillChanged, err := installSkill(name, agentsDir, claudeDir, version, previousSkill(manifest.Skills, name))
 			if err != nil {
 				return changed, axi.Failure("setup_path_conflict", "cannot install skill "+name, false, err.Error())
@@ -853,7 +853,7 @@ func (s *Service) applySetup(ctx context.Context, home, manifestPath string, man
 			}
 		}
 	} else if state.GlobalSkillsMode == "remove" {
-		for _, name := range []string{"posse", "posse-setup"} {
+		for _, name := range setupassets.SkillNames() {
 			record := previousSkill(manifest.Skills, name)
 			if !skillRecordExists(manifest.Skills, name) {
 				continue
@@ -1556,7 +1556,7 @@ func removeCreatedSkillDirs(record setupSkillRecord, dirs setupDirs) {
 }
 
 func uninstallSkill(record setupSkillRecord) error {
-	if record.Name != "posse" && record.Name != "posse-setup" {
+	if !setupassets.IsSkill(record.Name) {
 		return nil
 	}
 	if record.AgentsDir == "" {

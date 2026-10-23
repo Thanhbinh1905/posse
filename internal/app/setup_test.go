@@ -422,7 +422,7 @@ func TestDoctorOffersRemovalOfUnchangedGlobalSkills(t *testing.T) {
 	service, home, _, _ := setupOutputFixture(t)
 	dirs := setupDirs{claude: filepath.Join(home, ".claude"), agents: filepath.Join(home, ".agents", "skills")}
 	manifest := setupManifest{Version: "1"}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range setupassets.SkillNames() {
 		record, _, err := installSkill(name, dirs.agents, dirs.claude, "1", setupSkillRecord{})
 		if err != nil {
 			t.Fatal(err)
@@ -438,7 +438,7 @@ func TestDoctorOffersRemovalOfUnchangedGlobalSkills(t *testing.T) {
 	}
 	for _, check := range result.Checks {
 		if check.Name == "global skills" {
-			if check.Status != "warn" || !strings.Contains(check.Detail, "posse, posse-setup") || check.Action != "Run `posse setup --remove-global-skills` to remove unchanged Posse-owned files" {
+			if check.Status != "warn" || !strings.Contains(check.Detail, "posse, posse-setup, posse-down, posse-update") || check.Action != "Run `posse setup --remove-global-skills` to remove unchanged Posse-owned files" {
 				t.Fatalf("doctor global skills check = %#v", check)
 			}
 			return

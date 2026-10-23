@@ -70,7 +70,7 @@ func TestSetupWithoutHerdrServer(t *testing.T) {
 	if err != nil || !strings.Contains(string(plugins), filepath.Join(root, "posse", "plugin")) {
 		t.Fatalf("Herdr does not list the linked posse plugin: %s err=%v", plugins, err)
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 		if _, err := os.Stat(filepath.Join(root, "home", ".agents", "skills", name, "SKILL.md")); !os.IsNotExist(err) {
 			t.Fatalf("default setup installed global skill %s: %v", name, err)
 		}
@@ -79,7 +79,7 @@ func TestSetupWithoutHerdrServer(t *testing.T) {
 	if output := runPosse(t, binary, root, env, "setup", "--global-skills", "--binary", binary); !strings.Contains(output, "global_skill:posse") {
 		t.Fatalf("opt-in global skill install failed: %s", output)
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 		if _, err := os.Stat(filepath.Join(root, "home", ".agents", "skills", name, "SKILL.md")); err != nil {
 			t.Fatalf("opt-in global skill %s was not installed: %v", name, err)
 		}
@@ -105,7 +105,7 @@ func TestSetupWithoutHerdrServer(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "home", ".agents", "skills", "posse-setup", "SKILL.md")); !os.IsNotExist(err) {
 		t.Fatalf("removal kept unchanged Posse-owned skill: %v", err)
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 		if _, err := os.Lstat(filepath.Join(root, "claude", "skills", name)); !os.IsNotExist(err) {
 			t.Fatalf("removal kept unchanged Posse-owned Claude link %s: %v", name, err)
 		}

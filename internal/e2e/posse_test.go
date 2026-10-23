@@ -89,7 +89,7 @@ func TestPosseSpawnNoticeMergeTeardownAndRecovery(t *testing.T) {
 	  if [ "$previous" = plugin-dir ]; then
 	    case "$argument" in
 	      "$POSSE_HOME/projects/"*/launch-skills/*)
-	        for skill in posse posse-setup; do
+	        for skill in posse posse-setup posse-down posse-update; do
 	          cat "$argument/skills/$skill/SKILL.md" >> "$POSSE_E2E_SKILL_READS"
 	        done
 	        ;;
@@ -325,7 +325,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			t.Fatalf("setup changed bytes outside the SessionStart and PreToolUse insertions in %s:\n got: %s\nwant: %s", fixture.path, data, want)
 		}
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 		skill := filepath.Join(root, "home", ".agents", "skills", name, "SKILL.md")
 		link := filepath.Join(root, "claude", "skills", name)
 		if _, err := os.Stat(skill); !os.IsNotExist(err) {
@@ -561,15 +561,15 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err != nil || !strings.Contains(string(leadArgs), "--plugin-dir "+bundleRoots[0]) || !strings.Contains(string(workerArgs), "--plugin-dir "+bundleRoots[0]) {
 		t.Fatalf("Claude Lead and Worker were not given the isolated plugin snapshot: lead=%q worker=%q err=%v", leadArgs, workerArgs, err)
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 		path := filepath.Join(bundleRoots[0], "skills", name, "SKILL.md")
 		if contents, err := os.ReadFile(path); err != nil || !strings.Contains(string(contents), "name: "+name) {
 			t.Fatalf("frozen skill %s was not readable by the fake harness: %s err=%v", name, contents, err)
 		}
 	}
 	readSkills, err := os.ReadFile(skillReadsLog)
-	if err != nil || !strings.Contains(string(readSkills), "name: posse") || !strings.Contains(string(readSkills), "name: posse-setup") {
-		t.Fatalf("fake Claude could not read both injected skills: %s err=%v", readSkills, err)
+	if err != nil || !strings.Contains(string(readSkills), "name: posse") || !strings.Contains(string(readSkills), "name: posse-setup") || !strings.Contains(string(readSkills), "name: posse-down") || !strings.Contains(string(readSkills), "name: posse-update") {
+		t.Fatalf("fake Claude could not read all injected skills: %s err=%v", readSkills, err)
 	}
 	for _, path := range []string{filepath.Join(repo, ".agents"), filepath.Join(repo, ".claude", "skills"), filepath.Join(task.WorktreePath, ".agents")} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {

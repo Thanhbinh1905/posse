@@ -35,9 +35,9 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 		name string
 		data []byte
 	}
-	files := make([]skillFile, 0, 2)
+	files := make([]skillFile, 0, len(setupassets.SkillNames()))
 	var digestInput bytes.Buffer
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range setupassets.SkillNames() {
 		var data []byte
 		if selected == nil {
 			var err error
@@ -226,7 +226,7 @@ func appendPiSkillPath(path string, seenFiles map[string]bool, paths *[]string, 
 	if !hasDescription {
 		return
 	}
-	if name == "posse" || name == "posse-setup" {
+	if setupassets.IsSkill(name) {
 		*hasLegacyPosseSkills = true
 		return
 	}

@@ -235,7 +235,7 @@ func selectedSkillInputs(kind string) ([]taskplan.Input, error) {
 		inputs = append(inputs, taskplan.Select("codex-developer-instructions", "Codex config: developer_instructions", []byte(instructions)))
 	}
 	if kind == "claude" || kind == "codex" || kind == "pi" {
-		for _, name := range []string{"posse", "posse-setup"} {
+		for _, name := range setupassets.SkillNames() {
 			data, err := setupassets.Skill(name)
 			if err != nil {
 				return nil, err
