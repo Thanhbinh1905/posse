@@ -24,7 +24,7 @@ Every Lead and Worker may launch research children within `research.max_active` 
 
 ### Claude: hooks register the child the harness launches
 
-Tracked Claude Lead and Worker launches load a Posse-owned plugin whose PreToolUse, SubagentStart and SubagentStop hooks call `posse _research-hook claude --version <installed>`:
+Tracked Claude Lead and Worker launches load a Posse-owned plugin whose PreToolUse, SubagentStart and SubagentStop hooks call `posse _research-hook claude`. Launching never runs the Claude binary; the hook probes the parent Claude executable's version only when an Agent call needs admission and caches it per executable file:
 
 - **Admission.** An Agent call registers an attempt only for Explore, Plan, or a project or user definition with an explicit tool list of read-only tools and no bypass or accept-edits permission mode, MCP servers or isolation. A definition overriding a built-in name is checked as a custom agent. General agents, plugin agents, isolation worktrees, named teammates, an unknown or pre-2.1.0 Claude, a scope outside the parent's checkout and an exhausted budget are refused and recorded.
 - **Binding.** SubagentStart binds the agent ID to the parent session's single unbound attempt of that type. A second unbound child of the same type is refused until the first starts, so binding is never ambiguous.
