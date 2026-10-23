@@ -487,6 +487,7 @@ func (db *DB) writeProjectSnapshotLocked(ctx context.Context, projectID int64, s
 		return err
 	}
 	snapshot.Project = project
+	snapshot.StateDigest = projectSnapshotDigest(snapshot)
 	var encoded bytes.Buffer
 	if err := toml.NewEncoder(&encoded).Encode(snapshot); err != nil {
 		return err
@@ -514,16 +515,15 @@ func recordedProjectSnapshotDigest(path string) string {
 	defer file.Close()
 	header := make([]byte, 512)
 	n, _ := io.ReadFull(file, header)
-	header = header[:n]
-	end := bytes.Index(header, []byte("\n["))
-	if end < 0 {
+	scalars, _, found := bytes.Cut(header[:n], []byte("\n["))
+	if !found {
 		return ""
 	}
 	var recorded struct {
 		Version     int    `toml:"version"`
 		StateDigest string `toml:"state_digest"`
 	}
-	if _, err := toml.Decode(string(header[:end]), &recorded); err != nil || recorded.Version != 1 {
+	if _, err := toml.Decode(string(scalars), &recorded); err != nil || recorded.Version != 1 {
 		return ""
 	}
 	return recorded.StateDigest
