@@ -68,7 +68,7 @@ func TestFocusedRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testi
 		t.Fatal(err)
 	}
 	if task.Profile != "claude-opus" || !strings.Contains(task.AgentSession, piSession) || task.AgentSessionKind != "pi" {
-		t.Errorf("failed prompt delivery corrupted the Task's Profile or session ownership: Profile=%q session=%q owner=%q", task.Profile, task.AgentSession, task.AgentSessionKind)
+		t.Errorf("focused relaunch corrupted the Task's Profile or session ownership: Profile=%q session=%q owner=%q", task.Profile, task.AgentSession, task.AgentSessionKind)
 	}
 	identities, err := fixture.db.TaskLaunchIdentities(context.Background(), review.ID)
 	if err != nil {
@@ -97,7 +97,15 @@ func TestFocusedRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testi
 			t.Errorf("Claude relaunch %d received another harness's Pi session: args=%q; Task profile=%q session=%q", attempt+1, args, task.Profile, task.AgentSession)
 		}
 	}
-	if len(reviewStarts) > 1 && (!strings.Contains(reviewStarts[1], "--model opus") || !strings.Contains(reviewStarts[1], "relaunch.md")) {
-		t.Errorf("focused launch did not use the requested Claude Profile and opening prompt: %q", reviewStarts[1])
+	if len(reviewStarts) > 1 && (!strings.Contains(reviewStarts[1], "--model opus") || strings.Contains(reviewStarts[1], "relaunch.md")) {
+		t.Errorf("focused launch used unexpected Claude Profile arguments: %q", reviewStarts[1])
+	}
+	input, err := os.ReadFile(filepath.Join(fixture.root, "review-identity-input.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relaunchPrompt := "Read " + filepath.Join(fixture.home, "projects", "shop", "tasks", "t2", "relaunch.md") + " and follow it."
+	if !strings.Contains(string(input), relaunchPrompt) {
+		t.Errorf("focused relaunch prompt was not typed into the new Claude session: want %q in %q", relaunchPrompt, input)
 	}
 }

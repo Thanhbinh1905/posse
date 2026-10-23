@@ -699,11 +699,11 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	// These harnesses accept an opening turn without touching the composer.
-	openingPrompt := kind == "claude" || kind == "codex" || kind == "pi" || kind == "opencode"
+	// Keep the existing opening-argument path for Codex and OpenCode.
+	openingPrompt := kind == "codex" || kind == "opencode"
 	openingText := "Read " + launchPath + " and follow it."
 	switch kind {
-	case "claude", "codex", "pi":
+	case "codex":
 		argsForAgent = append(argsForAgent, openingText)
 	case "opencode":
 		argsForAgent = append(argsForAgent, "--prompt", openingText)
@@ -2756,9 +2756,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	relaunchPrompt := "Read " + relaunchPath + " and follow it."
-	openingPrompt := kind == "claude" || kind == "codex" || kind == "pi" || kind == "opencode"
+	openingPrompt := kind == "codex" || kind == "opencode"
 	switch kind {
-	case "claude", "codex", "pi":
+	case "codex":
 		startArgs = append(startArgs, relaunchPrompt)
 	case "opencode":
 		startArgs = append(startArgs, "--prompt", relaunchPrompt)

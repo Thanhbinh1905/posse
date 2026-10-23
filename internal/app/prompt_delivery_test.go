@@ -262,7 +262,7 @@ func TestStartRejectsMultipleClosingIssuesBeforeAcquiringSandbox(t *testing.T) {
 	}
 }
 
-func TestSupportedLaunchKindsCarryBriefWithoutTypingIntoFocusedComposer(t *testing.T) {
+func TestSupportedLaunchKindsDeliverBriefWithoutWaitingForFocus(t *testing.T) {
 	for _, kind := range []string{"claude", "codex", "pi", "opencode"} {
 		t.Run(kind, func(t *testing.T) {
 			fixture := newStartFixture(t)
@@ -279,24 +279,36 @@ func TestSupportedLaunchKindsCarryBriefWithoutTypingIntoFocusedComposer(t *testi
 			if code, output := fixture.start(t); code != 0 || !strings.Contains(output, "state: working") {
 				t.Fatalf("%s launch: %d %s", kind, code, output)
 			}
-			if fixture.fake.CallCount("agent.prompt") != 0 {
-				t.Fatalf("%s launch typed into the composer", kind)
+			openingPrompt := kind == "codex" || kind == "opencode"
+			wantPromptCalls := 1
+			if openingPrompt {
+				wantPromptCalls = 0
 			}
-			found := false
+			if got := fixture.fake.CallCount("agent.prompt"); got != wantPromptCalls {
+				t.Fatalf("%s prompt calls = %d, want %d", kind, got, wantPromptCalls)
+			}
+			var startArgs []string
+			var typedPrompt string
 			for _, call := range fixture.fake.Calls {
-				if call.Method == "agent.start" {
-					args := call.Params["args"].([]string)
-					found = strings.Contains(strings.Join(args, " "), "Read ") && strings.Contains(strings.Join(args, " "), "launch.md")
+				switch call.Method {
+				case "agent.start":
+					startArgs = call.Params["args"].([]string)
+				case "agent.prompt":
+					typedPrompt, _ = call.Params["text"].(string)
 				}
 			}
-			if !found {
-				t.Fatalf("%s did not receive the launch Brief as its opening argument", kind)
+			containsLaunchPath := strings.Contains(strings.Join(startArgs, " "), "launch.md")
+			if containsLaunchPath != openingPrompt {
+				t.Fatalf("%s opening args=%q, want launch path=%t", kind, startArgs, openingPrompt)
+			}
+			if !openingPrompt && !strings.Contains(typedPrompt, "launch.md") {
+				t.Fatalf("%s typed launch prompt=%q", kind, typedPrompt)
 			}
 		})
 	}
 }
 
-func TestStartFocusedDuringLaunchRemainsSpawning(t *testing.T) {
+func TestStartFocusedDuringLaunchCompletesWithTypedPrompt(t *testing.T) {
 	fixture := newStartFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
@@ -307,7 +319,7 @@ func TestStartFocusedDuringLaunchRemainsSpawning(t *testing.T) {
 	}
 	code, output := fixture.start(t)
 	task, notices := fixture.onlyTask(t)
-	if code != 0 || task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 0 {
+	if code != 0 || task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 1 {
 		t.Fatalf("focused start code=%d output=%s task=%#v notices=%#v prompts=%d", code, output, task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 }
@@ -344,7 +356,7 @@ func TestFocusedLaunchNeedsNoFocusRetryOrNotice(t *testing.T) {
 		}
 	}
 	task, notices := fixture.onlyTask(t)
-	if task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 0 {
+	if task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 1 {
 		t.Fatalf("focused launch task=%#v notices=%#v prompts=%d", task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 	fixture.fake.SnapshotValue.FocusedPaneID = "w1:p1"
@@ -354,24 +366,25 @@ func TestFocusedLaunchNeedsNoFocusRetryOrNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, _ = fixture.onlyTask(t)
-	if task.State != store.StateWorking || fixture.fake.CallCount("agent.prompt") != 0 {
+	if task.State != store.StateWorking || fixture.fake.CallCount("agent.prompt") != 1 {
 		t.Fatalf("focus reconciliation changed launch task=%#v prompts=%d", task, fixture.fake.CallCount("agent.prompt"))
 	}
 }
 
-func TestStartFailsTaskWhenLaunchPromptIsNeverPickedUp(t *testing.T) {
+func TestFocusedStartSubmitsLaunchPromptWithoutRetryNotice(t *testing.T) {
 	fixture := newStartFixture(t)
 	fixture.fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
 			fixture.fake.SnapshotValue.FocusedPaneID = "w1:p2"
+			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "idle", Focused: true})
 		}
 	}
 	if code, output := fixture.start(t); code != 0 || !strings.Contains(output, "state: working") {
 		t.Fatalf("focused launch code=%d output=%s", code, output)
 	}
 	task, notices := fixture.onlyTask(t)
-	if task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 0 {
-		t.Fatalf("Task after opening-argument launch = %#v notices=%#v", task, notices)
+	if task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("Task after focused typed launch = %#v notices=%#v prompts=%d", task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 }
 

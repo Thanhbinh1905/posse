@@ -706,16 +706,19 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	if err != nil || len(skillRoots) != 1 {
 		t.Fatalf("skill snapshot roots = %q, %v", skillRoots, err)
 	}
-	started := false
+	started, typedRelaunch := false, false
 	for _, call := range fake.Calls {
-		if call.Method != "agent.start" {
-			continue
+		switch call.Method {
+		case "agent.start":
+			args := call.Params["args"].([]string)
+			started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 14 && equalStrings(args[:12], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9", "--plugin-dir", skillRoots[0]}) && args[12] == "--plugin-dir" && args[13] == filepath.Join(home, "projects", "shop", "claude-research") && !strings.Contains(strings.Join(args, " "), "relaunch.md")
+		case "agent.prompt":
+			text, _ := call.Params["text"].(string)
+			typedRelaunch = typedRelaunch || strings.Contains(text, "relaunch.md")
 		}
-		args := call.Params["args"].([]string)
-		started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 15 && equalStrings(args[:12], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9", "--plugin-dir", skillRoots[0]}) && args[12] == "--plugin-dir" && args[13] == filepath.Join(home, "projects", "shop", "claude-research") && strings.Contains(args[14], "relaunch.md")
 	}
-	if !started {
-		t.Fatalf("relaunch omitted the complete resume args: %#v", fake.Calls)
+	if !started || !typedRelaunch {
+		t.Fatalf("relaunch args or focused typed prompt missing: started=%t typed=%t calls=%#v", started, typedRelaunch, fake.Calls)
 	}
 	workspaceRenamed, tabCreated, metadataBeforeStart, metadataAfterStart := false, false, false, false
 	startedIndex, firstMetadataIndex, lastMetadataIndex := -1, -1, -1

@@ -172,9 +172,7 @@ func newPiModelErrorFixture(t *testing.T, modelError string, repeatOnContinue bo
 set -eu
 if [ "${1:-}" = "--version" ]; then echo 'pi 1.0.0'; exit 0; fi
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent pi --state idle >/dev/null 2>&1
-prompt=
-for argument in "$@"; do case "$argument" in "Read "*.md" and follow it.") prompt=$argument ;; esac; done
-if [ -z "$prompt" ]; then IFS= read -r prompt || exit 0; fi
+IFS= read -r prompt || exit 0
 printf '%%s\n' "$prompt" >> "$POSSE_TEST_ROOT/pi-prompts.log"
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent pi --state working >/dev/null 2>&1
 : > "$POSSE_TEST_ROOT/pi-ready"

@@ -2,7 +2,7 @@
 
 Herdr focus describes layout selection, not whether the User is typing. Posse therefore does not treat a focused Worker pane as proof of User-owned input for explicit Lead commands.
 
-- Launch and relaunch pass the opening instruction as an argument to `agent.start` for Claude, Codex, Pi and OpenCode. Focus cannot delay those commands.
+- Codex and OpenCode receive the opening instruction as an `agent.start` argument where that path already exists. Claude and Pi must first become interactively ready, then receive the launch or relaunch instruction through a focused-safe typed prompt. Herdr keeps a Claude or Pi opening-argument launch pending for the first turn, so `agent.prompt` cannot steer it.
 - Explicit `posse send`, `posse send --interrupt`, `posse interrupt` and `posse keys` may send to a focused Worker. They retain blocked-agent, unknown-UI and harness-support checks.
 - Automatic Notice delivery, queued-message delivery, model-error recovery, launch retries and recovery prompts retain the focused-pane guard.
 
