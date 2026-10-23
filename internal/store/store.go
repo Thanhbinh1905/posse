@@ -895,7 +895,7 @@ func (db *DB) CreateReviewRoundTaskWithSequenceAndIntentWithinLimit(ctx context.
 
 var ErrTaskBranchExists = errors.New("Task branch already used")
 var ErrTaskBranchSequenceMismatch = errors.New("Task branch does not match allocated Task sequence")
-var ErrWorkerLimit = errors.New("Worker limit reached during admission")
+var ErrWorkerLimit = errors.New("worker limit reached during admission")
 
 // TaskBranchName returns the stable Git branch for a Task sequence.
 func TaskBranchName(sequence int) string {
@@ -1073,7 +1073,7 @@ func validateTaskDependenciesTx(ctx context.Context, tx *sql.Tx, projectID int64
 		return nil
 	}
 	if taskType == "review" {
-		return fmt.Errorf("Review readiness comes from review_of; after is not valid for Review Tasks")
+		return fmt.Errorf("review readiness comes from review_of; after is not valid for Review Tasks")
 	}
 	seen := make(map[int]bool, len(plan.Dependencies))
 	for _, dependency := range plan.Dependencies {
