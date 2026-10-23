@@ -2026,7 +2026,7 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 			return "", err
 		}
 		if taskType == "change" {
-			if err := upsertCompletedWorkerTurn(ctx, tx, task.ID, transitionID, paneID, server, time.Now().UnixMilli(), false); err != nil {
+			if err := upsertCompletedWorkerTurn(ctx, tx, task.ID, transitionID, paneID, server, time.Now().UnixMilli(), false, ""); err != nil {
 				return "", err
 			}
 		}

@@ -194,7 +194,9 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	if found && pane.Agent != "" {
 		status = pane.AgentStatus
 	}
-	resumed, err := db.ObserveCompletedWorker(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, now)
+	resumed, err := db.ObserveCompletedWorkerState(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, func() (string, error) {
+		return repositoryFingerprint(ctx, task.WorktreePath)
+	}, now)
 	if err != nil {
 		return nil, observationFailure(err)
 	}
