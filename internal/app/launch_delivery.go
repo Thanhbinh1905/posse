@@ -176,37 +176,19 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 				}
 				continue
 			}
-			var briefBytes []byte
-			for _, input := range plan.Inputs {
-				if input.Role == "brief" {
-					briefBytes = append([]byte(nil), input.Bytes...)
-					break
-				}
-			}
-			if len(briefBytes) == 0 {
-				return fmt.Errorf("queued Task %s has no frozen Brief input", taskIDString(queued.Seq))
-			}
-			brief, err := dispatch.ParseHistoricalBriefText(string(briefBytes))
+			briefBytes, brief, err := frozenTaskBrief(queued, plan)
 			if err != nil {
-				return fmt.Errorf("parse queued Task %s Brief: %w", taskIDString(queued.Seq), err)
+				return err
 			}
 			targets, err := projectTargets(ctx, db, project)
 			if err != nil {
 				return err
 			}
-			members := make([]taskMember, 0, len(plan.Execution.Members))
+			members, err := frozenTaskMembers(project, queued, plan, targets)
+			if err != nil {
+				return err
+			}
 			if project.IsWorkspace() {
-				byName := make(map[string]repoTarget, len(targets))
-				for _, target := range targets {
-					byName[target.Name] = target
-				}
-				for _, frozen := range plan.Execution.Members {
-					target, ok := byName[frozen.Name]
-					if !ok {
-						return fmt.Errorf("queued Task %s Member %q is no longer registered", taskIDString(queued.Seq), frozen.Name)
-					}
-					members = append(members, taskMember{repoTarget: target, Path: frozen.Path, MergeMode: frozen.Delivery, BaseRef: frozen.Base, TargetBranch: frozen.Target})
-				}
 				targets = targets[:0]
 				for _, member := range members {
 					targets = append(targets, member.repoTarget)
@@ -240,19 +222,7 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 			if err != nil {
 				return err
 			}
-			frozenCfg := cfg
-			frozenCfg.Kinds = make(map[string]config.Kind, len(cfg.Kinds)+1)
-			for name, kind := range cfg.Kinds {
-				frozenCfg.Kinds[name] = kind
-			}
-			frozenCfg.Profiles = make(map[string]config.Profile, len(cfg.Profiles)+1)
-			for name, profile := range cfg.Profiles {
-				frozenCfg.Profiles[name] = profile
-			}
-			frozenCfg.Kinds[plan.Launch.Profile.Kind] = plan.Launch.Kind
-			frozenCfg.Profiles[plan.Launch.ProfileName] = plan.Launch.Profile
-			frozenCfg.Pool = plan.Pool
-			resolution := dispatch.Resolution{Profile: plan.Launch.ProfileName, Rule: plan.Launch.DispatchRule, Resolved: plan.Launch.Profile}
+			frozenCfg, resolution := frozenLaunchConfig(cfg, plan)
 			launchCtx := &axi.Context{Context: ctx}
 			deferFinishIntent := func() error { return db.FinishIntent(ctx, intent.ID, intent.ProcessID) }
 			launchErr := s.launchAdmittedTask(launchCtx, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, nil, false)
@@ -270,4 +240,62 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 			return nil
 		}
 	}
+}
+
+// frozenTaskBrief returns the Brief bytes admitted with the Task plan.
+func frozenTaskBrief(task store.Task, plan *taskplan.Plan) ([]byte, dispatch.Brief, error) {
+	var briefBytes []byte
+	for _, input := range plan.Inputs {
+		if input.Role == "brief" {
+			briefBytes = append([]byte(nil), input.Bytes...)
+			break
+		}
+	}
+	if len(briefBytes) == 0 {
+		return nil, dispatch.Brief{}, fmt.Errorf("Task %s has no frozen Brief input", taskIDString(task.Seq))
+	}
+	brief, err := dispatch.ParseHistoricalBriefText(string(briefBytes))
+	if err != nil {
+		return nil, dispatch.Brief{}, fmt.Errorf("parse Task %s Brief: %w", taskIDString(task.Seq), err)
+	}
+	return briefBytes, brief, nil
+}
+
+// frozenTaskMembers maps the Members admitted with a Workspace Task plan back
+// to the currently registered repositories.
+func frozenTaskMembers(project store.Project, task store.Task, plan *taskplan.Plan, targets []repoTarget) ([]taskMember, error) {
+	members := make([]taskMember, 0, len(plan.Execution.Members))
+	if !project.IsWorkspace() {
+		return members, nil
+	}
+	byName := make(map[string]repoTarget, len(targets))
+	for _, target := range targets {
+		byName[target.Name] = target
+	}
+	for _, frozen := range plan.Execution.Members {
+		target, ok := byName[frozen.Name]
+		if !ok {
+			return nil, fmt.Errorf("Task %s Member %q is no longer registered", taskIDString(task.Seq), frozen.Name)
+		}
+		members = append(members, taskMember{repoTarget: target, Path: frozen.Path, MergeMode: frozen.Delivery, BaseRef: frozen.Base, TargetBranch: frozen.Target})
+	}
+	return members, nil
+}
+
+// frozenLaunchConfig overlays the admitted Profile, kind and Pool onto cfg so a
+// launch never depends on config edited after admission.
+func frozenLaunchConfig(cfg config.Config, plan *taskplan.Plan) (config.Config, dispatch.Resolution) {
+	frozen := cfg
+	frozen.Kinds = make(map[string]config.Kind, len(cfg.Kinds)+1)
+	for name, kind := range cfg.Kinds {
+		frozen.Kinds[name] = kind
+	}
+	frozen.Profiles = make(map[string]config.Profile, len(cfg.Profiles)+1)
+	for name, profile := range cfg.Profiles {
+		frozen.Profiles[name] = profile
+	}
+	frozen.Kinds[plan.Launch.Profile.Kind] = plan.Launch.Kind
+	frozen.Profiles[plan.Launch.ProfileName] = plan.Launch.Profile
+	frozen.Pool = plan.Pool
+	return frozen, dispatch.Resolution{Profile: plan.Launch.ProfileName, Rule: plan.Launch.DispatchRule, Resolved: plan.Launch.Profile}
 }
