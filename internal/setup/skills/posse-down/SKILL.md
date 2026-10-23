@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # posse down
 
-The CLI is the source of truth. Check `posse --help` and follow the actual command output; do not infer shutdown success from pane state alone.
+The CLI is the source of truth. Check `posse --help` and follow the actual command output; do not infer shutdown success from pane state alone. `posse down` is refused from a Worker, an agent pane, or a live Lead pane.
 
 Inspect `posse --full` from the Project folder. Review Project state, Tasks, `needs_you`, undelivered Notices, and Watch state. Stop if any live Task exists in `spawning`, `working`, `needs-decision`, `blocked`, `stalled`, `done` or `merging`. Ask the User to finish, merge, accept or teardown those Tasks first.
 
