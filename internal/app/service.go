@@ -443,8 +443,12 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 }
 
+// projectRecoveryWait bounds how long a command waits for another process's
+// Project recovery before returning a retryable error.
+var projectRecoveryWait = 60 * time.Second
+
 func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Project) error {
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(projectRecoveryWait)
 	for {
 		claim, err := db.ProjectRecovery(ctx, project.ID)
 		if err != nil {
@@ -454,7 +458,7 @@ func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Projec
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("project recovery is still running for %s", project.Name)
+			return axi.Failure("project_recovery_running", fmt.Sprintf("project recovery is still running for %s", project.Name), true, "Retry the command once recovery completes; check `posse status`")
 		}
 		select {
 		case <-ctx.Done():
