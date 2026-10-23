@@ -416,6 +416,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		var notices []store.Notice
 		if parsed.Bool("handoff") {
 			existing, found, err := db.NoticeDeliveryForDestinationRetry(ctx.Context, project.ID, parsed.Flags["destination"], currentTime())
+			if errors.Is(err, store.ErrStateRace) {
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -423,6 +426,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				return ctx.Print(noticeDeliveryUncertaintyResult(existing, "Inspect that Lead session before retrying"))
 			}
 			prior, priorFound, err := db.NoticeDeliveryForOtherSession(ctx.Context, project.ID, parsed.Flags["destination"])
+			if errors.Is(err, store.ErrStateRace) {
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -431,10 +437,15 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				case "uncertain":
 					return ctx.Print(noticeDeliveryUncertaintyResult(prior, "The previous session outcome is unresolved; inspect its history or effect before retrying"))
 				case "printed":
-					if err := db.MarkNoticeDeliveryUncertain(ctx.Context, prior.DeliveryID, currentTime()); err != nil {
+					if err := db.MarkNoticeDeliveryUncertain(ctx.Context, prior.DeliveryID, currentTime()); errors.Is(err, store.ErrStateRace) {
+						continue
+					} else if err != nil {
 						return err
 					}
 					prior, err = db.NoticeDelivery(ctx.Context, prior.DeliveryID)
+					if errors.Is(err, store.ErrStateRace) {
+						continue
+					}
 					if err != nil {
 						return err
 					}
@@ -455,6 +466,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			if found {
 				retryDelivery = &existing
 				notices, err = db.NoticesByIDs(ctx.Context, project.ID, existing.NoticeIDs)
+				if errors.Is(err, store.ErrStateRace) {
+					continue
+				}
 				if err != nil {
 					return err
 				}
@@ -463,6 +477,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		if retryDelivery == nil {
 			var err error
 			notices, err = db.UndeliveredNotices(ctx.Context, project.ID)
+			if errors.Is(err, store.ErrStateRace) {
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -511,6 +528,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				}
 				if cfg.Lowkey.Lead {
 					acked, err := db.AckUndeliveredPROpened(ctx.Context, project.ID, currentTime())
+					if errors.Is(err, store.ErrStateRace) {
+						continue
+					}
 					if err != nil {
 						return err
 					}
@@ -533,6 +553,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					return err
 				}
 				delivery, claimed, err := db.ClaimNoticeDelivery(ctx.Context, project.ID, ids, parsed.Flags["destination"], generation, token, currentTime(), noticeDeliveryLeaseTimeout.Milliseconds())
+				if errors.Is(err, store.ErrStateRace) {
+					continue
+				}
 				if err != nil {
 					return err
 				}
@@ -543,13 +566,18 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					continue
 				}
 				printedAt := currentTime()
-				if err := db.MarkNoticeDeliveryPrinted(ctx.Context, delivery.DeliveryID, token, printedAt); err != nil {
+				if err := db.MarkNoticeDeliveryPrinted(ctx.Context, delivery.DeliveryID, token, printedAt); errors.Is(err, store.ErrStateRace) {
+					continue
+				} else if err != nil {
 					return err
 				}
 				delivery.State, delivery.UpdatedAt = "printed", printedAt
 				handoff = &delivery
 			} else {
 				claimed, err := db.ClaimNoticeBatch(ctx.Context, project.ID, ids, token, currentTime())
+				if errors.Is(err, store.ErrStateRace) {
+					continue
+				}
 				if err != nil {
 					return err
 				}
@@ -590,7 +618,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			if handoff != nil {
 				return nil
 			}
-			if err := db.MarkClaimedNoticesDelivered(ctx.Context, project.ID, ids, token, currentTime()); err != nil {
+			if err := db.MarkClaimedNoticesDelivered(ctx.Context, project.ID, ids, token, currentTime()); err != nil && !errors.Is(err, store.ErrStateRace) {
 				return err
 			}
 			return s.regenerateProjects(ctx.Context, db)
