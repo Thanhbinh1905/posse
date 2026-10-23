@@ -12,6 +12,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/execution"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -20,6 +21,23 @@ func mergeIntentFailure(err error) error {
 		return axi.Failure("store_busy", "the store was busy while recording the merge intent", true, "Retry the command after the store is available")
 	}
 	return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+}
+
+// taskStateChangedFailure reports a normal race with another Task state change
+// by public Task ID; the caller can inspect the Task and retry.
+func taskStateChangedFailure(task store.Task) error {
+	id := taskIDString(task.Seq)
+	return axi.Failure("task_state_changed", "Task "+id+" changed state while the command ran", true, "Run `posse show "+id+"` to inspect its state, then retry")
+}
+
+// structureTaskStateRace replaces an unstructured store state race, which names
+// the database row, with the typed retryable failure for the public Task ID.
+func structureTaskStateRace(err error, task store.Task) error {
+	var structured *axi.Error
+	if err == nil || errors.As(err, &structured) || !isOnlyStateRace(err) {
+		return err
+	}
+	return taskStateChangedFailure(task)
 }
 
 func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
@@ -46,6 +64,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	defer func() { returnErr = structureTaskStateRace(returnErr, task) }()
 	plan, planErr := task.AdmittedPlan()
 	if planErr != nil {
 		return admittedPlanFailure(planErr)
@@ -189,16 +208,6 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		task.GatedSHA = gatedSHA
-		if gateErr := runMergeStep("gate.run", func() error { return runGates(ctx.Context, cfg, task) }); gateErr != nil {
-			if err := recordGateFailure(ctx.Context, db, project, task, gatedSHA, "", gateErr); err != nil {
-				return err
-			}
-			if finishErr := finishMergeIntent(); finishErr != nil {
-				return finishErr
-			}
-			_ = s.deliverNotices(ctx.Context, db, project)
-			return axi.Failure("gate_failed", gateErr.Error(), false, gateFailureHelp(task))
-		}
 		if started, err := s.maybeAutoStartReviewRound(ctx, db, home, project, task); err != nil {
 			return err
 		} else if started {
@@ -208,7 +217,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		if err := runMergeStep("task.merging", func() error {
-			return db.Transition(ctx.Context, task.ID, store.StateDone, store.StateMerging, "cli", "Gate passed and local fast-forward is ready")
+			return db.Transition(ctx.Context, task.ID, store.StateDone, store.StateMerging, "cli", "Local fast-forward is ready")
 		}); err != nil {
 			return err
 		}
@@ -249,13 +258,13 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		}
 	}
 	if task.GatedSHA == "" || latestSHA != task.GatedSHA {
-		if err := db.Transition(ctx.Context, task.ID, store.StateMerging, store.StateDone, "cli", "Task branch moved after the Gate passed"); err != nil {
+		if err := db.Transition(ctx.Context, task.ID, store.StateMerging, store.StateDone, "cli", "Task branch moved after its merge head was recorded"); err != nil {
 			return err
 		}
 		if err := finishMergeIntent(); err != nil {
 			return err
 		}
-		return axi.Failure("branch_moved", "Task branch moved after the Gate passed", false, "Run `posse merge "+taskIDString(task.Seq)+"` again to re-gate")
+		return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 	}
 	quote := strings.TrimSpace(parsed.Flags["user-approved"])
 	if quote != "" {
@@ -307,7 +316,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		if completedElsewhere {
 			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 		}
-		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
+		return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
@@ -387,16 +396,6 @@ func settleFailedMergeIntent(ctx context.Context, db *store.DB, project store.Pr
 		return err
 	}
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
-}
-
-func runGates(ctx context.Context, cfg config.Config, task store.Task) error {
-	for _, gate := range cfg.Defaults.Gate {
-		output, err := commandOutput(ctx, task.WorktreePath, gate)
-		if err != nil {
-			return newGateCommandFailure(gate, output, err)
-		}
-	}
-	return nil
 }
 
 func verifyFastForward(ctx context.Context, project store.Project, task store.Task) error {
@@ -525,7 +524,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
+		return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
 	}
 	if !inPlace && store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateMerged {
 		return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, "Pass `--discard --user-approved \"<User's words>\"`")
@@ -545,7 +544,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return ctx.Print(withCacheMaintenance(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
+	return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
 }
 
 func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string, keepBranchOption ...bool) (result teardownResult, returnErr error) {
@@ -914,27 +913,6 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}); err != nil {
 		return result, s.teardownIncomplete(ctx, db, project, task, "Task scratch removal", err)
 	}
-	if inPlace {
-		if err := s.runIntentStep(ctx, db, intent, "in_place.output", func() error {
-			baselinePath := inPlaceBaselinePath(*plan)
-			if _, statErr := os.Stat(baselinePath); os.IsNotExist(statErr) && task.Launches == 0 {
-				return nil
-			} else if statErr != nil {
-				return statErr
-			}
-			output, outputErr := captureInPlaceOutput(ctx, *plan, task.WorktreePath)
-			if outputErr != nil {
-				var failure *axi.Error
-				if !errors.As(outputErr, &failure) || failure.Code != "in_place_scope_violation" {
-					return outputErr
-				}
-				return recordInPlaceScopeNotice(ctx, db, project, task, output)
-			}
-			return nil
-		}); err != nil {
-			return result, s.teardownIncomplete(ctx, db, project, task, "in-place output capture", err)
-		}
-	}
 	var killed []string
 	err = s.runIntentStep(ctx, db, intent, "sandbox.release", func() error {
 		latestPanes, paneErr := s.verifyTaskPanesClosed(ctx, project, task, panePlan)
@@ -979,7 +957,19 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			}
 		}
 		if inPlace {
-			return releaseInPlaceLeases(ctx, db, project, task)
+			leases, err := db.ResourceLeases(ctx, project.ID)
+			if err != nil {
+				return err
+			}
+			manager := execution.NewManager(db)
+			prefix := fmt.Sprintf("in-place:%d:", task.ID)
+			for _, lease := range leases {
+				if lease.OwnerTaskID == task.ID && strings.HasPrefix(lease.SourceKey, prefix) {
+					if err := manager.Reconcile(ctx, lease, "Legacy Directory Task was stopped and its source was preserved"); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		var releaseErr error
 		killed, releaseErr = s.releaseSandboxWithAuthorization(ctx, db, project, task, cfg.Pool.Clean, discardable, processAuthorization)
@@ -990,6 +980,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}
 	result.Panes = paneResult
 	result.StoppedProcesses = append(stopped, killed...)
+	result.EscapedProcesses = taskOwnedProcessDetails(processAuthorization.escapedProcessPIDs())
 	if project.IsWorkspace() {
 		err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
 			if keepBranch {
@@ -1150,6 +1141,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		return result, err
 	}
 	intentFinished = true
+	if err := recordTeardownEscapedProcesses(ctx, db, project, task, result.EscapedProcesses); err != nil {
+		return result, err
+	}
 	if detail, err := s.trimWorkerGoBuildCache(ctx, home); err != nil {
 		result.CacheMaintenance = "warning: " + err.Error()
 	} else {
@@ -1158,7 +1152,10 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	return result, nil
 }
 
-func withCacheMaintenance(fields axi.Object, result teardownResult) axi.Object {
+func withTeardownDetails(fields axi.Object, result teardownResult) axi.Object {
+	if len(result.EscapedProcesses) > 0 {
+		fields = append(fields, axi.Field{Key: "escaped_processes", Value: describeTaskProcesses(result.EscapedProcesses)})
+	}
 	if result.CacheMaintenance != "" {
 		fields = append(fields, axi.Field{Key: "worker_go_cache", Value: result.CacheMaintenance})
 	}

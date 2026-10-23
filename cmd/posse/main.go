@@ -20,6 +20,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "_guard" {
 		os.Exit(service.RunGuard(os.Stdin, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_research-hook" {
+		os.Exit(service.RunResearchHook(os.Stdin, os.Stdout, os.Stderr, os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_research-run" {
+		os.Exit(service.RunResearchRunner(os.Args[2:], os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_finalize-lead" {
 		os.Exit(service.RunLeadFinalizer(os.Args[2:]))
 	}

@@ -192,7 +192,7 @@ func (db *DB) QueueValidationFixInstructionWithinBudget(ctx context.Context, tas
 }
 
 // QueueValidationFixInstructionWithSharedBudget enforces the frozen per-kind
-// limit and shared Review/Gate/CI cap in the same admission transaction.
+// limit and shared Review/CI cap in the same admission transaction.
 func (db *DB) QueueValidationFixInstructionWithSharedBudget(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string, maxRounds, sharedMax int) (QueueValidationFixResult, error) {
 	if maxRounds < 0 || sharedMax < 1 {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix budget")
@@ -257,7 +257,7 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status IN ('admitted','verdict')`, taskID).Scan(&reviews); err != nil {
 			return QueueValidationFixResult{}, err
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','gate','ci')`, taskID).Scan(&repairs); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','ci')`, taskID).Scan(&repairs); err != nil {
 			return QueueValidationFixResult{}, err
 		}
 		if reviews+repairs >= *sharedMax {
@@ -331,6 +331,18 @@ func (db *DB) ValidationContinuitySnapshot(ctx context.Context, taskID int64) (V
 func (db *DB) ValidationExpectedBaseHeads(ctx context.Context, taskID int64) ([]string, error) {
 	snapshot, err := db.ValidationContinuitySnapshot(ctx, taskID)
 	return snapshot.Heads, err
+}
+
+// OutstandingValidationFixHead returns the head named by the newest automatic
+// fix instruction of kind issued since the Task's most recent done Signal, or
+// "" when there is none.
+func (db *DB) OutstandingValidationFixHead(ctx context.Context, taskID int64, kind string) (string, error) {
+	var head string
+	err := db.QueryRowContext(ctx, `SELECT r.expected_base_head FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind=? AND m.status IN ('queued','claimed','interrupting','submitting','delivered') AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'),0) ORDER BY r.id DESC LIMIT 1`, taskID, kind, taskID).Scan(&head)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return head, err
 }
 
 func validationContinuitySnapshotTx(ctx context.Context, tx *writeTx, taskID int64) (ValidationContinuitySnapshot, error) {

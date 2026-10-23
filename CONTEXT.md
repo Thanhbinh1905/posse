@@ -18,6 +18,10 @@ _Avoid_: Primary, orchestrator, supervisor
 An agent that carries out exactly one Task on the Lead's behalf. Formerly: Rider.
 _Avoid_: Subagent, child
 
+**Research Child**:
+A bounded read-only native child of a Lead's or Worker's harness that Posse registers as a research attempt before accepting its result; it is not a Worker and changes no files.
+_Avoid_: Subagent swarm, helper Worker
+
 **Task**:
 One unit of delegated work with an explicit contract, carried out by one Worker.
 _Avoid_: Job, ticket, run
@@ -35,7 +39,7 @@ The Git branch that holds a Task's code; it is independent of the Task Name.
 _Avoid_: Task Name, slug
 
 **Change Task**:
-A Task whose outcome is a change to the Project, integrated through a Merge Mode or recorded as an in-place source change. Formerly: Ship Task.
+A Task whose outcome is a change to the Project, integrated through a Merge Mode. Formerly: Ship Task.
 _Avoid_: Fix task, build task
 
 **Closing Issue**:
@@ -63,7 +67,7 @@ One Review Task in a Review Loop that records a verdict for one exact Change hea
 _Avoid_: Pass, iteration, rereview
 
 **Fix Round**:
-One instruction Posse or the Lead queues to a Change Worker to fix a failed Gate, failed CI checks or selected Finding Patterns for one head, within a per-Project budget.
+One instruction Posse or the Lead queues to a Change Worker to fix failed CI checks or selected Finding Patterns for one head, within a per-Project budget.
 _Avoid_: Retry, fix attempt
 
 **Finding Pattern**:
@@ -95,7 +99,7 @@ A Worker's own declaration of where its Task stands, such as done, needs-decisio
 _Avoid_: Status, report, event
 
 **Decision**:
-A question put to the User that only the User may answer, such as whether to Merge, relaunch, discard Sandbox work or preserve and stop an in-place Task; answered once and recorded.
+A question put to the User that only the User may answer, such as whether to Merge, relaunch or discard Sandbox work; answered once and recorded.
 _Avoid_: Approval (for the question itself), prompt, needs-decision (that is a Signal to the Lead)
 
 **Brief**:
@@ -103,7 +107,7 @@ The written contract a Task starts from: its type, what done means, and how it M
 _Avoid_: Prompt, spec, plan
 
 **Notice**:
-Something the Lead must look at, such as a Signal that needs action, a blocked or exited Worker, a Stall, or a failed Gate.
+Something the Lead must look at, such as a Signal that needs action, a blocked or exited Worker, a Stall, or failed CI.
 _Avoid_: Alert, event, wake, notification
 
 **Pool**:
@@ -132,10 +136,6 @@ _Avoid_: Delivery mode
 A standing grant the User gives a Project that lets the Lead decide review findings, Merge, or both without asking; `yolo` grants both.
 _Avoid_: Permission, auto mode
 
-**Gate**:
-A configured executable check Posse runs before publication or Merge as required by the selected review mode, or before an in-place Task reports completion; not a User's stage-transition decision.
-_Avoid_: Stage approval, Validation, CI, pipeline
-
 **Watch**:
 The mechanism that observes a Project and delivers Notices to its Lead. Formerly: Lookout.
 _Avoid_: Monitor, watcher
@@ -145,24 +145,16 @@ A Worker that appears to be working but shows no progress in its output or its w
 _Avoid_: Hang, freeze, wedge
 
 **Teardown**:
-Removing a Task's Worker and releasing its custody after its work is preserved; Sandbox Tasks require Merge, reporting or approved discard, while in-place Tasks preserve source files and release path leases.
+Removing a Task's Worker and releasing its custody after its work is preserved; Tasks require Merge, reporting or approved discard.
 _Avoid_: Cleanup, discard
 
 **Project**:
-One Git repository, one Workspace of repositories, or one explicitly registered directory under management, with its own Tasks, state and policy.
+One Git repository or one Workspace of repositories, with its own Tasks, state and policy.
 _Avoid_: Repo (in prose), home
 
 **Workspace**:
 A Project whose root is a plain folder and whose Members are the repositories directly inside it; one Task may change several Members.
 _Avoid_: Monorepo, stack, multi-repo
-
-**Directory Project**:
-A folder explicitly registered as a local Project, whether or not it contains Git metadata. Its Tasks require explicit in-place execution, User consent and selected relative paths.
-_Avoid_: Workspace, repository Project
-
-**In-place execution**:
-A consented Task execution mode that works in a Directory Project's registered source root, leases selected paths, runs approved checks and preserves changes without creating a branch or Merge.
-_Avoid_: Sandbox execution, unscoped local work
 
 **Member**:
 One repository of a Workspace, with its own default branch, remote and Merge Mode.

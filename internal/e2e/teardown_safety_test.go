@@ -331,48 +331,95 @@ func TestTeardownPreservesForegroundCommandInTaskPane(t *testing.T) {
 	}
 }
 
-func TestTeardownBackfillsLegacyTaskPaneShellIdentity(t *testing.T) {
-	f := newWorkerTabsFixture(t)
-	task := f.start(t, "t1", "Backfill legacy pane identity", "legacy-pane-identity")
-	if task.PaneShellIdentity == "" {
-		t.Fatal("fixture Task pane executable identity was not recorded at launch")
-	}
+// setTaskPaneShellIdentity rewrites the recorded pane-shell image, as a Task
+// launched before the column existed ("") or before a shell upgrade would have.
+func setTaskPaneShellIdentity(t *testing.T, f *workerTabsFixture, task store.Task, identity string) {
+	t.Helper()
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET pane_shell_identity='' WHERE id=?`, task.ID); err != nil {
-		_ = db.Close()
+	defer db.Close()
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET pane_shell_identity=? WHERE id=?`, identity, task.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.PersistTask(context.Background(), task.ID); err != nil {
-		_ = db.Close()
 		t.Fatal(err)
 	}
-	if err := db.Close(); err != nil {
+}
+
+// TestTeardownBackfillsLegacyTaskPaneShellIdentity tears down a legacy Task
+// whose Worker is still the pane foreground. The Worker blocks in a shell
+// builtin, so the ownership proof sees no unretained child process and the
+// outcome is deterministic.
+func TestTeardownBackfillsLegacyTaskPaneShellIdentity(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	if err := os.WriteFile(filepath.Join(f.root, "quiet-agent"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	task := f.start(t, "t1", "Backfill legacy pane identity", "legacy-pane-identity")
+	recorded := task.PaneShellIdentity
+	if recorded == "" {
+		t.Fatal("fixture Task pane executable identity was not recorded at launch")
+	}
+	quiet := filepath.Join(f.root, "quiet-"+filepath.Base(task.WorktreePath)+".fifo")
+	if !waitForCondition(10*time.Second, func() bool { _, err := os.Stat(quiet); return err == nil }) {
+		t.Fatal("quiet fake Worker did not start waiting")
+	}
+	if observed := foregroundPID(t, f, task.PaneID); observed <= 1 {
+		t.Fatalf("quiet fake Worker is not the pane foreground: %d", observed)
+	}
+	setTaskPaneShellIdentity(t, f, task, "")
 	markTaskReported(t, f, task)
 
-	teardown := exec.Command(f.binary, "teardown", "t1")
-	teardown.Dir, teardown.Env = f.repo, f.leadEnv
-	outputBytes, teardownErr := teardown.CombinedOutput()
-	output := string(outputBytes)
-	if teardownErr == nil {
-		if !strings.Contains(output, "torn-down") {
-			t.Fatalf("Teardown returned success without finishing: %s", output)
-		}
-	} else if !strings.Contains(output, "teardown_incomplete") || !strings.Contains(output, "not retained during Task ownership proof") {
-		t.Fatalf("Teardown failed for a reason other than a newly observed Worker process: %s", output)
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
+		t.Fatalf("Teardown of a legacy Task with a live Worker did not finish: %s", output)
 	}
-	if current := f.task(t, "t1"); current.PaneShellIdentity == "" {
-		t.Fatal("Teardown did not persist the verified legacy Task pane shell identity")
+	if current := f.task(t, "t1"); current.PaneShellIdentity != recorded {
+		t.Fatalf("Teardown backfilled pane shell identity %q, want %q", current.PaneShellIdentity, recorded)
 	}
-	if teardownErr != nil {
-		f.exitWorker(t, "t1")
-		if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
-			t.Fatalf("Teardown did not retry after the Worker exited: %s", output)
-		}
+}
+
+// TestTeardownBackfillsLegacyShellOnlyTaskPane covers a legacy Task whose
+// Worker already exited, leaving only the pane shell in the foreground.
+func TestTeardownBackfillsLegacyShellOnlyTaskPane(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Legacy shell-only pane", "legacy-shell-only")
+	recorded := task.PaneShellIdentity
+	if recorded == "" {
+		t.Fatal("fixture Task pane executable identity was not recorded at launch")
+	}
+	setTaskPaneShellIdentity(t, f, task, "")
+	markTaskReported(t, f, task)
+	f.exitWorker(t, "t1")
+
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
+		t.Fatalf("Teardown of a legacy shell-only Task pane did not finish: %s", output)
+	}
+	if current := f.task(t, "t1"); current.PaneShellIdentity != recorded {
+		t.Fatalf("Teardown backfilled pane shell identity %q, want %q", current.PaneShellIdentity, recorded)
+	}
+}
+
+// TestTeardownAcceptsRespawnedUpgradedTaskPaneShell covers a shell package
+// upgrade: the pane runs a shell whose executable inode differs from the one
+// recorded at launch.
+func TestTeardownAcceptsRespawnedUpgradedTaskPaneShell(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Upgraded pane shell", "upgraded-shell")
+	recorded := task.PaneShellIdentity
+	if recorded == "" {
+		t.Fatal("fixture Task pane executable identity was not recorded at launch")
+	}
+	setTaskPaneShellIdentity(t, f, task, "0:1")
+	markTaskReported(t, f, task)
+	f.exitWorker(t, "t1")
+
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
+		t.Fatalf("Teardown of a Task pane with an upgraded shell did not finish: %s", output)
+	}
+	if current := f.task(t, "t1"); current.PaneShellIdentity != recorded {
+		t.Fatalf("Teardown recorded pane shell identity %q, want the running shell %q", current.PaneShellIdentity, recorded)
 	}
 }
 

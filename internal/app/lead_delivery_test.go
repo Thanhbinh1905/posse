@@ -409,7 +409,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 
 	claude := launch("claude")
 	plugin := filepath.Join(home, "projects", "shop", "lead-claude-lowkey")
-	if !equalStrings(claude.Args, []string{"--settings", claudeNoAttributionSettings, "--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0]}) || claude.TypedPrompt != "" ||
+	if !equalStrings(claude.Args, []string{"--settings", claudeNoAttributionSettings, "--dangerously-skip-permissions", "--append-system-prompt-file", instructions, "--plugin-dir", plugin, "--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "claude-research")}) || claude.TypedPrompt != "" ||
 		claude.Env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] != "1" || claude.Env["POSSE_LOWKEY_CONFIG"] != config.ConfigPath(home, "shop") ||
 		claude.Env["POSSE_LOWKEY_GLOBAL_CONFIG"] != config.ConfigPath(home, "") || claude.Env["POSSE_LOWKEY_NOTICES_DIR"] != claudeNoticeDirectory(home, "shop") {
 		t.Fatalf("claude launch = %#v", claude)

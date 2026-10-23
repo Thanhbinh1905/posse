@@ -323,7 +323,8 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Bool("repair") {
 		return s.repairWatch(ctx, db, home, project)
 	}
-	// Every adapter handoff repairs the independent Project poller; receipt operations only deliver Notices.
+	// Keep the Project observer alive independently of receipt work; its poller
+	// performs maintenance out of process while adapters own receiver re-arming.
 	if !parsed.Bool("poll-only") && parsed.Flags["receipt"] == "" {
 		if err := s.ensureWatchRuntime(ctx.Context, db, home, project); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Watch supervision for %s failed: %v\n", project.Name, err)
@@ -467,7 +468,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			}
 		}
 		if len(notices) == 0 {
-			if lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute {
+			if !parsed.Bool("handoff") && (lastHerdrReconcile.IsZero() || time.Since(lastHerdrReconcile) >= time.Minute) {
 				if _, err := s.prepareProjectObservation(ctx.Context, db, project); err != nil {
 					if store.IsBusy(err) {
 						// Contention is transient. Keep this Watch armed, and retry
@@ -480,11 +481,13 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					lastHerdrReconcile = time.Now()
 				}
 			}
-			if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
-				if store.IsBusy(err) {
-					fmt.Fprintf(ctx.ErrOut, "Watch maintenance deferred: %v\n", normalizeCommandError(err))
-				} else if noticeErr := s.recordWatchMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
-					return noticeErr
+			if !parsed.Bool("handoff") {
+				if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
+					if store.IsBusy(err) {
+						fmt.Fprintf(ctx.ErrOut, "Watch maintenance deferred: %v\n", normalizeCommandError(err))
+					} else if noticeErr := s.recordWatchMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
+						return noticeErr
+					}
 				}
 			}
 			if retryDelivery == nil {
@@ -769,13 +772,13 @@ func (s *Service) projectShow(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "repos", Value: repos}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set repositories.<repo>.merge_mode pr --project " + project.Name + "` to change one member's Merge Mode", "Run `posse config set repositories.<repo>.target_branch <branch> --project " + project.Name + "` to set one member's PR/MR target", "Run `posse project scan` after adding or removing a member repository"}}})
+		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "repos", Value: repos}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set repositories.<repo>.merge_mode pr --project " + project.Name + "` to change one member's Merge Mode", "Run `posse config set repositories.<repo>.target_branch <branch> --project " + project.Name + "` to set one member's PR/MR target", "Run `posse project scan` after adding or removing a member repository"}}})
 	}
 	if project.IsDirectory() {
-		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "execution_mode", Value: "in-place"}, {Key: "merge_mode", Value: "local"}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Write a Brief with `execution: in-place` and selected `paths:`, then run `posse start --user-approved \"<User's words>\"`", "Directory Projects do not branch, commit, publish, or Merge"}}})
+		return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "root", Value: project.Root}, {Key: "status", Value: project.Status}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Directory Projects are legacy records and do not admit new Tasks", "Register a Git repository with `posse project add`"}}})
 	}
 	targetBranch, _ := configTargetBranch(cfg, "", project.DefaultBranch)
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "root", Value: project.Root}, {Key: "default_branch", Value: project.DefaultBranch}, {Key: "target_branch", Value: targetBranch}, {Key: "status", Value: project.Status}, {Key: "merge_mode", Value: projectMergeMode(project, cfg)}, {Key: "gate", Value: cfg.Defaults.Gate}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set defaults.merge_mode \"local\" --project " + project.Name + "` to update Project settings", "Run `posse config set defaults.target_branch <branch> --project " + project.Name + "` to change the PR/MR target"}}})
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "root", Value: project.Root}, {Key: "default_branch", Value: project.DefaultBranch}, {Key: "target_branch", Value: targetBranch}, {Key: "status", Value: project.Status}, {Key: "merge_mode", Value: projectMergeMode(project, cfg)}, {Key: "autonomy", Value: map[string]any{"review": defaultValue(cfg.Autonomy.Review, "ask"), "merge": defaultValue(cfg.Autonomy.Merge, "ask")}}, {Key: "lead", Value: s.leadStatus(ctx.Context, project)}, {Key: "help", Value: []any{"Run `posse config set defaults.merge_mode \"local\" --project " + project.Name + "` to update Project settings", "Run `posse config set defaults.target_branch <branch> --project " + project.Name + "` to change the PR/MR target"}}})
 }
 
 func (s *Service) projectMove(ctx *axi.Context, args []string) error {
@@ -869,7 +872,7 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 		}
 		fmt.Fprintf(&out, "- Path: `%s`\n- Kind: %s\n- Merge Mode: %s\n- Autonomy: review=%s merge=%s\n- Lead: %s\n", project.Root, project.Kind, projectMergeMode(project, cfg), defaultValue(cfg.Autonomy.Review, "ask"), defaultValue(cfg.Autonomy.Merge, "ask"), s.leadStatus(ctx, project))
 		if project.IsDirectory() {
-			out.WriteString("- Execution: in-place when explicitly selected per Task\n")
+			out.WriteString("- Admission: legacy Directory Project; new Tasks are unsupported\n")
 		}
 		if len(tasks) == 0 {
 			out.WriteString("- Open Tasks: none\n")

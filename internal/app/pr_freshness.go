@@ -38,19 +38,47 @@ func inspectPRTargetFreshness(ctx context.Context, root, targetBranch, headSHA s
 	return freshness, nil
 }
 
-func prBranchBehindFailure(taskSeq int, headSHA string, freshness prTargetFreshness) error {
+func prBranchBehindFailure(taskSeq int, headSHA string, freshness prTargetFreshness, queued bool) error {
 	message := fmt.Sprintf("pull request head %s does not contain current target commit %s from origin/%s", headSHA, freshness.Tip, freshness.Branch)
+	if queued {
+		return axi.Failure("pr_branch_behind", message+"; Posse queued the Worker an instruction to merge origin/"+freshness.Branch, false, queuedTargetSyncHelp(taskSeq))
+	}
 	return axi.Failure(
 		"pr_branch_behind",
 		message,
 		false,
-		"Merge origin/"+freshness.Branch+" into the Task branch, rerun the Gate, republish, and report done before retrying `posse merge "+taskIDString(taskSeq)+"`; never rebase a pushed branch",
+		"Merge origin/"+freshness.Branch+" into the Task branch, republish, and report done before retrying `posse merge "+taskIDString(taskSeq)+"`; never rebase a pushed branch",
 	)
+}
+
+func queuedTargetSyncHelp(taskSeq int) string {
+	return "Wait for the Worker's done Signal, then run `posse merge " + taskIDString(taskSeq) + "` again; do not send a duplicate merge-target instruction"
+}
+
+// pendingTargetSyncFailure explains a Merge that found no gated head because
+// Posse already queued the Worker an instruction to merge the PR target.
+func pendingTargetSyncFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	if task.Type != "change" || task.MergeMode != "pr" && task.MergeMode != "no-mistakes" {
+		return nil
+	}
+	headSHA, err := db.OutstandingValidationFixHead(ctx, task.ID, "freshness")
+	if err != nil || headSHA == "" {
+		return err
+	}
+	branch := taskTargetBranch(project, task)
+	freshness, err := inspectPRTargetFreshness(ctx, project.Root, branch, headSHA)
+	if err != nil {
+		return err
+	}
+	return prBranchBehindFailure(task.Seq, headSHA, freshness, true)
 }
 
 func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
 	if task.State != store.StateWorking || task.Type != "change" || task.PRURL == "" || task.MergeMode != "pr" && task.MergeMode != "no-mistakes" {
 		return nil
+	}
+	if err := pendingTargetSyncFailure(ctx, db, project, task); err != nil {
+		return err
 	}
 	observation, err := db.LatestPRObservation(ctx, task.ID)
 	if store.IsNotFound(err) {
@@ -69,24 +97,26 @@ func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Pro
 	if freshness.Fresh {
 		return nil
 	}
-	return prBranchBehindFailure(task.Seq, observation.HeadSHA, freshness)
+	return prBranchBehindFailure(task.Seq, observation.HeadSHA, freshness, false)
 }
 
-func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) error {
+// queuePRTargetSyncInstruction reports whether the Worker has an instruction
+// to merge the target, either newly queued or deduplicated against an earlier one.
+func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) (bool, error) {
 	if task.State != store.StateDone && task.State != store.StateMerging {
-		return nil
+		return false, nil
 	}
 	memberLabel := ""
 	if member != "" {
 		memberLabel = "Workspace member " + member + ": "
 	}
 	instruction := fmt.Sprintf(
-		"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, rerun the configured Gate, republish the updated head through this Task's delivery mode, and signal done again.",
+		"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, republish the updated head through this Task's delivery mode, and signal done again.",
 		memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
 	)
 	if mergeMode == "no-mistakes" {
 		instruction = fmt.Sprintf(
-			"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, then rerun no-mistakes with `--skip=rebase` and the Brief intent so its Gate and publication run on the updated head. Signal done again afterward.",
+			"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, then rerun no-mistakes with `--skip=rebase` and the Brief intent. Signal done again afterward.",
 			memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
 		)
 	} else if member != "" {
@@ -97,14 +127,16 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	after := task.CreatedAt
 	signals, err := db.TaskSignals(ctx, task.ID, 1)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(signals) > 0 && signals[0].Verb == "done" {
 		after = signals[0].At
 	}
 	dedupeKey := fmt.Sprintf("freshness:%s:%s:%s:%d", member, headSHA, freshness.Tip, after)
-	_, err = db.QueueValidationFixInstruction(ctx, task.ID, "freshness", headSHA, dedupeKey, instruction)
-	return err
+	if _, err = db.QueueValidationFixInstruction(ctx, task.ID, "freshness", headSHA, dedupeKey, instruction); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, task store.Task, member, mergeMode, headSHA string) error {
@@ -119,10 +151,11 @@ func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, projec
 	if freshness.Fresh {
 		return nil
 	}
-	if err := queuePRTargetSyncInstruction(ctx, db, task, member, mergeMode, freshness, headSHA); err != nil {
+	queued, err := queuePRTargetSyncInstruction(ctx, db, task, member, mergeMode, freshness, headSHA)
+	if err != nil {
 		return err
 	}
-	return prBranchBehindFailure(task.Seq, headSHA, freshness)
+	return prBranchBehindFailure(task.Seq, headSHA, freshness, queued)
 }
 
 func stalePRChecks() string {

@@ -42,7 +42,7 @@ const codexOpeningPrompt = "Run `posse` and give the User a short status of the 
 // Lead's whole context.
 const noPollRule = "Never poll with sleep, `posse peek`, `posse list` or repeated `posse` calls to wait for Workers, CI or PRs; use `posse peek` only to inspect a specific concern."
 
-const lowkeyReportingRule = "Lowkey mode on: message the User only about needs-decision, message_delivery_uncertain, notice_delivery_uncertain, merge_ready when autonomy.merge=ask, failed/lost, pr_closed, review_policy_violation, head_discontinuity, gate_fix_exhausted, persistent pr_watch_failing/root_fetch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, working notes, pr_watch_recovered, root_fetch_recovered, first pr_watch_failing, restarts) silently; group only if useful. Never answer a needs-decision Notice for the User. The wake includes the Notice text; don't run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
+const lowkeyReportingRule = "Lowkey mode on: message the User only about needs-decision, message_delivery_uncertain, notice_delivery_uncertain, merge_ready when autonomy.merge=ask, failed/lost, pr_closed, review_policy_violation, head_discontinuity, persistent pr_watch_failing/root_fetch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, working notes, pr_watch_recovered, root_fetch_recovered, first pr_watch_failing, restarts) silently; group only if useful. Never answer a needs-decision Notice for the User. The wake includes the Notice text; don't run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
 
 const normalReportingRule = "Lowkey mode off: handle every Notice, tell the User the outcome in your own words without waiting to be asked, then run `posse ack <id|all>`."
 
@@ -162,6 +162,10 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 			return leadLaunch{}, err
 		}
 		launch.Args = append(launch.Args, "--plugin-dir", plugin, "--plugin-dir", skills.ClaudePluginDir)
+		launch.Args, err = appendResearchLaunchArgs(context.Background(), home, project, cfg, kind, launch.Args)
+		if err != nil {
+			return leadLaunch{}, err
+		}
 		launch.Args = prependAttributionArgs(kind, cfg.Profiles[cfg.Lead.Profiles[kind]], launch.Args)
 		launch.Env = map[string]string{
 			"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",

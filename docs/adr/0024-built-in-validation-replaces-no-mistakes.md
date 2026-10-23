@@ -1,5 +1,7 @@
 # 24. Built-in validation replaces no-mistakes
 
+**Current status:** ADR 0028 removes configurable command Gates and their repair loop. The command-Gate entries below describe the design before that removal, not current CLI behavior. PR verification uses forge CI at `gated_sha`; local delivery has no automated verification.
+
 ## Context
 
 The User asked for a built-in Posse process modelled on no-mistakes but fitted to Posse:

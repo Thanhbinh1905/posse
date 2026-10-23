@@ -238,7 +238,7 @@ func TestForgeProbeCacheHasShortTTLAndInvalidatesOnConfigChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := cfg
-	changed.Defaults.Gate = []string{"go test ./..."}
+	changed.Defaults.MergeMethod = "merge"
 	if _, err := cachedForgeProbe(context.Background(), root, "git.example", changed, "auto"); err != nil {
 		t.Fatal(err)
 	}

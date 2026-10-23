@@ -190,15 +190,12 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 			if err := validateTicketBlockers(ctx, cfg, brief, targets); err != nil {
 				continue
 			}
-			branch := ""
-			if !project.IsDirectory() {
-				branch = store.TaskBranchName(queued.Seq)
-				if err := taskBranchAvailableForBranch(ctx, db, project, branch, members); err != nil {
-					if errors.Is(err, store.ErrTaskBranchExists) {
-						continue
-					}
-					return err
+			branch := store.TaskBranchName(queued.Seq)
+			if err := taskBranchAvailableForBranch(ctx, db, project, branch, members); err != nil {
+				if errors.Is(err, store.ErrTaskBranchExists) {
+					continue
 				}
+				return err
 			}
 			claimed, err := db.ClaimQueuedTask(ctx, project.ID, queued.ID, cfg.Defaults.MaxWorkers, branch, os.Getpid())
 			if err != nil {

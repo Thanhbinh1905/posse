@@ -7,7 +7,7 @@ import (
 )
 
 // RecordVerifiedPRHead retains a head that was checked against the Task's
-// branch and forge before a later follow-up clears the Gate.
+// branch and forge before a later follow-up clears the recorded merge head.
 func (db *DB) RecordVerifiedPRHead(ctx context.Context, taskID int64, url, sha string) error {
 	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO verified_pr_heads(task_id, pr_url, head_sha) VALUES (?,?,?)`, taskID, url, sha)
 	return err
@@ -46,7 +46,7 @@ func (db *DB) WasVerifiedPRHead(ctx context.Context, taskID int64, url, sha stri
 		return found, err
 	}
 	// PRs opened before verified_pr_heads existed still have the head and URL
-	// recorded in their pr_opened Notice from the verified Gate.
+	// recorded in their pr_opened Notice from the validated publication head.
 	rows, err := db.QueryContext(ctx, `SELECT data_json FROM notices WHERE task_id=? AND kind='pr_opened'`, taskID)
 	if err != nil {
 		return false, err

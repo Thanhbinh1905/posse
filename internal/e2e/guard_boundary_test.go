@@ -136,7 +136,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"python option operand before command", fmt.Sprintf(`python3 -X probe -c "import subprocess; subprocess.run(['herdr', 'workspace', 'rename', '%s', 'changed'], check=True)"`, id), true},
 		{"python inspect environment with stdin", fmt.Sprintf("PYTHONINSPECT=1 python3 -c \"print('herdr')\" <<'PY'\nimport subprocess\nsubprocess.run(['herdr', 'workspace', 'rename', '%s', 'changed'], check=True)\nPY", id), true},
 		{"python inspect environment", "PYTHONINSPECT=1 python3 -c \"print('herdr')\"", true},
-		{"python redirected stdin", "python3 -c \"print('herdr')\" <<'PY'\nprint('post-command input')\nPY", true},
+		{"python redirected stdin", "python3 -c \"print('herdr')\" <<'PY'\nprint('post-command input')\nPY", false},
+		{"python heredoc edit of Go source naming herdr", "python3 - <<'PY'\nfrom pathlib import Path\np = Path('internal/herdr/adapter_test.go')\np.write_text(p.read_text() + 'import \"github.com/thanhbinh1905/posse/internal/herdr\"\\nvar _ = herdr.Snapshot{}\\n')\nPY", false},
+		{"python heredoc running herdr", fmt.Sprintf("python3 - <<'PY'\nimport subprocess\nsubprocess.run(['herdr', 'workspace', 'rename', '%s', 'forbidden'])\nPY", id), true},
 		{"direct Worker push", "git push origin HEAD", true},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
@@ -182,6 +184,12 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 					t.Logf("unguarded shell: %v %s", err, result)
 				} else if err != nil {
 					t.Errorf("isolated shell failed: %v %s", err, result)
+				}
+			}
+			if tc.name == "python heredoc edit of Go source naming herdr" {
+				edited, err := os.ReadFile(filepath.Join(source, "adapter_test.go"))
+				if err != nil || !strings.Contains(string(edited), "var _ = herdr.Snapshot{}") {
+					t.Errorf("allowed edit did not change the Go source: %v %q", err, edited)
 				}
 			}
 			snapshot, err := client.Snapshot(context.Background())

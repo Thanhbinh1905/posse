@@ -1,0 +1,40 @@
+#!/bin/sh
+# Fake Codex CLI for research tests. FAKE_CODEX_SANDBOX sets the sandbox
+# policy recorded in the rollout; FAKE_CODEX_MODE selects sleep or flood.
+set -eu
+if [ "${1:-}" = "--version" ]; then
+	echo "codex-cli ${FAKE_CODEX_VERSION:-0.163.0}"
+	exit 0
+fi
+printf '%s\n' "$*" >>"$FAKE_RESEARCH_LOG"
+thread=0199a213-81c0-7800-8aa1-bbab2a035a53
+if [ "${2:-}" = "resume" ]; then
+	for arg in "$@"; do
+		case "$arg" in
+		-*|exec|resume|*=*) ;;
+		*) thread=$arg ;;
+		esac
+	done
+fi
+prompt=$(cat)
+dir="$CODEX_HOME/sessions/2026/10/23"
+mkdir -p "$dir"
+rollout="$dir/rollout-2026-10-23T00-00-00-$thread.jsonl"
+printf '{"type":"session_meta","payload":{"id":"%s"}}\n' "$thread" >>"$rollout"
+printf '{"type":"turn_context","payload":{"sandbox_policy":{"type":"%s"}}}\n' "${FAKE_CODEX_SANDBOX:-read-only}" >>"$rollout"
+printf '{"type":"thread.started","thread_id":"%s"}\n' "$thread"
+printf '{"type":"turn.started"}\n'
+case "${FAKE_CODEX_MODE:-}" in
+sleep)
+	sleep 30
+	;;
+flood)
+	i=0
+	while [ $i -lt 2000 ]; do
+		printf '{"type":"item.completed","item":{"type":"reasoning","text":"%s"}}\n' "padding-padding-padding-padding-padding-padding"
+		i=$((i + 1))
+	done
+	;;
+esac
+printf '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"answer to: %s"}}\n' "$prompt"
+printf '{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}\n'

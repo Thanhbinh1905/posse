@@ -53,23 +53,25 @@ var keySpecs = []KeySpec{
 	{Key: "defaults.pr_poll", Type: TypeDuration, Default: "2m", Meaning: "Minimum interval between pull request and Project checkout polls."},
 	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Default: "none", Meaning: "Review evidence required to Merge a Change Task. full-pipeline is selectable and frozen but unavailable until VP-C validation ships; no-mistakes is deprecated.", UserOnly: true},
 	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
-	{Key: "defaults.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in the Sandbox before a Change Task may Merge.", UserOnly: true},
 	{Key: "review_loop.enabled", Type: TypeBoolean, Default: true, Meaning: "Enable built-in Review Rounds for Change Tasks.", UserOnly: true},
 	{Key: "review_loop.max_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum Review Rounds per Change Task; may be lowered to 1 or 2.", UserOnly: true},
 	{Key: "review_loop.block_at", Type: TypeString, Allowed: []string{"P0", "P1", "P2"}, Default: "P1", Meaning: "Finding severity at or above which introduced findings block Merge.", UserOnly: true},
-	{Key: "review_loop.auto_start", Type: TypeBoolean, Default: true, Meaning: "Automatically admit the next Review Round after its Gate passes.", UserOnly: true},
+	{Key: "review_loop.auto_start", Type: TypeBoolean, Default: true, Meaning: "Automatically admit the next Review Round when a completed Task enters the merge flow.", UserOnly: true},
 	{Key: "review_loop.docs", Type: TypeBoolean, Default: false, Meaning: "Include documentation gaps in the Review rubric.", UserOnly: true},
 	{Key: "review_loop.guidance", Type: TypeStringArray, Default: []string{}, Meaning: "Repository guidance paths supplied to Reviewers from the frozen target branch.", UserOnly: true},
-	{Key: "gate_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic Gate fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Change Task.", UserOnly: true},
 	{Key: "full_pipeline.run_workflows", Type: TypeBoolean, Default: false, Meaning: "Explicitly allow locally executing repository CI workflow shell steps in the private full-pipeline candidate; unsupported jobs remain visible and cannot be inferred from repository files.", UserOnly: true},
 	{Key: "repositories.<repo>.merge_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Meaning: "How this member repository of a workspace Project Merges; defaults to local without an origin, else the Project merge_mode. no-mistakes is deprecated and unavailable for workspace Tasks."},
 	{Key: "repositories.<repo>.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for this workspace Member; overrides defaults.target_branch and the Member's default branch."},
-	{Key: "repositories.<repo>.gate", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in this member's worktree before it may Merge; replaces defaults.gate for the member.", UserOnly: true},
 	{Key: "pool.clean", Type: TypeString, Allowed: []string{"warm", "pristine"}, Default: "warm", Meaning: "Whether released Sandboxes keep ignored files."},
 	{Key: "pool.setup", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in a Sandbox after it is acquired.", UserOnly: true},
 	{Key: "pool.keep_idle", Type: TypeInteger, Default: 4, Meaning: "Idle Sandboxes kept for each Project."},
+	{Key: "research.native", Type: TypeString, Allowed: []string{ResearchTracked, ResearchOff}, Default: ResearchTracked, Meaning: "Native research children: tracked admits only registered read-only children through hooks and `posse research`; off leaves harness children unmanaged and refuses `posse research start`.", UserOnly: true},
+	{Key: "research.max_active", Type: TypeInteger, Default: 2, Meaning: "Maximum registered or running research children per parent (the Lead or one Task)."},
+	{Key: "research.max_result_bytes", Type: TypeInteger, Default: 262144, Meaning: "Largest research result kept; longer results are truncated and marked."},
+	{Key: "research.max_output_bytes", Type: TypeInteger, Default: 8388608, Meaning: "Largest event stream a process-launched research child may write before Posse stops it."},
+	{Key: "research.timeout", Type: TypeDuration, Default: "30m", Meaning: "Longest run of a process-launched research child before Posse stops it."},
 	{Key: "retention.task_artifacts", Type: TypeDuration, Default: "2160h", Meaning: "How long Teardown keeps Reports, saved Task attachments and approved discard-tip bundles; `posse pool prune` removes expired artifacts."},
 	{Key: "worker_go_cache.max_size", Type: TypeString, Default: "8GiB", Meaning: "Size of the shared Posse Worker GOCACHE at which Posse trims least-recently-used entries; accepts bytes or a KiB, MiB, GiB or TiB suffix. User config only."},
 	{Key: "worker_go_cache.min_age", Type: TypeDuration, Default: "6h", Meaning: "Worker GOCACHE entries used more recently are never trimmed, so active Workers keep their builds; at least 2h. User config only."},
@@ -118,6 +120,11 @@ func Lookup(key string) (KeySpec, bool) {
 		}
 	}
 	return KeySpec{}, false
+}
+
+func IsRemovedGateKey(key string) bool {
+	return key == "gate" || key == "defaults.gate" || key == "gate_loop" || strings.HasPrefix(key, "gate_loop.") ||
+		key == "repositories.<repo>.gate" || strings.HasPrefix(key, "repositories.") && strings.HasSuffix(key, ".gate")
 }
 
 func IsUserOnly(key string) bool {
@@ -239,7 +246,7 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 			return fmt.Errorf("%s must be between 1 and 3", key)
 		}
 	}
-	if key == "gate_loop.max_fix_rounds" || key == "ci_loop.max_fix_rounds" || key == "ci_loop.rerun_cancelled" {
+	if key == "ci_loop.max_fix_rounds" || key == "ci_loop.rerun_cancelled" {
 		if number, ok := integerValue(value); ok && number < 0 {
 			return fmt.Errorf("%s cannot be negative", key)
 		}
@@ -400,7 +407,7 @@ func schemaKeyMatches(pattern, key string) bool {
 
 func canonicalSchemaKey(key string) string {
 	switch key {
-	case "max_workers", "stall_after", "idle_after", "auto_teardown", "merge_mode", "merge_method", "forge", "pr_poll", "review", "gate":
+	case "max_workers", "stall_after", "idle_after", "auto_teardown", "merge_mode", "merge_method", "forge", "pr_poll", "review":
 		return "defaults." + key
 	}
 	return key
@@ -423,7 +430,7 @@ func knownContainer(prefix string) bool {
 
 func isProjectScalarAlias(key string) bool {
 	switch key {
-	case "merge_mode", "max_workers", "stall_after", "idle_after", "auto_teardown", "merge_method", "forge", "pr_poll", "review", "gate":
+	case "merge_mode", "max_workers", "stall_after", "idle_after", "auto_teardown", "merge_method", "forge", "pr_poll", "review":
 		return true
 	default:
 		return false
