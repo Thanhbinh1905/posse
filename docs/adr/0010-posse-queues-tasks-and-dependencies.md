@@ -9,7 +9,7 @@ The v1 spec left automatic Task queueing out: at `max_workers`, `start` refused,
 - `after: [t12:landed, t14:accepted]` records typed prerequisites in the admitted plan. Admission validates predecessor existence and type in the Task creation transaction; unmet milestones keep the Task queued and `show` reports their wait reason. Ready queued Tasks are claimed and launched from their frozen plan, including the admitted Brief, Playbook, launch identity and execution configuration.
 - Review readiness comes from `review_of`, not `after`. A Change Task with a `landed` prerequisite cannot select a custom base; it starts from the default branch after the prerequisite Lands. Stacked branches remain out of scope.
 - Native GitHub `blocked_by` relationships are queried before starting ticketed Change Tasks. Open blockers refuse dispatch; unavailable or invalid blocker data fails closed with a visible wait reason. Core users should still check ticket blockers manually when the forge result is unavailable.
-- If a predecessor becomes `failed`, `lost` or torn down without satisfying its milestone, the edge remains in the admitted plan and `show` identifies the predecessor state; the queued Task is not dispatched.
+- If a predecessor becomes `failed`, `lost` or torn down without satisfying its milestone, the edge remains in the admitted plan and `show` identifies the predecessor state; the queued Task is not dispatched. Reconciliation raises a Decision on the dependent Task to cancel it or drop that prerequisite and run. Applying the latter records a new plan revision before attempting normal dispatch.
 
 ## Considered options
 
@@ -18,6 +18,6 @@ The v1 spec left automatic Task queueing out: at `max_workers`, `start` refused,
 
 ## Consequences
 
-- The lifecycle gains `queued -> spawning` and `queued -> torn-down` (cancel). `posse teardown <task>` cancels a queued Task without touching Worker resources.
-- Queue admission, inspection, cancellation, restart recovery, caller-driven scheduler refill, dependency waits, frozen-plan launch and GitHub blocker checks are implemented.
+- The lifecycle gains `queued -> spawning`, `queued -> queued` (drop an unsatisfied prerequisite through a revised plan) and `queued -> torn-down` (cancel). `posse teardown <task>` cancels a queued Task without touching Worker resources.
+- Queue admission, inspection, cancellation, restart recovery, caller-driven scheduler refill, dependency waits, failed-prerequisite Decisions, frozen-plan launch and GitHub blocker checks are implemented.
 - As with Stalls, queued Tasks can start late if nothing calls `posse` and no event fires ([spec section 23](../spec.md#23-open-risks), "Timers need a caller").
