@@ -54,7 +54,7 @@ With one available agent kind, `posse up` selects it without saving a preference
 
 For a clear implementation request, the Lead can dispatch one Change directly. Research Tasks, specifications, tickets and separate review Tasks are optional. Customize workflow guidance with `posse preferences show|path|set`; User and Project preferences can change advice but not Posse's runtime obligations or authority checks. Legacy preference files remain readable; move them explicitly with `posse preferences move`. Removed commands fail with an error naming their replacement. See [ADR 0026](docs/adr/0026-functional-vocabulary.md) for the vocabulary mapping and automatic 0.14 upgrade.
 
-The `posse-setup` skill (Claude Code: `/posse-setup`, Codex: `$posse-setup`) remains available as an optional full configuration tour. The User-invoked `/posse-down` and `/posse-update` skills guide safe shutdown and update/restart. Use `posse config` to personalize later and `posse --help` to explore the CLI.
+The `posse-setup` skill (Claude Code: `/posse-setup`, Codex: `$posse-setup`) remains available as an optional full configuration tour. The User-invoked `posse-down` and `posse-update` skills (Claude Code: `/posse-down`, `/posse-update`; Codex: `$posse-down`, `$posse-update`) guide safe shutdown and update/restart. Use `posse config` to personalize later and `posse --help` to explore the CLI.
 
 To uninstall, run the installer with `--uninstall` after `sh -s --`. Posse keeps local task history and configuration unless you confirm their removal.
 

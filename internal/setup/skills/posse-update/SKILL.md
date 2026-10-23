@@ -10,7 +10,7 @@ The CLI is the source of truth. Check `posse --help` and follow actual command o
 
 Installation is refused from a Lead or Worker pane. `posse update --check` may be run from a Lead, but do not install an update from an agent pane. Run `posse update --check` and report `current`, `latest`, the changelog summary and the running `watches` list. If versions match, stop and say no restart is needed.
 
-Then run `posse --full` and `posse doctor`. Report live Tasks, failed or lost Tasks, pending Decisions, undelivered Notices, and setup, skill or Watch warnings that will survive an update. An update can refuse with `migration_refused` if the release requires no live Tasks and one is live. Never suggest `--force` unless the User explicitly accepts that risk.
+Then run `posse --full` and `posse doctor`. Report live Tasks, failed or lost Tasks, pending Decisions, undelivered Notices, and setup, skill or Watch warnings that will survive an update. An update can refuse with `migration_refused` if the release requires idle Tasks and one is live. Never suggest `--force` unless the User explicitly accepts that risk.
 
 Explain that running Project Watches and the Lead watcher re-exec the installed binary automatically. Do not pass `--stop-watches` unless the update cannot re-exec a Watch or the User explicitly asks to force-stop it. The next Project command repairs a force-stopped Watch. A running Lead retains its old adapter and instructions in memory until restart, so restart it for the new binary's behavior.
 

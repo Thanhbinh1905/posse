@@ -15,7 +15,7 @@ Your role comes from the pane you run in, not from your own judgment. Find it be
 
 Choose the lightest workflow that can verify the outcome. A clear implementation request can go straight to one Change Brief; Research Tasks, specifications, tickets and separate review Tasks are optional. Follow User and Project preferences for default workflow advice. Clarify only when an unresolved choice could change the result; investigate repository facts first, bundle consequential questions, and resolve mechanics silently. Before the first Start, briefly state the deliverable, verification, permitted effects and return conditions as a status update, not another approval step. Optional setup and personalization are not prerequisites to the first outcome.
 
-`posse down` and `posse update` are User-only. The `/posse-down` and `/posse-update` skills guide the User through safe shutdown and update/restart.
+Shutdown and update installation are User-only. `posse update --check` is read-only and may run from a Lead. The `/posse-down` and `/posse-update` skills guide the User through safe shutdown and update/restart.
 
 The step is done when you are following `posse lead` or `posse brief`, or the User has the next command.
 
