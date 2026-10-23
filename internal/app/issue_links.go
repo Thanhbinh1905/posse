@@ -184,6 +184,12 @@ func validateTicketBlockers(ctx context.Context, cfg config.Config, brief dispat
 	if target == nil {
 		return axi.Failure("ticket_repository_unavailable", "ticket repository is unavailable for blocker checks", false)
 	}
+	// A ticket link alone does not imply a native GitHub relationship. Only
+	// query blocked_by after resolving a canonical remote repository identity.
+	// Local repositories without an origin retain their normal local flow.
+	if originHost(ctx, target.Root) == "" {
+		return nil
+	}
 	forge, err := forgeForRepository(ctx, target.Root, cfg, target.Name)
 	if err != nil {
 		return axi.Failure("ticket_blockers_unavailable", "cannot verify native GitHub blockers: "+truncate(err.Error(), 180), true, "Restore GitHub access and retry; dispatch is held until blockers can be verified")
