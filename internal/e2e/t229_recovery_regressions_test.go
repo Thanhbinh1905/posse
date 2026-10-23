@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -327,6 +328,37 @@ func TestT233MovedProjectRebuild(t *testing.T) {
 				t.Fatalf("Task was not attached to moved Project: %v", err)
 			}
 			if project.Root != moved {
+				t.Logf("recover --rebuild output:\n%s", output)
+				sidecars, globErr := filepath.Glob(database + "-*")
+				if globErr != nil {
+					t.Logf("glob SQLite sidecars: %v", globErr)
+				}
+				for _, sidecar := range sidecars {
+					info, err := os.Stat(sidecar)
+					if err != nil {
+						t.Logf("SQLite sidecar %s: stat error: %v", sidecar, err)
+						continue
+					}
+					t.Logf("SQLite sidecar %s: size=%d mtime=%s", sidecar, info.Size(), info.ModTime().Format(time.RFC3339Nano))
+				}
+				rows, queryErr := f.db.QueryContext(ctx, `SELECT id,name,root,project_uuid FROM projects ORDER BY id`)
+				if queryErr != nil {
+					t.Logf("projects table query: %v", queryErr)
+				} else {
+					for rows.Next() {
+						var id int64
+						var name, root, uuid string
+						if scanErr := rows.Scan(&id, &name, &root, &uuid); scanErr != nil {
+							t.Logf("projects table row scan: %v", scanErr)
+							break
+						}
+						t.Logf("projects table row: id=%d name=%q root=%q uuid=%q", id, name, root, uuid)
+					}
+					if rowsErr := rows.Err(); rowsErr != nil {
+						t.Logf("projects table rows: %v", rowsErr)
+					}
+					_ = rows.Close()
+				}
 				t.Fatalf("moved root=%q, want %q", project.Root, moved)
 			}
 		})
