@@ -196,11 +196,8 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 	}
 }
 
-// admitQueuedTask launches one queued Task once capacity allows. A foreground
-// command is killed with its caller, so with DetachQueuedLaunch the launch runs
-// in its own session and the caller only waits for it; an interrupted start
-// would otherwise leave a Sandbox and a pane without a Worker.
-func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, queued store.Task, plan *taskplan.Plan, inline bool) (bool, error) {
+// frozenTaskBrief returns the Brief bytes admitted with the Task plan.
+func frozenTaskBrief(task store.Task, plan *taskplan.Plan) ([]byte, dispatch.Brief, error) {
 	var briefBytes []byte
 	for _, input := range plan.Inputs {
 		if input.Role == "brief" {
@@ -209,29 +206,72 @@ func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string
 		}
 	}
 	if len(briefBytes) == 0 {
-		return false, fmt.Errorf("queued Task %s has no frozen Brief input", taskIDString(queued.Seq))
+		return nil, dispatch.Brief{}, fmt.Errorf("frozen Brief input missing for Task %s", taskIDString(task.Seq))
 	}
 	brief, err := dispatch.ParseHistoricalBriefText(string(briefBytes))
 	if err != nil {
-		return false, fmt.Errorf("parse queued Task %s Brief: %w", taskIDString(queued.Seq), err)
+		return nil, dispatch.Brief{}, fmt.Errorf("parse Task %s Brief: %w", taskIDString(task.Seq), err)
+	}
+	return briefBytes, brief, nil
+}
+
+// frozenTaskMembers maps the Members admitted with a Workspace Task plan back
+// to the currently registered repositories.
+func frozenTaskMembers(project store.Project, task store.Task, plan *taskplan.Plan, targets []repoTarget) ([]taskMember, error) {
+	members := make([]taskMember, 0, len(plan.Execution.Members))
+	if !project.IsWorkspace() {
+		return members, nil
+	}
+	byName := make(map[string]repoTarget, len(targets))
+	for _, target := range targets {
+		byName[target.Name] = target
+	}
+	for _, frozen := range plan.Execution.Members {
+		target, ok := byName[frozen.Name]
+		if !ok {
+			return nil, fmt.Errorf("workspace member %q of Task %s is no longer registered", frozen.Name, taskIDString(task.Seq))
+		}
+		members = append(members, taskMember{repoTarget: target, Path: frozen.Path, MergeMode: frozen.Delivery, BaseRef: frozen.Base, TargetBranch: frozen.Target})
+	}
+	return members, nil
+}
+
+// frozenLaunchConfig overlays the admitted Profile, kind and Pool onto cfg so a
+// launch never depends on config edited after admission.
+func frozenLaunchConfig(cfg config.Config, plan *taskplan.Plan) (config.Config, dispatch.Resolution) {
+	frozen := cfg
+	frozen.Kinds = make(map[string]config.Kind, len(cfg.Kinds)+1)
+	for name, kind := range cfg.Kinds {
+		frozen.Kinds[name] = kind
+	}
+	frozen.Profiles = make(map[string]config.Profile, len(cfg.Profiles)+1)
+	for name, profile := range cfg.Profiles {
+		frozen.Profiles[name] = profile
+	}
+	frozen.Kinds[plan.Launch.Profile.Kind] = plan.Launch.Kind
+	frozen.Profiles[plan.Launch.ProfileName] = plan.Launch.Profile
+	frozen.Pool = plan.Pool
+	return frozen, dispatch.Resolution{Profile: plan.Launch.ProfileName, Rule: plan.Launch.DispatchRule, Resolved: plan.Launch.Profile}
+}
+
+// admitQueuedTask launches one queued Task once capacity allows. A foreground
+// command is killed with its caller, so with DetachQueuedLaunch the launch runs
+// in its own session and the caller only waits for it; an interrupted start
+// would otherwise leave a Sandbox and a pane without a Worker.
+func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, queued store.Task, plan *taskplan.Plan, inline bool) (bool, error) {
+	briefBytes, brief, err := frozenTaskBrief(queued, plan)
+	if err != nil {
+		return false, err
 	}
 	targets, err := projectTargets(ctx, db, project)
 	if err != nil {
 		return false, err
 	}
-	members := make([]taskMember, 0, len(plan.Execution.Members))
+	members, err := frozenTaskMembers(project, queued, plan, targets)
+	if err != nil {
+		return false, err
+	}
 	if project.IsWorkspace() {
-		byName := make(map[string]repoTarget, len(targets))
-		for _, target := range targets {
-			byName[target.Name] = target
-		}
-		for _, frozen := range plan.Execution.Members {
-			target, ok := byName[frozen.Name]
-			if !ok {
-				return false, fmt.Errorf("queued Task %s Member %q is no longer registered", taskIDString(queued.Seq), frozen.Name)
-			}
-			members = append(members, taskMember{repoTarget: target, Path: frozen.Path, MergeMode: frozen.Delivery, BaseRef: frozen.Base, TargetBranch: frozen.Target})
-		}
 		targets = targets[:0]
 		for _, member := range members {
 			targets = append(targets, member.repoTarget)
@@ -268,23 +308,10 @@ func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string
 	if err != nil {
 		return false, err
 	}
-	frozenCfg := cfg
-	frozenCfg.Kinds = make(map[string]config.Kind, len(cfg.Kinds)+1)
-	for name, kind := range cfg.Kinds {
-		frozenCfg.Kinds[name] = kind
-	}
-	frozenCfg.Profiles = make(map[string]config.Profile, len(cfg.Profiles)+1)
-	for name, profile := range cfg.Profiles {
-		frozenCfg.Profiles[name] = profile
-	}
-	frozenCfg.Kinds[plan.Launch.Profile.Kind] = plan.Launch.Kind
-	frozenCfg.Profiles[plan.Launch.ProfileName] = plan.Launch.Profile
-	frozenCfg.Pool = plan.Pool
-	resolution := dispatch.Resolution{Profile: plan.Launch.ProfileName, Rule: plan.Launch.DispatchRule, Resolved: plan.Launch.Profile}
+	frozenCfg, resolution := frozenLaunchConfig(cfg, plan)
 	launchCtx := &axi.Context{Context: ctx}
-	deferFinishIntent := func() error { return db.FinishIntent(ctx, intent.ID, intent.ProcessID) }
 	launchErr := s.launchAdmittedTask(launchCtx, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, nil, false)
-	finishErr := deferFinishIntent()
+	finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	if launchErr != nil {
 		return false, launchErr
 	}
