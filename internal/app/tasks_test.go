@@ -286,7 +286,7 @@ Implement after the prerequisite.
 		t.Fatalf("dependent Task=%+v err=%v", dependent, err)
 	}
 	plan, err := dependent.AdmittedPlan()
-	if err != nil || plan == nil || len(plan.Dependencies) != 1 || plan.Dependencies[0].Milestone != "landed" {
+	if err != nil || plan == nil || len(plan.Dependencies) != 1 || plan.Dependencies[0].Milestone != "landed" || plan.Execution.Base != "main" || plan.Execution.BaseCommit != "" {
 		t.Fatalf("dependency was not frozen in admitted plan: plan=%+v err=%v", plan, err)
 	}
 	unmet, err := db.UnmetTaskDependencies(context.Background(), fixture.project.ID, plan.Dependencies)
