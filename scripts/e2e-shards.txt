@@ -296,3 +296,5 @@
 2 TestQueuedTaskAdmittedAtFreedSlotStarts
 4 TestQueuedTaskStartSurvivesKilledCaller
 2 TestShowFullRendersBriefInputsAsText
+4 TestNoChangeTaskFinishesAndTearsDownWithoutDiscard
+4 TestTeardownStillRefusesUnapprovedUnmergedWork
