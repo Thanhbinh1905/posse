@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOPROXY: https://proxy.golang.org|direct
+
 # One group per workflow and ref: a new push to the same PR cancels its superseded run,
 # while runs for different PRs and for main do not cancel each other.
 concurrency:
@@ -37,11 +40,26 @@ jobs:
       - name: Use job-local Go caches
         run: |
           echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-lint" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-lint" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-go-mod" >> "$GITHUB_ENV"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/posse-go-mod
+          key: go-mod-${{ runner.os }}-lint-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-lint-
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download &&
+            go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 -version >/dev/null && exit 0
+            echo "go mod download failed (attempt $attempt)" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
       - name: Check formatting
         run: |
           files=$(git ls-files '*.go' | xargs gofmt -l)
@@ -60,11 +78,11 @@ jobs:
       - name: Clean job-local Go caches
         if: ${{ always() }}
         run: |
-          for cache in "$GOCACHE" "$GOMODCACHE"; do
+          for cache in "$GOCACHE"; do
             [ -d "$cache" ] || continue
             find "$cache" -type d -exec chmod u+w {} +
           done
-          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+          rm -rf -- "$GOCACHE"
 
   test-shard:
     name: test shard ${{ matrix.shard }}
@@ -80,11 +98,25 @@ jobs:
       - name: Use job-local Go caches
         run: |
           echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test-${{ matrix.shard }}" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test-${{ matrix.shard }}" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-go-mod" >> "$GITHUB_ENV"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/posse-go-mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && exit 0
+            echo "go mod download failed (attempt $attempt)" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
       - name: Check race shard assignments
         if: ${{ matrix.shard == 1 }}
         run: scripts/run-race-shard.sh --self-test
@@ -101,11 +133,11 @@ jobs:
             find "$root" -type d -exec chmod u+rwx {} +
             rm -rf -- "$root"
           done
-          for cache in "$GOCACHE" "$GOMODCACHE"; do
+          for cache in "$GOCACHE"; do
             [ -d "$cache" ] || continue
             find "$cache" -type d -exec chmod u+w {} +
           done
-          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+          rm -rf -- "$GOCACHE"
 
   test:
     if: ${{ always() }}
@@ -136,11 +168,25 @@ jobs:
       - name: Use job-local Go caches
         run: |
           echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-${{ matrix.shard }}" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-${{ matrix.shard }}" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-go-mod" >> "$GITHUB_ENV"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/posse-go-mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && exit 0
+            echo "go mod download failed (attempt $attempt)" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
       - name: Install pinned Herdr release
         run: |
           tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/herdr"
@@ -190,11 +236,11 @@ jobs:
             rm -rf -- "$root"
           done
           rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
-          for cache in "$GOCACHE" "$GOMODCACHE"; do
+          for cache in "$GOCACHE"; do
             [ -d "$cache" ] || continue
             find "$cache" -type d -exec chmod u+w {} +
           done
-          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+          rm -rf -- "$GOCACHE"
 
   e2e:
     if: ${{ always() }}
@@ -227,11 +273,25 @@ jobs:
       - name: Use job-local Go caches
         run: |
           echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-duplicate-${{ matrix.shard }}" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-duplicate-${{ matrix.shard }}" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-go-mod" >> "$GITHUB_ENV"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/posse-go-mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && exit 0
+            echo "go mod download failed (attempt $attempt)" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
       - name: Install pinned Herdr release
         run: |
           tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/herdr"
@@ -273,11 +333,11 @@ jobs:
             rm -rf -- "$root"
           done
           rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
-          for cache in "$GOCACHE" "$GOMODCACHE"; do
+          for cache in "$GOCACHE"; do
             [ -d "$cache" ] || continue
             find "$cache" -type d -exec chmod u+w {} +
           done
-          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+          rm -rf -- "$GOCACHE"
 
   e2e-main-stress:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -289,11 +349,25 @@ jobs:
       - name: Use job-local Go caches
         run: |
           echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-stress" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-stress" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-go-mod" >> "$GITHUB_ENV"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/posse-go-mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && exit 0
+            echo "go mod download failed (attempt $attempt)" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
       - name: Install pinned Herdr release
         run: |
           tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/herdr"
@@ -336,11 +410,11 @@ jobs:
             rm -rf -- "$root"
           done
           rm -rf -- "$RUNNER_TEMP/posse-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
-          for cache in "$GOCACHE" "$GOMODCACHE"; do
+          for cache in "$GOCACHE"; do
             [ -d "$cache" ] || continue
             find "$cache" -type d -exec chmod u+w {} +
           done
-          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+          rm -rf -- "$GOCACHE"
 
   installer:
     runs-on: ubuntu-latest
@@ -407,11 +481,25 @@ jobs:
       - name: Use job-local Go caches
         run: |
           echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-build" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-mod-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-go-mod" >> "$GITHUB_ENV"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/posse-go-mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && exit 0
+            echo "go mod download failed (attempt $attempt)" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
       - name: Cross-compile release targets
         run: |
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
@@ -425,8 +513,8 @@ jobs:
         if: ${{ always() }}
         run: |
           rm -f -- "$RUNNER_TEMP/posse-linux-amd64" "$RUNNER_TEMP/posse-linux-arm64" "$RUNNER_TEMP/posse-darwin-amd64" "$RUNNER_TEMP/posse-darwin-arm64"
-          for cache in "$GOCACHE" "$GOMODCACHE"; do
+          for cache in "$GOCACHE"; do
             [ -d "$cache" ] || continue
             find "$cache" -type d -exec chmod u+w {} +
           done
-          rm -rf -- "$GOCACHE" "$GOMODCACHE"
+          rm -rf -- "$GOCACHE"
