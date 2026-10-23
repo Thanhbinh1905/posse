@@ -14,7 +14,7 @@ In v1:
 - Merge Modes: `local`, `pr`, `no-mistakes`.
 - Implementation: Go, shipped as one static binary `posse` ([ADR 0002](adr/0002-go-single-binary.md)).
 
-Out of v1: other runtimes, remote machines, coordination across Projects, quota-based routing, per-Worker-type Identity, `paths` matching in Dispatch Rules. Capacity queue admission, caller-driven refill, queued cancellation and restart recovery, typed local Task prerequisites, and GitHub ticket blocker checks are implemented as described in [ADR 0010](adr/0010-posse-queues-tasks-and-dependencies.md). A Task remains queued with a visible wait reason until its prerequisites, ticket blockers and Worker capacity permit normal spawn-intent dispatch. Core users should check ticket blockers manually while GitHub cannot provide a complete result.
+Out of v1: other runtimes, remote machines, coordination across Projects, quota-based routing, per-Worker-type Identity, `paths` matching in Dispatch Rules. Capacity queue admission, caller-driven refill, queued cancellation and restart recovery, typed local Task prerequisites, and GitHub ticket blocker checks are implemented as described in [ADR 0010](adr/0010-posse-queues-tasks-and-dependencies.md). A Task remains queued with a visible wait reason until its prerequisites, ticket blockers and Worker capacity permit normal spawn-intent dispatch. If a prerequisite fails, is lost or is torn down without satisfying its milestone, reconciliation raises a Decision on the queued Task to cancel it or drop that prerequisite and run. Applying the latter records a new plan revision before dispatch. Core users should check ticket blockers manually while GitHub cannot provide a complete result.
 
 ### 1.1 Workflow boundary
 
@@ -411,7 +411,8 @@ queued ─► spawning ─► working ─┬─► done ─► merging ─► me
 | Transition | Source | Trigger |
 |---|---|---|
 | queued → spawning | cli | capacity, typed local prerequisites and native ticket blockers permit caller-driven scheduler refill; the claim and normal start intent are atomic |
-| queued → torn-down | cli | `posse teardown <task>` cancels before Worker dispatch |
+| queued → torn-down | cli | `posse teardown <task>` cancels before Worker dispatch, or the User applies `cancel` on a failed-prerequisite Decision |
+| queued → queued | cli | the User applies `drop-prerequisite-and-run`; Posse records a new admitted-plan revision without that edge, then retries normal dispatch |
 | spawning → working | cli | agent started and brief prompt accepted |
 | working → done / needs-decision / failed | worker | `posse signal` |
 | working ↔ blocked | herdr | agent status `blocked`, then any non-blocked status |

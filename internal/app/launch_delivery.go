@@ -149,6 +149,31 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 				return err
 			}
 			if len(unmet) > 0 {
+				for _, dependency := range plan.Dependencies {
+					predecessor, taskErr := db.Task(ctx, project.ID, dependency.TaskID)
+					if taskErr != nil {
+						return taskErr
+					}
+					if predecessor.State != store.StateFailed && predecessor.State != store.StateLost && predecessor.State != store.StateTornDown {
+						continue
+					}
+					ready, readyErr := db.UnmetTaskDependencies(ctx, project.ID, []dispatch.Dependency{dependency})
+					if readyErr != nil {
+						return readyErr
+					}
+					if len(ready) == 0 {
+						continue
+					}
+					origin := fmt.Sprintf("dependency:%s:%s:%s", taskIDString(queued.Seq), dependency.TaskID, dependency.Milestone)
+					_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{
+						ProjectID: project.ID, TaskID: queued.ID, Origin: origin, Kind: "dependency",
+						Question: fmt.Sprintf("Prerequisite %s for queued Task %s is %s and cannot satisfy %s. Cancel the queued Task, or drop this prerequisite and run it?", dependency.TaskID, taskIDString(queued.Seq), predecessor.State, dependency.Milestone),
+						Options:  []string{"cancel", "drop-prerequisite-and-run"},
+					})
+					if decisionErr != nil {
+						return decisionErr
+					}
+				}
 				continue
 			}
 			var briefBytes []byte
