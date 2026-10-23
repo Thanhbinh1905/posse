@@ -24,6 +24,7 @@ type CompletedWorkerBusy struct {
 	ServerStartedAt string
 	BusySince       int64
 	TurnEnded       int64
+	Baseline        string
 }
 
 type ConfigApproval struct {
