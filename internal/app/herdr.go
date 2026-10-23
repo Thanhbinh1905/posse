@@ -51,7 +51,11 @@ func (s *Service) safePromptWhenBefore(ctx context.Context, paneID, text string,
 }
 
 func (s *Service) safePromptWhenWithSubmissionGate(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error, gate func(func() error) error) error {
-	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, "agent.prompt", map[string]any{"target": paneID, "text": text}, allowed, nil, gate)
+	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, "agent.prompt", map[string]any{"target": paneID, "text": text}, allowed, nil, gate, false)
+}
+
+func (s *Service) safePromptWhenBeforeFocused(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error, beforePrompt func() error) error {
+	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, "agent.prompt", map[string]any{"target": paneID, "text": text}, allowed, beforePrompt, nil, true)
 }
 
 func (s *Service) prompt(ctx context.Context, paneID string, params map[string]any, allowed func(herdr.Snapshot) error) error {
@@ -62,17 +66,20 @@ func (s *Service) promptBefore(ctx context.Context, paneID string, params map[st
 	return s.typeIntoBefore(ctx, paneID, "agent.prompt", params, allowed, beforePrompt)
 }
 
-// typeInto sends input to an agent pane unless the User is in it or the agent
-// waits at a dialog.
+// typeInto sends input unless the pane is focused or the agent waits at a dialog.
 func (s *Service) typeInto(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error) error {
 	return s.typeIntoBefore(ctx, paneID, method, params, allowed, nil)
 }
 
-func (s *Service) typeIntoBefore(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error) error {
-	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, method, params, allowed, beforeSend, nil)
+func (s *Service) typeIntoFocused(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error) error {
+	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, method, params, allowed, nil, nil, true)
 }
 
-func (s *Service) typeIntoBeforeWithSubmissionGate(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error, gate func(func() error) error) error {
+func (s *Service) typeIntoBefore(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error) error {
+	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, method, params, allowed, beforeSend, nil, false)
+}
+
+func (s *Service) typeIntoBeforeWithSubmissionGate(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error, gate func(func() error) error, allowFocused bool) error {
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return err
@@ -81,7 +88,7 @@ func (s *Service) typeIntoBeforeWithSubmissionGate(ctx context.Context, paneID, 
 		if pane.PaneID != paneID {
 			continue
 		}
-		if pane.Focused || snapshot.FocusedPaneID == paneID {
+		if !allowFocused && (pane.Focused || snapshot.FocusedPaneID == paneID) {
 			return axi.Failure("pane_focused", "refusing to type into a focused pane", false, "Unfocus the pane, then retry")
 		}
 		if pane.AgentStatus == "blocked" {
@@ -154,6 +161,12 @@ var launchPromptRetryDelay = time.Second
 func (s *Service) deliverLaunchPrompt(ctx context.Context, paneID, text string) error {
 	return s.confirmPrompt(ctx, paneID, text, func(ctx context.Context, method string, params map[string]any) error {
 		return s.typeInto(ctx, paneID, method, params, nil)
+	})
+}
+
+func (s *Service) deliverLaunchPromptFocused(ctx context.Context, paneID, text string) error {
+	return s.confirmPrompt(ctx, paneID, text, func(ctx context.Context, method string, params map[string]any) error {
+		return s.typeIntoFocused(ctx, paneID, method, params, nil)
 	})
 }
 

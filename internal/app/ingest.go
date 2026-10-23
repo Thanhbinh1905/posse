@@ -513,7 +513,7 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 		if err != nil {
 			return err
 		}
-		if message.WaitForIdle && canSteerPane(task, pane, snapshot, cfg) {
+		if message.WaitForIdle && canSteerPane(task, pane, snapshot, cfg, false) {
 			message, err = db.OldestSteerableQueuedMessage(ctx, task.ID)
 			if store.IsNotFound(err) {
 				continue
@@ -522,10 +522,10 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 				return err
 			}
 		}
-		if queuedMessageReason(task, message, pane, snapshot, cfg) != "" {
+		if queuedMessageReason(task, message, pane, snapshot, cfg, false) != "" {
 			continue
 		}
-		if _, _, err := s.deliverClaimedMessage(ctx, db, task, message, pane.PaneID, cfg); err != nil {
+		if _, _, err := s.deliverClaimedMessage(ctx, db, task, message, pane.PaneID, cfg, false); err != nil {
 			return err
 		}
 	}

@@ -12,7 +12,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
-func TestRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testing.T) {
+func TestFocusedRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
 	defer fixture.db.Close()
 
@@ -57,13 +57,10 @@ func TestRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testing.T) {
 	}
 
 	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": review.PaneID}); err != nil {
-		t.Fatalf("focus review pane to reproduce prompt-delivery failure: %v", err)
+		t.Fatalf("focus review pane before relaunch: %v", err)
 	}
-	for attempt := 1; attempt <= 2; attempt++ {
-		code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "claude-opus")
-		if code == 0 || !strings.Contains(output, "pane_focused") {
-			t.Fatalf("relaunch %d did not fail at focused-pane prompt delivery: code=%d\n%s", attempt, code, output)
-		}
+	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "claude-opus"); code != 0 {
+		t.Fatalf("focused relaunch failed: code=%d\n%s", code, output)
 	}
 
 	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t2")
@@ -71,14 +68,14 @@ func TestRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	if task.Profile != "claude-opus" || !strings.Contains(task.AgentSession, piSession) || task.AgentSessionKind != "pi" {
-		t.Errorf("failed prompt delivery corrupted the Task's Profile or session ownership: Profile=%q session=%q owner=%q", task.Profile, task.AgentSession, task.AgentSessionKind)
+		t.Errorf("focused relaunch corrupted the Task's Profile or session ownership: Profile=%q session=%q owner=%q", task.Profile, task.AgentSession, task.AgentSessionKind)
 	}
 	identities, err := fixture.db.TaskLaunchIdentities(context.Background(), review.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(identities) != 3 || identities[1].Profile != "claude-opus" || identities[1].ConfiguredModel != "opus" || !identities[1].ModelKnown || identities[2].Profile != "claude-opus" || identities[2].ConfiguredModel != "opus" || !identities[2].ModelKnown {
-		t.Errorf("failed relaunches lost their configured launch identities: %#v", identities)
+	if len(identities) != 2 || identities[1].Profile != "claude-opus" || identities[1].ConfiguredModel != "opus" || !identities[1].ModelKnown {
+		t.Errorf("focused relaunch lost its configured launch identity: %#v", identities)
 	}
 
 	log, err := os.ReadFile(filepath.Join(fixture.root, "review-identity-args.log"))
@@ -92,15 +89,23 @@ func TestRelaunchProfileSwitchDoesNotResumeAnotherHarnessSession(t *testing.T) {
 			reviewStarts = append(reviewStarts, fields[1])
 		}
 	}
-	if len(reviewStarts) != 3 {
-		t.Fatalf("review harness starts=%d, want initial Pi plus two Claude relaunches; log:\n%s", len(reviewStarts), log)
+	if len(reviewStarts) != 2 {
+		t.Fatalf("review harness starts=%d, want initial Pi plus one Claude relaunch; log:\n%s", len(reviewStarts), log)
 	}
 	for attempt, args := range reviewStarts[1:] {
 		if strings.Contains(args, piSession) || strings.Contains(args, "--resume") {
 			t.Errorf("Claude relaunch %d received another harness's Pi session: args=%q; Task profile=%q session=%q", attempt+1, args, task.Profile, task.AgentSession)
 		}
 	}
-	if len(reviewStarts) > 1 && !strings.Contains(reviewStarts[1], "--model opus") {
-		t.Errorf("first failed launch did not use the requested Claude Profile: %q", reviewStarts[1])
+	if len(reviewStarts) > 1 && (!strings.Contains(reviewStarts[1], "--model opus") || strings.Contains(reviewStarts[1], "relaunch.md")) {
+		t.Errorf("focused launch used unexpected Claude Profile arguments: %q", reviewStarts[1])
+	}
+	input, err := os.ReadFile(filepath.Join(fixture.root, "review-identity-input.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relaunchPrompt := "Read " + filepath.Join(fixture.home, "projects", "shop", "tasks", "t2", "relaunch.md") + " and follow it."
+	if !strings.Contains(string(input), relaunchPrompt) {
+		t.Errorf("focused relaunch prompt was not typed into the new Claude session: want %q in %q", relaunchPrompt, input)
 	}
 }

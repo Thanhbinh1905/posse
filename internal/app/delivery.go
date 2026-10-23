@@ -127,16 +127,17 @@ func deliveredMessageReason(pane herdr.Pane, compacting bool) string {
 	if compacting || pane.AgentStatus == "working" {
 		return "steered"
 	}
-	return "agent_ready_and_unfocused"
+	return "agent_ready"
 }
 
-func canSteerPane(task store.Task, pane herdr.Pane, snapshot herdr.Snapshot, cfg config.Config) bool {
-	return pane.AgentStatus == "working" && !pane.Focused && snapshot.FocusedPaneID != pane.PaneID &&
+func canSteerPane(task store.Task, pane herdr.Pane, snapshot herdr.Snapshot, cfg config.Config, allowFocused bool) bool {
+	focused := pane.Focused || snapshot.FocusedPaneID == pane.PaneID
+	return pane.AgentStatus == "working" && (allowFocused || !focused) &&
 		task.State != store.StateBlocked && pane.Agent != "" && cfg.Kinds[pane.Agent].Steer
 }
 
-func queuedMessageReason(task store.Task, message store.Message, pane herdr.Pane, snapshot herdr.Snapshot, cfg config.Config) string {
-	if pane.Focused || snapshot.FocusedPaneID == pane.PaneID {
+func queuedMessageReason(task store.Task, message store.Message, pane herdr.Pane, snapshot herdr.Snapshot, cfg config.Config, allowFocused bool) string {
+	if !allowFocused && (pane.Focused || snapshot.FocusedPaneID == pane.PaneID) {
 		return "focused"
 	}
 	if task.State == store.StateBlocked || pane.AgentStatus == "blocked" {
@@ -181,7 +182,7 @@ func newDeliveryClaimToken() (string, error) {
 	return hex.EncodeToString(value[:]), nil
 }
 
-func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config) (bool, string, error) {
+func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config, allowFocused bool) (bool, string, error) {
 	at := currentTime()
 	active, err := db.HasDeliveryInProgress(ctx, task.ID, at-deliveryClaimTimeout.Milliseconds())
 	if err != nil || active {
@@ -199,11 +200,11 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 		return false, "", err
 	}
 	claimCtx, stopClaim := keepMessageDeliveryClaimsAlive(ctx, db, task.ID, message.ID, token)
-	delivered, reason, submitErr := s.submitClaimedMessage(claimCtx, db, task, message, paneID, cfg, token)
+	delivered, reason, submitErr := s.submitClaimedMessage(claimCtx, db, task, message, paneID, cfg, token, allowFocused)
 	return delivered, reason, errors.Join(submitErr, stopClaim())
 }
 
-func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config, token string) (bool, string, error) {
+func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config, token string, allowFocused bool) (bool, string, error) {
 	check := func(snapshot herdr.Snapshot) error {
 		pane, found := findAppPane(snapshot.Panes, paneID, task.PaneLabel)
 		if !found || pane.PaneID != paneID {
@@ -214,7 +215,7 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		if err != nil {
 			return err
 		}
-		if queuedMessageReason(task, message, pane, snapshot, cfg) != "" {
+		if queuedMessageReason(task, message, pane, snapshot, cfg, allowFocused) != "" {
 			return axi.Failure("message_not_ready", "Worker is not ready for this message", true)
 		}
 		// Herdr can keep the previous idle/done status when a modal matches
@@ -258,13 +259,20 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		return nil
 	}
 	submitting := false
-	if err := s.safePromptWhenBefore(ctx, paneID, workerInstruction(task, message), check, func() error {
+	beforePrompt := func() error {
 		if err := db.MarkMessageSubmitting(ctx, message.ID, token); err != nil {
 			return err
 		}
 		submitting = true
 		return nil
-	}); err != nil {
+	}
+	var promptErr error
+	if allowFocused {
+		promptErr = s.safePromptWhenBeforeFocused(ctx, paneID, workerInstruction(task, message), check, beforePrompt)
+	} else {
+		promptErr = s.safePromptWhenBefore(ctx, paneID, workerInstruction(task, message), check, beforePrompt)
+	}
+	if err := promptErr; err != nil {
 		if submitting {
 			created, noticeErr := s.createMessageDeliveryUncertainNotice(ctx, db, task.ProjectID, task.Seq, message)
 			if noticeErr == nil && created {

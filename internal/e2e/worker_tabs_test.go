@@ -158,8 +158,8 @@ func TestTaskNamesBranchesAndLegacyRecoveryRemainIndependent(t *testing.T) {
 	f.exitWorker(t, "t2")
 }
 
-// TestFocusedWorkerLaunch focuses the new Worker tab before prompt delivery,
-// then verifies the Lead can safely complete delivery after unfocusing it.
+// TestFocusedWorkerLaunch focuses the new Worker tab before launch delivery and
+// verifies the explicit typed Brief reaches it without waiting for unfocus.
 func TestFocusedWorkerLaunch(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	if err := os.WriteFile(filepath.Join(f.root, "focus-spawn"), []byte(""), 0o600); err != nil {
@@ -194,8 +194,12 @@ func TestFocusedWorkerLaunch(t *testing.T) {
 	if err := command.Wait(); err != nil {
 		t.Fatalf("focused start: %v: %s", err, output.String())
 	}
-	if task := f.task(t, "t1"); task.State != store.StateSpawning || task.SandboxID == 0 {
-		t.Fatalf("focused Worker did not retain spawning Task and Sandbox: %#v output=%s", task, output.String())
+	if task := f.task(t, "t1"); task.State != store.StateWorking || task.SandboxID == 0 {
+		t.Fatalf("focused Worker did not reach working with its Sandbox: %#v output=%s", task, output.String())
+	}
+	prompts, err := os.ReadFile(filepath.Join(f.root, "focused-launch-prompts"))
+	if err != nil || !strings.Contains(string(prompts), "Read ") || !strings.Contains(string(prompts), "launch.md") {
+		t.Fatalf("focused Worker did not receive its typed launch Brief: %q, %v", prompts, err)
 	}
 	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": f.leadPaneID}); err != nil {
 		t.Fatal(err)
@@ -203,7 +207,7 @@ func TestFocusedWorkerLaunch(t *testing.T) {
 	focusEvent := setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", `{"event":"pane_focused","data":{"pane_id":"`+f.leadPaneID+`"}}`)
 	runPosse(t, f.binary, f.repo, focusEvent, "_ingest")
 	if task := f.task(t, "t1"); task.State != store.StateWorking {
-		t.Fatalf("unfocus did not deliver Brief: task=%#v output=%s", task, output.String())
+		t.Fatalf("focus reconciliation changed launch state: task=%#v output=%s", task, output.String())
 	}
 	if task := f.task(t, "t1"); task.SandboxID == 0 || task.PaneID != paneID {
 		t.Fatalf("queued launch did not use the same Sandbox and pane: %#v", task)
@@ -533,6 +537,7 @@ case "$PWD/" in
   "$POSSE_E2E_WORKTREES/"*)
     if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then sleep 3; fi
     IFS= read -r prompt || exit 0
+    if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then printf '%s\n' "$prompt" >> "$POSSE_TEST_ROOT/focused-launch-prompts"; fi
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     if [ -f "$POSSE_TEST_ROOT/check-task-env" ]; then
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" "$GOCACHE" > "$POSSE_TEST_ROOT/task-environment"

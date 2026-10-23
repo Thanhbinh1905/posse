@@ -82,8 +82,10 @@ func TestPosseSpawnNoticeMergeTeardownAndRecovery(t *testing.T) {
 	launchRead := filepath.Join(root, "worker-launch-delivered.md")
 	claudeBinary := filepath.Join(binDir, "claude")
 	fakeAgent := `#!/bin/sh
+	prompt=
 	previous=
 	for argument in "$@"; do
+	  case "$argument" in "Read "*.md" and follow it.") prompt=$argument ;; esac
 	  if [ "$previous" = plugin-dir ]; then
 	    case "$argument" in
 	      "$POSSE_HOME/projects/"*/launch-skills/*)
@@ -100,7 +102,7 @@ func TestPosseSpawnNoticeMergeTeardownAndRecovery(t *testing.T) {
 	case "$PWD/" in
 	  "$POSSE_E2E_WORKTREES/"*)
 	    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
-	    IFS= read -r prompt || exit 0
+	    if [ -z "$prompt" ]; then IFS= read -r prompt || exit 0; fi
 	    launch_path=${prompt#Read }
 	    launch_path=${launch_path% and follow it.}
 	    task_id=$(basename "$(dirname "$launch_path")")
@@ -487,6 +489,9 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertWorkerSidebarPresentation(t, client, launched, "Lead:shop")
+	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": launched.PaneID}); err != nil {
+		t.Fatalf("focus the Worker before explicit send: %v", err)
+	}
 	if output := runPosse(t, posseBinary, repo, leadEnv, "send", "t1", "Steer the current work"); !strings.Contains(output, "delivered") {
 		t.Fatalf("mid-turn send did not deliver: %s", output)
 	}

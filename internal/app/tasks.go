@@ -699,12 +699,14 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	// These harnesses accept an opening turn without touching the composer.
+	// Keep the existing opening-argument path for Codex and OpenCode.
 	openingPrompt := kind == "codex" || kind == "opencode"
-	if kind == "codex" {
-		argsForAgent = append(argsForAgent, "Read "+launchPath+" and follow it.")
-	} else if kind == "opencode" {
-		argsForAgent = append(argsForAgent, "--prompt", "Read "+launchPath+" and follow it.")
+	openingText := "Read " + launchPath + " and follow it."
+	switch kind {
+	case "codex":
+		argsForAgent = append(argsForAgent, openingText)
+	case "opencode":
+		argsForAgent = append(argsForAgent, "--prompt", openingText)
 	}
 	var started json.RawMessage
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.start", func() error {
@@ -722,39 +724,16 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	} else {
 		err = s.waitAgentReady(ctx.Context, opened.PaneID)
 	}
+	if err == nil && !openingPrompt {
+		err = s.runIntentStep(ctx.Context, db, intent, "agent.prompt", func() error {
+			return s.deliverLaunchPromptFocused(ctx.Context, opened.PaneID, openingText)
+		})
+	}
 	if err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	if !openingPrompt {
-		err = s.runIntentStep(ctx.Context, db, intent, "agent.prompt", func() error {
-			return s.deliverLaunchPrompt(ctx.Context, opened.PaneID, "Read "+launchPath+" and follow it.")
-		})
-		var focused *axi.Error
-		if errors.As(err, &focused) && focused.Code == "pane_focused" {
-			// The next focus event or watch tick will submit the Brief.
-			err = nil
-			if finishErr := db.FinishIntent(ctx.Context, intent.ID, os.Getpid()); finishErr != nil {
-				return finishErr
-			}
-			if refreshErr := s.regenerateProjects(ctx.Context, db); refreshErr != nil {
-				return refreshErr
-			}
-			result := axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "state", Value: "spawning"}, {Key: "worker", Value: workerName}}
-			if mode == "no-mistakes" {
-				result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning("merge_mode")}})
-			}
-			result = append(result, axi.Field{Key: "help", Value: []any{"Brief delivery waits for the Worker pane to become unfocused"}})
-			if report {
-				return ctx.Print(result)
-			}
-			return nil
-		}
-		if err != nil {
-			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
-			return err
-		}
-	}
+
 	if err := s.runIntentStep(ctx.Context, db, intent, "pane.metadata", func() error {
 		return s.refreshWorkerDisplay(ctx.Context, db, project, taskID, kind)
 	}); err != nil {
@@ -1991,7 +1970,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Worker pane before sending another instruction")
 	case "queued":
 		candidate, queueErr := db.OldestQueuedMessage(ctx.Context, task.ID)
-		if queueErr == nil && !message.WaitForIdle && paneFound && canSteerPane(task, sendPane, snapshot, cfg) {
+		if queueErr == nil && !message.WaitForIdle && paneFound && canSteerPane(task, sendPane, snapshot, cfg, true) {
 			// An explicit --queue message waits for idle, but it must not
 			// prevent a later instruction from steering the current turn.
 			candidate, queueErr = db.OldestSteerableQueuedMessage(ctx.Context, task.ID)
@@ -2008,13 +1987,13 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		earlierDelivered := false
 		earlierPending := false
 		if queueErr == nil && paneFound {
-			attemptedReason = queuedMessageReason(task, candidate, sendPane, snapshot, cfg)
+			attemptedReason = queuedMessageReason(task, candidate, sendPane, snapshot, cfg, true)
 			if attemptedReason != "" && candidate.ID != messageID {
 				earlierPending = true
 				blockedByMessageID = candidate.ID
 			}
 			if attemptedReason == "" {
-				wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, candidate, sendPane.PaneID, cfg)
+				wasDelivered, deliveryReason, err := s.deliverClaimedMessage(ctx.Context, db, task, candidate, sendPane.PaneID, cfg, true)
 				if err != nil {
 					return err
 				}
@@ -2053,7 +2032,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 			case earlierPending:
 				reason = "earlier_message_pending"
 			case paneFound:
-				reason = queuedMessageReason(task, message, sendPane, snapshot, cfg)
+				reason = queuedMessageReason(task, message, sendPane, snapshot, cfg, true)
 			}
 			if reason == "" {
 				reason = "delivery_in_progress"
@@ -2071,7 +2050,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	if delivered {
 		state = "delivered"
 	} else {
-		help := "The message will be delivered when the Worker is ready and unfocused"
+		help := "The message will be delivered when the Worker is ready"
 		if reason == "delivery_in_progress" {
 			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"
 		} else if reason == "blocked" || reason == "agent_ui_unknown" {
@@ -2212,15 +2191,6 @@ func (s *Service) keys(ctx *axi.Context, args []string) error {
 	if task.State != store.StateBlocked {
 		return axi.Failure("worker_not_blocked", taskIDString(task.Seq)+" is not blocked", false, "Use `posse send` for normal instructions")
 	}
-	snapshot, err := s.snapshot(ctx.Context)
-	if err != nil {
-		return err
-	}
-	for _, pane := range snapshot.Panes {
-		if pane.PaneID == task.PaneID && (pane.Focused || snapshot.FocusedPaneID == task.PaneID) {
-			return axi.Failure("pane_focused", "refusing to send keys to a focused pane", false, "Unfocus the pane, then retry")
-		}
-	}
 	_, err = s.herdrCall(ctx.Context, "agent.send_keys", map[string]any{"target": task.PaneID, "keys": args[1:]})
 	if err != nil {
 		return err
@@ -2293,9 +2263,6 @@ func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config
 	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 	if !found {
 		return interruptOutcome{}, axi.Failure("worker_pane_missing", "Worker pane is not available", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
-	}
-	if pane.Focused || snapshot.FocusedPaneID == pane.PaneID {
-		return interruptOutcome{}, axi.Failure("pane_focused", "refusing to interrupt a focused pane", false, "Unfocus the pane, then retry")
 	}
 	if task.State == store.StateBlocked || pane.AgentStatus == "blocked" {
 		return interruptOutcome{}, axi.Failure("worker_blocked", "refusing to send an abort key to a blocked Worker", false, "Inspect the Worker dialog with `posse peek "+taskIDString(task.Seq)+"`")
@@ -2394,7 +2361,7 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task,
 	if outcome.Pane.PaneID != "" {
 		paneID = outcome.Pane.PaneID
 	}
-	delivered, deliveryReason, deliveryErr := s.submitClaimedMessage(reservationCtx, db, task, message, paneID, cfg, token)
+	delivered, deliveryReason, deliveryErr := s.submitClaimedMessage(reservationCtx, db, task, message, paneID, cfg, token, true)
 	message, readErr := db.MessageByID(ctx.Context, messageID)
 	if readErr == nil && message.Status == "delivered" {
 		delivered = true
@@ -2426,7 +2393,7 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task,
 				if compactErr != nil {
 					return compactErr
 				}
-				reason = queuedMessageReason(task, message, pane, snapshot, cfg)
+				reason = queuedMessageReason(task, message, pane, snapshot, cfg, true)
 				if compacting && reason == "agent_not_ready" {
 					reason = "compacting"
 				}
@@ -2780,14 +2747,40 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			return failure(err)
 		}
 	}
+	relaunchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "relaunch.md")
+	messages, err := db.TaskMessagesAfter(ctx, task.ID, task.CreatedAt, maxRelaunchMessages+1)
+	if err != nil {
+		return failure(err)
+	}
+	if err := track("relaunch.write", func() error { return writeFile(relaunchPath, relaunchInstructions(gitStateReport, messages)) }); err != nil {
+		return failure(err)
+	}
+	relaunchPrompt := "Read " + relaunchPath + " and follow it."
+	openingPrompt := kind == "codex" || kind == "opencode"
+	switch kind {
+	case "codex":
+		startArgs = append(startArgs, relaunchPrompt)
+	case "opencode":
+		startArgs = append(startArgs, "--prompt", relaunchPrompt)
+	}
 	if err := track("agent.start", func() error {
 		_, callErr := s.startAgent(ctx, map[string]any{"name": workerName, "kind": kind, "pane_id": pane.PaneID, "args": startArgs})
 		return callErr
 	}); err != nil {
 		return failure(err)
 	}
-	if err := s.waitAgentReady(ctx, pane.PaneID); err != nil {
+	if openingPrompt {
+		err = s.waitAgentLaunched(ctx, pane.PaneID)
+	} else {
+		err = s.waitAgentReady(ctx, pane.PaneID)
+	}
+	if err != nil {
 		return failure(err)
+	}
+	if !openingPrompt {
+		if err := track("agent.prompt", func() error { return s.deliverLaunchPromptFocused(ctx, pane.PaneID, relaunchPrompt) }); err != nil {
+			return failure(err)
+		}
 	}
 	if plan == nil && profileName != task.Profile {
 		if err := track("task.profile", func() error {
@@ -2801,17 +2794,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}); err != nil {
 		return failure(err)
 	}
-	messages, err := db.TaskMessagesAfter(ctx, task.ID, task.CreatedAt, maxRelaunchMessages+1)
-	if err != nil {
-		return failure(err)
-	}
-	relaunchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "relaunch.md")
-	if err := track("relaunch.write", func() error { return writeFile(relaunchPath, relaunchInstructions(gitStateReport, messages)) }); err != nil {
-		return failure(err)
-	}
-	if err := track("agent.prompt", func() error { return s.deliverLaunchPrompt(ctx, pane.PaneID, "Read "+relaunchPath+" and follow it.") }); err != nil {
-		return failure(err)
-	}
+
 	if err := s.markRelaunchedWorking(ctx, db, project.ID, task.ID, automatic, snapshot.ServerStartedAt, track); err != nil {
 		return failure(err)
 	}
