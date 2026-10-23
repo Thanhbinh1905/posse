@@ -92,7 +92,7 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 	if len(adapter.Calls) != 0 {
 		t.Fatalf("setup used the Herdr socket although the server is not running: %#v", adapter.Calls)
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 		if _, err := os.Stat(filepath.Join(userHome, ".agents", "skills", name, "SKILL.md")); !os.IsNotExist(err) {
 			t.Fatalf("default setup installed global skill %s: %v", name, err)
 		}

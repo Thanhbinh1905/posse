@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-//go:embed assets/herdr-plugin.toml assets/pi-worker-guard.ts assets/lead-guidance.md skills/posse/SKILL.md skills/posse-setup/SKILL.md
+//go:embed assets/herdr-plugin.toml assets/pi-worker-guard.ts assets/lead-guidance.md skills/*/SKILL.md
 var files embed.FS
 
 func PluginManifest(binary, version string) ([]byte, error) {
@@ -41,8 +41,23 @@ func LeadGuidance() ([]byte, error) {
 	return files.ReadFile("assets/lead-guidance.md")
 }
 
+var skillNames = []string{"posse", "posse-setup", "posse-down", "posse-update"}
+
+func SkillNames() []string {
+	return append([]string(nil), skillNames...)
+}
+
+func IsSkill(name string) bool {
+	for _, skill := range skillNames {
+		if name == skill {
+			return true
+		}
+	}
+	return false
+}
+
 func Skill(name string) ([]byte, error) {
-	if name != "posse" && name != "posse-setup" {
+	if !IsSkill(name) {
 		return nil, fmt.Errorf("unknown embedded skill %q", name)
 	}
 	return files.ReadFile("skills/" + name + "/SKILL.md")

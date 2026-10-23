@@ -69,7 +69,7 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 	if containsString(piSkillPaths, projectSkill) {
 		t.Errorf("Pi launch exposed a Project skill despite preserving only User skills: %#v", piSkillPaths)
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range setupassets.SkillNames() {
 		legacy := filepath.Join(userHome, ".agents", "skills", name, "SKILL.md")
 		if containsString(piSkillPaths, legacy) {
 			t.Errorf("Pi launch passed legacy global %s alongside frozen copy: %#v", name, piSkillPaths)
@@ -89,7 +89,7 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 	if !found || json.Unmarshal([]byte(value), &instructions) != nil {
 		t.Fatalf("Codex developer_instructions is not a quoted string: %#v", codexArgs)
 	}
-	for _, name := range []string{"posse", "posse-setup"} {
+	for _, name := range setupassets.SkillNames() {
 		want, err := setupassets.Skill(name)
 		if err != nil {
 			t.Fatal(err)

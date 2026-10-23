@@ -50,7 +50,7 @@ case "$kind" in
       if [ "$previous" = plugin-dir ]; then
         case "$argument" in
           "$POSSE_HOME/projects/"*/launch-skills/*)
-            for skill in posse posse-setup; do cat "$argument/skills/$skill/SKILL.md" >> "$POSSE_E2E_SKILL_READS"; done
+            for skill in posse posse-setup posse-down posse-update; do cat "$argument/skills/$skill/SKILL.md" >> "$POSSE_E2E_SKILL_READS"; done
             ;;
         esac
         previous=
@@ -80,9 +80,9 @@ case "$kind" in
             python3 - "$POSSE_E2E_SKILL_READS" <<'PY'
 import json, os, re, sys
 instructions = json.loads(os.environ["POSSE_E2E_SKILL_INSTRUCTIONS"])
-paths = re.findall(r'[^ ;]+/skills/(?:posse|posse-setup)/SKILL\.md', instructions)
-if len(paths) != 2:
-    raise SystemExit(f"expected two exact skill paths, got {paths!r}")
+paths = re.findall(r'[^ ;]+/skills/(?:posse|posse-setup|posse-down|posse-update)/SKILL\.md', instructions)
+if len(paths) != 4:
+    raise SystemExit(f"expected four exact skill paths, got {paths!r}")
 with open(sys.argv[1], "a", encoding="utf-8") as output:
     for path in paths:
         with open(path, encoding="utf-8") as skill:
@@ -207,13 +207,13 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 					t.Fatalf("Claude launch omitted the scoped plugin argument: %s", argsContents)
 				}
 			case "pi":
-				if strings.Count(string(argsContents), "--skill") < 4 {
+				if strings.Count(string(argsContents), "--skill") < 8 {
 					t.Fatalf("Pi Lead/Worker args omitted skill paths: %s", argsContents)
 				}
 			}
 			contents, err := os.ReadFile(skillReads)
-			if err != nil || !strings.Contains(string(contents), "name: posse") || !strings.Contains(string(contents), "name: posse-setup") {
-				t.Fatalf("%s fake harness could not read both injected skills: %s err=%v", kind, contents, err)
+			if err != nil || !strings.Contains(string(contents), "name: posse") || !strings.Contains(string(contents), "name: posse-setup") || !strings.Contains(string(contents), "name: posse-down") || !strings.Contains(string(contents), "name: posse-update") {
+				t.Fatalf("%s fake harness could not read all injected skills: %s err=%v", kind, contents, err)
 			}
 			for _, path := range []string{
 				filepath.Join(root, "home", ".agents", "skills"),

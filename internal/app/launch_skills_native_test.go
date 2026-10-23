@@ -36,8 +36,9 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 			t.Setenv("PI_OFFLINE", "1")
 
 			if upgraded {
-				writePiSkill(t, filepath.Join(userHome, ".agents", "skills", "posse"), "posse", "OLD_GLOBAL_POSSE")
-				writePiSkill(t, filepath.Join(userHome, ".agents", "skills", "posse-setup"), "posse-setup", "OLD_GLOBAL_SETUP")
+				for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
+					writePiSkill(t, filepath.Join(userHome, ".agents", "skills", skillName), skillName, "OLD_GLOBAL_"+skillName)
+				}
 			}
 			writePiSkill(t, filepath.Join(userHome, ".agents", "skills", "unrelated-user"), "unrelated-user", "UNRELATED_USER_SKILL")
 			writePiSkill(t, filepath.Join(piHome, "skills", "pi-user"), "pi-user", "PI_USER_SKILL")
@@ -47,9 +48,9 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 			if err != nil {
 				t.Fatalf("freeze launch skills: %v", err)
 			}
-			frozenPaths := []string{
-				filepath.Join(skills.ClaudePluginDir, "skills", "posse", "SKILL.md"),
-				filepath.Join(skills.ClaudePluginDir, "skills", "posse-setup", "SKILL.md"),
+			var frozenPaths []string
+			for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
+				frozenPaths = append(frozenPaths, filepath.Join(skills.ClaudePluginDir, "skills", skillName, "SKILL.md"))
 			}
 			fixture, err := json.Marshal(map[string]any{
 				"cwd":         projectRoot,
@@ -75,7 +76,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 				t.Fatalf("decode Pi resource-loader output %q: %v", output, err)
 			}
 			if upgraded {
-				for _, skillName := range []string{"posse", "posse-setup"} {
+				for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 					baseline, found := loadedPiSkill(result.Baseline.Skills, skillName)
 					if !found || !strings.Contains(baseline.Content, "OLD_GLOBAL_") {
 						t.Errorf("native discovery did not reproduce the old global %s winner: skill=%#v found=%t", skillName, baseline, found)
@@ -85,7 +86,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 					}
 				}
 			} else {
-				for _, skillName := range []string{"posse", "posse-setup"} {
+				for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 					want, err := setupassets.Skill(skillName)
 					if err != nil {
 						t.Fatal(err)
@@ -101,7 +102,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 					t.Errorf("Pi native discovery reported a skill collision: %s", diagnostic.Message)
 				}
 			}
-			for _, skillName := range []string{"posse", "posse-setup"} {
+			for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 				want, err := setupassets.Skill(skillName)
 				if err != nil {
 					t.Fatal(err)
@@ -120,7 +121,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 				t.Error("Pi launch exposed Project skills while restoring only User skills")
 			}
 			if upgraded {
-				for _, skillName := range []string{"posse", "posse-setup"} {
+				for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
 					path := filepath.Join(userHome, ".agents", "skills", skillName, "SKILL.md")
 					contents, err := os.ReadFile(path)
 					if err != nil || !bytes.Contains(contents, []byte("OLD_GLOBAL_")) {
