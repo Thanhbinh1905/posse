@@ -2050,7 +2050,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	if delivered {
 		state = "delivered"
 	} else {
-		help := "The message will be delivered when the Worker is ready and unfocused"
+		help := "The message will be delivered when the Worker is ready"
 		if reason == "delivery_in_progress" {
 			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"
 		} else if reason == "blocked" || reason == "agent_ui_unknown" {

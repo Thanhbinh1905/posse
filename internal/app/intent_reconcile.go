@@ -224,7 +224,7 @@ func (s *Service) recoverStartIntent(ctx context.Context, db *store.DB, project 
 		}
 		return nil
 	}
-	if !strings.HasPrefix(intent.Step, "done:agent.prompt") && !strings.HasPrefix(intent.Step, "done:task.working") && pane.AgentStatus != "working" && taskKind(cfg, task) != "claude" && taskKind(cfg, task) != "codex" && taskKind(cfg, task) != "pi" && taskKind(cfg, task) != "opencode" {
+	if !strings.HasPrefix(intent.Step, "done:agent.prompt") && !strings.HasPrefix(intent.Step, "done:task.working") && pane.AgentStatus != "working" && taskKind(cfg, task) != "codex" && taskKind(cfg, task) != "opencode" {
 		home, err := s.homePath()
 		if err != nil {
 			return err

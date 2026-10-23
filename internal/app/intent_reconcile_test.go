@@ -67,6 +67,113 @@ func TestInterruptedStartWithoutPaneFailsAndReleasesSandbox(t *testing.T) {
 	}
 }
 
+func TestInterruptedClaudeAndPiStartsDeliverBriefOrStaySpawningWhenFocused(t *testing.T) {
+	for _, kind := range []string{"claude", "pi"} {
+		for _, focused := range []bool{false, true} {
+			name := kind + "/unfocused"
+			if focused {
+				name = kind + "/focused"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				root := t.TempDir()
+				repo := filepath.Join(root, "repo")
+				initRepo(t, repo)
+				home := filepath.Join(root, "posse")
+				if err := os.MkdirAll(filepath.Join(home, "projects", "shop", "tasks", "t1"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`[profiles.claude]
+kind = "claude"
+
+[profiles.pi]
+kind = "pi"
+
+[dispatch.default]
+use = "claude"
+`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				launchPath := filepath.Join(home, "projects", "shop", "tasks", "t1", "launch.md")
+				if err := os.WriteFile(launchPath, []byte("Worker Brief\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				db, err := store.Open(home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				project, err := db.CreateProject(ctx, "shop", repo, "main")
+				if err != nil {
+					t.Fatal(err)
+				}
+				const paneID = "w2:p1"
+				taskID, err := db.CreateTask(ctx, project.ID, store.Task{
+					Seq: 1, Type: "change", Title: "Interrupted " + kind + " start", MergeMode: "local",
+					Profile: kind, DispatchRule: "dispatch.default", PaneID: paneID,
+					PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.StartIntent(ctx, project.ID, taskID, "start", "done:agent.start", `{}`, deadIntentProcessID); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := config.Load(home, project.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pane := herdr.Pane{PaneID: paneID, WorkspaceID: "w2", Label: "posse:shop:t1", Agent: kind, AgentStatus: "idle", Focused: focused}
+				focusedPaneID := "w2:p2"
+				if focused {
+					focusedPaneID = paneID
+				}
+				fake := herdr.NewFake()
+				fake.SnapshotValue = herdr.Snapshot{FocusedPaneID: focusedPaneID, Panes: []herdr.Pane{pane}}
+				service := testService(home, fake)
+				intent, err := db.IntentByTask(ctx, taskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				task, err := db.TaskByID(ctx, project.ID, taskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := service.recoverStartIntent(ctx, db, project, cfg, task, intent, fake.SnapshotValue); err != nil {
+					t.Fatal(err)
+				}
+				task, err = db.TaskByID(ctx, project.ID, taskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if focused {
+					if task.State != store.StateSpawning || fake.CallCount("agent.prompt") != 0 {
+						t.Fatalf("focused interrupted start silently advanced: state=%s prompts=%d", task.State, fake.CallCount("agent.prompt"))
+					}
+					pane.Focused = false
+					fake.SnapshotValue.FocusedPaneID = "w2:p2"
+					fake.SnapshotValue.Panes[0] = pane
+					if err := service.retryPendingLaunches(ctx, db, project, cfg, fake.SnapshotValue); err != nil {
+						t.Fatal(err)
+					}
+					task, err = db.TaskByID(ctx, project.ID, taskID)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if task.State != store.StateWorking || fake.CallCount("agent.prompt") != 1 {
+					t.Fatalf("interrupted %s start did not deliver exactly one launch prompt: state=%s prompts=%d", kind, task.State, fake.CallCount("agent.prompt"))
+				}
+				for _, call := range fake.Calls {
+					if call.Method == "agent.prompt" && !strings.Contains(call.Params["text"].(string), launchPath) {
+						t.Fatalf("recovered prompt did not reference launch Brief: %#v", call.Params)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestInterruptedMergeIntentFinishesOrUndoesFromRepositoryState(t *testing.T) {
 	for _, merged := range []bool{false, true} {
 		t.Run(map[bool]string{false: "unmerged", true: "merged"}[merged], func(t *testing.T) {
