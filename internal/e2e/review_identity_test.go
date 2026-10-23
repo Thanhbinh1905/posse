@@ -43,7 +43,7 @@ func reviewIdentityFixture(t *testing.T) *prLifecycleFixture {
 		script := "#!/bin/sh\n" +
 			"printf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$POSSE_TEST_ROOT/review-identity-args.log\"\n" +
 			"if herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state idle >/dev/null 2>&1; then printf '%s\\t%s\\n' \"$HERDR_PANE_ID\" \"$PWD\" >> \"$POSSE_TEST_ROOT/review-identity-ready.log\"; fi\n" +
-			"while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state working >/dev/null 2>&1; : > \"$POSSE_TEST_ROOT/review-working-$HERDR_PANE_ID\"; done\n"
+			"while IFS= read -r line; do printf '%s\\t%s\\n' \"$PWD\" \"$line\" >> \"$POSSE_TEST_ROOT/review-identity-input.log\"; herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent " + kind + " --state working >/dev/null 2>&1; : > \"$POSSE_TEST_ROOT/review-working-$HERDR_PANE_ID\"; done\n"
 		if err := os.WriteFile(filepath.Join(fixture.root, "bin", kind), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}

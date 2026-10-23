@@ -7,7 +7,7 @@
 ## Decision
 
 - Configure the Herdr logical key sequence in `kinds.<kind>.interrupt_keys`. Defaults are Ctrl+C for Claude Code and Escape for Codex, Pi and OpenCode. Unknown kinds have no default and must be configured explicitly.
-- Send abort keys only to an unfocused busy Worker. For Pi, a standalone `Auto-compacting...` line on the current visible pane may identify a busy turn when Herdr reports `unknown`; historical or quoted mentions do not. Do not send keys to a blocked dialog or an idle composer.
+- Explicit `posse interrupt` and `send --interrupt` may send abort keys to a focused or unfocused busy Worker. For Pi, a standalone `Auto-compacting...` line on the current visible pane may identify a busy turn when Herdr reports `unknown`; historical or quoted mentions do not. Do not send keys to a blocked dialog or an idle composer.
 - Poll the pane for up to three seconds. Report interruption as verified only after the busy state ends or the pane disappears; otherwise return `interrupt_unverified`.
 - Keep ordinary steering separate from interruption. `posse send <task> --interrupt <message>` is the explicit abort-and-redirect path: claim queued messages before sending abort keys, verify the turn stopped, deliver the redirect, then restore the queued messages in their original order. This prevents the idle event caused by interruption from racing background delivery.
 - Add `posse unsend <message-id>` for atomic withdrawal while a message is still `queued`; its project preparation does not deliver messages. Claimed or submitting messages cannot be withdrawn.

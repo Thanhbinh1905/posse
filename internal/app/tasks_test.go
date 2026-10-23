@@ -706,16 +706,19 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	if err != nil || len(skillRoots) != 1 {
 		t.Fatalf("skill snapshot roots = %q, %v", skillRoots, err)
 	}
-	started := false
+	started, typedRelaunch := false, false
 	for _, call := range fake.Calls {
-		if call.Method != "agent.start" {
-			continue
+		switch call.Method {
+		case "agent.start":
+			args := call.Params["args"].([]string)
+			started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 14 && equalStrings(args[:12], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9", "--plugin-dir", skillRoots[0]}) && args[12] == "--plugin-dir" && args[13] == filepath.Join(home, "projects", "shop", "claude-research") && !strings.Contains(strings.Join(args, " "), "relaunch.md")
+		case "agent.prompt":
+			text, _ := call.Params["text"].(string)
+			typedRelaunch = typedRelaunch || strings.Contains(text, "relaunch.md")
 		}
-		args := call.Params["args"].([]string)
-		started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 14 && equalStrings(args[:10], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9"}) && equalStrings(args[10:], []string{"--plugin-dir", skillRoots[0], "--plugin-dir", filepath.Join(home, "projects", "shop", "claude-research")})
 	}
-	if !started {
-		t.Fatalf("relaunch omitted the complete resume args: %#v", fake.Calls)
+	if !started || !typedRelaunch {
+		t.Fatalf("relaunch args or focused typed prompt missing: started=%t typed=%t calls=%#v", started, typedRelaunch, fake.Calls)
 	}
 	workspaceRenamed, tabCreated, metadataBeforeStart, metadataAfterStart := false, false, false, false
 	startedIndex, firstMetadataIndex, lastMetadataIndex := -1, -1, -1
@@ -779,7 +782,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	for _, call := range fake.Calls {
 		if call.Method == "agent.start" && call.Params["kind"] == "codex" {
 			args := call.Params["args"].([]string)
-			freshStart = len(args) == 7 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "posse-setup", "SKILL.md"))
+			freshStart = len(args) == 8 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "posse-setup", "SKILL.md")) && strings.Contains(args[7], "relaunch.md")
 		}
 	}
 	if !freshStart {
@@ -1192,7 +1195,7 @@ func TestRelaunchRecoversTaskMarkedLostWhileRelaunching(t *testing.T) {
 	fixture := newRelaunchFixture(t, store.StateWorking)
 	marked := false
 	fixture.fake.BeforeCall = func(method string) {
-		if method != "agent.prompt" || marked {
+		if method != "agent.start" || marked {
 			return
 		}
 		marked = true

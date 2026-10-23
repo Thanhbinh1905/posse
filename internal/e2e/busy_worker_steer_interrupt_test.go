@@ -471,6 +471,9 @@ func TestBuiltInInterruptKeysVerifyStoppedWorkerForEachKindE2E(t *testing.T) {
 		}) {
 			t.Fatalf("fake %s Worker did not become busy and unfocused: %#v", kind, currentPane(t, client, task.PaneID))
 		}
+		if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": task.PaneID}); err != nil {
+			t.Fatalf("focus %s Worker before explicit commands: %v", kind, err)
+		}
 		taskName := "t" + strconv.Itoa(seq)
 		if kind == "opencode" {
 			output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", taskName, "Steer this turn now")

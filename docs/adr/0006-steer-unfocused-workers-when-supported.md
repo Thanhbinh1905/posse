@@ -1,6 +1,6 @@
-# Steer unfocused Workers when the harness accepts mid-turn input
+# Steer working Workers when the harness accepts mid-turn input
 
-A correction that waits for Worker idle can arrive after obsolete work is finished. `posse send` now submits to an unfocused working Worker for `claude`, `codex` and `pi`; `--queue` persists a wait-for-idle instruction, and unknown kinds default to waiting. Focused or blocked panes never receive automatic input. This trades immediate processing for earlier submission: steering takes effect at a harness-defined boundary, not necessarily before a running tool completes.
+A correction that waits for Worker idle can arrive after obsolete work is finished. `posse send` submits to a working Worker for `claude`, `codex` and `pi`, regardless of layout focus; `--queue` persists a wait-for-idle instruction, and unknown kinds default to waiting. Explicit commands may target focused panes, but automatic input remains focus-guarded. Blocked panes never receive typed message input. This trades immediate processing for earlier submission: steering takes effect at a harness-defined boundary, not necessarily before a running tool completes.
 
 ## Evidence
 
