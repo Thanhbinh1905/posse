@@ -2619,7 +2619,14 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	sandbox, sandboxErr := db.SandboxByTask(ctx, task.ID)
 	if sandboxErr != nil || sandbox.State != "held" || sandbox.TaskID != task.ID {
-		return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held", false, "Inspect the Task and its Pool Sandbox before relaunching"))
+		neverStarted, err := taskNeverStarted(ctx, db, task)
+		if err != nil {
+			return failure(err)
+		}
+		if neverStarted && plan != nil {
+			return s.relaunchNeverStarted(ctx, db, home, project, task, plan, revision)
+		}
+		return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
 	}
 	if task.State == store.StateFailed && (task.SandboxID == 0 || task.SandboxID != sandbox.ID) {
 		return failure(axi.Failure("relaunch_sandbox_missing", "failed Task no longer owns its Sandbox", false))
@@ -3185,4 +3192,83 @@ func retryBusy(ctx context.Context, attempts int, delay time.Duration, step func
 		}
 	}
 	return err
+}
+
+// taskNeverStarted reports a failed Task that never reached working. Its failed
+// start released the Sandbox, no Worker ever ran, and no work needs preserving.
+func taskNeverStarted(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	if task.State != store.StateFailed {
+		return false, nil
+	}
+	var worked bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM transitions WHERE task_id=? AND to_state=?)`, task.ID, store.StateWorking).Scan(&worked); err != nil {
+		return false, err
+	}
+	return !worked, nil
+}
+
+// relaunchNeverStarted repeats the start of a failed Task whose Sandbox was
+// released: it acquires a fresh Sandbox and launches the frozen Brief again.
+func (s *Service) relaunchNeverStarted(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, plan *taskplan.Plan, revision *taskplan.Plan) (relaunchResult, error) {
+	failure := func(err error) (relaunchResult, error) { return relaunchResult{}, err }
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return failure(configError(err))
+	}
+	count, err := db.ActiveWorkerCount(ctx, project.ID)
+	if err != nil {
+		return failure(err)
+	}
+	if count >= cfg.Defaults.MaxWorkers {
+		return failure(axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish, then relaunch"))
+	}
+	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "start")
+	if err != nil {
+		return failure(axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error()))
+	}
+	defer func() { _ = db.FinishIntent(ctx, intent.ID, intent.ProcessID) }()
+	if revision != nil {
+		if err := db.ReviseTaskPlan(ctx, task, *revision); err != nil {
+			return failure(err)
+		}
+		plan = revision
+	}
+	briefBytes, brief, err := frozenTaskBrief(task, plan)
+	if err != nil {
+		return failure(err)
+	}
+	targets, err := projectTargets(ctx, db, project)
+	if err != nil {
+		return failure(err)
+	}
+	members, err := frozenTaskMembers(project, task, plan, targets)
+	if err != nil {
+		return failure(err)
+	}
+	if err := db.Transition(ctx, task.ID, store.StateFailed, store.StateSpawning, "cli", "relaunching a Task that never started"); err != nil {
+		return failure(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return failure(err)
+	}
+	frozenCfg, resolution := frozenLaunchConfig(cfg, plan)
+	if err := s.launchAdmittedTask(&axi.Context{Context: ctx}, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, nil, false); err != nil {
+		return failure(err)
+	}
+	task, err = db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return failure(err)
+	}
+	return relaunchResult{Worker: task.AgentName, Pane: task.PaneID}, nil
+}
+
+// taskRelaunchable reports whether relaunch can carry out a recovery answer:
+// the Task still holds its Sandbox, or it never started and can acquire one.
+func taskRelaunchable(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	sandbox, err := db.SandboxByTask(ctx, task.ID)
+	if err == nil && sandbox.State == "held" && sandbox.TaskID == task.ID {
+		return true, nil
+	}
+	return taskNeverStarted(ctx, db, task)
 }
