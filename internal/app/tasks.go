@@ -2756,31 +2756,17 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	relaunchPrompt := "Read " + relaunchPath + " and follow it."
-	openingPrompt := kind == "codex" || kind == "opencode"
-	switch kind {
-	case "codex":
-		startArgs = append(startArgs, relaunchPrompt)
-	case "opencode":
-		startArgs = append(startArgs, "--prompt", relaunchPrompt)
-	}
 	if err := track("agent.start", func() error {
 		_, callErr := s.startAgent(ctx, map[string]any{"name": workerName, "kind": kind, "pane_id": pane.PaneID, "args": startArgs})
 		return callErr
 	}); err != nil {
 		return failure(err)
 	}
-	if openingPrompt {
-		err = s.waitAgentLaunched(ctx, pane.PaneID)
-	} else {
-		err = s.waitAgentReady(ctx, pane.PaneID)
-	}
-	if err != nil {
+	if err := s.waitAgentReady(ctx, pane.PaneID); err != nil {
 		return failure(err)
 	}
-	if !openingPrompt {
-		if err := track("agent.prompt", func() error { return s.deliverLaunchPromptFocused(ctx, pane.PaneID, relaunchPrompt) }); err != nil {
-			return failure(err)
-		}
+	if err := track("agent.prompt", func() error { return s.deliverLaunchPromptFocused(ctx, pane.PaneID, relaunchPrompt) }); err != nil {
+		return failure(err)
 	}
 	if plan == nil && profileName != task.Profile {
 		if err := track("task.profile", func() error {

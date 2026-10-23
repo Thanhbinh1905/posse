@@ -782,11 +782,17 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	for _, call := range fake.Calls {
 		if call.Method == "agent.start" && call.Params["kind"] == "codex" {
 			args := call.Params["args"].([]string)
-			freshStart = len(args) == 8 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "posse-setup", "SKILL.md")) && strings.Contains(args[7], "relaunch.md")
+			freshStart = len(args) == 7 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "posse-setup", "SKILL.md"))
 		}
 	}
-	if !freshStart {
-		t.Fatalf("kind-changing relaunch resumed the old session or omitted Profile args: %#v", fake.Calls)
+	deliveredRelaunch := false
+	for _, call := range fake.Calls[codexRelaunchStart:] {
+		if call.Method == "agent.prompt" && strings.Contains(fmt.Sprint(call.Params["text"]), "relaunch.md") {
+			deliveredRelaunch = true
+		}
+	}
+	if !freshStart || !deliveredRelaunch {
+		t.Fatalf("kind-changing relaunch resumed the old session, omitted Profile args, or failed to deliver its prompt: started=%t delivered=%t calls=%#v", freshStart, deliveredRelaunch, fake.Calls)
 	}
 	codexMetadataIndex, codexStartIndex := -1, -1
 	for index, call := range fake.Calls[codexRelaunchStart:] {
