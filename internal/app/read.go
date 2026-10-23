@@ -1,18 +1,23 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 type projectSummary struct {
@@ -532,6 +537,22 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		if parsed.Bool("full") {
 			view["plan"] = plan
+			if !ctx.JSON {
+				readable, err := planWithTextInputs(plan)
+				if err != nil {
+					return err
+				}
+				view["plan"] = readable
+			}
+		}
+	}
+	if taskNeedsUser(task) {
+		reason, err := taskFailureReason(ctx.Context, db, task)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			view["reason"] = reason
 		}
 	}
 	if children, err := taskResearchViews(ctx.Context, db, task); err != nil {
@@ -804,6 +825,51 @@ func noticeTaskName(ctx context.Context, db *store.DB, projectID, id int64) stri
 		return ""
 	}
 	return taskDisplayName(task)
+}
+
+// planWithTextInputs renders each frozen input as text so `show --full` is
+// readable; input bytes that are not valid UTF-8 stay base64 under bytes_base64.
+func planWithTextInputs(plan *taskplan.Plan) (any, error) {
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return nil, err
+	}
+	view, err := axi.ParseOrderedJSON(bytes.NewReader(encoded))
+	if err != nil {
+		return nil, err
+	}
+	root, ok := view.(axi.Object)
+	if !ok {
+		return view, nil
+	}
+	for _, field := range root {
+		inputs, ok := field.Value.([]any)
+		if field.Key != "inputs" || !ok {
+			continue
+		}
+		for _, item := range inputs {
+			input, ok := item.(axi.Object)
+			if !ok {
+				continue
+			}
+			for index, entry := range input {
+				if entry.Key != "bytes" {
+					continue
+				}
+				encoded, _ := entry.Value.(string)
+				raw, err := base64.StdEncoding.DecodeString(encoded)
+				if err != nil {
+					continue
+				}
+				if utf8.Valid(raw) {
+					input[index] = axi.Field{Key: "text", Value: string(raw)}
+				} else {
+					input[index] = axi.Field{Key: "bytes_base64", Value: encoded}
+				}
+			}
+		}
+	}
+	return root, nil
 }
 
 func taskNeedsUser(task store.Task) bool {

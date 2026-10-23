@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -176,92 +180,12 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 				}
 				continue
 			}
-			var briefBytes []byte
-			for _, input := range plan.Inputs {
-				if input.Role == "brief" {
-					briefBytes = append([]byte(nil), input.Bytes...)
-					break
-				}
-			}
-			if len(briefBytes) == 0 {
-				return fmt.Errorf("queued Task %s has no frozen Brief input", taskIDString(queued.Seq))
-			}
-			brief, err := dispatch.ParseHistoricalBriefText(string(briefBytes))
-			if err != nil {
-				return fmt.Errorf("parse queued Task %s Brief: %w", taskIDString(queued.Seq), err)
-			}
-			targets, err := projectTargets(ctx, db, project)
+			launchedTask, err := s.admitQueuedTask(ctx, db, home, project, cfg, queued, plan, false)
 			if err != nil {
 				return err
 			}
-			members := make([]taskMember, 0, len(plan.Execution.Members))
-			if project.IsWorkspace() {
-				byName := make(map[string]repoTarget, len(targets))
-				for _, target := range targets {
-					byName[target.Name] = target
-				}
-				for _, frozen := range plan.Execution.Members {
-					target, ok := byName[frozen.Name]
-					if !ok {
-						return fmt.Errorf("queued Task %s Member %q is no longer registered", taskIDString(queued.Seq), frozen.Name)
-					}
-					members = append(members, taskMember{repoTarget: target, Path: frozen.Path, MergeMode: frozen.Delivery, BaseRef: frozen.Base, TargetBranch: frozen.Target})
-				}
-				targets = targets[:0]
-				for _, member := range members {
-					targets = append(targets, member.repoTarget)
-				}
-			}
-			if err := validateTicketBlockers(ctx, cfg, brief, targets); err != nil {
+			if !launchedTask {
 				continue
-			}
-			branch := store.TaskBranchName(queued.Seq)
-			if err := taskBranchAvailableForBranch(ctx, db, project, branch, members); err != nil {
-				if errors.Is(err, store.ErrTaskBranchExists) {
-					continue
-				}
-				return err
-			}
-			claimed, err := db.ClaimQueuedTask(ctx, project.ID, queued.ID, cfg.Defaults.MaxWorkers, branch, os.Getpid())
-			if err != nil {
-				if errors.Is(err, store.ErrTaskBranchExists) {
-					continue
-				}
-				return err
-			}
-			if !claimed {
-				continue
-			}
-			task, err := db.TaskByID(ctx, project.ID, queued.ID)
-			if err != nil {
-				return err
-			}
-			intent, err := db.IntentByTask(ctx, task.ID)
-			if err != nil {
-				return err
-			}
-			frozenCfg := cfg
-			frozenCfg.Kinds = make(map[string]config.Kind, len(cfg.Kinds)+1)
-			for name, kind := range cfg.Kinds {
-				frozenCfg.Kinds[name] = kind
-			}
-			frozenCfg.Profiles = make(map[string]config.Profile, len(cfg.Profiles)+1)
-			for name, profile := range cfg.Profiles {
-				frozenCfg.Profiles[name] = profile
-			}
-			frozenCfg.Kinds[plan.Launch.Profile.Kind] = plan.Launch.Kind
-			frozenCfg.Profiles[plan.Launch.ProfileName] = plan.Launch.Profile
-			frozenCfg.Pool = plan.Pool
-			resolution := dispatch.Resolution{Profile: plan.Launch.ProfileName, Rule: plan.Launch.DispatchRule, Resolved: plan.Launch.Profile}
-			launchCtx := &axi.Context{Context: ctx}
-			deferFinishIntent := func() error { return db.FinishIntent(ctx, intent.ID, intent.ProcessID) }
-			launchErr := s.launchAdmittedTask(launchCtx, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, nil, false)
-			finishErr := deferFinishIntent()
-			if launchErr != nil {
-				return launchErr
-			}
-			if finishErr != nil && !errors.Is(finishErr, store.ErrIntentOwned) {
-				return finishErr
 			}
 			launched = true
 			break
@@ -270,4 +194,192 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 			return nil
 		}
 	}
+}
+
+// admitQueuedTask launches one queued Task once capacity allows. A foreground
+// command is killed with its caller, so with DetachQueuedLaunch the launch runs
+// in its own session and the caller only waits for it; an interrupted start
+// would otherwise leave a Sandbox and a pane without a Worker.
+func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, queued store.Task, plan *taskplan.Plan, inline bool) (bool, error) {
+	var briefBytes []byte
+	for _, input := range plan.Inputs {
+		if input.Role == "brief" {
+			briefBytes = append([]byte(nil), input.Bytes...)
+			break
+		}
+	}
+	if len(briefBytes) == 0 {
+		return false, fmt.Errorf("queued Task %s has no frozen Brief input", taskIDString(queued.Seq))
+	}
+	brief, err := dispatch.ParseHistoricalBriefText(string(briefBytes))
+	if err != nil {
+		return false, fmt.Errorf("parse queued Task %s Brief: %w", taskIDString(queued.Seq), err)
+	}
+	targets, err := projectTargets(ctx, db, project)
+	if err != nil {
+		return false, err
+	}
+	members := make([]taskMember, 0, len(plan.Execution.Members))
+	if project.IsWorkspace() {
+		byName := make(map[string]repoTarget, len(targets))
+		for _, target := range targets {
+			byName[target.Name] = target
+		}
+		for _, frozen := range plan.Execution.Members {
+			target, ok := byName[frozen.Name]
+			if !ok {
+				return false, fmt.Errorf("queued Task %s Member %q is no longer registered", taskIDString(queued.Seq), frozen.Name)
+			}
+			members = append(members, taskMember{repoTarget: target, Path: frozen.Path, MergeMode: frozen.Delivery, BaseRef: frozen.Base, TargetBranch: frozen.Target})
+		}
+		targets = targets[:0]
+		for _, member := range members {
+			targets = append(targets, member.repoTarget)
+		}
+	}
+	if err := validateTicketBlockers(ctx, cfg, brief, targets); err != nil {
+		return false, nil
+	}
+	branch := store.TaskBranchName(queued.Seq)
+	if err := taskBranchAvailableForBranch(ctx, db, project, branch, members); err != nil {
+		if errors.Is(err, store.ErrTaskBranchExists) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !inline && s.DetachQueuedLaunch {
+		return s.launchQueuedTaskDetached(ctx, db, home, project, queued)
+	}
+	claimed, err := db.ClaimQueuedTask(ctx, project.ID, queued.ID, cfg.Defaults.MaxWorkers, branch, os.Getpid())
+	if err != nil {
+		if errors.Is(err, store.ErrTaskBranchExists) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !claimed {
+		return false, nil
+	}
+	task, err := db.TaskByID(ctx, project.ID, queued.ID)
+	if err != nil {
+		return false, err
+	}
+	intent, err := db.IntentByTask(ctx, task.ID)
+	if err != nil {
+		return false, err
+	}
+	frozenCfg := cfg
+	frozenCfg.Kinds = make(map[string]config.Kind, len(cfg.Kinds)+1)
+	for name, kind := range cfg.Kinds {
+		frozenCfg.Kinds[name] = kind
+	}
+	frozenCfg.Profiles = make(map[string]config.Profile, len(cfg.Profiles)+1)
+	for name, profile := range cfg.Profiles {
+		frozenCfg.Profiles[name] = profile
+	}
+	frozenCfg.Kinds[plan.Launch.Profile.Kind] = plan.Launch.Kind
+	frozenCfg.Profiles[plan.Launch.ProfileName] = plan.Launch.Profile
+	frozenCfg.Pool = plan.Pool
+	resolution := dispatch.Resolution{Profile: plan.Launch.ProfileName, Rule: plan.Launch.DispatchRule, Resolved: plan.Launch.Profile}
+	launchCtx := &axi.Context{Context: ctx}
+	deferFinishIntent := func() error { return db.FinishIntent(ctx, intent.ID, intent.ProcessID) }
+	launchErr := s.launchAdmittedTask(launchCtx, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, nil, false)
+	finishErr := deferFinishIntent()
+	if launchErr != nil {
+		return false, launchErr
+	}
+	if finishErr != nil && !errors.Is(finishErr, store.ErrIntentOwned) {
+		return false, finishErr
+	}
+	return true, nil
+}
+
+// launchQueuedTaskDetached runs `posse _launch-queued` in a new session, so the
+// start survives the caller being interrupted. The detached process owns the
+// start intent. It reports whether the Task left the queue.
+func (s *Service) launchQueuedTaskDetached(ctx context.Context, db *store.DB, home string, project store.Project, queued store.Task) (bool, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	logPath := filepath.Join(home, "projects", project.Name, "launch.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return false, err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer logFile.Close()
+	command := exec.Command(executable, "_launch-queued", strconv.FormatInt(project.ID, 10), strconv.FormatInt(queued.ID, 10))
+	command.Stdout, command.Stderr = logFile, logFile
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		return false, fmt.Errorf("start queued Task %s launch: %w", taskIDString(queued.Seq), err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- command.Wait() }()
+	select {
+	case waitErr := <-exited:
+		if waitErr != nil {
+			fmt.Fprintf(os.Stderr, "queued Task %s launch stopped: %v (see %s)\n", taskIDString(queued.Seq), waitErr, logPath)
+		}
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	current, err := db.TaskByID(ctx, project.ID, queued.ID)
+	if err != nil {
+		return false, err
+	}
+	return current.State != store.StateQueued, nil
+}
+
+// RunQueuedLaunch is the detached `_launch-queued` entry point.
+func (s *Service) RunQueuedLaunch(args []string, errOut io.Writer) int {
+	if err := s.runQueuedLaunch(args); err != nil {
+		fmt.Fprintln(errOut, "posse: queued Task launch failed:", err)
+		return 1
+	}
+	return 0
+}
+
+func (s *Service) runQueuedLaunch(args []string) error {
+	if len(args) != 2 {
+		return errors.New("_launch-queued takes a Project id and a Task id")
+	}
+	projectID, projectErr := strconv.ParseInt(args[0], 10, 64)
+	taskID, taskErr := strconv.ParseInt(args[1], 10, 64)
+	if projectErr != nil || taskErr != nil {
+		return errors.New("_launch-queued takes a Project id and a Task id")
+	}
+	ctx := context.Background()
+	db, home, err := s.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	project, err := db.ProjectByID(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return err
+	}
+	queued, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil {
+		return err
+	}
+	if queued.State != store.StateQueued {
+		return nil
+	}
+	plan, err := queued.AdmittedPlan()
+	if err != nil {
+		return admittedPlanFailure(err)
+	}
+	if plan == nil {
+		return nil
+	}
+	_, err = s.admitQueuedTask(ctx, db, home, project, cfg, queued, plan, true)
+	return err
 }

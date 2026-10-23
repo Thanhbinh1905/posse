@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -907,6 +908,57 @@ func snapshotAgentName(snapshot herdr.Snapshot, paneID string) string {
 	}
 	return ""
 }
+
+// stopFailedStartProcesses stops the processes of a Task whose start failed
+// before any Worker received its Brief. It applies Teardown's ownership checks,
+// so a foreign process in the pane or Sandbox is preserved and reported.
+func (s *Service) stopFailedStartProcesses(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	held, err := taskSandboxHeldBy(ctx, db, task)
+	if err != nil {
+		return err
+	}
+	var authorization *sandboxProcessAuthorization
+	signalGuard := taskProcessSignalGuard(nil)
+	if held {
+		authorization = newSandboxProcessAuthorization()
+		defer authorization.Close()
+		if err := s.verifySandboxForegroundOwnershipWithAuthorization(ctx, db, project, task, authorization); err != nil {
+			return err
+		}
+		signalGuard = authorization.guardSignal
+	}
+	preserved, err := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard)
+	if err != nil {
+		return err
+	}
+	excluded := taskProcessDetailsPIDSet(preserved)
+	if held {
+		if _, err := stopSandboxProcessesAuthorized(task.WorktreePath, authorization, excluded); err != nil {
+			return err
+		}
+	}
+	_, err = stopTaskScratchProcessesAuthorized(home, project, task, authorization, excluded)
+	return err
+}
+
+// waitTaskPanesGone verifies Herdr removed the Task's panes, allowing it a
+// moment to notice that the stopped shell exited.
+func (s *Service) waitTaskPanesGone(ctx context.Context, project store.Project, task store.Task) (teardownPanes, error) {
+	deadline := time.Now().Add(failedStartPaneRemovalWait)
+	for {
+		result, err := s.verifyTaskPanesGone(ctx, project, task)
+		if err == nil || !time.Now().Before(deadline) || ctx.Err() != nil {
+			return result, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+const failedStartPaneRemovalWait = 5 * time.Second
 
 func (s *Service) verifyTaskPanesGone(ctx context.Context, project store.Project, task store.Task) (teardownPanes, error) {
 	plan, err := s.planTaskPaneTeardown(ctx, project, task)
