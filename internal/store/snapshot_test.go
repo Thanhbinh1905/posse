@@ -535,7 +535,7 @@ func unboundedProjectSnapshotSize(ctx context.Context, db *DB, project Project) 
 	return encoded.Len(), nil
 }
 
-func TestProjectSnapshotPersistenceWaitsForConcurrentMove(t *testing.T) {
+func TestProjectSnapshotWriteRechecksIdentityAfterLock(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	db, err := Open(home)
@@ -547,27 +547,40 @@ func TestProjectSnapshotPersistenceWaitsForConcurrentMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var staleSnapshot projectSnapshot
+	if _, err := toml.DecodeFile(db.ProjectSnapshotPath(project.Name), &staleSnapshot); err != nil {
+		t.Fatal(err)
+	}
 
 	lockPath := db.Path + ".project-" + strconv.FormatInt(project.ID, 10) + ".snapshot.lock"
 	lock, err := acquireStoreFileLock(ctx, lockPath, "test Project snapshot")
 	if err != nil {
 		t.Fatal(err)
 	}
-	blockedCtx, cancel := context.WithTimeout(ctx, 75*time.Millisecond)
-	defer cancel()
-	if err := db.PersistProject(blockedCtx, project.ID); !errors.Is(err, context.DeadlineExceeded) {
-		_ = lock.Close()
-		t.Fatalf("Project snapshot persistence while lock held = %v, want deadline", err)
-	}
 	movedRoot := filepath.Join(home, "moved-repo")
 	if _, err := db.ExecContext(ctx, `UPDATE projects SET root=? WHERE id=?`, movedRoot, project.ID); err != nil {
 		_ = lock.Close()
 		t.Fatal(err)
 	}
+	blockedCtx, cancel := context.WithTimeout(ctx, 75*time.Millisecond)
+	defer cancel()
+	if err := db.writeProjectSnapshot(blockedCtx, project.ID, staleSnapshot); !errors.Is(err, context.DeadlineExceeded) {
+		_ = lock.Close()
+		t.Fatalf("snapshot write while lock held = %v, want deadline", err)
+	}
+	started := time.Now()
+	if err := db.writeProjectSnapshot(ctx, project.ID, staleSnapshot); !errors.Is(err, ErrBusy) {
+		_ = lock.Close()
+		t.Fatalf("unbounded snapshot write while lock held = %v, want ErrBusy", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		_ = lock.Close()
+		t.Fatalf("snapshot lock wait took %s, want bounded wait", elapsed)
+	}
 	if err := lock.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PersistProject(ctx, project.ID); err != nil {
+	if err := db.writeProjectSnapshot(ctx, project.ID, staleSnapshot); err != nil {
 		t.Fatal(err)
 	}
 	var snapshot projectSnapshot

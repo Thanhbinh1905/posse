@@ -406,13 +406,10 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 }
 
 func (db *DB) PersistProject(ctx context.Context, projectID int64) error {
-	lockPath := db.Path + ".project-" + strconv.FormatInt(projectID, 10) + ".snapshot.lock"
-	lock, err := acquireStoreFileLock(ctx, lockPath, "Project snapshot")
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
+	return db.persistProject(ctx, projectID, false)
+}
 
+func (db *DB) persistProject(ctx context.Context, projectID int64, projectLockHeld bool) error {
 	project, err := db.ProjectByID(ctx, projectID)
 	if err != nil {
 		return err
@@ -440,11 +437,60 @@ func (db *DB) PersistProject(ctx context.Context, projectID int64) error {
 			}
 		}
 	}
+	if projectLockHeld {
+		return db.writeProjectSnapshotLocked(ctx, projectID, snapshot)
+	}
+	return db.writeProjectSnapshot(ctx, projectID, snapshot)
+}
+
+// writeProjectSnapshot serializes only the final Project identity check and
+// atomic write. Snapshot collection can involve slow database queries; holding
+// the file lock across them could prevent `posse down` from stopping a wedged
+// Watch process. Re-read the Project while holding the lock so a snapshot
+// captured before a Project move cannot overwrite its new root afterward.
+func (db *DB) writeProjectSnapshot(ctx context.Context, projectID int64, snapshot projectSnapshot) error {
+	lock, err := db.projectSnapshotLock(ctx, projectID, false)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	return db.writeProjectSnapshotLocked(ctx, projectID, snapshot)
+}
+
+func (db *DB) projectSnapshotLock(ctx context.Context, projectID int64, exclusive bool) (*os.File, error) {
+	lockPath := db.Path + ".project-" + strconv.FormatInt(projectID, 10) + ".snapshot.lock"
+	lockCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	var lock *os.File
+	var err error
+	if exclusive {
+		lock, err = acquireStoreFileLock(lockCtx, lockPath, "Project snapshot")
+	} else {
+		lock, err = acquireStoreFileLockShared(lockCtx, lockPath, "Project snapshot")
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%w: Project snapshot lock", ErrBusy)
+		}
+		return nil, err
+	}
+	return lock, nil
+}
+
+func (db *DB) writeProjectSnapshotLocked(ctx context.Context, projectID int64, snapshot projectSnapshot) error {
+	project, err := db.ProjectByID(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	snapshot.Project = project
 	var encoded bytes.Buffer
 	if err := toml.NewEncoder(&encoded).Encode(snapshot); err != nil {
 		return err
 	}
-	return atomicfile.Write(path, encoded.Bytes(), 0o600)
+	return atomicfile.Write(db.ProjectSnapshotPath(project.Name), encoded.Bytes(), 0o600)
 }
 
 func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {
