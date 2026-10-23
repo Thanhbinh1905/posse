@@ -10,6 +10,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -24,7 +25,7 @@ var shardIDs = []string{"1", "2", "3", "4"}
 // `go test ./...` catches E2E tests missing from scripts/e2e-shards.txt, the
 // manifest scripts/run-e2e-shard.sh reads.
 func TestShardManifestCoversEveryE2ETest(t *testing.T) {
-	assigned, counts := readShardManifest(t)
+	assigned, counts := readManifest(t, shardManifestPath)
 	discovered := discoverE2ETests(t)
 
 	var problems []string
@@ -54,9 +55,9 @@ type assignment struct {
 	line  int
 }
 
-func readShardManifest(t *testing.T) (map[string]assignment, map[string]int) {
+func readManifest(t *testing.T, path string) (map[string]assignment, map[string]int) {
 	t.Helper()
-	f, err := os.Open(shardManifestPath)
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open shard manifest: %v", err)
 	}
@@ -74,14 +75,14 @@ func readShardManifest(t *testing.T) (map[string]assignment, map[string]int) {
 			continue
 		}
 		if len(fields) != 2 {
-			t.Fatalf("scripts/e2e-shards.txt line %d: expected \"<shard> <test>\"", n)
+			t.Fatalf("%s line %d: expected \"<shard> <name>\"", path, n)
 		}
 		shard, name := fields[0], fields[1]
 		if _, ok := counts[shard]; !ok {
-			t.Fatalf("scripts/e2e-shards.txt line %d: invalid shard %s, expected one of %v", n, shard, shardIDs)
+			t.Fatalf("%s line %d: invalid shard %s, expected one of %v", path, n, shard, shardIDs)
 		}
 		if prev, dup := assigned[name]; dup {
-			t.Fatalf("scripts/e2e-shards.txt line %d: %s is already assigned on line %d", n, name, prev.line)
+			t.Fatalf("%s line %d: %s is already assigned on line %d", path, n, name, prev.line)
 		}
 		assigned[name] = assignment{shard: shard, line: n}
 		counts[shard]++
@@ -171,4 +172,47 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+const (
+	raceShardManifestPath = "../../scripts/race-shards.txt"
+	raceAppPackage        = "github.com/thanhbinh1905/posse/internal/app"
+)
+
+// TestRaceShardManifestCoversEveryPackage guards scripts/race-shards.txt, read
+// by scripts/run-race-shard.sh. The app package is sharded by test name and
+// must not appear in the manifest.
+func TestRaceShardManifestCoversEveryPackage(t *testing.T) {
+	out, err := exec.Command("go", "list", "../../...").Output()
+	if err != nil {
+		t.Fatalf("go list ./...: %v", err)
+	}
+	discovered := map[string]bool{}
+	for _, pkg := range strings.Fields(string(out)) {
+		if pkg != raceAppPackage {
+			discovered[pkg] = true
+		}
+	}
+
+	assigned, counts := readManifest(t, raceShardManifestPath)
+	var problems []string
+	for _, pkg := range sortedKeys(discovered) {
+		if _, ok := assigned[pkg]; ok {
+			continue
+		}
+		shard := lightestShard(counts)
+		problems = append(problems, fmt.Sprintf(
+			"package %s is not assigned to a race shard; add this line to scripts/race-shards.txt (shard %s currently has the fewest packages):\n\t%s %s",
+			pkg, shard, shard, pkg))
+		counts[shard]++
+	}
+	for _, pkg := range sortedKeys(assigned) {
+		if !discovered[pkg] {
+			problems = append(problems, fmt.Sprintf(
+				"scripts/race-shards.txt line %d assigns %s, which is not a non-app package; remove it", assigned[pkg].line, pkg))
+		}
+	}
+	if len(problems) > 0 {
+		t.Fatalf("race shard manifest is out of date:\n%s", strings.Join(problems, "\n"))
+	}
 }
