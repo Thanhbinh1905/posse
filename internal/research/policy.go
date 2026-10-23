@@ -257,6 +257,82 @@ var readOnlyGitCommands = map[string]bool{
 	"shortlog": true, "show": true, "show-ref": true, "status": true,
 }
 
+// readOnlyGHCommands maps a gh command group to the subcommands that only read
+// tracker or CI state. Anything not listed is refused.
+var readOnlyGHCommands = map[string]map[string]bool{
+	"issue": {"list": true, "view": true},
+	"pr":    {"list": true, "view": true, "diff": true, "checks": true},
+	"run":   {"list": true, "view": true},
+}
+
+// readOnlyGHAPIFlags are the only flags `gh api` may carry; the value is true
+// when the flag consumes an argument. Body, field and input flags are absent
+// because they turn the request into a POST.
+var readOnlyGHAPIFlags = map[string]bool{
+	"--paginate": false, "--slurp": false, "-i": false, "--include": false,
+	"--jq": true, "-q": true, "--cache": true, "--method": true, "-X": true,
+	"--hostname": true, "-H": true, "--header": true,
+}
+
+func readOnlyGH(args []string) error {
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		if (args[0] == "-R" || args[0] == "--repo") && len(args) > 1 {
+			args = args[2:]
+			continue
+		}
+		return fmt.Errorf("gh option %s is refused", args[0])
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("gh needs a read-only subcommand")
+	}
+	if args[0] == "api" {
+		return readOnlyGHAPI(args[1:])
+	}
+	if len(args) < 2 || !readOnlyGHCommands[args[0]][args[1]] {
+		return fmt.Errorf("gh %s is not a read-only gh command; allowed: issue list|view, pr list|view|diff|checks, run list|view, api with GET", strings.Join(args[:min(len(args), 2)], " "))
+	}
+	for _, arg := range args[2:] {
+		if arg == "--web" || arg == "-w" {
+			return fmt.Errorf("gh %s %s %s opens a browser and is refused", args[0], args[1], arg)
+		}
+	}
+	return nil
+}
+
+// readOnlyGHAPI admits a single GET request to a REST endpoint. graphql is
+// refused because it is always a POST and can carry mutations.
+func readOnlyGHAPI(args []string) error {
+	endpoints := 0
+	for i := 0; i < len(args); i++ {
+		name, value, joined := strings.Cut(args[i], "=")
+		if !strings.HasPrefix(args[i], "-") {
+			endpoints++
+			if strings.HasPrefix(strings.TrimPrefix(args[i], "/"), "graphql") {
+				return fmt.Errorf("gh api graphql is refused: it can mutate")
+			}
+			continue
+		}
+		takesValue, ok := readOnlyGHAPIFlags[name]
+		if !ok {
+			return fmt.Errorf("gh api flag %s is refused: only GET reads are allowed", args[i])
+		}
+		if takesValue && !joined {
+			if i+1 >= len(args) {
+				return fmt.Errorf("gh api flag %s needs a value", args[i])
+			}
+			i++
+			value = args[i]
+		}
+		if (name == "--method" || name == "-X") && !strings.EqualFold(value, "GET") {
+			return fmt.Errorf("gh api method %s is refused: only GET reads are allowed", value)
+		}
+	}
+	if endpoints != 1 {
+		return fmt.Errorf("gh api needs exactly one REST endpoint")
+	}
+	return nil
+}
+
 // ReadOnlyCommand reports whether a shell command only reads. It accepts
 // pipelines and lists of allowlisted programs with literal or parameter
 // arguments, and refuses redirection to files, substitutions, subshells and
@@ -335,8 +411,11 @@ func readOnlyCall(call *syntax.CallExpr) error {
 		args = append(args, value)
 	}
 	program := filepath.Base(args[0])
-	if program == "git" {
+	switch program {
+	case "git":
 		return readOnlyGit(args[1:])
+	case "gh":
+		return readOnlyGH(args[1:])
 	}
 	refused, ok := readOnlyPrograms[program]
 	if !ok {

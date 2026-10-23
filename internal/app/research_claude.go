@@ -92,7 +92,7 @@ func (s *Service) claudeResearchHook(ctx context.Context, input claudeResearchHo
 	switch input.HookEventName {
 	case "PreToolUse":
 		if input.AgentID != "" {
-			return s.claudeChildToolCall(ctx, db, input)
+			return s.claudeChildToolCall(ctx, db, home, input)
 		}
 		return s.admitClaudeChild(ctx, db, home, input, version)
 	case "SubagentStart":
@@ -237,6 +237,31 @@ func researchChildContext(attempt store.ResearchAttempt) string {
 	return fmt.Sprintf("You are Posse research child %s: read-only. Posse refuses file edits, writes, nested agents and shell commands that are not known to be read-only. Return your findings as your final message.", research.AttemptID(attempt.ID))
 }
 
+// reopenClaudeChild moves a completed child back to running when it fits the
+// active budget. It returns the refusal reason when it does not.
+func (s *Service) reopenClaudeChild(ctx context.Context, db *store.DB, home string, attempt store.ResearchAttempt) (string, error) {
+	project, err := db.ProjectByID(ctx, attempt.ProjectID)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := s.researchConfig(home, project)
+	if err != nil {
+		return "", err
+	}
+	active, err := db.CountActiveResearchAttempts(ctx)
+	if err != nil {
+		return "", err
+	}
+	if active >= cfg.Research.MaxActive {
+		return fmt.Sprintf("research budget of %d active children is used; wait for a child to finish or cancel one with `posse research cancel`", cfg.Research.MaxActive), nil
+	}
+	note := "resumed after completion"
+	if _, err := db.UpdateResearchAttempt(ctx, attempt.ID, []string{string(research.Completed)}, store.ResearchChange{State: researchState(research.Running), Note: &note}); err != nil && !errors.Is(err, store.ErrStateRace) {
+		return "", err
+	}
+	return "", nil
+}
+
 // claudeChildTranscript is where Claude Code keeps a subagent transcript: a
 // subagents directory beside the parent session transcript.
 func claudeChildTranscript(input claudeResearchHookInput) string {
@@ -252,7 +277,7 @@ func claudeChildTranscript(input claudeResearchHookInput) string {
 
 // claudeChildToolCall enforces the read-only contract inside the child,
 // regardless of its declared permission mode or any bypass the parent holds.
-func (s *Service) claudeChildToolCall(ctx context.Context, db *store.DB, input claudeResearchHookInput) (string, string, error) {
+func (s *Service) claudeChildToolCall(ctx context.Context, db *store.DB, home string, input claudeResearchHookInput) (string, string, error) {
 	attempt, err := db.ResearchAttemptByChild(ctx, string(research.Claude), input.AgentID)
 	if store.IsNotFound(err) {
 		bound, bindErr := s.bindPendingClaudeChild(ctx, db, input)
@@ -290,6 +315,19 @@ func (s *Service) claudeChildToolCall(ctx context.Context, db *store.DB, input c
 			if _, err := db.ExecContext(ctx, `UPDATE research_attempts SET parent_pid=?, parent_identity=? WHERE id=?`, parentPID, parentIdentity, attempt.ID); err != nil {
 				return "", "", err
 			}
+		}
+	case research.Completed:
+		// SendMessage resumes a finished child inside its parent session; the
+		// same attempt runs again and SubagentStop accepts its new result.
+		if attempt.ParentSession != input.SessionID {
+			return fmt.Sprintf("research child %s is completed and belongs to another session; stop now", id), "", nil
+		}
+		reason, err := s.reopenClaudeChild(ctx, db, home, attempt)
+		if err != nil {
+			return "", "", err
+		}
+		if reason != "" {
+			return fmt.Sprintf("research child %s is completed and cannot resume: %s; stop now", id, reason), "", nil
 		}
 	case research.Cancelled:
 		return fmt.Sprintf("research child %s was cancelled by Posse; stop now and return without further tool calls", id), "", nil
