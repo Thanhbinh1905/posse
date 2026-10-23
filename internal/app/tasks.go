@@ -1306,7 +1306,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			filtered = append(filtered, args[i])
 		}
 	}
-	parsed, err := parseArgs("signal", filtered, map[string]flagSpec{"report": {}, "findings": {}, "resolutions": {}, "pr": {}, "verdict": {}, "turn": {}})
+	parsed, err := parseArgs("signal", filtered, map[string]flagSpec{"report": {}, "findings": {}, "resolutions": {}, "pr": {}, "verdict": {}, "turn": {}, "no-change": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -1315,6 +1315,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	verb := parsed.Positionals[0]
 	note := strings.Join(parsed.Positionals[1:], " ")
+	noChange := parsed.Bool("no-change")
 	if !oneOfString(verb, "working", "needs-decision", "done", "failed") {
 		return axi.Usage("Signal verb must be working, needs-decision, done or failed")
 	}
@@ -1379,7 +1380,14 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if parsed.Flags["pr"] != "" && (verb != "done" || task.Type != "change" || project.IsWorkspace() || (task.MergeMode != "no-mistakes" && task.MergeMode != "pr")) {
 		return axi.Failure("signal_invalid", "--pr is only valid on a PR or no-mistakes Change Task done Signal", false)
 	}
+	if noChange && (verb != "done" || task.Type != "change" || project.IsWorkspace() || parsed.Flags["pr"] != "" || parsed.Flags["resolutions"] != "") {
+		return axi.Failure("signal_invalid", "--no-change is only valid on a done Signal of a single-repository Change Task without --pr or --resolutions", false)
+	}
 	data := map[string]any{}
+	if noChange {
+		data["no_change"] = true
+		note = "No change needed: " + note
+	}
 	if parsed.Flags["turn"] != "" {
 		if verb != "done" {
 			return axi.Failure("signal_invalid", "--turn is only valid on a done Signal", false)
@@ -1438,6 +1446,14 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			}
 			if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg); err != nil {
 				return err
+			}
+		} else if task.Type == "change" && noChange {
+			work, err := s.unmergedWork(ctx.Context, db, project, task)
+			if err != nil {
+				return err
+			}
+			if work != "" {
+				return axi.Failure("signal_invalid", "--no-change requires a branch with no commits ahead of "+task.BaseRef+" and a clean worktree: "+work, false, "Commit the change and signal done without --no-change")
 			}
 		} else if task.Type == "change" {
 			privateCandidate := false
@@ -1691,7 +1707,13 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		verdict = &store.ReviewVerdictInput{Verdict: verdictFlag, ReportSHA256: digest, Findings: reviewFindings}
 	}
-	state, err := s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, false, reviewResolutions)
+	var state store.State
+	if noChange {
+		// No candidate or head to validate: the Task changed nothing.
+		state, err = db.RecordWorkerSignalWithVerdict(ctx.Context, task, verb, note, data, noticeKind, nil)
+	} else {
+		state, err = s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, false, reviewResolutions)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrTaskMergeInProgress) {
 			return axi.Failure("merge_in_progress", "cannot reopen the Task because its merge has started or is in progress", false, "Wait for the Lead to resolve the merge outcome before retrying the Signal")
@@ -1743,7 +1765,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
 	defer cancelMaintenance()
-	if verb == "done" && task.Type == "change" {
+	if verb == "done" && task.Type == "change" && !noChange {
 		if err := s.checkReviewCapAfterDone(maintenanceCtx, db, home, project, task); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Review cap reconciliation deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 		}
