@@ -292,6 +292,10 @@ assignments='
 4 TestClosedPRDiscardRechecksForgeStateBeforeTeardown
 4 TestResearchChildrenRunThroughTheDetachedRunner
 4 TestResearchHookRefusesWriteCapableClaudeChildren
+4 TestLeadCanDeferP2FindingWithIssue
+4 TestCIFixAfterReviewPassHasNoReviewEvidence
+4 TestCleanTargetMergeAfterReviewPassLandsWithoutANewRound
+4 TestBlockingReviewFindingRefusesMergeUnderReviewNone
 '
 
 validate_assignments() {
