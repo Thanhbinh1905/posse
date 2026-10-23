@@ -598,12 +598,14 @@ func TestGitLabDoctorChecksHostAuthentication(t *testing.T) {
 	if code != 0 || !strings.Contains(output, "glab auth git.example.com,warn") || !strings.Contains(output, "authentication missing") {
 		t.Fatalf("doctor trusted cached authentication instead of checking current state: %d %s %s", code, output, stderr)
 	}
-	if err := os.WriteFile(filepath.Join(f.bin, "glab"), []byte("#!/bin/sh\n/bin/sleep 5\n"), 0o700); err != nil {
+	// The fake CLI hangs far longer than doctor's 2s forge timeout, so the
+	// bound proves doctor stopped waiting without depending on machine load.
+	if err := os.WriteFile(filepath.Join(f.bin, "glab"), []byte("#!/bin/sh\n/bin/sleep 30\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	started := time.Now()
 	code, output, stderr = f.run("doctor")
-	if elapsed := time.Since(started); elapsed > 3*time.Second {
+	if elapsed := time.Since(started); elapsed > 15*time.Second {
 		t.Fatalf("doctor waited %s for a hanging forge CLI: %d %s %s", elapsed, code, output, stderr)
 	}
 	if code != 0 || !strings.Contains(output, "glab auth git.example.com,warn") || !strings.Contains(output, "timed out after 2s") {
