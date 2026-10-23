@@ -369,6 +369,87 @@ Implement after the prerequisite.
 	}
 }
 
+func TestFailedPrerequisiteDecisionCanDropEdgeAndRunQueuedTask(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", ShortName: "predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateFailed, "worker", "fixture failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := `---
+type: change
+title: Dependent change
+done_when: prerequisite is resolved
+after: t1:landed
+---
+Wait for the prerequisite.
+`
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = &bytes.Buffer{}, &bytes.Buffer{}
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+		t.Fatalf("dependent start exit=%d output=%s", code, cli.Out)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.refillQueuedTasks(ctx, db, fixture.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "dependency" || strings.Join(decisions[0].Options, ",") != "cancel,drop-prerequisite-and-run" {
+		t.Fatalf("dependency Decision=%#v err=%v", decisions, err)
+	}
+	queued, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil || queued.State != store.StateQueued || queued.Branch != "" {
+		t.Fatalf("queued Task changed before Decision: task=%+v err=%v", queued, err)
+	}
+	decision, err := db.AnswerDecision(ctx, fixture.project.ID, decisions[0].ID, "drop-prerequisite-and-run", "User approved dropping the failed prerequisite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli = fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"apply", fmt.Sprint(decision.ID)}); code != 0 {
+		t.Fatalf("apply dependency Decision exit=%d output=%s", code, output.String())
+	}
+	db, err = store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	updated, err := db.Task(ctx, fixture.project.ID, "t2")
+	plan, planErr := updated.AdmittedPlan()
+	if err != nil || planErr != nil || updated.State != store.StateWorking || len(plan.Dependencies) != 0 || plan.Revision != 2 {
+		t.Fatalf("applied dependency Decision did not revise and dispatch Task: task=%+v plan=%+v err=%v planErr=%v output=%s", updated, plan, err, planErr, output.String())
+	}
+}
+
 func TestStartRejectsWrongTypedPrerequisiteAtomically(t *testing.T) {
 	fixture := newStartFixture(t)
 	db, err := store.Open(fixture.home)
