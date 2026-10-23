@@ -41,6 +41,33 @@ func sandboxProcessExecutableIdentity(pid int) (string, error) {
 	return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino), nil
 }
 
+// loginShellNames are interactive shells a Herdr pane can run as its shell.
+var loginShellNames = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "mksh": true, "ash": true, "fish": true, "tcsh": true, "csh": true, "nu": true, "elvish": true}
+
+// sandboxProcessRunsLoginShell reports whether PID executes a login shell,
+// named in /etc/shells or by a known shell name. A replaced or deleted image
+// path still names the shell its package installed.
+func sandboxProcessRunsLoginShell(pid int) (bool, error) {
+	target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	if err != nil {
+		return false, err
+	}
+	target = strings.TrimSuffix(target, " (deleted)")
+	if loginShellNames[filepath.Base(target)] {
+		return true, nil
+	}
+	listed, err := os.ReadFile("/etc/shells")
+	if err != nil {
+		return false, nil
+	}
+	for _, line := range strings.Split(string(listed), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") && samePath(line, target) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func sandboxProcessGroupID(pid int) (int, error) {
 	fields, err := sandboxProcessStatFields(pid)
 	if err != nil {

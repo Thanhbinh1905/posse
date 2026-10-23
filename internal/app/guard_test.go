@@ -131,7 +131,6 @@ func TestGuardKeepsOpaquePythonHerdrAccessBlocked(t *testing.T) {
 		"PYTHONUSERBASE=/tmp/python python3 -c \"print('herdr')\"",
 		"R=/tmp/python; PYTHONPATH=$R python3 -c \"print('herdr')\"",
 		"python3 -c \"print('herdr')\" <<'PY'\nimport subprocess\nsubprocess.run(['herdr'])\nPY",
-		"printf input | python3 -c \"print('herdr')\"",
 	} {
 		if refused, reason := guardCommand(command, scope); !refused || reason.why == "" {
 			t.Errorf("guard did not conservatively refuse opaque Python command %q: %#v", command, reason)

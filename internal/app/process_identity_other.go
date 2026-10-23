@@ -16,6 +16,10 @@ func sandboxProcessExecutableIdentity(pid int) (string, error) {
 	return "", fmt.Errorf("process executable identity is unsupported on this platform for PID %d", pid)
 }
 
+func sandboxProcessRunsLoginShell(pid int) (bool, error) {
+	return false, fmt.Errorf("process executable inspection is unsupported on this platform for PID %d", pid)
+}
+
 func sandboxProcessGroupID(pid int) (int, error) {
 	return 0, fmt.Errorf("process group is unsupported on this platform for PID %d", pid)
 }

@@ -542,6 +542,13 @@ case "$PWD/" in
       setsid python3 "$POSSE_TEST_ROOT/detached-server.py" "$POSSE_TEST_ROOT" "$TMPDIR/detached-server-reference" >/dev/null 2>&1 &
       echo $! > "$POSSE_TEST_ROOT/detached-server.pid"
     fi
+    if [ -f "$POSSE_TEST_ROOT/quiet-agent" ]; then
+      # Block in a shell builtin so the Worker starts no child processes.
+      quiet="$POSSE_TEST_ROOT/quiet-${PWD##*/}.fifo"
+      mkfifo "$quiet"
+      IFS= read -r _ < "$quiet"
+      exit 0
+    fi
     while [ ! -f "$PWD/.posse-e2e-agent-exit" ]; do sleep 0.05; done
     ;;
   *)

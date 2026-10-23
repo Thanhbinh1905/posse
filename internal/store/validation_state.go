@@ -333,6 +333,18 @@ func (db *DB) ValidationExpectedBaseHeads(ctx context.Context, taskID int64) ([]
 	return snapshot.Heads, err
 }
 
+// OutstandingValidationFixHead returns the head named by the newest automatic
+// fix instruction of kind issued since the Task's most recent done Signal, or
+// "" when there is none.
+func (db *DB) OutstandingValidationFixHead(ctx context.Context, taskID int64, kind string) (string, error) {
+	var head string
+	err := db.QueryRowContext(ctx, `SELECT r.expected_base_head FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind=? AND m.status IN ('queued','claimed','interrupting','submitting','delivered') AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'),0) ORDER BY r.id DESC LIMIT 1`, taskID, kind, taskID).Scan(&head)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return head, err
+}
+
 func validationContinuitySnapshotTx(ctx context.Context, tx *writeTx, taskID int64) (ValidationContinuitySnapshot, error) {
 	return validationContinuitySnapshot(ctx, tx, taskID)
 }
