@@ -94,3 +94,19 @@ func mergeTaskProcessDetails(groups ...[]taskProcessDetail) []taskProcessDetail 
 	sort.Slice(result, func(i, j int) bool { return result[i].PID < result[j].PID })
 	return result
 }
+
+// recordTeardownEscapedProcesses reports Task-marked processes that outlived
+// Teardown because they no longer reference the Sandbox or Task scratch.
+func recordTeardownEscapedProcesses(ctx context.Context, db *store.DB, project store.Project, task store.Task, processes []taskProcessDetail) error {
+	if len(processes) == 0 {
+		return nil
+	}
+	remedy := "Teardown could not prove these processes belong to the Task, so it left them running. Stop them if they are leftovers of the Task."
+	summary := fmt.Sprintf("%s was torn down, but Task-marked processes outside its Sandbox survived: %s. %s", taskDisplayName(task), describeTaskProcesses(processes), remedy)
+	data, err := json.Marshal(map[string]any{"processes": processes, "remedy": remedy})
+	if err != nil {
+		return err
+	}
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "teardown_escaped_processes", Summary: summary, DataJSON: string(data)})
+	return err
+}

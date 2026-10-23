@@ -629,6 +629,12 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		task, _ = db.TaskByID(ctx, project.ID, task.ID)
 	}
 	if task.GatedSHA == "" || task.PRURL == "" {
+		if err := pendingTargetSyncFailure(ctx, db, project, task); err != nil {
+			return err
+		}
+		if task.State != store.StateMerging {
+			return taskStateChangedFailure(task)
+		}
 		return axi.Failure("merge_refused", "Task has no recorded pull request or gated commit", false)
 	}
 	forge, err := forgeForRepository(ctx, project.Root, cfg, "")
@@ -1143,11 +1149,12 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		return err
 	}
 	type pendingObservation struct {
-		task      store.Task
-		current   store.PRObservation
-		failures  []failedCheck
-		previous  store.PRObservation
-		hasBefore bool
+		task       store.Task
+		current    store.PRObservation
+		failures   []failedCheck
+		ciFailures []failedCheck
+		previous   store.PRObservation
+		hasBefore  bool
 	}
 	observations := make([]pendingObservation, 0, len(targets))
 	for _, task := range watched {
@@ -1200,7 +1207,7 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 				continue
 			}
 			if !freshness.Fresh {
-				if err := queuePRTargetSyncInstruction(ctx, db, task, "", task.MergeMode, freshness, observation.HeadSHA); err != nil {
+				if _, err := queuePRTargetSyncInstruction(ctx, db, task, "", task.MergeMode, freshness, observation.HeadSHA); err != nil {
 					return err
 				}
 				observation.Checks = stalePRChecks()
@@ -1234,7 +1241,11 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 				continue
 			}
 		}
-		observations = append(observations, pendingObservation{task: task, current: observation, failures: failures, previous: previous, hasBefore: hasPrevious})
+		ciFailures := failures
+		if forge.Kind != "gitlab" && pull.checksRunning() {
+			ciFailures = nil
+		}
+		observations = append(observations, pendingObservation{task: task, current: observation, failures: failures, ciFailures: ciFailures, previous: previous, hasBefore: hasPrevious})
 	}
 	for _, observed := range observations {
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
@@ -1257,7 +1268,7 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 			return err
 		}
 		if observed.current.State == "OPEN" {
-			if err := s.processCIObservation(ctx, db, project, observed.task, observed.current, observed.failures, forge, ""); err != nil {
+			if err := s.processCIObservation(ctx, db, project, observed.task, observed.current, observed.ciFailures, forge, ""); err != nil {
 				return err
 			}
 		}
@@ -1504,6 +1515,20 @@ func (pull *ghPullRequest) StatusCheckRollupState() string {
 		return "PENDING"
 	}
 	return pull.StatusCheckRollup.State
+}
+
+// checksRunning reports whether any check on the head has not finished. GitHub
+// rolls up to FAILURE on the first failed check, so a CI fix round waits until
+// the run settles and its instruction names every failed check.
+func (pull *ghPullRequest) checksRunning() bool {
+	for _, node := range pull.checkNodes() {
+		status, _ := node["status"].(string)
+		contextState, _ := node["state"].(string)
+		if status != "" && !strings.EqualFold(status, "COMPLETED") || strings.EqualFold(contextState, "PENDING") || strings.EqualFold(contextState, "EXPECTED") {
+			return true
+		}
+	}
+	return false
 }
 
 func (pull *ghPullRequest) checkNodes() []map[string]any {

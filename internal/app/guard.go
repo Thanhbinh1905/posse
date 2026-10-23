@@ -555,10 +555,76 @@ func (g *guard) interpreter(e *shellEnv, args []string, literal []bool, raw, std
 	if strings.TrimSpace(code) == "" {
 		code = stdin
 	}
-	if pythonInterpreter(filepath.Base(args[0])) && provenPythonInvocation(e, args, literal, stdinRedirected) {
+	name := filepath.Base(args[0])
+	if pythonInterpreter(name) && provenPythonInvocation(e, args, literal, stdinRedirected) {
 		return false, guardReason{}
 	}
-	return g.opaque(e, raw, raw+"\n"+code)
+	if pythonInterpreter(name) && pythonRunsUnseenCode(e, args) {
+		return g.opaque(e, raw, raw+"\n"+code)
+	}
+	return g.interpreterCode(e, name, raw, raw+"\n"+code+"\n"+stdin)
+}
+
+// pythonRunsUnseenCode reports an interactive mode or startup override that
+// can run code the command does not show, so any Herdr mention is refused.
+func pythonRunsUnseenCode(e *shellEnv, args []string) bool {
+	for _, arg := range args[1:] {
+		if arg == "-c" || arg == "-m" || arg == "--" || !strings.HasPrefix(arg, "-") {
+			break
+		}
+		if !strings.HasPrefix(arg, "--") && strings.Contains(arg, "i") {
+			return true
+		}
+	}
+	for _, name := range []string{"PYTHONINSPECT", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"} {
+		if e.unknown[name] || e.exported[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// interpreterCode checks a program for an interpreter. Text that only names
+// Herdr, such as Go source importing the herdr package that the program edits,
+// cannot reach the session. The program is refused when it names the Herdr
+// socket or its variables, or when it can start processes and names herdr as
+// a program to run.
+func (g *guard) interpreterCode(e *shellEnv, interpreter, raw, code string) (bool, guardReason) {
+	code = strings.NewReplacer(`\t`, "\t", `\n`, "\n").Replace(code)
+	if g.namesRealSocket(code) {
+		return refuse(raw, "it names the socket of the Herdr session this Worker runs in")
+	}
+	if !herdrSocketReference.MatchString(code) && !(startsProcess(interpreter, code) && herdrProgram.MatchString(code)) {
+		return false, guardReason{}
+	}
+	if socket, known := e.socket(); known && g.realSocket != "" && !sameSocket(socket, g.realSocket) {
+		return false, guardReason{}
+	}
+	return refuse(raw, "it can run herdr or open its socket in a way posse cannot check, and its environment still points at the Worker's Herdr session")
+}
+
+var (
+	herdrSocketReference = regexp.MustCompile(`herdr\.sock|HERDR_SOCKET_PATH|HERDR_BIN_PATH`)
+	// herdrProgram matches herdr as a command word or as an absolute,
+	// home-relative or ./ executable path, not as a package path or identifier.
+	herdrProgram = regexp.MustCompile("(^|[\\s\"'`(\\[,;|&=]|\\$\\()(?:(?:/|~/|\\$\\{?HOME\\}?/|\\./)[^\\s\"'`]*/)?herdr($|[\\s\"'`)\\],;|&])")
+	processStart = regexp.MustCompile(`subprocess|os\.(system|popen|exec|spawn|posix_spawn)|pty\.spawn|popen|child_process|exec(Sync|File)\b|spawnSync|\bspawn\s*\(|\bsystem(\s*\(|\s+["'q])|\bexec(\s*\(|\s+["'])|\bqx\s*[({\[/|!'"]|%x[({\[]|shell_exec|passthru|proc_open|pcntl_exec|os\.execute|Open3|Deno\.(Command|run)|Bun\.spawn|do shell script|\bgetline\b|\|&|(?m)^\s*(exec|spawn)\s`)
+	awkPipe      = regexp.MustCompile(`\|\s*"|"\s*\|`)
+	// backtickRuns lists interpreters where a backquoted string runs a command.
+	backtickRuns = map[string]bool{"perl": true, "ruby": true, "php": true}
+)
+
+// startsProcess reports whether interpreter code can start another program.
+func startsProcess(interpreter, code string) bool {
+	if processStart.MatchString(code) {
+		return true
+	}
+	language := strings.TrimRight(interpreter, "0123456789.")
+	if backtickRuns[language] && strings.Contains(code, "`") {
+		return true
+	}
+	// awk pipes print output into, or reads from, a shell command.
+	return strings.HasSuffix(language, "awk") && awkPipe.MatchString(code)
 }
 
 // executable checks a program named by path: a text script is read and
@@ -588,6 +654,9 @@ func (g *guard) executable(e *shellEnv, program string, args []string, literal [
 	}
 	if shells[interpreter] {
 		return g.check(e.clone(), contents, depth+1, stdinRedirected)
+	}
+	if interpreters.MatchString(interpreter) && !(pythonInterpreter(interpreter) && pythonRunsUnseenCode(e, fields)) {
+		return g.interpreterCode(e, interpreter, raw, raw+"\n"+contents)
 	}
 	return g.opaque(e, raw, raw+"\n"+contents)
 }
