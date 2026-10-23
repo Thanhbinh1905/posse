@@ -137,6 +137,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "list", Usage: "$ list [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
 		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, model-error recovery episode, undelivered messages, Signals and transitions.", Handler: s.show},
+		{Name: "diff", Usage: "$ diff <task> [--stat]", Summary: "Print a Task's diff against its base, or a per-Member diff for a Workspace Task.", Handler: s.diff},
 		{Name: "accept", Usage: "$ accept <task> [--user-approved <quote>]", Summary: "Record User acceptance of a publication-bound Research Report after independent review.", Handler: s.acceptReport},
 		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Worker's question to the User as a Decision.", Handler: s.ask},
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},

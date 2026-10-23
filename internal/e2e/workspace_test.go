@@ -316,6 +316,14 @@ esac
 			t.Fatalf("Sandbox must not contain %s: %v", absent, err)
 		}
 	}
+	diff := runPosse(t, posseBinary, workspace, leadEnv, "diff", "t1")
+	if !strings.Contains(diff, "Member: backend") || !strings.Contains(diff, "Member: worker") || !strings.Contains(diff, "worker-change.txt") {
+		t.Fatalf("Workspace Task diff omitted a Member: %s", diff)
+	}
+	stat := runPosse(t, posseBinary, workspace, leadEnv, "diff", "t1", "--stat")
+	if !strings.Contains(stat, "Member: backend") || !strings.Contains(stat, "Member: worker") || strings.Contains(stat, "diff --git") {
+		t.Fatalf("Workspace Task diff --stat: %s", stat)
+	}
 	if output := runPosse(t, posseBinary, workspace, leadEnv, "merge", "t1"); !strings.Contains(output, "state: merging") || !strings.Contains(output, "backend,local,gated") || !strings.Contains(output, "worker,local,gated") {
 		t.Fatalf("merge: %s", output)
 	}
