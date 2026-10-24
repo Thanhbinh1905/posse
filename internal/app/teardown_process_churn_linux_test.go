@@ -190,6 +190,55 @@ func TestReportedCodexResearchAcceptsNamelessAgentWithRecordedSession(t *testing
 	}
 }
 
+func TestTeardownOwnershipToleratesAgentReportLapsingBetweenSnapshots(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	attachPRFixtureSandbox(t, fixture)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskLaunch(ctx, fixture.task.ID, fixture.worktree, "w2", "w2:p1", "posse:shop:t1", agentName("shop", fixture.task.Seq, 1)); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell := startSandboxProcess(t, fixture.worktree)
+	agent := startSandboxProcess(t, fixture.worktree)
+	snapshot := herdr.Snapshot{
+		Panes: []herdr.Pane{
+			{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude"},
+			{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, TabID: "w2:t1", Label: task.PaneLabel, CWD: fixture.worktree, Agent: "claude"},
+		},
+		Agents: []herdr.Agent{{Name: agentName("shop", task.Seq, 1), PaneID: task.PaneID, Kind: "claude"}},
+	}
+	adapter := &researchProcessChurnAdapter{
+		Fake:            fixture.service.Herdr.(*herdr.Fake),
+		snapshot:        snapshot,
+		shellPID:        shell.Process.Pid,
+		agentPID:        agent.Process.Pid,
+		worktree:        fixture.worktree,
+		leadCWD:         fixture.repo,
+		lapseAgentAfter: 2, // initial scan and the pre-verification recheck still see the agent
+	}
+	fixture.service.Herdr = adapter
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	if err := fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, authorization); err != nil {
+		t.Fatalf("Herdr dropping its agent report during verification was refused although the pane still belongs to the Task: %v", err)
+	}
+	if authorization.handle(agent.Process.Pid) == nil {
+		t.Fatal("exact Worker process was not retained after ownership verification")
+	}
+
+	adapter.snapshotCalls, adapter.lapseAgentAfter = 0, 0
+	adapter.replaceAgentAfter = agentName("shop", task.Seq+1, 1)
+	foreignAuthorization := newSandboxProcessAuthorization()
+	defer foreignAuthorization.Close()
+	err = fixture.service.verifySandboxForegroundOwnershipWithAuthorization(ctx, fixture.db, fixture.project, task, foreignAuthorization)
+	if err == nil || !strings.Contains(err.Error(), "changed Herdr ownership") {
+		t.Fatalf("pane taken over by another Task's agent during verification was not refused: %v", err)
+	}
+}
+
 func TestReportedResearchAllowsTransientPaneProcessWithoutAuthorizingIt(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	sandbox := attachPRFixtureSandbox(t, fixture)
@@ -294,10 +343,30 @@ type researchProcessChurnAdapter struct {
 	leadCWD               string
 	agentProcessName      string
 	processCalls          int
+	snapshotCalls         int
+	lapseAgentAfter       int
+	replaceAgentAfter     string
 }
 
 func (adapter *researchProcessChurnAdapter) Snapshot(context.Context) (herdr.Snapshot, error) {
-	return adapter.snapshot, nil
+	adapter.snapshotCalls++
+	if adapter.replaceAgentAfter != "" && adapter.snapshotCalls > 2 {
+		replaced := adapter.snapshot
+		replaced.Agents = []herdr.Agent{{Name: adapter.replaceAgentAfter, PaneID: adapter.snapshot.Panes[len(adapter.snapshot.Panes)-1].PaneID, Kind: "claude"}}
+		return replaced, nil
+	}
+	if adapter.lapseAgentAfter == 0 || adapter.snapshotCalls <= adapter.lapseAgentAfter {
+		return adapter.snapshot, nil
+	}
+	lapsed := adapter.snapshot
+	lapsed.Agents = nil
+	lapsed.Panes = append([]herdr.Pane(nil), adapter.snapshot.Panes...)
+	for i := range lapsed.Panes {
+		if lapsed.Panes[i].PaneID == adapter.snapshot.Panes[len(adapter.snapshot.Panes)-1].PaneID {
+			lapsed.Panes[i].Agent = ""
+		}
+	}
+	return lapsed, nil
 }
 
 func (adapter *researchProcessChurnAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
