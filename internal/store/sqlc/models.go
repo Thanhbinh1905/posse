@@ -103,6 +103,18 @@ type MemberWatchError struct {
 	UpdatedAt int64
 }
 
+type MergeQueueEntry struct {
+	ID            int64
+	ProjectID     int64
+	TaskID        int64
+	Repo          string
+	TargetBranch  string
+	EnteredAt     int64
+	CreatedAt     int64
+	DequeuedAt    int64
+	DequeueReason string
+}
+
 type Message struct {
 	ID          int64
 	TaskID      int64

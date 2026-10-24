@@ -669,6 +669,113 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 	}
 }
 
+// Three done PRs share main. Without a merge queue, each landing asks every
+// behind PR to merge main. With it, each landing updates exactly one PR.
+func TestMergeQueuePromotesOneBehindPRPerLanding(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	projectConfig := filepath.Join(fixture.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("[autonomy]\nland = \"auto\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"t1", "t2", "t3"}
+	for _, id := range ids {
+		brief := filepath.Join(fixture.root, "queue-"+id+".md")
+		if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Queued change "+id+"\ndone_when: committed change exists\n---\nMake a change.\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fixture.startAndComplete(t, brief, id)
+		if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", id); !strings.Contains(output, "merging") {
+			t.Fatalf("%s PR did not open: %s", id, output)
+		}
+	}
+	tasks := map[string]store.Task{}
+	for _, id := range ids {
+		tasks[id] = fixture.mustTask(t, id)
+	}
+	openPull := func(id, head string) fakePull {
+		return fakePull{alias: "pr" + strings.TrimPrefix(id, "t"), state: "OPEN", checks: "SUCCESS", review: "APPROVED", mergeable: "MERGEABLE", head: head}
+	}
+	mergedPull := func(id, head, merge string) fakePull {
+		pull := openPull(id, head)
+		pull.state, pull.mergeCommit = "MERGED", merge
+		return pull
+	}
+	fixture.writeGraphQLPulls(t, openPull("t1", tasks["t1"].GatedSHA), openPull("t2", tasks["t2"].GatedSHA), openPull("t3", tasks["t3"].GatedSHA))
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	freshnessRounds := func(id string) int {
+		t.Helper()
+		var count int
+		if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness'`, fixture.mustTask(t, id).ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	land := func(id string) string {
+		t.Helper()
+		if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", id, "--execute"); !strings.Contains(output, "merging") {
+			t.Fatalf("%s PR did not merge: %s", id, output)
+		}
+		return fixture.mergeOnLocalOrigin(t, fixture.mustTask(t, id), id)
+	}
+
+	// Landing 1: only the queue head t2 is asked to merge main.
+	firstMerge := land("t1")
+	fixture.writeGraphQLPulls(t, mergedPull("t1", tasks["t1"].GatedSHA, firstMerge), openPull("t2", tasks["t2"].GatedSHA), openPull("t3", tasks["t3"].GatedSHA))
+	fixture.waitTaskState(t, "t2", store.StateWorking)
+	for i := 0; i < 3; i++ {
+		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t3")
+	}
+	if current := fixture.mustTask(t, "t3"); current.State != store.StateMerging || freshnessRounds("t3") != 0 {
+		t.Fatalf("queued t3 was asked to update before promotion: state=%s rounds=%d", current.State, freshnessRounds("t3"))
+	}
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t3"); !strings.Contains(output, "merge_queue[1]{head,length,position,target}:") || !strings.Contains(output, "t2,2,2,main") {
+		t.Fatalf("posse show does not report t3's queue position: %s", output)
+	}
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list"); !strings.Contains(output, "2/2 main") {
+		t.Fatalf("posse list does not report the queue position: %s", output)
+	}
+	command := exec.Command(fixture.binary, "merge", "t3", "--execute")
+	command.Dir, command.Env = fixture.repo, fixture.leadEnv
+	if output, err := command.CombinedOutput(); err == nil || !strings.Contains(string(output), "pr_branch_behind") || !strings.Contains(string(output), "position 2 of 2") {
+		t.Fatalf("Merge of a queued Task did not report its queue position: %v\n%s", err, output)
+	}
+
+	// The head merges main, republishes and lands; only then is t3 promoted.
+	t2 := fixture.mustTask(t, "t2")
+	if !waitForCondition(30*time.Second, func() bool {
+		_, err := gitCommand(fixture.env, t2.WorktreePath, "merge-base", "--is-ancestor", firstMerge, "HEAD")
+		return err == nil
+	}) {
+		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
+		head, _ := gitCommand(fixture.env, t2.WorktreePath, "log", "--oneline", "-5")
+		t.Fatalf("t2 Worker did not merge origin/main: head=%s delivery=%s", head, log)
+	}
+	syncedHead := strings.TrimSpace(gitTest(t, fixture.env, t2.WorktreePath, "rev-parse", "HEAD"))
+	fixture.writeGraphQLPulls(t, openPull("t2", syncedHead), openPull("t3", tasks["t3"].GatedSHA))
+	if err := os.WriteFile(filepath.Join(fixture.fixGate, "t2"), []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.waitTaskState(t, "t2", store.StateDone)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t2"); !strings.Contains(output, "merging") {
+		t.Fatalf("synced t2 did not record its merge head: %s", output)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
+	if rounds := freshnessRounds("t3"); rounds != 0 {
+		t.Fatalf("t3 was asked to update while t2 held the queue head: rounds=%d", rounds)
+	}
+	secondMerge := land("t2")
+	fixture.writeGraphQLPulls(t, mergedPull("t2", syncedHead, secondMerge), openPull("t3", tasks["t3"].GatedSHA))
+	fixture.waitTaskState(t, "t3", store.StateWorking)
+
+	if got := []int{freshnessRounds("t2"), freshnessRounds("t3")}; got[0] != 1 || got[1] != 1 {
+		t.Fatalf("merge-target instructions per Task = %v, want one update per landing", got)
+	}
+}
+
 func TestExternalMergeDuringFollowUpWithMovedTaskBranch(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
@@ -2006,17 +2113,24 @@ case "$PWD/" in
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
     : > "$POSSE_TEST_ROOT/worker-ready-$task_id"
     while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id" ]; do sleep 0.02; done
-    case "$task_id" in t1) pr_url='https://github.com/acme/shop/pull/17' ;; t2) pr_url='https://github.com/acme/shop/pull/18' ;; esac
+    pr_url="https://github.com/acme/shop/pull/$((16 + ${task_id#t}))"
     "$POSSE_E2E_POSSE_BIN" publish "Worker committed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
     "$POSSE_E2E_POSSE_BIN" signal done "Worker committed $task_id" --pr "$pr_url" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     : > "$POSSE_TEST_ROOT/worker-idle-$task_id"
     while IFS= read -r instruction; do
+      # A Posse envelope puts its JSON body on the line after its header.
+      case "$instruction" in "[posse |"*) IFS= read -r body || body=; instruction="$instruction
+$body" ;; esac
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
       while [ -e "$POSSE_TEST_ROOT/pause-fix-commit" ]; do sleep 0.02; done
       printf 'fix change %s\n' "$task_id" > "e2e-fix-$task_id.txt"
       git add "e2e-fix-$task_id.txt"
       git commit -m "fix worker change $task_id" >/dev/null || true
+      case "$instruction" in *"Merge origin/main"*)
+        git fetch --quiet --refmap= origin main >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
+        git merge --quiet --no-edit FETCH_HEAD >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1 ;;
+      esac
       while [ ! -e "$POSSE_E2E_FIX_GATE/$task_id" ]; do sleep 0.02; done
       "$POSSE_E2E_POSSE_BIN" publish "Worker fixed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
       turn_token=$(printf '%s\n' "$instruction" | sed -n 's/.*| turn \([^]]*\)].*/\1/p')
@@ -2050,7 +2164,9 @@ case "$1 $2" in
     *) exit 90 ;;
     esac ;; 
   "pr list")
-    case " $* " in *' --head posse/t1 '*) branch=posse/t1; number=17 ;; *' --head posse/t2 '*) branch=posse/t2; number=18 ;; *) exit 90 ;; esac
+    branch=$(printf '%s\n' "$*" | sed -n 's/.*--head \(posse\/t[0-9][0-9]*\).*/\1/p')
+    if [ -z "$branch" ]; then exit 90; fi
+    number=$((16 + ${branch#posse/t}))
     if grep -q "/pull/$number" "$POSSE_TEST_GH_OPEN_PRS"; then
       if [ -f "$POSSE_TEST_ROOT/gh-list-stale-head" ]; then
         if [ ! -f "$POSSE_TEST_ROOT/gh-list-stale-head-started" ]; then date +%s%3N > "$POSSE_TEST_ROOT/gh-list-stale-head-started"; fi
@@ -2070,7 +2186,9 @@ case "$1 $2" in
       printf '[]\n'
     fi ;;
   "pr create")
-    case " $* " in *' --head posse/t1 '*) branch=posse/t1; number=17 ;; *' --head posse/t2 '*) branch=posse/t2; number=18 ;; *) exit 90 ;; esac
+    branch=$(printf '%s\n' "$*" | sed -n 's/.*--head \(posse\/t[0-9][0-9]*\).*/\1/p')
+    if [ -z "$branch" ]; then exit 90; fi
+    number=$((16 + ${branch#posse/t}))
     head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
     url="https://github.com/acme/shop/pull/$number"
     while [ "$#" -gt 0 ]; do
@@ -2080,7 +2198,7 @@ case "$1 $2" in
         *) shift ;;
       esac
     done
-    printf '[{"url":"%s","headRefName":"%s","headRefOid":"%s"}]\n' "$url" "$branch" "$head" > "$POSSE_TEST_GH_OPEN_PRS"
+    printf '[{"url":"%s","headRefName":"%s","headRefOid":"%s"}]\n' "$url" "$branch" "$head" >> "$POSSE_TEST_GH_OPEN_PRS"
     printf '%s\n' "$url" ;;
   "pr edit")
     while [ "$#" -gt 0 ]; do
@@ -2096,15 +2214,21 @@ case "$1 $2" in
     case "$*" in
       *'--json title,body'*) python3 -c 'import json,sys; print(json.dumps({"title":open(sys.argv[1]).read(),"body":open(sys.argv[2]).read()}))' "$POSSE_TEST_GH_TITLE" "$POSSE_TEST_GH_BODY" ;;
       *)
-        case "$3" in */17) branch=posse/t1 ;; */18) branch=posse/t2 ;; *) exit 90 ;; esac
+        case "$3" in */1[7-9]|*/[2-9][0-9]) branch="posse/t$((${3##*/} - 16))" ;; *) exit 90 ;; esac
         head=
         if [ -n "$branch" ]; then head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch"); fi
         state=OPEN
         base=main
         if [ -f "$POSSE_TEST_GH_BASE_BRANCH_FILE" ]; then base=$(cat "$POSSE_TEST_GH_BASE_BRANCH_FILE"); fi
-        if grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then state=MERGED
-        elif grep -q '"state":"CLOSED"' "$POSSE_TEST_GH_STATE" || [ -e "$POSSE_TEST_GH_PR_CLOSED" ]; then state=CLOSED
+        # A state file with several PRs answers for the requested PR only.
+        recorded=$(python3 -c 'import json,sys
+pulls=json.load(open(sys.argv[1])).get("data",{}).get("repo1",{}).values()
+print(next((p["state"] for p in pulls if p.get("url")==sys.argv[2]),""))' "$POSSE_TEST_GH_STATE" "$3")
+        if [ -n "$recorded" ]; then state=$recorded
+        elif grep -q '"state":"MERGED"' "$POSSE_TEST_GH_STATE"; then state=MERGED
+        elif grep -q '"state":"CLOSED"' "$POSSE_TEST_GH_STATE"; then state=CLOSED
         fi
+        if [ "$state" = OPEN ] && [ -e "$POSSE_TEST_GH_PR_CLOSED" ]; then state=CLOSED; fi
         printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$state" "$head" "$branch" "$base" ;;
     esac ;;
   "pr close")
@@ -2365,6 +2489,8 @@ func (fixture *prLifecycleFixture) startAndComplete(t *testing.T, brief, taskID 
 	name := "pr-lifecycle-change"
 	if taskID == "t2" {
 		name = "external-merge-change"
+	} else if taskID != "t1" {
+		name = "queued-change-" + taskID
 	} else if strings.Contains(brief, "follow-up") {
 		name = "pr-follow-up"
 	}
@@ -2462,26 +2588,42 @@ func (fixture *prLifecycleFixture) waitTaskState(t *testing.T, taskID string, wa
 
 func (fixture *prLifecycleFixture) writeGraphQL(t *testing.T, alias, state, checks, review, mergeable, mergeCommit, head string) {
 	t.Helper()
-	contexts := []any{}
-	if checks == "FAILURE" {
-		contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://checks.example/unit"})
+	fixture.writeGraphQLPulls(t, fakePull{alias: alias, state: state, checks: checks, review: review, mergeable: mergeable, mergeCommit: mergeCommit, head: head})
+}
+
+// fakePull is one PR in the fake GraphQL response; alias prN is Task tN.
+type fakePull struct {
+	alias, state, checks, review, mergeable, mergeCommit, head string
+}
+
+func (fixture *prLifecycleFixture) writeGraphQLPulls(t *testing.T, pulls ...fakePull) {
+	t.Helper()
+	repository := map[string]any{}
+	for _, fake := range pulls {
+		contexts := []any{}
+		if fake.checks == "FAILURE" {
+			contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://checks.example/unit"})
+		}
+		number, err := strconv.Atoi(strings.TrimPrefix(fake.alias, "pr"))
+		if err != nil {
+			t.Fatalf("fake PR alias %q: %v", fake.alias, err)
+		}
+		task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t"+strconv.Itoa(number))
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseBranch := task.TargetBranch
+		if baseBranch == "" {
+			baseBranch = fixture.project.DefaultBranch
+		}
+		repository[fake.alias] = map[string]any{
+			"url":   "https://github.com/acme/shop/pull/" + strconv.Itoa(16+number),
+			"state": fake.state, "headRefOid": fake.head, "baseRefName": baseBranch, "mergeable": fake.mergeable, "reviewDecision": fake.review,
+			"mergeCommit":       map[string]any{"oid": fake.mergeCommit},
+			"statusCheckRollup": map[string]any{"state": fake.checks, "contexts": map[string]any{"nodes": contexts}},
+		}
 	}
-	taskID := map[string]string{"pr1": "t1", "pr2": "t2"}[alias]
-	task, err := fixture.db.Task(context.Background(), fixture.project.ID, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseBranch := task.TargetBranch
-	if baseBranch == "" {
-		baseBranch = fixture.project.DefaultBranch
-	}
-	pull := map[string]any{
-		"url":   "https://github.com/acme/shop/pull/" + map[string]string{"pr1": "17", "pr2": "18"}[alias],
-		"state": state, "headRefOid": head, "baseRefName": baseBranch, "mergeable": mergeable, "reviewDecision": review,
-		"mergeCommit":       map[string]any{"oid": mergeCommit},
-		"statusCheckRollup": map[string]any{"state": checks, "contexts": map[string]any{"nodes": contexts}},
-	}
-	encoded, err := json.Marshal(map[string]any{"data": map[string]any{"repo1": map[string]any{alias: pull}}})
+	encoded, err := json.Marshal(map[string]any{"data": map[string]any{"repo1": repository}})
 	if err != nil {
 		t.Fatal(err)
 	}

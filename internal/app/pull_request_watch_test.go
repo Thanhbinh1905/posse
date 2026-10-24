@@ -228,6 +228,35 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 	}
 }
 
+func TestPRWatchDequeuesRedMergeQueueHead(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+	}
+	if err := fixture.db.EnterMergeQueue(ctx, fixture.task.ID, "", "main", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if places, err := fixture.db.MergeQueuePlaces(ctx, fixture.project.ID); err != nil || len(places[fixture.task.ID]) != 1 {
+		t.Fatalf("Task did not enter the merge queue: %#v err=%v", places, err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	var reason string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT dequeue_reason FROM merge_queue_entries WHERE task_id=?`, fixture.task.ID).Scan(&reason); err != nil || reason != "checks_failed" {
+		t.Fatalf("red head was not dequeued: reason=%q err=%v", reason, err)
+	}
+	if places, err := fixture.db.MergeQueuePlaces(ctx, fixture.project.ID); err != nil || len(places[fixture.task.ID]) != 0 {
+		t.Fatalf("red head still holds a queue place: %#v err=%v", places, err)
+	}
+}
+
 func TestPRWatchRaisesMergeReadyWhenTaskEntersMergeAfterPRIsGreen(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	ctx := context.Background()
