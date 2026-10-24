@@ -15,6 +15,7 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 	}
 	for _, statement := range []string{
 		`ALTER TABLE pr_body_markers DROP COLUMN validation_digest`,
+		`DROP TABLE merge_queue_entries`,
 		`DROP TABLE research_attempts`,
 		`DROP TABLE member_watch_errors`,
 		`DROP TABLE validation_stage_results`,

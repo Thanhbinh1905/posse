@@ -1165,6 +1165,12 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		hasBefore  bool
 	}
 	observations := make([]pendingObservation, 0, len(targets))
+	type behindPR struct {
+		task      store.Task
+		freshness prTargetFreshness
+		headSHA   string
+	}
+	behind := []behindPR{}
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
 			if strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest") {
@@ -1215,14 +1221,20 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 				continue
 			}
 			if !freshness.Fresh {
-				if _, err := queuePRTargetSyncInstruction(ctx, db, task, "", task.MergeMode, freshness, observation.HeadSHA); err != nil {
+				// Enter every behind Task before promoting, so the head follows
+				// done Signal order rather than poll order.
+				if err := db.EnterMergeQueue(ctx, task.ID, "", freshness.Branch, now.UnixMilli()); err != nil {
 					return err
 				}
+				behind = append(behind, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
 				observation.Checks = stalePRChecks()
 				failures = nil
 			}
 		}
 		if observation.State == "MERGED" {
+			if err := db.DequeueMergeQueue(ctx, task.ID, "", "merged", now.UnixMilli()); err != nil {
+				return err
+			}
 			verified, verifyErr := db.WasVerifiedPRHead(ctx, task.ID, task.PRURL, observation.HeadSHA)
 			if verifyErr != nil {
 				return verifyErr
@@ -1253,7 +1265,18 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		if forge.Kind != "gitlab" && pull.checksRunning() {
 			ciFailures = nil
 		}
+		if len(ciFailures) > 0 {
+			// A red head leaves the queue so it cannot block the next entry.
+			if err := db.DequeueMergeQueue(ctx, task.ID, "", "checks_failed", now.UnixMilli()); err != nil {
+				return err
+			}
+		}
 		observations = append(observations, pendingObservation{task: task, current: observation, failures: failures, ciFailures: ciFailures, previous: previous, hasBefore: hasPrevious})
+	}
+	for _, pending := range behind {
+		if _, err := queuePRTargetSyncInstruction(ctx, db, pending.task, "", pending.task.MergeMode, pending.freshness, pending.headSHA); err != nil {
+			return err
+		}
 	}
 	for _, observed := range observations {
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
