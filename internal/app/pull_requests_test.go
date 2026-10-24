@@ -1318,6 +1318,8 @@ case "$1 $2" in
       git -C "$POSSE_TEST_GH_ADVANCE_REPO" push origin "$POSSE_TEST_GH_ADVANCE_SHA:refs/heads/${POSSE_TEST_GH_ADVANCE_BRANCH:-main}" >/dev/null
     fi
     cat "$POSSE_TEST_GH_STATE"
+    # A .next state answers every later query, as after a merge.
+    if [ -e "$POSSE_TEST_GH_STATE.next" ]; then mv "$POSSE_TEST_GH_STATE.next" "$POSSE_TEST_GH_STATE"; fi
     if [ -e "$POSSE_TEST_GH_STATE.exit" ]; then printf 'GraphQL request returned errors\n' >&2; exit 1; fi ;;
   "pr list")
     if [ "${POSSE_TEST_GH_FILTER_BASE:-}" = "1" ]; then
