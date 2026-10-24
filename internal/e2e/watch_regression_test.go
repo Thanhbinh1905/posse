@@ -550,6 +550,8 @@ func TestWatchHeartbeatAdvancesBetweenSerialSlowPRFetches(t *testing.T) {
 		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
 	}
 	stopLiveWatchRuntime(t, f.root)
+	// PR polls fetch the target only under the current-target rule.
+	writePRLifecycleProjectConfig(t, f, requireCurrentTargetConfig)
 
 	realGit, err := exec.LookPath("git")
 	if err != nil {
