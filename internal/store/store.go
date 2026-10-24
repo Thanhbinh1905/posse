@@ -386,7 +386,7 @@ func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, maxW
 		return false, nil
 	}
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN ('spawning','working','needs-decision','blocked','stalled')`, projectID).Scan(&active); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging'))`, projectID).Scan(&active); err != nil {
 		return false, err
 	}
 	if active >= maxWorkers {
@@ -970,7 +970,7 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	}
 	if maxWorkers > 0 && task.State != StateQueued {
 		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN ('spawning','working','needs-decision','blocked','stalled')`, projectID).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging'))`, projectID).Scan(&active); err != nil {
 			return 0, 0, err
 		}
 		if active >= maxWorkers {
