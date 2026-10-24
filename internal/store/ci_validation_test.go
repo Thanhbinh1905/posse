@@ -100,3 +100,41 @@ func TestQueueCIFixInstructionEnforcesBudgetAtomically(t *testing.T) {
 		t.Fatalf("rounds=%d queued messages=%d, want one each", rounds, messages)
 	}
 }
+
+func TestCIFixQueuedNoticeSurvivesDeliveryReopeningTheTask(t *testing.T) {
+	fixture := newReviewVerdictFixture(t, nil)
+	prURL := "https://github.com/acme/shop/pull/1"
+	if err := fixture.db.Transition(fixture.ctx, fixture.change, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(fixture.ctx, fixture.change, StateWorking, StateDone, "worker", "completed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(fixture.ctx, `UPDATE tasks SET landing_mode='pr',gated_sha=?,pr_url=? WHERE id=?`, reviewShaA, prURL, fixture.change); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.db.QueueCIFixInstruction(fixture.ctx, fixture.change, reviewShaA, prURL, "ci:unit", "Fix unit", "", 2)
+	if err != nil || !result.Queued {
+		t.Fatalf("queue CI fix: %#v err=%v", result, err)
+	}
+	// Delivering the instruction reopens the Task and clears the gated head
+	// before the caller records the Notice.
+	if err := fixture.db.Transition(fixture.ctx, fixture.change, StateDone, StateWorking, "lead", "Lead submitted an instruction"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(fixture.ctx, `UPDATE tasks SET gated_sha='' WHERE id=?`, fixture.change); err != nil {
+		t.Fatal(err)
+	}
+	var projectID int64
+	if err := fixture.db.QueryRowContext(fixture.ctx, `SELECT project_id FROM tasks WHERE id=?`, fixture.change).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	notice := Notice{ProjectID: projectID, TaskID: fixture.change, Kind: "ci_fix_queued", Summary: "queued", DataJSON: `{"head_sha":"` + reviewShaA + `","check_set":"set"}`}
+	inserted, err := fixture.db.CreateValidationNoticeOnce(fixture.ctx, notice, prURL, reviewShaA, "set")
+	if err != nil || !inserted {
+		t.Fatalf("ci_fix_queued Notice after delivery: inserted=%v err=%v", inserted, err)
+	}
+	if inserted, err = fixture.db.CreateValidationNoticeOnce(fixture.ctx, notice, prURL, reviewShaA, "set"); err != nil || inserted {
+		t.Fatalf("duplicate ci_fix_queued Notice: inserted=%v err=%v", inserted, err)
+	}
+}
