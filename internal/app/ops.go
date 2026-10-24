@@ -368,6 +368,19 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Bool("handoff") && (parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "") {
 		return axi.Usage("--handoff cannot be combined with --ack or --requeue")
 	}
+	if parsed.Bool("handoff") {
+		lock, activePID, err := acquireHandoffWatchLock(home, parsed.Flags["destination"], os.Getpid())
+		if err != nil {
+			return err
+		}
+		if activePID != 0 {
+			return axi.Failure("watch_already_active", fmt.Sprintf("A handoff Watch for %s is already active (pid %d).", parsed.Flags["destination"], activePID), false)
+		}
+		defer func() {
+			_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+			_ = lock.Close()
+		}()
+	}
 	if parsed.Flags["requeue"] != "" && parsed.Flags["ack"] != "" {
 		return axi.Usage("--requeue and --ack cannot be combined")
 	}
@@ -404,6 +417,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	}
 	lastHerdrReconcile := time.Time{}
 	lastReexecCheck := time.Time{}
+	claimRaceAttempts := 0
 	for {
 		select {
 		case <-stopSignals:
@@ -535,6 +549,16 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					return err
 				}
 				delivery, claimed, err := db.ClaimNoticeDelivery(ctx.Context, project.ID, ids, parsed.Flags["destination"], generation, token, currentTime(), noticeDeliveryLeaseTimeout.Milliseconds())
+				if errors.Is(err, store.ErrStateRace) {
+					claimRaceAttempts++
+					if claimRaceAttempts <= 3 {
+						if err := waitNoticeDeliveryRetry(ctx.Context); err != nil {
+							return err
+						}
+						continue
+					}
+					return axi.Failure("watch_state_changed", "Notice state changed repeatedly while claiming the handoff; retry this Watch.", true)
+				}
 				if err != nil {
 					return err
 				}
@@ -544,20 +568,35 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 					}
 					continue
 				}
+				claimRaceAttempts = 0
 				printedAt := currentTime()
 				if err := db.MarkNoticeDeliveryPrinted(ctx.Context, delivery.DeliveryID, token, printedAt); err != nil {
+					if errors.Is(err, store.ErrStateRace) {
+						return axi.Failure("watch_state_changed", "Handoff ownership changed before the Notice batch could be printed; retry this Watch.", true)
+					}
 					return err
 				}
 				delivery.State, delivery.UpdatedAt = "printed", printedAt
 				handoff = &delivery
 			} else {
 				claimed, err := db.ClaimNoticeBatch(ctx.Context, project.ID, ids, token, currentTime())
+				if errors.Is(err, store.ErrStateRace) {
+					claimRaceAttempts++
+					if claimRaceAttempts <= 3 {
+						if err := waitNoticeDeliveryRetry(ctx.Context); err != nil {
+							return err
+						}
+						continue
+					}
+					return axi.Failure("watch_state_changed", "Notice state changed repeatedly while claiming the batch; retry this Watch.", true)
+				}
 				if err != nil {
 					return err
 				}
 				if !claimed {
 					continue
 				}
+				claimRaceAttempts = 0
 			}
 			home, err := s.homePath()
 			if err != nil {
@@ -593,6 +632,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 				return nil
 			}
 			if err := db.MarkClaimedNoticesDelivered(ctx.Context, project.ID, ids, token, currentTime()); err != nil {
+				if errors.Is(err, store.ErrStateRace) {
+					return axi.Failure("watch_state_changed", "The Notice batch was printed, but its delivery state changed concurrently. Confirm it is not already visible before retrying.", false)
+				}
 				return err
 			}
 			return s.regenerateProjects(ctx.Context, db)
