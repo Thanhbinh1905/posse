@@ -269,11 +269,39 @@ func TestSnapshotDecodesHerdrSessionSnapshotEnvelope(t *testing.T) {
 	}
 }
 
+// A Herdr server that is slow to answer under CI load must not turn a submitted
+// prompt into an uncertain delivery.
+func TestAgentPromptWaitsForSlowHerdrResponse(t *testing.T) {
+	socket := filepath.Join(shortTestSocketDir(t), "herdr.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		var request APIRequest
+		if err := json.NewDecoder(bufio.NewReader(connection)).Decode(&request); err != nil {
+			return
+		}
+		time.Sleep(3500 * time.Millisecond)
+		_ = json.NewEncoder(connection).Encode(map[string]any{"id": request.ID, "result": map[string]any{}})
+	}()
+	client := NewWithEnv("herdr", []string{"HERDR_SOCKET_PATH=" + socket})
+	if _, err := client.Call(context.Background(), "agent.prompt", map[string]any{"target": "w1:p1", "text": "hi"}); err != nil {
+		t.Fatalf("agent.prompt did not wait for a slow Herdr response: %v", err)
+	}
+}
+
 func TestMethodTimeoutsRespectCallerDeadline(t *testing.T) {
 	if got := methodTimeout("session.snapshot"); got != 3*time.Second {
 		t.Fatalf("short Herdr method timeout = %s", got)
 	}
-	for _, method := range []string{"agent.start", "worktree.open", "workspace.create", "workspace.close"} {
+	for _, method := range []string{"agent.start", "agent.prompt", "worktree.open", "workspace.create", "workspace.close"} {
 		if got := methodTimeout(method); got <= 3*time.Second {
 			t.Errorf("long Herdr method %s timeout = %s", method, got)
 		}
