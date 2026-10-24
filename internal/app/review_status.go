@@ -173,8 +173,13 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	validation, err := validationSummaryFor(ctx.Context, db, change)
+	if err != nil {
+		return err
+	}
 	return ctx.Print(axi.Object{
 		{Key: "task", Value: taskIDString(change.Seq)},
+		{Key: "validation", Value: validation.view()},
 		{Key: "review_rounds_used", Value: usage.ReviewRounds},
 		{Key: "repair_rounds_used", Value: usage.RepairRounds},
 		{Key: "pending_review_rounds", Value: pendingRounds},

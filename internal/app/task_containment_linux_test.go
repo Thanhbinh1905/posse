@@ -707,3 +707,26 @@ func taskContainmentTestEnvironment(marker, ready string, port int) []string {
 		"TASK_TEST_PORT="+strconv.Itoa(port),
 	)
 }
+
+func TestTaskProcessExitedTreatsZombieAndGoneProcessesAsExited(t *testing.T) {
+	command := exec.Command("sleep", "300")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := command.Process.Pid
+	if taskProcessExited(pid) {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatal("running process reported as exited")
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool { return taskProcessExited(pid) }) {
+		t.Fatal("unreaped zombie not reported as exited")
+	}
+	_ = command.Wait()
+	if !taskProcessExited(pid) {
+		t.Fatal("reaped process not reported as exited")
+	}
+}

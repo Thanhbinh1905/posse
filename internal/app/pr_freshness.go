@@ -18,6 +18,15 @@ type prTargetFreshness struct {
 }
 
 func inspectPRTargetFreshness(ctx context.Context, root, targetBranch, headSHA string) (prTargetFreshness, error) {
+	freshness, err := fetchPRTargetTip(ctx, root, targetBranch)
+	if err != nil {
+		return freshness, err
+	}
+	return freshness.of(ctx, root, headSHA)
+}
+
+// fetchPRTargetTip refreshes origin/<target> and records its tip.
+func fetchPRTargetTip(ctx context.Context, root, targetBranch string) (prTargetFreshness, error) {
 	freshness := prTargetFreshness{Branch: targetBranch}
 	targetRef := "refs/remotes/origin/" + targetBranch
 	refspec := "+refs/heads/" + targetBranch + ":" + targetRef
@@ -32,10 +41,16 @@ func inspectPRTargetFreshness(ctx context.Context, root, targetBranch, headSHA s
 	if freshness.Tip, err = gitOutput(ctx, root, "rev-parse", "--verify", targetRef+"^{commit}"); err != nil {
 		return freshness, axi.Failure("target_branch_unavailable", "could not inspect PR target branch "+targetBranch, true, err.Error())
 	}
+	return freshness, nil
+}
+
+// of reports whether headSHA contains the recorded target tip without
+// refreshing it.
+func (freshness prTargetFreshness) of(ctx context.Context, root, headSHA string) (prTargetFreshness, error) {
 	if strings.TrimSpace(headSHA) == "" {
-		return freshness, fmt.Errorf("pull request has no head commit to check against origin/%s", targetBranch)
+		return freshness, fmt.Errorf("pull request has no head commit to check against origin/%s", freshness.Branch)
 	}
-	_, err = gitOutput(ctx, root, "merge-base", "--is-ancestor", targetRef, headSHA)
+	_, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", freshness.Tip, headSHA)
 	freshness.Fresh = err == nil
 	return freshness, nil
 }

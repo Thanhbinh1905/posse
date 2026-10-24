@@ -373,7 +373,9 @@ func TestGitLabMRDescriptionMatchesGitHubPRBody(t *testing.T) {
 	}
 	written, err := os.ReadFile(os.Getenv("POSSE_TEST_GLAB_DESCRIPTION"))
 	marker, markerErr := f.db.GetPRBodyMarker(context.Background(), f.task.ID, "")
-	if err != nil || markerErr != nil || string(written) != managedPublishBody(body, marker.Token) {
+	writtenBody, hasBlock := replaceValidationBlock(string(written), marker.Token, "")
+	bodyWithoutBlock, _ := replaceValidationBlock(managedPublishBody(body, marker.Token), marker.Token, "")
+	if err != nil || markerErr != nil || !hasBlock || !strings.Contains(string(written), validationBlockStart) || writtenBody != bodyWithoutBlock {
 		t.Fatalf("MR body differs from GitHub PR body: %q want tokenized body: %v %v", written, err, markerErr)
 	}
 	log, err := os.ReadFile(f.ghLog)

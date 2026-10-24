@@ -177,11 +177,12 @@ type NoticeNotification struct {
 }
 
 type PrBodyMarker struct {
-	TaskID      int64
-	Repo        string
-	PrUrl       string
-	MarkerToken string
-	UpdatedAt   int64
+	TaskID           int64
+	Repo             string
+	PrUrl            string
+	MarkerToken      string
+	UpdatedAt        int64
+	ValidationDigest string
 }
 
 type PrObservation struct {
