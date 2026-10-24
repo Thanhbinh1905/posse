@@ -896,7 +896,7 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			recordWatchFailure(ctx, db, project.ID, &lastFailure, "reconcile", err)
 		}
 		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
-			recordWatchFailure(ctx, db, project.ID, &lastFailure, "watch", err)
+			recordWatchFailure(ctx, db, project.ID, &lastFailure, "maintenance", err)
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return nil
