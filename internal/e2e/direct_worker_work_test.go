@@ -41,10 +41,8 @@ func TestT283DirectPaneWorkReopensCompletedChange(t *testing.T) {
 			waitForRelaunchHelpAgentStatus(t, fixture, before.PaneID, "idle")
 			// Observe the old turn ending before direct input starts a new one.
 			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
-			// Keep the worktree clean: the new turn status alone must suffice.
-			if err := os.WriteFile(filepath.Join(fixture.root, "pause-fix-commit"), nil, 0600); err != nil {
-				t.Fatal(err)
-			}
+			// The new turn commits a change, which reopens the Task. A turn that
+			// leaves the repository unchanged does not (#443).
 			if _, err := client.Run(context.Background(), "pane", "run", before.PaneID, "Continue t2 directly from User input."); err != nil {
 				t.Fatal(err)
 			}
@@ -81,9 +79,6 @@ func TestT283DirectPaneWorkReopensCompletedChange(t *testing.T) {
 			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
 			if fixture.mustTask(t, "t2").State != store.StateWorking {
 				t.Fatal("Herdr idle completed t2 without a Signal")
-			}
-			if err := os.Remove(filepath.Join(fixture.root, "pause-fix-commit")); err != nil {
-				t.Fatal(err)
 			}
 			if err := os.WriteFile(filepath.Join(fixture.fixGate, "t2"), nil, 0600); err != nil {
 				t.Fatal(err)
