@@ -60,7 +60,7 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 			returnedErr = fmt.Errorf("remember Project server observation: %w", err)
 		}
 	}
-	notices, err := ReconcileSnapshot(budgetCtx, db, projectID, snapshot, now, idleAfter)
+	notices, err := ReconcileSnapshot(withBackgroundJobDetector(budgetCtx, adapter), db, projectID, snapshot, now, idleAfter)
 	result.Notices = append(result.Notices, notices...)
 	if err != nil {
 		return result, errors.Join(returnedErr, err)
@@ -253,7 +253,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		serverStartedAt = snapshot.ServerStartedAt
 	}
 	idleSince := task.IdleSince
-	if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
+	if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") && !paneHasBackgroundJob(ctx, pane) {
 		if idleSince == 0 {
 			idleSince = now.UnixMilli()
 		}
