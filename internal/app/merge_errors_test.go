@@ -15,6 +15,7 @@ import (
 
 func TestPRMergeBehindTargetReportsQueuedTargetSyncInstruction(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	fixture.requireCurrentTarget(t)
 	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
 	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("prepare Merge: exit=%d output=%s error=%s", code, output, stderr)
@@ -40,6 +41,7 @@ func TestPRMergeBehindTargetReportsQueuedTargetSyncInstruction(t *testing.T) {
 
 func TestPRMergeExecuteRaceWithQueuedTargetSyncNamesTheInstruction(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	fixture.requireCurrentTarget(t)
 	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
 	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("prepare Merge: exit=%d output=%s error=%s", code, output, stderr)
@@ -55,7 +57,7 @@ func TestPRMergeExecuteRaceWithQueuedTargetSyncNamesTheInstruction(t *testing.T)
 	// The Worker reopened the Task and cleared its gated head after this Merge
 	// command had read it in merging.
 	stale.GatedSHA = ""
-	err = fixture.service.mergePullRequest(&axi.Context{Context: context.Background()}, fixture.db, fixture.project, config.Config{}, stale, "merge it", store.Intent{})
+	err = fixture.service.mergePullRequest(&axi.Context{Context: context.Background()}, fixture.db, fixture.project, config.Config{Defaults: config.Defaults{RequireCurrentTarget: true}}, stale, "merge it", store.Intent{})
 	var failure *axi.Error
 	if !errors.As(err, &failure) || failure.Code != "pr_branch_behind" || !strings.Contains(failure.Message, "Posse queued the Worker an instruction to merge origin/main") || strings.Contains(failure.Message, "no recorded pull request") {
 		t.Fatalf("racing Merge error = %#v (%v)", failure, err)

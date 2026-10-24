@@ -1,5 +1,7 @@
 # Serialize PR target updates through a Posse merge queue
 
+This queue applies only when ADR 0019's current-target rule is on (`defaults.require_current_target = true`). It is off by default since 2026-10-24: behind PRs then merge without an update, and only conflicting PRs ask their Worker to merge the target, without queueing ([ADR 0019 amendment](0019-pr-merges-require-current-target.md#amendment-optional-and-off-by-default)).
+
 ## Context
 
 ADR 0019 makes a PR/MR merge only when its gated head contains the current target tip, and asks every behind done or merging Task to merge `origin/<target>`. With N done PRs on one target, every landing sends N Workers that instruction. Each landing then costs about N Worker turns and N full CI runs, PRs still land about one per CI cycle, done Tasks return to working against `max_workers`, and the extra CI load surfaces flakes and proxy errors.
