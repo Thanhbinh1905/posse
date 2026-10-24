@@ -1342,6 +1342,10 @@ func (db *DB) BreakSandbox(ctx context.Context, sandboxID, taskID int64) error {
 	if count != 1 {
 		return ErrStateRace
 	}
+	// A quarantined Sandbox holds no resource lease; only a Task-owned Sandbox does.
+	if err := db.releaseSandboxLeaseTx(ctx, tx, sandboxID); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}

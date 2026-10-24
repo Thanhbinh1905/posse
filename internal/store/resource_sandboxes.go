@@ -49,10 +49,10 @@ func (db *DB) ResourceSandboxLeases(ctx context.Context) ([]ResourceSandboxLease
 }
 
 // ReleaseSandboxResourceLease is for a Sandbox whose durable state is already idle
-// or whose row no longer exists. Held and quarantined Sandboxes remain leased.
+// or whose row no longer exists. Held Sandboxes remain leased.
 func (db *DB) ReleaseSandboxResourceLease(ctx context.Context, sandboxID int64) error {
 	var projectID int64
-	err := db.QueryRowContext(ctx, `SELECT project_id FROM mounts WHERE id=? AND state NOT IN ('idle','pruning')`, sandboxID).Scan(&projectID)
+	err := db.QueryRowContext(ctx, `SELECT project_id FROM mounts WHERE id=? AND state NOT IN ('idle','pruning','broken')`, sandboxID).Scan(&projectID)
 	if err == nil {
 		return ErrStateRace
 	}
