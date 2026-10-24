@@ -77,7 +77,11 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	if parsed.Bool("execute") {
 		if task.State != store.StateDone && task.State != store.StateMerging {
-			if err := workingPRBehindFailure(ctx.Context, db, project, task); err != nil {
+			cfg, err := config.Load(home, project.Name)
+			if err != nil {
+				return configFailure(err)
+			}
+			if err := workingPRBehindFailure(ctx.Context, db, project, cfg, task); err != nil {
 				return err
 			}
 			return axi.Failure("merge_refused", "Task must be done or merging before Merge", false)
