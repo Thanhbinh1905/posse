@@ -86,14 +86,16 @@ func (db *DB) ObserveCompletedWorkerState(ctx context.Context, expected Task, pa
 		}
 		return nil, tx.Commit()
 	}
-	if known && recordedBaseline == "" {
+	if known && recordedBaseline == "" && recordedTurnEnded == 0 {
 		// The done Signal armed this turn before any fingerprint was observed.
 		if _, err := tx.ExecContext(ctx, `UPDATE completed_rider_busy SET baseline=? WHERE task_id=?`, current, expected.ID); err != nil {
 			return nil, err
 		}
 		recordedBaseline = current
 	}
-	changed := !known || recordedBaseline != current
+	// A turn that ended without a readable fingerprint has no baseline to
+	// compare, so a new busy turn counts as a change.
+	changed := !known || recordedBaseline == "" || recordedBaseline != current
 	if turnEnded {
 		// Idle changes are not a turn: Merge's branch_moved check covers a fast
 		// turn that changed HEAD between observations.

@@ -165,3 +165,47 @@ func TestCompletedWorkerUnchangedNewTurnKeepsDone(t *testing.T) {
 		t.Fatalf("no signal-again instruction queued: %#v %v", queued, err)
 	}
 }
+
+func TestCompletedWorkerUnreadableTurnEndBaselineReopensOnNewTurn(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "t1", MergeMode: "local", AutonomyReview: "ask", AutonomyMerge: "ask"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "start"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreadable := func() (string, error) { return "", errors.New("git unavailable") }
+	readable := func() (string, error) { return "head-1", nil }
+	now := time.Now()
+	for _, step := range []struct {
+		status string
+		read   func() (string, error)
+	}{{"working", readable}, {"idle", unreadable}} {
+		now = now.Add(time.Second)
+		if _, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", step.status, step.read, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(time.Second)
+	notice, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", "working", readable, now)
+	if err != nil || notice == nil {
+		t.Fatalf("new turn after an unreadable turn end did not reopen: %#v %v", notice, err)
+	}
+}
