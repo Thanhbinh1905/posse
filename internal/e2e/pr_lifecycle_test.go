@@ -2014,9 +2014,9 @@ case "$PWD/" in
     while IFS= read -r instruction; do
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
       while [ -e "$POSSE_TEST_ROOT/pause-fix-commit" ]; do sleep 0.02; done
-      printf 'fix change %s\n' "$task_id" >> "e2e-fix-$task_id.txt"
+      printf 'fix change %s\n' "$task_id" > "e2e-fix-$task_id.txt"
       git add "e2e-fix-$task_id.txt"
-      git commit -m "fix worker change $task_id" >/dev/null
+      git commit -m "fix worker change $task_id" >/dev/null || true
       while [ ! -e "$POSSE_E2E_FIX_GATE/$task_id" ]; do sleep 0.02; done
       "$POSSE_E2E_POSSE_BIN" publish "Worker fixed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
       turn_token=$(printf '%s\n' "$instruction" | sed -n 's/.*| turn \([^]]*\)].*/\1/p')
