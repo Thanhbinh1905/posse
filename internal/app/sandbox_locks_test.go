@@ -207,7 +207,7 @@ func TestBrokenSandboxUnlocksAndAcquireReplacesOnlyStalePosseLock(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := breakSandbox(ctx, db, project, first, sandbox, "test broken checkout"); err != nil {
+	if err := breakSandbox(ctx, db, project, first, sandbox, "test broken checkout", nil); err != nil {
 		t.Fatal(err)
 	}
 	if reason, err := sandboxLockReason(ctx, repo, sandbox.Path); err != nil || reason != "" {
