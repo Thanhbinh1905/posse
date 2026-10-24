@@ -1419,7 +1419,7 @@ func verifyOwnedProcessSet(roots []ownedProcessRoot, retained []ownedProcess, tr
 			} else if err != nil {
 				return fmt.Errorf("verify unretained process %d during teardown: %w", pid, err)
 			}
-			return fmt.Errorf("unverified process %d appeared during teardown; preserving Task data", pid)
+			return fmt.Errorf("unverified process %d %s; preserving Task data", pid, authorization.unverifiedProcessState(pid))
 		}
 		alive, err := process.handle.Alive()
 		if err != nil {

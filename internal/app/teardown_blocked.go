@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -25,6 +27,7 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 			}
 		}
 	}
+	processes = residualParentProcesses(processes)
 	if len(processes) == 0 {
 		return nil
 	}
@@ -47,6 +50,26 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 		return err
 	}
 	return nil
+}
+
+// residualParentProcesses keeps the processes the User can act on. It drops
+// processes that already exited and children of another listed process, such
+// as the `sleep` a polling shell loop spawns each iteration, so the set stays
+// stable across retries.
+func residualParentProcesses(processes []taskProcessDetail) []taskProcessDetail {
+	listed := make(map[int]bool, len(processes))
+	for _, process := range processes {
+		listed[process.PID] = true
+	}
+	parents := make([]taskProcessDetail, 0, len(processes))
+	for _, process := range processes {
+		parent, err := sandboxProcessParentID(process.PID)
+		if errors.Is(err, os.ErrNotExist) || err == nil && listed[parent] {
+			continue
+		}
+		parents = append(parents, process)
+	}
+	return parents
 }
 
 func describeTaskProcesses(processes []taskProcessDetail) string {
