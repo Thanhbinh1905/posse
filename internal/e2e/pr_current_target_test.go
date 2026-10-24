@@ -54,7 +54,7 @@ func TestPRMergeWithoutCurrentTargetRuleMergesBehindPR(t *testing.T) {
 		return fakePull{alias: "pr" + strings.TrimPrefix(id, "t"), state: "OPEN", checks: "SUCCESS", review: "APPROVED", mergeable: mergeable, head: tasks[id].GatedSHA}
 	}
 	fixture.writeGraphQLPulls(t, openPull("t1", "MERGEABLE"), openPull("t2", "MERGEABLE"), openPull("t3", "MERGEABLE"))
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	fixture.showUntilGreen(t, "t1", tasks["t1"].GatedSHA)
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1", "--execute"); !strings.Contains(output, "merging") {
 		t.Fatalf("t1 PR did not merge: %s", output)
 	}
