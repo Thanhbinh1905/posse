@@ -182,7 +182,7 @@ func TestWorkspacePRPollAndDiscardSkipMemberlessResearch(t *testing.T) {
 }
 
 func TestWorkspacePRMergeChecksTargetFreshnessBeforeRecordingHead(t *testing.T) {
-	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nrequire_current_target = true\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
 	ctx := context.Background()
 	workerRoot := filepath.Join(f.workspace, "worker")
 	advanceTree := filepath.Join(f.root, "worker-target-advance")
@@ -205,6 +205,32 @@ func TestWorkspacePRMergeChecksTargetFreshnessBeforeRecordingHead(t *testing.T) 
 	var instruction string
 	if err := f.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, f.task.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Workspace member worker") || !strings.Contains(instruction, "--repo worker") {
 		t.Fatalf("workspace Worker did not receive a member-specific sync instruction: body=%q err=%v", instruction, err)
+	}
+}
+
+// Without defaults.require_current_target, a behind workspace Member passes
+// the freshness check and receives no merge-target instruction. The fixture's
+// local-path origin then stops Merge at forge validation.
+func TestWorkspacePRMergeWithoutCurrentTargetRuleSkipsFreshness(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	workerRoot := filepath.Join(f.workspace, "worker")
+	advanceTree := filepath.Join(f.root, "worker-target-advance")
+	gitTest(t, workerRoot, "worktree", "add", "-b", "target-advance", advanceTree, "refs/heads/main")
+	if err := os.WriteFile(filepath.Join(advanceTree, "target-only.txt"), []byte("target update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, advanceTree, "add", "target-only.txt")
+	gitTest(t, advanceTree, "commit", "-m", "advance target")
+	gitTest(t, advanceTree, "push", "origin", "HEAD:refs/heads/main")
+
+	f.run("merge", "t1")
+	if output := f.out.String(); strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, "pr_origin_invalid") {
+		t.Fatalf("behind workspace Member did not pass the freshness check: %s", output)
+	}
+	var queued int
+	if err := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, f.task.ID).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("behind workspace Member got merge-target instructions: queued=%d err=%v", queued, err)
 	}
 }
 

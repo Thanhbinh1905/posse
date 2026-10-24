@@ -124,7 +124,7 @@ Formerly: Land.
 _Avoid_: Deliver
 
 **Merge Queue**:
-Posse's FIFO queue per target branch of done Change Tasks whose PR is behind that target; only its head is asked to merge the target.
+Posse's FIFO queue per target branch of done Change Tasks whose PR is behind that target; only its head is asked to merge the target. Used only when `defaults.require_current_target` is on.
 _Avoid_: Forge merge queue, merge train
 
 **Orphan**:
