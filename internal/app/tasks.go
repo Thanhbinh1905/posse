@@ -1546,6 +1546,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 					return validationErr
 				}
 				if verifiedCurrentHead {
+					s.refreshFailedObservedPRChecks(ctx.Context, db, project, cfg, task.ID, "", parsed.Flags["pr"], sha)
 					if err := rejectFailedObservedPRChecks(ctx.Context, db, task.ID, "", parsed.Flags["pr"], sha); err != nil {
 						return err
 					}
