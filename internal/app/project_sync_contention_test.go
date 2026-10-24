@@ -54,6 +54,9 @@ func TestPollOnlyWatchDefersFetchLockContentionWithoutNotice(t *testing.T) {
 	})
 	t.Setenv("HERDR_PANE_ID", paneID)
 
+	previousBudget := fetchLockWaitBudget
+	fetchLockWaitBudget = 100 * time.Millisecond
+	t.Cleanup(func() { fetchLockWaitBudget = previousBudget })
 	owner, err := acquireRepositoryFetchLock(context.Background(), fixture.repo)
 	if err != nil {
 		t.Fatal(err)
