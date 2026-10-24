@@ -353,51 +353,56 @@ func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
 	}
 }
 
-// GitHub reports the PR open, then it merges before Posse refetches the
-// target. The new tip holds the PR's own squash merge, so the PR must not be
-// queued or asked to merge it (#482).
-func TestPRWatchDoesNotAskPRMergedDuringQueryToMergeTarget(t *testing.T) {
-	fixture := newPRMergeFixture(t, "pr", store.StateDone)
-	ctx := context.Background()
-	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
-		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
-	}
-	worktree := filepath.Join(fixture.root, "squash-merge")
-	gitTest(t, fixture.repo, "worktree", "add", "--detach", worktree, "refs/heads/main")
-	gitTest(t, worktree, "merge", "--squash", fixture.headSHA)
-	gitTest(t, worktree, "commit", "-m", "squash merge t1")
-	t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD")))
-	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
-	cfg, err := config.Load(fixture.home, fixture.project.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
-		t.Fatal(err)
-	}
-	observation, err := fixture.db.LatestPRObservation(ctx, fixture.task.ID)
-	if err != nil || decodeChecks(observation.Checks).State != "STALE" {
-		t.Fatalf("checks observed before the target advanced were accepted: observation=%#v err=%v", observation, err)
-	}
-	freshnessRounds := func() int {
-		t.Helper()
-		var count int
-		if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness'`, fixture.task.ID).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		return count
-	}
-	var entries int
-	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM merge_queue_entries WHERE task_id=?`, fixture.task.ID).Scan(&entries); err != nil || entries != 0 || freshnessRounds() != 0 {
-		t.Fatalf("PR merged during the query was queued to merge its own merge: entries=%d rounds=%d err=%v", entries, freshnessRounds(), err)
-	}
-	// A PR still open on the next poll is behind and becomes the queue head.
-	t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", "")
-	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
-		t.Fatal(err)
-	}
-	if rounds := freshnessRounds(); rounds != 1 {
-		t.Fatalf("PR still open behind the target got %d merge-target instructions, want 1", rounds)
+// GitHub reports the PR open, then the target advances before Posse
+// refetches it. The new tip may hold the PR's own squash merge, so the poll
+// queries again instead of asking the PR to merge its own merge (#482).
+func TestPRWatchRequeriesPRWhoseTargetAdvancedDuringQuery(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		merged     bool
+		wantRounds int
+	}{
+		{name: "merged during query", merged: true},
+		{name: "still open behind", wantRounds: 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+			}
+			worktree := filepath.Join(fixture.root, "squash-merge")
+			gitTest(t, fixture.repo, "worktree", "add", "--detach", worktree, "refs/heads/main")
+			gitTest(t, worktree, "merge", "--squash", fixture.headSHA)
+			gitTest(t, worktree, "commit", "-m", "squash merge t1")
+			merge := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+			t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", merge)
+			if scenario.merged {
+				fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, fixture.headSHA)
+				if err := os.Rename(fixture.ghState, fixture.ghState+".next"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+				t.Fatal(err)
+			}
+			observation, err := fixture.db.LatestPRObservation(ctx, fixture.task.ID)
+			if err != nil || (scenario.merged && observation.State != "MERGED") || (!scenario.merged && decodeChecks(observation.Checks).State != "STALE") {
+				t.Fatalf("observation after the target advanced during the query = %#v err=%v", observation, err)
+			}
+			var entries, rounds int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM merge_queue_entries WHERE task_id=? AND dequeued_at=0),(SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness')`, fixture.task.ID, fixture.task.ID).Scan(&entries, &rounds); err != nil {
+				t.Fatal(err)
+			}
+			if rounds != scenario.wantRounds || entries != scenario.wantRounds {
+				t.Fatalf("live merge queue entries=%d merge-target instructions=%d, want %d each", entries, rounds, scenario.wantRounds)
+			}
+		})
 	}
 }
 

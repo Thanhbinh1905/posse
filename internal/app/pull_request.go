@@ -979,6 +979,18 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 	if project.IsWorkspace() {
 		return s.pollWorkspacePullRequestsAndNotify(ctx, db, project, cfg, force, onWorkspaceTaskMerged)
 	}
+	targetMoved := false
+	if err := s.pollProjectPullRequestsPass(ctx, db, project, cfg, force, &targetMoved); err != nil || !targetMoved {
+		return err
+	}
+	// An open PR whose target advanced during the forge query may have merged
+	// or fallen behind. Query again now rather than at the next poll.
+	return s.pollProjectPullRequestsPass(ctx, db, project, cfg, true, nil)
+}
+
+// pollProjectPullRequestsPass observes every watched PR once. It sets
+// targetMoved when an open PR's target advanced during the forge query.
+func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, targetMoved *bool) error {
 	now := time.Now()
 	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
 	claim, err := db.ClaimPRPoll(ctx, project.ID, now, interval, force)
@@ -1229,8 +1241,12 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 			}
 			if !freshness.Fresh {
 				// A target that advanced only during the query may hold this
-				// PR's own merge; the next poll observes it merged or behind.
-				if !beforeQuery.Fresh {
+				// PR's own merge; a later query observes it merged or behind.
+				if beforeQuery.Fresh {
+					if targetMoved != nil {
+						*targetMoved = true
+					}
+				} else {
 					// Enter every behind Task before promoting, so the head follows
 					// done Signal order rather than poll order.
 					if err := db.EnterMergeQueue(ctx, task.ID, "", freshness.Branch, now.UnixMilli()); err != nil {
