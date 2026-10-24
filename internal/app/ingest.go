@@ -483,12 +483,12 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 	if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
 		return err
 	}
-	tasks, err := db.Tasks(ctx, project.ID, true)
+	tasks, err := db.Tasks(ctx, project.ID, false)
 	if err != nil {
 		return err
 	}
 	for _, task := range tasks {
-		if (task.State == store.StateDone && task.Type != "change") || task.State == store.StateReported || task.State == store.StateMerged || task.State == store.StateTornDown || task.State == store.StateFailed || task.State == store.StateLost {
+		if (task.State == store.StateDone && task.Type != "change") || task.State == store.StateFailed || task.State == store.StateLost {
 			continue
 		}
 		active, err := db.HasDeliveryInProgress(ctx, task.ID, currentTime()-deliveryClaimTimeout.Milliseconds())

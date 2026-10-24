@@ -32,12 +32,12 @@ func (s *Service) retryPendingLaunches(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return err
 	}
-	tasks, err := db.Tasks(ctx, project.ID, true)
+	tasks, err := db.TasksInState(ctx, project.ID, store.StateSpawning)
 	if err != nil {
 		return err
 	}
 	for _, task := range tasks {
-		if task.State != store.StateSpawning || task.PaneID == "" {
+		if task.PaneID == "" {
 			continue
 		}
 		if _, err := db.IntentByTask(ctx, task.ID); err == nil {

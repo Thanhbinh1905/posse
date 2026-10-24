@@ -259,6 +259,9 @@ SELECT id, project_id, COALESCE(task_id, 0) AS task_id, kind, summary, data_json
     created_at, COALESCE(delivered_at, 0) AS delivered_at, COALESCE(acked_at, 0) AS acked_at
 FROM notices WHERE project_id = ? AND acked_at IS NULL ORDER BY id;
 
+-- name: OpenNoticeCount :one
+SELECT COUNT(*) FROM notices WHERE project_id = ? AND acked_at IS NULL;
+
 -- name: UndeliveredNotices :many
 SELECT id, project_id, COALESCE(task_id, 0) AS task_id, kind, summary, data_json,
     created_at, 0 AS delivered_at, 0 AS acked_at
@@ -330,11 +333,18 @@ SELECT * FROM tasks
 WHERE worktree_path = ? AND state != 'torn-down' ORDER BY id DESC LIMIT 1;
 
 -- name: Tasks :many
-SELECT * FROM tasks
+SELECT * FROM tasks INDEXED BY tasks_project_state_idx
 WHERE project_id = ? AND state NOT IN ('merged', 'reported', 'torn-down') ORDER BY seq;
 
 -- name: AllTasks :many
 SELECT * FROM tasks WHERE project_id = ? ORDER BY seq;
+
+-- name: TasksInState :many
+SELECT * FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id = ? AND state = ? ORDER BY seq;
+
+-- name: TasksWithPaneLabels :many
+SELECT * FROM tasks
+WHERE project_id = ? AND pane_label IN (SELECT value FROM json_each(sqlc.arg(labels_json))) ORDER BY seq;
 
 -- name: LiveTasks :many
 SELECT * FROM tasks

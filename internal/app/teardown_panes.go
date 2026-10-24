@@ -71,14 +71,11 @@ func (s *Service) autoTeardownMergedTasks(ctx context.Context, db *store.DB, pro
 	if s.Herdr == nil {
 		return nil
 	}
-	tasks, err := db.Tasks(ctx, project.ID, true)
+	tasks, err := db.TasksInState(ctx, project.ID, store.StateMerged)
 	if err != nil {
 		return err
 	}
 	for _, task := range tasks {
-		if task.State != store.StateMerged {
-			continue
-		}
 		mergedPR := task.MergeMode == "pr" || task.MergeMode == "no-mistakes"
 		if project.IsWorkspace() {
 			repos, err := db.TaskRepos(ctx, task.ID)

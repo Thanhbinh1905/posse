@@ -487,8 +487,11 @@ func (db *DB) writeProjectSnapshotLocked(ctx context.Context, projectID int64, s
 	if err != nil {
 		return err
 	}
-	snapshot.Project = project
-	snapshot.StateDigest = projectSnapshotDigest(snapshot)
+	// The caller's digest stays valid unless the Project row changed meanwhile.
+	if project != snapshot.Project || snapshot.StateDigest == "" {
+		snapshot.Project = project
+		snapshot.StateDigest = projectSnapshotDigest(snapshot)
+	}
 	var encoded bytes.Buffer
 	if err := toml.NewEncoder(&encoded).Encode(snapshot); err != nil {
 		return err
