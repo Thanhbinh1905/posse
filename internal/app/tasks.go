@@ -1127,13 +1127,6 @@ func (s *Service) waitAgent(ctx context.Context, paneID string, anyStatus bool) 
 
 func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Project, id int64, title, reason string) error {
 	if task, err := db.TaskByID(ctx, project.ID, id); err == nil {
-		if s.Herdr != nil && (task.HerdrWorkspaceID != "" || task.PaneID != "" || task.PaneLabel != "") {
-			if _, closeErr := s.verifyTaskPanesGone(ctx, project, task); closeErr != nil {
-				reason += "; Task pane cleanup failed: " + closeErr.Error()
-			} else {
-				s.relabelProjectTabs(ctx, db, project)
-			}
-		}
 		// A written launch Brief and an initialized Sandbox let relaunch resume
 		// the same Task and branch. Earlier failures still release the Sandbox.
 		home, homeErr := s.homePath()
@@ -1141,7 +1134,26 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 		_, launchErr := os.Stat(launchPath)
 		plan, planErr := task.AdmittedPlan()
 		inPlace := planErr == nil && plan != nil && plan.Execution.Mode == "in-place"
-		if !inPlace && (task.Branch == "" || task.WorktreePath == "" || launchErr != nil || homeErr != nil) {
+		releasesSandbox := !inPlace && (task.Branch == "" || task.WorktreePath == "" || launchErr != nil || homeErr != nil)
+		if s.Herdr != nil && (task.HerdrWorkspaceID != "" || task.PaneID != "" || task.PaneLabel != "") {
+			if releasesSandbox {
+				// No Worker received a Brief, so the pane holds at most the shell
+				// Posse opened. Stop it under Teardown's ownership checks.
+				if stopErr := s.stopFailedStartProcesses(ctx, db, project, task); stopErr != nil {
+					reason += "; Task process shutdown failed: " + stopErr.Error()
+				}
+			}
+			verifyPanes := s.verifyTaskPanesGone
+			if releasesSandbox {
+				verifyPanes = s.waitTaskPanesGone
+			}
+			if _, closeErr := verifyPanes(ctx, project, task); closeErr != nil {
+				reason += "; Task pane cleanup failed: " + closeErr.Error()
+			} else {
+				s.relabelProjectTabs(ctx, db, project)
+			}
+		}
+		if releasesSandbox {
 			cfg, _ := config.Load(home, project.Name)
 			if _, releaseErr := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false); releaseErr != nil {
 				reason += "; Sandbox release failed: " + releaseErr.Error()
