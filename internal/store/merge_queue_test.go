@@ -74,7 +74,10 @@ func TestMergeQueueOrdersByDoneSignalKeepsInFlightHeadAndDequeues(t *testing.T) 
 
 	// The next done Signal ends the in-flight instruction; the Task keeps its
 	// original done Signal order.
-	if _, err := db.ExecContext(ctx, `INSERT INTO signals(task_id,verb,at) VALUES(?,'done',?)`, ids["second"], time.Now().UnixMilli()+1); err != nil {
+	// Explicit times keep the done Signal, dequeue and green check ordered
+	// even when they fall within one millisecond.
+	syncedAt := time.Now().UnixMilli() + 1
+	if _, err := db.ExecContext(ctx, `INSERT INTO signals(task_id,verb,at) VALUES(?,'done',?)`, ids["second"], syncedAt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='done' WHERE id=?`, ids["second"]); err != nil {
@@ -86,7 +89,7 @@ func TestMergeQueueOrdersByDoneSignalKeepsInFlightHeadAndDequeues(t *testing.T) 
 
 	// A red head leaves the queue and stays out until its checks turn green,
 	// then re-enters at the back.
-	if err := db.DequeueMergeQueue(ctx, ids["second"], "", "checks_failed", time.Now().UnixMilli()); err != nil {
+	if err := db.DequeueMergeQueue(ctx, ids["second"], "", "checks_failed", syncedAt+1); err != nil {
 		t.Fatal(err)
 	}
 	if got := place("second"); got.Queued() {
@@ -95,7 +98,7 @@ func TestMergeQueueOrdersByDoneSignalKeepsInFlightHeadAndDequeues(t *testing.T) 
 	if got := place("late"); !got.Head() || got.Length != 1 {
 		t.Fatalf("next entry was not promoted after the red head left: %+v", got)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO pr_observations(project_id,task_id,pr_url,state,checks,observed_at) VALUES(?,?,?,?,?,?)`, project.ID, ids["second"], "https://github.com/acme/shop/pull/2", "OPEN", `{"state":"SUCCESS"}`, time.Now().UnixMilli()+5); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO pr_observations(project_id,task_id,pr_url,state,checks,observed_at) VALUES(?,?,?,?,?,?)`, project.ID, ids["second"], "https://github.com/acme/shop/pull/2", "OPEN", `{"state":"SUCCESS"}`, syncedAt+2); err != nil {
 		t.Fatal(err)
 	}
 	if got := place("second"); got.Position != 2 || got.HeadTaskID != ids["late"] {
