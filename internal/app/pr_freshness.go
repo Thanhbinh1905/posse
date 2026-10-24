@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -89,12 +90,15 @@ func pendingTargetSyncFailure(ctx context.Context, db *store.DB, project store.P
 	return prBranchBehindFailure(task.Seq, headSHA, freshness, targetSync{Queued: true})
 }
 
-func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) error {
 	if task.State != store.StateWorking || task.Type != "change" || task.PRURL == "" || task.MergeMode != "pr" && task.MergeMode != "no-mistakes" {
 		return nil
 	}
 	if err := pendingTargetSyncFailure(ctx, db, project, task); err != nil {
 		return err
+	}
+	if !cfg.Defaults.RequireCurrentTarget {
+		return nil
 	}
 	observation, err := db.LatestPRObservation(ctx, task.ID)
 	if store.IsNotFound(err) {
@@ -130,6 +134,24 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	if !place.Head() {
 		return targetSync{Place: place}, nil
 	}
+	if err := queueTargetMergeInstruction(ctx, db, task, member, mergeMode, freshness, headSHA); err != nil {
+		return targetSync{}, err
+	}
+	return targetSync{Queued: true, Place: place}, nil
+}
+
+// queueConflictTargetSyncInstruction asks the Worker of a done or merging Task
+// whose PR conflicts with its target to merge the target, without the merge
+// queue. It applies when defaults.require_current_target is off, so only
+// real conflicts need a Worker update (ADR 0019).
+func queueConflictTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) error {
+	if task.State != store.StateDone && task.State != store.StateMerging {
+		return nil
+	}
+	return queueTargetMergeInstruction(ctx, db, task, member, mergeMode, freshness, headSHA)
+}
+
+func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) error {
 	memberLabel := ""
 	if member != "" {
 		memberLabel = "Workspace member " + member + ": "
@@ -151,20 +173,22 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	after := task.CreatedAt
 	signals, err := db.TaskSignals(ctx, task.ID, 1)
 	if err != nil {
-		return targetSync{}, err
+		return err
 	}
 	if len(signals) > 0 && signals[0].Verb == "done" {
 		after = signals[0].At
 	}
 	dedupeKey := fmt.Sprintf("freshness:%s:%s:%s:%d", member, headSHA, freshness.Tip, after)
-	if _, err = db.QueueValidationFixInstruction(ctx, task.ID, "freshness", headSHA, dedupeKey, instruction); err != nil {
-		return targetSync{}, err
-	}
-	return targetSync{Queued: true, Place: place}, nil
+	_, err = db.QueueValidationFixInstruction(ctx, task.ID, "freshness", headSHA, dedupeKey, instruction)
+	return err
 }
 
-func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, task store.Task, member, mergeMode, headSHA string) error {
-	if mergeMode != "pr" && mergeMode != "no-mistakes" {
+// requirePRTargetFresh enforces ADR 0019's current-target rule when
+// defaults.require_current_target is on. When it is off, a behind PR may
+// merge; the forge's mergeability, required by requireGreenObservation,
+// still refuses a conflicting head.
+func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member, mergeMode, headSHA string) error {
+	if mergeMode != "pr" && mergeMode != "no-mistakes" || !cfg.Defaults.RequireCurrentTarget {
 		return nil
 	}
 	targetBranch := taskTargetBranch(project, task)
