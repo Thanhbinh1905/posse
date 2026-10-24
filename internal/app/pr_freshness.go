@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -38,10 +39,25 @@ func inspectPRTargetFreshness(ctx context.Context, root, targetBranch, headSHA s
 	return freshness, nil
 }
 
-func prBranchBehindFailure(taskSeq int, headSHA string, freshness prTargetFreshness, queued bool) error {
+// targetSync is the result of asking a behind PR to merge its target: the
+// Worker has a queued instruction only when its Task heads the merge queue.
+type targetSync struct {
+	Queued bool
+	Place  store.MergeQueuePlace
+}
+
+func prBranchBehindFailure(taskSeq int, headSHA string, freshness prTargetFreshness, sync targetSync) error {
 	message := fmt.Sprintf("pull request head %s does not contain current target commit %s from origin/%s", headSHA, freshness.Tip, freshness.Branch)
-	if queued {
+	if sync.Queued {
 		return axi.Failure("pr_branch_behind", message+"; Posse queued the Worker an instruction to merge origin/"+freshness.Branch, false, queuedTargetSyncHelp(taskSeq))
+	}
+	if sync.Place.Queued() {
+		return axi.Failure(
+			"pr_branch_behind",
+			fmt.Sprintf("%s; the Task is at position %d of %d in the origin/%s merge queue behind %s", message, sync.Place.Position, sync.Place.Length, freshness.Branch, taskIDString(sync.Place.HeadSeq)),
+			false,
+			"Wait until the merge queue promotes "+taskIDString(taskSeq)+"; Posse then asks its Worker to merge origin/"+freshness.Branch+". Do not send a merge-target instruction",
+		)
 	}
 	return axi.Failure(
 		"pr_branch_behind",
@@ -70,7 +86,7 @@ func pendingTargetSyncFailure(ctx context.Context, db *store.DB, project store.P
 	if err != nil {
 		return err
 	}
-	return prBranchBehindFailure(task.Seq, headSHA, freshness, true)
+	return prBranchBehindFailure(task.Seq, headSHA, freshness, targetSync{Queued: true})
 }
 
 func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
@@ -97,14 +113,22 @@ func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Pro
 	if freshness.Fresh {
 		return nil
 	}
-	return prBranchBehindFailure(task.Seq, observation.HeadSHA, freshness, false)
+	return prBranchBehindFailure(task.Seq, observation.HeadSHA, freshness, targetSync{})
 }
 
-// queuePRTargetSyncInstruction reports whether the Worker has an instruction
-// to merge the target, either newly queued or deduplicated against an earlier one.
-func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) (bool, error) {
+// queuePRTargetSyncInstruction enters a behind done or merging Task in its
+// target's merge queue and queues the merge-target instruction only for the
+// queue head, deduplicated against an earlier one (ADR 0031).
+func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) (targetSync, error) {
 	if task.State != store.StateDone && task.State != store.StateMerging {
-		return false, nil
+		return targetSync{}, nil
+	}
+	place, err := db.PlaceInMergeQueue(ctx, task.ID, member, freshness.Branch, time.Now().UnixMilli())
+	if err != nil {
+		return targetSync{}, err
+	}
+	if !place.Head() {
+		return targetSync{Place: place}, nil
 	}
 	memberLabel := ""
 	if member != "" {
@@ -127,16 +151,16 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	after := task.CreatedAt
 	signals, err := db.TaskSignals(ctx, task.ID, 1)
 	if err != nil {
-		return false, err
+		return targetSync{}, err
 	}
 	if len(signals) > 0 && signals[0].Verb == "done" {
 		after = signals[0].At
 	}
 	dedupeKey := fmt.Sprintf("freshness:%s:%s:%s:%d", member, headSHA, freshness.Tip, after)
 	if _, err = db.QueueValidationFixInstruction(ctx, task.ID, "freshness", headSHA, dedupeKey, instruction); err != nil {
-		return false, err
+		return targetSync{}, err
 	}
-	return true, nil
+	return targetSync{Queued: true, Place: place}, nil
 }
 
 func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, task store.Task, member, mergeMode, headSHA string) error {
@@ -151,13 +175,43 @@ func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, projec
 	if freshness.Fresh {
 		return nil
 	}
-	queued, err := queuePRTargetSyncInstruction(ctx, db, task, member, mergeMode, freshness, headSHA)
+	sync, err := queuePRTargetSyncInstruction(ctx, db, task, member, mergeMode, freshness, headSHA)
 	if err != nil {
 		return err
 	}
-	return prBranchBehindFailure(task.Seq, headSHA, freshness, queued)
+	return prBranchBehindFailure(task.Seq, headSHA, freshness, sync)
 }
 
 func stalePRChecks() string {
 	return marshalJSON(checkSnapshot{State: "STALE"})
+}
+
+// mergeQueueLabel summarizes a Task's queue places for Task lists, such as
+// "2/3 main" or "api 1/2 main" for a Workspace Member.
+func mergeQueueLabel(places []store.MergeQueuePlace) string {
+	labels := make([]string, 0, len(places))
+	for _, place := range places {
+		label := fmt.Sprintf("%d/%d %s", place.Position, place.Length, place.TargetBranch)
+		if place.Repo != "" {
+			label = place.Repo + " " + label
+		}
+		labels = append(labels, label)
+	}
+	return strings.Join(labels, ", ")
+}
+
+func mergeQueueView(ctx context.Context, db *store.DB, task store.Task) ([]map[string]any, error) {
+	places, err := db.MergeQueuePlaces(ctx, task.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]map[string]any, 0, len(places[task.ID]))
+	for _, place := range places[task.ID] {
+		view := map[string]any{"target": place.TargetBranch, "position": place.Position, "length": place.Length, "head": taskIDString(place.HeadSeq)}
+		if place.Repo != "" {
+			view["repo"] = place.Repo
+		}
+		views = append(views, view)
+	}
+	return views, nil
 }
