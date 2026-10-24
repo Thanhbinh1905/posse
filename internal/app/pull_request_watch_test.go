@@ -169,6 +169,7 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			fixture.requireCurrentTarget(t)
 			if scenario.conflicting {
 				path := filepath.Join(fixture.worktree, "README.md")
 				if err := os.WriteFile(path, []byte("Task README update\n"), 0o600); err != nil {
@@ -223,6 +224,79 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 				if !strings.Contains(body, required) {
 					t.Errorf("freshness instruction omitted %q: %s", required, body)
 				}
+			}
+		})
+	}
+}
+
+// With defaults.require_current_target off, a clean-but-behind PR keeps its
+// green checks and gets no instruction, while a conflicting PR is asked to
+// merge the target without entering the merge queue.
+func TestPRWatchWithoutCurrentTargetRuleAsksOnlyConflictingBranches(t *testing.T) {
+	for _, scenario := range []struct {
+		name        string
+		conflicting bool
+		mergeable   string
+	}{
+		{name: "behind but clean", mergeable: "MERGEABLE"},
+		{name: "conflicting", conflicting: true, mergeable: "CONFLICTING"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			if scenario.conflicting {
+				path := filepath.Join(fixture.worktree, "README.md")
+				if err := os.WriteFile(path, []byte("Task README update\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				gitTest(t, fixture.worktree, "add", "README.md")
+				gitTest(t, fixture.worktree, "commit", "-m", "change README")
+				fixture.headSHA = strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+			}
+			if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+			}
+			targetTip := fixture.advanceTarget(t, scenario.conflicting, true)
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", scenario.mergeable, "", fixture.headSHA)
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observation, err := fixture.db.LatestPRObservation(ctx, fixture.task.ID)
+			if err != nil || decodeChecks(observation.Checks).State != "SUCCESS" {
+				t.Fatalf("behind PR checks were not kept: observation=%#v err=%v", observation, err)
+			}
+			if places, err := fixture.db.MergeQueuePlaces(ctx, fixture.project.ID); err != nil || len(places[fixture.task.ID]) != 0 {
+				t.Fatalf("Task entered the merge queue without the current-target rule: %#v err=%v", places, err)
+			}
+			notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var queued int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil {
+				t.Fatal(err)
+			}
+			if !scenario.conflicting {
+				if queued != 0 || countNoticeKind(notices, "merge_ready") != 1 {
+					t.Fatalf("clean-but-behind PR: queued instructions=%d merge_ready=%d, want 0 and 1", queued, countNoticeKind(notices, "merge_ready"))
+				}
+				return
+			}
+			if countNoticeKind(notices, "pr_conflict") != 1 || countNoticeKind(notices, "merge_ready") != 0 {
+				t.Fatalf("conflicting PR notices = %#v", notices)
+			}
+			var body string
+			if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil || queued != 1 {
+				t.Fatalf("conflicting PR instructions = %d, %v; want one", queued, err)
+			}
+			if !strings.Contains(body, "Merge origin/main") || !strings.Contains(body, targetTip) {
+				t.Fatalf("conflict instruction does not ask to merge the target: %s", body)
 			}
 		})
 	}
@@ -326,6 +400,7 @@ func TestPRWatchRaisesMergeReadyWhenTaskEntersMergeAfterPRIsGreen(t *testing.T) 
 
 func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	fixture.requireCurrentTarget(t)
 	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
 	}
