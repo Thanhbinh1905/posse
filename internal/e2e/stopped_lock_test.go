@@ -85,7 +85,7 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 			if err := syscall.Kill(owner.Process.Pid, syscall.SIGSTOP); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 			defer cancel()
 			wakeArgs := []string{"--json"}
 			if kind == "sandbox" {
@@ -125,8 +125,8 @@ func TestProjectCommandDoesNotWaitForeverForStoppedLockOwner(t *testing.T) {
 			}
 			// A user command can first wait for the sync lock held by the
 			// Watch, then for the fetch lock; both waits are independently
-			// bounded at three seconds. Keep margin below the 10-second watchdog.
-			if elapsed := time.Since(started); elapsed > 7*time.Second {
+			// bounded (three and twenty seconds). Keep margin below the 40-second watchdog.
+			if elapsed := time.Since(started); elapsed > 30*time.Second {
 				t.Fatalf("lock wait exceeded bound: %s", elapsed)
 			}
 			if err := owner.Process.Kill(); err != nil {
