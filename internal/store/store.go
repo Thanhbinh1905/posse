@@ -357,7 +357,7 @@ var transitions = map[State]map[State]bool{
 	StateMerging:       {StateMerged: true, StateDone: true, StateWorking: true, StateTornDown: true},
 	StateMerged:        {StateTornDown: true},
 	StateReported:      {StateTornDown: true},
-	StateFailed:        {StateWorking: true, StateTornDown: true, StateMerged: true},
+	StateFailed:        {StateSpawning: true, StateWorking: true, StateTornDown: true, StateMerged: true},
 	StateLost:          {StateWorking: true, StateTornDown: true, StateMerged: true},
 }
 
