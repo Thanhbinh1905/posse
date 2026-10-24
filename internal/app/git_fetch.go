@@ -13,6 +13,12 @@ import (
 
 const gitFetchAttempts = 4
 
+// A fetch holding the lock can legitimately run for several seconds, and
+// concurrent Worker publishes routinely queue behind each other.
+var fetchLockWaitBudget = 20 * time.Second
+
+const fetchLockBusyReason = "another origin fetch is in progress; retry the operation"
+
 func gitFetch(ctx context.Context, root string, args ...string) (string, error) {
 	reportWatchProgress(ctx)
 	lock, err := acquireRepositoryFetchLock(ctx, root)
@@ -45,7 +51,7 @@ func acquireRepositoryFetchLock(ctx context.Context, root string) (*os.File, err
 	if err != nil {
 		return nil, fmt.Errorf("resolve Git common directory for fetch lock: %w", err)
 	}
-	return acquireFileLock(ctx, filepath.Join(commonDir, "posse-fetch.lock"))
+	return acquireFileLockReason(ctx, filepath.Join(commonDir, "posse-fetch.lock"), fetchLockWaitBudget, fetchLockBusyReason)
 }
 
 func acquireRepositorySyncLock(ctx context.Context, root string) (*os.File, error) {
