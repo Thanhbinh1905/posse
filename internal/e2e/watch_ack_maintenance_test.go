@@ -322,7 +322,7 @@ func TestWatchAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 		}
 	}
 	// Keep the unrelated automatic Teardown active so shared Project preparation
-	// reaches its retryable teardown_in_progress failure before acknowledging.
+	// meets a teardown_in_progress outcome before acknowledging.
 	if err := f.db.StartIntent(ctx, f.project.ID, maintenanceTaskID, "teardown", "in_progress:panes.close", `{"discard":false}`, os.Getpid()); err != nil {
 		t.Fatalf("start unrelated automatic Teardown: %v", err)
 	}
@@ -399,22 +399,15 @@ func TestWatchAckCommitsBeforeUnrelatedTeardown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry acknowledged Notice and report unrelated maintenance failure: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "Watch maintenance failed (retryable)") {
-		t.Fatalf("unrelated Teardown failure was not surfaced as a retryable Notice: %s", output)
-	}
+	// A Teardown still in progress is routine and must not raise a Notice.
 	notices, err := f.db.Notices(ctx, f.project.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var maintenanceNotice *store.Notice
-	for i := range notices {
-		if notices[i].Kind == "pr_watch_failing" && strings.Contains(notices[i].Summary, "Watch maintenance failed (retryable)") {
-			maintenanceNotice = &notices[i]
-			break
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" {
+			t.Fatalf("unrelated Teardown in progress raised %#v\n%s", notice, output)
 		}
-	}
-	if maintenanceNotice == nil || maintenanceNotice.DeliveredAt == 0 || maintenanceNotice.AckedAt != 0 {
-		t.Fatalf("maintenance failure Notice state = %#v, want delivered and still open", maintenanceNotice)
 	}
 	if err := f.db.FinishIntent(ctx, intent.ID, os.Getpid()); err != nil {
 		t.Fatal(err)
