@@ -712,12 +712,18 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				var checks []failedCheck
 				checksRunning := false
 				skipChecks := false
+				// An OPEN observation is behind only if it lacks this tip, fetched
+				// before the forge query: a later tip may hold the PR's own merge.
+				var targetTip prTargetFreshness
+				if err == nil {
+					targetTip, err = fetchPRTargetTip(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task))
+				}
 				if err == nil {
 					headSHA := member.repo.GatedSHA
 					if headSHA == "" && member.task.WorktreePath != "" && target.task.Branch != "" {
 						headSHA, _ = gitOutput(pollCtx, member.task.WorktreePath, "rev-parse", "refs/heads/"+target.task.Branch)
 					}
-					freshness, freshnessErr := inspectPRTargetFreshness(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task), headSHA)
+					freshness, freshnessErr := targetTip.of(pollCtx, member.target.Root, headSHA)
 					if freshnessErr != nil {
 						err = freshnessErr
 					} else if !freshness.Fresh {
@@ -739,13 +745,20 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				}
 				if err == nil && observation.State == "OPEN" {
 					freshness, freshnessErr := inspectPRTargetFreshness(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task), observation.HeadSHA)
+					var beforeQuery prTargetFreshness
+					if freshnessErr == nil && !freshness.Fresh {
+						beforeQuery, freshnessErr = targetTip.of(pollCtx, member.target.Root, observation.HeadSHA)
+					}
 					if freshnessErr != nil {
 						err = freshnessErr
 					} else if !freshness.Fresh {
-						if enterErr := db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli()); enterErr != nil {
-							err = enterErr
-						} else {
-							behind = append(behind, behindMember{target: target, freshness: freshness, headSHA: observation.HeadSHA})
+						if !beforeQuery.Fresh {
+							err = db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli())
+							if err == nil {
+								behind = append(behind, behindMember{target: target, freshness: freshness, headSHA: observation.HeadSHA})
+							}
+						}
+						if err == nil {
 							observation.Checks = stalePRChecks()
 							checks = nil
 						}

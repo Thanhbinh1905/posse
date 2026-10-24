@@ -714,18 +714,35 @@ func TestMergeQueuePromotesOneBehindPRPerLanding(t *testing.T) {
 		}
 		return count
 	}
-	land := func(id string) string {
+	// A forge moves the target and reports the PR merged in one step. Holding
+	// Posse's fetch lock across the push and the GraphQL rewrite keeps a poll
+	// from fetching the new tip and then reading the old OPEN state.
+	land := func(id string, observed func(merge string) []fakePull) string {
 		t.Helper()
 		if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", id, "--execute"); !strings.Contains(output, "merging") {
 			t.Fatalf("%s PR did not merge: %s", id, output)
 		}
-		return fixture.mergeOnLocalOrigin(t, fixture.mustTask(t, id), id)
+		lock, err := os.OpenFile(filepath.Join(fixture.repo, ".git", "posse-fetch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Close()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			t.Fatal(err)
+		}
+		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		merge := fixture.mergeOnLocalOrigin(t, fixture.mustTask(t, id), id)
+		fixture.writeGraphQLPulls(t, observed(merge)...)
+		return merge
 	}
 
 	// Landing 1: only the queue head t2 is asked to merge main.
-	firstMerge := land("t1")
-	fixture.writeGraphQLPulls(t, mergedPull("t1", tasks["t1"].GatedSHA, firstMerge), openPull("t2", tasks["t2"].GatedSHA), openPull("t3", tasks["t3"].GatedSHA))
+	firstMerge := land("t1", func(merge string) []fakePull {
+		return []fakePull{mergedPull("t1", tasks["t1"].GatedSHA, merge), openPull("t2", tasks["t2"].GatedSHA), openPull("t3", tasks["t3"].GatedSHA)}
+	})
 	fixture.waitTaskState(t, "t2", store.StateWorking)
+	// Reads refuse while t1's auto-Teardown runs in another process.
+	showAfterActiveTeardown(t, fixture, "t1")
 	for i := 0; i < 3; i++ {
 		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t3")
 	}
@@ -767,12 +784,28 @@ func TestMergeQueuePromotesOneBehindPRPerLanding(t *testing.T) {
 	if rounds := freshnessRounds("t3"); rounds != 0 {
 		t.Fatalf("t3 was asked to update while t2 held the queue head: rounds=%d", rounds)
 	}
-	secondMerge := land("t2")
-	fixture.writeGraphQLPulls(t, mergedPull("t2", syncedHead, secondMerge), openPull("t3", tasks["t3"].GatedSHA))
+	secondMerge := land("t2", func(merge string) []fakePull {
+		return []fakePull{mergedPull("t2", syncedHead, merge), openPull("t3", tasks["t3"].GatedSHA)}
+	})
 	fixture.waitTaskState(t, "t3", store.StateWorking)
 
 	if got := []int{freshnessRounds("t2"), freshnessRounds("t3")}; got[0] != 1 || got[1] != 1 {
-		t.Fatalf("merge-target instructions per Task = %v, want one update per landing", got)
+		// Each dedupe key names the PR head and target tip the instruction was for.
+		rows, err := fixture.db.QueryContext(context.Background(), `SELECT t.seq,r.dedupe_key FROM validation_fix_rounds r JOIN tasks t ON t.id=r.ship_task_id WHERE t.project_id=? AND r.kind='freshness' ORDER BY r.id`, fixture.project.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var rounds []string
+		for rows.Next() {
+			var seq int
+			var key string
+			if err := rows.Scan(&seq, &key); err != nil {
+				t.Fatal(err)
+			}
+			rounds = append(rounds, fmt.Sprintf("t%d %s", seq, key))
+		}
+		t.Fatalf("merge-target instructions per Task = %v, want one update per landing\nlandings: t1=%s t2=%s\nrounds: %s", got, firstMerge, secondMerge, strings.Join(rounds, "; "))
 	}
 }
 

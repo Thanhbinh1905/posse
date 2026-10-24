@@ -1018,7 +1018,18 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 	targets := make([]prWatchTarget, 0, len(watched))
 	failedTasks := make(map[int64]error)
 	staleBeforeQuery := make(map[int64]bool)
+	// Target tips fetched before the forge query. An OPEN observation is
+	// behind only if it lacks this tip: a tip fetched after the query may
+	// already contain this PR's own merge.
+	targetTips := make(map[int64]prTargetFreshness)
 	for _, task := range watched {
+		targetTip, fetchErr := fetchPRTargetTip(ctx, project.Root, taskTargetBranch(project, task))
+		if fetchErr != nil {
+			failedTasks[task.ID] = fetchErr
+			staleBeforeQuery[task.ID] = true
+			continue
+		}
+		targetTips[task.ID] = targetTip
 		headSHA := task.GatedSHA
 		if headSHA == "" && task.WorktreePath != "" && task.Branch != "" {
 			headSHA, _ = gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
@@ -1033,7 +1044,7 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 			staleBeforeQuery[task.ID] = true
 			continue
 		}
-		freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), headSHA)
+		freshness, freshnessErr := targetTip.of(ctx, project.Root, headSHA)
 		if freshnessErr != nil {
 			failedTasks[task.ID] = freshnessErr
 			staleBeforeQuery[task.ID] = true
@@ -1206,6 +1217,10 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		}
 		if observation.State == "OPEN" {
 			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
+			var beforeQuery prTargetFreshness
+			if freshnessErr == nil && !freshness.Fresh {
+				beforeQuery, freshnessErr = targetTips[task.ID].of(ctx, project.Root, observation.HeadSHA)
+			}
 			if freshnessErr != nil {
 				if recordErr := recordPRTaskWatchFailure(ctx, db, project, task, freshnessErr, now); recordErr != nil {
 					return recordErr
@@ -1213,12 +1228,16 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 				continue
 			}
 			if !freshness.Fresh {
-				// Enter every behind Task before promoting, so the head follows
-				// done Signal order rather than poll order.
-				if err := db.EnterMergeQueue(ctx, task.ID, "", freshness.Branch, now.UnixMilli()); err != nil {
-					return err
+				// A target that advanced only during the query may hold this
+				// PR's own merge; the next poll observes it merged or behind.
+				if !beforeQuery.Fresh {
+					// Enter every behind Task before promoting, so the head follows
+					// done Signal order rather than poll order.
+					if err := db.EnterMergeQueue(ctx, task.ID, "", freshness.Branch, now.UnixMilli()); err != nil {
+						return err
+					}
+					behind = append(behind, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
 				}
-				behind = append(behind, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
 				observation.Checks = stalePRChecks()
 				failures = nil
 			}
