@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -315,5 +317,40 @@ func TestWatchRuntimeHealthReportsMissingProcess(t *testing.T) {
 	}
 	if check.Status != "warn" || !strings.Contains(check.Detail, "watch=missing") {
 		t.Fatalf("missing watch health = %#v", check)
+	}
+}
+
+func TestSystemWatchProcessesSkipsEnvironmentOfNonWatchProcesses(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads the Linux process table")
+	}
+	root := t.TempDir()
+	process := filepath.Join(root, "4242")
+	if err := os.Mkdir(process, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(process, "cmdline"), []byte("sleep\x00600\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A FIFO without a writer blocks a read forever, so discovery hangs if it
+	// reads the environment of a process that is not a Watch command.
+	if err := syscall.Mkfifo(filepath.Join(process, "environ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := watchProcRoot
+	watchProcRoot = root
+	t.Cleanup(func() { watchProcRoot = previous })
+	done := make(chan error, 1)
+	go func() {
+		_, err := systemWatchProcesses(t.TempDir())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("discovery read the environment of a non-Watch process")
 	}
 }
