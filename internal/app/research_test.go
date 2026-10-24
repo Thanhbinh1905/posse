@@ -223,14 +223,41 @@ func TestClaudeResearchHooksTrackReadOnlyChildren(t *testing.T) {
 	if err != nil || string(data) != "The schema lives in internal/store/migrations." || !strings.HasPrefix(completed.ResultPath, f.home) {
 		t.Fatalf("result %s %q err=%v", completed.ResultPath, data, err)
 	}
-	// The completed child may no longer call tools.
-	if code, _, _ := f.hook(childCall("agent-1", "Read", map[string]any{"file_path": "go.mod"})); code != guardExitBlocked {
-		t.Fatalf("completed child kept tools: code=%d", code)
+	// A resumed completed child runs again under the same attempt and is
+	// still read-only.
+	if code, _, stderr := f.hook(childCall("agent-1", "Read", map[string]any{"file_path": "go.mod"})); code != 0 {
+		t.Fatalf("resumed child refused: code=%d stderr=%s", code, stderr)
+	}
+	if code, _, _ := f.hook(childCall("agent-1", "Bash", map[string]any{"command": "rm -rf internal"})); code != guardExitBlocked {
+		t.Fatalf("resumed child lost read-only enforcement: code=%d", code)
+	}
+	if resumed, err := f.db.ResearchAttempt(ctx, registered.ID); err != nil || resumed.State != "running" {
+		t.Fatalf("resumed %+v err=%v", resumed, err)
+	}
+	if code, _, stderr := f.hook(map[string]any{"hook_event_name": "SubagentStop", "agent_id": "agent-1", "agent_type": "Explore", "agent_transcript_path": transcript, "last_assistant_message": "Resumed answer."}); code != 0 {
+		t.Fatalf("second SubagentStop: code=%d stderr=%s", code, stderr)
+	}
+	if again, err := f.db.ResearchAttempt(ctx, registered.ID); err != nil || again.State != "completed" || again.ResultBytes != int64(len("Resumed answer.")) {
+		t.Fatalf("recompleted %+v err=%v", again, err)
+	}
+	// Completed again, a foreign session may not resume it.
+	foreign := childCall("agent-1", "Read", map[string]any{"file_path": "go.mod"})
+	foreign["session_id"] = "other-session"
+	if code, _, stderr := f.hook(foreign); code != guardExitBlocked || !strings.Contains(stderr, "another session") {
+		t.Fatalf("foreign resume: code=%d stderr=%s", code, stderr)
+	}
+	completed, err = f.db.ResearchAttempt(ctx, registered.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(completed.ResultPath)
+	if err != nil || string(data) != "Resumed answer." {
+		t.Fatalf("resumed result %q err=%v", data, err)
 	}
 
 	// The result is visible through the CLI with its pointer.
 	code, output := runCLI(t, f.service, "research", "show", research.AttemptID(registered.ID), "--result")
-	if code != 0 || !strings.Contains(output, "internal/store/migrations") || !strings.Contains(output, "completed") {
+	if code != 0 || !strings.Contains(output, "Resumed answer.") || !strings.Contains(output, "completed") {
 		t.Fatalf("show: %d %s", code, output)
 	}
 	code, output = runCLI(t, f.service, "research", "list", "--all")
@@ -426,5 +453,26 @@ func TestClaudeResearchPluginInstallsHooksOnlyWhenTracked(t *testing.T) {
 	version = ""
 	if code, stderr := hook(agentCall("tool-2", "Plan", nil)); code != guardExitBlocked || !strings.Contains(stderr, "version") {
 		t.Fatalf("unknown version: code=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestClaudeResearchResumeOfCompletedChildHonorsBudget(t *testing.T) {
+	f := newResearchFixture(t)
+	if code, output := runCLI(t, f.service, "config", "set", "research.max_active", "1"); code != 0 {
+		t.Fatal(output)
+	}
+	if code, _, stderr := f.hook(agentCall("tool-a", "Explore", nil)); code != 0 {
+		t.Fatal(stderr)
+	}
+	f.hook(map[string]any{"hook_event_name": "SubagentStart", "agent_id": "agent-a", "agent_type": "Explore"})
+	f.hook(map[string]any{"hook_event_name": "SubagentStop", "agent_id": "agent-a", "agent_type": "Explore", "last_assistant_message": "done"})
+	if code, _, stderr := f.hook(agentCall("tool-b", "Plan", nil)); code != 0 {
+		t.Fatal(stderr)
+	}
+	if code, _, stderr := f.hook(childCall("agent-a", "Read", map[string]any{"file_path": "go.mod"})); code != guardExitBlocked || !strings.Contains(stderr, "cannot resume") || !strings.Contains(stderr, "budget") {
+		t.Fatalf("resume over budget: code=%d stderr=%s", code, stderr)
+	}
+	if first := f.attempts()[len(f.attempts())-1]; first.State != "completed" {
+		t.Fatalf("attempt reopened over budget: %+v", first)
 	}
 }
