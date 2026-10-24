@@ -189,13 +189,9 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 		if len(survivors) == 0 {
 			return processLabels(allPIDs), nil
 		}
-		stillAlive, err := sandboxHandlesInSandbox(handles, root)
-		if err != nil {
-			return nil, err
-		}
-		if len(stillAlive) == 0 {
-			return nil, fmt.Errorf("unverified Sandbox processes appeared during teardown: %v", survivors)
-		}
+		// A short-lived process (a shell prompt helper after the Worker exits)
+		// can be alive for a single poll. Keep polling until the deadline
+		// instead of failing on the first sighting; nothing unretained is signaled.
 		time.Sleep(25 * time.Millisecond)
 	}
 	survivors, err := sandboxProcessIDs(root)
@@ -205,6 +201,13 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 	survivors, err = excludeTaskProcessTree(survivors, excludedPIDs)
 	if err != nil {
 		return nil, err
+	}
+	stillAlive, err := sandboxHandlesInSandbox(handles, root)
+	if err != nil {
+		return nil, err
+	}
+	if len(stillAlive) == 0 && len(survivors) > 0 {
+		return nil, fmt.Errorf("unverified Sandbox processes appeared during teardown: %v", survivors)
 	}
 	return processLabels(allPIDs), fmt.Errorf("sandbox processes survived teardown: %v", survivors)
 }

@@ -436,10 +436,12 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not confirm Herdr ownership for pane %s", pane.PaneID), true, err.Error())
 		}
 		finalPane, finalFound := snapshotPane(finalSnapshot, pane.PaneID)
-		finalName := snapshotAgentName(finalSnapshot, pane.PaneID)
 		finalTaskPane := finalFound && ownsTaskPane(finalSnapshot, project, task, taskTabs(finalSnapshot, project, task), finalPane)
 		finalForeignShell := finalFound && shellOnlyPaneInSandbox(finalSnapshot, finalPane, heldSandbox.Path)
-		if !finalFound || finalName != currentAgentName || finalPane.Agent != currentPane.Agent || foreignShellPane && !finalForeignShell || !foreignShellPane && !finalTaskPane {
+		// Herdr can drop or re-report an agent between snapshots; ownsTaskPane
+		// already rejects a pane whose agent belongs to another Task, so only
+		// a pane that stopped being the Task's (or a foreign shell) is refused.
+		if !finalFound || foreignShellPane && !finalForeignShell || !foreignShellPane && !finalTaskPane {
 			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("foreground process %d in Sandbox pane %s changed Herdr ownership during verification", foreground, pane.PaneID), false, "Stop or inspect the unrelated agent, preserve its work, then retry Teardown")
 		}
 		// Backfill a legacy Task's shell image, or record a respawned upgraded
