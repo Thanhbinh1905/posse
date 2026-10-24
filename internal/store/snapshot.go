@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -567,38 +568,56 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 	if err := decisionRows.Close(); err != nil {
 		return projectStateSnapshot{}, err
 	}
-	noticeRows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
-		FROM notices WHERE project_id=? AND
-		(acked_at IS NULL OR id IN (
-			SELECT id FROM notices WHERE project_id=? ORDER BY id DESC LIMIT ?
-		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
-	if err != nil {
-		return projectStateSnapshot{}, err
-	}
-	for noticeRows.Next() {
-		var notice Notice
-		var taskID, deliveredAt, ackedAt sql.NullInt64
-		if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
+	// Read open Notices from their index range and the recent tail from the
+	// Project id index. A single OR filter made SQLite walk every Notice of
+	// the Project on each snapshot.
+	notices := map[int64]Notice{}
+	for _, query := range []struct {
+		sql  string
+		args []any
+	}{
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+			FROM notices INDEXED BY notices_open_idx WHERE project_id=? AND acked_at IS NULL`, []any{projectID}},
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+			FROM notices INDEXED BY notices_project_id_idx WHERE project_id=? ORDER BY id DESC LIMIT ?`, []any{projectID, projectSnapshotHistoryLimit}},
+	} {
+		noticeRows, err := db.QueryContext(ctx, query.sql, query.args...)
+		if err != nil {
+			return projectStateSnapshot{}, err
+		}
+		for noticeRows.Next() {
+			var notice Notice
+			var taskID, deliveredAt, ackedAt sql.NullInt64
+			if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
+				_ = noticeRows.Close()
+				return projectStateSnapshot{}, err
+			}
+			if taskID.Valid {
+				notice.TaskID = taskID.Int64
+			}
+			if deliveredAt.Valid {
+				notice.DeliveredAt = deliveredAt.Int64
+			}
+			if ackedAt.Valid {
+				notice.AckedAt = ackedAt.Int64
+			}
+			notices[notice.ID] = notice
+		}
+		if err := noticeRows.Err(); err != nil {
 			_ = noticeRows.Close()
 			return projectStateSnapshot{}, err
 		}
-		if taskID.Valid {
-			notice.TaskID = taskID.Int64
+		if err := noticeRows.Close(); err != nil {
+			return projectStateSnapshot{}, err
 		}
-		if deliveredAt.Valid {
-			notice.DeliveredAt = deliveredAt.Int64
-		}
-		if ackedAt.Valid {
-			notice.AckedAt = ackedAt.Int64
-		}
-		state.Notices = append(state.Notices, noticeSnapshot(notice))
 	}
-	if err := noticeRows.Err(); err != nil {
-		_ = noticeRows.Close()
-		return projectStateSnapshot{}, err
+	noticeIDs := make([]int64, 0, len(notices))
+	for id := range notices {
+		noticeIDs = append(noticeIDs, id)
 	}
-	if err := noticeRows.Close(); err != nil {
-		return projectStateSnapshot{}, err
+	slices.Sort(noticeIDs)
+	for _, id := range noticeIDs {
+		state.Notices = append(state.Notices, noticeSnapshot(notices[id]))
 	}
 	err = db.QueryRowContext(ctx, `SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?`, projectID).Scan(&state.DecisionNoticeCursor)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

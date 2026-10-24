@@ -2679,7 +2679,7 @@ func (db *DB) Notices(ctx context.Context, projectID int64, openOnly bool) ([]No
 // availability Notice records a disappearance that no recovery has closed.
 func (db *DB) SandboxMissingEpisodeOpen(ctx context.Context, projectID, taskID int64) (bool, error) {
 	var kind string
-	err := db.QueryRowContext(ctx, `SELECT kind FROM notices WHERE project_id=? AND task_id=? AND kind IN ('sandbox_missing','sandbox_recovered') ORDER BY id DESC LIMIT 1`, projectID, taskID).Scan(&kind)
+	err := db.QueryRowContext(ctx, `SELECT kind FROM notices INDEXED BY notices_sandbox_episode_idx WHERE task_id=? AND kind IN ('sandbox_missing','sandbox_recovered') AND project_id=? ORDER BY id DESC LIMIT 1`, taskID, projectID).Scan(&kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
