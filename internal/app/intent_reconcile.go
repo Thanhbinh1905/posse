@@ -211,6 +211,11 @@ func (s *Service) recoverStartIntent(ctx context.Context, db *store.DB, project 
 	if task.State != store.StateSpawning {
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	}
+	// The caller's snapshot can predate the start that was just interrupted;
+	// judging the pane from it would misreport a pane the start already opened.
+	if fresh, err := s.snapshot(ctx); err == nil {
+		snapshot = fresh
+	}
 	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 	if !found {
 		if err := s.failSpawn(ctx, db, project, task.ID, task.Title, "start was interrupted before a Worker pane appeared"); err != nil {
