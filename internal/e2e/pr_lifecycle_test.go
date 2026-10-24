@@ -605,14 +605,18 @@ func TestPRMergeRefusesBranchBehindLatestTarget(t *testing.T) {
 		}
 	}
 	first, second = fixture.mustTask(t, "t1"), fixture.mustTask(t, "t2")
-	fixture.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", first.GatedSHA)
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
-	fixture.writeGraphQL(t, "pr2", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", second.GatedSHA)
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
+	// Both PRs stay in every response so a background poll never records a
+	// missing PR between the two observations.
+	fixture.writeGraphQLPulls(t,
+		fakePull{alias: "pr1", state: "OPEN", checks: "SUCCESS", review: "APPROVED", mergeable: "MERGEABLE", head: first.GatedSHA},
+		fakePull{alias: "pr2", state: "OPEN", checks: "SUCCESS", review: "APPROVED", mergeable: "MERGEABLE", head: second.GatedSHA})
+	fixture.showUntilGreen(t, "t1", first.GatedSHA)
+	fixture.showUntilGreen(t, "t2", second.GatedSHA)
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1", "--execute"); !strings.Contains(output, "merging") {
 		t.Fatalf("first PR did not merge: %s", output)
 	}
 	fixture.mergeOnLocalOrigin(t, first, "t1")
+	fixture.writeGraphQL(t, "pr2", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", second.GatedSHA)
 	if err := os.Remove(fixture.ghMerge); err != nil {
 		t.Fatal(err)
 	}
@@ -705,7 +709,7 @@ func TestMergeQueuePromotesOneBehindPRPerLanding(t *testing.T) {
 		return pull
 	}
 	fixture.writeGraphQLPulls(t, openPull("t1", tasks["t1"].GatedSHA), openPull("t2", tasks["t2"].GatedSHA), openPull("t3", tasks["t3"].GatedSHA))
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	fixture.showUntilGreen(t, "t1", tasks["t1"].GatedSHA)
 	freshnessRounds := func(id string) int {
 		t.Helper()
 		var count int
@@ -2578,6 +2582,24 @@ func (fixture *prLifecycleFixture) waitTaskState(t *testing.T, taskID string, wa
 		task, _ := fixture.db.Task(context.Background(), fixture.project.ID, taskID)
 		log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
 		t.Fatalf("Task %s did not reach %s: %#v, Worker delivery: %s", taskID, want, task, log)
+	}
+}
+
+// showUntilGreen runs `posse show` until the newest observation of the Task
+// records green checks at head. A poll skips silently while the live watch
+// holds the Project's poll claim, and that in-flight poll may have read the
+// forge before the fixture changed, so one show does not guarantee an
+// observation of the new state.
+func (fixture *prLifecycleFixture) showUntilGreen(t *testing.T, taskID, head string) {
+	t.Helper()
+	task := fixture.mustTask(t, taskID)
+	if !waitForCondition(30*time.Second, func() bool {
+		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", taskID)
+		observation, err := fixture.db.LatestPRObservation(context.Background(), task.ID)
+		return err == nil && observation.HeadSHA == head && decodeChecksState(observation.Checks) == "SUCCESS" && observation.Mergeable == "MERGEABLE"
+	}) {
+		observation, err := fixture.db.LatestPRObservation(context.Background(), task.ID)
+		t.Fatalf("no green observation of %s at %s: %#v, %v", taskID, head, observation, err)
 	}
 }
 
