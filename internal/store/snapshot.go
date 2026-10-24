@@ -3,13 +3,17 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,10 +63,13 @@ type TaskSnapshot struct {
 }
 
 type projectSnapshot struct {
-	Version int                  `toml:"version"`
-	Project Project              `toml:"project"`
-	Members []ProjectRepo        `toml:"members,omitempty"`
-	State   projectStateSnapshot `toml:"state"`
+	Version int `toml:"version"`
+	// StateDigest covers everything except the capture time. It precedes every
+	// table, so an unchanged check reads only the header of a large snapshot.
+	StateDigest string               `toml:"state_digest,omitempty"`
+	Project     Project              `toml:"project"`
+	Members     []ProjectRepo        `toml:"members,omitempty"`
+	State       projectStateSnapshot `toml:"state"`
 }
 
 type projectStateSnapshot struct {
@@ -423,19 +430,14 @@ func (db *DB) persistProject(ctx context.Context, projectID int64, projectLockHe
 	if snapshot.State, err = db.projectStateSnapshot(ctx, projectID); err != nil {
 		return err
 	}
+	snapshot.StateDigest = projectSnapshotDigest(snapshot)
 	path := db.ProjectSnapshotPath(project.Name)
 	// Unchanged state keeps its capture time, so the write below is skipped.
 	// Recovery orders snapshots by that time; equal state cannot reorder them.
-	if data, err := os.ReadFile(path); err == nil {
-		var previous projectSnapshot
-		if _, err := toml.Decode(string(data), &previous); err == nil && previous.State.CapturedAt != 0 {
-			unchanged := snapshot
-			unchanged.State.CapturedAt = previous.State.CapturedAt
-			var encoded bytes.Buffer
-			if err := toml.NewEncoder(&encoded).Encode(unchanged); err == nil && bytes.Equal(encoded.Bytes(), data) {
-				return nil
-			}
-		}
+	// A Project with thousands of open Notices must not decode its whole
+	// snapshot on every Task write, so only the recorded digest is compared.
+	if recordedProjectSnapshotDigest(path) == snapshot.StateDigest {
+		return nil
 	}
 	if projectLockHeld {
 		return db.writeProjectSnapshotLocked(ctx, projectID, snapshot)
@@ -486,11 +488,46 @@ func (db *DB) writeProjectSnapshotLocked(ctx context.Context, projectID int64, s
 		return err
 	}
 	snapshot.Project = project
+	snapshot.StateDigest = projectSnapshotDigest(snapshot)
 	var encoded bytes.Buffer
 	if err := toml.NewEncoder(&encoded).Encode(snapshot); err != nil {
 		return err
 	}
 	return atomicfile.Write(db.ProjectSnapshotPath(project.Name), encoded.Bytes(), 0o600)
+}
+
+func projectSnapshotDigest(snapshot projectSnapshot) string {
+	snapshot.StateDigest = ""
+	snapshot.State.CapturedAt = 0
+	// %#v covers every field whatever its encoding tags, and these snapshot
+	// types hold only values, so equal state always prints identically.
+	digest := sha256.New()
+	fmt.Fprintf(digest, "%#v", snapshot)
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+// recordedProjectSnapshotDigest returns "" when the snapshot is missing,
+// unreadable or written before digests were recorded.
+func recordedProjectSnapshotDigest(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	header := make([]byte, 512)
+	n, _ := io.ReadFull(file, header)
+	scalars, _, found := bytes.Cut(header[:n], []byte("\n["))
+	if !found {
+		return ""
+	}
+	var recorded struct {
+		Version     int    `toml:"version"`
+		StateDigest string `toml:"state_digest"`
+	}
+	if _, err := toml.Decode(string(scalars), &recorded); err != nil || recorded.Version != 1 {
+		return ""
+	}
+	return recorded.StateDigest
 }
 
 func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {
@@ -531,38 +568,56 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 	if err := decisionRows.Close(); err != nil {
 		return projectStateSnapshot{}, err
 	}
-	noticeRows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
-		FROM notices WHERE project_id=? AND
-		(acked_at IS NULL OR id IN (
-			SELECT id FROM notices WHERE project_id=? ORDER BY id DESC LIMIT ?
-		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
-	if err != nil {
-		return projectStateSnapshot{}, err
-	}
-	for noticeRows.Next() {
-		var notice Notice
-		var taskID, deliveredAt, ackedAt sql.NullInt64
-		if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
+	// Read open Notices from their index range and the recent tail from the
+	// Project id index. A single OR filter made SQLite walk every Notice of
+	// the Project on each snapshot.
+	notices := map[int64]Notice{}
+	for _, query := range []struct {
+		sql  string
+		args []any
+	}{
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+			FROM notices INDEXED BY notices_open_idx WHERE project_id=? AND acked_at IS NULL`, []any{projectID}},
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+			FROM notices INDEXED BY notices_project_id_idx WHERE project_id=? ORDER BY id DESC LIMIT ?`, []any{projectID, projectSnapshotHistoryLimit}},
+	} {
+		noticeRows, err := db.QueryContext(ctx, query.sql, query.args...)
+		if err != nil {
+			return projectStateSnapshot{}, err
+		}
+		for noticeRows.Next() {
+			var notice Notice
+			var taskID, deliveredAt, ackedAt sql.NullInt64
+			if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
+				_ = noticeRows.Close()
+				return projectStateSnapshot{}, err
+			}
+			if taskID.Valid {
+				notice.TaskID = taskID.Int64
+			}
+			if deliveredAt.Valid {
+				notice.DeliveredAt = deliveredAt.Int64
+			}
+			if ackedAt.Valid {
+				notice.AckedAt = ackedAt.Int64
+			}
+			notices[notice.ID] = notice
+		}
+		if err := noticeRows.Err(); err != nil {
 			_ = noticeRows.Close()
 			return projectStateSnapshot{}, err
 		}
-		if taskID.Valid {
-			notice.TaskID = taskID.Int64
+		if err := noticeRows.Close(); err != nil {
+			return projectStateSnapshot{}, err
 		}
-		if deliveredAt.Valid {
-			notice.DeliveredAt = deliveredAt.Int64
-		}
-		if ackedAt.Valid {
-			notice.AckedAt = ackedAt.Int64
-		}
-		state.Notices = append(state.Notices, noticeSnapshot(notice))
 	}
-	if err := noticeRows.Err(); err != nil {
-		_ = noticeRows.Close()
-		return projectStateSnapshot{}, err
+	noticeIDs := make([]int64, 0, len(notices))
+	for id := range notices {
+		noticeIDs = append(noticeIDs, id)
 	}
-	if err := noticeRows.Close(); err != nil {
-		return projectStateSnapshot{}, err
+	slices.Sort(noticeIDs)
+	for _, id := range noticeIDs {
+		state.Notices = append(state.Notices, noticeSnapshot(notices[id]))
 	}
 	err = db.QueryRowContext(ctx, `SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?`, projectID).Scan(&state.DecisionNoticeCursor)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
