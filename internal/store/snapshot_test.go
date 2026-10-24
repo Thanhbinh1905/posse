@@ -643,3 +643,78 @@ func TestUnchangedProjectSnapshotIsNotRewritten(t *testing.T) {
 		t.Fatal("changed Project state kept the previous snapshot capture time")
 	}
 }
+
+// The unchanged check compares a digest recorded in the snapshot header
+// instead of decoding the whole snapshot. It must still notice an in-place
+// edit that keeps every row count, and a legacy snapshot without a digest.
+func TestProjectSnapshotDigestDetectsInPlaceEditsAndLegacySnapshots(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noticeID, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "worker_idle", Summary: "before"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := db.ProjectSnapshotPath(project.Name)
+	read := func() projectSnapshot {
+		t.Helper()
+		var snapshot projectSnapshot
+		if _, err := toml.DecodeFile(path, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	first := read()
+	if first.StateDigest == "" || recordedProjectSnapshotDigest(path) != first.StateDigest {
+		t.Fatalf("snapshot header digest = %q, decoded digest = %q", recordedProjectSnapshotDigest(path), first.StateDigest)
+	}
+
+	if _, err := db.ExecContext(ctx, `UPDATE notices SET summary='after' WHERE id=?`, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET project_uuid=? WHERE id=?`, "00000000-0000-4000-8000-000000000428", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	edited := read()
+	if edited.StateDigest == first.StateDigest || edited.State.CapturedAt <= first.State.CapturedAt || edited.Project.UUID != "00000000-0000-4000-8000-000000000428" {
+		t.Fatalf("in-place edit was not persisted: first=%#v edited=%#v", first, edited)
+	}
+	var summary string
+	for _, notice := range edited.State.Notices {
+		if notice.ID == noticeID {
+			summary = notice.Summary
+		}
+	}
+	if summary != "after" {
+		t.Fatalf("edited Notice summary in snapshot = %q, want after", summary)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(string(data), "state_digest = \""+edited.StateDigest+"\"\n", "", 1)
+	if legacy == string(data) {
+		t.Fatal("snapshot did not record its digest in the header")
+	}
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if recordedProjectSnapshotDigest(path) != edited.StateDigest {
+		t.Fatalf("legacy snapshot without a digest was not rewritten: header digest %q", recordedProjectSnapshotDigest(path))
+	}
+}

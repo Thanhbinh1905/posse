@@ -94,6 +94,15 @@ func (db *DB) EnsureSandboxResourceLease(ctx context.Context, request ResourceLe
 	if err := validateResourceLeaseRequest(request); err != nil {
 		return ResourceLease{}, err
 	}
+	// Every reconciliation ensures every held Sandbox. Confirm an existing
+	// lease from a read so routine passes do not queue for the write lock.
+	if existing, err := db.queries.ResourceLeaseBySource(ctx, request.SourceKey); err == nil {
+		if lease := resourceLeaseFromSource(existing); sameSandboxResourceLease(lease, request) {
+			return lease, nil
+		}
+	} else if !IsNotFound(err) {
+		return ResourceLease{}, err
+	}
 	token := fmt.Sprintf("sandbox:%d", request.SandboxID)
 	return db.claimResourceLease(ctx, request, token, true)
 }
@@ -183,7 +192,7 @@ func claimResourceLeaseTx(ctx context.Context, tx *writeTx, request ResourceLeas
 	}
 	if existing, lookupErr := queries.ResourceLeaseBySource(ctx, request.SourceKey); lookupErr == nil {
 		lease := resourceLeaseFromSource(existing)
-		if !ensure || lease.ResourceType != request.ResourceType || lease.ScopeRoot != request.ScopeRoot || lease.ScopePath != request.ScopePath || lease.OwnerProjectID != request.OwnerProjectID || lease.SandboxID != request.SandboxID {
+		if !ensure || !sameSandboxResourceLease(lease, request) {
 			return ResourceLease{}, false, &ResourceLeaseConflict{Lease: lease}
 		}
 		return lease, false, nil
@@ -243,6 +252,10 @@ func (db *DB) persistProjects(ctx context.Context, projects []int64) error {
 		}
 	}
 	return persistErr
+}
+
+func sameSandboxResourceLease(lease ResourceLease, request ResourceLeaseRequest) bool {
+	return lease.ResourceType == request.ResourceType && lease.ScopeRoot == request.ScopeRoot && lease.ScopePath == request.ScopePath && lease.OwnerProjectID == request.OwnerProjectID && lease.SandboxID == request.SandboxID
 }
 
 func validateResourceLeaseRequest(request ResourceLeaseRequest) error {

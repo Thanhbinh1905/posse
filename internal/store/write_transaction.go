@@ -62,11 +62,22 @@ func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (resul
 		result, err = db.DB.ExecContext(ctx, query, args...)
 		return result, retryableContention(err)
 	}
-	err = db.withBusyTimeout(ctx, writeBusyTimeout(ctx), func(conn *sql.Conn) error {
-		result, err = conn.ExecContext(ctx, query, args...)
-		return err
-	})
-	return result, err
+	// Like beginTxWithRetry, keep retrying short lock waits until the caller's
+	// deadline. A busy autocommit statement has not applied, so it is safe to rerun.
+	for attempt := 0; ; attempt++ {
+		err = db.withBusyTimeout(ctx, writeBusyTimeout(ctx), func(conn *sql.Conn) error {
+			result, err = conn.ExecContext(ctx, query, args...)
+			return err
+		})
+		if !isBusyErr(err) || ctx.Err() != nil {
+			return result, err
+		}
+		select {
+		case <-ctx.Done():
+			return result, err
+		case <-time.After(time.Duration(min(attempt+1, 4)) * 50 * time.Millisecond):
+		}
+	}
 }
 
 // BEGIN IMMEDIATE acquires the write lock before reading, avoiding deferred
