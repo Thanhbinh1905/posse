@@ -3,40 +3,19 @@
 package app
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
 	"testing"
 	"time"
 )
 
-func TestResidualParentProcessesDropsChildrenAndExited(t *testing.T) {
-	parent := exec.Command("/bin/sh", "-c", "sleep 30 & wait")
-	if err := parent.Start(); err != nil {
-		t.Fatal(err)
+func TestStableTaskProcessesDropsProcessesThatDoNotSurviveRescan(t *testing.T) {
+	first := []taskProcessDetail{{PID: 10}, {PID: 20}, {PID: 30}}
+	got := stableTaskProcesses(first, func() []taskProcessDetail { return []taskProcessDetail{{PID: 10}, {PID: 30}, {PID: 40}} })
+	if len(got) != 2 || got[0].PID != 10 || got[1].PID != 30 {
+		t.Fatalf("stable processes = %#v, want PIDs 10 and 30", got)
 	}
-	t.Cleanup(func() { _ = parent.Process.Kill(); _, _ = parent.Process.Wait() })
-	var child int
-	deadline := time.Now().Add(5 * time.Second)
-	for child == 0 && time.Now().Before(deadline) {
-		entries, _ := os.ReadDir("/proc")
-		for _, entry := range entries {
-			var pid int
-			if _, err := fmt.Sscan(entry.Name(), &pid); err != nil || pid <= 1 {
-				continue
-			}
-			if ppid, err := sandboxProcessParentID(pid); err == nil && ppid == parent.Process.Pid {
-				child = pid
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if child == 0 {
-		t.Fatal("shell child did not start")
-	}
-	got := residualParentProcesses([]taskProcessDetail{{PID: parent.Process.Pid}, {PID: child}, {PID: 1 << 30}})
-	if len(got) != 1 || got[0].PID != parent.Process.Pid {
-		t.Fatalf("residual parents = %#v, want only PID %d", got, parent.Process.Pid)
+	if got := stableTaskProcesses(nil, func() []taskProcessDetail { t.Fatal("rescanned an empty set"); return nil }); got != nil {
+		t.Fatalf("empty set = %#v", got)
 	}
 }
 
