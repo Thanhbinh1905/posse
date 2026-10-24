@@ -60,7 +60,7 @@ func seedProductionHistory(t *testing.T, f *prLifecycleFixture) {
 	// Two alternating Watch failures defeat the consecutive-summary dedupe and
 	// leave thousands of unacknowledged Project Notices behind.
 	for i := range 3700 {
-		phase := "watch"
+		phase := "maintenance"
 		if i%2 == 0 {
 			phase = "reconcile"
 		}

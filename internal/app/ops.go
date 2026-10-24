@@ -278,7 +278,9 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 	default:
 	}
 	if s.Herdr != nil {
-		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
+		// A Teardown still running after the bounded wait is routine after a
+		// merge; the next poll observes its outcome, so it is not a failure.
+		if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil && !isTeardownInProgress(err) {
 			failures = append(failures, fmt.Errorf("active Task Teardown: %w", err))
 		}
 	}

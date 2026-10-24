@@ -131,6 +131,9 @@ func retainTaskContainmentProcesses(authorization *sandboxProcessAuthorization, 
 			return fmt.Errorf("inspect Task-contained process %d: %w", pid, err)
 		}
 		if !taskContainsProcess(pid, task, roots) {
+			if taskProcessExited(pid) {
+				continue
+			}
 			return fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
 		}
 		retained, err := retainTaskProcessHandle(pid, bootID+"/"+startTime, task, roots, authorization)
@@ -298,11 +301,21 @@ func retainTaskProcessHandle(pid int, observedIdentity string, task store.Task, 
 			return false, err
 		}
 		if alive && !taskContainsProcess(pid, task, roots) {
+			if taskProcessExited(pid) {
+				return false, nil
+			}
 			return false, fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
 		}
 		return alive, nil
 	}
 	return false, fmt.Errorf("task process %d kept changing identity while retaining its handle", pid)
+}
+
+// taskProcessExited reports whether pid is gone or a zombie. Containment reads
+// fail for such a process, so a failed read is only an escape when it is alive.
+func taskProcessExited(pid int) bool {
+	zombie, err := sandboxProcessIsZombie(pid)
+	return processGone(err) || err == nil && zombie
 }
 
 func taskProcessHasOwnershipProof(pid int, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {

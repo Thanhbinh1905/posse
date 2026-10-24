@@ -314,7 +314,7 @@ func TestWatchFailureInBothPhasesRaisesOneNoticePerPhase(t *testing.T) {
 	persistent := errors.New("config.toml: defaults.review: legacy review policy")
 	for range 5 {
 		recordWatchFailure(ctx, fixture.db, fixture.project.ID, lastFailures, "reconcile", persistent)
-		recordWatchFailure(ctx, fixture.db, fixture.project.ID, lastFailures, "watch", persistent)
+		recordWatchFailure(ctx, fixture.db, fixture.project.ID, lastFailures, "maintenance", persistent)
 	}
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil {
