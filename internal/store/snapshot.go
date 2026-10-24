@@ -79,6 +79,10 @@ type projectStateSnapshot struct {
 	Decisions            []decisionSnapshot      `toml:"decisions,omitempty"`
 	Notices              []noticeSnapshot        `toml:"notices,omitempty"`
 	DecisionNoticeCursor int64                   `toml:"decision_notice_cursor"`
+	// HistoryRevision changes with every write to the Project's Notices or
+	// Decisions (migration 00069). The digest covers it instead of that
+	// history, which can hold thousands of open Notices. Zero means unknown.
+	HistoryRevision int64 `toml:"-"`
 }
 
 // Project snapshots are recovery input, not an unbounded audit log. Keep all
@@ -427,17 +431,31 @@ func (db *DB) persistProject(ctx context.Context, projectID int64, projectLockHe
 			return err
 		}
 	}
-	if snapshot.State, err = db.projectStateSnapshot(ctx, projectID); err != nil {
+	if snapshot.State, err = db.projectLiveStateSnapshot(ctx, projectID); err != nil {
 		return err
+	}
+	historyRead := snapshot.State.HistoryRevision == 0
+	if historyRead {
+		if err := db.readProjectHistorySnapshot(ctx, projectID, &snapshot.State); err != nil {
+			return err
+		}
 	}
 	snapshot.StateDigest = projectSnapshotDigest(snapshot)
 	path := db.ProjectSnapshotPath(project.Name)
 	// Unchanged state keeps its capture time, so the write below is skipped.
 	// Recovery orders snapshots by that time; equal state cannot reorder them.
 	// A Project with thousands of open Notices must not decode its whole
-	// snapshot on every Task write, so only the recorded digest is compared.
+	// snapshot or read its history on every Task write, so only the recorded
+	// digest is compared.
 	if recordedProjectSnapshotDigest(path) == snapshot.StateDigest {
 		return nil
+	}
+	// History read after its revision can only be newer than the digest
+	// claims, which costs at most one more rewrite.
+	if !historyRead {
+		if err := db.readProjectHistorySnapshot(ctx, projectID, &snapshot.State); err != nil {
+			return err
+		}
 	}
 	if projectLockHeld {
 		return db.writeProjectSnapshotLocked(ctx, projectID, snapshot)
@@ -502,6 +520,9 @@ func (db *DB) writeProjectSnapshotLocked(ctx context.Context, projectID int64, s
 func projectSnapshotDigest(snapshot projectSnapshot) string {
 	snapshot.StateDigest = ""
 	snapshot.State.CapturedAt = 0
+	if snapshot.State.HistoryRevision != 0 {
+		snapshot.State.Decisions, snapshot.State.Notices = nil, nil
+	}
 	// %#v covers every field whatever its encoding tags, and these snapshot
 	// types hold only values, so equal state always prints identically.
 	digest := sha256.New()
@@ -534,11 +555,28 @@ func recordedProjectSnapshotDigest(path string) string {
 }
 
 func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {
+	state, err := db.projectLiveStateSnapshot(ctx, projectID)
+	if err != nil {
+		return projectStateSnapshot{}, err
+	}
+	if err := db.readProjectHistorySnapshot(ctx, projectID, &state); err != nil {
+		return projectStateSnapshot{}, err
+	}
+	return state, nil
+}
+
+// projectLiveStateSnapshot reads the Project state other than its Notice and
+// Decision history, and the revision of that history.
+func (db *DB) projectLiveStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {
+	state := projectStateSnapshot{CapturedAt: time.Now().UnixNano()}
+	err := db.QueryRowContext(ctx, `SELECT revision FROM project_history_revisions WHERE project_id=?`, projectID).Scan(&state.HistoryRevision)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return projectStateSnapshot{}, err
+	}
 	sandboxes, err := db.Sandboxes(ctx, projectID)
 	if err != nil {
 		return projectStateSnapshot{}, err
 	}
-	state := projectStateSnapshot{CapturedAt: time.Now().UnixNano()}
 	for _, sandbox := range sandboxes {
 		state.Sandboxes = append(state.Sandboxes, sandboxSnapshot(sandbox))
 	}
@@ -549,27 +587,37 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 	for _, lease := range leases {
 		state.ResourceLeases = append(state.ResourceLeases, resourceLeaseSnapshotFromLease(lease))
 	}
+	err = db.QueryRowContext(ctx, `SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?`, projectID).Scan(&state.DecisionNoticeCursor)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return projectStateSnapshot{}, err
+	}
+	return state, nil
+}
+
+// readProjectHistorySnapshot adds unanswered and recent Decisions and open and
+// recent Notices to state.
+func (db *DB) readProjectHistorySnapshot(ctx context.Context, projectID int64, state *projectStateSnapshot) error {
 	decisionRows, err := db.QueryContext(ctx, decisionSelect+` WHERE project_id=? AND
 		(answered_at=0 AND obsolete_at=0 OR id IN (
 			SELECT id FROM decisions WHERE project_id=? ORDER BY id DESC LIMIT ?
 		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
 	if err != nil {
-		return projectStateSnapshot{}, err
+		return err
 	}
 	for decisionRows.Next() {
 		decision, err := decisionRow(decisionRows)
 		if err != nil {
 			_ = decisionRows.Close()
-			return projectStateSnapshot{}, err
+			return err
 		}
 		state.Decisions = append(state.Decisions, decisionSnapshot(decision))
 	}
 	if err := decisionRows.Err(); err != nil {
 		_ = decisionRows.Close()
-		return projectStateSnapshot{}, err
+		return err
 	}
 	if err := decisionRows.Close(); err != nil {
-		return projectStateSnapshot{}, err
+		return err
 	}
 	// Read open Notices from their index range and the recent tail from the
 	// Project id index. A single OR filter made SQLite walk every Notice of
@@ -586,14 +634,14 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 	} {
 		noticeRows, err := db.QueryContext(ctx, query.sql, query.args...)
 		if err != nil {
-			return projectStateSnapshot{}, err
+			return err
 		}
 		for noticeRows.Next() {
 			var notice Notice
 			var taskID, deliveredAt, ackedAt sql.NullInt64
 			if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
 				_ = noticeRows.Close()
-				return projectStateSnapshot{}, err
+				return err
 			}
 			if taskID.Valid {
 				notice.TaskID = taskID.Int64
@@ -608,10 +656,10 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 		}
 		if err := noticeRows.Err(); err != nil {
 			_ = noticeRows.Close()
-			return projectStateSnapshot{}, err
+			return err
 		}
 		if err := noticeRows.Close(); err != nil {
-			return projectStateSnapshot{}, err
+			return err
 		}
 	}
 	noticeIDs := make([]int64, 0, len(notices))
@@ -622,11 +670,7 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 	for _, id := range noticeIDs {
 		state.Notices = append(state.Notices, noticeSnapshot(notices[id]))
 	}
-	err = db.QueryRowContext(ctx, `SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?`, projectID).Scan(&state.DecisionNoticeCursor)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return projectStateSnapshot{}, err
-	}
-	return state, nil
+	return nil
 }
 
 func (db *DB) BackupDaily(now time.Time) error {
