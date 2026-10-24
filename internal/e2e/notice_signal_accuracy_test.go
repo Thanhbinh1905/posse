@@ -905,3 +905,92 @@ func TestAckedClaudeWakeResolvesReceiptInSameTurn(t *testing.T) {
 		t.Fatalf("next wake repeated or lost a Notice: %+v", batch)
 	}
 }
+
+func TestDoneSignalAcceptsRerunOfFailedRequiredChecks(t *testing.T) {
+	fixture := newPRLifecycleFixtureWithManualWatchOwner(t)
+	defer fixture.db.Close()
+
+	ctx := context.Background()
+	branch := "posse/t1"
+	worktree := filepath.Join(fixture.root, "posse", "pool", "rerun-done")
+	gitTest(t, fixture.env, fixture.repo, "worktree", "add", "-b", branch, worktree, "main")
+	if err := os.WriteFile(filepath.Join(worktree, "change.txt"), []byte("change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.env, worktree, "add", "change.txt")
+	gitTest(t, fixture.env, worktree, "commit", "-m", "change for rerun completion")
+	head := strings.TrimSpace(gitTest(t, fixture.env, worktree, "rev-parse", "HEAD"))
+	gitTest(t, fixture.env, worktree, "push", "origin", branch)
+
+	taskID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
+		Seq: 1, Type: "change", Title: "Rerun completion", MergeMode: "pr", Branch: branch,
+		BaseRef: "main", WorktreePath: worktree,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "E2E fixture"); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/acme/shop/pull/17"
+	if _, err := fixture.db.NextTaskLaunchWithIdentity(ctx, taskID, "deep", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.UpdateTaskMerge(ctx, taskID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetTaskGatedSHA(ctx, taskID, head); err != nil {
+		t.Fatal(err)
+	}
+	openPRs, err := json.Marshal([]map[string]string{{"url": prURL, "headRefName": branch, "headRefOid": head}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.ghOpenPRs, openPRs, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := store.PRObservation{
+		ProjectID: fixture.project.ID, TaskID: taskID, PRURL: prURL, HeadSHA: head, State: "OPEN",
+		Checks: `{"state":"FAILURE","failures":[{"name":"unit","url":"https://checks.example/unit"}]}`,
+		Review: "APPROVED", Mergeable: "MERGEABLE", ObservedAt: time.Now().UnixMilli(),
+	}
+	if _, err := fixture.db.RecordPRObservation(ctx, failed, store.PRObservationEffect{}, task); err != nil {
+		t.Fatal(err)
+	}
+
+	workerEnv := setEnv(fixture.leadEnv, "HERDR_PANE_ID", "")
+	signalDone := func() ([]byte, error) {
+		worker := exec.Command(fixture.binary, "signal", "done", "Rerun completion", "--pr", prURL, "--turn", "launch:1")
+		worker.Dir, worker.Env = worktree, workerEnv
+		return worker.CombinedOutput()
+	}
+
+	// The forge still reports the failure: done stays refused.
+	fixture.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "APPROVED", "MERGEABLE", "", head)
+	if output, err := signalDone(); err == nil || !strings.Contains(string(output), "checks_failed") {
+		t.Fatalf("done Signal accepted a head whose checks still fail: err=%v output=%s", err, output)
+	}
+
+	// The Worker reran the failed job: the forge reports pending checks while the
+	// stored observation is still the failure.
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "APPROVED", "MERGEABLE", "", head)
+	if output, err := signalDone(); err != nil || !strings.Contains(string(output), "state: done") {
+		t.Fatalf("done Signal was refused while the failed checks are rerunning: err=%v output=%s", err, output)
+	}
+	observation, err := fixture.db.LatestPRObservation(ctx, taskID)
+	if err != nil || decodeChecksState(observation.Checks) != "PENDING" {
+		t.Fatalf("observation after the rerun: %#v, %v", observation, err)
+	}
+}
+
+func decodeChecksState(encoded string) string {
+	var checks struct {
+		State string `json:"state"`
+	}
+	_ = json.Unmarshal([]byte(encoded), &checks)
+	return checks.State
+}

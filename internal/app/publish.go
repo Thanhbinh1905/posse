@@ -298,6 +298,7 @@ func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.D
 		if err := validateWorkerPullRequest(ctx, member.project, member.task, forge, member.repo.PRURL, sha); err != nil {
 			return prefixFailure(member.repo.Repo, err)
 		}
+		s.refreshFailedObservedPRChecks(ctx, db, project, cfg, task.ID, member.repo.Repo, member.repo.PRURL, sha)
 		if err := rejectFailedObservedPRChecks(ctx, db, task.ID, member.repo.Repo, member.repo.PRURL, sha); err != nil {
 			return prefixFailure(member.repo.Repo, err)
 		}
