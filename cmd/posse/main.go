@@ -14,6 +14,7 @@ var version = "dev"
 func main() {
 	service := app.New("", herdr.New())
 	store.MigrationGate = service.MigrationGate
+	service.DetachQueuedLaunch = true
 	if len(os.Args) > 1 && os.Args[1] == "_ingest" {
 		os.Exit(service.RunIngest(os.Args[2:]))
 	}
@@ -28,6 +29,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_finalize-lead" {
 		os.Exit(service.RunLeadFinalizer(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_launch-queued" {
+		service.DetachQueuedLaunch = false
+		os.Exit(service.RunQueuedLaunch(os.Args[2:], os.Stderr))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "_claude-stop" {
 		os.Exit(service.RunClaudeStop(os.Stdin, os.Stderr, os.Args[2:]))
