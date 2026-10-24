@@ -80,6 +80,10 @@ func commandOutputArgsWithTimeout(ctx context.Context, timeout time.Duration, cw
 }
 
 func commandStdoutArgs(ctx context.Context, cwd, name string, args ...string) (string, error) {
+	return commandStdoutArgsWithEnv(ctx, cwd, nil, name, args...)
+}
+
+func commandStdoutArgsWithEnv(ctx context.Context, cwd string, extraEnv []string, name string, args ...string) (string, error) {
 	timeout := timeoutForExternalCommand(name, args)
 	commandContext := ctx
 	cancel := func() {}
@@ -90,6 +94,12 @@ func commandStdoutArgs(ctx context.Context, cwd, name string, args ...string) (s
 	command := execgroup.CommandContext(commandContext, name, args...)
 	command.Dir = cwd
 	command.Env = externalCommandEnvironment(name)
+	for _, entry := range extraEnv {
+		key, value, found := strings.Cut(entry, "=")
+		if found {
+			command.Env = replaceEnvironment(command.Env, key, value)
+		}
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
