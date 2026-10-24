@@ -201,7 +201,7 @@ func (s *Service) acquireWorkspaceSandbox(ctx context.Context, db *store.DB, pro
 			return sandbox, err
 		}
 		if err := s.prepareWorkspaceSandbox(ctx, project, targets, members, sandbox.Path, cleanMode, rootContext); err != nil {
-			if breakErr := breakSandbox(ctx, db, project, task, sandbox, err.Error()); breakErr != nil {
+			if breakErr := breakSandbox(ctx, db, project, task, sandbox, err.Error(), nil); breakErr != nil {
 				return sandbox, errors.Join(err, breakErr)
 			}
 			var failure *axi.Error
