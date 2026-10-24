@@ -66,13 +66,13 @@ func (m *Manager) EnsureSandboxLeases(ctx context.Context) error {
 	}
 	active := make(map[int64]bool, len(sandboxes))
 	for _, sandbox := range sandboxes {
+		if sandbox.State == "broken" {
+			continue
+		}
 		active[sandbox.ID] = true
 		owner := fmt.Sprintf("%s sandbox-%d", sandbox.ProjectName, sandbox.Number)
 		if sandbox.TaskSeq > 0 {
 			owner += fmt.Sprintf(" (t%d)", sandbox.TaskSeq)
-		}
-		if sandbox.State == "broken" {
-			owner += " (quarantined)"
 		}
 		_, err := m.EnsureSandboxPath(ctx, sandbox.Path, store.ResourceLeaseRequest{
 			OwnerProjectID: sandbox.ProjectID,
