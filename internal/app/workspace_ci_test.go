@@ -153,7 +153,7 @@ func TestWorkspacePRWatchRequeriesMemberPRWhoseTargetAdvancedDuringQuery(t *test
 		{name: "still open behind", wantRounds: 1},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			fixture := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"local\"\nreview = \"none\"\nauto_teardown = \"never\"\n[repositories.worker]\nmerge_mode = \"pr\"\n", []string{"worker"}, []string{"worker"})
+			fixture := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"local\"\nrequire_current_target = true\nreview = \"none\"\nauto_teardown = \"never\"\n[repositories.worker]\nmerge_mode = \"pr\"\n", []string{"worker"}, []string{"worker"})
 			ctx := context.Background()
 			workerRoot := filepath.Join(fixture.workspace, "worker")
 			remote := filepath.Join(fixture.root, "remotes", "worker.git")

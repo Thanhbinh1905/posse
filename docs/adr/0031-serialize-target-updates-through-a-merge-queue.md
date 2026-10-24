@@ -1,5 +1,7 @@
 # Serialize PR target updates through a Posse merge queue
 
+This queue applies only when ADR 0019's current-target rule is on (`defaults.require_current_target = true`). It is off by default since 2026-10-24: behind PRs then merge without an update, and only conflicting PRs ask their Worker to merge the target, without queueing ([ADR 0019 amendment](0019-pr-merges-require-current-target.md#amendment-optional-and-off-by-default)).
+
 ## Context
 
 ADR 0019 makes a PR/MR merge only when its gated head contains the current target tip, and asks every behind done or merging Task to merge `origin/<target>`. With N done PRs on one target, every landing sends N Workers that instruction. Each landing then costs about N Worker turns and N full CI runs, PRs still land about one per CI cycle, done Tasks return to working against `max_workers`, and the extra CI load surfaces flakes and proxy errors.
@@ -11,7 +13,7 @@ GitHub's merge queue is not available for repositories owned by a personal accou
 Posse keeps one FIFO merge queue per target, keyed by Project, Workspace Member (empty for a repository Project) and frozen target branch. There is no batching.
 
 - A done or merging Change Task whose open PR head lacks the target tip enters its target's queue. Entries order by the Task's latest done Signal at entry, so poll order does not decide the head. A Task that is fresh never needs the queue.
-- The tip that makes a PR behind is the one fetched before the forge query. A target that advanced only during the query may hold the PR's own merge, so that observation is `STALE` without a queue entry, and the poll queries the PR once more to see it merged or behind.
+- The tip that makes a PR behind is the one fetched before the forge query. A target that advanced only during the query may hold the PR's own merge, so that observation is `STALE` without a queue entry, and the poll queries the PR once more to see it merged or behind. A poll pass that saw such a move promotes no queue head.
 - Only the queue head receives the ADR 0019 merge-target instruction. Other entries stay done or merging with no Worker turn and no CI rerun; their observations are recorded as `STALE`, and `pr_conflict` is still reported. `posse merge` on a queued Task refuses with `pr_branch_behind`, naming its position and the head.
 - An entry whose merge-target instruction is in flight, from queueing until the Worker's next done Signal, stays the head even while its Task is working.
 - An entry is dequeued when its PR merges, when its fresh head fails required checks (`checks_failed`, with the existing `pr_checks_failed` handling), or when its Task leaves done and merging without an in-flight instruction, for example through `needs-decision`, `stalled` or a Lead follow-up. The next entry is then promoted. A conflicting head receives the same instruction, which asks the Worker to resolve conflicts; if it cannot, it leaves the queue through its Signal.

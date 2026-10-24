@@ -22,6 +22,7 @@ func TestPRMergeRefusesStaleHeadBeforeGate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\ngate = [\"touch "+gateMarker+"\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fixture.requireCurrentTarget(t)
 	targetTip := fixture.advanceTarget(t, false, true)
 	code, output, stderr := fixture.run("merge", "t1")
 	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) {
@@ -42,6 +43,7 @@ func TestNoMistakesMergeRefusesStaleHeadAndSkipsRebaseOnRecovery(t *testing.T) {
 	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, prURL, ""); err != nil {
 		t.Fatal(err)
 	}
+	fixture.requireCurrentTarget(t)
 	targetTip := fixture.advanceTarget(t, false, true)
 	code, output, stderr := fixture.run("merge", "t1")
 	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) {
@@ -1276,6 +1278,24 @@ func removeFixtureTaskPane(fixture *prMergeFixture) {
 		adapter.mu.Lock()
 		adapter.snapshot = remove(adapter.snapshot)
 		adapter.mu.Unlock()
+	}
+}
+
+// requireCurrentTarget enables ADR 0019's current-target rule, which is off
+// by default, in the fixture's User config.
+func (fixture *prMergeFixture) requireCurrentTarget(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(fixture.home, "config.toml")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(string(content), "[defaults]\n", "[defaults]\nrequire_current_target = true\n", 1)
+	if updated == string(content) {
+		t.Fatalf("fixture config has no [defaults] table: %s", content)
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

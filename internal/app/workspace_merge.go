@@ -116,7 +116,7 @@ func (s *Service) mergeWorkspace(out *axi.Context, db *store.DB, project store.P
 			if member.repo.State != store.TaskRepoMerge || member.repo.MergeMode != "pr" || member.repo.GatedSHA == "" {
 				continue
 			}
-			if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, member.repo.Repo, member.repo.MergeMode, member.repo.GatedSHA); err != nil {
+			if err := s.requirePRTargetFresh(ctx, db, member.project, cfg, member.task, member.repo.Repo, member.repo.MergeMode, member.repo.GatedSHA); err != nil {
 				return prefixFailure(member.repo.Repo, err)
 			}
 		}
@@ -218,7 +218,7 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 		gated := member.task
 		gated.GatedSHA = gatedSHA
 		if repo.MergeMode == "pr" {
-			if err := s.requirePRTargetFresh(ctx, db, member.project, gated, repo.Repo, repo.MergeMode, gatedSHA); err != nil {
+			if err := s.requirePRTargetFresh(ctx, db, member.project, cfg, gated, repo.Repo, repo.MergeMode, gatedSHA); err != nil {
 				return prefixFailure(repo.Repo, err)
 			}
 		}
@@ -237,7 +237,7 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 			return axi.Failure("branch_moved", repo.Repo+": Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 		}
 		if repo.MergeMode == "pr" {
-			if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, repo.Repo, repo.MergeMode, gatedSHA); err != nil {
+			if err := s.requirePRTargetFresh(ctx, db, member.project, cfg, member.task, repo.Repo, repo.MergeMode, gatedSHA); err != nil {
 				return prefixFailure(repo.Repo, err)
 			}
 		}
@@ -417,14 +417,14 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 		return prefixFailure(repo.Repo, err)
 	}
 	defer mergeLock.Close()
-	if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, repo.Repo, repo.MergeMode, repo.GatedSHA); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, member.project, cfg, member.task, repo.Repo, repo.MergeMode, repo.GatedSHA); err != nil {
 		return prefixFailure(repo.Repo, err)
 	}
 	// Recheck the selected evidence immediately before each Member merge effect.
 	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
 		return prefixFailure(repo.Repo, err)
 	}
-	if err := s.requirePRTargetFresh(ctx, db, member.project, member.task, repo.Repo, repo.MergeMode, repo.GatedSHA); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, member.project, cfg, member.task, repo.Repo, repo.MergeMode, repo.GatedSHA); err != nil {
 		return prefixFailure(repo.Repo, err)
 	}
 	method := defaultValue(cfg.Defaults.MergeMethod, "squash")
@@ -705,6 +705,9 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			// publish results, so the head follows done Signal order.
 			behind := []behindMember{}
 			groupMoved := false
+			// Without the current-target rule only conflicting Members ask the
+			// Worker to merge the target, and they bypass the merge queue.
+			conflicts := []behindMember{}
 			groupResults := make([]pollResult, 0, len(group.targets))
 			for _, target := range group.targets {
 				member := target.member
@@ -719,20 +722,20 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 					// An OPEN observation is behind only if it lacks this tip, fetched
 					// before the forge query: a later tip may hold the PR's own merge.
 					var targetTip prTargetFreshness
-					if err == nil {
+					if err == nil && cfg.Defaults.RequireCurrentTarget {
 						targetTip, err = fetchPRTargetTip(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task))
-					}
-					if err == nil {
-						headSHA := member.repo.GatedSHA
-						if headSHA == "" && member.task.WorktreePath != "" && target.task.Branch != "" {
-							headSHA, _ = gitOutput(pollCtx, member.task.WorktreePath, "rev-parse", "refs/heads/"+target.task.Branch)
-						}
-						freshness, freshnessErr := targetTip.of(pollCtx, member.target.Root, headSHA)
-						if freshnessErr != nil {
-							err = freshnessErr
-						} else if !freshness.Fresh {
-							skipChecks = true
-							err = db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli())
+						if err == nil {
+							headSHA := member.repo.GatedSHA
+							if headSHA == "" && member.task.WorktreePath != "" && target.task.Branch != "" {
+								headSHA, _ = gitOutput(pollCtx, member.task.WorktreePath, "rev-parse", "refs/heads/"+target.task.Branch)
+							}
+							freshness, freshnessErr := targetTip.of(pollCtx, member.target.Root, headSHA)
+							if freshnessErr != nil {
+								err = freshnessErr
+							} else if !freshness.Fresh {
+								skipChecks = true
+								err = db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli())
+							}
 						}
 					}
 					if err == nil {
@@ -747,14 +750,16 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 							}
 						}
 					}
-					if err == nil && observation.State == "OPEN" {
+					if err == nil && observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING") {
 						freshness, freshnessErr := inspectPRTargetFreshness(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task), observation.HeadSHA)
 						var beforeQuery prTargetFreshness
-						if freshnessErr == nil && !freshness.Fresh {
+						if freshnessErr == nil && !freshness.Fresh && cfg.Defaults.RequireCurrentTarget {
 							beforeQuery, freshnessErr = targetTip.of(pollCtx, member.target.Root, observation.HeadSHA)
 						}
 						if freshnessErr != nil {
 							err = freshnessErr
+						} else if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget {
+							conflicts = append(conflicts, behindMember{target: target, freshness: freshness, headSHA: observation.HeadSHA})
 						} else if !freshness.Fresh {
 							if beforeQuery.Fresh {
 								targetMoved = true
@@ -790,19 +795,30 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				}
 				groupResults = append(groupResults, pollResult{target: target, observation: observation, checks: checks, ciChecks: ciChecks, forge: forge, err: err})
 			}
-			// A Member whose target still moved during its second view may
-			// belong ahead of the Members seen behind. The next poll promotes.
-			if groupMoved {
-				behind = nil
-			}
-			for _, pending := range behind {
-				if _, err := queuePRTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.target.member.repo.MergeMode, pending.freshness, pending.headSHA); err != nil {
+			queueTargetSync := func(pending behindMember, queue func() error) {
+				if err := queue(); err != nil {
 					for index := range groupResults {
 						if groupResults[index].target.member.repo.Repo == pending.target.member.repo.Repo && groupResults[index].target.task.ID == pending.target.task.ID {
 							groupResults[index].err = err
 						}
 					}
 				}
+			}
+			// A Member whose target still moved during its second view may
+			// belong ahead of the Members seen behind. The next poll promotes.
+			if groupMoved {
+				behind = nil
+			}
+			for _, pending := range behind {
+				queueTargetSync(pending, func() error {
+					_, err := queuePRTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.target.member.repo.MergeMode, pending.freshness, pending.headSHA)
+					return err
+				})
+			}
+			for _, pending := range conflicts {
+				queueTargetSync(pending, func() error {
+					return queueConflictTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.target.member.repo.MergeMode, pending.freshness, pending.headSHA)
+				})
 			}
 			for _, result := range groupResults {
 				results <- result

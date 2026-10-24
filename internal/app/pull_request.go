@@ -126,7 +126,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 	}()
 	if merge {
 		if task.State != store.StateDone && task.State != store.StateMerging {
-			if err := workingPRBehindFailure(ctx, db, project, task); err != nil {
+			if err := workingPRBehindFailure(ctx, db, project, cfg, task); err != nil {
 				return err
 			}
 			return axi.Failure("merge_refused", "Task must be done or merging before Merge", false)
@@ -136,7 +136,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 		}
 	}
 	if task.State == store.StateMerging && task.GatedSHA != "" {
-		if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, task.GatedSHA); err != nil {
+		if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, task.GatedSHA); err != nil {
 			return err
 		}
 	}
@@ -210,7 +210,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 					return err
 				}
 			}
-			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, gatedSHA); err != nil {
+			if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
 				return err
 			}
 			if err := db.SetTaskGatedSHA(ctx, task.ID, gatedSHA); err != nil {
@@ -227,7 +227,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 				}
 				return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
 			}
-			if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, gatedSHA); err != nil {
+			if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
 				if clearErr := db.ClearTaskGatedSHA(ctx, task.ID); clearErr != nil {
 					return errors.Join(err, clearErr)
 				}
@@ -605,7 +605,7 @@ func (s *Service) enterNoMistakesMerge(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return err
 	}
-	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, gatedSHA); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
 		return err
 	}
 	if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
@@ -681,7 +681,7 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		return err
 	}
 	defer mergeLock.Close()
-	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, task.GatedSHA); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, task.GatedSHA); err != nil {
 		return err
 	}
 	if err := requireGreenObservation(ctx, db, task); err != nil {
@@ -701,7 +701,7 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 			return err
 		}
 	}
-	if err := s.requirePRTargetFresh(ctx, db, project, task, "", task.MergeMode, task.GatedSHA); err != nil {
+	if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, task.GatedSHA); err != nil {
 		return err
 	}
 	if err := requireGreenObservation(ctx, db, task); err != nil {
@@ -1035,16 +1035,19 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	// the query may already contain this PR's own merge.
 	targetTips := make(map[string]prTargetFreshness)
 	for _, task := range watched {
-		branch := taskTargetBranch(project, task)
-		targetTip, fetched := targetTips[branch]
-		if !fetched {
-			var fetchErr error
-			if targetTip, fetchErr = fetchPRTargetTip(ctx, project.Root, branch); fetchErr != nil {
-				failedTasks[task.ID] = fetchErr
-				staleBeforeQuery[task.ID] = true
-				continue
+		var targetTip prTargetFreshness
+		if cfg.Defaults.RequireCurrentTarget {
+			branch := taskTargetBranch(project, task)
+			fetched := false
+			if targetTip, fetched = targetTips[branch]; !fetched {
+				var fetchErr error
+				if targetTip, fetchErr = fetchPRTargetTip(ctx, project.Root, branch); fetchErr != nil {
+					failedTasks[task.ID] = fetchErr
+					staleBeforeQuery[task.ID] = true
+					continue
+				}
+				targetTips[branch] = targetTip
 			}
-			targetTips[branch] = targetTip
 		}
 		headSHA := task.GatedSHA
 		if headSHA == "" && task.WorktreePath != "" && task.Branch != "" {
@@ -1058,6 +1061,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		}
 		if headSHA == "" {
 			staleBeforeQuery[task.ID] = true
+			continue
+		}
+		if !cfg.Defaults.RequireCurrentTarget {
 			continue
 		}
 		freshness, freshnessErr := targetTip.of(ctx, project.Root, headSHA)
@@ -1191,6 +1197,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	}
 	behind := []behindPR{}
 	moved := false
+	// Without the current-target rule only conflicting PRs ask the Worker to
+	// merge the target, and they bypass the merge queue.
+	conflicts := []behindPR{}
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
 			if strings.Contains(taskErr.Error(), "Could not resolve to a PullRequest") {
@@ -1232,10 +1241,10 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			}
 			continue
 		}
-		if observation.State == "OPEN" {
+		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING") {
 			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
 			var beforeQuery prTargetFreshness
-			if freshnessErr == nil && !freshness.Fresh {
+			if freshnessErr == nil && !freshness.Fresh && cfg.Defaults.RequireCurrentTarget {
 				beforeQuery, freshnessErr = targetTips[freshness.Branch].of(ctx, project.Root, observation.HeadSHA)
 			}
 			if freshnessErr != nil {
@@ -1244,7 +1253,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 				}
 				continue
 			}
-			if !freshness.Fresh {
+			if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget {
+				conflicts = append(conflicts, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
+			} else if !freshness.Fresh {
 				// A target that advanced only during the query may hold this
 				// PR's own merge; a later query observes it merged or behind.
 				if beforeQuery.Fresh {
@@ -1313,6 +1324,11 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	}
 	for _, pending := range behind {
 		if _, err := queuePRTargetSyncInstruction(ctx, db, pending.task, "", pending.task.MergeMode, pending.freshness, pending.headSHA); err != nil {
+			return err
+		}
+	}
+	for _, pending := range conflicts {
+		if err := queueConflictTargetSyncInstruction(ctx, db, pending.task, "", pending.task.MergeMode, pending.freshness, pending.headSHA); err != nil {
 			return err
 		}
 	}
