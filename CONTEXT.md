@@ -123,6 +123,10 @@ To integrate a Change Task's change into the Project through the Project's merge
 Formerly: Land.
 _Avoid_: Deliver
 
+**Merge Queue**:
+Posse's FIFO queue per target branch of done Change Tasks whose PR is behind that target; only its head is asked to merge the target.
+_Avoid_: Forge merge queue, merge train
+
 **Orphan**:
 Work a Worker made on a merged Task beyond what merged, such as later commits or uncommitted changes; the User decides whether it becomes a new Task or is discarded. Formerly: Leftover.
 _Avoid_: Follow-up (that is a message to a Worker), residue, diff
