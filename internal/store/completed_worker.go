@@ -13,6 +13,16 @@ import (
 // turn-ending status is followed by a new working status. A done Signal arms
 // the current turn, so its closing reply cannot reopen the Task.
 func (db *DB) ObserveCompletedWorker(ctx context.Context, expected Task, paneID, server, status string, now time.Time) (*Notice, error) {
+	return db.ObserveCompletedWorkerState(ctx, expected, paneID, server, status, nil, now)
+}
+
+// ObserveCompletedWorkerState also compares the Task repository fingerprint
+// with the one recorded when the completed turn ended. A new turn that leaves
+// it unchanged, such as a background-task wake that only acknowledges a result,
+// keeps the done Signal valid. A changed or unreadable fingerprint reopens the
+// Task and queues an instruction to signal again. A nil fingerprint function
+// treats every new turn as a change.
+func (db *DB) ObserveCompletedWorkerState(ctx context.Context, expected Task, paneID, server, status string, fingerprint func() (string, error), now time.Time) (*Notice, error) {
 	if expected.Type != "change" || (expected.State != StateDone && expected.State != StateMerging) {
 		return nil, nil
 	}
@@ -20,22 +30,28 @@ func (db *DB) ObserveCompletedWorker(ctx context.Context, expected Task, paneID,
 	defer cancel()
 	busy := status == "working"
 	turnEnded := status == "idle" || status == "done"
+	current, known := "", false
+	if fingerprint != nil && (busy || turnEnded) {
+		if value, err := fingerprint(); err == nil {
+			current, known = value, true
+		}
+	}
 
 	// Avoid a write transaction on every idle observer tick after the turn
 	// boundary has already been recorded.
 	if turnEnded {
 		var currentTransition, recordedTransition int64
-		var recordedPane, recordedServer string
+		var recordedPane, recordedServer, recordedBaseline string
 		var recordedTurnEnded int
 		err := db.QueryRowContext(ctx, `SELECT COALESCE((SELECT id FROM transitions WHERE task_id=tasks.id AND to_state='done' ORDER BY id DESC LIMIT 1),(SELECT MAX(id) FROM transitions WHERE task_id=tasks.id),0) FROM tasks WHERE id=?`, expected.ID).Scan(&currentTransition)
 		if err != nil {
 			return nil, err
 		}
-		err = db.QueryRowContext(ctx, `SELECT transition_id,pane_id,server_started_at,turn_ended FROM completed_rider_busy WHERE task_id=?`, expected.ID).Scan(&recordedTransition, &recordedPane, &recordedServer, &recordedTurnEnded)
+		err = db.QueryRowContext(ctx, `SELECT transition_id,pane_id,server_started_at,turn_ended,baseline FROM completed_rider_busy WHERE task_id=?`, expected.ID).Scan(&recordedTransition, &recordedPane, &recordedServer, &recordedTurnEnded, &recordedBaseline)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
-		if err == nil && recordedTransition == currentTransition && recordedPane == paneID && recordedServer == server && recordedTurnEnded != 0 {
+		if err == nil && recordedTransition == currentTransition && recordedPane == paneID && recordedServer == server && recordedTurnEnded != 0 && (!known || recordedBaseline == current) {
 			return nil, nil
 		}
 	}
@@ -58,29 +74,43 @@ func (db *DB) ObserveCompletedWorker(ctx context.Context, expected Task, paneID,
 		return nil, tx.Commit()
 	}
 	var recordedTransition int64
-	var recordedPane, recordedServer string
+	var recordedPane, recordedServer, recordedBaseline string
 	var recordedTurnEnded int
-	err = tx.QueryRowContext(ctx, `SELECT transition_id,pane_id,server_started_at,turn_ended FROM completed_rider_busy WHERE task_id=?`, expected.ID).Scan(&recordedTransition, &recordedPane, &recordedServer, &recordedTurnEnded)
+	err = tx.QueryRowContext(ctx, `SELECT transition_id,pane_id,server_started_at,turn_ended,baseline FROM completed_rider_busy WHERE task_id=?`, expected.ID).Scan(&recordedTransition, &recordedPane, &recordedServer, &recordedTurnEnded, &recordedBaseline)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 	if errors.Is(err, sql.ErrNoRows) || recordedTransition != transitionID || recordedPane != paneID || recordedServer != server {
-		if err := upsertCompletedWorkerTurn(ctx, tx, expected.ID, transitionID, paneID, server, now.UnixMilli(), turnEnded); err != nil {
+		if err := upsertCompletedWorkerTurn(ctx, tx, expected.ID, transitionID, paneID, server, now.UnixMilli(), turnEnded, current); err != nil {
 			return nil, err
 		}
 		return nil, tx.Commit()
 	}
+	if known && recordedBaseline == "" && recordedTurnEnded == 0 {
+		// The done Signal armed this turn before any fingerprint was observed.
+		if _, err := tx.ExecContext(ctx, `UPDATE completed_rider_busy SET baseline=? WHERE task_id=?`, current, expected.ID); err != nil {
+			return nil, err
+		}
+		recordedBaseline = current
+	}
+	// A turn that ended without a readable fingerprint has no baseline to
+	// compare, so a new busy turn counts as a change.
+	changed := !known || recordedBaseline == "" || recordedBaseline != current
 	if turnEnded {
-		if recordedTurnEnded == 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE completed_rider_busy SET turn_ended=1 WHERE task_id=?`, expected.ID); err != nil {
-				return nil, err
-			}
+		// Idle changes are not a turn: Merge's branch_moved check covers a fast
+		// turn that changed HEAD between observations.
+		if _, err := tx.ExecContext(ctx, `UPDATE completed_rider_busy SET turn_ended=1,baseline=? WHERE task_id=?`, current, expected.ID); err != nil {
+			return nil, err
 		}
 		return nil, tx.Commit()
 	}
-	if !busy || recordedTurnEnded == 0 {
+	if !busy || recordedTurnEnded == 0 || (known && !changed) {
 		return nil, tx.Commit()
 	}
+	return db.reopenCompletedWorkerTx(ctx, tx, expected, state, paneID, status, now)
+}
+
+func (db *DB) reopenCompletedWorkerTx(ctx context.Context, tx *writeTx, expected Task, state State, paneID, status string, now time.Time) (*Notice, error) {
 
 	if err := cancelPendingMergeIntentTx(ctx, tx, expected.ID); err != nil {
 		if errors.Is(err, ErrTaskMergeInProgress) || errors.Is(err, ErrIntentOwned) {
@@ -119,18 +149,21 @@ func (db *DB) ObserveCompletedWorker(ctx context.Context, expected Task, paneID,
 	if err := tx.QueryRowContext(ctx, `SELECT last_insert_rowid()`).Scan(&notice.ID); err != nil {
 		return nil, err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(task_id, body, created_at, status, wait_for_idle) VALUES(?,?,?,'queued',1)`, expected.ID, "Posse reopened this Task because a new turn changed its repository after your done Signal. Commit, publish if needed, and signal done again.", now.UnixMilli()); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return &notice, db.PersistTask(ctx, expected.ID)
 }
 
-func upsertCompletedWorkerTurn(ctx context.Context, tx *writeTx, taskID, transitionID int64, paneID, server string, observedAt int64, turnEnded bool) error {
+func upsertCompletedWorkerTurn(ctx context.Context, tx *writeTx, taskID, transitionID int64, paneID, server string, observedAt int64, turnEnded bool, baseline string) error {
 	ended := 0
 	if turnEnded {
 		ended = 1
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO completed_rider_busy(task_id,transition_id,pane_id,server_started_at,busy_since,turn_ended) VALUES(?,?,?,?,?,?)
-ON CONFLICT(task_id) DO UPDATE SET transition_id=excluded.transition_id,pane_id=excluded.pane_id,server_started_at=excluded.server_started_at,busy_since=excluded.busy_since,turn_ended=excluded.turn_ended`, taskID, transitionID, paneID, server, observedAt, ended)
+	_, err := tx.ExecContext(ctx, `INSERT INTO completed_rider_busy(task_id,transition_id,pane_id,server_started_at,busy_since,turn_ended,baseline) VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(task_id) DO UPDATE SET transition_id=excluded.transition_id,pane_id=excluded.pane_id,server_started_at=excluded.server_started_at,busy_since=excluded.busy_since,turn_ended=excluded.turn_ended,baseline=excluded.baseline`, taskID, transitionID, paneID, server, observedAt, ended, baseline)
 	return err
 }
