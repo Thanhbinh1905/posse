@@ -56,9 +56,10 @@ func (s *Service) leadStatus(ctx context.Context, project store.Project) string 
 }
 
 type activeTaskSummary struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	State string `json:"state"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	State      string `json:"state"`
+	MergeQueue string `json:"merge_queue,omitempty"`
 }
 
 type taskSummary struct {
@@ -68,6 +69,7 @@ type taskSummary struct {
 	Title   string       `json:"title"`
 	Name    string       `json:"name"`
 	PRState string       `json:"pr_state,omitempty"`
+	Queue   string       `json:"merge_queue,omitempty"`
 	Profile string       `json:"profile,omitempty"`
 	Branch  string       `json:"branch,omitempty"`
 	Reason  string       `json:"reason,omitempty"`
@@ -170,10 +172,14 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	if err != nil {
 		return err
 	}
+	queuePlaces, err := db.MergeQueuePlaces(ctx.Context, project.ID)
+	if err != nil {
+		return err
+	}
 	taskRows := make([]taskSummary, 0, len(tasks))
 	needsYou := make([]taskSummary, 0)
 	for _, task := range tasks {
-		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task)}
+		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID])}
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
 			if err != nil {
@@ -226,7 +232,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 				}
 				attention = append(attention, taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason})
 			} else {
-				active = append(active, activeTaskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State)})
+				active = append(active, activeTaskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), MergeQueue: mergeQueueLabel(queuePlaces[task.ID])})
 			}
 		}
 		pending, err := db.UndeliveredNotices(ctx.Context, project.ID)
@@ -416,9 +422,13 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	queuePlaces, err := db.MergeQueuePlaces(ctx.Context, project.ID)
+	if err != nil {
+		return err
+	}
 	rows := make([]taskSummary, 0, len(tasks))
 	for _, task := range tasks {
-		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Profile: task.Profile, Usage: taskUsage(task, cfg)}
+		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile, Usage: taskUsage(task, cfg)}
 		if taskNeedsUser(task) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)
 			if err != nil {
@@ -664,6 +674,11 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			return err
 		}
 		view["pr"] = pr
+	}
+	if queue, err := mergeQueueView(ctx.Context, db, task); err != nil {
+		return err
+	} else if len(queue) > 0 {
+		view["merge_queue"] = queue
 	}
 	if project.IsWorkspace() {
 		repos, err := db.TaskRepos(ctx.Context, task.ID)
