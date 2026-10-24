@@ -15,10 +15,17 @@ const fileLockWaitBudget = 3 * time.Second
 
 type fileLockWaitError struct {
 	path string
+	// reason replaces the generic database-contention prefix for locks that do
+	// not guard store state.
+	reason string
 }
 
 func (e *fileLockWaitError) Error() string {
-	return fmt.Sprintf("%v: timed out acquiring %s", store.ErrBusy, e.path)
+	prefix := e.reason
+	if prefix == "" {
+		prefix = store.ErrBusy.Error()
+	}
+	return fmt.Sprintf("%s: timed out acquiring %s", prefix, e.path)
 }
 
 func (e *fileLockWaitError) Unwrap() error { return store.ErrBusy }
@@ -31,6 +38,13 @@ func acquireFileLock(ctx context.Context, path string) (*os.File, error) {
 
 // acquireFileLockWithin waits at most budget; a zero budget tries once.
 func acquireFileLockWithin(ctx context.Context, path string, budget time.Duration) (*os.File, error) {
+	return acquireFileLockReason(ctx, path, budget, "")
+}
+
+// acquireFileLockReason is acquireFileLockWithin with a timeout message that
+// names the contended resource; the error still unwraps to store.ErrBusy so
+// callers keep treating it as retryable.
+func acquireFileLockReason(ctx context.Context, path string, budget time.Duration, reason string) (*os.File, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
@@ -52,7 +66,7 @@ func acquireFileLockWithin(ctx context.Context, path string, budget time.Duratio
 			if errors.Is(waitCtx.Err(), context.Canceled) {
 				return nil, waitCtx.Err()
 			}
-			return nil, &fileLockWaitError{path: path}
+			return nil, &fileLockWaitError{path: path, reason: reason}
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
