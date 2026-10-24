@@ -1115,15 +1115,23 @@ SELECT task_id, repo, pr_url, marker_token, updated_at FROM pr_body_markers
 WHERE task_id = ? ORDER BY repo
 `
 
-func (q *Queries) PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PrBodyMarker, error) {
+type PRBodyMarkersByTaskRow struct {
+	TaskID      int64
+	Repo        string
+	PrUrl       string
+	MarkerToken string
+	UpdatedAt   int64
+}
+
+func (q *Queries) PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PRBodyMarkersByTaskRow, error) {
 	rows, err := q.db.QueryContext(ctx, pRBodyMarkersByTask, taskID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []PrBodyMarker{}
+	items := []PRBodyMarkersByTaskRow{}
 	for rows.Next() {
-		var i PrBodyMarker
+		var i PRBodyMarkersByTaskRow
 		if err := rows.Scan(
 			&i.TaskID,
 			&i.Repo,

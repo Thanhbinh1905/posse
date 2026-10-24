@@ -704,56 +704,82 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			// Enter every behind Member before promoting the queue head, then
 			// publish results, so the head follows done Signal order.
 			behind := []behindMember{}
+			groupMoved := false
 			// Without the current-target rule only conflicting Members ask the
 			// Worker to merge the target, and they bypass the merge queue.
 			conflicts := []behindMember{}
 			groupResults := make([]pollResult, 0, len(group.targets))
 			for _, target := range group.targets {
 				member := target.member
-				err := forgeErr
+				var err error
 				var observation store.PRObservation
 				var checks []failedCheck
-				checksRunning := false
-				skipChecks := false
-				if err == nil && cfg.Defaults.RequireCurrentTarget {
-					headSHA := member.repo.GatedSHA
-					if headSHA == "" && member.task.WorktreePath != "" && target.task.Branch != "" {
-						headSHA, _ = gitOutput(pollCtx, member.task.WorktreePath, "rev-parse", "refs/heads/"+target.task.Branch)
-					}
-					freshness, freshnessErr := inspectPRTargetFreshness(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task), headSHA)
-					if freshnessErr != nil {
-						err = freshnessErr
-					} else if !freshness.Fresh {
-						skipChecks = true
-						err = db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli())
-					}
-				}
-				if err == nil {
-					if forge.Kind == "gitlab" {
-						observation, checks, err = gitlabObservationWithChecks(pollCtx, forge, member.task, taskTargetBranch(member.project, member.task), now.UnixMilli(), !skipChecks)
-					} else {
-						var pull *ghPullRequest
-						pull, err = viewMemberPullRequest(pollCtx, member, !skipChecks)
+				var checksRunning bool
+				for attempt := 0; ; attempt++ {
+					err = forgeErr
+					observation, checks, checksRunning = store.PRObservation{}, nil, false
+					skipChecks, targetMoved := false, false
+					// An OPEN observation is behind only if it lacks this tip, fetched
+					// before the forge query: a later tip may hold the PR's own merge.
+					var targetTip prTargetFreshness
+					if err == nil && cfg.Defaults.RequireCurrentTarget {
+						targetTip, err = fetchPRTargetTip(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task))
 						if err == nil {
-							observation, checks, err = makePRObservation(project.ID, member.task, pull, now, taskTargetBranch(member.project, member.task))
-							checksRunning = pull.checksRunning()
+							headSHA := member.repo.GatedSHA
+							if headSHA == "" && member.task.WorktreePath != "" && target.task.Branch != "" {
+								headSHA, _ = gitOutput(pollCtx, member.task.WorktreePath, "rev-parse", "refs/heads/"+target.task.Branch)
+							}
+							freshness, freshnessErr := targetTip.of(pollCtx, member.target.Root, headSHA)
+							if freshnessErr != nil {
+								err = freshnessErr
+							} else if !freshness.Fresh {
+								skipChecks = true
+								err = db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli())
+							}
 						}
 					}
-				}
-				if err == nil && observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING") {
-					freshness, freshnessErr := inspectPRTargetFreshness(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task), observation.HeadSHA)
-					if freshnessErr != nil {
-						err = freshnessErr
-					} else if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget {
-						conflicts = append(conflicts, behindMember{target: target, freshness: freshness, headSHA: observation.HeadSHA})
-					} else if !freshness.Fresh {
-						if enterErr := db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli()); enterErr != nil {
-							err = enterErr
+					if err == nil {
+						if forge.Kind == "gitlab" {
+							observation, checks, err = gitlabObservationWithChecks(pollCtx, forge, member.task, taskTargetBranch(member.project, member.task), now.UnixMilli(), !skipChecks)
 						} else {
-							behind = append(behind, behindMember{target: target, freshness: freshness, headSHA: observation.HeadSHA})
-							observation.Checks = stalePRChecks()
-							checks = nil
+							var pull *ghPullRequest
+							pull, err = viewMemberPullRequest(pollCtx, member, !skipChecks)
+							if err == nil {
+								observation, checks, err = makePRObservation(project.ID, member.task, pull, now, taskTargetBranch(member.project, member.task))
+								checksRunning = pull.checksRunning()
+							}
 						}
+					}
+					if err == nil && observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING") {
+						freshness, freshnessErr := inspectPRTargetFreshness(pollCtx, member.target.Root, taskTargetBranch(member.project, member.task), observation.HeadSHA)
+						var beforeQuery prTargetFreshness
+						if freshnessErr == nil && !freshness.Fresh && cfg.Defaults.RequireCurrentTarget {
+							beforeQuery, freshnessErr = targetTip.of(pollCtx, member.target.Root, observation.HeadSHA)
+						}
+						if freshnessErr != nil {
+							err = freshnessErr
+						} else if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget {
+							conflicts = append(conflicts, behindMember{target: target, freshness: freshness, headSHA: observation.HeadSHA})
+						} else if !freshness.Fresh {
+							if beforeQuery.Fresh {
+								targetMoved = true
+							} else {
+								err = db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli())
+								if err == nil {
+									behind = append(behind, behindMember{target: target, freshness: freshness, headSHA: observation.HeadSHA})
+								}
+							}
+							if err == nil {
+								observation.Checks = stalePRChecks()
+								checks = nil
+							}
+						}
+					}
+					// An open PR whose target advanced during the query may have
+					// merged or fallen behind. Query it again now.
+					if !targetMoved || attempt > 0 {
+						groupMoved = groupMoved || targetMoved
+						break
 					}
 				}
 				ciChecks := checks
@@ -777,6 +803,11 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 						}
 					}
 				}
+			}
+			// A Member whose target still moved during its second view may
+			// belong ahead of the Members seen behind. The next poll promotes.
+			if groupMoved {
+				behind = nil
 			}
 			for _, pending := range behind {
 				queueTargetSync(pending, func() error {

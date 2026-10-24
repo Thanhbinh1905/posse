@@ -139,3 +139,104 @@ esac
 		t.Fatalf("workspace rerun commands = %q", log)
 	}
 }
+
+// A Member PR reads OPEN, then the target advances before Posse refetches it.
+// The new tip may hold the PR's own squash merge, so the poll views the PR
+// again instead of asking it to merge its own merge (#482).
+func TestWorkspacePRWatchRequeriesMemberPRWhoseTargetAdvancedDuringQuery(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		merged     bool
+		wantRounds int
+	}{
+		{name: "merged during query", merged: true},
+		{name: "still open behind", wantRounds: 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"local\"\nrequire_current_target = true\nreview = \"none\"\nauto_teardown = \"never\"\n[repositories.worker]\nmerge_mode = \"pr\"\n", []string{"worker"}, []string{"worker"})
+			ctx := context.Background()
+			workerRoot := filepath.Join(fixture.workspace, "worker")
+			remote := filepath.Join(fixture.root, "remotes", "worker.git")
+			gitTest(t, workerRoot, "remote", "set-url", "origin", "https://github.com/acme/worker.git")
+			gitTest(t, workerRoot, "config", "remote.origin.pushurl", remote)
+			gitTest(t, workerRoot, "config", "url.file://"+remote+".insteadOf", "https://github.com/acme/worker.git")
+			repo := fixture.repos()["worker"]
+			repo.PRURL = "https://github.com/acme/worker/pull/7"
+			repo.GatedSHA = strings.TrimSpace(gitTest(t, repo.WorktreePath, "rev-parse", "refs/heads/"+fixture.task.Branch))
+			repo.State = store.TaskRepoMerge
+			if err := fixture.db.UpdateTaskRepo(ctx, repo); err != nil {
+				t.Fatal(err)
+			}
+			squash := filepath.Join(fixture.root, "squash-merge")
+			gitTest(t, workerRoot, "worktree", "add", "--detach", squash, "refs/heads/main")
+			gitTest(t, squash, "merge", "--squash", repo.GatedSHA)
+			gitTest(t, squash, "commit", "-m", "squash merge worker PR")
+			merge := strings.TrimSpace(gitTest(t, squash, "rev-parse", "HEAD"))
+
+			bin := filepath.Join(fixture.root, "bin")
+			ghScript := `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "pr view")
+    if [ -e "$POSSE_TEST_GH_ADVANCE" ]; then
+      git -C "$POSSE_TEST_GH_ADVANCE_REPO" push --quiet origin "$(cat "$POSSE_TEST_GH_ADVANCE"):refs/heads/main"
+      rm "$POSSE_TEST_GH_ADVANCE"
+    fi
+    cat "$POSSE_TEST_GH_VIEW"
+    if [ -e "$POSSE_TEST_GH_VIEW.next" ]; then mv "$POSSE_TEST_GH_VIEW.next" "$POSSE_TEST_GH_VIEW"; fi ;;
+  *) exit 90 ;;
+esac
+`
+			if err := os.MkdirAll(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(ghScript), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			advance := filepath.Join(fixture.root, "gh-advance")
+			if err := os.WriteFile(advance, []byte(merge), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("POSSE_TEST_GH_ADVANCE", advance)
+			t.Setenv("POSSE_TEST_GH_ADVANCE_REPO", workerRoot)
+			viewPath := filepath.Join(fixture.root, "gh-view.json")
+			t.Setenv("POSSE_TEST_GH_VIEW", viewPath)
+			writeView := func(path, state, mergeCommit string) {
+				t.Helper()
+				view, err := json.Marshal(map[string]any{
+					"url": repo.PRURL, "state": state, "headRefOid": repo.GatedSHA, "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED",
+					"mergeCommit": map[string]any{"oid": mergeCommit}, "statusCheckRollup": []any{},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, view, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeView(viewPath, "OPEN", "")
+			if scenario.merged {
+				writeView(viewPath+".next", "MERGED", merge)
+			}
+
+			if err := fixture.service.pollWorkspacePullRequests(ctx, fixture.db, fixture.project, fixture.config(), true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(advance); !os.IsNotExist(err) {
+				t.Fatalf("fake forge did not advance the target during the PR view: %v", err)
+			}
+			observation, err := fixture.db.LatestMemberPRObservation(ctx, fixture.task.ID, "worker")
+			if err != nil || (scenario.merged && observation.State != "MERGED") || (!scenario.merged && decodeChecks(observation.Checks).State != "STALE") {
+				t.Fatalf("observation after the target advanced during the PR view = %#v err=%v", observation, err)
+			}
+			var entries, rounds int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM merge_queue_entries WHERE task_id=? AND dequeued_at=0),(SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness')`, fixture.task.ID, fixture.task.ID).Scan(&entries, &rounds); err != nil {
+				t.Fatal(err)
+			}
+			if rounds != scenario.wantRounds || entries != scenario.wantRounds {
+				t.Fatalf("live merge queue entries=%d merge-target instructions=%d, want %d each", entries, rounds, scenario.wantRounds)
+			}
+		})
+	}
+}

@@ -706,6 +706,53 @@ func TestMergeQueuePromotesOneBehindPRPerLanding(t *testing.T) {
 	}
 	fixture.writeGraphQLPulls(t, openPull("t1", tasks["t1"].GatedSHA), openPull("t2", tasks["t2"].GatedSHA), openPull("t3", tasks["t3"].GatedSHA))
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
+	// queueState renders the rows that decide merge queue promotion.
+	queueState := func() string {
+		t.Helper()
+		var out strings.Builder
+		for _, query := range []string{
+			`SELECT t.seq,t.state,e.entered_at,e.dequeued_at,e.dequeue_reason FROM merge_queue_entries e JOIN tasks t ON t.id=e.task_id ORDER BY e.id`,
+			`SELECT t.seq,m.status,m.created_at,substr(m.body,1,80) FROM messages m JOIN tasks t ON t.id=m.task_id ORDER BY m.id`,
+			`SELECT t.seq,o.state,o.head_sha,json_extract(o.checks,'$.state'),o.observed_at FROM pr_observations o JOIN tasks t ON t.id=o.task_id WHERE o.id IN (SELECT MAX(id) FROM pr_observations GROUP BY task_id)`,
+			`SELECT t.seq,s.verb,s.at FROM signals s JOIN tasks t ON t.id=s.task_id ORDER BY s.id`,
+			`SELECT COALESCE(t.seq,0),n.kind,n.summary,n.created_at FROM notices n LEFT JOIN tasks t ON t.id=n.task_id ORDER BY n.id`,
+			`SELECT COALESCE(t.seq,0),i.command,i.step,i.updated_at FROM intents i LEFT JOIN tasks t ON t.id=i.task_id ORDER BY i.id`,
+		} {
+			rows, err := fixture.db.QueryContext(context.Background(), query)
+			if err != nil {
+				fmt.Fprintf(&out, "\n%s: %v", query, err)
+				continue
+			}
+			columns, _ := rows.Columns()
+			fmt.Fprintf(&out, "\n%v:", columns)
+			for rows.Next() {
+				values := make([]any, len(columns))
+				pointers := make([]any, len(columns))
+				for index := range values {
+					pointers[index] = &values[index]
+				}
+				if err := rows.Scan(pointers...); err != nil {
+					fmt.Fprintf(&out, " scan: %v", err)
+					break
+				}
+				fmt.Fprintf(&out, "\n  %v", values)
+			}
+			rows.Close()
+		}
+		watch, err := fixture.db.WatchRuntime(context.Background(), fixture.project.ID)
+		fmt.Fprintf(&out, "\nWatch: %#v (%v)\nnow: %d", watch, err, time.Now().UnixMilli())
+		return out.String()
+	}
+	waitState := func(id string, want store.State) {
+		t.Helper()
+		if !waitForCondition(30*time.Second, func() bool {
+			task, err := fixture.db.Task(context.Background(), fixture.project.ID, id)
+			return err == nil && task.State == want
+		}) {
+			log, _ := os.ReadFile(filepath.Join(fixture.root, "worker-delivery.log"))
+			t.Fatalf("Task %s did not reach %s; Worker delivery: %s%s", id, want, log, queueState())
+		}
+	}
 	freshnessRounds := func(id string) int {
 		t.Helper()
 		var count int
@@ -714,18 +761,35 @@ func TestMergeQueuePromotesOneBehindPRPerLanding(t *testing.T) {
 		}
 		return count
 	}
-	land := func(id string) string {
+	// A forge moves the target and reports the PR merged in one step. Holding
+	// Posse's fetch lock across the push and the GraphQL rewrite keeps a poll
+	// from fetching the new tip and then reading the old OPEN state.
+	land := func(id string, observed func(merge string) []fakePull) string {
 		t.Helper()
 		if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", id, "--execute"); !strings.Contains(output, "merging") {
 			t.Fatalf("%s PR did not merge: %s", id, output)
 		}
-		return fixture.mergeOnLocalOrigin(t, fixture.mustTask(t, id), id)
+		lock, err := os.OpenFile(filepath.Join(fixture.repo, ".git", "posse-fetch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Close()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			t.Fatal(err)
+		}
+		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		merge := fixture.mergeOnLocalOrigin(t, fixture.mustTask(t, id), id)
+		fixture.writeGraphQLPulls(t, observed(merge)...)
+		return merge
 	}
 
 	// Landing 1: only the queue head t2 is asked to merge main.
-	firstMerge := land("t1")
-	fixture.writeGraphQLPulls(t, mergedPull("t1", tasks["t1"].GatedSHA, firstMerge), openPull("t2", tasks["t2"].GatedSHA), openPull("t3", tasks["t3"].GatedSHA))
-	fixture.waitTaskState(t, "t2", store.StateWorking)
+	firstMerge := land("t1", func(merge string) []fakePull {
+		return []fakePull{mergedPull("t1", tasks["t1"].GatedSHA, merge), openPull("t2", tasks["t2"].GatedSHA), openPull("t3", tasks["t3"].GatedSHA)}
+	})
+	waitState("t2", store.StateWorking)
+	// Reads refuse while t1's auto-Teardown runs in another process.
+	showAfterActiveTeardown(t, fixture, "t1")
 	for i := 0; i < 3; i++ {
 		runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t3")
 	}
@@ -759,7 +823,7 @@ func TestMergeQueuePromotesOneBehindPRPerLanding(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.fixGate, "t2"), []byte("release\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture.waitTaskState(t, "t2", store.StateDone)
+	waitState("t2", store.StateDone)
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t2"); !strings.Contains(output, "merging") {
 		t.Fatalf("synced t2 did not record its merge head: %s", output)
 	}
@@ -767,12 +831,28 @@ func TestMergeQueuePromotesOneBehindPRPerLanding(t *testing.T) {
 	if rounds := freshnessRounds("t3"); rounds != 0 {
 		t.Fatalf("t3 was asked to update while t2 held the queue head: rounds=%d", rounds)
 	}
-	secondMerge := land("t2")
-	fixture.writeGraphQLPulls(t, mergedPull("t2", syncedHead, secondMerge), openPull("t3", tasks["t3"].GatedSHA))
-	fixture.waitTaskState(t, "t3", store.StateWorking)
+	secondMerge := land("t2", func(merge string) []fakePull {
+		return []fakePull{mergedPull("t2", syncedHead, merge), openPull("t3", tasks["t3"].GatedSHA)}
+	})
+	waitState("t3", store.StateWorking)
 
 	if got := []int{freshnessRounds("t2"), freshnessRounds("t3")}; got[0] != 1 || got[1] != 1 {
-		t.Fatalf("merge-target instructions per Task = %v, want one update per landing", got)
+		// Each dedupe key names the PR head and target tip the instruction was for.
+		rows, err := fixture.db.QueryContext(context.Background(), `SELECT t.seq,r.dedupe_key FROM validation_fix_rounds r JOIN tasks t ON t.id=r.ship_task_id WHERE t.project_id=? AND r.kind='freshness' ORDER BY r.id`, fixture.project.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var rounds []string
+		for rows.Next() {
+			var seq int
+			var key string
+			if err := rows.Scan(&seq, &key); err != nil {
+				t.Fatal(err)
+			}
+			rounds = append(rounds, fmt.Sprintf("t%d %s", seq, key))
+		}
+		t.Fatalf("merge-target instructions per Task = %v, want one update per landing\nlandings: t1=%s t2=%s\nrounds: %s%s", got, firstMerge, secondMerge, strings.Join(rounds, "; "), queueState())
 	}
 }
 
