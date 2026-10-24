@@ -16,6 +16,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
+	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -1628,6 +1629,19 @@ func decodeChecks(value string) checkSnapshot {
 	var checks checkSnapshot
 	_ = json.Unmarshal([]byte(value), &checks)
 	return checks
+}
+
+// refreshFailedObservedPRChecks re-polls the forge when the stored observation
+// of this head shows failed checks. A rerun replaces the failed check runs with
+// pending ones, and the stored observation lags the poll interval. Poll errors
+// fall back to the stored observation.
+func (s *Service) refreshFailedObservedPRChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, taskID int64, repo, prURL, headSHA string) {
+	if rejectFailedObservedPRChecks(ctx, db, taskID, repo, prURL, headSHA) == nil {
+		return
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, runtime.ReconcileBudget)
+	defer cancel()
+	_ = s.pollProjectPullRequests(pollCtx, db, project, cfg, true)
 }
 
 func rejectFailedObservedPRChecks(ctx context.Context, db *store.DB, taskID int64, repo, prURL, headSHA string) error {

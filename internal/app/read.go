@@ -18,6 +18,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
+	"github.com/thanhbinh1905/posse/internal/usage"
 )
 
 type projectSummary struct {
@@ -67,18 +68,19 @@ type activeTaskSummary struct {
 }
 
 type taskSummary struct {
-	ID      string   `json:"id"`
-	Type    string   `json:"type"`
-	State   string   `json:"state"`
-	Title   string   `json:"title"`
-	Name    string   `json:"name"`
-	PRState string   `json:"pr_state,omitempty"`
-	Queue   string   `json:"merge_queue,omitempty"`
-	Profile string   `json:"profile,omitempty"`
-	Branch  string   `json:"branch,omitempty"`
-	Reason  string   `json:"reason,omitempty"`
-	Issues  []string `json:"issues,omitempty"`
-	Refs    []string `json:"refs,omitempty"`
+	ID      string       `json:"id"`
+	Type    string       `json:"type"`
+	State   string       `json:"state"`
+	Title   string       `json:"title"`
+	Name    string       `json:"name"`
+	PRState string       `json:"pr_state,omitempty"`
+	Queue   string       `json:"merge_queue,omitempty"`
+	Profile string       `json:"profile,omitempty"`
+	Branch  string       `json:"branch,omitempty"`
+	Reason  string       `json:"reason,omitempty"`
+	Issues  []string     `json:"issues,omitempty"`
+	Refs    []string     `json:"refs,omitempty"`
+	Usage   usage.Counts `json:"usage"`
 }
 
 type noticeSummary struct {
@@ -431,7 +433,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	}
 	rows := make([]taskSummary, 0, len(tasks))
 	for _, task := range tasks {
-		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile}
+		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile, Usage: taskUsage(task, cfg)}
 		if taskNeedsUser(task) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)
 			if err != nil {
@@ -490,6 +492,18 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 	return "waiting for a Worker slot", nil
 }
 
+func taskUsage(task store.Task, cfg config.Config) usage.Counts {
+	kind := task.AgentSessionKind
+	if kind == "" {
+		if plan, err := task.AdmittedPlan(); err == nil && plan != nil {
+			kind = plan.Launch.Profile.Kind
+		} else if profile, ok := cfg.Profiles[task.Profile]; ok {
+			kind = profile.Kind
+		}
+	}
+	return usage.Read(kind, agentSessionID(kind, task.AgentSession), task.WorktreePath)
+}
+
 func (s *Service) show(ctx *axi.Context, args []string) error {
 	parsed, err := parseArgs("show", args, map[string]flagSpec{"full": {boolean: true}})
 	if err != nil {
@@ -528,7 +542,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		return err
 	}
 	id := taskIDString(task.Seq)
-	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile}
+	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(task, cfg)}
 	plan, err := task.AdmittedPlan()
 	if err != nil {
 		return admittedPlanFailure(err)
