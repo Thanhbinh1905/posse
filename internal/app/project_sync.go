@@ -196,30 +196,22 @@ func (s *Service) syncRepository(ctx context.Context, db *store.DB, project stor
 			return result, err
 		}
 	}
-	leases := make([]store.ResourceLease, 0, 3)
-	defer func() {
-		if err := releaseResourceLeases(context.Background(), manager, leases); err != nil {
-			returnErr = errors.Join(returnErr, err)
-		}
-	}()
-	pathLease, err := manager.AcquirePath(ctx, target.Root, store.ResourceLeaseRequest{OwnerProjectID: project.ID, Owner: owner, SourceKey: pathSource})
+	leases, err := manager.AcquireAll(ctx, []execution.LeaseRequest{
+		{Path: target.Root, Request: store.ResourceLeaseRequest{OwnerProjectID: project.ID, Owner: owner, SourceKey: pathSource}},
+		{Repository: target.Root, Ref: localRef, Request: store.ResourceLeaseRequest{OwnerProjectID: project.ID, Owner: owner, SourceKey: localSource}},
+		{Repository: target.Root, Ref: remoteRef, Request: store.ResourceLeaseRequest{OwnerProjectID: project.ID, Owner: owner, SourceKey: remoteSource}},
+	})
 	if err != nil {
 		if reason, ok := resourceConflictReason(err); ok {
 			return projectSyncResult{Status: "skipped", Reason: reason}, nil
 		}
 		return result, err
 	}
-	leases = append(leases, pathLease)
-	for _, item := range []struct{ source, ref string }{{localSource, localRef}, {remoteSource, remoteRef}} {
-		lease, err := manager.AcquireGitRef(ctx, target.Root, item.ref, store.ResourceLeaseRequest{OwnerProjectID: project.ID, Owner: owner, SourceKey: item.source})
-		if err != nil {
-			if reason, ok := resourceConflictReason(err); ok {
-				return projectSyncResult{Status: "skipped", Reason: reason}, nil
-			}
-			return result, err
+	defer func() {
+		if err := manager.ReleaseAll(context.Background(), leases); err != nil {
+			returnErr = errors.Join(returnErr, err)
 		}
-		leases = append(leases, lease)
-	}
+	}()
 	if _, err := gitFetch(ctx, target.Root, "--no-tags", "origin", "+"+target.DefaultBranch+":"+remoteRef); err != nil {
 		// A failed fetch says nothing about whether origin is ahead. Let local
 		// contention retry without adding to the persistent failure streak.

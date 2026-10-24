@@ -49,7 +49,6 @@ func withIntentGitResources(ctx context.Context, db *store.DB, project store.Pro
 	}
 	refs = append([]string(nil), refs...)
 	sort.Strings(refs)
-	leases := make([]store.ResourceLease, 0, len(refs)+1)
 	owner := fmt.Sprintf("Merge t%d", task.Seq)
 	if task.Seq < 1 {
 		owner = "Posse Merge"
@@ -58,35 +57,22 @@ func withIntentGitResources(ctx context.Context, db *store.DB, project store.Pro
 		return store.ResourceLeaseRequest{OwnerProjectID: project.ID, OwnerTaskID: task.ID, Owner: owner,
 			SourceKey: source, IntentID: intentID}
 	}
+	requests := make([]execution.LeaseRequest, 0, len(refs)+1)
 	if path != "" {
-		lease, err := manager.AcquirePath(ctx, path, request(fmt.Sprintf("intent:%d:path:%s", intentID, path)))
-		if err != nil {
-			return resourceLeaseError(err)
-		}
-		leases = append(leases, lease)
+		requests = append(requests, execution.LeaseRequest{Path: path, Request: request(fmt.Sprintf("intent:%d:path:%s", intentID, path))})
 	}
 	for _, ref := range refs {
-		lease, err := manager.AcquireGitRef(ctx, repository, ref, request(fmt.Sprintf("intent:%d:git:%s:%s", intentID, repository, ref)))
-		if err != nil {
-			_ = releaseResourceLeases(ctx, manager, leases)
-			return resourceLeaseError(err)
-		}
-		leases = append(leases, lease)
+		requests = append(requests, execution.LeaseRequest{Repository: repository, Ref: ref,
+			Request: request(fmt.Sprintf("intent:%d:git:%s:%s", intentID, repository, ref))})
+	}
+	leases, err := manager.AcquireAll(ctx, requests)
+	if err != nil {
+		return resourceLeaseError(err)
 	}
 	if err := effect(); err != nil {
 		return err
 	}
-	return releaseResourceLeases(ctx, manager, leases)
-}
-
-func releaseResourceLeases(ctx context.Context, manager *execution.Manager, leases []store.ResourceLease) error {
-	var releaseErr error
-	for index := len(leases) - 1; index >= 0; index-- {
-		if err := manager.Release(ctx, leases[index]); err != nil {
-			releaseErr = errors.Join(releaseErr, err)
-		}
-	}
-	return releaseErr
+	return manager.ReleaseAll(ctx, leases)
 }
 
 func localMergePathScope(ctx context.Context, project store.Project, task store.Task) (string, error) {
