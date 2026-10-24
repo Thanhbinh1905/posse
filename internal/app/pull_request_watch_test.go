@@ -406,6 +406,83 @@ func TestPRWatchRequeriesPRWhoseTargetAdvancedDuringQuery(t *testing.T) {
 	}
 }
 
+// t1 contains the target tip and t2 lacks it. Another merge advances the
+// target during the forge query, so t1 is also behind. The pass that saw the
+// move must not promote t2 ahead of t1, which signalled done first (#482).
+func TestPRWatchKeepsDoneOrderWhenTargetAdvancesDuringQuery(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	firstTip := fixture.advanceTarget(t, false, true)
+	gitTest(t, fixture.worktree, "merge", "--no-edit", firstTip)
+	freshHead := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerging, "cli", "PR opened"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET pr_url='https://github.com/acme/shop/pull/17', gated_sha=? WHERE id=?`, freshHead, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	secondID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "Second change", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main", PRURL: "https://github.com/acme/shop/pull/18", GatedSHA: fixture.headSHA, AutonomyMerge: "ask"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerging, "cli"}} {
+		if step.to == store.StateDone {
+			if _, err := fixture.db.AddSignal(ctx, secondID, "done", "second done", nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := fixture.db.Transition(ctx, secondID, step.from, step.to, step.source, "second Task"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	advance := filepath.Join(fixture.root, "target-advance")
+	if err := os.WriteFile(filepath.Join(advance, "other-merge.txt"), []byte("another PR\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, advance, "add", "other-merge.txt")
+	gitTest(t, advance, "commit", "-m", "another PR merged")
+	t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", strings.TrimSpace(gitTest(t, advance, "rev-parse", "HEAD")))
+	response := map[string]any{"data": map[string]any{"repo1": map[string]any{
+		"pr1": stackedWatchPull("https://github.com/acme/shop/pull/17", "OPEN", freshHead, "main", ""),
+		"pr2": stackedWatchPull("https://github.com/acme/shop/pull/18", "OPEN", fixture.headSHA, "main", ""),
+	}}}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.ghState, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	rounds := map[int]int{}
+	rows, err := fixture.db.QueryContext(ctx, `SELECT t.seq,COUNT(r.id) FROM tasks t LEFT JOIN validation_fix_rounds r ON r.ship_task_id=t.id AND r.kind='freshness' GROUP BY t.id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq, count int
+		if err := rows.Scan(&seq, &count); err != nil {
+			t.Fatal(err)
+		}
+		rounds[seq] = count
+	}
+	places, err := fixture.db.MergeQueuePlaces(ctx, fixture.project.ID)
+	if err != nil || rounds[1] != 1 || rounds[2] != 0 || len(places[fixture.task.ID]) != 1 || !places[fixture.task.ID][0].Head() {
+		t.Fatalf("merge-target instructions by Task = %v, queue places = %#v err=%v; want only t1, the queue head", rounds, places, err)
+	}
+}
+
 func TestPRWatchRecordsChecksReviewConflictAndMergeTransitions(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {

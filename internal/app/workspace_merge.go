@@ -704,6 +704,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			// Enter every behind Member before promoting the queue head, then
 			// publish results, so the head follows done Signal order.
 			behind := []behindMember{}
+			groupMoved := false
 			groupResults := make([]pollResult, 0, len(group.targets))
 			for _, target := range group.targets {
 				member := target.member
@@ -772,6 +773,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 					// An open PR whose target advanced during the query may have
 					// merged or fallen behind. Query it again now.
 					if !targetMoved || attempt > 0 {
+						groupMoved = groupMoved || targetMoved
 						break
 					}
 				}
@@ -787,6 +789,11 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 					err = db.DequeueMergeQueue(pollCtx, target.task.ID, member.repo.Repo, reason, now.UnixMilli())
 				}
 				groupResults = append(groupResults, pollResult{target: target, observation: observation, checks: checks, ciChecks: ciChecks, forge: forge, err: err})
+			}
+			// A Member whose target still moved during its second view may
+			// belong ahead of the Members seen behind. The next poll promotes.
+			if groupMoved {
+				behind = nil
 			}
 			for _, pending := range behind {
 				if _, err := queuePRTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.target.member.repo.MergeMode, pending.freshness, pending.headSHA); err != nil {
