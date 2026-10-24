@@ -2206,7 +2206,7 @@ $body" ;; esac
       while [ -e "$POSSE_TEST_ROOT/pause-fix-commit" ]; do sleep 0.02; done
       printf 'fix change %s\n' "$task_id" > "e2e-fix-$task_id.txt"
       git add "e2e-fix-$task_id.txt"
-      git commit -m "fix worker change $task_id" >/dev/null
+      git commit -m "fix worker change $task_id" >/dev/null || true
       case "$instruction" in *"Merge origin/main"*)
         git fetch --quiet --refmap= origin main >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
         git merge --quiet --no-edit FETCH_HEAD >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1 ;;
@@ -2214,6 +2214,11 @@ $body" ;; esac
       while [ ! -e "$POSSE_E2E_FIX_GATE/$task_id" ]; do sleep 0.02; done
       "$POSSE_E2E_POSSE_BIN" publish "Worker fixed $task_id" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
       turn_token=$(printf '%s\n' "$instruction" | sed -n 's/.*| turn \([^]]*\)].*/\1/p')
+      if [ -z "$turn_token" ]; then
+        # Direct pane input carries no token; Posse's reopen instruction follows.
+        herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
+        continue
+      fi
       "$POSSE_E2E_POSSE_BIN" signal done "Worker fixed $task_id" --pr "$pr_url" --turn "$turn_token" >> "$POSSE_TEST_ROOT/worker-delivery.log" 2>&1
       herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
     done

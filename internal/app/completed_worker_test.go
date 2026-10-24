@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,10 @@ func TestResumedWorkerCannotMergeOrRaiseMergeReady(t *testing.T) {
 	now := time.Now()
 	snapshot.Panes[0].AgentStatus = "idle"
 	if _, err := runtime.ReconcileSnapshot(ctx, f.db, f.project.ID, snapshot, now); err != nil {
+		t.Fatal(err)
+	}
+	// The new turn changes the Task repository, so it reopens the Task.
+	if err := os.WriteFile(filepath.Join(f.task.WorktreePath, "new-turn.txt"), []byte("change\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Panes[0].AgentStatus = "working"

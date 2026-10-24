@@ -306,6 +306,10 @@ done
 		if _, err := f.client.Run(t.Context(), "pane", "run", task.PaneID, "Resume cancelled Task"); err != nil {
 			t.Fatal(err)
 		}
+		// The resumed turn changes the repository, which is what reopens the Task (#443).
+		if err := os.WriteFile(filepath.Join(task.WorktreePath, "resumed-change.txt"), []byte("resumed Worker work\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if !waitForCondition(12*time.Second, func() bool {
 			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
 			return f.task(t, "t1").State == store.StateWorking
