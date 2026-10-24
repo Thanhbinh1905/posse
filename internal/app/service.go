@@ -40,6 +40,9 @@ type Service struct {
 	maintenanceCancels   map[string]context.CancelFunc
 	maintenanceWG        sync.WaitGroup
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
+	// DetachQueuedLaunch runs each queued Task start in its own session. The
+	// posse binary sets it; unit tests keep the start in-process.
+	DetachQueuedLaunch bool
 }
 
 func New(home string, adapter herdr.Adapter) *Service {
