@@ -66,7 +66,7 @@ func (s *Service) releaseSandboxWithAuthorization(ctx context.Context, db *store
 		if errors.Is(err, errSandboxDefaultRefUnavailable) {
 			return killed, err
 		}
-		if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset during release"); breakErr != nil {
+		if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset during release", err); breakErr != nil {
 			return killed, errors.Join(err, breakErr)
 		}
 		if approvedDiscard {
