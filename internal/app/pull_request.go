@@ -825,7 +825,7 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 	if issueLinks != "" {
 		issueSection += "\n\n" + issueLinks
 	}
-	body := strings.Join([]string{
+	sections := []string{
 		"## Summary\n\n" + strings.TrimSpace(summary),
 		issueSection,
 		"## Changes\n\n" + changes,
@@ -833,7 +833,15 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 		"## Proof\n\n" + proof,
 		"## Risk And Rollback\n\n" + risk,
 		"## Documentation\n\n" + documentation,
-	}, "\n\n") + "\n"
+	}
+	if task.Type == "change" {
+		validation, err := validationSummaryFor(ctx, db, task)
+		if err != nil {
+			return "", "", err
+		}
+		sections = append(sections, validation.markdown())
+	}
+	body := strings.Join(sections, "\n\n") + "\n"
 	title := task.PRTitle
 	if title == "" {
 		title = brief.Title
@@ -1307,6 +1315,11 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		if observed.current.State == "OPEN" {
 			if err := s.processCIObservation(ctx, db, project, observed.task, observed.current, observed.ciFailures, forge, ""); err != nil {
 				return err
+			}
+			if err := s.refreshPRValidationBlock(ctx, db, project, observed.task, forge, observed.current.PRURL, ""); err != nil {
+				if noticeErr := recordPRTaskWatchFailure(ctx, db, project, observed.task, err, now); noticeErr != nil {
+					return noticeErr
+				}
 			}
 		}
 		if recorded && observed.current.State == "CLOSED" {
