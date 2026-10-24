@@ -696,6 +696,15 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				}()
 			}
 			forge, forgeErr := forgeForRepository(pollCtx, group.targets[0].member.target.Root, cfg, group.repo)
+			type behindMember struct {
+				target    pollTarget
+				freshness prTargetFreshness
+				headSHA   string
+			}
+			// Enter every behind Member before promoting the queue head, then
+			// publish results, so the head follows done Signal order.
+			behind := []behindMember{}
+			groupResults := make([]pollResult, 0, len(group.targets))
 			for _, target := range group.targets {
 				member := target.member
 				err := forgeErr
@@ -713,7 +722,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 						err = freshnessErr
 					} else if !freshness.Fresh {
 						skipChecks = true
-						_, err = queuePRTargetSyncInstruction(pollCtx, db, target.task, member.repo.Repo, member.repo.MergeMode, freshness, headSHA)
+						err = db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli())
 					}
 				}
 				if err == nil {
@@ -733,9 +742,10 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 					if freshnessErr != nil {
 						err = freshnessErr
 					} else if !freshness.Fresh {
-						if _, queueErr := queuePRTargetSyncInstruction(pollCtx, db, target.task, member.repo.Repo, member.repo.MergeMode, freshness, observation.HeadSHA); queueErr != nil {
-							err = queueErr
+						if enterErr := db.EnterMergeQueue(pollCtx, target.task.ID, member.repo.Repo, freshness.Branch, now.UnixMilli()); enterErr != nil {
+							err = enterErr
 						} else {
+							behind = append(behind, behindMember{target: target, freshness: freshness, headSHA: observation.HeadSHA})
 							observation.Checks = stalePRChecks()
 							checks = nil
 						}
@@ -745,7 +755,26 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				if checksRunning {
 					ciChecks = nil
 				}
-				results <- pollResult{target: target, observation: observation, checks: checks, ciChecks: ciChecks, forge: forge, err: err}
+				if err == nil && (observation.State == "MERGED" || len(ciChecks) > 0) {
+					reason := "merged"
+					if observation.State != "MERGED" {
+						reason = "checks_failed"
+					}
+					err = db.DequeueMergeQueue(pollCtx, target.task.ID, member.repo.Repo, reason, now.UnixMilli())
+				}
+				groupResults = append(groupResults, pollResult{target: target, observation: observation, checks: checks, ciChecks: ciChecks, forge: forge, err: err})
+			}
+			for _, pending := range behind {
+				if _, err := queuePRTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.target.member.repo.MergeMode, pending.freshness, pending.headSHA); err != nil {
+					for index := range groupResults {
+						if groupResults[index].target.member.repo.Repo == pending.target.member.repo.Repo && groupResults[index].target.task.ID == pending.target.task.ID {
+							groupResults[index].err = err
+						}
+					}
+				}
+			}
+			for _, result := range groupResults {
+				results <- result
 			}
 		}()
 	}
